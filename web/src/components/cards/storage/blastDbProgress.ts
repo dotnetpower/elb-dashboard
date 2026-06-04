@@ -43,3 +43,86 @@ export function formatEta(
   const remainingSeconds = (elapsedSeconds * (total - copied)) / copied;
   return `~${formatDuration(remainingSeconds)} left`;
 }
+
+/**
+ * Format a download speed from a bytes delta over an elapsed interval.
+ *
+ * Generic `bytes / seconds` → human rate. The caller decides the interval:
+ * `BlastDbRow` passes a trailing-window delta to render an *instantaneous*
+ * rate, not a whole-copy average.
+ *
+ * Returns:
+ *   - `""` when there is nothing meaningful to show (no bytes moved, or fewer
+ *     than ~5 s elapsed so the figure would be noisy)
+ *   - `"42.3 MB/s"` / `"1.2 GB/s"` / `"512 KB/s"` once enough has landed
+ */
+export function formatSpeed(bytesDone: number, elapsedSeconds: number): string {
+  if (bytesDone <= 0 || elapsedSeconds < 5) return "";
+  const bytesPerSec = bytesDone / elapsedSeconds;
+  const units = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+  let value = bytesPerSec;
+  let unitIdx = 0;
+  while (value >= 1024 && unitIdx < units.length - 1) {
+    value /= 1024;
+    unitIdx += 1;
+  }
+  const precision = value >= 100 || unitIdx === 0 ? 0 : 1;
+  return `${value.toFixed(precision)} ${units[unitIdx]}`;
+}
+
+export const SPEED_WINDOW_MS = 45_000;
+
+/** A single observation of cumulative bytes landed at a wall-clock instant. */
+export interface SpeedSample {
+  bytes: number;
+  t: number;
+}
+
+/**
+ * Append a new cumulative-bytes observation to a trailing-window sample list,
+ * returning a NEW array (pure — never mutates the input).
+ *
+ * A sample is only recorded when bytes strictly advance: the backend poll
+ * interval is ~10-15 s while the row re-renders ~1 Hz, so most observations
+ * repeat the previous value, and a decrease (metadata reset / re-list) must
+ * never push a backwards sample. After appending, samples older than
+ * `windowMs` are trimmed, but the last two are always kept so a brief lull
+ * does not erase the rate.
+ */
+export function recordSpeedSample(
+  samples: readonly SpeedSample[],
+  bytes: number,
+  nowMs: number,
+  windowMs: number = SPEED_WINDOW_MS,
+): SpeedSample[] {
+  const last = samples[samples.length - 1];
+  const next: SpeedSample[] =
+    !last || bytes > last.bytes ? [...samples, { bytes, t: nowMs }] : [...samples];
+  while (next.length > 2 && nowMs - next[0].t > windowMs) {
+    next.shift();
+  }
+  return next;
+}
+
+/**
+ * Compute an instantaneous download-speed label from trailing-window samples.
+ *
+ * Uses the first↔last sample delta so the dead startup time (AKS pods
+ * scheduling / pulling images / scanning NCBI S3 with zero bytes landed) is
+ * excluded from the divisor. Returns `""` (hide the figure) when there is no
+ * forward movement to measure or the most recent sample is stale (nothing has
+ * advanced within `windowMs`), so a stalled copy stops showing an old rate.
+ */
+export function computeWindowedSpeed(
+  samples: readonly SpeedSample[],
+  nowMs: number,
+  windowMs: number = SPEED_WINDOW_MS,
+): string {
+  const first = samples[0];
+  const latest = samples[samples.length - 1];
+  if (!first || !latest || latest.t <= first.t) return "";
+  if (nowMs - latest.t > windowMs) return "";
+  const deltaBytes = latest.bytes - first.bytes;
+  const deltaSeconds = (latest.t - first.t) / 1000;
+  return formatSpeed(deltaBytes, deltaSeconds);
+}

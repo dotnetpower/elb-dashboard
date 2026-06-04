@@ -13,7 +13,12 @@ Risky contracts: Treats `AlreadyExists` / `Conflict` as success. Any other failu
     recorded into ``error`` and the caller (typically `provision_aks`) does **not**
     fail the task — the AKS cluster is fully usable; only OpenAPI proxy / spec / Try-It
     is unreachable until peering lands. The returned payload always includes a
-    ``recovery_command`` string the SPA / operator can paste.
+    ``recovery_command`` string the SPA / operator can paste. When a target-VNet
+    peering fails with an Azure RBAC denial (``AuthorizationFailed`` /
+    ``LinkedAuthorizationFailed``) the payload additionally carries
+    ``rbac_remediation`` (role + target-VNet scope + ready-to-paste
+    ``az role assignment create``) because the generic ``recovery_command``
+    only fixes platform-to-AKS peering, not target-to-AKS peering.
     `probe_private_ip` is the SSRF chokepoint: it refuses any non-RFC1918 / loopback /
     link-local / multicast target and any path with control characters so an
     authenticated caller cannot redirect the api sidecar's outbound HTTP at Azure
@@ -26,6 +31,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -96,6 +102,71 @@ def _recovery_command(
         f"--cluster-name {cluster_name} "
         f"--subscription {subscription_id}"
     )
+
+
+_NETWORK_CONTRIBUTOR_ROLE = "Network Contributor"
+_OBJECT_ID_RE = re.compile(r"object id '([0-9a-fA-F-]{36})'")
+
+
+def _is_authorization_failure(error: str | None) -> bool:
+    """True when a peering error is an Azure RBAC denial (not a transient fault).
+
+    Covers both ``AuthorizationFailed`` (the local-direction write is denied)
+    and ``LinkedAuthorizationFailed`` (the local write is allowed but the
+    linked remote VNet check is denied) — both mean the dashboard managed
+    identity is missing peering-write on the *target* VNet.
+    """
+    if not error:
+        return False
+    low = error.lower()
+    return "authorizationfailed" in low or "linkedauthorizationfailed" in low
+
+
+def _mi_object_id_from_error(error: str | None) -> str:
+    """Extract the managed identity object id Azure embeds in an authz error.
+
+    Azure's ``AuthorizationFailed`` message always carries
+    ``with object id '<guid>'``. Returns ``""`` when no id is present so the
+    remediation falls back to a human-readable placeholder.
+    """
+    if not error:
+        return ""
+    match = _OBJECT_ID_RE.search(error)
+    return match.group(1) if match else ""
+
+
+def _rbac_remediation(*, target_vnet_id: str, mi_object_id: str) -> dict[str, str]:
+    """Render the exact least-privilege grant that unblocks target peering.
+
+    VNet peering requires write on BOTH ends. The dashboard MI already holds
+    Contributor on the AKS-VNet resource group, so a single ``Network
+    Contributor`` assignment scoped to the *target* VNet resolves both the
+    ``target_to_aks`` (direct write) and ``aks_to_target`` (linked check)
+    directions. Scoping to the VNet — not its resource group or the
+    subscription — keeps the grant least-privilege per the hardening charter.
+    """
+    assignee = mi_object_id or "<dashboard-managed-identity-object-id>"
+    command = (
+        "az role assignment create "
+        f"--assignee-object-id {assignee} "
+        "--assignee-principal-type ServicePrincipal "
+        f'--role "{_NETWORK_CONTRIBUTOR_ROLE}" '
+        f"--scope {target_vnet_id}"
+    )
+    message = (
+        "The dashboard managed identity lacks "
+        "'Microsoft.Network/virtualNetworks/virtualNetworkPeerings/write' on the "
+        "target VNet. Peering needs write on both ends, so grant the identity "
+        "'Network Contributor' scoped to the target VNet (command below), then "
+        "re-run 'Peer & probe'. Note: the 'peer-cluster-network.sh' recovery only "
+        "fixes platform-to-AKS peering, not this target-to-AKS peering."
+    )
+    return {
+        "role": _NETWORK_CONTRIBUTOR_ROLE,
+        "scope": target_vnet_id,
+        "command": command,
+        "message": message,
+    }
 
 
 def _resolve_aks_node_vnet(
@@ -548,6 +619,11 @@ def ensure_vnet_peering_with_target(
     }
     if pair_summary["error"]:
         payload["error"] = pair_summary["error"]
+        if _is_authorization_failure(pair_summary["error"]):
+            payload["rbac_remediation"] = _rbac_remediation(
+                target_vnet_id=target_vnet_id,
+                mi_object_id=_mi_object_id_from_error(pair_summary["error"]),
+            )
     return payload
 
 

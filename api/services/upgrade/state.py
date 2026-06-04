@@ -49,6 +49,13 @@ STATE_FETCHING = "fetching"
 STATE_BUILDING = "building"
 STATE_PATCHING = "patching"
 STATE_ROLLING_OUT = "rolling_out"
+# Blue/green-only states (entered when STRICT_BLUEGREEN is on). The green
+# revision is live but holds 0% traffic while we validate it
+# (`validating`), then holds 100% during the bake/confirm window
+# (`confirming`) before the row is marked `succeeded` and the old blue
+# revision is garbage-collected.
+STATE_VALIDATING = "validating"
+STATE_CONFIRMING = "confirming"
 STATE_SUCCEEDED = "succeeded"
 STATE_FAILED_PRE = "failed_pre"
 STATE_FAILED_ROLLOUT = "failed_rollout"
@@ -64,6 +71,8 @@ VALID_STATES = frozenset(
         STATE_BUILDING,
         STATE_PATCHING,
         STATE_ROLLING_OUT,
+        STATE_VALIDATING,
+        STATE_CONFIRMING,
         STATE_SUCCEEDED,
         STATE_FAILED_PRE,
         STATE_FAILED_ROLLOUT,
@@ -119,6 +128,23 @@ class UpgradeState:
     build_log_blob: str = ""
     rollback_target_json: str = ""
     rollback_available_until: str = ""
+    # Blue/green bookkeeping (populated only when STRICT_BLUEGREEN is on).
+    # `green_revision` is the freshly-staged revision carrying the target
+    # images; `blue_revision` is the previously-serving revision kept warm
+    # at 0% traffic so rollback is an instant traffic-flip. `confirm_deadline`
+    # is the ISO timestamp after which a healthy green is promoted to
+    # `succeeded`; `traffic_serving` records the revision the reconciler last
+    # verified is actually receiving 100% of ingress traffic.
+    green_revision: str = ""
+    blue_revision: str = ""
+    confirm_deadline: str = ""
+    traffic_serving: str = ""
+    # ISO timestamp the row entered `validating`. This is the anchor for the
+    # green-health timeout, and is deliberately distinct from `started_at`
+    # (which marks the whole upgrade's start): the build/clone phases consume
+    # most of `started_at`'s budget, so measuring the green readiness window
+    # from `started_at` would false-abort a healthy green before it boots.
+    validating_started_at: str = ""
     idempotency_key: str = ""
     updated_at: str = ""
     etag: str = field(default="", compare=False)
@@ -397,6 +423,11 @@ def _entity_to_state(entity: Any) -> UpgradeState:
         build_log_blob=str(entity.get("build_log_blob", "")),
         rollback_target_json=str(entity.get("rollback_target_json", "")),
         rollback_available_until=str(entity.get("rollback_available_until", "")),
+        green_revision=str(entity.get("green_revision", "")),
+        blue_revision=str(entity.get("blue_revision", "")),
+        confirm_deadline=str(entity.get("confirm_deadline", "")),
+        traffic_serving=str(entity.get("traffic_serving", "")),
+        validating_started_at=str(entity.get("validating_started_at", "")),
         idempotency_key=str(entity.get("idempotency_key", "")),
         updated_at=str(entity.get("updated_at", "")),
         etag=etag,
@@ -426,6 +457,11 @@ def _state_to_entity(state: UpgradeState) -> dict[str, Any]:
         "build_log_blob": state.build_log_blob,
         "rollback_target_json": state.rollback_target_json,
         "rollback_available_until": state.rollback_available_until,
+        "green_revision": state.green_revision,
+        "blue_revision": state.blue_revision,
+        "confirm_deadline": state.confirm_deadline,
+        "traffic_serving": state.traffic_serving,
+        "validating_started_at": state.validating_started_at,
         "idempotency_key": state.idempotency_key,
         "updated_at": state.updated_at,
     }

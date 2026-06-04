@@ -260,6 +260,39 @@ def test_idempotency_skip_requires_nonzero_content_length() -> None:
     assert '"$existing_len" != "PARSE_FAIL"' in PREPARE_DB_AKS_SCRIPT
 
 
+def test_script_uses_no_awk() -> None:
+    """The prepare-db script must not shell out to awk.
+
+    Regression guard for the shard-wide failure found 2026-06-04: the
+    Content-Length pre-flight parsed `curl -sIL` output with
+    `awk 'BEGIN{IGNORECASE=1} /^content-length:/ {...}'`. The job runs in
+    `mcr.microsoft.com/azure-cli` (Azure Linux / Mariner), which ships NO
+    awk, so the first sampled file (every VERIFY_EVERY_N-th) hit
+    `awk: command not found` and `set -euo pipefail` killed the pod. With
+    the verify sampling at 1/10 this failed every shard on its 10th file,
+    backoffLimit was exhausted, and the Job reported `Failed 0/10` while
+    ~77% of nt was already staged. The image guarantees python3 (azure-cli
+    is a python app and the script already uses python3), so the parser
+    must stay awk-free."""
+    assert "awk" not in PREPARE_DB_AKS_SCRIPT
+
+
+def test_content_length_preflight_uses_python3() -> None:
+    """The NCBI Content-Length pre-flight must parse with python3.
+
+    Pins the awk-free replacement: `curl -sIL` follows redirects and emits
+    a `content-length` header for every hop, so the parser keeps the LAST
+    value seen (the final 200 response's real size) rather than the first
+    (a 301/302 hop carries the wrong size or none). This is the value the
+    post-upload verify compares against to catch NCBI truncations."""
+    assert "content-length:" in PREPARE_DB_AKS_SCRIPT.lower()
+    # The pre-flight feeds curl's header dump into a python3 parser.
+    assert 'curl -sIL --retry 3 --retry-delay 10 --max-time 60 \\' in (
+        PREPARE_DB_AKS_SCRIPT
+    )
+    assert "python3 -c" in PREPARE_DB_AKS_SCRIPT
+
+
 def test_script_bootstraps_azcopy_from_aka_ms() -> None:
     """The pinned azure-cli image does not bundle azcopy or GNU tar, so
     the script must download azcopy from aka.ms and extract it via

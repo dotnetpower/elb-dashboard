@@ -25,6 +25,8 @@ export type UpgradeStateName =
   | "fetching"
   | "building"
   | "patching"
+  | "validating"
+  | "confirming"
   | "rolling_out"
   | "succeeded"
   | "failed_pre"
@@ -54,6 +56,12 @@ export interface UpgradeStatus {
   rollback_target: Record<string, string>;
   rollback_available_until: string;
   updated_at: string;
+  // Blue/green (STRICT_BLUEGREEN) staging fields. Empty string when the
+  // Single-mode recreate path ran (flag off) or the row is idle.
+  green_revision: string;
+  blue_revision: string;
+  confirm_deadline: string;
+  traffic_serving: string;
 }
 
 export interface UpgradeCandidate {

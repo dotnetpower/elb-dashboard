@@ -227,9 +227,25 @@ while IFS= read -r KEY; do
         # Captured here so the post-upload verification step can compare
         # apples to apples without trusting curl's exit code alone (a HTTP
         # 200 + truncated body would otherwise upload silently).
+        #
+        # Parse with python3 (always present — this is the azure-cli image,
+        # and the script already relies on python3 above). The
+        # mcr.microsoft.com/azure-cli base image ships no GNU text tools,
+        # so a `BEGIN{IGNORECASE=1}`-style one-liner would abort the pod
+        # under `set -euo pipefail` on the first sampled file (command not
+        # found) and fail the whole shard. curl -sIL follows redirects and
+        # prints headers for EVERY hop, so take the LAST content-length seen
+        # (the final 200 response's real size), not the first (a 301/302 hop
+        # has none or the wrong one).
         expected_size=$(curl -sIL --retry 3 --retry-delay 10 --max-time 60 \
             "$src_url" \
-            | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub(/[^0-9]/,"",$2); print $2; exit}')
+            | python3 -c 'import re,sys
+val=""
+for line in sys.stdin:
+    m=re.match(r"(?i)^content-length:\s*([0-9]+)\s*$", line.strip())
+    if m:
+        val=m.group(1)
+print(val)')
         if [ -z "${expected_size:-}" ] || [ "$expected_size" = "0" ]; then
             log "WARN no Content-Length for ${KEY}; integrity check will be skipped"
             expected_size=""

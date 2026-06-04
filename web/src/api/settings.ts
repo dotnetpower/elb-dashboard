@@ -163,6 +163,19 @@ export interface VnetPeeringResponse {
   peerings?: VnetPeeringDirection[];
   probe?: VnetPeeringProbe;
   recovery_command?: string;
+  /**
+   * Present only when a target-VNet peering failed with an Azure RBAC denial.
+   * Carries the exact least-privilege `az role assignment create` the operator
+   * can paste to grant the dashboard managed identity `Network Contributor` on
+   * the target VNet. Unlike `recovery_command`, this fixes target-to-AKS
+   * peering (not platform-to-AKS).
+   */
+  rbac_remediation?: {
+    role: string;
+    scope: string;
+    command: string;
+    message: string;
+  };
   /** Helper-level partial-failure or skip explanation. */
   error?: string;
   skipped?: boolean;

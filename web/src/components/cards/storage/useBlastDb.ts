@@ -77,6 +77,11 @@ export interface DownloadedDbMeta {
     succeeded_pods?: number;
     failed_pods?: number;
     shard_count?: number;
+    /**
+     * AKS-fanout only: total bytes landed in Storage so far. The SPA divides
+     * this by elapsed seconds to render a live download speed (MB/s).
+     */
+    bytes_done?: number;
   };
   failed_files?: Array<{ blob: string; status: string; reason?: string }>;
   db_order_oracle?: {

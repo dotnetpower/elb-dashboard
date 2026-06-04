@@ -44,6 +44,7 @@ from api.services.upgrade import (
     history,
     image_builder,
     remote_tags,
+    revisions,
     state,
 )
 
@@ -61,6 +62,11 @@ STATE_TRANSITION_TIMELINE = (
     state.STATE_BUILDING,
     state.STATE_PATCHING,
     state.STATE_ROLLING_OUT,
+    # Blue/green-only intermediate states (entered when STRICT_BLUEGREEN is
+    # on). The Single-mode happy path skips straight from rolling_out to
+    # succeeded; the blue/green path inserts validating + confirming.
+    state.STATE_VALIDATING,
+    state.STATE_CONFIRMING,
     state.STATE_SUCCEEDED,
 )
 # Invariant enforced by tests: every state in STATE_TRANSITION_TIMELINE
@@ -392,6 +398,25 @@ def execute_upgrade_inline(
         return _fail_pre(job_id, f"state moved during patching: {exc.current}")
 
     revision_suffix = f"v{target_version.replace('.', '-')}-{job_id[:6]}"
+    bluegreen = revisions.strict_bluegreen()
+    blue_revision = ""
+    green_revision = ""
+    if bluegreen:
+        # Blue/green: pin 100% of traffic to the currently-serving (blue)
+        # revision BEFORE the swap so the green revision `swap_images`
+        # creates starts at 0% traffic. Without this pin, Multiple mode
+        # routes 100% to the newest (green) revision the moment it is
+        # created, defeating the validation gate.
+        try:
+            app_name = aca_template._env(aca_template.CONTAINER_APP_NAME_ENV)
+            green_revision = f"{app_name}--{revision_suffix}"
+            blue_revision = revisions.serving_revision()
+            revisions.pin_traffic(
+                revision_name=blue_revision, label=revisions.BLUE_LABEL
+            )
+        except (revisions.RevisionsError, aca_template.TemplateError) as exc:
+            return _fail_rollout(job_id, f"blue/green pin failed: {exc}")
+
     try:
         aca_mod.swap_images(
             target_version=target_version, revision_suffix=revision_suffix
@@ -399,6 +424,35 @@ def execute_upgrade_inline(
     except aca_template.TemplateError as exc:
         LOGGER.exception("upgrade.execute: begin_update failed; row stays in rolling_out")
         return _fail_rollout(job_id, f"begin_update failed: {exc}")
+
+    if bluegreen:
+        # Hand off to the reconciler (which runs on the still-alive blue
+        # revision via beat): it validates green health, cuts traffic over,
+        # bakes the confirm window, then marks succeeded + GCs blue. The
+        # worker task returns promptly rather than blocking on the bake.
+        try:
+            entered = _utc_now()
+            return state.cas_state(
+                expected_state=state.STATE_ROLLING_OUT,
+                new_state=state.STATE_VALIDATING,
+                mutate=lambda s: (
+                    setattr(s, "green_revision", green_revision),
+                    setattr(s, "blue_revision", blue_revision),
+                    # Anchor the green-health timeout to the moment green was
+                    # created, NOT `started_at` (which already absorbed the
+                    # clone+build minutes) — otherwise a healthy-but-booting
+                    # green would false-abort immediately.
+                    setattr(s, "validating_started_at", entered),
+                    setattr(
+                        s,
+                        "phase_detail",
+                        "green revision created; validating health",
+                    ),
+                    setattr(s, "phase_progress", 92),
+                )[-1],
+            )
+        except (state.StateTransitionRefused, state.RowEtagMismatch):
+            return state.get_state()
     return state.get_state()
 
 

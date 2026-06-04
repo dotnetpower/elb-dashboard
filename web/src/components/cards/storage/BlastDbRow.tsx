@@ -8,9 +8,14 @@ import {
   Loader2,
   RefreshCw,
 } from "lucide-react";
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { formatEta } from "@/components/cards/storage/blastDbProgress";
+import {
+  computeWindowedSpeed,
+  formatEta,
+  recordSpeedSample,
+  type SpeedSample,
+} from "@/components/cards/storage/blastDbProgress";
 import {
   type BlastDbCatalogItem,
   formatBytes,
@@ -186,6 +191,35 @@ export function BlastDbRow({
     hasPerFile && copyElapsedSeconds > 0
       ? formatEta(copyElapsedSeconds, copiedFiles, perFileTotal)
       : null;
+  // Live *instantaneous* download speed from recent `bytes_done` samples.
+  // Only the AKS-fanout path reports `bytes_done`; the server-side
+  // blob-to-blob copy does not (no real network download on the worker side).
+  // Averaging over the whole copy understates the rate because the AKS pods
+  // spend the first ~30-60 s scheduling / pulling images / scanning NCBI S3
+  // with zero bytes landed, so we sample bytes over a trailing window (in an
+  // effect — sampling is a side effect, never done during render) and project
+  // an instantaneous rate, hiding the figure when nothing advances recently.
+  const speedSamplesRef = useRef<SpeedSample[]>([]);
+  const [speedLabel, setSpeedLabel] = useState("");
+  const bytesDone =
+    copyActive && typeof cs?.bytes_done === "number" ? cs.bytes_done : null;
+  useEffect(() => {
+    if (!copyActive) {
+      speedSamplesRef.current = [];
+      setSpeedLabel("");
+      return;
+    }
+    if (bytesDone === null) return;
+    const now = Date.now();
+    speedSamplesRef.current = recordSpeedSample(
+      speedSamplesRef.current,
+      bytesDone,
+      now,
+    );
+    setSpeedLabel(computeWindowedSpeed(speedSamplesRef.current, now));
+    // `elapsed` advances ~1 Hz via the parent tick, so a stalled copy still
+    // re-runs this effect and `computeWindowedSpeed` clears the stale rate.
+  }, [copyActive, bytesDone, elapsed]);
   const unsupported = db.unsupported;
   const isUnsupported = Boolean(unsupported);
   // Suppress the generic "Not in current NCBI snapshot" warning for DBs we
@@ -414,6 +448,17 @@ export function BlastDbRow({
                   }}
                 >
                   · {copyElapsedSeconds}s
+                </span>
+              )}
+              {speedLabel && (
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--text-faint)",
+                  }}
+                >
+                  {" "}
+                  · {speedLabel}
                 </span>
               )}
               {etaLabel && (

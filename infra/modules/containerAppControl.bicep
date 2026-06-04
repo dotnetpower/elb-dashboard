@@ -118,6 +118,29 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
     environmentId: environmentResourceId
     workloadProfileName: 'Consumption'
     configuration: {
+      // Single-revision mode: one revision serves 100% of traffic and every
+      // template change recreates it in place. This is the legacy
+      // self-upgrade posture and the steady state while STRICT_BLUEGREEN is
+      // OFF (default).
+      //
+      // Native blue/green (STRICT_BLUEGREEN=true) requires
+      // `activeRevisionsMode: 'Multiple'` so the runtime can stage a green
+      // revision at 0% traffic, cut over, and flip back to the warm blue
+      // revision in seconds. This flip is intentionally NOT applied here yet
+      // because it is irreversible-by-provision and carries two hazards that
+      // must be handled operationally first:
+      //   1. Regression guard — Multiple mode with STRICT_BLUEGREEN still OFF
+      //      gives every new revision 0% traffic by default, so the legacy
+      //      in-place recreate would silently never take traffic. The two
+      //      switches MUST be flipped together.
+      //   2. IaC vs runtime traffic ownership — in Multiple mode the upgrade
+      //      reconciler mutates the `traffic` array at runtime (pin/cutover/
+      //      flip). A declarative `traffic` block here would be reset by the
+      //      next `azd provision`, which during a confirm window or after a
+      //      rollback would yank traffic to the wrong revision. The cutover
+      //      must therefore stay runtime-owned (no static traffic block), and
+      //      operators must avoid `azd provision` mid-cutover.
+      // See docs/features_change/2026-06 for the rollout runbook.
       activeRevisionsMode: 'Single'
       secrets: [
         // Shared secret for the loopback exec channel between the api/worker
@@ -239,6 +262,20 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // `owner_oid` — intended for the single-tenant development phase
             // only. Flip back to 'false' before multi-user production.
             { name: 'BLAST_JOBS_SHARED_VISIBILITY', value: 'false' }
+            // Native ACA blue/green self-upgrade (issue: guaranteed rollback +
+            // no leftover revisions). Default OFF preserves the legacy
+            // Single-mode in-place revision recreate (Charter §12a Rule 4):
+            // pipeline/reconciler/rollback all branch on this flag, so OFF is
+            // a zero-regression no-op. Flipping to 'true' REQUIRES the
+            // Container App to also run in `activeRevisionsMode: Multiple`
+            // (see the configuration block above) — otherwise traffic always
+            // follows the latest revision and the traffic-flip rollback /
+            // GC cannot work. Optional knobs (env_int defaults apply when
+            // unset, see api/services/upgrade/revisions.py + reconciler.py):
+            //   UPGRADE_CONFIRM_WINDOW_SECONDS (default 300)
+            //   UPGRADE_VALIDATING_TIMEOUT_SECONDS (default 600)
+            //   UPGRADE_REVISION_KEEP_N (default 2)
+            { name: 'STRICT_BLUEGREEN', value: 'false' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
           probes: [
@@ -333,6 +370,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // BLAST capacity gate (issue #23) — must match the api sidecar.
             // Default OFF preserves the existing submit-lock path.
             { name: 'BLAST_GATE_ENABLED', value: 'false' }
+            // Blue/green self-upgrade flag — must match the api sidecar so the
+            // worker-run pipeline/rollback tasks branch identically. Default
+            // OFF (Charter §12a Rule 4).
+            { name: 'STRICT_BLUEGREEN', value: 'false' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
@@ -368,6 +409,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // BLAST capacity gate (issue #23) — must match the api sidecar.
             // Default OFF preserves the existing submit-lock path.
             { name: 'BLAST_GATE_ENABLED', value: 'false' }
+            // Blue/green self-upgrade flag — must match the api sidecar so the
+            // beat-driven reconciler drives validating→confirming→succeeded
+            // identically. Default OFF (Charter §12a Rule 4).
+            { name: 'STRICT_BLUEGREEN', value: 'false' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }

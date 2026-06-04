@@ -426,6 +426,34 @@ def prepare_db_via_aks(
     }
 
 
+def _count_staged_blobs(container: Any, db_name: str) -> tuple[int, int] | None:
+    """Best-effort ``(count, total_bytes)`` of fully-staged blobs under ``<db>/``.
+
+    The AKS-fanout pods upload one blob per source file at
+    ``<db>/<basename>``, so a prefix list gives a live per-file progress
+    signal the K8s Job status cannot (the Job only flips a pod to
+    ``succeeded`` once ALL of its ~480 files are done, which is why the SPA
+    otherwise sits at ``0 / 10 shards`` for many minutes). The summed blob
+    size is the bytes actually landed in Storage, which the SPA divides by
+    elapsed time to render a real download throughput (MB/s). Returns ``None``
+    when the listing fails so the caller can fall back to pod-level counts
+    rather than reporting a wrong/zero file count.
+    """
+    try:
+        prefix = f"{db_name}/"
+        count = 0
+        total_bytes = 0
+        for blob in container.list_blobs(name_starts_with=prefix):
+            count += 1
+            total_bytes += int(getattr(blob, "size", 0) or 0)
+        return count, total_bytes
+    except Exception as exc:  # pragma: no cover - network/SDK variance
+        LOGGER.debug(
+            "AKS staged-blob count skipped db=%s: %s", db_name, type(exc).__name__
+        )
+        return None
+
+
 def _on_job_progress(
     container: Any,
     db_name: str,
@@ -438,8 +466,14 @@ def _on_job_progress(
 ) -> None:
     """Mirror the server-side `_record_progress` shape so the SPA can render."""
 
+    # Live per-file signal so the SPA shows a moving "N / total files" bar, a
+    # throughput ETA, and a download speed (bytes landed / elapsed) instead of
+    # "0 / 10 shards · 0%" while every shard is still mid-flight. Falls back to
+    # pod-level counts when the listing fails.
+    staged = _count_staged_blobs(container, db_name)
+
     def _mut(meta: dict[str, Any]) -> dict[str, Any]:
-        meta["copy_status"] = {
+        copy_status: dict[str, Any] = {
             "phase": "copying",
             "mode": mode_label,
             "total_files": len(file_keys),
@@ -448,6 +482,10 @@ def _on_job_progress(
             "failed_pods": int(snapshot.get("failed_pods") or 0),
             "shard_count": int(snapshot.get("shard_count") or 0),
         }
+        if staged is not None:
+            copy_status["success"] = staged[0]
+            copy_status["bytes_done"] = staged[1]
+        meta["copy_status"] = copy_status
         return meta
 
     try:

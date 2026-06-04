@@ -112,6 +112,12 @@ export function UpgradePage() {
   }, [refreshAll]);
 
   const phase = status ? statePhase(status.state) : "idle";
+  // During the blue/green confirm window, rollback is an instant traffic
+  // flip back to the still-warm blue revision — no ACR pull, so the ACR
+  // pre-flight gate below does not apply.
+  const fastFlip = Boolean(
+    status && status.state === "confirming" && status.blue_revision,
+  );
   const newerCandidates = useMemo(() => {
     if (!candidates || !status) return [] as UpgradeCandidate[];
     if (!status.running_version) return candidates.candidates;
@@ -366,14 +372,25 @@ export function UpgradePage() {
       {(phase === "succeeded" ||
         phase === "failed" ||
         status.state === "rolling_out" ||
+        status.state === "confirming" ||
         status.state === "rolled_back") &&
         Object.keys(status.rollback_target).length > 0 && (
           <section className="glass-card" style={cardStack}>
             <h3 style={{ margin: 0 }}>Rollback</h3>
-            <p className="muted" style={{ margin: 0 }}>
-              Replaces the deployed images with the snapshot taken before the upgrade. Requires
-              that ACR still carries those tags.
-            </p>
+            {fastFlip ? (
+              <p className="muted" style={{ margin: 0 }}>
+                Confirm window is open. Rolling back now flips traffic back to the
+                still-warm previous revision{" "}
+                <code>{status.blue_revision}</code> in seconds — no image pull, no
+                reboot. After the window closes the previous revision is removed and
+                rollback reverts to the slower snapshot re-deploy below.
+              </p>
+            ) : (
+              <p className="muted" style={{ margin: 0 }}>
+                Replaces the deployed images with the snapshot taken before the upgrade. Requires
+                that ACR still carries those tags.
+              </p>
+            )}
             <ImageDiffTable
               current={status.current_images}
               target={status.rollback_target}
@@ -400,7 +417,9 @@ export function UpgradePage() {
                       </li>
                     ))}
                 </ul>
-                Use the escape-hatch commands below or rebuild the older image.
+                {fastFlip
+                  ? "The snapshot re-deploy path is unavailable, but the confirm-window traffic flip above does not need ACR."
+                  : "Use the escape-hatch commands below or rebuild the older image."}
               </div>
             )}
             {preflight && preflight.available && (
@@ -424,7 +443,7 @@ export function UpgradePage() {
             <button
               type="button"
               className="glass-button"
-              disabled={submitting || (preflight ? !preflight.available : false)}
+              disabled={submitting || (fastFlip ? false : preflight ? !preflight.available : false)}
               onClick={() => void triggerRollback()}
             >
               <RotateCcw size={14} strokeWidth={1.6} /> Roll back

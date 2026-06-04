@@ -2266,6 +2266,13 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<VnetPeeringResponse | null>(null);
 
+  // RBAC-remediation affordances: copy the grant command, and re-probe in a
+  // loop after the operator runs it (Azure role propagation takes 1-5 min, so
+  // the first manual retry usually still fails — this absorbs that delay).
+  const [copied, setCopied] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryNote, setRetryNote] = useState<string | null>(null);
+
   const [nsgRunning, setNsgRunning] = useState(false);
   const [nsgError, setNsgError] = useState<string | null>(null);
   const [nsgResult, setNsgResult] = useState<VnetPeeringNsgRuleResponse | null>(null);
@@ -2410,23 +2417,85 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
     setResult(null);
     setNsgError(null);
     setNsgResult(null);
+    setRetryNote(null);
     setRunning(true);
     try {
-      const response = await settingsApi.peerVnet({
-        subscription_id: subscriptionId,
-        resource_group: selectedClusterRg,
-        cluster_name: clusterName,
-        target_subscription_id: targetSubscriptionId,
-        target_resource_group: targetResourceGroup,
-        target_vnet_name: targetVnetName,
-        target_ip: targetIp || undefined,
-        target_path: targetPath || undefined,
-      });
+      const response = await callPeer();
       setResult(response);
     } catch (err) {
       setError(formatApiError(err, "settings"));
     } finally {
       setRunning(false);
+    }
+  };
+
+  // Single peering round-trip, shared by the manual button, the post-grant
+  // retry loop, and the post-NSG re-probe so they all send identical args.
+  const callPeer = () =>
+    settingsApi.peerVnet({
+      subscription_id: subscriptionId,
+      resource_group: selectedClusterRg,
+      cluster_name: clusterName,
+      target_subscription_id: targetSubscriptionId,
+      target_resource_group: targetResourceGroup,
+      target_vnet_name: targetVnetName,
+      target_ip: targetIp || undefined,
+      target_path: targetPath || undefined,
+    });
+
+  const copyRemediationCommand = async () => {
+    const command = result?.rbac_remediation?.command;
+    if (!command) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2200);
+    } catch {
+      // Clipboard API can be blocked (insecure context / permissions) — the
+      // command stays visible in the <code> block for manual selection.
+      setCopied(false);
+    }
+  };
+
+  // Poll peerVnet after the operator grants the role. Azure RBAC propagation
+  // is 1-5 min, so we retry on a backoff and stop as soon as the response no
+  // longer carries an RBAC denial (rbac_remediation absent) — that means both
+  // peering directions finally succeeded.
+  const retryAfterGrant = async () => {
+    if (!canSubmit || retrying) return;
+    const delaysMs = [10000, 20000, 30000, 30000, 30000, 30000];
+    setRetrying(true);
+    setError(null);
+    try {
+      for (let attempt = 0; attempt < delaysMs.length; attempt += 1) {
+        setRetryNote(
+          `Waiting for role propagation, then retrying (${attempt + 1}/${delaysMs.length})…`,
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, delaysMs[attempt]));
+        let response: VnetPeeringResponse;
+        try {
+          response = await callPeer();
+        } catch (err) {
+          setError(formatApiError(err, "settings"));
+          setRetryNote(null);
+          return;
+        }
+        setResult(response);
+        if (!response.rbac_remediation) {
+          setRetryNote(
+            response.error
+              ? "Peering no longer blocked by RBAC; see the result above."
+              : "Peering succeeded — RBAC grant has propagated.",
+          );
+          return;
+        }
+      }
+      setRetryNote(
+        "Still blocked after retrying. Confirm the role assignment landed on the " +
+          "target VNet, then retry again.",
+      );
+    } finally {
+      setRetrying(false);
     }
   };
 
@@ -2455,16 +2524,7 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
       if (!dryRun && response.applied) {
         // Re-run the probe so the operator sees the unblocked state in one go.
         try {
-          const reProbe = await settingsApi.peerVnet({
-            subscription_id: subscriptionId,
-            resource_group: selectedClusterRg,
-            cluster_name: clusterName,
-            target_subscription_id: targetSubscriptionId,
-            target_resource_group: targetResourceGroup,
-            target_vnet_name: targetVnetName,
-            target_ip: targetIp || undefined,
-            target_path: targetPath || undefined,
-          });
+          const reProbe = await callPeer();
           setResult(reProbe);
         } catch {
           // Probe failure here is informational only — the NSG rule
@@ -2626,7 +2686,7 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
           <button
             className="glass-button glass-button--primary"
             onClick={peer}
-            disabled={!canSubmit || running}
+            disabled={!canSubmit || running || retrying}
             style={{ fontSize: 12 }}
           >
             {running ? "Peering..." : "Peer & probe"}
@@ -2674,6 +2734,41 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
             )}
             {result.error && (
               <StatusLine kind="error">{result.error}</StatusLine>
+            )}
+            {result.rbac_remediation && (
+              <>
+                <StatusLine kind="error">
+                  {result.rbac_remediation.message}{" "}
+                  <code>{result.rbac_remediation.command}</code>
+                </StatusLine>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    paddingBottom: 4,
+                  }}
+                >
+                  <button
+                    className="glass-button"
+                    onClick={copyRemediationCommand}
+                    style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
+                  >
+                    <Copy size={12} /> {copied ? "Copied" : "Copy command"}
+                  </button>
+                  <button
+                    className="glass-button glass-button--primary"
+                    onClick={retryAfterGrant}
+                    disabled={retrying || !canSubmit}
+                    style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
+                  >
+                    {retrying && <Loader2 size={12} className="spin" />}
+                    {retrying ? "Retrying…" : "I granted the role — retry"}
+                  </button>
+                </div>
+                {retryNote && <StatusLine kind="info">{retryNote}</StatusLine>}
+              </>
             )}
             {probe && !probe.reachable && probe.message && (
               <StatusLine kind="error">Probe error: {probe.message}</StatusLine>

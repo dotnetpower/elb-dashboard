@@ -49,6 +49,18 @@ class _FakeContainer:
     def __init__(self, initial: dict[str, Any] | None = None) -> None:
         self.meta: dict[str, Any] = dict(initial or {})
         self.update_calls: list[dict[str, Any]] = []
+        # Optional staged-blob inventory for `_count_staged_blobs`. Names are
+        # full blob paths (e.g. "core_nt/core_nt.000.nhr"); the optional
+        # per-name byte size feeds the download-speed signal.
+        self.blob_names: list[str] = []
+        self.blob_sizes: dict[str, int] = {}
+
+    def list_blobs(self, name_starts_with: str = "") -> list[Any]:
+        return [
+            _types.SimpleNamespace(name=name, size=self.blob_sizes.get(name, 0))
+            for name in self.blob_names
+            if name.startswith(name_starts_with)
+        ]
 
 
 def _fake_update_metadata(
@@ -391,3 +403,79 @@ def test_aks_task_missing_source_version_raises(monkeypatch: pytest.MonkeyPatch)
     _set_container(_FakeContainer())
     with pytest.raises(ValueError):
         prepare_db_via_aks.run(**_base_kwargs(source_version=""))
+
+
+def test_on_job_progress_reports_file_level_success() -> None:
+    """The copying-phase callback surfaces a live per-file `success` count.
+
+    Without this the SPA only sees pod-level `succeeded_pods`/`shard_count`
+    (0/10 until a whole shard finishes), so the modal sits at "0 / 10 shards
+    · 0%" for many minutes even while blobs are landing.
+    """
+    container = _FakeContainer({"db_name": "core_nt"})
+    container.blob_names = [
+        "core_nt/core_nt.000.nhr",
+        "core_nt/core_nt.000.nin",
+        "core_nt/core_nt.001.nhr",
+        # Unrelated prefix must not be counted.
+        "core_ntx/other.nhr",
+    ]
+    container.blob_sizes = {
+        "core_nt/core_nt.000.nhr": 1000,
+        "core_nt/core_nt.000.nin": 2000,
+        "core_nt/core_nt.001.nhr": 500,
+        "core_ntx/other.nhr": 9999,
+    }
+    file_keys = [f"v/core_nt.{i:03d}.nhr" for i in range(10)]
+    snapshot = {
+        "active_pods": 10,
+        "succeeded_pods": 0,
+        "failed_pods": 0,
+        "shard_count": 10,
+    }
+
+    task_module._on_job_progress(
+        container,
+        "core_nt",
+        "stworkload",
+        file_keys,
+        snapshot,
+        mode_label="aks",
+        update_metadata=_fake_update_metadata,
+    )
+
+    cs = container.meta["copy_status"]
+    assert cs["phase"] == "copying"
+    assert cs["mode"] == "aks"
+    assert cs["total_files"] == 10
+    assert cs["shard_count"] == 10
+    assert cs["succeeded_pods"] == 0
+    # File-level signal: 3 blobs under "core_nt/", not the "core_ntx/" decoy.
+    assert cs["success"] == 3
+    # Byte-level signal for download speed: 1000 + 2000 + 500, decoy excluded.
+    assert cs["bytes_done"] == 3500
+
+
+def test_on_job_progress_falls_back_when_listing_fails() -> None:
+    """A listing failure must not poison progress — `success` is simply omitted."""
+
+    class _BoomContainer(_FakeContainer):
+        def list_blobs(self, name_starts_with: str = "") -> list[Any]:
+            raise RuntimeError("network blocked")
+
+    container = _BoomContainer({"db_name": "core_nt"})
+    task_module._on_job_progress(
+        container,
+        "core_nt",
+        "stworkload",
+        ["v/core_nt.000.nhr"],
+        {"active_pods": 10, "succeeded_pods": 0, "failed_pods": 0, "shard_count": 10},
+        mode_label="aks",
+        update_metadata=_fake_update_metadata,
+    )
+
+    cs = container.meta["copy_status"]
+    assert "success" not in cs
+    assert "bytes_done" not in cs
+    assert cs["succeeded_pods"] == 0
+    assert cs["shard_count"] == 10

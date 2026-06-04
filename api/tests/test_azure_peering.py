@@ -379,6 +379,108 @@ def test_helper_peers_target_vnet_and_probes_private_ip(monkeypatch) -> None:
     assert len(state["peering_recorder"]) == 2
 
 
+def test_target_helper_surfaces_rbac_remediation_on_authz_failure(monkeypatch) -> None:
+    """When peering the target VNet is denied by RBAC, the payload must carry a
+    precise `rbac_remediation` (Network Contributor scoped to the target VNet,
+    with the MI object id parsed from the Azure error) — not just the generic
+    platform-to-AKS recovery_command.
+    """
+    aks_vnet = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg-elb-cluster_elb-cluster-01_koreacentral/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet-23268255"
+    )
+    target_vnet = (
+        "/subscriptions/sub-2/resourceGroups/rg-target/providers/"
+        "Microsoft.Network/virtualNetworks/vnet-target"
+    )
+    authz = Exception(
+        "(AuthorizationFailed) The client 'app' with object id "
+        "'e51aaab3-eb17-4935-a7eb-446b53a5c445' does not have authorization to "
+        "perform action 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings/write'"
+    )
+
+    _install_clients(
+        monkeypatch,
+        node_rg_vnets=[aks_vnet],
+        resource_lists={"rg-target": [target_vnet]},
+        peering_raises={
+            "peer-vnet-target-to-aks-vnet-23268255": authz,
+            "peer-aks-vnet-23268255-to-vnet-target": authz,
+        },
+    )
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.httpx.get",
+        lambda url, timeout: SimpleNamespace(
+            is_success=False, status_code=503, reason_phrase="unreachable"
+        ),
+    )
+    from api.tasks.azure.peering import ensure_vnet_peering_with_target
+
+    result = ensure_vnet_peering_with_target(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-01",
+        target_subscription_id="sub-2",
+        target_resource_group="rg-target",
+        target_vnet_name="vnet-target",
+    )
+
+    assert "AuthorizationFailed" in result["error"]
+    remediation = result["rbac_remediation"]
+    assert remediation["role"] == "Network Contributor"
+    assert remediation["scope"] == target_vnet
+    # MI object id parsed out of the Azure error and scoped to the target VNet.
+    assert "e51aaab3-eb17-4935-a7eb-446b53a5c445" in remediation["command"]
+    assert f"--scope {target_vnet}" in remediation["command"]
+    assert "az role assignment create" in remediation["command"]
+
+
+def test_target_helper_omits_rbac_remediation_on_non_authz_error(monkeypatch) -> None:
+    """A non-RBAC peering failure records `error` but must NOT fabricate an
+    `rbac_remediation` block.
+    """
+    aks_vnet = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg-elb-cluster_elb-cluster-01_koreacentral/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet-23268255"
+    )
+    target_vnet = (
+        "/subscriptions/sub-2/resourceGroups/rg-target/providers/"
+        "Microsoft.Network/virtualNetworks/vnet-target"
+    )
+
+    _install_clients(
+        monkeypatch,
+        node_rg_vnets=[aks_vnet],
+        resource_lists={"rg-target": [target_vnet]},
+        peering_raises={
+            "peer-vnet-target-to-aks-vnet-23268255": Exception(
+                "(InternalServerError) try again"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.httpx.get",
+        lambda url, timeout: SimpleNamespace(
+            is_success=False, status_code=503, reason_phrase="unreachable"
+        ),
+    )
+    from api.tasks.azure.peering import ensure_vnet_peering_with_target
+
+    result = ensure_vnet_peering_with_target(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-01",
+        target_subscription_id="sub-2",
+        target_resource_group="rg-target",
+        target_vnet_name="vnet-target",
+    )
+
+    assert "InternalServerError" in result["error"]
+    assert "rbac_remediation" not in result
+
+
 def _make_byo_cluster(
     *,
     node_rg: str = "MC_rg-elb-cluster_elb-cluster-02_koreacentral",

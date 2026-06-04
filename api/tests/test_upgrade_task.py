@@ -735,6 +735,10 @@ def test_state_transition_timeline_walks_through_every_state(env: None) -> None:
     assert state.STATE_BUILDING in upgrade_task.STATE_TRANSITION_TIMELINE
     assert state.STATE_PATCHING in upgrade_task.STATE_TRANSITION_TIMELINE
     assert state.STATE_ROLLING_OUT in upgrade_task.STATE_TRANSITION_TIMELINE
+    # Blue/green intermediate states must stay registered in the timeline so
+    # the documented invariant (and the frontend state union) cannot drift.
+    assert state.STATE_VALIDATING in upgrade_task.STATE_TRANSITION_TIMELINE
+    assert state.STATE_CONFIRMING in upgrade_task.STATE_TRANSITION_TIMELINE
     assert state.STATE_SUCCEEDED in upgrade_task.STATE_TRANSITION_TIMELINE
     # And the rolling_out row landed during the run.
     assert state.get_state().state == state.STATE_ROLLING_OUT
