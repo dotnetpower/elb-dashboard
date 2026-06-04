@@ -1269,6 +1269,179 @@ def test_dispatch_split_child_submits_records_terminal_failure(
     )
 
 
+def _fake_split_repo(
+    updates: list[tuple[str, dict[str, object]]],
+    history: list[tuple[str, str, dict[str, object]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.state.job_state import JobState
+
+    class FakeRepo:
+        def create(self, state: JobState) -> JobState:
+            return state
+
+        def update(self, job_id: str, **kwargs: object) -> JobState:
+            updates.append((job_id, kwargs))
+            return JobState(job_id=job_id, type="blast-child", status=str(kwargs.get("status", "")))
+
+        def append_history(self, job_id: str, event: str, payload: dict[str, object]) -> None:
+            history.append((job_id, event, payload))
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: FakeRepo())
+
+
+def _split_child(group_id: str) -> dict[str, object]:
+    child_job_id = f"job-123-{group_id}"
+    return {
+        "group_id": group_id,
+        "child_job_id": child_job_id,
+        "query_file": f"queries/split/job-123/{group_id}/query.fa",
+        "argv": blast._elastic_blast_argv("submit", child_job_id),
+        "config_content": "[blast]\nqueries=x\n",
+        "options": {"outfmt": 6},
+    }
+
+
+def test_dispatch_split_child_submits_k8s_gated_acquires_and_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In k8s mode each child waits for admission then releases the Lease."""
+    from api.services.blast import k8s_gate
+    from api.services.k8s.submit_lease import SubmitLeaseHandle
+
+    monkeypatch.setenv("BLAST_COORD_BACKEND", "k8s")
+    updates: list[tuple[str, dict[str, object]]] = []
+    history: list[tuple[str, str, dict[str, object]]] = []
+    _fake_split_repo(updates, history, monkeypatch)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    handle = SubmitLeaseHandle(
+        name="elb-blast-submit-default", namespace="default", holder="dashboard-split-x"
+    )
+    waited: list[str] = []
+    released: list[object] = []
+    monkeypatch.setattr(
+        k8s_gate,
+        "wait_for_k8s_admission",
+        lambda *a, **k: (waited.append(k["job_id"]), handle)[1],
+    )
+    monkeypatch.setattr(
+        k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1])
+    )
+
+    def fake_terminal_run(
+        *, argv: list[str], stdin: str, stdin_file: str, timeout_seconds: int
+    ) -> dict[str, object]:
+        del argv, stdin, stdin_file, timeout_seconds
+        return {"exit_code": 0, "stdout": '{"decision":"accepted"}\n', "stderr": ""}
+
+    result = blast._dispatch_split_child_submits(
+        parent_job_id="job-123",
+        owner_oid="oid-1",
+        tenant_id="tenant-1",
+        children=[_split_child("qg1"), _split_child("qg2")],
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="cluster",
+        terminal_run=fake_terminal_run,
+    )
+
+    assert [r["status"] for r in result] == ["running", "running"]
+    assert waited == ["job-123-qg1", "job-123-qg2"]
+    assert released == [handle, handle]  # one release per child
+
+
+def test_dispatch_split_child_submits_k8s_gate_timeout_fails_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child whose gate wait times out is failed without running terminal."""
+    from api.services.blast import k8s_gate
+
+    monkeypatch.setenv("BLAST_COORD_BACKEND", "k8s")
+    updates: list[tuple[str, dict[str, object]]] = []
+    history: list[tuple[str, str, dict[str, object]]] = []
+    _fake_split_repo(updates, history, monkeypatch)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise k8s_gate.K8sGateWaitTimeout("deadline")
+
+    monkeypatch.setattr(k8s_gate, "wait_for_k8s_admission", _boom)
+    released: list[object] = []
+    monkeypatch.setattr(
+        k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1])
+    )
+
+    terminal_ran = False
+
+    def fake_terminal_run(**_kwargs: object) -> dict[str, object]:
+        nonlocal terminal_ran
+        terminal_ran = True
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    result = blast._dispatch_split_child_submits(
+        parent_job_id="job-123",
+        owner_oid="oid-1",
+        tenant_id="tenant-1",
+        children=[_split_child("qg1")],
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="cluster",
+        terminal_run=fake_terminal_run,
+    )
+
+    assert result[0]["status"] == "failed"
+    assert "submit_gate_unavailable" in str(result[0]["error"])
+    assert terminal_ran is False
+    assert released == []  # no Lease acquired → nothing to release
+
+
+def test_dispatch_split_child_submits_parent_budget_exhausted_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the parent wall-clock budget is spent, remaining children fail
+    immediately without waiting or running terminal (critique H4/H5)."""
+    from api.services.blast import coordination, k8s_gate
+
+    monkeypatch.setenv("BLAST_COORD_BACKEND", "k8s")
+    updates: list[tuple[str, dict[str, object]]] = []
+    history: list[tuple[str, str, dict[str, object]]] = []
+    _fake_split_repo(updates, history, monkeypatch)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    # Zero budget → every child is past the deadline before its first wait.
+    monkeypatch.setattr(coordination, "split_parent_gate_budget_seconds", lambda: 0)
+
+    waited: list[str] = []
+    monkeypatch.setattr(
+        k8s_gate,
+        "wait_for_k8s_admission",
+        lambda *a, **k: (waited.append(k["job_id"]), None)[1],
+    )
+
+    terminal_ran = False
+
+    def fake_terminal_run(**_kwargs: object) -> dict[str, object]:
+        nonlocal terminal_ran
+        terminal_ran = True
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    result = blast._dispatch_split_child_submits(
+        parent_job_id="job-123",
+        owner_oid="oid-1",
+        tenant_id="tenant-1",
+        children=[_split_child("qg1"), _split_child("qg2")],
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="cluster",
+        terminal_run=fake_terminal_run,
+    )
+
+    assert [r["status"] for r in result] == ["failed", "failed"]
+    assert "parent_gate_budget_exhausted" in str(result[0]["error"])
+    assert waited == []  # never even attempted a gate wait
+    assert terminal_ran is False
+
+
 def test_ensure_terminal_azure_cli_login_uses_existing_account() -> None:
     calls: list[list[str]] = []
 

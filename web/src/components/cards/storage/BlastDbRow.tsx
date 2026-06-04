@@ -281,6 +281,33 @@ export function BlastDbRow({
     // `elapsed` advances ~1 Hz via the parent tick, so a stalled copy still
     // re-runs this effect and `computeWindowedSpeed` clears the stale rate.
   }, [copyActive, bytesDone, elapsed]);
+  // "Looks frozen but isn't" guard. The AKS pods stream each NCBI file to a
+  // block blob with azcopy `--from-to=PipeBlob`, which COMMITS the blob only
+  // when the whole file finishes. The committed-blob listing that feeds
+  // `progressDone`/`bytes_done` therefore stays flat for minutes while every
+  // pod chews through a multi-GB `.nsq` sequence volume — the network is at
+  // full speed but the counter and the bytes-derived speed label do not move.
+  // Without a hint this reads as a stall, so when the committed count has not
+  // advanced for a while during an active copy we surface a reassuring
+  // "transferring large volumes…" note instead of a dead-looking frozen row.
+  const lastAdvanceMsRef = useRef<number>(Date.now());
+  const lastProgressRef = useRef<number>(progressDone);
+  useEffect(() => {
+    if (!copyActive) {
+      lastAdvanceMsRef.current = Date.now();
+      lastProgressRef.current = 0;
+      return;
+    }
+    if (progressDone > lastProgressRef.current) {
+      lastProgressRef.current = progressDone;
+      lastAdvanceMsRef.current = Date.now();
+    }
+  }, [copyActive, progressDone]);
+  const transferringLargeVolumes =
+    copyActive &&
+    !speedLabel &&
+    copyElapsedSeconds > 0 &&
+    Date.now() - lastAdvanceMsRef.current > 20_000;
   const unsupported = db.unsupported;
   const isUnsupported = Boolean(unsupported);
   // Suppress the generic "Not in current NCBI snapshot" warning for DBs we
@@ -522,8 +549,21 @@ export function BlastDbRow({
                   · {speedLabel}
                 </span>
               )}
-              {etaLabel && (
-                <span style={{ color: "var(--text-faint)" }}> · {etaLabel}</span>
+              {transferringLargeVolumes ? (
+                <span
+                  style={{ color: "var(--text-faint)" }}
+                  title="Each large sequence volume is committed only when its download finishes, so the file counter pauses between commits even though data is still streaming at full speed."
+                >
+                  {" "}
+                  · transferring large volumes…
+                </span>
+              ) : (
+                etaLabel && (
+                  <span style={{ color: "var(--text-faint)" }}>
+                    {" "}
+                    · {etaLabel}
+                  </span>
+                )
               )}
             </span>
           )}

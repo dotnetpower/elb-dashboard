@@ -27,6 +27,7 @@ Validation: `uv run pytest -q api/tests/test_prepare_db_aks_task.py
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -70,9 +71,40 @@ def get_credential() -> Any:
 # Step-wise poll cadence in seconds. The task polls every
 # ``_JOB_POLL_INTERVAL_SECONDS`` and times out at ``_JOB_POLL_MAX_SECONDS``
 # regardless of `activeDeadlineSeconds` so the Celery side never gets stuck
-# even if the K8s API stops responding.
+# even if the K8s API stops responding. The poll ceiling MUST outlive the
+# Job's `activeDeadlineSeconds` (default 4h) so the poller observes the
+# terminal Complete/Failed/DeadlineExceeded condition instead of declaring
+# its own ``timed_out`` first and leaving the Job orphaned. Override via env
+# to scale with even larger DBs.
 _JOB_POLL_INTERVAL_SECONDS = 30.0
-_JOB_POLL_MAX_SECONDS = 4 * 60 * 60
+_JOB_POLL_MAX_SECONDS = int(
+    os.environ.get("PREPARE_DB_AKS_JOB_POLL_MAX_SECONDS", str(4 * 60 * 60 + 15 * 60))
+)
+
+# Per-task Celery time limits. The global worker limit (1h hard, see
+# api/celery_app.py) would SIGKILL this poller long before a multi-hour
+# `nt`/`core_nt` download finishes — leaving the Job running but unobserved
+# and the DB stuck `partial`. Override the global limit for THIS task only,
+# sitting above the poll ceiling plus a margin for the post-job
+# `_poll_copy_completion` reconcile sweep. Keep soft < hard.
+_TASK_SOFT_TIME_LIMIT = int(
+    os.environ.get(
+        "PREPARE_DB_AKS_TASK_SOFT_TIME_LIMIT", str(_JOB_POLL_MAX_SECONDS + 20 * 60)
+    )
+)
+_TASK_HARD_TIME_LIMIT = int(
+    os.environ.get(
+        "PREPARE_DB_AKS_TASK_TIME_LIMIT", str(_JOB_POLL_MAX_SECONDS + 30 * 60)
+    )
+)
+if _TASK_SOFT_TIME_LIMIT >= _TASK_HARD_TIME_LIMIT:
+    raise ValueError(
+        "PREPARE_DB_AKS_TASK_SOFT_TIME_LIMIT must be < PREPARE_DB_AKS_TASK_TIME_LIMIT"
+    )
+if _TASK_HARD_TIME_LIMIT <= _JOB_POLL_MAX_SECONDS:
+    raise ValueError(
+        "PREPARE_DB_AKS_TASK_TIME_LIMIT must exceed PREPARE_DB_AKS_JOB_POLL_MAX_SECONDS"
+    )
 
 
 @shared_task(
@@ -83,6 +115,8 @@ _JOB_POLL_MAX_SECONDS = 4 * 60 * 60
     retry_backoff=True,
     retry_backoff_max=300,
     retry_jitter=True,
+    soft_time_limit=_TASK_SOFT_TIME_LIMIT,
+    time_limit=_TASK_HARD_TIME_LIMIT,
 )
 def prepare_db_via_aks(
     self: Any,

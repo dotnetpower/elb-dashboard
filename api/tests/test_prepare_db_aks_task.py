@@ -479,3 +479,27 @@ def test_on_job_progress_falls_back_when_listing_fails() -> None:
     assert "bytes_done" not in cs
     assert cs["succeeded_pods"] == 0
     assert cs["shard_count"] == 10
+
+
+def test_task_time_limits_outlive_job_poll_and_deadline() -> None:
+    """The per-task Celery time limits MUST exceed the job poll ceiling and
+    the Job's `activeDeadlineSeconds`, otherwise the global 1h worker limit
+    SIGKILLs the poller mid-download and the DB is stuck `partial`.
+
+    Regression guard for the `nt` "partial · 1081 failed" incident: the Job
+    deadline was 45 min and the global Celery limit 1h, so a multi-hour
+    `nt`/`core_nt` download could never complete.
+    """
+    from api.services.k8s.prepare_db_jobs import DEFAULT_ACTIVE_DEADLINE_SECONDS
+
+    # Ordering ladder: job deadline <= poll ceiling < soft < hard.
+    assert task_module._JOB_POLL_MAX_SECONDS >= DEFAULT_ACTIVE_DEADLINE_SECONDS
+    assert task_module._TASK_SOFT_TIME_LIMIT > task_module._JOB_POLL_MAX_SECONDS
+    assert task_module._TASK_HARD_TIME_LIMIT > task_module._TASK_SOFT_TIME_LIMIT
+
+    # Celery must actually apply the per-task overrides (not the global 1h).
+    assert prepare_db_via_aks.soft_time_limit == task_module._TASK_SOFT_TIME_LIMIT
+    assert prepare_db_via_aks.time_limit == task_module._TASK_HARD_TIME_LIMIT
+    # And both must comfortably exceed the old global 1h hard limit so the
+    # multi-hour download is never cut off by the default worker limit.
+    assert prepare_db_via_aks.time_limit > 3600

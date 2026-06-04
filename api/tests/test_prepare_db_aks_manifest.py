@@ -190,13 +190,16 @@ def test_manifest_default_image_is_pinned() -> None:
     assert container["imagePullPolicy"] == "IfNotPresent"
 
 
-def test_manifest_default_active_deadline_is_45_minutes() -> None:
-    """Phase 1.5: bumped from 30 -> 45 min so the slowest shard in a
-    5-node throttled run still has headroom for ~10-15 large `.nsq`
-    files after its peers finish."""
-    assert DEFAULT_ACTIVE_DEADLINE_SECONDS == 2700
+def test_manifest_default_active_deadline_is_4_hours() -> None:
+    """`nt`/`core_nt` stream for well over an hour at 10-shard parallelism
+    (the dashboard badges them "May take hours"). The old 45 min ceiling
+    fired `activeDeadlineSeconds` mid-download, marking the Job
+    `Failed/DeadlineExceeded` and surfacing abandoned-but-not-errored files
+    as a misleading "partial · N failed". 4h stops cutting the big DBs off;
+    normal completion still exits the instant all shards succeed."""
+    assert DEFAULT_ACTIVE_DEADLINE_SECONDS == 4 * 60 * 60
     manifest = _baseline_manifest()
-    assert manifest["spec"]["activeDeadlineSeconds"] == 2700
+    assert manifest["spec"]["activeDeadlineSeconds"] == 4 * 60 * 60
 
 
 def test_script_streams_via_pipeblob() -> None:

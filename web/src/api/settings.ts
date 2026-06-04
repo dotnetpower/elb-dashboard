@@ -131,7 +131,11 @@ export interface VnetPeeringRequest {
   target_subscription_id: string;
   target_resource_group: string;
   target_vnet_name: string;
-  /** Optional override. Defaults to the elb-openapi internal-LB IP `10.224.0.7`. */
+  /**
+   * The elb-openapi internal-LB IP. Auto-detected per cluster by the UI (the
+   * internal-LB IP differs per cluster topology). When omitted, the backend
+   * falls back to a legacy default that is correct only for auto-VNet clusters.
+   */
   target_ip?: string;
   /** Optional path component of the probe URL. Defaults to `/openapi.json`. */
   target_path?: string;

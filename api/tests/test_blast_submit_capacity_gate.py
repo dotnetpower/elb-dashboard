@@ -365,6 +365,151 @@ def test_submit_gate_enabled_reserve_lost_race_requeues(
 
 
 # ---------------------------------------------------------------------------
+# BLAST_COORD_BACKEND=k8s precedence (§2a) — the cluster-backed Lease + count
+# gate wins over BLAST_GATE_ENABLED; the Redis capacity gate / submit lock are
+# bypassed entirely (reserve_slot / acquire_submit_lock never called).
+# ---------------------------------------------------------------------------
+
+
+def test_submit_k8s_backend_admit_releases_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.blast import k8s_gate
+    from api.services.k8s.submit_lease import SubmitLeaseHandle
+
+    monkeypatch.setenv("BLAST_COORD_BACKEND", "k8s")
+    monkeypatch.setenv("BLAST_GATE_ENABLED", "true")  # k8s must still win (§2a)
+    tracker = _install_pipeline_stubs(monkeypatch)
+
+    handle = SubmitLeaseHandle(
+        name="elb-blast-submit-default", namespace="default", holder="dashboard-z"
+    )
+    released: list[object] = []
+    monkeypatch.setattr(
+        k8s_gate,
+        "acquire_k8s_admission",
+        lambda *_a, **_k: k8s_gate.K8sAdmission(admitted=True, lease=handle),
+    )
+    monkeypatch.setattr(
+        k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1])
+    )
+    # Neither the Redis gate nor the submit lock may be touched in k8s mode.
+    monkeypatch.setattr(
+        capacity_gate,
+        "reserve_slot",
+        lambda *_a, **_k: pytest.fail("reserve_slot must not run in k8s mode"),
+    )
+    monkeypatch.setattr(
+        submit_task,
+        "acquire_submit_lock",
+        lambda *_a, **_k: pytest.fail("acquire_submit_lock must not run in k8s mode"),
+    )
+
+    result = _blast.submit.run(**_SUBMIT_KWARGS)
+
+    assert result["status"] == "completed"
+    assert tracker.stream_calls == 1
+    assert released == [handle]  # Lease released after the submit completes
+
+
+def test_submit_k8s_backend_capacity_full_requeues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.blast import k8s_gate
+
+    monkeypatch.setenv("BLAST_COORD_BACKEND", "k8s")
+    tracker = _install_pipeline_stubs(monkeypatch)
+
+    monkeypatch.setattr(
+        k8s_gate,
+        "acquire_k8s_admission",
+        lambda *_a, **_k: k8s_gate.K8sAdmission(
+            admitted=False,
+            reason=k8s_gate.REASON_CAPACITY_FULL,
+            retryable=True,
+            active_count=3,
+        ),
+    )
+
+    result = _blast.submit.run(**_SUBMIT_KWARGS)
+
+    assert result == {
+        "job_id": "job-cap-1",
+        "status": "running",
+        "phase": "waiting_for_capacity",
+        "requeued": True,
+    }
+    assert tracker.stream_calls == 0
+    assert len(tracker.requeues) == 1
+    # countdown carries +0..10s de-sync jitter around the 30s base (H6/L26).
+    assert 30 <= tracker.requeues[0]["countdown"] <= 40
+    deny_rows = [u for u in tracker.updates if u[1] == "waiting_for_capacity"]
+    assert deny_rows
+    assert deny_rows[-1][2]["error_code"] == "blast_capacity_full"
+
+
+def test_submit_k8s_backend_submit_slot_busy_requeues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.blast import k8s_gate
+
+    monkeypatch.setenv("BLAST_COORD_BACKEND", "k8s")
+    tracker = _install_pipeline_stubs(monkeypatch)
+
+    monkeypatch.setattr(
+        k8s_gate,
+        "acquire_k8s_admission",
+        lambda *_a, **_k: k8s_gate.K8sAdmission(
+            admitted=False, reason=k8s_gate.REASON_SUBMIT_SLOT_BUSY, retryable=True
+        ),
+    )
+
+    result = _blast.submit.run(**_SUBMIT_KWARGS)
+
+    assert result == {
+        "job_id": "job-cap-1",
+        "status": "running",
+        "phase": "waiting_for_submit_slot",
+        "requeued": True,
+    }
+    assert tracker.stream_calls == 0
+    deny_rows = [u for u in tracker.updates if u[1] == "waiting_for_submit_slot"]
+    assert deny_rows
+    assert deny_rows[-1][2]["error_code"] == "blast_submit_slot_busy"
+
+
+def test_submit_k8s_backend_lease_api_error_uses_retry_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.blast import k8s_gate
+
+    monkeypatch.setenv("BLAST_COORD_BACKEND", "k8s")
+    _install_pipeline_stubs(monkeypatch)
+
+    monkeypatch.setattr(
+        k8s_gate,
+        "acquire_k8s_admission",
+        lambda *_a, **_k: k8s_gate.K8sAdmission(
+            admitted=False, reason=k8s_gate.REASON_LEASE_API_ERROR, error=True
+        ),
+    )
+    retry_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        _blast,
+        "_retry_or_fail",
+        lambda _self, **kwargs: retry_calls.append(kwargs)
+        or {"job_id": kwargs["job_id"], "status": "retrying"},
+    )
+
+    result = _blast.submit.run(**_SUBMIT_KWARGS)
+
+    assert result["status"] == "retrying"
+    assert retry_calls
+    assert retry_calls[-1]["error_code"] == "blast_submit_lease_api_error"
+    assert retry_calls[-1]["phase"] == "submit_coordination_unavailable"
+
+
+# ---------------------------------------------------------------------------
 # Stage 5 — telemetry counter bumps (admit / deny / release / reserve_lost).
 # Each test isolates the counter store via _reset_counters_for_tests so the
 # in-process dict can't bleed across tests when the module is reused.

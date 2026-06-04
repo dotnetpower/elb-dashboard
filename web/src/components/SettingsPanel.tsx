@@ -2425,9 +2425,12 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
 
 /**
  * Peer a remote VNet with the AKS auto-VNet so VMs in that VNet can
- * `curl http://<openapi-private-ip>/openapi.json`. The default target
- * IP `10.224.0.7` matches the current elb-openapi internal-LoadBalancer
- * assignment; operators can override per-cluster.
+ * `curl http://<openapi-private-ip>/openapi.json`. The OpenAPI private IP
+ * is auto-detected from the selected cluster's live `elb-openapi`
+ * internal-LoadBalancer Service (the internal-LB IP differs per cluster —
+ * a BYO-subnet cluster lands inside the platform VNet, an auto-VNet cluster
+ * lands in 10.224.0.0/16 — so a single hardcoded default is wrong). The
+ * operator can still override the resolved value per-cluster.
  *
  * The dashboard's MI must hold `Network Contributor` on the target
  * resource group AND on the AKS auto-RG (MC_*) for both peering
@@ -2449,7 +2452,13 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
   const [targetVnetName, setTargetVnetName] = useState("");
   const [vnets, setVnets] = useState<VirtualNetworkSummary[]>([]);
   const [vnetsLoading, setVnetsLoading] = useState(false);
-  const [targetIp, setTargetIp] = useState("10.224.0.7");
+  const [targetIp, setTargetIp] = useState("");
+  // Auto-detect of the elb-openapi internal-LB IP for the selected cluster.
+  // `targetIpTouchedRef` flips the moment the operator edits the field by
+  // hand so a later cluster switch / re-resolve never clobbers their value.
+  const [targetIpResolving, setTargetIpResolving] = useState(false);
+  const [targetIpAutoNote, setTargetIpAutoNote] = useState<string | null>(null);
+  const targetIpTouchedRef = useRef(false);
   const [targetPath, setTargetPath] = useState("/openapi.json");
 
   const [running, setRunning] = useState(false);
@@ -2590,6 +2599,52 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
       cancelled = true;
     };
   }, [subscriptionId, config?.workloadResourceGroup]);
+
+  // Auto-detect the elb-openapi internal-LB IP for the selected cluster.
+  // The internal-LB IP is per-cluster (a BYO-subnet cluster lands inside the
+  // platform VNet, an auto-VNet cluster lands in 10.224.0.0/16), so there is
+  // no safe single default — resolve it live whenever the cluster selection
+  // changes, unless the operator has typed an override.
+  useEffect(() => {
+    if (targetIpTouchedRef.current) return;
+    if (!subscriptionId || !selectedClusterRg || !clusterName) {
+      setTargetIpAutoNote(null);
+      return;
+    }
+    let cancelled = false;
+    setTargetIpResolving(true);
+    setTargetIpAutoNote(null);
+    void (async () => {
+      try {
+        const svc = await monitoringApi.serviceIp(
+          subscriptionId,
+          selectedClusterRg,
+          clusterName,
+          "elb-openapi",
+        );
+        if (cancelled || targetIpTouchedRef.current) return;
+        if (svc.external_ip) {
+          setTargetIp(svc.external_ip);
+          setTargetIpAutoNote(`Auto-detected from ${clusterName}.`);
+        } else {
+          setTargetIpAutoNote(
+            "elb-openapi has no internal-LB IP yet (Service pending or not deployed). " +
+              "Enter the IP manually once it is assigned.",
+          );
+        }
+      } catch {
+        if (cancelled || targetIpTouchedRef.current) return;
+        setTargetIpAutoNote(
+          "Could not auto-detect the elb-openapi IP; enter it manually.",
+        );
+      } finally {
+        if (!cancelled) setTargetIpResolving(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [subscriptionId, selectedClusterRg, clusterName]);
 
   const canSubmit = Boolean(
     subscriptionId &&
@@ -2746,9 +2801,9 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
       <Group>
         <StatusLine kind="info">
           Peer a remote VNet with this cluster&apos;s AKS auto-VNet so VMs in
-          that VNet can reach the elb-openapi private IP (default
-          <code> 10.224.0.7</code>). Bidirectional peering is created
-          idempotently; the dashboard&apos;s managed identity needs
+          that VNet can reach the elb-openapi private IP (auto-detected from the
+          selected cluster&apos;s internal LoadBalancer). Bidirectional peering
+          is created idempotently; the dashboard&apos;s managed identity needs
           <code> Network Contributor</code> on both sides.
         </StatusLine>
         <Field
@@ -2847,12 +2902,21 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
         </Field>
         <Field
           label="OpenAPI private IP"
-          hint="Internal-LB IP exposed by the elb-openapi Service inside the AKS auto-VNet."
+          hint={
+            targetIpResolving
+              ? "Detecting the elb-openapi internal-LB IP for this cluster…"
+              : targetIpAutoNote ??
+                "Internal-LB IP exposed by the elb-openapi Service. Auto-detected from the selected cluster; override if needed."
+          }
         >
           <input
             value={targetIp}
-            onChange={(event) => setTargetIp(event.target.value)}
-            placeholder="10.224.0.7"
+            onChange={(event) => {
+              targetIpTouchedRef.current = true;
+              setTargetIpAutoNote(null);
+              setTargetIp(event.target.value);
+            }}
+            placeholder={targetIpResolving ? "Detecting…" : "Auto-detected from cluster"}
             style={INPUT_STYLE}
           />
         </Field>

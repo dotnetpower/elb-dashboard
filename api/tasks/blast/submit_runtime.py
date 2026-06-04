@@ -135,6 +135,7 @@ def _stream_submit_command(
     config_content: str,
     progress_phase: str = "submitting",
 ) -> dict[str, Any]:
+    from api.services.blast.coordination import SUBMIT_EXEC_TIMEOUT_SECONDS
     from api.services.sanitise import sanitise
     from api.services.terminal_exec import stream as terminal_stream
 
@@ -151,7 +152,7 @@ def _stream_submit_command(
         argv=_elastic_blast_argv("submit", job_id),
         stdin=config_content,
         stdin_file=ELASTIC_BLAST_CFG_FILE,
-        timeout_seconds=600,
+        timeout_seconds=SUBMIT_EXEC_TIMEOUT_SECONDS,
     ):
         if "line" in item:
             stream_name = str(item.get("stream") or "stdout")

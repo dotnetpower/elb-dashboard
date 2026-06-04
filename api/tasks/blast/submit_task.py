@@ -25,11 +25,17 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import time
 from typing import Any
 
 from celery import shared_task
 
+from api.services.blast.coordination import (
+    capacity_wait_max_seconds,
+    coordination_backend,
+    submit_slot_wait_max_seconds,
+)
 from api.services.blast.db_metadata import extract_db_name
 from api.services.blast.oracles import (
     upload_db_order_oracle_pointer_if_available,
@@ -50,6 +56,21 @@ from api.tasks.blast.submit_lock import (
     submit_lock_key,
 )
 from api.tasks.blast.submit_logs import persist_submit_log_events
+
+# Single source for the k8s-gate deny requeue cadence. ``retry_after_seconds``
+# (the informational state-row field) carries the nominal base; the actual
+# Celery ``countdown`` adds bounded jitter so a herd of submitters denied at the
+# same instant (Lease busy / ceiling full) do not re-poll the apiserver in
+# lock-step (critique H6/L26).
+_GATE_REQUEUE_BASE_COUNTDOWN_SECONDS = 30
+_GATE_REQUEUE_JITTER_SECONDS = 10
+
+
+def _gate_requeue_countdown() -> float:
+    """Base requeue countdown plus +0..jitter seconds of de-sync jitter."""
+    return _GATE_REQUEUE_BASE_COUNTDOWN_SECONDS + random.uniform(  # noqa: S311 - jitter, not crypto
+        0, _GATE_REQUEUE_JITTER_SECONDS
+    )
 
 
 def _capacity_gate_enabled() -> bool:
@@ -106,6 +127,8 @@ def submit(
     caller_oid: str = "",
     caller_tenant_id: str = "",
     warmup_wait_deadline_ts: float | None = None,
+    submit_slot_wait_deadline_ts: float | None = None,
+    capacity_wait_deadline_ts: float | None = None,
 ) -> dict[str, Any]:
     """Submit a BLAST search via the terminal sidecar.
 
@@ -118,6 +141,11 @@ def submit(
     and every subsequent re-enqueue forwards it unchanged, so the warmup wait
     loop fails once the deadline passes instead of looping forever. External
     callers never pass it.
+
+    ``submit_slot_wait_deadline_ts`` / ``capacity_wait_deadline_ts`` are the
+    matching internal knobs for the ``BLAST_COORD_BACKEND=k8s`` admission gate:
+    a Lease-contended (Gate A) or ceiling-full (Gate B) submit re-enqueues with
+    a deadline so neither wait loops forever. External callers never pass them.
     """
 
     _blast._progress(self, "preparing")
@@ -387,6 +415,7 @@ def submit(
                 options=effective_options,
                 owner_oid=caller_oid,
                 tenant_id=caller_tenant_id,
+                subscription_id=subscription_id,
             )
         except ValueError as exc:
             error = _blast._snippet(exc)
@@ -511,7 +540,131 @@ def submit(
         gate_enabled = _capacity_gate_enabled()
         submit_lock: tuple[Any, str] | None = None
         capacity_reservation = None
-        if gate_enabled:
+        k8s_lease = None
+        # §2a precedence: BLAST_COORD_BACKEND=k8s wins over BLAST_GATE_ENABLED.
+        # In k8s mode the cluster-backed Lease (Gate A) + job-count ceiling
+        # (Gate B) are authoritative; the Redis capacity gate / submit lock are
+        # bypassed entirely (reserve_slot is never called).
+        backend = coordination_backend()
+        if backend == "k8s":
+            from api.services import get_credential
+            from api.services.blast import k8s_gate
+
+            credential = get_credential()
+            admission = k8s_gate.acquire_k8s_admission(
+                credential,
+                subscription_id,
+                resource_group,
+                cluster_name,
+                namespace="default",
+                job_id=job_id,
+                source="dashboard",
+            )
+            if not admission.admitted:
+                if admission.error:
+                    # A genuine apiserver failure — surface via the bounded
+                    # retry path, NOT a silent forever-requeue.
+                    return _blast._retry_or_fail(
+                        self,
+                        job_id=job_id,
+                        phase="submit_coordination_unavailable",
+                        exc=RuntimeError(admission.reason or "lease_api_error"),
+                        error_code="blast_submit_lease_api_error",
+                    )
+                now = time.time()
+                if admission.reason == k8s_gate.REASON_SUBMIT_SLOT_BUSY:
+                    phase_name = "waiting_for_submit_slot"
+                    deadline = submit_slot_wait_deadline_ts or (
+                        now + submit_slot_wait_max_seconds()
+                    )
+                    error_code = "blast_submit_slot_busy"
+                    deadline_code = "blast_submit_slot_wait_deadline_exceeded"
+                    # Carry BOTH deadlines forward as explicit locals so an
+                    # oscillation between submit_slot_busy and capacity_full
+                    # cannot reset either bound. This branch refreshes the
+                    # submit-slot deadline; the capacity deadline passes through
+                    # untouched (critique M11 — no dict-key-overwrite reliance).
+                    next_submit_slot_deadline = deadline
+                    next_capacity_deadline = capacity_wait_deadline_ts
+                else:
+                    # capacity_full or capacity_count_error (fail-closed)
+                    phase_name = "waiting_for_capacity"
+                    deadline = capacity_wait_deadline_ts or (
+                        now + capacity_wait_max_seconds()
+                    )
+                    error_code = f"blast_{admission.reason}"
+                    deadline_code = "blast_capacity_wait_deadline_exceeded"
+                    next_submit_slot_deadline = submit_slot_wait_deadline_ts
+                    next_capacity_deadline = deadline
+                if now >= deadline:
+                    LOGGER.warning(
+                        "blast_k8s_gate_wait_deadline_exceeded job_id=%s "
+                        "cluster=%s phase=%s reason=%s",
+                        job_id,
+                        cluster_name,
+                        phase_name,
+                        admission.reason,
+                    )
+                    _blast._update_state(
+                        job_id,
+                        phase_name,
+                        status="failed",
+                        event="submit_wait_deadline_exceeded",
+                        error_code=deadline_code,
+                    )
+                    return {
+                        "job_id": job_id,
+                        "status": "failed",
+                        "phase": phase_name,
+                        "error_code": deadline_code,
+                    }
+                _blast._update_state(
+                    job_id,
+                    phase_name,
+                    status="running",
+                    event="k8s_gate_deny",
+                    error_code=error_code,
+                    retry_after_seconds=_GATE_REQUEUE_BASE_COUNTDOWN_SECONDS,
+                )
+                try:
+                    submit.apply_async(
+                        kwargs={
+                            "job_id": job_id,
+                            "subscription_id": subscription_id,
+                            "resource_group": resource_group,
+                            "cluster_name": cluster_name,
+                            "storage_account": storage_account,
+                            "program": program,
+                            "database": database,
+                            "query_file": query_file,
+                            "options": options,
+                            "caller_oid": caller_oid,
+                            "caller_tenant_id": caller_tenant_id,
+                            # Both wait deadlines carried forward via explicit
+                            # locals computed above (critique M11): the active
+                            # branch's bound is refreshed, the other is preserved.
+                            "submit_slot_wait_deadline_ts": next_submit_slot_deadline,
+                            "capacity_wait_deadline_ts": next_capacity_deadline,
+                        },
+                        countdown=_gate_requeue_countdown(),
+                        queue="blast",
+                    )
+                except Exception as enq_exc:
+                    return _blast._retry_or_fail(
+                        self,
+                        job_id=job_id,
+                        phase=phase_name,
+                        exc=enq_exc,
+                        error_code="blast_submit_requeue_failed",
+                    )
+                return {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": phase_name,
+                    "requeued": True,
+                }
+            k8s_lease = admission.lease
+        elif gate_enabled:
             from api.services import get_credential
             from api.services.blast import capacity_gate, capacity_signals
 
@@ -748,6 +901,22 @@ def submit(
                 capacity_gate.bump_release(cluster_name)
                 LOGGER.info(
                     "blast_gate_release cluster=%s job_id=%s",
+                    cluster_name,
+                    job_id,
+                )
+            if k8s_lease is not None:
+                from api.services import get_credential
+                from api.services.blast import k8s_gate
+
+                k8s_gate.release_k8s_admission(
+                    get_credential(),
+                    subscription_id,
+                    resource_group,
+                    cluster_name,
+                    k8s_lease,
+                )
+                LOGGER.info(
+                    "blast_k8s_gate_release cluster=%s job_id=%s",
                     cluster_name,
                     job_id,
                 )

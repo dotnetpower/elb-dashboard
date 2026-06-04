@@ -31,6 +31,9 @@ from api.services.k8s.timestamps import (
 from api.services.k8s.timestamps import (
     min_k8s_timestamp as _min_k8s_timestamp,
 )
+from api.services.k8s.timestamps import (
+    parse_k8s_timestamp as _parse_k8s_timestamp,
+)
 
 _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,63}$")
 
@@ -307,6 +310,135 @@ def k8s_check_blast_status(
         return result
     except Exception as exc:
         return {"status": "unknown", "pods": 0, "detail": str(exc)[:200]}
+    finally:
+        session.close()
+
+
+def _job_is_terminal(job: dict[str, Any]) -> bool:
+    """A K8s Job is terminal once it has any succeeded or failed pod."""
+    status = job.get("status", {}) or {}
+    try:
+        succeeded = int(status.get("succeeded", 0) or 0)
+        failed = int(status.get("failed", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return succeeded > 0 or failed > 0
+
+
+def _job_label(job: dict[str, Any], name: str) -> str:
+    return str(((job.get("metadata", {}) or {}).get("labels", {}) or {}).get(name) or "")
+
+
+def _job_age_seconds(job: dict[str, Any], now: float) -> float | None:
+    raw = (job.get("metadata", {}) or {}).get("creationTimestamp")
+    if not raw:
+        return None
+    try:
+        created = _parse_k8s_timestamp(str(raw)).timestamp()
+    except ValueError:
+        return None
+    return max(0.0, now - created)
+
+
+def k8s_count_active_blast_submissions(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str,
+) -> int:
+    """Gate B count — distinct active ``elastic-blast submit`` units on the cluster.
+
+    Counts distinct ``elb-job-id`` values among NON-TERMINAL ``app=finalizer`` Jobs
+    (one finalizer per submit, created synchronously, lifecycle-long). NOT raw
+    ``app=blast`` Jobs (N-per-submit, async on Azure) — see the design note
+    docs/research/blast-submit-coordination.md §5.1.
+
+    Two correctness contracts this helper MUST keep:
+
+    * **Uncached / fresh read.** This is an admission decision, so it bypasses the
+      ~3s ``_fetch_blast_pods_and_jobs`` memo: a finalizer created seconds ago by
+      the previous Lease holder must be visible (design §5.2). It does its own
+      direct list.
+    * **Fail-closed.** A read failure RAISES (caller releases the Lease and
+      requeues ``waiting_for_capacity``); it never returns a low count that would
+      over-admit past the ceiling (design §5.2).
+
+    Phantom-slot guard: a lone finalizer with no live companion (``app=submit`` /
+    ``app=blast``) and older than ``BLAST_FINALIZER_GRACE_SECONDS`` is treated as
+    an orphaned phantom and NOT counted; younger ones are counted to cover the
+    async batch-creation lag (design §5.1).
+    """
+    from api.services.blast.coordination import (
+        FINALIZER_COMPANION_SELECTORS,
+        FINALIZER_JOB_ID_LABEL,
+        FINALIZER_LABEL_SELECTOR,
+        finalizer_grace_seconds,
+    )
+    from api.services.k8s.monitoring import _get_k8s_session
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        # Gate B MUST count in the EXACT same namespace Gate A (the Lease) locked.
+        # The Lease (api.services.k8s.submit_lease) scopes itself to the raw
+        # ``namespace`` argument, so this count uses the raw namespace too —
+        # NOT ``_namespace_or_default`` (a cluster-default lookup that can resolve
+        # to a DIFFERENT namespace than the Lease, enforcing the ceiling against
+        # the wrong population while the mutex guards another) — critique C3.
+        target_ns = (namespace or "default").strip() or "default"
+        finalizer_app = FINALIZER_LABEL_SELECTOR.split("=", 1)[-1]
+        companion_apps = {sel.split("=", 1)[-1] for sel in FINALIZER_COMPANION_SELECTORS}
+        # One set-based selector list keeps the read scoped while still fresh.
+        selector = f"app in ({finalizer_app},{','.join(sorted(companion_apps))})"
+        resp = session.get(
+            f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs",
+            params={"labelSelector": selector},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"jobs API error: {resp.status_code}")
+        items = resp.json().get("items", []) or []
+
+        now = time.time()
+        grace = finalizer_grace_seconds()
+        live_companion_ids: set[str] = set()
+        finalizers: list[dict[str, Any]] = []
+        for job in items:
+            app = _job_label(job, "app")
+            if _job_is_terminal(job):
+                continue
+            if app == finalizer_app:
+                finalizers.append(job)
+            elif app in companion_apps:
+                job_id = _job_label(job, FINALIZER_JOB_ID_LABEL)
+                if job_id:
+                    live_companion_ids.add(job_id)
+
+        counted: set[str] = set()
+        for job in finalizers:
+            job_id = _job_label(job, FINALIZER_JOB_ID_LABEL)
+            if not job_id:
+                # A non-terminal finalizer with no elb-job-id label cannot be
+                # matched to a companion, but it still represents a real submit
+                # occupying a slot. Skipping it (the old behaviour) UNDER-COUNTS
+                # and over-admits past the ceiling. Count it fail-closed with a
+                # synthetic per-Job key so each distinct label-less finalizer
+                # occupies exactly one slot (critique M15).
+                synthetic = job.get("metadata", {}).get("uid") or job.get("metadata", {}).get(
+                    "name"
+                )
+                counted.add(f"__unlabeled__:{synthetic or id(job)}")
+                continue
+            if job_id in counted:
+                continue
+            if job_id in live_companion_ids:
+                counted.add(job_id)
+                continue
+            age = _job_age_seconds(job, now)
+            if age is None or age < grace:
+                counted.add(job_id)  # within async-creation grace → still a live slot
+            # else: companion-less + past grace → phantom, not counted
+        return len(counted)
     finally:
         session.close()
 

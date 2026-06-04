@@ -307,6 +307,25 @@ acquire(holder, ttl=900):
   tests. Phase 0 must (a) assert `lease_ttl > submit_exec_timeout` at startup and
   (b) cover it with a test, so the ordering is a checked contract, not a
   coincidence.
+* **The invariant chain also includes the Celery time limits — the conditional
+  release only runs if the task exits *gracefully*.** The release lives in a
+  `finally`, which Python runs on a normal return or a catchable exception, but
+  **not** on a `SIGKILL`. Celery's hard `task_time_limit` (default 3600 s,
+  env-overridable via `CELERY_TASK_TIME_LIMIT`,
+  [celery_app.py](../../api/celery_app.py)) **SIGKILLs the worker child**, so a
+  submit task killed by the hard limit **skips the `finally`** and the Lease is
+  orphaned until its 900 s TTL — every other submitter blocked that whole time.
+  Today the chain is safe (`submit_exec 600 < soft 3300 < hard 3600`): the
+  subprocess's own 600 s timeout (a catchable `TimeoutError`) fires long before
+  the soft limit, so `finally` always runs. But all four numbers are
+  **env-configurable and independently tunable**, so the safety is a coincidence,
+  not a contract. Phase 0's startup assertion must check the **full chain**
+  `submit_exec_timeout < CELERY_TASK_SOFT_TIME_LIMIT < CELERY_TASK_TIME_LIMIT`
+  **and** `submit_exec_timeout < lease_ttl`, so that a graceful, `finally`-running
+  failure is guaranteed before any hard kill. (The soft limit raises a catchable
+  `SoftTimeLimitExceeded`, which still runs `finally`; only the hard limit does
+  not — so keeping the submit's own subprocess timeout below the soft limit is
+  what makes the release reliable.)
 * Release in a `finally`, but **conditionally** — exactly like the Redis lock's
   Lua-CAS token check, not an unconditional clear:
 
@@ -481,7 +500,25 @@ release lease (finally)
 > instead because that is the 1-per-submit, synchronously-created, lifecycle-long
 > marker (§5.1) — do not "unify" the two onto `app=blast` without re-introducing
 > the N-per-submit + async-visibility defects.
-
+> **Cross-feature marker divergence with auto-stop — a finalizer-tail teardown
+> risk.** The AKS auto-stop idle gate already runs a live K8s probe
+> ([auto_stop_live.py](../../api/services/auto_stop_live.py)
+> `probe_live_blast_activity`) that **additively** counts `app=blast` Jobs so an
+> OpenAPI-submitted run the dashboard cannot see still blocks a stop. But Gate B
+> occupancy is now defined on `app=finalizer` (§5.1), and the two markers do not
+> have the same lifetime: the `app=blast` batch Jobs finish **before** the
+> `app=finalizer` Job (which then merges/cleans up), and in `cloud_job_submission`
+> mode they appear **after** submit returns. So there is a tail window where
+> `app=blast` count is 0 (auto-stop sees "idle") while the finalizer is still
+> running (Gate B still counts the slot occupied) → **auto-stop can scale the
+> cluster down while a finalizer is finishing a run Gate B considers active.**
+> Resolution direction: align auto-stop's live predicate to also treat a
+> non-terminal `app=finalizer` (or any live `elb-job-id`) as "in use", so the
+> teardown gate and the admission gate share one liveness definition. Until then,
+> record the finalizer-tail teardown window as a known cross-feature limitation.
+> (Note this is *additive* on auto-stop's side and never *forces* a stop, so the
+> failure mode is a premature scale-down of a finishing job, not a stranded
+> cluster.)
 ### 5.3 Where "3" comes from
 
 | Approach | Value | Recommended |
@@ -613,6 +650,8 @@ A cross-repo tracking issue is required (charter §13 cross-repo consistency).
 | **Per-namespace ceiling vs global "3"** | Gate B counts per-`(cluster, ns)`, but "max 3 parallel" is a **global** intent; with >1 namespace each gets its own 3 → up to 3×N cluster-wide | Moot today (`namespace` is hard-coded `default`), but the design claims per-ns generality. **Caution — the two gates must share one scope.** Gate A is per-namespace (`elb-blast-submit-<ns>`, §4.1), so it only serialises submitters *within* a namespace. "Fixing" the global cap by counting Gate B **cluster-wide** while Gate A stays per-ns is **unsound**: two submitters in different namespaces hold different Leases *concurrently*, both run the cluster-wide count, both see headroom, both admit → the "check Gate B while holding Gate A" serialisation (§3) is broken across namespaces. A cluster-wide ceiling needs a **cluster-wide single-name Lease** too. Phase 0 options: (a) keep **both** per-namespace, or (b) make **both** cluster-wide; never mix. |
 | **Orphaned finalizer = phantom slot** | a submit that fails after the finalizer Job is applied but before its batch work materialises leaves a non-terminal `app=finalizer` Job holding a Gate B slot forever; H4's finalizer-count makes this a capacity leak (3→2), and it is indistinguishable from a healthy submit mid-async-batch-creation | Liveness-bounded counting: a lone finalizer occupies a slot only while its `elb-job-id` shows matching `app=submit`/`app=blast` Jobs **or** is younger than `FINALIZER_GRACE_SECONDS` (covers async creation lag); older lone finalizers are reconciled (warn-badge + operator delete, never silent auto-fail) (§5.1). |
 | **Holder-identity collision** | `holderIdentity=<source>-<shortid>`: two distinct submits colliding on the short id → the same-holder *renew* branch lets the second renew the first's live Lease and proceed → concurrent submit inside the mutex | `holderIdentity` is a **globally unique per-acquisition token** (`<source>-<full-uuid>` / full task id), never a truncation; a test asserts two distinct submits never produce equal identities (§4.1). |
+| **Celery hard-kill skips release** | the conditional release is in a `finally`; Celery's hard `task_time_limit` SIGKILLs the worker child → `finally` never runs → Lease orphaned until its 900 s TTL, blocking every other submitter | Extend the startup ordering assertion to the **full chain** `submit_exec_timeout < CELERY_TASK_SOFT_TIME_LIMIT < CELERY_TASK_TIME_LIMIT` **and** `< lease_ttl`, so a graceful (`finally`-running) failure always precedes any hard kill. Safe today (600 < 3300 < 3600) but all four are env-configurable, so the invariant must be checked not assumed (§4.3). |
+| **Auto-stop / Gate B marker divergence** | auto-stop's live probe counts `app=blast`; Gate B occupancy counts `app=finalizer`. The batch Jobs finish (and, on Azure, appear) at different times than the finalizer → auto-stop can scale the cluster down during the finalizer tail that Gate B still counts as an occupied slot | Align auto-stop's live predicate to also treat a non-terminal `app=finalizer` / live `elb-job-id` as "in use" so teardown and admission share one liveness definition (§5.1). Additive + never force-stops, so the worst case is a premature scale-down of a finishing job, not a stranded cluster. |
 | **Visibility race** | job not yet visible right after submit → over-admit | Gate B is checked **while holding** Gate A; the previous submit's **`app=finalizer`** marker is created **synchronously** by `submit()` and is in etcd before the Lease is released. (The `app=blast` batch Jobs are *not* a safe marker on Azure — they are created asynchronously in `cloud_job_submission` mode, §5.1.) Requires an **uncached, consistent** count read — the existing `_fetch_blast_pods_and_jobs` 3 s memo would re-open this race, so `k8s_count_active_blast_submissions` does a fresh list (§5.2). ✅ |
 | **Wrong count unit** | counting raw `app=blast` Jobs → one multi-batch submit creates N Jobs and trips the ceiling of 3 by itself; or counts async-invisible batch Jobs → over-admit | Count **distinct `elb-job-id` of the `app=finalizer` Job** (1 per submit, synchronous, lifecycle-long), not raw `app=blast` Jobs (N per submit, async on Azure) and not pods (§5.1). Verified against the upstream AKS templates. |
 | **Cross-path count mismatch** | dashboard counts `app=finalizer` distinct-`elb-job-id`, OpenAPI counts raw `app=blast` → same cluster, different numbers → the shared "3" is a fiction | Both repos pin the **same selector + same dedup-by-`elb-job-id`** in a shared constant (§5.2, §7.2). |
@@ -683,6 +722,11 @@ A cross-repo tracking issue is required (charter §13 cross-repo consistency).
   `cloud_job_submission` mode? Needed to distinguish a healthy
   finalizer-with-no-batch-Jobs-yet from an orphaned one (§5.1 phantom-slot row).
   Measure on a live cluster.
+* Should auto-stop's live probe ([auto_stop_live.py](../../api/services/auto_stop_live.py))
+  be migrated from `app=blast` to the same `app=finalizer` / `elb-job-id`
+  liveness marker Gate B uses, so the teardown gate and the admission gate agree
+  on "in use" (§5.1 finalizer-tail teardown row)? If kept separate, document the
+  finalizer-tail scale-down window as accepted.
 * ~~Is the upstream `app=blast` label + `elb-job-id` contract stable~~ **Refined:**
   Gate B must count the **`app=finalizer`** marker, not `app=blast` (§5.1) —
   `app=blast` is N-per-submit and, in `cloud_job_submission` mode, created

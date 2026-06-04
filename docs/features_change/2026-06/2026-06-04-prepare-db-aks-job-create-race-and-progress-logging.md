@@ -35,6 +35,17 @@ Investigation produced two findings:
   * one `[<idx>/<total>] scanned; <skip> already staged, <ok> copied` line
     every 50 skipped files (so a long resume that re-checks thousands of
     already-staged blobs still looks alive while it scans).
+* **Dashboard no longer looks frozen during large-volume downloads.** The
+  BLAST Databases row derives its `N / total files` counter and MB/s speed
+  from the *committed* blob listing, but azcopy `--from-to=PipeBlob` commits
+  each blob only when its whole file finishes. While every shard pod streams a
+  multi-GB `.nsq` sequence volume (which can take minutes each), the committed
+  count and the bytes-derived speed stay flat even though the network is at
+  full throughput — reading as a stall. `BlastDbRow` now detects a committed
+  count that has not advanced for >20 s during an active copy and shows a
+  reassuring `· transferring large volumes…` note (with an explanatory
+  tooltip) in place of the misleading file-count-rate ETA, which over-promised
+  because the remaining files are the largest.
 * **Cancel→re-Get no longer collides with a terminating Job.**
   `_create_job_if_absent` now distinguishes a healthy duplicate from a Job
   carrying `metadata.deletionTimestamp`: it waits (default 60 s, polling every
@@ -56,6 +67,12 @@ Investigation produced two findings:
   * `PREPARE_DB_AKS_SCRIPT`: added the per-file copy heartbeat and the
     throttled skip heartbeat described above. No change to the copy command
     itself (`curl | azcopy copy ... --from-to=PipeBlob`).
+* `web/src/components/cards/storage/BlastDbRow.tsx`
+  * Added a committed-count stall detector (`lastAdvanceMsRef` /
+    `lastProgressRef` + `transferringLargeVolumes`) and rendered the
+    `transferring large volumes…` hint, suppressing the file-count ETA while
+    that hint is shown. Pure presentation; no change to the copy/transfer
+    path or to any API contract.
 * No IaC change. The new script ships in the per-job ConfigMap built at submit
   time and takes effect on the **next** prepare-db job after the api/worker
   images are next deployed — no redeploy was performed for this change.
@@ -67,7 +84,13 @@ Investigation produced two findings:
 * New focused suite `api/tests/test_prepare_db_aks_job_create.py` (6 cases):
   absent→created; healthy 200→existing; terminating→404→created; terminating
   never clears→error+terminating; create 409→re-eval→existing; GET 500→error.
-* Live cluster evidence (moonchoi sub, `elb-cluster-02`): pod 0 of
-  `prepare-db-nt-260526010501` running `curl nt_viruses.10.nsq` +
-  `azcopy copy PipeBlob`; eth0 RX +79,273,930 bytes over 5 s; 10/10 pods
-  `Running`; 3728 `nt` blobs staged — confirming the download was never stuck.
+* Live cluster evidence (moonchoi sub, `elb-cluster-02`): all 10 shard pods of
+  `prepare-db-nt-260526010501` `Running`, each `curl`-streaming a distinct
+  multi-GB `.nsq` volume (`nt.066`, `nt.058`, `nt_euk.000`, …) into
+  `azcopy copy PipeBlob`; pod 0 eth0 RX +78,605,516 bytes over 5 s (~14 MB/s,
+  ~140 MB/s aggregate); committed `nt` blob count observed rising 3728 → 3730
+  — confirming the download was never stuck and that the committed count
+  intentionally lags behind in-flight PipeBlob uploads (the exact reason the
+  `transferring large volumes…` hint was added).
+* `cd web && npm run build` → built clean; `npx vitest run
+  src/components/cards/storage` → **37 passed**.

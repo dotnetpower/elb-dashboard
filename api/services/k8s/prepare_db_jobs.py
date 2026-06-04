@@ -55,10 +55,18 @@ DEFAULT_AZCOPY_IMAGE = "mcr.microsoft.com/azure-cli:2.81.0"
 DEFAULT_AZCOPY_CONCURRENCY = 16
 DEFAULT_BACKOFF_LIMIT = 2
 DEFAULT_TTL_SECONDS_AFTER_FINISHED = 3600
-# 45 min: leaves headroom for a 5-node throttled scenario where the slowest
-# shard still has ~10-15 large `.nsq` files to stream after the others
-# finish. 30 min was tight for `core_nt` at AKS scale.
-DEFAULT_ACTIVE_DEADLINE_SECONDS = 2700
+# 4 hours: `nt` (~4.8k files) and `core_nt` genuinely take well over an hour
+# to stream from NCBI at 10-shard parallelism — the dashboard itself badges
+# these as "May take hours". The previous 45 min ceiling fired
+# `activeDeadlineSeconds` mid-download (K8s marks the Job
+# `Failed/DeadlineExceeded`), abandoning every still-in-flight shard. The
+# downstream per-blob reconcile then counted those never-committed files as
+# `failed: missing`, surfacing as a misleading "partial · N failed" even
+# though nothing actually errored — the Job was simply killed too early.
+# Normal completion still exits the instant all shards succeed, so a larger
+# ceiling never slows a small DB; it only stops cutting off the big ones.
+# Override per-job via `PREPARE_DB_AKS_JOB_TIMEOUT_SECONDS`.
+DEFAULT_ACTIVE_DEADLINE_SECONDS = 4 * 60 * 60
 DEFAULT_FILES_PER_POD = 50
 DEFAULT_MAX_PARALLELISM = 10
 # When a Job with the deterministic ``(db, source_version)`` name already

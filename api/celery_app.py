@@ -29,6 +29,8 @@ import os
 
 from celery import Celery
 
+from api.services.blast.coordination import assert_coordination_invariants
+
 LOGGER = logging.getLogger(__name__)
 
 # Mirror api.main's azure SDK silencer for worker/beat. Without this the
@@ -81,6 +83,14 @@ if _TASK_SOFT_TIME_LIMIT >= _TASK_TIME_LIMIT:
 _RESULT_EXPIRES_SECONDS = int(os.environ.get("CELERY_RESULT_EXPIRES", "3600"))
 if _RESULT_EXPIRES_SECONDS > 7200:
     raise ValueError("CELERY_RESULT_EXPIRES must be <= 7200 seconds")
+
+# When BLAST_COORD_BACKEND=k8s, the submit Lease is released in a `finally` that
+# only runs on a graceful exit; a hard Celery SIGKILL skips it and orphans the
+# Lease until TTL. Assert the full ordering chain
+# (submit_exec < soft < hard, submit_exec < lease_ttl) at worker startup so a
+# misconfiguration fails fast instead of silently re-opening the concurrent-submit
+# race. No-op unless the k8s backend is active (charter §12a Rule 4 default-OFF).
+assert_coordination_invariants()
 
 celery_app.conf.update(
     task_acks_late=True,

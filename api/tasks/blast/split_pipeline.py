@@ -222,9 +222,38 @@ def _dispatch_split_child_submits(
     owner_oid: str,
     tenant_id: str,
     children: list[dict[str, Any]],
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+    namespace: str = "default",
     terminal_run: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Create child state records and submit each child ElasticBLAST config."""
+    """Create child state records and submit each child ElasticBLAST config.
+
+    Under ``BLAST_COORD_BACKEND=k8s`` each child ``elastic-blast submit`` is a
+    distinct submit (one finalizer = one Gate B slot, §5.1), so each child must
+    pass the same submit Lease (Gate A) + cluster-count (Gate B) gate as the
+    regular path or the split fan-out re-opens the cross-path race the gate
+    closes (§7.1.4). Children are dispatched sequentially inside this one parent
+    task, so they cannot Celery-requeue mid-fan-out; instead each waits inline,
+    bounded by ``split_child_gate_wait_max_seconds()`` (a SMALL per-child cap, not
+    the full requeue-path ``submit_slot_wait_max_seconds``) AND a single
+    ``split_parent_gate_budget_seconds()`` wall-clock budget computed ONCE before
+    the loop. The per-child cap bounds head-of-line blocking on the single
+    worker; the parent budget bounds the total monopoly across all children and
+    is immune to Celery re-running the parent task (which would otherwise reset
+    each child's wait window — critique H4/H5). A child whose gate wait times out
+    or whose Lease API errors is marked failed (the parent reports partial
+    failure) rather than blocking the single worker indefinitely.
+    """
+    import time
+
+    from api.services.blast.coordination import (
+        SUBMIT_EXEC_TIMEOUT_SECONDS,
+        is_k8s_backend,
+        split_child_gate_wait_max_seconds,
+        split_parent_gate_budget_seconds,
+    )
     from api.services.state.job_state import JobState
     from api.services.state_repo import JobStateRepository
 
@@ -232,6 +261,21 @@ def _dispatch_split_child_submits(
         from api.services.terminal_exec import run as _terminal_run
 
         terminal_run = _terminal_run
+
+    gate_k8s = bool(
+        is_k8s_backend() and subscription_id and resource_group and cluster_name
+    )
+    credential = None
+    parent_gate_deadline = 0.0
+    child_gate_cap = 0
+    if gate_k8s:
+        from api.services import get_credential
+
+        credential = get_credential()
+        # Computed ONCE here, never inside the per-child loop, so a Celery retry
+        # of the parent does not multiply the worker monopoly (critique H5).
+        parent_gate_deadline = time.time() + split_parent_gate_budget_seconds()
+        child_gate_cap = split_child_gate_wait_max_seconds()
 
     repo = JobStateRepository()
     dispatched: list[dict[str, Any]] = []
@@ -264,12 +308,111 @@ def _dispatch_split_child_submits(
             )
 
         repo.update(child_job_id, status="running", phase="submitting")
-        result = terminal_run(
-            argv=argv,
-            stdin=config_content,
-            stdin_file=_blast.ELASTIC_BLAST_CFG_FILE,
-            timeout_seconds=600,
-        )
+
+        child_lease = None
+        if gate_k8s:
+            from api.services.blast import k8s_gate
+
+            # Per-child deadline = the smaller of the per-child cap and whatever
+            # remains of the parent's overall budget. Once the parent budget is
+            # exhausted, fail the remaining children immediately rather than
+            # waiting a fresh window each (critique H4/H5).
+            now = time.time()
+            child_deadline = min(now + child_gate_cap, parent_gate_deadline)
+            if now >= parent_gate_deadline:
+                error = "submit_gate_unavailable: parent_gate_budget_exhausted"
+                LOGGER.info(
+                    "split child gate budget exhausted job_id=%s",
+                    child_job_id,
+                )
+                repo.update(
+                    child_job_id,
+                    status="failed",
+                    phase="submit_failed",
+                    error_code=error,
+                )
+                repo.append_history(
+                    child_job_id,
+                    "submit_failed",
+                    {
+                        "parent_job_id": parent_job_id,
+                        "group_id": child.get("group_id"),
+                        "error": error,
+                    },
+                )
+                dispatched.append(
+                    {
+                        "child_job_id": child_job_id,
+                        "group_id": child.get("group_id"),
+                        "status": "failed",
+                        "phase": "submit_failed",
+                        "error": error,
+                    }
+                )
+                continue
+
+            try:
+                child_lease = k8s_gate.wait_for_k8s_admission(
+                    credential,
+                    subscription_id,
+                    resource_group,
+                    cluster_name,
+                    namespace=namespace,
+                    job_id=child_job_id,
+                    deadline_ts=child_deadline,
+                    source="dashboard-split",
+                )
+            except Exception as exc:
+                error = f"submit_gate_unavailable: {type(exc).__name__}"
+                LOGGER.info(
+                    "split child gate denied job_id=%s: %s",
+                    child_job_id,
+                    type(exc).__name__,
+                )
+                repo.update(
+                    child_job_id,
+                    status="failed",
+                    phase="submit_failed",
+                    error_code=error,
+                )
+                repo.append_history(
+                    child_job_id,
+                    "submit_failed",
+                    {
+                        "parent_job_id": parent_job_id,
+                        "group_id": child.get("group_id"),
+                        "error": error,
+                    },
+                )
+                dispatched.append(
+                    {
+                        "child_job_id": child_job_id,
+                        "group_id": child.get("group_id"),
+                        "status": "failed",
+                        "phase": "submit_failed",
+                        "error": error,
+                    }
+                )
+                continue
+
+        try:
+            result = terminal_run(
+                argv=argv,
+                stdin=config_content,
+                stdin_file=_blast.ELASTIC_BLAST_CFG_FILE,
+                timeout_seconds=SUBMIT_EXEC_TIMEOUT_SECONDS,
+            )
+        finally:
+            if child_lease is not None:
+                from api.services.blast import k8s_gate
+
+                k8s_gate.release_k8s_admission(
+                    credential,
+                    subscription_id,
+                    resource_group,
+                    cluster_name,
+                    child_lease,
+                )
         payload_json = _blast._last_json(str(result.get("stdout", "")))
         exit_code = int(result.get("exit_code", 1) or 0)
         if exit_code == 0:
@@ -328,6 +471,7 @@ def _run_split_parent_submission(
     options: dict[str, Any] | None,
     owner_oid: str,
     tenant_id: str,
+    subscription_id: str = "",
     terminal_run: Any | None = None,
 ) -> dict[str, Any]:
     """Run split-query preparation and child submission for a parent job.
@@ -366,6 +510,9 @@ def _run_split_parent_submission(
         owner_oid=owner_oid,
         tenant_id=tenant_id,
         children=children,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
         terminal_run=terminal_run,
     )
     failed = [child for child in dispatched if child.get("status") == "failed"]
@@ -404,6 +551,7 @@ def _run_storage_query_split_parent_submission(
     options: dict[str, Any] | None,
     owner_oid: str,
     tenant_id: str,
+    subscription_id: str = "",
     terminal_run: Any | None = None,
 ) -> dict[str, Any]:
     """Read the original query FASTA from Storage and dispatch split children.
@@ -471,6 +619,7 @@ def _run_storage_query_split_parent_submission(
             options=options,
             owner_oid=owner_oid,
             tenant_id=tenant_id,
+            subscription_id=subscription_id,
             terminal_run=terminal_run,
         )
     finally:

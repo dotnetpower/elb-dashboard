@@ -451,7 +451,7 @@ def _try_dispatch_aks_mode(
         image_env = os.environ.get(
             "PREPARE_DB_AKS_AZCOPY_IMAGE", "mcr.microsoft.com/azure-cli:2.81.0"
         )
-        timeout_env = os.environ.get("PREPARE_DB_AKS_JOB_TIMEOUT_SECONDS", "2700")
+        timeout_env = os.environ.get("PREPARE_DB_AKS_JOB_TIMEOUT_SECONDS", str(4 * 60 * 60))
         # New since Phase 1.5: per-shard azcopy buffer concurrency, K8s
         # backoffLimit override, and ttlSecondsAfterFinished. Defaults
         # come from `api.services.k8s.prepare_db_jobs` if the env var
@@ -473,7 +473,7 @@ def _try_dispatch_aks_mode(
         try:
             active_deadline = max(60, int(timeout_env))
         except ValueError:
-            active_deadline = 2700
+            active_deadline = 4 * 60 * 60
         try:
             azcopy_concurrency: int | None = (
                 max(1, min(512, int(azcopy_concurrency_env)))
