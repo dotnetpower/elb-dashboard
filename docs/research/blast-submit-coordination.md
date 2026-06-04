@@ -14,8 +14,11 @@ tags:
 # Cross-Path BLAST Submit Coordination (Dashboard + OpenAPI)
 
 Date: 2026-06-04 (updated 2026-06-05)
-Status: **Implemented, default-OFF** — both phases have shipped; cross-path
-coordination is dormant until an operator flips `BLAST_COORD_BACKEND=k8s`.
+Status: **Implemented (Phase 0 + Phase 1 code), NOT yet activated** — both code
+halves have landed but cross-path coordination is dormant: the dashboard runs
+the default-OFF `BLAST_COORD_BACKEND=redis`, and the sibling coordinator is
+**committed but not yet built into a deployed image** (verified 2026-06-05, see
+"Activation blockers" below).
 - **Phase 0 (this repo, dashboard)** — shipped behind the default-OFF
   `BLAST_COORD_BACKEND` flag: `api/services/blast/coordination.py` (backend
   resolver + `assert_coordination_invariants`), `api/services/k8s/submit_lease.py`
@@ -23,11 +26,25 @@ coordination is dormant until an operator flips `BLAST_COORD_BACKEND=k8s`.
   (`k8s_count_active_blast_submissions`, Gate B), `api/services/blast/k8s_gate.py`,
   wired into `submit_task.py` and the split fan-out.
 - **Phase 1 (sibling `dotnetpower/elastic-blast-azure`, `docker-openapi`)** —
-  shipped **and deployed** (`submit_coordination.py`, `submit_exec_timeout <
-  lease_ttl` cap; commits `32e5119e` + `3d3fd56a`, tracking issue #1).
-- **Remaining** — operator action only: set `BLAST_COORD_BACKEND=k8s` on the
-  dashboard Container App to activate the shared gates (rollout order satisfied
-  now that the sibling is live, see §10).
+  code **committed + pushed to `master`** (`submit_coordination.py`,
+  `submit_exec_timeout < lease_ttl` cap; commits `32e5119e` + `3d3fd56a`,
+  tracking issue #1) but **not yet built/deployed** — the live `elb-openapi:4.20`
+  image (built 2026-06-04 07:50 UTC, before those commits) does not contain
+  `submit_coordination.py`, and the `elb-openapi` Deployment sets no
+  `BLAST_COORD_BACKEND`.
+- **Activation blockers (must clear before flipping the dashboard to `=k8s`)**:
+  1. Build + deploy a sibling `elb-openapi` image that includes the coordination
+     code (`cd docker-openapi && make azure-build VERSION=<next>`), and set
+     `BLAST_COORD_BACKEND=k8s` on the `elb-openapi` Deployment. RBAC is already
+     satisfied — `elb-openapi-sa` is bound to `cluster-admin`, so Leases
+     (get/create/update) and Jobs (list) are permitted.
+  2. The on-cluster `azure-workload-identity` mutating webhook currently has **no
+     endpoints** on `elb-cluster-02`, so new `elb-openapi` pods fail to start
+     (`0/2` available). The rollout cannot stabilise until that webhook is
+     restored.
+  Flipping the dashboard to `=k8s` *before* the sibling holds the same Lease
+  re-opens the transient over-admit window (§10), so the flip stays blocked until
+  blocker 1 is done.
 
 Owner: `api/tasks/blast/` + `api/services/k8s/` maintainers, plus the sibling
 `dotnetpower/elastic-blast-azure` `docker-openapi` maintainers.
@@ -684,12 +701,15 @@ A cross-repo tracking issue is required (charter §13 cross-repo consistency).
 
 ## 10. Phased rollout (charter §12a Rule 4 — default-OFF)
 
-> **Current position (2026-06-05): Phase 0 shipped + Phase 1 sibling deployed.**
-> The dashboard still runs `BLAST_COORD_BACKEND=redis` (default-OFF). The
-> sibling `docker-openapi` coordinator is **live**, so the load-bearing ordering
-> caveat below (dashboard `=k8s` while sibling not yet deployed) is now
-> satisfied — flipping the dashboard to `=k8s` no longer opens the transient
-> over-admit window. The flip itself is the remaining **operator action**.
+> **Current position (2026-06-05): Phase 0 shipped; Phase 1 code pushed but NOT
+> yet deployed.** The dashboard still runs `BLAST_COORD_BACKEND=redis`
+> (default-OFF). The sibling coordinator is committed to `master` but the live
+> `elb-openapi:4.20` image predates it and carries no coordination code, so the
+> sibling does **not** yet hold the shared Lease. The load-bearing ordering
+> caveat below is therefore **not yet satisfied** — flipping the dashboard to
+> `=k8s` now would open the transient over-admit window. Clear the activation
+> blockers in the header first (build/deploy the sibling image + restore the
+> `azure-workload-identity` webhook on `elb-cluster-02`), then flip.
 
 > **When does this actually fix the cross-path race?** Not at Phase 0. Phase 0
 > only re-implements the dashboard's *own* serialisation on a cluster-resident
