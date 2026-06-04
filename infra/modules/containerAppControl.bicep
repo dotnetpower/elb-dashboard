@@ -270,10 +270,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Container App to also run in `activeRevisionsMode: Multiple`
             // (see the configuration block above) — otherwise traffic always
             // follows the latest revision and the traffic-flip rollback /
-            // GC cannot work. Optional knobs (env_int defaults apply when
-            // unset, see api/services/upgrade/revisions.py + reconciler.py):
+            // GC cannot work. Optional knobs (read at call time; defaults
+            // apply when unset — see reconciler.py validating_timeout_seconds()
+            // / confirm_window_seconds() and revision_gc.keep_n_revisions()):
+            //   UPGRADE_VALIDATING_TIMEOUT_SECONDS (default 900)
             //   UPGRADE_CONFIRM_WINDOW_SECONDS (default 300)
-            //   UPGRADE_VALIDATING_TIMEOUT_SECONDS (default 600)
             //   UPGRADE_REVISION_KEEP_N (default 2)
             { name: 'STRICT_BLUEGREEN', value: 'false' }
             { name: 'LOG_LEVEL', value: 'INFO' }

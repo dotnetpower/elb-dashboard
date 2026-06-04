@@ -18,7 +18,7 @@ import { AksCardMockupsRefined } from "@/pages/mockups/AksCardMockupsRefined";
 import { AksCardMockupsPremium } from "@/pages/mockups/AksCardMockupsPremium";
 import { AksCardMockupsSimple } from "@/pages/mockups/AksCardMockupsSimple";
 import { SidecarInspectorMockups } from "@/pages/mockups/SidecarInspectorMockups";
-import { configValue, isDevBypassEnabled, isFeatureEnabled, isUsableClientId } from "@/config/runtime";
+import { configValue, isDevBypassEnabled, isUsableClientId } from "@/config/runtime";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 
 const DEV_BYPASS = isDevBypassEnabled();
@@ -92,7 +92,7 @@ function AppRoutes() {
   const customDbEnabled = usePreviewFeatureEnabled("customDb");
   const labToolsEnabled = usePreviewFeatureEnabled("labTools");
   const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
-  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalEnabled = usePreviewFeatureEnabled("terminal");
 
   return (
     <ErrorBoundary>

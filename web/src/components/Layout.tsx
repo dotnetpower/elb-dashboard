@@ -6,7 +6,6 @@ import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { LatestJobChip } from "@/components/LatestJobChip";
 import { NavMoreDropdown } from "@/components/NavMoreDropdown";
-import { UpgradeBadge } from "@/components/UpgradeBadge";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { apiLoginRequest } from "@/auth/msal";
 import { subscribeAuthSessionIssues, type AuthSessionIssue } from "@/auth/sessionEvents";
@@ -15,7 +14,7 @@ import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useSettingsPanel } from "@/hooks/useSettingsPanel";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
-import { isFeatureEnabled } from "@/config/runtime";
+import { useUpgradeAvailability } from "@/hooks/useUpgradeAvailability";
 
 import "./Layout.css";
 
@@ -188,13 +187,14 @@ export function Layout({ children }: PropsWithChildren) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { showHelp, setShowHelp } = useKeyboardShortcuts();
   const settingsPanel = useSettingsPanel();
+  const upgrade = useUpgradeAvailability();
   const autoRefreshMs = useAutoRefreshInterval();
   const autoRefreshLabel = autoRefreshMs >= 1000 ? `${Math.round(autoRefreshMs / 1000)}s` : `${autoRefreshMs}ms`;
   const cluster = useClusterReadiness();
   const customDbEnabled = usePreviewFeatureEnabled("customDb");
   const labToolsEnabled = usePreviewFeatureEnabled("labTools");
   const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
-  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalEnabled = usePreviewFeatureEnabled("terminal");
   // Responsive nav tiers. Tier A (>=1320 px) shows the full horizontal nav.
   // Tier B (720–1320 px) collapses the Tools group (Lab Tools / Terminal /
   // API) into a "More ▾" dropdown so Dashboard / New Search / Recent
@@ -257,7 +257,6 @@ export function Layout({ children }: PropsWithChildren) {
               >
                 v{buildVersion} · {__APP_COMMIT__}
               </span>
-              <UpgradeBadge />
             </div>
           </div>
         </div>
@@ -383,10 +382,17 @@ export function Layout({ children }: PropsWithChildren) {
         <button
           className="cfg-gear"
           onClick={settingsPanel.open}
-          title="Settings"
-          style={{ marginLeft: 0 }}
+          title={upgrade.attention ? "Settings — an update is available" : "Settings"}
+          style={{ marginLeft: 0, position: "relative" }}
         >
           <SettingsIcon size={14} />
+          {upgrade.attention && (
+            <span
+              className="cfg-gear__dot"
+              aria-label="Update available"
+              role="img"
+            />
+          )}
         </button>
 
         <UserMenuDropdown

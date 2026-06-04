@@ -21,7 +21,10 @@ import {
   shouldConfirmDownloadBeforeAks,
 } from "@/components/cards/storage/BlastDbClusterConfirm";
 import { BlastDbLargeConfirm } from "@/components/cards/storage/BlastDbLargeConfirm";
-import { BlastDbRow } from "@/components/cards/storage/BlastDbRow";
+import {
+  BlastDbRow,
+  BlastDbRowSkeleton,
+} from "@/components/cards/storage/BlastDbRow";
 import { BlastDbUpdateConfirm } from "@/components/cards/storage/BlastDbUpdateConfirm";
 import {
   readAutoWarmupDbs,
@@ -115,6 +118,7 @@ export function BlastDbModal({
   const [confirmLargeDb, setConfirmLargeDb] = useState<string | null>(null);
   const [confirmUpdateDb, setConfirmUpdateDb] = useState<string | null>(null);
   const [confirmCancelDb, setConfirmCancelDb] = useState<string | null>(null);
+  const [confirmDeleteDb, setConfirmDeleteDb] = useState<string | null>(null);
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
     readAutoWarmupDbs(),
   );
@@ -134,6 +138,7 @@ export function BlastDbModal({
         setConfirmLargeDb(null);
         setConfirmUpdateDb(null);
         setConfirmCancelDb(null);
+        setConfirmDeleteDb(null);
       }
     };
     window.addEventListener("keydown", handleEsc);
@@ -174,6 +179,7 @@ export function BlastDbModal({
     handleDownload,
     handleBuildOracle,
     handleCancel,
+    handleDelete,
   } = state;
 
   // Preview NCBI snapshot info for every catalog row + the custom-input
@@ -237,6 +243,12 @@ export function BlastDbModal({
   const degraded = (dbQuery.data as { degraded?: boolean; message?: string } | undefined)
     ?.degraded;
   const degradedMsg = (dbQuery.data as { message?: string } | undefined)?.message;
+
+  // While the database list is still loading for the first time the
+  // downloaded-state map is empty, so every catalog row would otherwise
+  // render an actionable "Get" button (and Update/Delete look reachable too).
+  // Show shimmer placeholders instead until the real state is known.
+  const dbInitialLoading = dbQuery.isLoading;
 
   const visibleDbCount = useMemo(
     () => filterDbCatalog(DB_CATALOG, moleculeFilter, showUnavailable).length,
@@ -518,7 +530,11 @@ export function BlastDbModal({
 
         <div style={{ overflowY: "auto", flex: 1, paddingRight: 4 }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {visibleDbCount === 0 && (
+            {dbInitialLoading &&
+              Array.from({ length: 6 }).map((_, i) => (
+                <BlastDbRowSkeleton key={`db-skeleton-${i}`} />
+              ))}
+            {!dbInitialLoading && visibleDbCount === 0 && (
               <div
                 className="muted"
                 style={{ fontSize: 12, padding: "16px 4px", textAlign: "center" }}
@@ -527,7 +543,8 @@ export function BlastDbModal({
                 databases NCBI does not publish as a pullable BLAST DB.
               </div>
             )}
-            {CATEGORIES.map((cat) => {
+            {!dbInitialLoading &&
+              CATEGORIES.map((cat) => {
               const dbs = filterDbCatalog(
                 DB_CATALOG.filter((d) => d.category === cat),
                 moleculeFilter,
@@ -633,6 +650,7 @@ export function BlastDbModal({
                         onBuildOracle={() => void handleBuildOracle(db.value)}
                         onConfirmLarge={() => requestDownload(db.value, true)}
                         onCancel={() => setConfirmCancelDb(db.value)}
+                        onDelete={() => setConfirmDeleteDb(db.value)}
                         onToggleAutoWarmup={(checked) =>
                           toggleAutoWarmup(db.value, checked)
                         }
@@ -646,7 +664,7 @@ export function BlastDbModal({
 
           <div style={{ marginTop: "var(--space-2)" }}>
             <BlastDbCustomInput
-              disabled={downloading !== null || writeDisabled}
+              disabled={dbInitialLoading || downloading !== null || writeDisabled}
               writeDisabledReason={writeDisabled ? writeDisabledReason : undefined}
               onDownload={(name) => requestDownload(name, false)}
             />
@@ -703,6 +721,27 @@ export function BlastDbModal({
                 void handleCancel(dbValue);
               }}
               onCancel={() => setConfirmCancelDb(null)}
+            />
+          )}
+
+          {confirmDeleteDb && (
+            <ConfirmDialog
+              title={`Delete ${confirmDeleteDb}?`}
+              message={
+                "This permanently removes every staged shard blob and the " +
+                "database metadata from the blast-db container. Any AKS " +
+                "prepare-db Job left over is deleted too. This cannot be " +
+                "undone — you would have to download the database again."
+              }
+              confirmLabel="Delete database"
+              confirmAriaLabel={`Permanently delete ${confirmDeleteDb}`}
+              tone="danger"
+              onConfirm={() => {
+                const dbValue = confirmDeleteDb;
+                setConfirmDeleteDb(null);
+                void handleDelete(dbValue);
+              }}
+              onCancel={() => setConfirmDeleteDb(null)}
             />
           )}
 

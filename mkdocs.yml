@@ -132,6 +132,7 @@ nav:
           - BLAST SearchSP Discovery: research/blast-searchsp-discovery.md
           - Web BLAST Compatibility Plan: research/web-blast-compatibility-plan.md
           - AKS Capacity Gate: research/aks-capacity-gate.md
+          - Cross-Path Submit Coordination: research/blast-submit-coordination.md
   - Contributor:
       - contributor-guide/index.md
       - Screenshot Workflow: contributor-guide/screenshot-workflow.md

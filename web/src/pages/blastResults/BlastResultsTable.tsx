@@ -10,7 +10,7 @@ import {
 
 import { formatBytes } from "@/components/BlastFilePreview";
 import type { BlastResultFile } from "@/api/endpoints";
-import { isFeatureEnabled } from "@/config/runtime";
+import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { classifyBlastResultFile } from "@/pages/blastResultsModel";
 
 interface BlastResultsTableProps {
@@ -337,7 +337,7 @@ export function NoResultFilesPanel({
   hasAnyCluster,
   onRetry,
 }: NoResultFilesPanelProps) {
-  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalEnabled = usePreviewFeatureEnabled("terminal");
 
   return (
     <div

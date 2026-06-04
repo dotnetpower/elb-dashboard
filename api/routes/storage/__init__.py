@@ -27,6 +27,7 @@ from api.routes.storage.local_debug import (
 )
 from api.routes.storage.prepare_db import prepare_db as prepare_db
 from api.routes.storage.prepare_db import prepare_db_cancel as prepare_db_cancel
+from api.routes.storage.prepare_db import prepare_db_delete as prepare_db_delete
 from api.services import get_credential as get_credential
 
 router = APIRouter(prefix="/api/storage", tags=["storage"])

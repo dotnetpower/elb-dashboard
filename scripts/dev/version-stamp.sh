@@ -75,7 +75,9 @@ print(quote(sys.argv[1], safe=""))
 PY
 )"
 
-replacement="<!-- ELB_SOURCE_STAMP_START -->[![Source Stamp](https://img.shields.io/badge/source-${encoded_stamp}-2f6fed)](./scripts/dev/version-stamp.sh)<!-- ELB_SOURCE_STAMP_END -->"
+replacement="<!-- ELB_SOURCE_STAMP_START -->
+[![Source Stamp](https://img.shields.io/badge/source-${encoded_stamp}-2f6fed)](./scripts/dev/version-stamp.sh)
+<!-- ELB_SOURCE_STAMP_END -->"
 
 python3 - "$replacement" <<'PY'
 import pathlib

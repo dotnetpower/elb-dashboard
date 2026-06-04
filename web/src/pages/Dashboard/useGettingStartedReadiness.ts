@@ -5,7 +5,7 @@ import { monitoringApi } from "@/api/endpoints";
 import type { ResourceConfig } from "@/components/SetupWizard";
 import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import { usePrefetchApiReference } from "@/hooks/usePrefetchApiReference";
-import { isFeatureEnabled } from "@/config/runtime";
+import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 
 const MOBILE_MEDIA_QUERY = "(max-width: 760px)";
 
@@ -80,7 +80,7 @@ export function useGettingStartedReadiness({
     retry: 1,
   });
 
-  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalEnabled = usePreviewFeatureEnabled("terminal");
   const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
 
   // Pre-warm the React Query cache for the API Reference page so the

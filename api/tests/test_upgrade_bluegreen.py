@@ -240,6 +240,9 @@ def test_pipeline_stages_green_and_enters_validating(
     assert after.state == state.STATE_VALIDATING
     assert after.blue_revision == "ca-elb-dashboard--blue"
     assert after.green_revision.startswith("ca-elb-dashboard--v0-3-0-")
+    # The validating anchor must be stamped on entry so the green-health
+    # timeout is measured from here, not from the upgrade's start.
+    assert after.validating_started_at
     # Blue must be pinned (so green starts at 0% traffic) before the swap.
     assert pin_calls == ["ca-elb-dashboard--blue"]
 
@@ -343,6 +346,54 @@ def test_validating_timeout_aborts(env: None) -> None:
     assert after.state == state.STATE_FAILED_ROLLOUT
 
 
+def test_validating_timeout_uses_validating_anchor_not_build_time(env: None) -> None:
+    """Regression: the green-health window is measured from when the row
+    ENTERED validating, not from `started_at` (which already absorbed the
+    clone+build minutes). A green that has only been booting for a few
+    seconds must NOT abort just because the overall upgrade is old."""
+    build_start = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    # Green was created 30 min into the upgrade (after a long build).
+    validating_entry = build_start + timedelta(minutes=30)
+    _enter_state(
+        state.STATE_VALIDATING,
+        job_id="job-1",
+        green_revision="ca-elb-dashboard--green",
+        blue_revision="ca-elb-dashboard--blue",
+        started_at=build_start.isoformat(timespec="seconds"),
+        validating_started_at=validating_entry.isoformat(timespec="seconds"),
+    )
+    rev = _FakeRevisions()
+    watcher = _FakeWatcher(_Status("Provisioning", "Provisioning", -1, True))
+    # Only 10 s into the validating window — well under the timeout even
+    # though `started_at` is 30 min + 10 s in the past.
+    now = validating_entry + timedelta(seconds=10)
+    after = reconciler.reconcile_rolling_out_inline(
+        watcher=watcher, revisions_mod=rev, now=lambda: now
+    )
+    assert after.state == state.STATE_VALIDATING
+    assert rev.cutover_calls == []
+
+
+def test_validating_timeout_env_override(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """UPGRADE_VALIDATING_TIMEOUT_SECONDS shortens the green-health window."""
+    monkeypatch.setenv("UPGRADE_VALIDATING_TIMEOUT_SECONDS", "120")
+    entry = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    _enter_state(
+        state.STATE_VALIDATING,
+        job_id="job-1",
+        green_revision="ca-elb-dashboard--green",
+        blue_revision="ca-elb-dashboard--blue",
+        started_at=entry.isoformat(timespec="seconds"),
+        validating_started_at=entry.isoformat(timespec="seconds"),
+    )
+    rev = _FakeRevisions()
+    watcher = _FakeWatcher(_Status("Provisioning", "Provisioning", -1, True))
+    after = reconciler.reconcile_rolling_out_inline(
+        watcher=watcher, revisions_mod=rev, now=lambda: entry + timedelta(seconds=121)
+    )
+    assert after.state == state.STATE_FAILED_ROLLOUT
+
+
 # --------------------------------------------------------------------------
 # Reconciler: confirming -> succeeded / rolled_back
 # --------------------------------------------------------------------------
@@ -429,6 +480,32 @@ def test_confirming_traffic_not_on_green_re_cuts_and_waits(env: None) -> None:
     )
     assert after.state == state.STATE_CONFIRMING
     assert rev.cutover_calls == [("ca-elb-dashboard--green", "ca-elb-dashboard--blue")]
+
+
+def test_confirming_cutover_never_converges_escalates(env: None) -> None:
+    """Bounded-loop guard: if the cutover never lands (serving keeps
+    reporting blue) past the confirm deadline + grace, the row escalates to
+    `rollback_failed` instead of spinning in `confirming` forever."""
+    cut = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    deadline = cut + timedelta(seconds=reconciler.CONFIRM_WINDOW_SECONDS)
+    _enter_state(
+        state.STATE_CONFIRMING,
+        job_id="job-1",
+        green_revision="ca-elb-dashboard--green",
+        blue_revision="ca-elb-dashboard--blue",
+        confirm_deadline=deadline.isoformat(timespec="seconds"),
+    )
+    rev = _FakeRevisions(serving="ca-elb-dashboard--blue")
+    watcher = _FakeWatcher(_Status("Running", "Provisioned", 1, True))
+    # Past deadline + the converge grace → escalate, do not re-cut again.
+    past = deadline + timedelta(
+        seconds=reconciler.CONFIRM_CUTOVER_CONVERGE_GRACE_SECONDS + 1
+    )
+    after = reconciler.reconcile_rolling_out_inline(
+        watcher=watcher, revisions_mod=rev, now=lambda: past
+    )
+    assert after.state == state.STATE_ROLLBACK_FAILED
+    assert rev.cutover_calls == []
 
 
 # --------------------------------------------------------------------------

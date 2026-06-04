@@ -116,6 +116,26 @@ def test_keep_n_retains_serving_plus_recent() -> None:
     assert set(result.deactivated) == {"ca--old1", "ca--old2"}
 
 
+def test_keep_n_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UPGRADE_REVISION_KEEP_N widens retention when keep_n is not passed."""
+    monkeypatch.setenv("UPGRADE_REVISION_KEEP_N", "3")
+    now = _now()
+    revs = [
+        _Rev("ca--green", True, 100, now),
+        _Rev("ca--blue", True, 0, now - timedelta(minutes=5)),
+        _Rev("ca--old1", True, 0, now - timedelta(minutes=10)),
+        _Rev("ca--old2", True, 0, now - timedelta(minutes=15)),
+    ]
+    images = {r.name: {f"myacr.azurecr.io/elb-api:{r.name}"} for r in revs}
+    fake_rev = _FakeRevisions(revs, serving="ca--green", images=images)
+
+    # keep_n omitted → resolved from env (3) → green+blue+old1 retained,
+    # only the oldest (old2) is deactivated.
+    result = revision_gc.collect_garbage_inline(revisions_mod=fake_rev, acr_mod=_FakeAcr())
+    assert set(result.deactivated) == {"ca--old2"}
+    assert revision_gc.keep_n_revisions() == 3
+
+
 def test_protected_blue_green_never_deactivated() -> None:
     now = _now()
     state.update_state(

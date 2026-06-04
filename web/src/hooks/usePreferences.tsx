@@ -22,7 +22,7 @@ import {
 import { isFeatureEnabled, type FeatureFlag } from "@/config/runtime";
 
 export type ThemeMode = "light" | "dark" | "system";
-export type PreviewFeature = "customDb" | "labTools" | "liveWall";
+export type PreviewFeature = "customDb" | "labTools" | "liveWall" | "terminal";
 
 export interface Preferences {
   __v: 1;
@@ -53,6 +53,12 @@ export interface Preferences {
   previewLabToolsEnabled: boolean;
   /** Preview opt-in: show the Live Wall monitor route. */
   previewLiveWallEnabled: boolean;
+  /**
+   * Preview opt-in: show the browser terminal route, navigation entry,
+   * dashboard card, and keyboard shortcut. Disabled by default; the
+   * terminal is an optional surface, not part of the core flow.
+   */
+  previewTerminalEnabled: boolean;
 }
 
 const STORAGE_KEY = "elb-prefs";
@@ -69,17 +75,20 @@ const DEFAULT_PREFERENCES: Preferences = {
   previewCustomDbEnabled: false,
   previewLabToolsEnabled: false,
   previewLiveWallEnabled: false,
+  previewTerminalEnabled: false,
 };
 
 export const PREVIEW_PREF_KEYS = {
   customDb: "previewCustomDbEnabled",
   labTools: "previewLabToolsEnabled",
   liveWall: "previewLiveWallEnabled",
+  terminal: "previewTerminalEnabled",
 } satisfies Record<PreviewFeature, keyof Preferences>;
 
 const PREVIEW_RUNTIME_FLAGS: Partial<Record<PreviewFeature, FeatureFlag>> = {
   customDb: "customDb",
   labTools: "labTools",
+  terminal: "terminal",
 };
 
 function safeReadJson<T>(key: string): T | null {

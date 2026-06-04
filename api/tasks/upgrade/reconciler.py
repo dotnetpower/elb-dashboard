@@ -15,7 +15,9 @@ Edit boundaries: All reconciler decision logic lives here; no business
 Key entry points: `reconcile_rolling_out_inline`, `reconcile_rolling_out`,
   `PRE_PATCH_BUDGET_SECONDS`, `PATCH_NEVER_LANDED_GRACE_SECONDS`,
   `ROLLING_OUT_TIMEOUT_SECONDS`, `VALIDATING_TIMEOUT_SECONDS`,
-  `CONFIRM_WINDOW_SECONDS`, `_RUNNING_STATE_TERMINAL_FAILURES`.
+  `CONFIRM_WINDOW_SECONDS`, `CONFIRM_CUTOVER_CONVERGE_GRACE_SECONDS`,
+  `validating_timeout_seconds`, `confirm_window_seconds`,
+  `_RUNNING_STATE_TERMINAL_FAILURES`.
 Risky contracts: This task runs on every revision via beat. It MUST be
   safe to call against an idle/terminal row (no-op). The replica-zero
   guard escalates only when `started_at` is sufficiently in the past

@@ -1629,4 +1629,178 @@ def prepare_db_cancel(
     }
 
 
+@router.post("/prepare-db/{db_name}/delete")
+def prepare_db_delete(
+    db_name: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Permanently remove a staged BLAST database from the ``blast-db``
+    container.
+
+    Closes the resource lifecycle: a database the user created with
+    prepare-db can be deleted again to reclaim Storage and reset the row to
+    the "not downloaded" state. Steps, in order:
+
+    1. Read metadata. Refuse (409) when a copy is genuinely in flight
+       (``copy_status.phase`` in ``{queued, copying}`` or
+       ``update_in_progress``) — the caller must Cancel first so we never
+       race a live azcopy/server-side copy. A ``partial`` / ``cancelled`` /
+       ``init_failed`` / ``completed`` database is safe to delete.
+    2. Delete any leftover AKS-fanout Job + ConfigMap recorded in
+       ``aks_job_ref`` (idempotent; a 404 is success).
+    3. Delete every blob under ``{db_name}/`` (the shards + taxonomy) and
+       finally the ``{db_name}-metadata.json`` blob, so the DB vanishes
+       from ``list_databases``.
+
+    Idempotent — deleting an absent database returns a no-op success.
+    """
+    sub = str(body.get("subscription_id") or "")
+    storage_rg = str(body.get("storage_resource_group") or "")
+    account_name = str(body.get("account_name") or "")
+    if not all([sub, storage_rg, account_name, db_name]):
+        raise HTTPException(
+            400,
+            "subscription_id, storage_resource_group, account_name path-{db_name} required",
+        )
+    _check(sub, _RE_SUB, "subscription_id")
+    _check(storage_rg, _RE_RG, "storage_resource_group")
+    _check(account_name, _RE_STORAGE_ACCOUNT, "account_name")
+    _check(db_name, _RE_DB_NAME, "db_name")
+
+    cred = get_credential()
+    from api.services.storage.public_access import ensure_local_storage_access
+
+    ensure_local_storage_access(cred, sub, storage_rg, account_name)
+
+    from api.services.storage.data import _blob_service
+
+    blob_svc = _blob_service(cred, account_name)
+    container = blob_svc.get_container_client("blast-db")
+    meta, _etag = _download_blob_with_etag(container, db_name)
+    copy_status = meta.get("copy_status") or {}
+    phase = str(copy_status.get("phase") or "") if isinstance(copy_status, dict) else ""
+    # Guard: never delete under a live copy. The caller must Cancel first,
+    # which deletes the AKS Job and rewrites phase to "cancelled" — only then
+    # is a Delete safe. update_in_progress covers the generation-swap update
+    # path where copy_status may still read "completed" for the old gen.
+    if phase in {"queued", "copying"} or meta.get("update_in_progress"):
+        raise HTTPException(
+            409,
+            f"database {db_name} has a copy in progress; cancel it before deleting",
+        )
+
+    # AKS-fanout cleanup: remove any Job + ConfigMap still referenced. Best
+    # effort — a missing Job (already GC'd by TTL) is fine.
+    aks_job_deleted: dict[str, Any] | None = None
+    aks_job_ref_raw = meta.get("aks_job_ref")
+    aks_job_ref = aks_job_ref_raw if isinstance(aks_job_ref_raw, dict) else None
+    if aks_job_ref:
+        try:
+            from api.services.k8s.prepare_db_jobs import delete_prepare_db_job
+
+            aks_job_deleted = delete_prepare_db_job(
+                cred,
+                str(aks_job_ref.get("subscription_id") or sub),
+                str(aks_job_ref.get("resource_group") or ""),
+                str(aks_job_ref.get("cluster_name") or ""),
+                namespace=str(aks_job_ref.get("namespace") or "default"),
+                job_name=str(aks_job_ref.get("job_name") or ""),
+                configmap_name=str(
+                    aks_job_ref.get("configmap_name")
+                    or aks_job_ref.get("job_name")
+                    or ""
+                )
+                or None,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "prepare_db_delete AKS Job delete failed db=%s job=%s: %s",
+                db_name,
+                aks_job_ref.get("job_name"),
+                type(exc).__name__,
+            )
+            aks_job_deleted = {"status": "error", "error": type(exc).__name__}
+
+    # Delete all shard / taxonomy blobs under {db_name}/, then the metadata
+    # blob last so a mid-delete crash still leaves the metadata pointing at a
+    # (now-partial) DB the user can re-delete rather than orphaning blobs.
+    deleted = 0
+    errors = 0
+    for blob in container.list_blobs(name_starts_with=f"{db_name}/"):
+        try:
+            container.delete_blob(blob.name, delete_snapshots="include")
+            deleted += 1
+        except ResourceNotFoundError:
+            pass
+        except Exception as exc:
+            errors += 1
+            LOGGER.debug(
+                "prepare_db_delete blob delete failed db=%s blob=%s: %s",
+                db_name,
+                blob.name,
+                type(exc).__name__,
+            )
+
+    metadata_deleted = False
+    try:
+        container.delete_blob(f"{db_name}-metadata.json", delete_snapshots="include")
+        metadata_deleted = True
+    except ResourceNotFoundError:
+        metadata_deleted = True
+    except Exception as exc:
+        LOGGER.warning(
+            "prepare_db_delete metadata blob delete failed db=%s: %s",
+            db_name,
+            type(exc).__name__,
+        )
+
+    # Drop the merged display-metadata cache so the SPA's DB list reflects the
+    # removal on the next read instead of waiting out the TTL.
+    try:
+        from api.services.blast.db_metadata import notify_blast_db_metadata_changed
+
+        notify_blast_db_metadata_changed(account_name, db_name)
+    except Exception as exc:
+        LOGGER.debug(
+            "prepare_db_delete cache invalidate skipped db=%s: %s",
+            db_name,
+            type(exc).__name__,
+        )
+
+    try:
+        from api.services.db.ops_audit import record_db_op
+
+        record_db_op(
+            op="prepare_db_delete",
+            caller=caller,
+            account_name=account_name,
+            db_name=db_name,
+            extra={
+                "deleted": deleted,
+                "errors": errors,
+                "metadata_deleted": metadata_deleted,
+            },
+        )
+    except Exception as exc:
+        LOGGER.debug("delete audit record skipped: %s", type(exc).__name__)
+
+    LOGGER.info(
+        "prepare_db_delete oid=%s db=%s deleted=%d errors=%d metadata_deleted=%s",
+        redact_oid(caller.object_id),
+        db_name,
+        deleted,
+        errors,
+        metadata_deleted,
+    )
+    return {
+        "ok": True,
+        "db_name": db_name,
+        "deleted": deleted,
+        "errors": errors,
+        "metadata_deleted": metadata_deleted,
+        "aks_job_deleted": aks_job_deleted,
+    }
+
+
 

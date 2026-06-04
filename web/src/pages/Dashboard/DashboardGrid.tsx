@@ -4,7 +4,7 @@ import { SidecarsCard } from "@/components/cards/SidecarsCard";
 import { StorageCard } from "@/components/cards/StorageCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
 import type { ResourceConfig } from "@/components/SetupWizard";
-import { isFeatureEnabled } from "@/config/runtime";
+import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { useScrollToHash } from "@/hooks/useScrollToHash";
 
 export interface DashboardGridProps {
@@ -12,7 +12,7 @@ export interface DashboardGridProps {
 }
 
 export function DashboardGrid({ config }: DashboardGridProps) {
-  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalEnabled = usePreviewFeatureEnabled("terminal");
   // Mounted only after workspace discovery completes, so `#acr-card`
   // (and any future card anchors) are guaranteed to be in the DOM when
   // the deep-link scroll fires. Putting this in `Dashboard` would race

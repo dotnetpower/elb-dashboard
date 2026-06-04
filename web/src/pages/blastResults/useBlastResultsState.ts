@@ -14,7 +14,7 @@ import {
   resolveBlastResultState,
   splitBlastResultFiles,
 } from "@/pages/blastResultsModel";
-import { isFeatureEnabled } from "@/config/runtime";
+import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 
 const TERMINAL_PHASES = new Set([
   "completed",
@@ -78,7 +78,7 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const cluster = useClusterReadiness();
-  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalEnabled = usePreviewFeatureEnabled("terminal");
   const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
 
   const jobQuery = useQuery({

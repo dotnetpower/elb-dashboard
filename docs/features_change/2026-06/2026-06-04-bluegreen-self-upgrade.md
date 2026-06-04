@@ -87,9 +87,11 @@ this change because it is provision-irreversible and carries two hazards:
 
 The rollout is therefore a coordinated manual deploy: set
 `activeRevisionsMode: 'Multiple'` **and** `STRICT_BLUEGREEN=true` in the same
-revision, no static `traffic` block. Optional knobs:
-`UPGRADE_CONFIRM_WINDOW_SECONDS` (300), `UPGRADE_VALIDATING_TIMEOUT_SECONDS`
-(600), `UPGRADE_REVISION_KEEP_N` (2). The caveat is documented inline at the
+revision, no static `traffic` block. Optional knobs (read at call time, so a
+revision can be reconfigured without a code change):
+`UPGRADE_VALIDATING_TIMEOUT_SECONDS` (default 900),
+`UPGRADE_CONFIRM_WINDOW_SECONDS` (default 300), `UPGRADE_REVISION_KEEP_N`
+(default 2). The caveat is documented inline at the
 `activeRevisionsMode` line in `infra/modules/containerAppControl.bicep`.
 
 ## Validation evidence

@@ -4,7 +4,9 @@
 [![Publish Release Notes](https://github.com/dotnetpower/elb-dashboard/actions/workflows/release.yml/badge.svg)](https://github.com/dotnetpower/elb-dashboard/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/github/license/dotnetpower/elb-dashboard)](./LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/dotnetpower/elb-dashboard?include_prereleases&sort=semver)](https://github.com/dotnetpower/elb-dashboard/releases)
-<!-- ELB_SOURCE_STAMP_START -->[![Source Stamp](https://img.shields.io/badge/source-v0.2.106%20%C2%B7%2054eb4ab-2f6fed)](./scripts/dev/version-stamp.sh)<!-- ELB_SOURCE_STAMP_END -->
+<!-- ELB_SOURCE_STAMP_START -->
+[![Source Stamp](https://img.shields.io/badge/source-v0.2.192%20%C2%B7%202b7cfab-2f6fed)](./scripts/dev/version-stamp.sh)
+<!-- ELB_SOURCE_STAMP_END -->
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776ab?logo=python&logoColor=white)](./pyproject.toml)
 [![Node 20](https://img.shields.io/badge/node-20-339933?logo=node.js&logoColor=white)](./web/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)

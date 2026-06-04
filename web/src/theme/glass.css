@@ -1756,6 +1756,20 @@ textarea.form-input {
   border-color: var(--border-weak);
 }
 
+/* Attention dot: shown on the Settings gear when a self-upgrade is
+   available, in progress, failed, or rolled back. Calm amber, no glow. */
+.cfg-gear__dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warning, #d8a657);
+  border: 1px solid var(--bg-primary);
+  pointer-events: none;
+}
+
 /* ── Stat panels ── */
 .stat-row {
   display: grid;

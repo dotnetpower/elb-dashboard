@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
+  ArrowUpCircle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -18,6 +19,7 @@ import {
   Moon,
   Network,
   FlaskConical,
+  RefreshCw,
   RotateCcw,
   Settings as SettingsIcon,
   Sun,
@@ -25,6 +27,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { formatApiError } from "@/api/client";
 import { aksApi, type OpenApiPublicHttpsStatus } from "@/api/aks";
@@ -47,6 +50,7 @@ import {
   type WarmCacheMode,
 } from "@/api/settings";
 import { tasksApi, type TaskStatusResponse } from "@/api/tasks";
+import { useUpgradeAvailability } from "@/hooks/useUpgradeAvailability";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { clearConfig, loadSavedConfig, type ResourceConfig } from "@/components/SetupWizard";
 import { useAppInsights } from "@/hooks/useAppInsights";
@@ -59,6 +63,7 @@ import { pickPreferredCluster } from "@/utils/clusterSelection";
 type SectionId =
   | "appearance"
   | "preview"
+  | "updates"
   | "telemetry"
   | "aks"
   | "performance"
@@ -126,6 +131,7 @@ const REGION_RE = /^[a-z][a-z0-9]{2,29}$/;
 const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> = [
   { id: "appearance", label: "Appearance", icon: <Sun size={14} strokeWidth={1.5} /> },
   { id: "preview", label: "Preview", icon: <FlaskConical size={14} strokeWidth={1.5} /> },
+  { id: "updates", label: "Updates", icon: <ArrowUpCircle size={14} strokeWidth={1.5} /> },
   { id: "telemetry", label: "Telemetry", icon: <Activity size={14} strokeWidth={1.5} /> },
   { id: "aks", label: "AKS Observability", icon: <Monitor size={14} strokeWidth={1.5} /> },
   { id: "performance", label: "Performance", icon: <HardDrive size={14} strokeWidth={1.5} /> },
@@ -287,6 +293,7 @@ export function SettingsPanel({ open, onClose }: Props) {
           <main style={{ padding: "20px 24px", overflowY: "auto" }}>
             {active === "appearance" && <AppearanceSection />}
             {active === "preview" && <PreviewSection />}
+            {active === "updates" && <UpdatesSection onClose={onClose} />}
             {active === "telemetry" && <TelemetrySection config={config} />}
             {active === "aks" && <AksSection config={config} />}
             {active === "performance" && <PerformanceSection config={config} />}
@@ -400,10 +407,193 @@ function PreviewSection() {
             />
           }
         />
+        <Row
+          label="Terminal"
+          hint="Show the browser terminal route, navigation entry, dashboard card, and keyboard shortcut. Disabled by default."
+          control={
+            <Toggle
+              checked={prefs.previewTerminalEnabled}
+              onChange={(value) => setPref("previewTerminalEnabled", value)}
+              label="Terminal preview"
+            />
+          }
+        />
       </Group>
       <StatusLine kind="info">
         Preview selections are stored in this browser only and take effect immediately.
       </StatusLine>
+    </Section>
+  );
+}
+
+function formatCheckedAt(iso: string): string {
+  if (!iso) return "";
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return iso;
+  return parsed.toLocaleString();
+}
+
+/**
+ * Server self-upgrade status + an explicit "Check now" control. Replaces
+ * the old header badge. Status comes from the shared
+ * `useUpgradeAvailability` hook, which polls `/api/upgrade/status` on a 60s
+ * (visibility-gated) cadence and fans out across tabs via BroadcastChannel —
+ * so an available update surfaces here (and on the Settings gear dot) without
+ * a click. The button forces a `/api/upgrade/check`, absorbing the 429
+ * throttle. The full start/rollback flow lives on the `/upgrade` page.
+ */
+function UpdatesSection({ onClose }: { onClose: () => void }) {
+  const { status, loading, error, available, phase, checkNow } = useUpgradeAvailability();
+  const [checking, setChecking] = useState(false);
+  const [actionMessage, setActionMessage] = useState<
+    { kind: "info" | "success" | "error"; text: string } | null
+  >(null);
+
+  const configured = Boolean(status?.git_remote);
+  const inProgress = phase === "active";
+  const failed = phase === "failed";
+  const rolledBack = phase === "rolled_back";
+
+  const handleCheck = useCallback(async () => {
+    setChecking(true);
+    setActionMessage(null);
+    try {
+      await checkNow();
+      // Don't repeat the availability badge here — just confirm the action ran.
+      setActionMessage({ kind: "success", text: "Checked just now." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // `/check` is throttled (429) to protect the upstream git remote.
+      if (msg.includes("429")) {
+        setActionMessage({
+          kind: "info",
+          text: "Check throttled — try again shortly. Status still refreshes automatically.",
+        });
+      } else {
+        setActionMessage({ kind: "error", text: formatApiError(err) });
+      }
+    } finally {
+      setChecking(false);
+    }
+  }, [checkNow]);
+
+  const checkedAt = formatCheckedAt(status?.latest_checked_at || "");
+
+  return (
+    <Section heading="Updates">
+      <Group>
+        <Row
+          label="Current version"
+          hint={status?.running_sha ? `Commit ${status.running_sha.slice(0, 7)}` : undefined}
+          control={
+            loading ? (
+              <Badge tone="muted">Loading…</Badge>
+            ) : (
+              <code style={{ fontSize: 12, color: "var(--text-primary)" }}>
+                v{status?.running_version || "—"}
+              </code>
+            )
+          }
+        />
+        <Row
+          label="Latest available"
+          hint={
+            !configured ? undefined : checkedAt ? `Last checked ${checkedAt}` : "Not checked yet"
+          }
+          control={
+            loading ? (
+              <Badge tone="muted">Loading…</Badge>
+            ) : !configured ? (
+              <Badge tone="muted">Not configured</Badge>
+            ) : available ? (
+              <Badge tone="warning" icon={<ArrowUpCircle size={12} strokeWidth={1.8} />}>
+                v{status?.latest_version}
+              </Badge>
+            ) : (
+              <Badge tone="success" icon={<CheckCircle2 size={12} strokeWidth={1.8} />}>
+                Up to date
+              </Badge>
+            )
+          }
+        />
+        {inProgress && (
+          <Row
+            label="Upgrade in progress"
+            hint={status?.phase_detail || undefined}
+            control={
+              <Badge tone="warning" icon={<RotateCcw size={12} strokeWidth={1.8} />}>
+                {status?.phase_progress || 0}%
+              </Badge>
+            }
+          />
+        )}
+      </Group>
+
+      <Group>
+        <Row
+          label="Check for updates"
+          hint="Polls the configured git remote for a newer release tag. Throttled to protect upstream."
+          control={
+            <button
+              className="glass-button"
+              onClick={handleCheck}
+              disabled={checking || !configured}
+              style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
+            >
+              {checking ? (
+                <Loader2 size={13} className="spin" />
+              ) : (
+                <RefreshCw size={13} strokeWidth={1.7} />
+              )}
+              {checking ? "Checking…" : "Check now"}
+            </button>
+          }
+        />
+        {configured && (
+          <Row
+            label="Manage upgrade"
+            hint="Open the full self-upgrade page to start, monitor, or roll back an update."
+            control={
+              <Link
+                to="/upgrade"
+                onClick={onClose}
+                className="glass-button"
+                style={{
+                  fontSize: 12,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  textDecoration: "none",
+                }}
+              >
+                <ExternalLink size={13} strokeWidth={1.7} />
+                Open
+              </Link>
+            }
+          />
+        )}
+      </Group>
+
+      {!configured && !loading && (
+        <StatusLine kind="info">
+          No upgrade remote is configured (<code>UPGRADE_GIT_REMOTE</code>). The control plane
+          will not surface new releases until an operator sets it.
+        </StatusLine>
+      )}
+      {failed && (
+        <StatusLine kind="error">
+          The last upgrade did not complete. Open the upgrade page to review the failure and roll
+          back if needed.
+        </StatusLine>
+      )}
+      {rolledBack && (
+        <StatusLine kind="info">
+          The last upgrade was rolled back. The control plane is running v
+          {status?.running_version || "—"}.
+        </StatusLine>
+      )}
+      {actionMessage && <StatusLine kind={actionMessage.kind}>{actionMessage.text}</StatusLine>}
+      {error && <StatusLine kind="error">{error}</StatusLine>}
     </Section>
   );
 }

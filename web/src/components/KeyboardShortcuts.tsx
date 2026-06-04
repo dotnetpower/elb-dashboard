@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 
-import { isFeatureEnabled } from "@/config/runtime";
+import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 
 type Shortcut = { key: string; label: string; action: string };
 
@@ -26,8 +26,8 @@ const BASE_SHORTCUTS: Shortcut[] = [
   { key: "Esc", label: "Close panel / dialog", action: "close" },
 ];
 
-function shortcuts(): Shortcut[] {
-  if (!isFeatureEnabled("terminal")) return BASE_SHORTCUTS;
+function shortcuts(terminalEnabled: boolean): Shortcut[] {
+  if (!terminalEnabled) return BASE_SHORTCUTS;
   return [
     BASE_SHORTCUTS[0],
     { key: "g t", label: "Go to Terminal", action: "/terminal" },
@@ -38,6 +38,7 @@ function shortcuts(): Shortcut[] {
 export function useKeyboardShortcuts() {
   const [showHelp, setShowHelp] = useState(false);
   const navigate = useNavigate();
+  const terminalEnabled = usePreviewFeatureEnabled("terminal");
   const pendingRef = useRef("");
 
   const handleKey = useCallback(
@@ -68,7 +69,7 @@ export function useKeyboardShortcuts() {
 
       if (pendingRef.current === "g") {
         const combo = `g ${e.key}`;
-        const match = shortcuts().find((s) => s.key === combo);
+        const match = shortcuts(terminalEnabled).find((s) => s.key === combo);
         if (match && match.action !== "help") {
           e.preventDefault();
           navigate(match.action);
@@ -77,7 +78,7 @@ export function useKeyboardShortcuts() {
         pendingRef.current = "";
       }
     },
-    [navigate],
+    [navigate, terminalEnabled],
   );
 
   useEffect(() => {
@@ -202,7 +203,8 @@ export function ShortcutOverlay({ onClose }: { onClose: () => void }) {
 }
 
 function ShortcutsTab() {
-  const visibleShortcuts = shortcuts();
+  const terminalEnabled = usePreviewFeatureEnabled("terminal");
+  const visibleShortcuts = shortcuts(terminalEnabled);
   const navShortcuts = visibleShortcuts.filter(
     (s) => s.action.startsWith("/") || s.action.startsWith("g"),
   );

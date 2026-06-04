@@ -451,6 +451,38 @@ export function useBlastDb({
     }
   };
 
+  const handleDelete = async (dbName: string) => {
+    if (!enabled) return;
+    setDownloadResult(null);
+    try {
+      const resp = await monitoringApi.deletePrepareBlastDb(
+        subscriptionId,
+        resourceGroup,
+        accountName,
+        dbName,
+      );
+      setInProgress((prev) => {
+        if (!prev.has(dbName)) return prev;
+        const next = new Map(prev);
+        next.delete(dbName);
+        return next;
+      });
+      phaseToastedRef.current.delete(dbName);
+      setDownloadResult({
+        db: dbName,
+        msg: `Deleted — removed ${resp.deleted} blobs${resp.errors ? ` (${resp.errors} errors)` : ""}.`,
+        type: "ok",
+      });
+      void dbQuery.refetch();
+    } catch (e) {
+      setDownloadResult({
+        db: dbName,
+        msg: formatApiError(e, "storage"),
+        type: "err",
+      });
+    }
+  };
+
   const handleBuildOracle = async (dbName: string) => {
     if (!enabled || !clusterName) return;
     setOracleBuilding(dbName);
@@ -621,6 +653,7 @@ export function useBlastDb({
     handleUpdate,
     handleBuildOracle,
     handleCancel,
+    handleDelete,
   };
 }
 

@@ -606,6 +606,29 @@ export const monitoringApi = {
       account_name: accountName,
     }),
 
+  /**
+   * Permanently delete a staged BLAST database (all shard blobs +
+   * metadata). Refused (409) by the backend while a copy is in flight — the
+   * caller must {@link cancelPrepareBlastDb} first. Idempotent.
+   */
+  deletePrepareBlastDb: (
+    subscriptionId: string,
+    storageRg: string,
+    accountName: string,
+    dbName: string,
+  ) =>
+    api.post<{
+      ok: boolean;
+      db_name: string;
+      deleted: number;
+      errors: number;
+      metadata_deleted: boolean;
+    }>(`/storage/prepare-db/${encodeURIComponent(dbName)}/delete`, {
+      subscription_id: subscriptionId,
+      storage_resource_group: storageRg,
+      account_name: accountName,
+    }),
+
   warmupStatus: (subscriptionId: string, rg: string, clusterName: string) =>
     api.get<WarmupStatus>(
       `/monitor/aks/warmup-status?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,

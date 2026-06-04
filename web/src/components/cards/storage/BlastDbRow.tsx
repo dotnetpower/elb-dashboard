@@ -7,6 +7,7 @@ import {
   ListOrdered,
   Loader2,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -72,6 +73,12 @@ interface BlastDbRowProps {
    * supported in a given context.
    */
   onCancel?: () => void;
+  /**
+   * Permanently delete a staged database (all shard blobs + metadata).
+   * Optional — caller may omit when delete is not supported in a given
+   * context. Shown for a Ready row and for a `partial`/`cancelled` leftover.
+   */
+  onDelete?: () => void;
   onToggleAutoWarmup: (checked: boolean) => void;
 }
 
@@ -82,6 +89,46 @@ interface BlastDbRowProps {
  * Pure-presentational; all lifecycle decisions are made by the parent and
  * passed in via props.
  */
+
+/**
+ * Loading placeholder for a single catalog row. Rendered while the database
+ * list is still being fetched, so the modal never shows actionable
+ * Download/Update/Delete buttons before the real downloaded-state is known
+ * (those buttons would all look "active" because the empty list makes every
+ * row appear not-yet-downloaded). Mirrors the real row's
+ * ``20px 1fr auto`` grid so the layout does not jump when data arrives.
+ */
+export function BlastDbRowSkeleton() {
+  return (
+    <div
+      aria-hidden
+      style={{
+        display: "grid",
+        gridTemplateColumns: "20px 1fr auto",
+        columnGap: 10,
+        alignItems: "center",
+        padding: "8px 10px",
+        borderRadius: 6,
+        border: "1px solid transparent",
+        marginBottom: 2,
+      }}
+    >
+      <span
+        className="skeleton"
+        style={{ width: 14, height: 14, borderRadius: "50%" }}
+      />
+      <span style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span className="skeleton" style={{ width: "42%", height: 12 }} />
+        <span className="skeleton" style={{ width: "68%", height: 9 }} />
+      </span>
+      <span
+        className="skeleton"
+        style={{ width: 84, height: 24, borderRadius: 6 }}
+      />
+    </div>
+  );
+}
+
 export function BlastDbRow({
   db,
   meta,
@@ -106,6 +153,7 @@ export function BlastDbRow({
   onBuildOracle,
   onConfirmLarge,
   onCancel,
+  onDelete,
   onToggleAutoWarmup,
 }: BlastDbRowProps) {
   const triggerDownload = () => {
@@ -690,13 +738,41 @@ export function BlastDbRow({
         }}
       >
         {isUpdating ? (
-          <span
-            className="gt gt-b"
-            style={{ fontSize: 10, display: "inline-flex", alignItems: "center", gap: 4 }}
-          >
-            <Loader2 size={10} className="spin" /> Updating
-            {progressTotal > 0 ? ` · ${copyPct}%` : ""}
-          </span>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <span
+              className="gt gt-b"
+              style={{
+                fontSize: 10,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <Loader2 size={10} className="spin" /> Updating
+              {progressTotal > 0 ? ` · ${copyPct}%` : ""}
+            </span>
+            {onCancel && (
+              <button
+                className="glass-button"
+                style={{
+                  fontSize: 10,
+                  padding: "2px 6px",
+                  color: "var(--danger)",
+                  borderColor: "rgba(224,123,138,0.3)",
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCancel();
+                }}
+                disabled={writeDisabled}
+                title={
+                  writeDisabled ? writeDisabledReason : "Cancel in-flight update"
+                }
+              >
+                Cancel
+              </button>
+            )}
+          </div>
         ) : hasUpdate ? (
           <button
             className="glass-button"
@@ -754,6 +830,32 @@ export function BlastDbRow({
             <span className="gt gt-g" style={{ fontSize: 10 }}>
               Ready
             </span>
+            {onDelete && (
+              <button
+                className="glass-button"
+                style={{
+                  fontSize: 10,
+                  padding: "2px 6px",
+                  color: "var(--danger)",
+                  borderColor: "rgba(224,123,138,0.3)",
+                  display: "inline-flex",
+                  alignItems: "center",
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete();
+                }}
+                disabled={writeDisabled}
+                title={
+                  writeDisabled
+                    ? writeDisabledReason
+                    : "Delete this database (removes all staged blobs)"
+                }
+                aria-label={`Delete ${db.value}`}
+              >
+                <Trash2 size={11} />
+              </button>
+            )}
           </div>
         ) : isDownloading ? (
           <span
@@ -788,35 +890,63 @@ export function BlastDbRow({
             )}
           </div>
         ) : (
-          <button
-            className="glass-button glass-button--primary"
-            style={{
-              fontSize: 11,
-              padding: "3px 10px",
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-              triggerDownload();
-            }}
-            disabled={downloadBlocked}
-            title={
-              writeDisabled
-                ? writeDisabledReason
-                : isUnsupported && unsupported
-                ? unsupported.hint
-                : previewUnavailable
-                  ? (preview?.message ??
-                    "Not in current NCBI S3 snapshot. Retry once the snapshot rotates.")
-                  : downloadDisabled
-                    ? "Another download is in progress"
-                    : `Download ${db.value}`
-            }
-          >
-            <Download size={11} /> {isPartial ? "Retry" : "Get"}
-          </button>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <button
+              className="glass-button glass-button--primary"
+              style={{
+                fontSize: 11,
+                padding: "3px 10px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                triggerDownload();
+              }}
+              disabled={downloadBlocked}
+              title={
+                writeDisabled
+                  ? writeDisabledReason
+                  : isUnsupported && unsupported
+                  ? unsupported.hint
+                  : previewUnavailable
+                    ? (preview?.message ??
+                      "Not in current NCBI S3 snapshot. Retry once the snapshot rotates.")
+                    : downloadDisabled
+                      ? "Another download is in progress"
+                      : `Download ${db.value}`
+              }
+            >
+              <Download size={11} /> {isPartial ? "Retry" : "Get"}
+            </button>
+            {onDelete && (isPartial || copyPhase === "cancelled") && (
+              <button
+                className="glass-button"
+                style={{
+                  fontSize: 10,
+                  padding: "2px 6px",
+                  color: "var(--danger)",
+                  borderColor: "rgba(224,123,138,0.3)",
+                  display: "inline-flex",
+                  alignItems: "center",
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete();
+                }}
+                disabled={writeDisabled}
+                title={
+                  writeDisabled
+                    ? writeDisabledReason
+                    : "Delete this database (removes all staged blobs)"
+                }
+                aria-label={`Delete ${db.value}`}
+              >
+                <Trash2 size={11} />
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>
