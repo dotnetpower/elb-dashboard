@@ -24,7 +24,13 @@ from __future__ import annotations
 # E. coli K-12 16S rRNA query (NR_024570.1) against 16S_ribosomal_RNA with
 # taxid 562 and outfmt 5, replacing the biologically nonsensical Monkeypox
 # ATGC-repeat placeholders — see
-# docs/features_change/2026-06/2026-06-04-openapi-mode-b-16s-example-fix.md).
+# docs/features_change/2026-06/2026-06-04-openapi-mode-b-16s-example-fix.md;
+# 4.20 == upstream 3.7.5 — _refresh_job_status now gates the SUCCESS.txt
+# marker on _list_result_files so a job only reports completed once the
+# result listing the download path uses is populated, with a bounded
+# RESULTS_VISIBILITY_GRACE_SECONDS fallback; fixes the completed -> /results
+# 404 race from Azure Blob list-after-write visibility lag — see
+# docs/features_change/2026-06/2026-06-04-openapi-results-visibility-race.md).
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
@@ -44,7 +50,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.19",
+    "elb-openapi": "4.20",
 }
 
 # GitHub source repo for ACR Build Tasks.
