@@ -59,7 +59,9 @@ export interface TaxonomyDetailModalProps {
 }
 
 function ncbiTaxonomyBrowserUrl(taxid: number): string {
-  return `https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?id=${taxid}`;
+  // Modern NCBI Datasets taxonomy browser. The legacy wwwtax.cgi page is being
+  // retired by NCBI (Fall 2026) and already shows a deprecation banner.
+  return `https://www.ncbi.nlm.nih.gov/datasets/taxonomy/${encodeURIComponent(String(taxid))}/`;
 }
 
 function displayRank(rank: string | null | undefined): string | null {

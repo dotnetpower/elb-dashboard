@@ -65,6 +65,8 @@ export interface BlastTriage {
   ambiguousTopHits: BlastHit[];
   evidenceLevel: EvidenceLevel;
   warnings: string[];
+  /** Non-empty, non-comment lines that were skipped (fewer than 12 columns). */
+  ignoredLineCount: number;
 }
 
 export interface DiagnosticHardeningReviewItem {
@@ -552,12 +554,27 @@ export function parseBlastOutfmt6(text: string): BlastHit[] {
     .sort((left, right) => right.bitScore - left.bitScore || left.evalue - right.evalue);
 }
 
+/**
+ * Count non-empty, non-comment lines that were dropped because they had fewer
+ * than the 12 columns a BLAST outfmt 6 row needs. Surfacing this lets the
+ * cockpit explain a "0 hits" paste instead of silently discarding bad input.
+ */
+export function countIgnoredOutfmt6Lines(text: string): number {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => line.split(/\t|\s{2,}/))
+    .filter((fields) => fields.length < 12).length;
+}
+
 export function triageBlastOutfmt6(
   text: string,
   workflowId: DiagnosticWorkflowId,
 ): BlastTriage {
   const workflow = getDiagnosticWorkflow(workflowId);
   const hits = parseBlastOutfmt6(text);
+  const ignoredLineCount = countIgnoredOutfmt6Lines(text);
   const topHit = hits[0] ?? null;
   const warnings: string[] = [];
 
@@ -567,7 +584,10 @@ export function triageBlastOutfmt6(
       topHit: null,
       ambiguousTopHits: [],
       evidenceLevel: "none",
-      warnings: ["No tabular BLAST hits were detected."],
+      warnings: ignoredLineCount > 0
+        ? [`No valid outfmt 6 rows; ${ignoredLineCount} line(s) had fewer than 12 columns.`]
+        : ["No tabular BLAST hits were detected."],
+      ignoredLineCount,
     };
   }
 
@@ -590,6 +610,9 @@ export function triageBlastOutfmt6(
   if (ambiguousTopHits.length > 0) {
     warnings.push("Near-tie top hits were detected; avoid over-specific species calls without manual review.");
   }
+  if (ignoredLineCount > 0) {
+    warnings.push(`${ignoredLineCount} line(s) were ignored because they had fewer than 12 columns.`);
+  }
 
   const passesIdentity = topHit.identity >= workflow.minIdentity;
   const passesCoverage = topHit.queryCoverage !== null && topHit.queryCoverage >= workflow.minCoverage;
@@ -605,6 +628,7 @@ export function triageBlastOutfmt6(
     ambiguousTopHits,
     evidenceLevel,
     warnings,
+    ignoredLineCount,
   };
 }
 

@@ -103,6 +103,40 @@ def test_guard_blocks_attempts_to_disable_itself() -> None:
     assert result.stdout.strip() == "blocked"
 
 
+def test_guard_blocks_elastic_blast_delete() -> None:
+    result = _guard_check("elastic-blast delete --cfg blast.ini")
+    assert result.stdout.strip() == "blocked"
+
+
+def test_guard_blocks_elb_delete_short_alias() -> None:
+    result = _guard_check("elb delete")
+    assert result.stdout.strip() == "blocked"
+
+
+def test_guard_blocks_elastic_blast_delete_with_global_flag() -> None:
+    result = _guard_check("elastic-blast --loglevel DEBUG delete --cfg blast.ini")
+    assert result.stdout.strip() == "blocked"
+
+
+def test_guard_allows_elastic_blast_submit() -> None:
+    result = _guard_check("elastic-blast submit --cfg blast.ini")
+    assert result.stdout.strip() == "allowed"
+
+
+def test_guard_allows_elastic_blast_status() -> None:
+    result = _guard_check("elastic-blast status --cfg blast.ini")
+    assert result.stdout.strip() == "allowed"
+
+
+def test_guard_allows_submit_with_delete_substring_in_path() -> None:
+    # A results path that merely contains "delete" as a substring must not
+    # trip the delete-subcommand guard.
+    result = _guard_check(
+        "elastic-blast submit --cfg blast.ini --results az://acct/predelete-runs/out"
+    )
+    assert result.stdout.strip() == "allowed"
+
+
 def test_guard_allows_sudo_apt_install() -> None:
     result = _guard_check("sudo apt install -y htop")
     assert result.stdout.strip() == "allowed"

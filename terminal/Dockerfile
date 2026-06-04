@@ -152,7 +152,8 @@ COPY runtime_overrides /opt/elb/runtime_overrides
 COPY entrypoint.sh /usr/local/bin/elb-entrypoint
 COPY exec_server.py /usr/local/bin/elb-exec-server
 COPY cgroup_reporter.py /usr/local/bin/elb-cgroup-reporter
-RUN chmod +x /usr/local/bin/elb-entrypoint /usr/local/bin/elb-exec-server /usr/local/bin/elb-cgroup-reporter /usr/local/bin/elb-banner /usr/local/bin/elb-tool-versions /etc/profile.d/elb-env.sh /etc/profile.d/elb-command-guard.sh /etc/profile.d/elb-history.sh \
+COPY elb_cfg.py /usr/local/bin/elb-cfg
+RUN chmod +x /usr/local/bin/elb-entrypoint /usr/local/bin/elb-exec-server /usr/local/bin/elb-cgroup-reporter /usr/local/bin/elb-banner /usr/local/bin/elb-tool-versions /usr/local/bin/elb-cfg /etc/profile.d/elb-env.sh /etc/profile.d/elb-command-guard.sh /etc/profile.d/elb-history.sh \
     && chmod 0644 /etc/tmux.conf
 
 USER azureuser:azureuser

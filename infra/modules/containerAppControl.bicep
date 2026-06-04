@@ -98,6 +98,11 @@ var storageDnsSuffix = environment().suffixes.storage
 var tableEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.table.${storageDnsSuffix}'
 var blobEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.blob.${storageDnsSuffix}'
 var platformResourceGroupName = resourceGroup().name
+// ACR short name (registry label) derived from the login server, e.g.
+// `acrelbdashboard.azurecr.io` -> `acrelbdashboard`. Used by the terminal
+// sidecar's `elb-cfg` helper to seed `azure-acr-name` defaults so a
+// researcher does not have to remember the registry name by hand.
+var platformAcrName = empty(acrLoginServer) ? '' : split(acrLoginServer, '.')[0]
 
 resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
@@ -414,6 +419,17 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZCOPY_MSI_CLIENT_ID', value: sharedIdentityClientId }
             { name: 'ELB_SKIP_DB_VERIFY', value: 'true' }
             { name: 'ELB_DISABLE_AUTO_SHUTDOWN', value: '1' }
+            // Non-secret platform coordinates surfaced to the interactive
+            // shell so the `elb-cfg` helper and the scaffolded
+            // `elastic-blast.ini` template can pre-fill region / resource
+            // group / storage account / ACR without the researcher having to
+            // memorise them. These mirror the api/worker sidecars and are
+            // safe to expose (no credentials, only resource names).
+            { name: 'AZURE_SUBSCRIPTION_ID', value: subscriptionId }
+            { name: 'AZURE_RESOURCE_GROUP', value: platformResourceGroupName }
+            { name: 'AZURE_REGION', value: location }
+            { name: 'STORAGE_ACCOUNT_NAME', value: platformStorageAccountName }
+            { name: 'PLATFORM_ACR_NAME', value: platformAcrName }
             // Programmatic exec channel — see api/services/terminal_exec.py
             // and terminal/exec_server.py. Same secret as the api sidecar.
             { name: 'EXEC_TOKEN', secretRef: 'exec-token' }

@@ -4,6 +4,7 @@ import {
   analyzeDiagnosticReadiness,
   analyzeDiagnosticTriage,
   buildDiagnosticRunbookDraft,
+  countIgnoredOutfmt6Lines,
   DEFAULT_DIAGNOSTIC_CONTEXT,
   DIAGNOSTIC_WORKFLOWS,
   evaluateDiagnosticHardeningReview,
@@ -79,6 +80,21 @@ describe("terminal diagnostic model", () => {
       queryCoverage: 96,
       bitScore: 500,
     });
+  });
+
+  it("counts malformed outfmt 6 lines and surfaces them in triage", () => {
+    const text = [
+      "q1\tspeciesA\t99.5\t1450\t0\t0\t1\t1450\t1\t1450\t1e-100\t500\t98",
+      "garbage line without enough columns",
+      "# a comment line is ignored silently",
+      "",
+    ].join("\n");
+
+    expect(countIgnoredOutfmt6Lines(text)).toBe(1);
+
+    const triage = triageBlastOutfmt6(text, "pathogen-id");
+    expect(triage.ignoredLineCount).toBe(1);
+    expect(triage.warnings.some((warning) => warning.includes("ignored"))).toBe(true);
   });
 
   it("triages near-tie hits as requiring review", () => {

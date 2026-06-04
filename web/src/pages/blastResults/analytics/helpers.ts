@@ -192,11 +192,13 @@ export function ncbiSearchUrl(accession: string): string {
   return `https://www.ncbi.nlm.nih.gov/search/all/?term=${encodeURIComponent(accession)}`;
 }
 
-/** NCBI Taxonomy browser deep link by taxid. */
+/** NCBI Datasets taxonomy browser deep link by taxid. */
 export function ncbiTaxonomyUrl(taxid: string | number): string {
-  return `https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?id=${encodeURIComponent(
+  // Modern NCBI Datasets taxonomy browser. The legacy wwwtax.cgi page is being
+  // retired by NCBI (Fall 2026) and already shows a deprecation banner.
+  return `https://www.ncbi.nlm.nih.gov/datasets/taxonomy/${encodeURIComponent(
     String(taxid),
-  )}`;
+  )}/`;
 }
 
 export function taxidLabel(value: string | undefined): string {

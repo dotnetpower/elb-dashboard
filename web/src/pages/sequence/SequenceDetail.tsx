@@ -24,6 +24,7 @@ import {
 } from "@/api/ncbi";
 import { SViewerEmbed } from "./SViewerEmbed";
 import { SequenceBlocks } from "./SequenceBlocks";
+import { ncbiTaxonomyUrl, ncbiNucleotideByOrganismUrl, ncbiOrganismClause } from "./ncbiLinks";
 
 const NCBI_NUCCORE_BASE = "https://www.ncbi.nlm.nih.gov/nuccore";
 // Standalone Sequence Viewer lives at the bare ``/projects/sviewer/`` path.
@@ -127,14 +128,11 @@ function firstQualifier(
 const NCBI_BIOPROJECT_BASE = "https://www.ncbi.nlm.nih.gov/bioproject";
 const NCBI_BIOSAMPLE_BASE = "https://www.ncbi.nlm.nih.gov/biosample";
 const NCBI_PUBMED_BASE = "https://pubmed.ncbi.nlm.nih.gov";
-const NCBI_TAXONOMY_BASE =
-  "https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?id=";
 const NCBI_GENE_BASE = "https://www.ncbi.nlm.nih.gov/gene/";
 const NCBI_GENE_SEARCH_BASE = "https://www.ncbi.nlm.nih.gov/gene/?term=";
 const NCBI_CLINVAR_SEARCH_BASE = "https://www.ncbi.nlm.nih.gov/clinvar/?term=";
 const NCBI_DBSNP_SEARCH_BASE = "https://www.ncbi.nlm.nih.gov/snp/?term=";
 const NCBI_OMIM_SEARCH_BASE = "https://www.ncbi.nlm.nih.gov/omim/?term=";
-const NCBI_NUCCORE_SEARCH_BASE = "https://www.ncbi.nlm.nih.gov/nuccore/?term=";
 const DOI_BASE = "https://doi.org/";
 
 function xrefUrl(dbname: string, id: string): string | null {
@@ -208,9 +206,10 @@ function buildRelatedResources(opts: {
       confidence: "exact",
     });
   } else if (singleGene) {
-    // No GeneID on the record \u2014 fall back to a symbol search, scoped by
+    // No GeneID on the record — fall back to a symbol search, scoped by
     // organism when known. Flagged as a search so it never looks authoritative.
-    const term = organism ? `${singleGene}[gene] AND ${organism}[orgn]` : `${singleGene}[gene]`;
+    const orgClause = ncbiOrganismClause({ taxid, organism });
+    const term = orgClause ? `${singleGene}[gene] AND ${orgClause}` : `${singleGene}[gene]`;
     out.push({
       label: "Gene",
       href: `${NCBI_GENE_SEARCH_BASE}${encodeURIComponent(term)}`,
@@ -247,17 +246,21 @@ function buildRelatedResources(opts: {
   if (taxid != null) {
     out.push({
       label: "Taxonomy",
-      href: `${NCBI_TAXONOMY_BASE}${encodeURIComponent(String(taxid))}`,
+      href: ncbiTaxonomyUrl(taxid),
       hint: organism ?? `taxid ${taxid}`,
       confidence: "exact",
     });
   }
-  if (organism) {
+  // Prefer a taxid-scoped nucleotide search (`txid<N>[Organism:exp]`) — exact
+  // and immune to the unquoted-multi-word-organism `[orgn]` binding bug. Only
+  // fall back to a quoted organism phrase when no taxid resolved.
+  const nucleotideHref = ncbiNucleotideByOrganismUrl({ taxid, organism });
+  if (nucleotideHref) {
     out.push({
       label: "Nucleotide",
-      href: `${NCBI_NUCCORE_SEARCH_BASE}${encodeURIComponent(`${organism}[orgn]`)}`,
-      hint: `${organism} records`,
-      confidence: "search",
+      href: nucleotideHref,
+      hint: organism ? `${organism} records` : `taxid ${taxid} records`,
+      confidence: taxid != null ? "exact" : "search",
     });
   }
   return out;
@@ -336,7 +339,7 @@ function dbXrefUrl(value: string): { label: string; href: string | null } {
   const db = value.slice(0, idx).trim();
   const id = value.slice(idx + 1).trim();
   const key = db.toLowerCase();
-  if (key === "taxon") return { label: value, href: `${NCBI_TAXONOMY_BASE}${encodeURIComponent(id)}` };
+  if (key === "taxon") return { label: value, href: ncbiTaxonomyUrl(id) };
   if (key === "geneid") return { label: value, href: `${NCBI_GENE_BASE}${encodeURIComponent(id)}` };
   return { label: value, href: null };
 }

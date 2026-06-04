@@ -95,6 +95,18 @@ __elb_terminal_guard_reason() {
     return 0
   fi
 
+  # elastic-blast / elb `delete` tears down the AKS cluster and all results
+  # for the run — the same destructive-infra class as `az group delete`.
+  # Only the `delete` subcommand is gated; submit/status/run stay allowed.
+  # The option-chain `([[:space:]][^[:space:]]+)*` lets global flags precede
+  # the subcommand (e.g. `elastic-blast --loglevel DEBUG delete`) while the
+  # explicit `[[:space:]]delete` word boundary avoids matching a "delete"
+  # substring inside a path/URL argument of submit.
+  if [[ "$command_text" =~ (^|[[:space:];|&])(elastic-blast|elb)([[:space:]][^[:space:]]+)*[[:space:]]delete([[:space:]]|$) ]]; then
+    printf '%s' "elastic-blast delete tears down the cluster and all results; run it from the dashboard BLAST workflow"
+    return 0
+  fi
+
   if [[ "$command_text" =~ (^|[[:space:]])kubectl[[:space:]].*delete[[:space:]].*(namespace|ns|node|clusterrole|clusterrolebinding|crd|customresourcedefinition|pv|storageclass)([[:space:]]|$) ]]; then
     printf '%s' "cluster-level kubectl delete operations are blocked"
     return 0

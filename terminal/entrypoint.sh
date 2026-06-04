@@ -30,7 +30,76 @@ export USER="${USER:-azureuser}"
 export SHELL="${SHELL:-/bin/bash}"
 mkdir -p "$HOME/.azure" "$HOME/.kube" 2>/dev/null || true
 
-# Print the MOTD as part of the first shell login.
+# ---------------------------------------------------------------------------
+# Scaffold ElasticBLAST cfg starting points (idempotent — never clobbers a
+# file the user has already edited). The home directory is ephemeral, so this
+# runs on every revision start; each write is guarded by `[[ -e ]]` so a user
+# who edited the template keeps their changes for the life of the session.
+# Values are seeded from the non-secret platform coordinates injected by
+# infra/modules/containerAppControl.bicep (AZURE_REGION / AZURE_RESOURCE_GROUP
+# / STORAGE_ACCOUNT_NAME / PLATFORM_ACR_NAME).
+# ---------------------------------------------------------------------------
+scaffold_blast_cfg() {
+  local examples="$HOME/examples"
+  mkdir -p "$examples" 2>/dev/null || true
+
+  local template="$HOME/elastic-blast.ini.template"
+  if [[ ! -e "$template" ]]; then
+    # Generate a best-effort template from env defaults. elb-cfg prints a
+    # WARNING for still-empty required keys on stderr; we keep stdout only.
+    if /usr/local/bin/elb-cfg --program blastn > "$template" 2>/dev/null; then
+      :
+    else
+      rm -f "$template" 2>/dev/null || true
+    fi
+  fi
+
+  local sample_query="$examples/sample-query.fa"
+  if [[ ! -e "$sample_query" ]]; then
+    cat > "$sample_query" <<'FASTA' 2>/dev/null || true
+>sample_query_1 example nucleotide sequence for a smoke-test BLAST run
+ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT
+GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAA
+FASTA
+  fi
+
+  local readme="$examples/README.txt"
+  if [[ ! -e "$readme" ]]; then
+    cat > "$readme" <<'TXT' 2>/dev/null || true
+ElasticBLAST quick start (browser terminal)
+===========================================
+
+1. Generate a config from the platform defaults:
+
+     elb-cfg --program blastn \
+             --db blast-db/16S_ribosomal_RNA/16S_ribosomal_RNA \
+             --queries sample-query.fa \
+             --results results/run-001 \
+             -o ~/elastic-blast.ini
+
+2. Validate it:
+
+     elb-cfg --check ~/elastic-blast.ini
+
+3. Submit:
+
+     elastic-blast submit --cfg ~/elastic-blast.ini
+
+Notes
+-----
+* Region / resource group / storage account / ACR default from the
+  environment; override with --region / --rg / --storage-account / --acr-name.
+* A bare --queries / --results / --db name is expanded into a full blob URL
+  under the matching container (queries / results / blast-db).
+* The dashboard "Submit" path is the authority for shard sizing; this helper
+  covers the common single-config manual run.
+* Your home directory is EPHEMERAL — stage inputs/outputs to Storage with
+  azcopy; files left here are lost when the revision restarts.
+TXT
+  fi
+}
+scaffold_blast_cfg || true
+
 cat /etc/motd 2>/dev/null || true
 
 if [[ -z "${EXEC_TOKEN:-}" ]]; then

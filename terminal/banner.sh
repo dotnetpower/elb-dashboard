@@ -55,8 +55,30 @@ render_title_block() {
     "$DIM$MUTED" "$RESET"
 }
 
+render_onboarding() {
+  # First-run guidance + the load-bearing warning that $HOME does not persist
+  # across revision restarts. Shown once per interactive session (profile.sh
+  # guards on ELB_MOTD_SHOWN).
+  printf '\n'
+  printf '  %sGet started%s\n' "$BOLD" "$RESET"
+  printf '    %s1.%s %saz login --use-device-code%s   %s# attribute cloud actions to you%s\n' \
+    "$BOLD" "$RESET" "$CYAN" "$RESET" "$DIM$MUTED" "$RESET"
+  printf '    %s2.%s %selb-cfg --program blastn -o ~/elastic-blast.ini%s   %s# scaffold a config%s\n' \
+    "$BOLD" "$RESET" "$CYAN" "$RESET" "$DIM$MUTED" "$RESET"
+  printf '    %s3.%s %selb-cfg --check ~/elastic-blast.ini%s   %s# validate before submit%s\n' \
+    "$BOLD" "$RESET" "$CYAN" "$RESET" "$DIM$MUTED" "$RESET"
+  printf '       %sExamples and a template are in %s~/examples/%s%s.\n' \
+    "$DIM$MUTED" "$RESET$MUTED" "$DIM$MUTED" "$RESET"
+  printf '\n'
+  printf '  %s⚠ Ephemeral home:%s %s$HOME is wiped on every revision restart.%s\n' \
+    "$BOLD$PINK_TRUE" "$RESET" "$BOLD" "$RESET"
+  printf '         %sStage inputs/outputs to Storage with %sazcopy%s%s; do not keep the only copy here.%s\n' \
+    "$MUTED" "$CYAN" "$RESET$MUTED" "$MUTED" "$RESET"
+}
+
 render_compact_banner() {
   render_title_block
+  render_onboarding
 }
 
 render_plain() {

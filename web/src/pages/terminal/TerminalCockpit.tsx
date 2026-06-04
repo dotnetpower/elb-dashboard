@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
@@ -17,10 +17,12 @@ import {
 } from "lucide-react";
 
 import { fetchApiRaw } from "@/api/client";
+import { TerminalCfgForm } from "@/pages/terminal/TerminalCfgForm";
 import {
   classifyCommand,
-  COCKPIT_CHAPTERS,
   COCKPIT_WORKFLOWS,
+  deriveChapterSignalsFromActivity,
+  deriveSessionChapters,
   INNOVATION_CAPABILITIES,
   normaliseCommandForTerminalInsert,
   type CommandImpact,
@@ -47,7 +49,46 @@ interface TerminalCockpitProps {
   callerDisplay: string | null;
   shellUser: string | null;
   onCopyCommand: (command: string) => void;
-  onInsertCommand: (command: string) => void;
+  onInsertCommand: (command: string, options?: { run?: boolean }) => void;
+  // Command lines the terminal has genuinely executed (typed directly or
+  // inserted-and-run). Drives the session chapter ladder from real activity
+  // instead of from typed-but-unrun previews. Owned by RemoteTerminal so it
+  // survives a cockpit side-panel toggle.
+  executedCommands: string[];
+}
+
+// Cockpit working state (preview command, diagnostic context, pasted triage
+// TSV) is persisted to sessionStorage so it survives a side-panel toggle
+// (cockpit -> manual -> cockpit remounts the component) and a tab reload. It is
+// intentionally session-scoped, not localStorage, so a fresh tab starts clean.
+const COCKPIT_SS_PREFIX = "elb.cockpit.";
+
+// Read a persisted value, validating its shape before trusting it. A stale or
+// schema-drifted sessionStorage entry must never flow unchecked into state
+// (e.g. a non-string `command` would throw in classifyCommand). `revive` may
+// migrate/normalise the parsed value or return null to reject it; without a
+// `revive` the parsed value must match the fallback's primitive type.
+function readSession<T>(key: string, fallback: T, revive?: (value: unknown) => T | null): T {
+  try {
+    const raw = sessionStorage.getItem(COCKPIT_SS_PREFIX + key);
+    if (raw == null) return fallback;
+    const parsed = JSON.parse(raw) as unknown;
+    if (revive) {
+      const revived = revive(parsed);
+      return revived == null ? fallback : revived;
+    }
+    return typeof parsed === typeof fallback ? (parsed as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeSession(key: string, value: unknown): void {
+  try {
+    sessionStorage.setItem(COCKPIT_SS_PREFIX + key, JSON.stringify(value));
+  } catch {
+    /* storage may be unavailable or over quota; persistence is best-effort */
+  }
 }
 
 interface TerminalHealthResponse {
@@ -106,13 +147,45 @@ export function TerminalCockpit({
   shellUser,
   onCopyCommand,
   onInsertCommand,
+  executedCommands,
 }: TerminalCockpitProps) {
-  const [command, setCommand] = useState("az account show -o table");
-  const [diagnosticContext, setDiagnosticContext] = useState<DiagnosticSampleContext>(
-    DEFAULT_DIAGNOSTIC_CONTEXT,
+  const [command, setCommand] = useState(() => readSession("command", "az account show -o table"));
+  const [diagnosticContext, setDiagnosticContext] = useState<DiagnosticSampleContext>(() =>
+    readSession("context", DEFAULT_DIAGNOSTIC_CONTEXT, (value) =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? { ...DEFAULT_DIAGNOSTIC_CONTEXT, ...(value as Partial<DiagnosticSampleContext>) }
+        : null,
+    ),
   );
-  const [blastTsv, setBlastTsv] = useState("");
+  const [blastTsv, setBlastTsv] = useState(() => readSession("tsv", ""));
+  const [runOnInsert, setRunOnInsert] = useState(() => readSession("runOnInsert", true));
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [riskAnnouncement, setRiskAnnouncement] = useState("");
+  const commandInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // When set, the next Azure CLI query bypasses the backend's 60 s cache.
+  const forceAzureRef = useRef(false);
   const analysis = useMemo(() => classifyCommand(command), [command]);
+
+  useEffect(() => writeSession("command", command), [command]);
+  useEffect(() => writeSession("context", diagnosticContext), [diagnosticContext]);
+  useEffect(() => writeSession("tsv", blastTsv), [blastTsv]);
+  useEffect(() => writeSession("runOnInsert", runOnInsert), [runOnInsert]);
+  // Debounce the screen-reader risk announcement so editing a command does not
+  // narrate the verdict on every keystroke; it settles ~400 ms after typing.
+  useEffect(() => {
+    const id = setTimeout(
+      () =>
+        setRiskAnnouncement(
+          `Command risk ${analysis.risk}, ${analysis.confidence} confidence, impact ${impactLabel(analysis.impact)}.`,
+        ),
+      400,
+    );
+    return () => clearTimeout(id);
+  }, [analysis.risk, analysis.confidence, analysis.impact]);
+  useEffect(() => () => {
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+  }, []);
   const diagnosticWorkflow = getDiagnosticWorkflow(diagnosticContext.workflowId);
   const diagnosticGuards = useMemo(
     () => analyzeDiagnosticReadiness(command, diagnosticContext),
@@ -171,23 +244,32 @@ export function TerminalCockpit({
     queryFn: fetchTerminalHealth,
     refetchInterval: 30_000,
     staleTime: 15_000,
-    retry: false,
+    retry: 1,
   });
   // T2: poll the Azure CLI sign-in status separately from sidecar health.
-  // Backend caches the underlying `az account show` call for 60 s so this is
-  // safe at a 2-minute UI refresh.
+  // Backend caches the underlying `az account show` call for 60 s so the
+  // periodic poll is cheap. The manual refresh button sets `forceAzureRef` so
+  // the next fetch passes `force=true` and genuinely bypasses that cache.
   const azureCli = useQuery({
     queryKey: ["terminal-azure-cli"],
-    queryFn: () => fetchAzureCliStatus(false),
+    queryFn: () => {
+      const force = forceAzureRef.current;
+      forceAzureRef.current = false;
+      return fetchAzureCliStatus(force);
+    },
     refetchInterval: 120_000,
     staleTime: 60_000,
-    retry: false,
+    retry: 1,
   });
 
+  const refreshAzureCli = () => {
+    forceAzureRef.current = true;
+    void azureCli.refetch();
+  };
+
   const healthStatus = health.data?.status ?? (health.isLoading ? "checking" : "unknown");
-  const liveCount = INNOVATION_CAPABILITIES.filter((item) => item.status === "live").length;
-  const guardedCount = INNOVATION_CAPABILITIES.filter((item) => item.status === "guarded").length;
-  const foundationCount = INNOVATION_CAPABILITIES.filter((item) => item.status === "foundation").length;
+  const shippedCount = INNOVATION_CAPABILITIES.filter((item) => item.tier === "shipped").length;
+  const roadmapCount = INNOVATION_CAPABILITIES.filter((item) => item.tier === "roadmap").length;
   const insertCommand = normaliseCommandForTerminalInsert(command);
   const terminalReady = connectionStatus === "connected";
   const canInsert = terminalReady && insertCommand.length > 0 && analysis.risk !== "high";
@@ -205,6 +287,43 @@ export function TerminalCockpit({
   ) => {
     setDiagnosticContext((current) => ({ ...current, [key]: value }));
   };
+
+  // Load a command into the preview AND move focus there, so a palette /
+  // recommendation / preset / "Safer" click visibly lands instead of silently
+  // swapping text the user may not be looking at.
+  const loadCommand = (next: string) => {
+    setCommand(next);
+    requestAnimationFrame(() => commandInputRef.current?.focus({ preventScroll: true }));
+  };
+
+  // Copy with transient "Copied" feedback keyed per button.
+  const handleCopy = (text: string, key: string) => {
+    onCopyCommand(text);
+    setCopiedKey(key);
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = setTimeout(() => setCopiedKey(null), 1800);
+  };
+
+  // Insert through the parent. The session chapters advance from
+  // `executedCommands` (real PTY activity captured in RemoteTerminal), so there
+  // is no separate client-side record to keep here — a typed-but-unrun insert
+  // simply never reaches the executed list until the user presses Enter.
+  const handleInsert = () => {
+    if (!canInsert) return;
+    onInsertCommand(insertCommand, { run: runOnInsert });
+  };
+
+  const sessionChapters = useMemo(
+    () =>
+      deriveSessionChapters(
+        deriveChapterSignalsFromActivity({
+          azureSignedIn: azureCli.data?.status === "signed_in",
+          executedCommands,
+          hasTriageEvidence: blastTriage.evidenceLevel !== "none",
+        }),
+      ),
+    [azureCli.data?.status, blastTriage.evidenceLevel, executedCommands],
+  );
 
   return (
     <aside className="terminal-cockpit" aria-label="Terminal cockpit">
@@ -257,20 +376,12 @@ export function TerminalCockpit({
           </strong>
           <button
             type="button"
-            onClick={() => azureCli.refetch()}
+            className="terminal-cockpit__refresh-btn"
+            onClick={refreshAzureCli}
             disabled={azureCli.isFetching}
+            aria-busy={azureCli.isFetching}
             aria-label="Re-check az login status"
             title="Re-check az login status (bypasses 60s cache)"
-            style={{
-              background: "none",
-              border: "none",
-              padding: 0,
-              marginLeft: 6,
-              cursor: azureCli.isFetching ? "wait" : "pointer",
-              color: "var(--text-faint)",
-              display: "inline-flex",
-              alignItems: "center",
-            }}
           >
             <RefreshCw size={11} strokeWidth={1.5} className={azureCli.isFetching ? "spin" : undefined} />
           </button>
@@ -283,10 +394,17 @@ export function TerminalCockpit({
           Command Preview
         </div>
         <textarea
+          ref={commandInputRef}
           className="terminal-cockpit__command-input"
           value={command}
           spellCheck={false}
           onChange={(event) => setCommand(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              handleInsert();
+            }
+          }}
           aria-label="Command to preview"
         />
         <div className="terminal-cockpit__chips">
@@ -294,8 +412,19 @@ export function TerminalCockpit({
             {analysis.risk} risk
           </span>
           <span className="terminal-cockpit__chip">{impactLabel(analysis.impact)}</span>
+          <span
+            className={`terminal-cockpit__chip terminal-cockpit__chip--confidence-${analysis.confidence}`}
+            title="How sure the classifier is about this verdict"
+          >
+            {analysis.confidence} confidence
+          </span>
           <span className="terminal-cockpit__chip">{callerDisplay ?? "local identity"}</span>
         </div>
+        {/* Announce risk/confidence changes to assistive tech (debounced so it
+            does not narrate on every keystroke). */}
+        <p className="terminal-cockpit__sr-only" aria-live="polite">
+          {riskAnnouncement}
+        </p>
         <p>{analysis.summary}</p>
         <ul className="terminal-cockpit__checks">
           {analysis.checks.map((check) => (
@@ -303,32 +432,50 @@ export function TerminalCockpit({
           ))}
         </ul>
         {analysis.rollback && <div className="terminal-cockpit__rollback">{analysis.rollback}</div>}
+        <label className="terminal-cockpit__toggle">
+          <input
+            type="checkbox"
+            checked={runOnInsert}
+            onChange={(event) => setRunOnInsert(event.target.checked)}
+          />
+          <span>Run on insert (off = type only, press Enter yourself)</span>
+        </label>
         <div className="terminal-cockpit__actions">
           <button
             type="button"
             className="glass-button"
-            onClick={() => onInsertCommand(insertCommand)}
+            onClick={handleInsert}
             disabled={!canInsert}
             title={insertTitle}
           >
             <SendToBack size={13} strokeWidth={1.5} />
-            Insert
+            {runOnInsert ? "Insert & run" : "Insert"}
           </button>
-          <button type="button" className="glass-button" onClick={() => onCopyCommand(command)}>
+          <button
+            type="button"
+            className="glass-button"
+            onClick={() => handleCopy(command, "preview")}
+          >
             <Copy size={13} strokeWidth={1.5} />
-            Copy
+            {copiedKey === "preview" ? "Copied" : "Copy"}
           </button>
           {analysis.saferCommand && (
             <button
               type="button"
               className="glass-button"
-              onClick={() => setCommand(analysis.saferCommand ?? command)}
+              onClick={() => loadCommand(analysis.saferCommand ?? command)}
+              title={`Replace with: ${analysis.saferCommand}`}
             >
-              Safer
+              Safer: {analysis.saferCommand}
             </button>
           )}
         </div>
+        {!canInsert && insertCommand.length > 0 && (
+          <p className="terminal-cockpit__insert-blocked">{insertTitle}</p>
+        )}
       </section>
+
+      <TerminalCfgForm onApply={(generated) => setCommand(generated)} />
 
       <section className="terminal-cockpit__panel terminal-cockpit__panel--diagnostic">
         <div className="terminal-cockpit__panel-title">
@@ -349,7 +496,7 @@ export function TerminalCockpit({
                   inputType: workflow.preferredInputs[0],
                   database: workflow.preferredDatabases[0],
                 }));
-                setCommand(workflow.recommendedCommands[0]);
+                loadCommand(workflow.recommendedCommands[0]);
               }}
             >
               {workflow.label}
@@ -411,7 +558,7 @@ export function TerminalCockpit({
         </div>
         <div className="terminal-cockpit__recommendations">
           {diagnosticWorkflow.recommendedCommands.map((item) => (
-            <button type="button" key={item} onClick={() => setCommand(item)}>
+            <button type="button" key={item} onClick={() => loadCommand(item)}>
               <code>{item}</code>
             </button>
           ))}
@@ -521,6 +668,14 @@ export function TerminalCockpit({
         <div className="terminal-cockpit__panel-title">
           <FileSearch size={14} strokeWidth={1.5} />
           BLAST Result Triage
+          <span className="terminal-cockpit__coverage-count">
+            {
+              blastTsv
+                .split(/\r?\n/)
+                .filter((line) => line.trim() && !line.trim().startsWith("#")).length
+            }{" "}
+            rows
+          </span>
         </div>
         <textarea
           className="terminal-cockpit__command-input terminal-cockpit__triage-input"
@@ -534,6 +689,9 @@ export function TerminalCockpit({
           <span>{blastTriage.hitCount} hits</span>
           <span>Evidence: {blastTriage.evidenceLevel}</span>
           {blastTriage.topHit && <span>Top: {blastTriage.topHit.subjectId}</span>}
+          {blastTriage.ignoredLineCount > 0 && (
+            <span data-state="warning">{blastTriage.ignoredLineCount} ignored</span>
+          )}
         </div>
         {blastTriage.topHit && (
           <div className="terminal-cockpit__top-hit">
@@ -543,15 +701,41 @@ export function TerminalCockpit({
             <span>bitscore {blastTriage.topHit.bitScore}</span>
           </div>
         )}
+        {blastTriage.ambiguousTopHits.length > 0 && (
+          <div className="terminal-cockpit__ambiguous">
+            <strong>Near-tie hits ({blastTriage.ambiguousTopHits.length})</strong>
+            {blastTriage.ambiguousTopHits.map((hit) => (
+              <div key={`${hit.subjectId}-${hit.bitScore}`}>
+                <code>{hit.subjectId}</code>
+                <span>{hit.identity}% id</span>
+                <span>bitscore {hit.bitScore}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <ul className="terminal-cockpit__checks">
           {blastTriage.warnings.map((warning) => (
             <li key={warning}>{warning}</li>
           ))}
         </ul>
-        <button type="button" className="glass-button" onClick={() => onCopyCommand(runbookDraft)}>
-          <Copy size={13} strokeWidth={1.5} />
-          Copy Evidence Summary
-        </button>
+        <div className="terminal-cockpit__actions">
+          <button
+            type="button"
+            className="glass-button"
+            onClick={() => handleCopy(runbookDraft, "evidence")}
+          >
+            <Copy size={13} strokeWidth={1.5} />
+            {copiedKey === "evidence" ? "Copied" : "Copy Evidence Summary"}
+          </button>
+          <button
+            type="button"
+            className="glass-button"
+            onClick={() => setBlastTsv("")}
+            disabled={blastTsv.length === 0}
+          >
+            Clear
+          </button>
+        </div>
       </section>
 
       <section className="terminal-cockpit__panel">
@@ -565,7 +749,7 @@ export function TerminalCockpit({
               type="button"
               className="terminal-cockpit__workflow"
               key={workflow.id}
-              onClick={() => setCommand(workflow.command)}
+              onClick={() => loadCommand(workflow.command)}
               title={workflow.intent}
             >
               <span>{workflow.label}</span>
@@ -578,7 +762,7 @@ export function TerminalCockpit({
       <section className="terminal-cockpit__panel">
         <div className="terminal-cockpit__panel-title">Session Chapters</div>
         <div className="terminal-cockpit__chapters">
-          {COCKPIT_CHAPTERS.map((chapter) => (
+          {sessionChapters.map((chapter) => (
             <div className="terminal-cockpit__chapter" data-state={chapter.status} key={chapter.id}>
               <span>{chapter.label}</span>
               <small>{chapter.detail}</small>
@@ -591,17 +775,17 @@ export function TerminalCockpit({
         <div className="terminal-cockpit__panel-title">
           Innovation Coverage
           <span className="terminal-cockpit__coverage-count">
-            {liveCount} live · {guardedCount} guarded · {foundationCount} foundation
+            {shippedCount} shipped · {roadmapCount} roadmap
           </span>
         </div>
         <div className="terminal-cockpit__capabilities">
           {INNOVATION_CAPABILITIES.map((item) => {
             const Icon = item.icon;
             return (
-              <div className="terminal-cockpit__capability" data-state={item.status} key={item.id}>
+              <div className="terminal-cockpit__capability" data-state={item.tier} key={item.id}>
                 <Icon size={13} strokeWidth={1.5} />
                 <span>{item.label}</span>
-                <small>{item.status}</small>
+                <small>{item.tier}</small>
               </div>
             );
           })}

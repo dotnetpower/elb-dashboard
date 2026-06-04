@@ -55,6 +55,8 @@ export const TERMINAL_MANUAL_SECTIONS: TerminalManualSection[] = [
       { command: "blastn -version", description: "Check the installed BLAST+ version." },
       { command: "makeblastdb -in refs.fa -dbtype nucl -out refs", description: "Build a nucleotide database." },
       { command: "blastn -query query.fa -db refs -outfmt 6 -out hits.tsv", description: "Run a local tabular BLAST search." },
+      { command: "elb-cfg --program blastn --db blast-db/16S/16S --queries q.fa --results run-1 -o ~/elastic-blast.ini", description: "Generate an elastic-blast.ini from platform defaults." },
+      { command: "elb-cfg --check ~/elastic-blast.ini", description: "Validate an existing config before submitting." },
       { command: "elastic-blast --help", description: "Open ElasticBLAST CLI help." },
       { command: "elb-tool-versions", description: "Print installed terminal tool versions." },
     ],

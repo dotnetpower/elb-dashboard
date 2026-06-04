@@ -7,3 +7,12 @@
   Audit: every command in this session is recorded to ~/.elb-history/commands.<pid>.log
          (by using this terminal you consent to this logging)
 
+  Get started
+    1. az login --use-device-code                       # attribute cloud actions to you
+    2. elb-cfg --program blastn -o ~/elastic-blast.ini  # scaffold a config
+    3. elb-cfg --check ~/elastic-blast.ini              # validate before submit
+       Examples and a template are in ~/examples/.
+
+  WARNING - Ephemeral home: $HOME is wiped on every revision restart.
+       Stage inputs/outputs to Storage with azcopy; do not keep the only copy here.
+
