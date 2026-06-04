@@ -197,7 +197,15 @@ flowchart TB
 **Why check Gate B while holding Gate A:** the mutex serialises submitters, so
 when submitter *N* counts cluster jobs, submitter *N-1* has already created its
 Job object in etcd and released the Lease. That eliminates the "just submitted
-but not yet visible" admit race without any extra reservation bookkeeping.
+but not yet visible" admit race without any extra reservation bookkeeping —
+**but only for a marker that `elastic-blast submit` creates *synchronously*.**
+The actual `app=blast` batch Jobs are **not** such a marker on Azure (see §5.1):
+in `cloud_job_submission` mode they are created by an in-cluster `app=submit`
+job **after** `elastic-blast submit` returns, so they are invisible at
+Lease-release time and the guarantee fails. Gate B must therefore count the
+**`app=finalizer` / `elb-job-id`** marker, which both Azure submit paths create
+*synchronously* at the end of `submit()` and which lives for the whole job
+lifecycle (§5.1).
 
 ---
 
@@ -221,6 +229,19 @@ spec:
 The Lease name maps 1:1 to today's `submit_lock_key`:
 `elb-blast-submit-<namespace>`. Different namespaces → different Lease names →
 parallel, preserving the existing per-`(cluster, namespace)` semantics.
+
+> **`holderIdentity` must be a *globally unique* token per acquisition, not a
+> truncated id.** The same-holder renew branch in §4.2
+> (`if lease.holderIdentity == holder: renew`) treats an identity match as "this
+> is my own Lease, safe to renew and proceed". If `holderIdentity` is a short
+> hash like `dashboard-ab12` and two *different* dashboard submits ever collide
+> on that suffix, submitter B would read submitter A's live Lease, see its own
+> identity, **renew it, and proceed concurrently** — a silent concurrent-submit
+> exactly inside the window the mutex protects. The Redis lock avoids this by
+> using a per-acquisition random token; the Lease must do the same. Phase 0 uses
+> `<source>-<full-uuid>` (or the full Celery task id / OpenAPI job uuid), never a
+> truncation, and a test asserts two distinct submits never produce equal
+> `holderIdentity`.
 
 ### 4.2 Acquire (optimistic concurrency)
 
@@ -341,26 +362,68 @@ Two consequences Phase 0 must handle:
 
 ```text
 active_submissions(cluster, ns) =
-    number of distinct elb-job-id K8s Jobs (label app=blast) in ns
-    that are NON-TERMINAL (not fully succeeded, not failed-out)
+    number of distinct elb-job-id values among NON-TERMINAL K8s Jobs
+    labelled app=finalizer in ns
+    (one finalizer Job per elastic-blast submit, created synchronously)
 ```
 
-* Unit is **one elastic-blast submit = one K8s Job (elb-job-id)**, not pod count.
-* A Pending Job still **holds a run slot** (it is committed work), so for *Gate B*
-  counting `active(=pending+running) > 0` as "occupies a slot" is correct. This
-  is intentionally *separate* from the UI status label, where Pending vs Running
-  must be split (a distinct fix tracked in
+* **Unit = one `elastic-blast submit` = one distinct `elb-job-id`**, counted via
+  the **`app=finalizer`** marker — **not** `app=blast`, and **not** a raw Job
+  count. This is a load-bearing correction verified against the upstream AKS
+  templates ([`blast-batch-job-aks`](https://github.com/dotnetpower/elastic-blast-azure)
+  vs `elb-finalizer-aks`):
+  * **`app=blast` is N-per-submit, not 1.** The batch job name embeds `JOB_NUM`
+    (`${PROGRAM}-batch-${DB}-job-${JOB_NUM}-...`); one search fans out to one
+    `app=blast` Job **per batch/shard**, all sharing a single `elb-job-id`.
+    Counting raw `app=blast` Jobs would let a single multi-batch search trip the
+    ceiling of 3 by itself.
+  * **`app=blast` is created asynchronously on Azure.** With
+    `cloud_job_submission` enabled, `elastic-blast submit` applies an
+    `app=submit` *job-submission* Job and returns; that Job then creates the
+    `app=blast` batch Jobs **later, in-cluster**. So at Lease-release time the
+    batch Jobs do not exist yet → counting them **over-admits** (the §3 race).
+  * **`app=setup` is not reliable either** — the init/PV Jobs are skipped when a
+    cluster is reused (`cluster_initialized`), so they undercount on warm
+    clusters.
+  * **`app=finalizer` is the correct marker:** `submit()` deploys exactly one
+    `elb-finalizer-<short>` Job (`app=finalizer`, `elb-job-id=<id>`)
+    **synchronously, in both the cloud-job-submission and direct paths**, and it
+    stays non-terminal until the whole search completes. So it is 1:1 with an
+    active search, visible the instant `submit()` returns, and lives for the
+    lifecycle — exactly the properties Gate B needs.
+* Counting is **distinct-by-`elb-job-id`** so that even if the marker ever
+  became >1 Job, a single submit still consumes exactly one slot.
+* A finalizer Job that is `Pending`/`Running` still **holds a run slot** (it is
+  committed work). This is intentionally *separate* from the UI status label,
+  where Pending vs Running must be split (a distinct fix tracked in
   [blast_status.py](../../api/services/k8s/blast_status.py); see §9).
-* **A split search consumes *multiple* slots.** The unit is the K8s Job, and the
-  dashboard's storage-query split fans out one `elastic-blast submit` (hence one
-  Job) **per child shard** ([split_pipeline.py](../../api/tasks/blast/split_pipeline.py)
+* **A failed/partial submit can orphan its finalizer → phantom slot.** Because
+  the finalizer is created *synchronously and first-ish* (before the async
+  `app=blast` batch Jobs exist in `cloud_job_submission` mode, §3), a submit that
+  errors **after** the finalizer is applied but **before/while** the batch Jobs
+  are created leaves a non-terminal `app=finalizer` Job with **no live batch work
+  behind it**. Under H4's finalizer-count it keeps holding a Gate B slot
+  indefinitely (capacity leak 3→2), and — critically — "finalizer with zero
+  `app=blast` Jobs" is **also the normal transient state** of a *healthy* submit
+  mid-async-creation, so the two cannot be told apart by job-count alone. Phase 0
+  needs an explicit GC/liveness rule: treat a finalizer as occupying a slot only
+  while its `elb-job-id` shows liveness (matching `app=submit`/`app=blast` Jobs
+  present **or** age below a `FINALIZER_GRACE_SECONDS` bound that covers the async
+  batch-creation lag); past that, a lone finalizer is reconciled (warn-badge +
+  operator delete, never silent auto-fail — same posture as the stuck-pod row in
+  §9). Without this rule the switch from `app=blast` to `app=finalizer` counting
+  trades over-admission for a slow capacity leak.
+* **A split search consumes *multiple* slots.** The dashboard's storage-query
+  split fans out one `elastic-blast submit` — hence one **finalizer** — **per
+  child shard** ([split_pipeline.py](../../api/tasks/blast/split_pipeline.py)
   `_dispatch_split_child_submits`). So a 5-way split search occupies up to 5
   slots and a single user search can saturate or exceed the ceiling of 3.
-  "3 parallel" therefore means **3 K8s Jobs, not 3 user searches**. Phase 0 must
-  decide and document one of: (a) children count individually (simplest, but one
-  split search can starve others), (b) the ceiling is raised for split workloads,
-  or (c) split children are accounted as one logical unit. v1 picks (a) and
-  records the starvation limitation (§9 fairness row).
+  "3 parallel" therefore means **3 finalizers (= 3 submits), not 3 user
+  searches**. Phase 0 must decide and document one of: (a) children count
+  individually (simplest, but one split search can starve others), (b) the
+  ceiling is raised for split workloads, or (c) split children are accounted as
+  one logical unit. v1 picks (a) and records the starvation limitation (§9
+  fairness row).
 
 ### 5.2 Where it runs
 
@@ -380,8 +443,11 @@ release lease (finally)
 
 * Dashboard counts via the existing `_fetch_blast_pods_and_jobs` machinery
   (new helper `k8s_count_active_blast_submissions`); OpenAPI counts via
-  in-cluster `kubectl get jobs -l app=blast -o json`. **Same cluster, same label
-  selector → the same "3" is shared automatically.**
+  in-cluster `kubectl get jobs -l app=finalizer -o json`. **Both must count the
+  same marker and dedup by `elb-job-id`** — if one path counts `app=finalizer`
+  distinct-`elb-job-id` and the other counts raw `app=blast` Jobs, they compute
+  *different* numbers for the same cluster state and the shared "3" is a fiction.
+  Pin one selector + one dedup rule in a constant shared by both repos.
 
 > **The admission count MUST bypass the monitoring cache.**
 > [`_fetch_blast_pods_and_jobs`](../../api/services/k8s/blast_status.py) is
@@ -401,17 +467,20 @@ release lease (finally)
 > the ceiling.
 
 > **Unverified external contract — must be confirmed before Phase 0 relies on
-> it.** The shared `app=blast` label selector and a stable per-submit
-> `elb-job-id` are produced by **upstream elastic-blast**, not by this repo. If
-> upstream changes the label, Gate B silently miscounts (admits too many or too
-> few). Phase 0 must (a) confirm against a live cluster
-> (`kubectl get jobs -l app=blast -o json` shows one Job per submit with a
-> distinct `elb-job-id`), (b) pin the exact selector in a constant shared by the
-> counter and the tests, and (c) treat a zero-match-but-jobs-exist result as a
-> *fail-safe* (do not admit blindly when the selector returns nothing yet pods
-> are clearly running). The same selector already underpins the auto-stop probe
-> (`probe_live_blast_activity`), so it is the established assumption — Phase 0
-> just makes it load-bearing for admission and therefore must verify it.
+> it.** The marker label (`app=finalizer`) and a stable per-submit `elb-job-id`
+> are produced by **upstream elastic-blast**, not by this repo. If upstream
+> changes the label or the finalizer is ever made optional, Gate B silently
+> miscounts. Phase 0 must (a) confirm against a live cluster
+> (`kubectl get jobs -l app=finalizer -o json` shows exactly one Job per submit
+> with a distinct `elb-job-id`, created the instant submit returns), (b) pin the
+> exact selector in a constant shared by the counter and the tests, and (c)
+> treat a zero-match-but-`app=blast`-Jobs-exist result as a *fail-safe* (do not
+> admit blindly when the finalizer selector returns nothing yet search pods are
+> clearly running). Note the existing auto-stop probe keys on `app=blast`
+> (`probe_live_blast_activity`); Gate B deliberately keys on `app=finalizer`
+> instead because that is the 1-per-submit, synchronously-created, lifecycle-long
+> marker (§5.1) — do not "unify" the two onto `app=blast` without re-introducing
+> the N-per-submit + async-visibility defects.
 
 ### 5.3 Where "3" comes from
 
@@ -500,7 +569,10 @@ stateDiagram-v2
 1. `_run_submit_bg`: acquire the same-named Lease + cluster `active < 3` before
    `elastic-blast submit`, release in `finally`.
 2. `_claim_next_job`: gate on (Lease acquirable + cluster `active < 3`) instead
-   of `MAX_ACTIVE_SUBMISSIONS` alone.
+   of `MAX_ACTIVE_SUBMISSIONS` alone. The `active` count is the **same**
+   `app=finalizer` distinct-`elb-job-id` count the dashboard uses (§5.1/§5.2),
+   **not** a raw `kubectl get jobs -l app=blast` count — the two repos must share
+   one selector + one dedup rule or they disagree on "3".
 3. ServiceAccount Lease RBAC (`Role` + `RoleBinding`).
 4. `BLAST_MAX_RUN_CONCURRENCY=3` (same key/value as the dashboard).
 
@@ -538,8 +610,12 @@ A cross-repo tracking issue is required (charter §13 cross-repo consistency).
 | **Concurrency race** | two submitters grab an expired Lease | `resourceVersion` CAS → exactly one wins (409). `create` collisions also 409. ✅ |
 | **Gate A wait unbounded** | a stuck/crashed Lease holder pins the mutex; every other submitter loops `waiting_for_submit_slot` every 30 s with **no deadline** (today's re-enqueue does not consume `max_retries`) → invisible forever | Phase 0 adds a `submit_slot_wait_deadline_ts` (mirrors `warmup_wait_deadline_ts`) so Gate A contention terminates as `submit_slot_timeout`. `BLAST_CAPACITY_WAIT_MAX_SECONDS` bounds only Gate B (§6). |
 | **Clock skew across paths** | expiry is judged on the **caller's** clock; dashboard-MI vs openapi-pod skew → premature takeover → concurrent submit | Add a skew margin before treating a Lease expired and/or compare against apiserver-stamped `renewTime` (§4.2). The CAS only picks one *writer*, not a *legitimate* one. |
-| **Per-namespace ceiling vs global "3"** | Gate B counts per-`(cluster, ns)`, but "max 3 parallel" is a **global** intent; with >1 namespace each gets its own 3 → up to 3×N cluster-wide | Moot today (`namespace` is hard-coded `default`), but the design claims per-ns generality. Phase 0 either declares the ceiling explicitly **per-namespace**, or counts `app=blast` Jobs **cluster-wide** (drop the `ns` filter in the count) so the global cap holds (§5.1). |
-| **Visibility race** | job not yet visible right after submit → over-admit | Gate B is checked **while holding** Gate A; the previous job's object already exists **in etcd**. Requires an **uncached, consistent** count read — the existing `_fetch_blast_pods_and_jobs` 3 s memo would re-open this race, so `k8s_count_active_blast_submissions` does a fresh list (§5.2). ✅ |
+| **Per-namespace ceiling vs global "3"** | Gate B counts per-`(cluster, ns)`, but "max 3 parallel" is a **global** intent; with >1 namespace each gets its own 3 → up to 3×N cluster-wide | Moot today (`namespace` is hard-coded `default`), but the design claims per-ns generality. **Caution — the two gates must share one scope.** Gate A is per-namespace (`elb-blast-submit-<ns>`, §4.1), so it only serialises submitters *within* a namespace. "Fixing" the global cap by counting Gate B **cluster-wide** while Gate A stays per-ns is **unsound**: two submitters in different namespaces hold different Leases *concurrently*, both run the cluster-wide count, both see headroom, both admit → the "check Gate B while holding Gate A" serialisation (§3) is broken across namespaces. A cluster-wide ceiling needs a **cluster-wide single-name Lease** too. Phase 0 options: (a) keep **both** per-namespace, or (b) make **both** cluster-wide; never mix. |
+| **Orphaned finalizer = phantom slot** | a submit that fails after the finalizer Job is applied but before its batch work materialises leaves a non-terminal `app=finalizer` Job holding a Gate B slot forever; H4's finalizer-count makes this a capacity leak (3→2), and it is indistinguishable from a healthy submit mid-async-batch-creation | Liveness-bounded counting: a lone finalizer occupies a slot only while its `elb-job-id` shows matching `app=submit`/`app=blast` Jobs **or** is younger than `FINALIZER_GRACE_SECONDS` (covers async creation lag); older lone finalizers are reconciled (warn-badge + operator delete, never silent auto-fail) (§5.1). |
+| **Holder-identity collision** | `holderIdentity=<source>-<shortid>`: two distinct submits colliding on the short id → the same-holder *renew* branch lets the second renew the first's live Lease and proceed → concurrent submit inside the mutex | `holderIdentity` is a **globally unique per-acquisition token** (`<source>-<full-uuid>` / full task id), never a truncation; a test asserts two distinct submits never produce equal identities (§4.1). |
+| **Visibility race** | job not yet visible right after submit → over-admit | Gate B is checked **while holding** Gate A; the previous submit's **`app=finalizer`** marker is created **synchronously** by `submit()` and is in etcd before the Lease is released. (The `app=blast` batch Jobs are *not* a safe marker on Azure — they are created asynchronously in `cloud_job_submission` mode, §5.1.) Requires an **uncached, consistent** count read — the existing `_fetch_blast_pods_and_jobs` 3 s memo would re-open this race, so `k8s_count_active_blast_submissions` does a fresh list (§5.2). ✅ |
+| **Wrong count unit** | counting raw `app=blast` Jobs → one multi-batch submit creates N Jobs and trips the ceiling of 3 by itself; or counts async-invisible batch Jobs → over-admit | Count **distinct `elb-job-id` of the `app=finalizer` Job** (1 per submit, synchronous, lifecycle-long), not raw `app=blast` Jobs (N per submit, async on Azure) and not pods (§5.1). Verified against the upstream AKS templates. |
+| **Cross-path count mismatch** | dashboard counts `app=finalizer` distinct-`elb-job-id`, OpenAPI counts raw `app=blast` → same cluster, different numbers → the shared "3" is a fiction | Both repos pin the **same selector + same dedup-by-`elb-job-id`** in a shared constant (§5.2, §7.2). |
 | **Lease release clobber** | holder A overruns the TTL, holder B takes over, then A's `finally` clears the Lease → erases B mid-submit | Release is **conditional**: GET, verify `holderIdentity == self`, then `resourceVersion`-CAS PATCH to empty (§4.3). Mirrors the Redis Lua-CAS token release. ✅ |
 | **Acquire error vs busy** | a K8s API outage misread as `BUSY` → silent 30 s requeue forever | `BUSY` is only a live holder-conflict / 409 CAS loss; any API error maps to the bounded `_retry_or_fail` path so the outage surfaces (§4.2). ✅ |
 | **Count-read failure** | the cluster count call raises → admit blind | Fail-**closed**: release Lease, requeue `waiting_for_capacity`; the `BLAST_CAPACITY_WAIT_MAX_SECONDS` deadline surfaces a persistent outage as `capacity_timeout` (§5.2). ✅ |
@@ -584,6 +660,14 @@ A cross-repo tracking issue is required (charter §13 cross-repo consistency).
    `BLAST_MAX_RUN_CONCURRENCY` if node capacity allows; keep the Redis
    `submit_lock` one more cycle, then remove.
 
+> **Rollback symmetry.** Flipping `BLAST_COORD_BACKEND=k8s` *back* to `redis`
+> mid-flight has the mirror of the Phase-1 window: in-flight Leases are abandoned
+> (reclaimed only at TTL) while new submits coordinate via Redis again, so during
+> the overlap a Lease-coordinated submit and a Redis-coordinated one don't see
+> each other → transient race until the last pre-rollback Lease expires. This is
+> the same *smaller-than-§1.3* class as the Phase-1 caveat; drain in-flight
+> submits (or wait one Lease-TTL) before treating a rollback as race-free.
+
 ---
 
 ## 11. Open questions
@@ -595,6 +679,19 @@ A cross-repo tracking issue is required (charter §13 cross-repo consistency).
 * Should "3" eventually be node-derived (§5.3 v2) rather than a fixed env?
 * Does the sibling `elb-openapi` pod's ServiceAccount already carry any
   `coordination.k8s.io` grant, or is a fresh `Role` required?
-* Is the upstream `app=blast` label + `elb-job-id` contract stable across the
-  elastic-blast versions we pin (§5.1 unverified-contract note)? Confirm on a
-  live cluster before Phase 0 makes it load-bearing for admission.
+* What `FINALIZER_GRACE_SECONDS` actually covers the async batch-creation lag in
+  `cloud_job_submission` mode? Needed to distinguish a healthy
+  finalizer-with-no-batch-Jobs-yet from an orphaned one (§5.1 phantom-slot row).
+  Measure on a live cluster.
+* ~~Is the upstream `app=blast` label + `elb-job-id` contract stable~~ **Refined:**
+  Gate B must count the **`app=finalizer`** marker, not `app=blast` (§5.1) —
+  `app=blast` is N-per-submit and, in `cloud_job_submission` mode, created
+  asynchronously after submit returns. Confirm on a live cluster that exactly one
+  `app=finalizer` Job appears per submit, synchronously, before Phase 0 makes it
+  load-bearing for admission.
+* Do both submit paths resolve to the **same kubeconfig-context default
+  namespace**? `elastic-blast` applies its Jobs with no explicit `-n`, so they
+  land in the context's default namespace; the Lease is pinned to `default`. If
+  a deployment's kubeconfig sets a non-`default` namespace, the Jobs and the
+  Lease diverge and coordination silently breaks. Pin the namespace explicitly
+  in Phase 0.

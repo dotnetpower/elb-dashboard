@@ -174,6 +174,7 @@ export function BlastDbModal({
     oracleBuilding,
     inProgress,
     elapsed,
+    pendingAction,
     downloadResult,
     dismissDownloadResult,
     handleDownload,
@@ -650,7 +651,9 @@ export function BlastDbModal({
                         onBuildOracle={() => void handleBuildOracle(db.value)}
                         onConfirmLarge={() => requestDownload(db.value, true)}
                         onCancel={() => setConfirmCancelDb(db.value)}
+                        isCancelling={pendingAction.get(db.value) === "cancel"}
                         onDelete={() => setConfirmDeleteDb(db.value)}
+                        isDeleting={pendingAction.get(db.value) === "delete"}
                         onToggleAutoWarmup={(checked) =>
                           toggleAutoWarmup(db.value, checked)
                         }

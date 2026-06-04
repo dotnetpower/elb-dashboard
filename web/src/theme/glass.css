@@ -5893,6 +5893,35 @@ button.blast-db-table__row:focus-visible {
   font-size: 9px;
   line-height: 1.4;
 }
+.terminal-cockpit__cfg-field--db {
+  margin-top: 8px;
+}
+.terminal-cockpit__cfg-field--db .terminal-cockpit__cfg-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.terminal-cockpit__cfg-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 4px 6px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.terminal-cockpit__cfg-advanced-toggle:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+.terminal-cockpit__cfg-advanced-toggle + .terminal-cockpit__cfg-grid {
+  margin-top: 6px;
+}
 .terminal-cockpit__cfg-preview {
   margin: 10px 0 0;
   padding: 8px;

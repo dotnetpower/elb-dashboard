@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from azure.core.credentials import TokenCredential
@@ -60,6 +61,15 @@ DEFAULT_TTL_SECONDS_AFTER_FINISHED = 3600
 DEFAULT_ACTIVE_DEADLINE_SECONDS = 2700
 DEFAULT_FILES_PER_POD = 50
 DEFAULT_MAX_PARALLELISM = 10
+# When a Job with the deterministic ``(db, source_version)`` name already
+# exists but carries a ``deletionTimestamp`` (i.e. a just-issued cancel is
+# still tearing it down in the background), ``_create_job_if_absent`` waits
+# up to this long for the terminating Job to disappear before creating a
+# fresh one. Without this, a cancel-then-resubmit within the same NCBI
+# snapshot day collides with the dying Job, is mis-reported as a healthy
+# "existing" run, and never spawns new pods.
+DEFAULT_TERMINATING_WAIT_SECONDS = 60.0
+DEFAULT_TERMINATING_POLL_SECONDS = 2.0
 SOURCE_VERSION_ANNOTATION = "elb.dashboard/source-version"
 
 _SAFE_DB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -211,6 +221,13 @@ while IFS= read -r KEY; do
     if [ -n "$existing_len" ] && [ "$existing_len" != "PARSE_FAIL" ] \
             && [ "$existing_len" -gt 0 ] 2>/dev/null ; then
         skip=$((skip + 1))
+        # Throttled heartbeat for resume runs. Re-checking thousands of
+        # already-staged blobs (one `azcopy list` per file) is silent and
+        # can take minutes for a big DB like `nt`; emit a line every 50
+        # skips so the pod still looks alive while it scans.
+        if [ $((skip % 50)) -eq 0 ]; then
+            log "[${file_index}/${TOTAL}] scanned; ${skip} already staged, ${ok} copied"
+        fi
         continue
     fi
     # Decide upfront whether THIS file is one of the sampled ones. We
@@ -251,6 +268,15 @@ print(val)')
             expected_size=""
         fi
     fi
+    # Progress heartbeat. The copy itself runs with `--log-level=ERROR
+    # >/dev/null`, so a healthy multi-GB file (e.g. an `nt` shard) would
+    # otherwise emit ZERO output for several minutes, making `kubectl logs`
+    # look hung even though azcopy is streaming at full NIC speed. Logging
+    # the file index/total + name before each copy turns that opaque
+    # silence into a visibly-advancing counter so operators can tell a
+    # slow-but-healthy run from a genuine stall. One line per file
+    # (<= a few hundred per shard) is cheap for `kubectl logs`.
+    log "[${file_index}/${TOTAL}] copy ${file_basename}${expected_size:+ (~${expected_size} bytes)}"
     # Stream NCBI -> pod NIC -> Azure Blob with no on-disk staging. Peak
     # memory ≈ block-size-mb × azcopy's internal buffer count (~200 MiB),
     # well under the 1 GiB container memory limit even for 10+ GiB files.
@@ -812,35 +838,82 @@ def _upsert_configmap(session: Any, server: str, manifest: dict[str, Any]) -> di
     return {"status": "updated", "name": name}
 
 
-def _create_job_if_absent(session: Any, server: str, manifest: dict[str, Any]) -> dict[str, Any]:
+def _create_job_if_absent(
+    session: Any,
+    server: str,
+    manifest: dict[str, Any],
+    *,
+    terminating_wait_seconds: float = DEFAULT_TERMINATING_WAIT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_TERMINATING_POLL_SECONDS,
+) -> dict[str, Any]:
     metadata = manifest.get("metadata", {}) or {}
     namespace = str(metadata.get("namespace") or DEFAULT_NAMESPACE)
     name = str(metadata.get("name") or "")
     if not name:
         return {"status": "error", "error": "job name required"}
-    get_url = f"{server}/apis/batch/v1/namespaces/{namespace}/jobs/{name}"
-    existing = session.get(get_url, timeout=10)
-    if existing.status_code == 200:
-        return {"status": "existing", "name": name}
-    if existing.status_code not in (404,):
+    jobs_url = f"{server}/apis/batch/v1/namespaces/{namespace}/jobs"
+    get_url = f"{jobs_url}/{name}"
+
+    deadline = time.monotonic() + max(0.0, terminating_wait_seconds)
+    while True:
+        existing = session.get(get_url, timeout=10)
+        if existing.status_code == 200:
+            # A Job with this deterministic name already exists. If it is
+            # healthy (no deletionTimestamp) it is a genuine in-flight
+            # duplicate — report "existing" so the caller does not spawn a
+            # second Job. If it carries a deletionTimestamp it is a
+            # *terminating* Job left by a just-issued cancel; the
+            # deterministic name will be reused, so wait for it to be
+            # collected before creating a fresh one instead of polling the
+            # zombie forever.
+            terminating = False
+            try:
+                body = existing.json()
+                terminating = bool(
+                    (body.get("metadata") or {}).get("deletionTimestamp")
+                )
+            except Exception:
+                terminating = False
+            if not terminating:
+                return {"status": "existing", "name": name}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "status": "error",
+                    "name": name,
+                    "terminating": True,
+                    "error": (
+                        "previous Job is still terminating after a cancel; "
+                        "retry shortly"
+                    ),
+                }
+            time.sleep(min(poll_interval_seconds, remaining))
+            continue
+        if existing.status_code != 404:
+            return {
+                "status": "error",
+                "name": name,
+                "status_code": existing.status_code,
+                "error": existing.text[:300],
+            }
+        # 404 — safe to create.
+        create = session.post(jobs_url, json=manifest, timeout=10)
+        if create.status_code in (200, 201, 202):
+            return {"status": "created", "name": name}
+        if create.status_code == 409:
+            # Lost a race: either a peer created the Job, or the terminating
+            # Job has not finished disappearing yet. Re-evaluate via GET so
+            # the deletionTimestamp branch can wait it out; a healthy peer
+            # Job is correctly reported as "existing".
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"status": "existing", "name": name}
+            time.sleep(min(poll_interval_seconds, remaining))
+            continue
         return {
             "status": "error",
             "name": name,
-            "status_code": existing.status_code,
-            "error": existing.text[:300],
+            "status_code": create.status_code,
+            "error": create.text[:300],
         }
-    create = session.post(
-        f"{server}/apis/batch/v1/namespaces/{namespace}/jobs",
-        json=manifest,
-        timeout=10,
-    )
-    if create.status_code in (200, 201, 202):
-        return {"status": "created", "name": name}
-    if create.status_code == 409:
-        return {"status": "existing", "name": name}
-    return {
-        "status": "error",
-        "name": name,
-        "status_code": create.status_code,
-        "error": create.text[:300],
-    }
+

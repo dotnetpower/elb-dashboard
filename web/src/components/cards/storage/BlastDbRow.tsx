@@ -74,11 +74,22 @@ interface BlastDbRowProps {
    */
   onCancel?: () => void;
   /**
+   * True while an abort request for this row is in flight. Renders the Cancel
+   * button as a disabled "Cancelling…" spinner so the action gives immediate
+   * feedback instead of looking unchanged until the network call resolves.
+   */
+  isCancelling?: boolean;
+  /**
    * Permanently delete a staged database (all shard blobs + metadata).
    * Optional — caller may omit when delete is not supported in a given
    * context. Shown for a Ready row and for a `partial`/`cancelled` leftover.
    */
   onDelete?: () => void;
+  /**
+   * True while a delete request for this row is in flight. Renders the Delete
+   * button as a disabled spinner.
+   */
+  isDeleting?: boolean;
   onToggleAutoWarmup: (checked: boolean) => void;
 }
 
@@ -153,7 +164,9 @@ export function BlastDbRow({
   onBuildOracle,
   onConfirmLarge,
   onCancel,
+  isCancelling = false,
   onDelete,
+  isDeleting = false,
   onToggleAutoWarmup,
 }: BlastDbRowProps) {
   const triggerDownload = () => {
@@ -759,17 +772,26 @@ export function BlastDbRow({
                   padding: "2px 6px",
                   color: "var(--danger)",
                   borderColor: "rgba(224,123,138,0.3)",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
                 }}
                 onClick={(e) => {
                   e.stopPropagation();
                   onCancel();
                 }}
-                disabled={writeDisabled}
+                disabled={writeDisabled || isCancelling}
                 title={
                   writeDisabled ? writeDisabledReason : "Cancel in-flight update"
                 }
               >
-                Cancel
+                {isCancelling ? (
+                  <>
+                    <Loader2 size={10} className="spin" /> Cancelling…
+                  </>
+                ) : (
+                  "Cancel"
+                )}
               </button>
             )}
           </div>
@@ -845,7 +867,7 @@ export function BlastDbRow({
                   e.stopPropagation();
                   onDelete();
                 }}
-                disabled={writeDisabled}
+                disabled={writeDisabled || isDeleting}
                 title={
                   writeDisabled
                     ? writeDisabledReason
@@ -853,7 +875,11 @@ export function BlastDbRow({
                 }
                 aria-label={`Delete ${db.value}`}
               >
-                <Trash2 size={11} />
+                {isDeleting ? (
+                  <Loader2 size={11} className="spin" />
+                ) : (
+                  <Trash2 size={11} />
+                )}
               </button>
             )}
           </div>
@@ -877,15 +903,24 @@ export function BlastDbRow({
                   padding: "2px 6px",
                   color: "var(--danger)",
                   borderColor: "rgba(224,123,138,0.3)",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
                 }}
                 onClick={(e) => {
                   e.stopPropagation();
                   onCancel();
                 }}
-                disabled={writeDisabled}
+                disabled={writeDisabled || isCancelling}
                 title={writeDisabled ? writeDisabledReason : "Cancel in-flight download"}
               >
-                Cancel
+                {isCancelling ? (
+                  <>
+                    <Loader2 size={10} className="spin" /> Cancelling…
+                  </>
+                ) : (
+                  "Cancel"
+                )}
               </button>
             )}
           </div>
@@ -935,7 +970,7 @@ export function BlastDbRow({
                   e.stopPropagation();
                   onDelete();
                 }}
-                disabled={writeDisabled}
+                disabled={writeDisabled || isDeleting}
                 title={
                   writeDisabled
                     ? writeDisabledReason
@@ -943,7 +978,11 @@ export function BlastDbRow({
                 }
                 aria-label={`Delete ${db.value}`}
               >
-                <Trash2 size={11} />
+                {isDeleting ? (
+                  <Loader2 size={11} className="spin" />
+                ) : (
+                  <Trash2 size={11} />
+                )}
               </button>
             )}
           </div>

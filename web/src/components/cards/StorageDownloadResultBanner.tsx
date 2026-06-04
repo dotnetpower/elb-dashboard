@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, X } from "lucide-react";
 
 import { formatNcbiVersion } from "@/components/cards/storageDbCatalog";
 
@@ -7,13 +7,16 @@ export function StorageDownloadResultBanner({
   result,
   onDismiss,
 }: {
-  result: { db: string; msg: string; version?: string; type: "ok" | "err" };
+  result: { db: string; msg: string; version?: string; type: "ok" | "err" | "pending" };
   onDismiss: () => void;
 }) {
   const [fading, setFading] = useState(false);
 
   useEffect(() => {
-    if (result.type === "err") return;
+    // Errors stay until dismissed; pending banners are replaced by the
+    // terminal ok/err result when the request resolves, so neither
+    // auto-dismisses.
+    if (result.type !== "ok") return;
     const fadeTimer = setTimeout(() => setFading(true), 3000);
     const removeTimer = setTimeout(onDismiss, 3500);
     return () => {
@@ -30,9 +33,24 @@ export function StorageDownloadResultBanner({
         borderRadius: 8,
         fontSize: 12,
         background:
-          result.type === "ok" ? "rgba(115,191,105,0.08)" : "rgba(242,114,111,0.08)",
-        border: `1px solid ${result.type === "ok" ? "rgba(115,191,105,0.25)" : "rgba(242,114,111,0.25)"}`,
-        color: result.type === "ok" ? "var(--success)" : "var(--danger)",
+          result.type === "ok"
+            ? "rgba(115,191,105,0.08)"
+            : result.type === "pending"
+              ? "rgba(110,159,255,0.08)"
+              : "rgba(242,114,111,0.08)",
+        border: `1px solid ${
+          result.type === "ok"
+            ? "rgba(115,191,105,0.25)"
+            : result.type === "pending"
+              ? "rgba(110,159,255,0.28)"
+              : "rgba(242,114,111,0.25)"
+        }`,
+        color:
+          result.type === "ok"
+            ? "var(--success)"
+            : result.type === "pending"
+              ? "var(--accent)"
+              : "var(--danger)",
         display: "flex",
         alignItems: "center",
         gap: 8,
@@ -42,6 +60,8 @@ export function StorageDownloadResultBanner({
     >
       {result.type === "ok" ? (
         <CheckCircle2 size={14} style={{ flexShrink: 0 }} />
+      ) : result.type === "pending" ? (
+        <Loader2 size={14} className="spin" style={{ flexShrink: 0 }} />
       ) : (
         <AlertTriangle size={14} style={{ flexShrink: 0 }} />
       )}

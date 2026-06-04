@@ -24,7 +24,7 @@ export interface DownloadResult {
   db: string;
   msg: string;
   version?: string;
-  type: "ok" | "err";
+  type: "ok" | "err" | "pending";
 }
 
 interface InProgressInfo {
@@ -134,6 +134,13 @@ export function useBlastDb({
   >(() => new Map());
   const [elapsed, setElapsed] = useState(0);
   const [oracleBuilding, setOracleBuilding] = useState<string | null>(null);
+  // Per-DB in-flight lifecycle action (cancel / delete). These network calls
+  // take a few seconds; tracking them lets the row show an immediate
+  // "Cancelling…" / "Deleting…" spinner instead of looking unchanged until the
+  // request resolves.
+  const [pendingAction, setPendingAction] = useState<
+    Map<string, "cancel" | "delete">
+  >(() => new Map());
   // Dedup key for the completion-detection effect: we toast at most once per
   // (db, terminal phase) so a 10 s dbQuery refetch interval doesn't re-fire
   // the partial-error toast every poll while the row sits in `partial` state.
@@ -421,7 +428,14 @@ export function useBlastDb({
 
   const handleCancel = async (dbName: string) => {
     if (!enabled) return;
-    setDownloadResult(null);
+    // Immediate feedback: mark the row as cancelling and surface a pending
+    // banner BEFORE the network round trip so the action never looks ignored.
+    setPendingAction((prev) => new Map(prev).set(dbName, "cancel"));
+    setDownloadResult({
+      db: dbName,
+      msg: "Cancelling — aborting the remaining pending copies…",
+      type: "pending",
+    });
     try {
       const resp = await monitoringApi.cancelPrepareBlastDb(
         subscriptionId,
@@ -448,12 +462,26 @@ export function useBlastDb({
         msg: formatApiError(e, "storage"),
         type: "err",
       });
+    } finally {
+      setPendingAction((prev) => {
+        if (!prev.has(dbName)) return prev;
+        const next = new Map(prev);
+        next.delete(dbName);
+        return next;
+      });
     }
   };
 
   const handleDelete = async (dbName: string) => {
     if (!enabled) return;
-    setDownloadResult(null);
+    // Immediate feedback: mark the row as deleting and surface a pending
+    // banner BEFORE the network round trip.
+    setPendingAction((prev) => new Map(prev).set(dbName, "delete"));
+    setDownloadResult({
+      db: dbName,
+      msg: "Deleting — removing the staged blobs…",
+      type: "pending",
+    });
     try {
       const resp = await monitoringApi.deletePrepareBlastDb(
         subscriptionId,
@@ -479,6 +507,13 @@ export function useBlastDb({
         db: dbName,
         msg: formatApiError(e, "storage"),
         type: "err",
+      });
+    } finally {
+      setPendingAction((prev) => {
+        if (!prev.has(dbName)) return prev;
+        const next = new Map(prev);
+        next.delete(dbName);
+        return next;
       });
     }
   };
@@ -645,6 +680,7 @@ export function useBlastDb({
     elapsed,
     inProgress,
     activeDownload,
+    pendingAction,
     // Result toast
     downloadResult,
     dismissDownloadResult: () => setDownloadResult(null),
