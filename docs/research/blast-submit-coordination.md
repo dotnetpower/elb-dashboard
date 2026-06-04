@@ -14,37 +14,35 @@ tags:
 # Cross-Path BLAST Submit Coordination (Dashboard + OpenAPI)
 
 Date: 2026-06-04 (updated 2026-06-05)
-Status: **Implemented (Phase 0 + Phase 1 code), NOT yet activated** — both code
-halves have landed but cross-path coordination is dormant: the dashboard runs
-the default-OFF `BLAST_COORD_BACKEND=redis`, and the sibling coordinator is
-**committed but not yet built into a deployed image** (verified 2026-06-05, see
-"Activation blockers" below).
-- **Phase 0 (this repo, dashboard)** — shipped behind the default-OFF
+Status: **Implemented + ACTIVATED** — both code halves are deployed and the
+cross-path coordination is live: the dashboard and the sibling `elb-openapi`
+service both run `BLAST_COORD_BACKEND=k8s` and acquire the same per-namespace
+Lease (`elb-blast-submit-default`) on the shared AKS cluster (activated
+2026-06-05).
+- **Phase 0 (this repo, dashboard)** — shipped behind the
   `BLAST_COORD_BACKEND` flag: `api/services/blast/coordination.py` (backend
   resolver + `assert_coordination_invariants`), `api/services/k8s/submit_lease.py`
   (Gate A Lease), `api/services/k8s/blast_status.py`
   (`k8s_count_active_blast_submissions`, Gate B), `api/services/blast/k8s_gate.py`,
-  wired into `submit_task.py` and the split fan-out.
+  wired into `submit_task.py` and the split fan-out. The dashboard Container App
+  `ca-elb-dashboard` now has `BLAST_COORD_BACKEND=k8s` set on the `api`,
+  `worker`, and `beat` sidecars (revision `0000132`, healthy; the startup
+  `assert_coordination_invariants` chain `submit_exec(600) <
+  CELERY_TASK_SOFT_TIME_LIMIT(3300) < CELERY_TASK_TIME_LIMIT(3600)` and
+  `submit_exec(600) < lease_ttl(900)` passes).
 - **Phase 1 (sibling `dotnetpower/elastic-blast-azure`, `docker-openapi`)** —
-  code **committed + pushed to `master`** (`submit_coordination.py`,
-  `submit_exec_timeout < lease_ttl` cap; commits `32e5119e` + `3d3fd56a`,
-  tracking issue #1) but **not yet built/deployed** — the live `elb-openapi:4.20`
-  image (built 2026-06-04 07:50 UTC, before those commits) does not contain
-  `submit_coordination.py`, and the `elb-openapi` Deployment sets no
-  `BLAST_COORD_BACKEND`.
-- **Activation blockers (must clear before flipping the dashboard to `=k8s`)**:
-  1. Build + deploy a sibling `elb-openapi` image that includes the coordination
-     code (`cd docker-openapi && make azure-build VERSION=<next>`), and set
-     `BLAST_COORD_BACKEND=k8s` on the `elb-openapi` Deployment. RBAC is already
-     satisfied — `elb-openapi-sa` is bound to `cluster-admin`, so Leases
-     (get/create/update) and Jobs (list) are permitted.
-  2. The on-cluster `azure-workload-identity` mutating webhook currently has **no
-     endpoints** on `elb-cluster-02`, so new `elb-openapi` pods fail to start
-     (`0/2` available). The rollout cannot stabilise until that webhook is
-     restored.
-  Flipping the dashboard to `=k8s` *before* the sibling holds the same Lease
-  re-opens the transient over-admit window (§10), so the flip stays blocked until
-  blocker 1 is done.
+  shipped **and deployed** (`submit_coordination.py`, `submit_exec_timeout <
+  lease_ttl` cap; commits `32e5119e` + `3d3fd56a`, tracking issue #1). Image
+  `elb-openapi:4.21` (built 2026-06-05, contains `submit_coordination.py` and is
+  imported by `main.py`) is rolled out on `elb-cluster-02`, and the `elb-openapi`
+  Deployment has `BLAST_COORD_BACKEND=k8s`. The pod resolves `backend=k8s`,
+  `max_run=3`, `lease_ttl=900`, `submit_exec=780`, `lease_name=
+  elb-blast-submit-default` — matching the dashboard's pinned namespace,
+  ceiling, and Lease name. RBAC is satisfied — `elb-openapi-sa` is bound to
+  `cluster-admin`, so Leases (get/create/update) and Jobs (list) are permitted.
+- **Rollout ordering honoured**: the sibling image was built + deployed and
+  confirmed resolving `backend=k8s` BEFORE the dashboard was flipped, so the §10
+  transient over-admit window never opened.
 
 Owner: `api/tasks/blast/` + `api/services/k8s/` maintainers, plus the sibling
 `dotnetpower/elastic-blast-azure` `docker-openapi` maintainers.
@@ -701,15 +699,16 @@ A cross-repo tracking issue is required (charter §13 cross-repo consistency).
 
 ## 10. Phased rollout (charter §12a Rule 4 — default-OFF)
 
-> **Current position (2026-06-05): Phase 0 shipped; Phase 1 code pushed but NOT
-> yet deployed.** The dashboard still runs `BLAST_COORD_BACKEND=redis`
-> (default-OFF). The sibling coordinator is committed to `master` but the live
-> `elb-openapi:4.20` image predates it and carries no coordination code, so the
-> sibling does **not** yet hold the shared Lease. The load-bearing ordering
-> caveat below is therefore **not yet satisfied** — flipping the dashboard to
-> `=k8s` now would open the transient over-admit window. Clear the activation
-> blockers in the header first (build/deploy the sibling image + restore the
-> `azure-workload-identity` webhook on `elb-cluster-02`), then flip.
+> **Current position (2026-06-05): Phase 0 + Phase 1 deployed and ACTIVATED.**
+> Both paths run `BLAST_COORD_BACKEND=k8s`: the dashboard Container App
+> (`api`/`worker`/`beat` sidecars, revision `0000132`) and the sibling
+> `elb-openapi:4.21` Deployment on `elb-cluster-02`. The sibling was built,
+> deployed, and confirmed resolving `backend=k8s` with the matching Lease name
+> `elb-blast-submit-default` BEFORE the dashboard was flipped, so the
+> load-bearing ordering caveat below is satisfied — the transient over-admit
+> window never opened. Both paths now acquire the same per-namespace Lease and
+> count the same `app=finalizer` population, so the shared ceiling of 3 is
+> honoured cross-path.
 
 > **When does this actually fix the cross-path race?** Not at Phase 0. Phase 0
 > only re-implements the dashboard's *own* serialisation on a cluster-resident
