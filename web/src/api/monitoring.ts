@@ -546,10 +546,21 @@ export const monitoringApi = {
     storageRg: string,
     accountName: string,
     dbName: string,
-  ) =>
-    api.post<{
+    /**
+     * When both AKS coordinates are supplied, the request opts into
+     * `mode=auto`: the backend tries the AKS-fanout azcopy path (parallel,
+     * fast) and transparently falls back to the slow server-side blob copy
+     * when the cluster is stopped, under-provisioned, or the kubelet identity
+     * lacks Storage Blob Data Contributor. Omitting the coordinates preserves
+     * the legacy server-side-only behaviour.
+     */
+    aks?: { resourceGroup?: string; clusterName?: string },
+  ) => {
+    const useAks = Boolean(aks?.resourceGroup && aks?.clusterName);
+    return api.post<{
       ok: boolean;
       db_name: string;
+      mode?: string;
       files_copied?: number;
       files_already_copying?: number;
       files_total?: number;
@@ -561,7 +572,15 @@ export const monitoringApi = {
       storage_resource_group: storageRg,
       account_name: accountName,
       db_name: dbName,
-    }),
+      ...(useAks
+        ? {
+            mode: "auto",
+            aks_resource_group: aks!.resourceGroup,
+            cluster_name: aks!.clusterName,
+          }
+        : {}),
+    });
+  },
 
   /**
    * Abort an in-flight prepare-db copy. Calls ``abort_copy`` against every

@@ -144,6 +144,72 @@ def _resolve_aks_node_vnet(
     return vnet_ids[0]
 
 
+def _vnet_id_from_subnet_id(subnet_id: str) -> str:
+    """Strip ``/subnets/<name>`` off a subnet ARM id to get the parent VNet id.
+
+    Returns ``""`` when the id does not contain a ``/subnets/`` marker so a
+    malformed value degrades to "not resolved" instead of raising.
+    """
+    sid = (subnet_id or "").strip()
+    if not sid:
+        return ""
+    marker = "/subnets/"
+    idx = sid.lower().find(marker)
+    if idx < 0:
+        return ""
+    return sid[:idx]
+
+
+def _resolve_aks_vnet_id(
+    cred: Any,
+    *,
+    subscription_id: str,
+    node_resource_group: str,
+    cluster: Any,
+) -> str:
+    """Resolve the AKS cluster's VNet ARM id across managed-VNet and BYO-subnet modes.
+
+    Two cluster topologies must both work:
+
+    * **Managed-VNet mode** (``provision_aks`` default): AKS creates exactly one
+      VNet inside the ``MC_*`` node resource group. ``_resolve_aks_node_vnet``
+      finds it.
+    * **BYO-subnet mode** (the dashboard's ``vnet-elb-dashboard/snet-aks``
+      model): the agent pools reference an operator-managed subnet, the ``MC_*``
+      node RG holds **no** VNet, and the cluster actually lives in the platform
+      VNet. ``_resolve_aks_node_vnet`` returns ``""`` there — so fall back to the
+      parent VNet of the first agent-pool ``vnet_subnet_id``.
+
+    Returns ``""`` only when neither path resolves a VNet (genuinely
+    unpeerable), letting the caller keep the existing ``aks_node_rg_has_no_vnet``
+    skip semantics.
+    """
+    vnet_id = _resolve_aks_node_vnet(
+        cred,
+        subscription_id=subscription_id,
+        node_resource_group=node_resource_group,
+    )
+    if vnet_id:
+        return vnet_id
+
+    # BYO-subnet fallback: derive the VNet from the agent pool subnet id.
+    from api.services.aks.node_subnet_nsg import first_node_subnet_id
+
+    subnet_id = first_node_subnet_id(cluster)
+    byo_vnet_id = _vnet_id_from_subnet_id(subnet_id)
+    if byo_vnet_id:
+        LOGGER.info(
+            "vnet peering: resolved AKS VNet from BYO node subnet (%s)",
+            byo_vnet_id,
+        )
+    return byo_vnet_id
+
+
+def _normalise_vnet_id(vnet_id: str) -> str:
+    """Case-fold + strip trailing slash so two ARM ids compare equal."""
+    return (vnet_id or "").rstrip("/").lower()
+
+
 def _peering_name(local_vnet_name: str, remote_vnet_name: str) -> str:
     return f"peer-{local_vnet_name}-to-{remote_vnet_name}"
 
@@ -389,15 +455,21 @@ def ensure_vnet_peering_with_target(
             "probe": probe_private_ip(target_ip=target_ip, target_path=target_path),
         }
 
-    aks_vnet_id = _resolve_aks_node_vnet(
+    aks_vnet_id = _resolve_aks_vnet_id(
         cred,
         subscription_id=subscription_id,
         node_resource_group=node_rg,
+        cluster=cluster,
     )
     if not aks_vnet_id:
         return {
             "skipped": True,
             "reason": "aks_node_rg_has_no_vnet",
+            "message": (
+                "Could not resolve the AKS cluster VNet: the MC_* node "
+                "resource group has no VNet and no agent pool exposes a "
+                "vnet_subnet_id. Nothing to peer."
+            ),
             "node_resource_group": node_rg,
             "recovery_command": _recovery_command(
                 subscription_id=subscription_id,
@@ -418,6 +490,30 @@ def ensure_vnet_peering_with_target(
         return {
             "error": f"target_vnet lookup failed: {str(exc)[:200]}",
             "aks_vnet": aks_vnet_id,
+            "node_resource_group": node_rg,
+            "recovery_command": _recovery_command(
+                subscription_id=subscription_id,
+                cluster_resource_group=cluster_resource_group,
+                cluster_name=cluster_name,
+            ),
+            "probe": probe_private_ip(target_ip=target_ip, target_path=target_path),
+        }
+
+    # In BYO-subnet mode the AKS "VNet" is the dashboard platform VNet. If the
+    # operator picks that same VNet as the peering target, ARM rejects a
+    # self-peering ("cannot peer a virtual network to itself"). Surface a clear
+    # skip instead — VMs already in that VNet reach the OpenAPI IP directly.
+    if _normalise_vnet_id(target_vnet_id) == _normalise_vnet_id(aks_vnet_id):
+        return {
+            "skipped": True,
+            "reason": "target_vnet_is_aks_vnet",
+            "message": (
+                "The selected target VNet is the VNet the AKS cluster already "
+                "runs in (BYO-subnet mode), so no peering is needed — VMs in "
+                "this VNet reach the OpenAPI private IP directly."
+            ),
+            "aks_vnet": aks_vnet_id,
+            "target_vnet": target_vnet_id,
             "node_resource_group": node_rg,
             "recovery_command": _recovery_command(
                 subscription_id=subscription_id,
@@ -527,16 +623,40 @@ def ensure_vnet_peering_with_cluster(
             ),
         }
 
-    aks_vnet_id = _resolve_aks_node_vnet(
+    aks_vnet_id = _resolve_aks_vnet_id(
         cred,
         subscription_id=subscription_id,
         node_resource_group=node_rg,
+        cluster=cluster,
     )
     if not aks_vnet_id:
         return {
             "skipped": True,
             "reason": "aks_node_rg_has_no_vnet",
+            "message": (
+                "Could not resolve the AKS cluster VNet: the MC_* node "
+                "resource group has no VNet and no agent pool exposes a "
+                "vnet_subnet_id. Nothing to peer."
+            ),
             "dashboard_vnet": dash_vnet,
+            "node_resource_group": node_rg,
+            "recovery_command": _recovery_command(
+                subscription_id=subscription_id,
+                cluster_resource_group=cluster_resource_group,
+                cluster_name=cluster_name,
+            ),
+        }
+
+    # BYO-subnet mode: the AKS cluster lives in the dashboard platform VNet, so
+    # the AKS VNet *is* the dashboard VNet. There is nothing to peer (and ARM
+    # rejects self-peering) — the api sidecar already shares the VNet and can
+    # reach the OpenAPI internal-LB IP directly.
+    if _normalise_vnet_id(aks_vnet_id) == _normalise_vnet_id(dash_vnet):
+        return {
+            "skipped": True,
+            "reason": "aks_shares_dashboard_vnet",
+            "dashboard_vnet": dash_vnet,
+            "aks_vnet": aks_vnet_id,
             "node_resource_group": node_rg,
             "recovery_command": _recovery_command(
                 subscription_id=subscription_id,

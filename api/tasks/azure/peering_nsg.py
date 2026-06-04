@@ -362,7 +362,7 @@ def resolve_vnet_pair_for_cluster(
     route layer can surface a stable 4xx instead of guessing.
     """
     from api.services.azure_clients import aks_client
-    from api.tasks.azure.peering import _resolve_aks_node_vnet, _resolve_vnet_id
+    from api.tasks.azure.peering import _resolve_aks_vnet_id, _resolve_vnet_id
 
     aks_cl = aks_client(cred, subscription_id)
     try:
@@ -372,10 +372,11 @@ def resolve_vnet_pair_for_cluster(
     node_rg = (getattr(cluster, "node_resource_group", None) or "").strip()
     if not node_rg:
         raise LookupError("aks cluster has no node_resource_group")
-    aks_vnet_id = _resolve_aks_node_vnet(
+    aks_vnet_id = _resolve_aks_vnet_id(
         cred,
         subscription_id=subscription_id,
         node_resource_group=node_rg,
+        cluster=cluster,
     )
     if not aks_vnet_id:
         raise LookupError(f"no VNet found in AKS node resource group {node_rg!r}")

@@ -213,6 +213,20 @@ def test_script_streams_via_pipeblob() -> None:
     assert "set -euo pipefail" in PREPARE_DB_AKS_SCRIPT
 
 
+def test_pipeblob_destination_is_single_positional() -> None:
+    """PipeBlob copy must pass the destination as the only positional
+    argument (`azcopy copy "<dst>" --from-to=PipeBlob`).
+
+    Regression guard for the 0-byte-upload outage: azcopy >= 10.32 rejects
+    the two-positional form `azcopy copy --from-to=PipeBlob "" "<dst>"` —
+    it treats the empty first positional as the source and aborts the copy
+    immediately with a non-zero exit and no transfer, so every shard
+    "ran" but uploaded nothing. Pin the destination-first form and forbid
+    the empty `""` placeholder so the broken syntax can never come back."""
+    assert 'azcopy copy "$dst_url" --from-to=PipeBlob' in PREPARE_DB_AKS_SCRIPT
+    assert '--from-to=PipeBlob "" "$dst_url"' not in PREPARE_DB_AKS_SCRIPT
+
+
 def test_script_skips_already_uploaded_blobs() -> None:
     """Per-file idempotency: `azcopy list` against the destination URL,
     skip if it already has a ContentLength. This makes a backoffLimit
@@ -223,6 +237,27 @@ def test_script_skips_already_uploaded_blobs() -> None:
     # tell "0 skipped on first run vs N skipped on retry" at a glance.
     assert "skip=$((skip + 1))" in PREPARE_DB_AKS_SCRIPT
     assert "skip=${skip}" in PREPARE_DB_AKS_SCRIPT
+
+
+def test_idempotency_skip_requires_nonzero_content_length() -> None:
+    """Idempotency must skip ONLY fully-uploaded blobs, never 0-byte
+    placeholders.
+
+    Regression guard for the corrupt-DB outage: an aborted server-side
+    copy (legacy prepare path) leaves a 0-byte blob whose ContentLength
+    KEY exists but whose value is 0. The old `grep -q '"ContentLength"'`
+    check skipped those too, so the AKS rerun left ~1000 truncated blobs
+    and a corrupt BLAST database. The skip decision must therefore gate on
+    ContentLength > 0, with missing / 0-byte / parse-fail all falling
+    through to a clean re-download."""
+    # The brittle key-presence grep must be gone.
+    assert "grep -q '\"ContentLength\"'" not in PREPARE_DB_AKS_SCRIPT
+    # Skip is gated on a strictly-positive size via the shared helper.
+    assert "blob_content_length" in PREPARE_DB_AKS_SCRIPT
+    assert 'existing_len=$(blob_content_length "$dst_url")' in PREPARE_DB_AKS_SCRIPT
+    assert '[ "$existing_len" -gt 0 ]' in PREPARE_DB_AKS_SCRIPT
+    # PARSE_FAIL (azcopy schema drift) must NOT count as "already uploaded".
+    assert '"$existing_len" != "PARSE_FAIL"' in PREPARE_DB_AKS_SCRIPT
 
 
 def test_script_bootstraps_azcopy_from_aka_ms() -> None:

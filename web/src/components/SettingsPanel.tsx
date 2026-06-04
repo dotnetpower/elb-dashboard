@@ -2668,7 +2668,9 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
               </StatusLine>
             )}
             {result.skipped && result.reason && (
-              <StatusLine kind="info">Skipped: {result.reason}</StatusLine>
+              <StatusLine kind="info">
+                Skipped: {result.message ?? result.reason}
+              </StatusLine>
             )}
             {result.error && (
               <StatusLine kind="error">{result.error}</StatusLine>

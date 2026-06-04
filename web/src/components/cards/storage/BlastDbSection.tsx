@@ -28,6 +28,13 @@ interface BlastDbSectionProps {
   resourceGroup: string;
   accountName: string;
   clusterName: string;
+  /**
+   * AKS workload cluster coordinates (name + RG) when known. Threaded to
+   * `useBlastDb` so a download can opt into the fast AKS-fanout azcopy path;
+   * the backend falls back to the server-side copy when AKS cannot serve it.
+   */
+  aksClusterName?: string;
+  aksResourceGroup?: string;
   acrName?: string;
   clusterTopology?: BlastDbClusterTopology;
   /**
@@ -52,6 +59,8 @@ export function BlastDbSection({
   resourceGroup,
   accountName,
   clusterName,
+  aksClusterName,
+  aksResourceGroup,
   acrName,
   clusterTopology,
   clusterReady = true,
@@ -63,6 +72,8 @@ export function BlastDbSection({
     resourceGroup,
     accountName,
     clusterName,
+    aksClusterName,
+    aksResourceGroup,
     acrName,
     enabled,
   });

@@ -167,6 +167,8 @@ export interface VnetPeeringResponse {
   error?: string;
   skipped?: boolean;
   reason?: string;
+  /** Human-readable elaboration on a skip (e.g. BYO-subnet self-peering). */
+  message?: string;
 }
 
 export interface VnetPeeringNsgRuleRequest {

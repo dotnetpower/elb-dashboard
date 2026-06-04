@@ -155,6 +155,40 @@ DEST_BASE="https://${STORAGE_ACCOUNT}.${BLOB_SUFFIX}/blast-db/${DB_NAME}"
 # only safety net then).
 VERIFY_EVERY_N="${ELB_VERIFY_EVERY_N:-10}"
 
+# Echo the integer ContentLength of a single blob to stdout, or nothing
+# if the blob is absent. Emits the literal "PARSE_FAIL" when azcopy
+# returns a shape we don't understand (version/schema drift) so callers
+# can distinguish "blob missing" (empty) from "can't tell" (PARSE_FAIL).
+# Shared by the per-file idempotency check and the post-upload verify.
+blob_content_length() {
+    azcopy list "$1" --output-type=json 2>/dev/null \
+        | python3 -c 'import json,sys
+got = False
+for line in sys.stdin:
+    line=line.strip()
+    if not line:
+        continue
+    try:
+        obj=json.loads(line)
+    except Exception:
+        continue
+    msg=obj.get("MessageContent") or obj.get("messageContent")
+    if isinstance(msg, str) and msg:
+        try:
+            inner=json.loads(msg)
+        except Exception:
+            inner=None
+        if isinstance(inner, dict):
+            cl=inner.get("ContentLength") or inner.get("contentLength")
+            if cl is not None:
+                print(cl); got=True; break
+    cl=obj.get("ContentLength") or obj.get("contentLength")
+    if cl is not None:
+        print(cl); got=True; break
+if not got:
+    print("PARSE_FAIL")'
+}
+
 ok=0
 fail=0
 skip=0
@@ -165,12 +199,17 @@ while IFS= read -r KEY; do
     file_basename="${KEY##*/}"
     src_url="${NCBI_BASE}/${KEY}"
     dst_url="${DEST_BASE}/${file_basename}"
-    # Per-file idempotency: if a previous attempt of this shard already
-    # uploaded this blob (e.g. a retry after backoffLimit kick-in), do not
-    # re-fetch from NCBI. `azcopy list` against a single blob returns its
-    # ContentLength when present and an empty listing when missing.
-    if azcopy list "$dst_url" --output-type=json 2>/dev/null \
-            | grep -q '"ContentLength"' ; then
+    # Per-file idempotency: skip ONLY blobs that are already FULLY
+    # uploaded. A previous attempt (or an aborted server-side copy from
+    # the legacy prepare path) can leave a 0-byte placeholder whose
+    # ContentLength KEY exists but whose value is 0 — the old key-presence
+    # check skipped those too, leaving a corrupt BLAST database. Require
+    # ContentLength > 0; missing blobs (empty), 0-byte placeholders, and
+    # parse-fail all fall through to a clean re-download (azcopy
+    # overwrites).
+    existing_len=$(blob_content_length "$dst_url")
+    if [ -n "$existing_len" ] && [ "$existing_len" != "PARSE_FAIL" ] \
+            && [ "$existing_len" -gt 0 ] 2>/dev/null ; then
         skip=$((skip + 1))
         continue
     fi
@@ -200,9 +239,18 @@ while IFS= read -r KEY; do
     # memory ≈ block-size-mb × azcopy's internal buffer count (~200 MiB),
     # well under the 1 GiB container memory limit even for 10+ GiB files.
     # `set -euo pipefail` makes the pipeline fail if either side errors.
+    #
+    # PipeBlob takes the destination as a SINGLE positional argument
+    # (`azcopy copy "<dst>" --from-to=PipeBlob`); stdin is the implicit
+    # source. The older two-positional form `azcopy copy --from-to=PipeBlob
+    # "" "<dst>"` is rejected by azcopy >= 10.32 (the empty first positional
+    # is parsed as the source and the copy aborts immediately with no
+    # transfer and a non-zero exit), which silently uploaded 0 bytes for
+    # every file. Keep the destination first and do NOT reintroduce the
+    # empty `""` placeholder.
     if curl -sSfL --retry 5 --retry-delay 30 --retry-all-errors \
             --max-time 1800 "$src_url" \
-        | azcopy copy --from-to=PipeBlob "" "$dst_url" \
+        | azcopy copy "$dst_url" --from-to=PipeBlob \
             --block-size-mb=64 --log-level=ERROR >/dev/null ; then
         # Post-upload integrity check ONLY on sampled files (see
         # VERIFY_EVERY_N). Mismatch means NCBI gave us a truncated body
@@ -219,32 +267,7 @@ while IFS= read -r KEY; do
         #                  good rather than enter a delete-and-retry
         #                  loop that would burn through the backoffLimit
         if [ -n "$expected_size" ]; then
-            uploaded_size=$(azcopy list "$dst_url" --output-type=json 2>/dev/null \
-                | python3 -c 'import json,sys
-got = False
-for line in sys.stdin:
-    line=line.strip()
-    if not line:
-        continue
-    try:
-        obj=json.loads(line)
-    except Exception:
-        continue
-    msg=obj.get("MessageContent") or obj.get("messageContent")
-    if isinstance(msg, str) and msg:
-        try:
-            inner=json.loads(msg)
-        except Exception:
-            inner=None
-        if isinstance(inner, dict):
-            cl=inner.get("ContentLength") or inner.get("contentLength")
-            if cl is not None:
-                print(cl); got=True; break
-    cl=obj.get("ContentLength") or obj.get("contentLength")
-    if cl is not None:
-        print(cl); got=True; break
-if not got:
-    print("PARSE_FAIL")')
+            uploaded_size=$(blob_content_length "$dst_url")
             if [ "$uploaded_size" = "PARSE_FAIL" ] || [ -z "$uploaded_size" ]; then
                 log "WARN verify parse-fail ${KEY}; trusting upload exit code"
                 ok=$((ok + 1))

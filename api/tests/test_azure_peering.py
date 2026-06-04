@@ -379,6 +379,134 @@ def test_helper_peers_target_vnet_and_probes_private_ip(monkeypatch) -> None:
     assert len(state["peering_recorder"]) == 2
 
 
+def _make_byo_cluster(
+    *,
+    node_rg: str = "MC_rg-elb-cluster_elb-cluster-02_koreacentral",
+    subnet_id: str,
+):
+    """A BYO-subnet AKS cluster: empty MC_ RG, agent pools on an operator subnet."""
+    return SimpleNamespace(
+        node_resource_group=node_rg,
+        agent_pool_profiles=[SimpleNamespace(vnet_subnet_id=subnet_id)],
+    )
+
+
+def test_target_helper_resolves_byo_subnet_vnet_when_node_rg_empty(monkeypatch) -> None:
+    """BYO-subnet mode: MC_ RG has no VNet, so the AKS VNet is derived from the
+    agent-pool subnet id. Peering with a *different* target VNet still lands.
+    """
+    aks_vnet = (
+        "/subscriptions/sub-1/resourceGroups/rg-elb-dashboard/providers/"
+        "Microsoft.Network/virtualNetworks/vnet-elb-dashboard"
+    )
+    target_vnet = (
+        "/subscriptions/sub-1/resourceGroups/rg-vm/providers/"
+        "Microsoft.Network/virtualNetworks/ubuntu2204-vnet"
+    )
+
+    class _ProbeResponse:
+        is_success = False
+        status_code = None
+        reason_phrase = "timed out"
+
+    state = _install_clients(
+        monkeypatch,
+        cluster_obj=_make_byo_cluster(subnet_id=f"{aks_vnet}/subnets/snet-aks"),
+        node_rg_vnets=[],
+        resource_lists={"rg-vm": [target_vnet]},
+    )
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.httpx.get",
+        lambda url, timeout: _ProbeResponse(),
+    )
+    from api.tasks.azure.peering import ensure_vnet_peering_with_target
+
+    result = ensure_vnet_peering_with_target(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-02",
+        target_subscription_id="sub-1",
+        target_resource_group="rg-vm",
+        target_vnet_name="ubuntu2204-vnet",
+    )
+
+    assert "skipped" not in result, result
+    assert result["aks_vnet"] == aks_vnet
+    assert result["target_vnet"] == target_vnet
+    directions = [p["direction"] for p in result["peerings"]]
+    assert directions == ["target_to_aks", "aks_to_target"]
+    assert len(state["peering_recorder"]) == 2
+
+
+def test_target_helper_skips_self_peering_when_target_is_aks_vnet(monkeypatch) -> None:
+    """BYO-subnet mode: picking the dashboard VNet itself as the target is a
+    self-peering ARM error. Skip with a clear reason instead.
+    """
+    aks_vnet = (
+        "/subscriptions/sub-1/resourceGroups/rg-elb-dashboard/providers/"
+        "Microsoft.Network/virtualNetworks/vnet-elb-dashboard"
+    )
+
+    state = _install_clients(
+        monkeypatch,
+        cluster_obj=_make_byo_cluster(subnet_id=f"{aks_vnet}/subnets/snet-aks"),
+        node_rg_vnets=[],
+        resource_lists={"rg-elb-dashboard": [aks_vnet]},
+    )
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.httpx.get",
+        lambda url, timeout: SimpleNamespace(
+            is_success=False, status_code=None, reason_phrase="timed out"
+        ),
+    )
+    from api.tasks.azure.peering import ensure_vnet_peering_with_target
+
+    result = ensure_vnet_peering_with_target(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-02",
+        target_subscription_id="sub-1",
+        target_resource_group="rg-elb-dashboard",
+        target_vnet_name="vnet-elb-dashboard",
+    )
+
+    assert result["skipped"] is True
+    assert result["reason"] == "target_vnet_is_aks_vnet"
+    assert result["message"]
+    assert state["peering_recorder"] == []
+
+
+def test_cluster_helper_skips_when_aks_shares_dashboard_vnet(monkeypatch) -> None:
+    """BYO-subnet provision: the AKS VNet IS the dashboard platform VNet, so the
+    provision-time peering is a no-op self-peer. Skip cleanly.
+    """
+    dash_vnet = (
+        "/subscriptions/sub-1/resourceGroups/rg-elb-dashboard/providers/"
+        "Microsoft.Network/virtualNetworks/vnet-elb-dashboard"
+    )
+    state = _install_clients(
+        monkeypatch,
+        cluster_obj=_make_byo_cluster(subnet_id=f"{dash_vnet}/subnets/snet-aks"),
+        node_rg_vnets=[],
+    )
+    from api.tasks.azure.peering import ensure_vnet_peering_with_cluster
+
+    result = ensure_vnet_peering_with_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-02",
+        dashboard_vnet_id=dash_vnet,
+    )
+
+    assert result["skipped"] is True
+    assert result["reason"] == "aks_shares_dashboard_vnet"
+    assert result["aks_vnet"] == dash_vnet
+    assert state["peering_recorder"] == []
+
+
 # ---------------------------------------------------------------------------
 # probe_private_ip — SSRF chokepoint
 # ---------------------------------------------------------------------------

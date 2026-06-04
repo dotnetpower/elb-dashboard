@@ -95,6 +95,16 @@ interface UseBlastDbArgs {
   resourceGroup: string;
   accountName: string;
   clusterName: string;
+  /**
+   * AKS workload cluster coordinates (name + RG) used to opt `prepare-db`
+   * into the fast AKS-fanout azcopy path. Resolved from the subscription-wide
+   * cluster list so the pair is self-consistent (the workload cluster usually
+   * lives in its own RG, not the Storage RG). When either is absent the
+   * download uses the server-side copy. The backend still falls back to the
+   * server-side copy when the cluster cannot serve the download.
+   */
+  aksClusterName?: string;
+  aksResourceGroup?: string;
   acrName?: string;
   enabled: boolean;
 }
@@ -104,6 +114,8 @@ export function useBlastDb({
   resourceGroup,
   accountName,
   clusterName,
+  aksClusterName,
+  aksResourceGroup,
   acrName,
   enabled,
 }: UseBlastDbArgs) {
@@ -363,6 +375,9 @@ export function useBlastDb({
         resourceGroup,
         accountName,
         dbName,
+        aksResourceGroup && aksClusterName
+          ? { resourceGroup: aksResourceGroup, clusterName: aksClusterName }
+          : undefined,
       );
       const total =
         resp.files_total ?? (resp.files_copied ?? 0) + (resp.files_already_copying ?? 0);

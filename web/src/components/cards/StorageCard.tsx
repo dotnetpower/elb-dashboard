@@ -93,6 +93,25 @@ export function StorageCard({
     subscriptionId,
   ]);
 
+  // Resource group of the cluster a download should fan out across. The AKS
+  // workload cluster usually lives in its own RG (not the Storage RG), so we
+  // resolve it from the subscription-wide cluster list. Passing this to
+  // BlastDbSection lets prepare-db opt into the fast AKS-fanout azcopy path;
+  // the backend still falls back to the server-side copy when the cluster is
+  // stopped, under-provisioned, or missing the kubelet Storage RBAC.
+  const aksDownloadCoords = useMemo(() => {
+    const clusters = clusterQuery.data?.clusters ?? [];
+    const preferred = pickPreferredCluster(clusters, {
+      name: clusterName,
+      resourceGroup,
+      requireNodes: true,
+    });
+    return {
+      clusterName: preferred?.name ?? clusterName ?? "elb-cluster",
+      resourceGroup: preferred?.resource_group,
+    };
+  }, [clusterName, clusterQuery.data, resourceGroup]);
+
   // Tracks whether BlastDbSection has any in-flight download — used only to
   // keep the card's "fetching" shimmer on while a copy is running.
   const [dbDownloading, setDbDownloading] = useState<string | null>(null);
@@ -171,6 +190,8 @@ export function StorageCard({
             resourceGroup={resourceGroup}
             accountName={accountName}
             clusterName={clusterName ?? "elb-cluster"}
+            aksClusterName={aksDownloadCoords.clusterName}
+            aksResourceGroup={aksDownloadCoords.resourceGroup}
             acrName={acrName}
             clusterTopology={clusterTopology}
             clusterReady={clusterReady}
