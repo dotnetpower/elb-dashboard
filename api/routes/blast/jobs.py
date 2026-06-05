@@ -4,7 +4,7 @@ Responsibility: /api/blast job listing and lifecycle routes
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
 Key entry points: `_local_list_row_may_have_split_children`, `blast_jobs_list`,
-`blast_job_execution_steps`, `blast_job_get`
+`blast_jobs_by_accession`, `blast_job_execution_steps`, `blast_job_get`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
@@ -350,6 +350,66 @@ def blast_jobs_list(
         response.update(external_degraded)
     _blast_jobs_list_cache_set(cache_key, response)
     return response
+
+
+@router.get("/jobs/by-accession/{accession}")
+def blast_jobs_by_accession(
+    request: Request,
+    accession: str = Path(...),
+    match: str = Query(default="base", pattern="^(base|exact)$"),
+    limit: int = Query(default=10, ge=1, le=50),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """List the caller's accession-mode BLAST jobs that used ``accession`` as query.
+
+    Powers the Sequence Detail "Your BLAST jobs for this accession" card. The
+    lookup is strictly owner-scoped (``caller.object_id``) — a caller only ever
+    sees their own jobs. Registered above ``/jobs/{job_id}`` so the literal
+    ``by-accession`` segment is never captured as a ``job_id``.
+
+    Read-only and additive: a jobstate failure degrades to
+    ``200 { degraded: true, reason }`` so the Sequence Detail page never 500s
+    because of this card.
+    """
+    accession = accession.strip()
+    from api.services.blast.job_back_reference import accession_base
+
+    acc_base = accession_base(accession)
+    jobs: list[dict[str, Any]] = []
+    degraded = False
+    reason: str | None = None
+    try:
+        from api.services.blast.job_back_reference import find_jobs_for_accession
+        from api.services.state_repo import get_state_repo
+
+        repo = get_state_repo()
+        jobs = find_jobs_for_accession(
+            repo,
+            caller.object_id,
+            accession,
+            match=match,
+            limit=limit,
+        )
+    except Exception as exc:
+        LOGGER.warning("blast_jobs_by_accession failed: %s", type(exc).__name__)
+        degraded = True
+        reason = "jobstate_unavailable"
+    LOGGER.info(
+        "blast_jobs_by_accession match=%s count=%d degraded=%s",
+        match,
+        len(jobs),
+        degraded,
+    )
+    return {
+        "accession": accession,
+        "accession_base": acc_base,
+        "match": match,
+        "count": len(jobs),
+        "jobs": jobs,
+        "degraded": degraded,
+        "reason": reason,
+        "meta": build_meta(request_id=request_id_from_scope(request)),
+    }
 
 
 @router.get("/jobs/{job_id}/execution-steps")

@@ -24,6 +24,7 @@ import {
 } from "@/api/ncbi";
 import { SViewerEmbed } from "./SViewerEmbed";
 import { SequenceBlocks } from "./SequenceBlocks";
+import { JobBackReferenceCard } from "./JobBackReferenceCard";
 import { ncbiTaxonomyUrl, ncbiNucleotideByOrganismUrl, ncbiOrganismClause } from "./ncbiLinks";
 
 const NCBI_NUCCORE_BASE = "https://www.ncbi.nlm.nih.gov/nuccore";
@@ -705,6 +706,8 @@ export function SequenceDetail() {
           <MetaCell label="Updated" value={summary?.update_date || genbank?.update_date} />
         </dl>
       </div>
+
+      <JobBackReferenceCard accession={accession} />
 
       {flatRecord && (
         <div

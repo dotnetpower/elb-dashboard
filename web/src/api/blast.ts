@@ -214,6 +214,38 @@ export interface BlastExecutionStepsSnapshot {
   output?: unknown;
 }
 
+/**
+ * One row of the Sequence Detail "Your BLAST jobs for this accession" card.
+ * Whitelisted projection returned by `GET /blast/jobs/by-accession/{accession}`
+ * — no raw payload, no Storage URLs.
+ */
+export interface BlastJobForAccession {
+  job_id: string;
+  status: string;
+  phase: string;
+  database: string;
+  created_at: string | null;
+  query_accession: string | null;
+  /** 1-based inclusive sub-range start, or null for a whole-sequence job. */
+  seq_start: number | null;
+  /** 1-based inclusive sub-range stop, or null for a whole-sequence job. */
+  seq_stop: number | null;
+  /** SPA route to the job detail page, e.g. `/blast/jobs/<job_id>`. */
+  detail_url: string;
+}
+
+export interface JobsForAccessionResponse {
+  accession: string;
+  accession_base: string;
+  match: "base" | "exact";
+  count: number;
+  jobs: BlastJobForAccession[];
+  /** True when the jobstate lookup failed; `jobs` is empty and the card degrades calmly. */
+  degraded: boolean;
+  reason: string | null;
+  meta?: ApiResponseMeta;
+}
+
 export interface BlastProvenanceBundle {
   schema_version: number;
   job_id: string;
@@ -725,6 +757,25 @@ export const blastApi = {
     const qs = params.toString();
     return api.get<BlastJobSummary>(
       `/blast/jobs/${encodeURIComponent(jobId)}${qs ? `?${qs}` : ""}`,
+    );
+  },
+
+  /**
+   * List the caller's accession-mode BLAST jobs that used `accession` as the
+   * query. Owner-scoped on the server; powers the Sequence Detail
+   * "Your BLAST jobs for this accession" card. Never throws on a jobstate
+   * outage — the server returns `{ degraded: true }` with an empty `jobs`.
+   */
+  getJobsForAccession: (
+    accession: string,
+    opts?: { match?: "base" | "exact"; limit?: number },
+  ) => {
+    const params = new URLSearchParams();
+    if (opts?.match) params.set("match", opts.match);
+    if (opts?.limit != null) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return api.get<JobsForAccessionResponse>(
+      `/blast/jobs/by-accession/${encodeURIComponent(accession)}${qs ? `?${qs}` : ""}`,
     );
   },
 
