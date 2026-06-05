@@ -20,6 +20,24 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ops_redis_public_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the ops-Redis public-HTTPS cache to miss for every test here.
+
+    The proxy resolves its upstream via ``get_public_tls_base_url``, which falls
+    back to the ops-Redis cache populated by ``reconcile_openapi_public_https``.
+    These tests assert the legacy cluster-IP path, so a local dev Redis that has
+    reconciled a real cluster (writing the live HTTPS FQDN into
+    ``openapi:runtime:public-base-url``) makes them fail locally while CI stays
+    green only because it has no Redis. Pinning the fallback to ``{}`` keeps the
+    IP / env-hook behaviour deterministic regardless of local Redis state.
+    """
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_public_base_url",
+        lambda **_kwargs: {},
+    )
+
+
 @pytest.fixture()
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")

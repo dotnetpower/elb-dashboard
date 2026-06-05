@@ -20,6 +20,26 @@ import pytest
 from api.services.openapi.runtime import get_public_tls_base_url
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ops_redis_public_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the ops-Redis public-HTTPS cache to miss for every test here.
+
+    ``get_public_tls_base_url`` resolves ``OPENAPI_PUBLIC_BASE_URL`` first and
+    then falls back to the ops-Redis cache populated by
+    ``reconcile_openapi_public_https``. These tests assert the empty / legacy-IP
+    default, so a local dev Redis that has reconciled a real cluster (writing
+    the live HTTPS FQDN into ``openapi:runtime:public-base-url``) makes them
+    fail locally while CI stays green only because it has no Redis. Pinning the
+    fallback to ``{}`` makes the env-hook behaviour deterministic regardless of
+    local Redis state; tests that exercise the env hook set the env var
+    explicitly and are unaffected because env resolution wins first.
+    """
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_public_base_url",
+        lambda **_kwargs: {},
+    )
+
+
 def test_get_public_tls_base_url_returns_empty_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
