@@ -308,16 +308,21 @@ def test_run_truncates_stdout_above_cap(
     # env override applies even though the server thread is already running.
     monkeypatch.setenv("EXEC_RUN_MAX_OUTPUT_BYTES", str(64 * 1024))
 
+    # Build the 64-A line once (single ``tr`` spawn) then echo it 4096 times
+    # with the shell builtin ``printf``. The previous form spawned a
+    # ``printf | tr`` pipeline per iteration (~8192 processes), which made
+    # the child time-sensitive and flaky under the parallel suite.
     _install_stub(
         tmp_path,
         "az",
-        '#!/bin/bash\nfor i in $(seq 1 4096); do printf "%64s\\n" "" | tr " " "A"; done\n',
+        '#!/bin/bash\nline=$(printf "%64s" "" | tr " " "A")\n'
+        'for i in $(seq 1 4096); do printf "%s\\n" "$line"; done\n',
     )
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
 
     from api.services import terminal_exec
 
-    result = terminal_exec.run(["az", "flood"], timeout_seconds=10)
+    result = terminal_exec.run(["az", "flood"], timeout_seconds=30)
     assert result["exit_code"] == 0
     # After sidecar truncation the api-side sanitizer expands each A-line
     # into ``<base64-redacted>``; the bytes-on-the-wire pre-sanitize cap

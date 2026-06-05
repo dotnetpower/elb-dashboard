@@ -14,8 +14,29 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from api.auth import CallerIdentity, require_caller
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def _reset_nsg_locks(monkeypatch) -> None:
+    """Isolate the per-NSG apply lock for each test, independent of Redis.
+
+    ``acquire_nsg_lock`` prefers a Redis backend when one is reachable and
+    only falls back to a process-global in-memory dict. A developer machine
+    (or another test session) commonly has a local Redis on 6379 for the
+    worker/beat sidecars, so the lock lands in Redis with a 180s TTL and the
+    route's best-effort ``handle.release()`` is the only thing that frees it.
+    Tests reuse the same ``nsg_id``, so any unreleased / TTL-pinned key makes
+    the next apply return ``nsg_apply_busy`` (503) — green in CI (no Redis)
+    but red locally. Forcing the in-memory backend and clearing it before
+    each test makes the suite deterministic in both environments.
+    """
+    from api.services import peering_nsg_lock
+
+    monkeypatch.setattr(peering_nsg_lock, "_redis_client_or_none", lambda: None)
+    peering_nsg_lock.reset_memory_locks_for_tests()
 
 
 def _build_app(monkeypatch):
