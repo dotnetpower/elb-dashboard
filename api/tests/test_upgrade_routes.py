@@ -39,6 +39,13 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
         "UPGRADE_ADMIN_OIDS", "00000000-0000-0000-0000-000000000000"
     )
     monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+    # The commit channel (default on) adds a best-effort branch-head fetch to
+    # /check. Stub it network-free by default so release-path tests don't touch
+    # the network; commit-channel tests override this per-test.
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_branch_head",
+        lambda _url, **_kw: "",
+    )
     state.set_backend(state.InMemoryBackend())
 
     from api.services.upgrade import acr_inventory, build_logs, history
@@ -108,6 +115,7 @@ def test_candidates_returns_unconfigured_when_remote_unset(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv(remote_tags.UPGRADE_GIT_REMOTE_ENV, raising=False)
+    monkeypatch.setattr(remote_tags, "DEFAULT_GIT_REMOTE", "")
     resp = client.get("/api/upgrade/candidates")
     assert resp.status_code == 200
     body = resp.json()
@@ -196,12 +204,112 @@ def test_check_clears_latest_when_remote_unset(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv(remote_tags.UPGRADE_GIT_REMOTE_ENV, raising=False)
+    monkeypatch.setattr(remote_tags, "DEFAULT_GIT_REMOTE", "")
     state.update_state(lambda s: (setattr(s, "latest_version", "0.9.0"), None)[-1])
 
     resp = client.post("/api/upgrade/check")
     body = resp.json()
     assert body["latest_version"] == ""
     assert body["git_remote"] == ""
+
+
+def test_status_fills_effective_default_remote(client: TestClient) -> None:
+    # With the in-code default remote active and no check yet, the persisted
+    # row's git_remote is still empty — but the status response surfaces the
+    # effective (masked) remote so the SPA never shows "not configured".
+    body = client.get("/api/upgrade/status").json()
+    assert body["git_remote"] == remote_tags.DEFAULT_GIT_REMOTE
+    # The channel toggle defaults on.
+    assert body["track_commits"] is True
+
+
+def test_settings_toggles_track_commits(client: TestClient) -> None:
+    off = client.post("/api/upgrade/settings", json={"track_commits": False})
+    assert off.status_code == 200
+    assert off.json()["track_commits"] is False
+    # Persisted across reads.
+    assert client.get("/api/upgrade/status").json()["track_commits"] is False
+
+    on = client.post("/api/upgrade/settings", json={"track_commits": True})
+    assert on.json()["track_commits"] is True
+
+
+def test_check_commit_channel_populates_latest_commit_sha(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    tags = [
+        remote_tags.RemoteTag(name="0.4.0", raw_ref="refs/tags/v0.4.0", commit_sha="f" * 40),
+    ]
+    head = "e" * 40
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_release_tags", lambda _url: tags
+    )
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_branch_head",
+        lambda _url, *, branch="main": head,
+    )
+
+    body = client.post("/api/upgrade/check").json()
+    assert body["latest_version"] == "0.4.0"
+    assert body["latest_commit_sha"] == head
+
+
+def test_check_commit_channel_survives_branch_head_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A branch-head discovery failure must not sink the release check.
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    tags = [
+        remote_tags.RemoteTag(name="0.4.0", raw_ref="refs/tags/v0.4.0", commit_sha="f" * 40),
+    ]
+
+    def _head_boom(_url: str, **_kw: object) -> str:
+        raise remote_tags.RemoteTagsError("branch head down")
+
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_release_tags", lambda _url: tags
+    )
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_branch_head", _head_boom
+    )
+
+    body = client.post("/api/upgrade/check").json()
+    assert body["latest_version"] == "0.4.0"
+    assert body["latest_commit_sha"] == ""
+
+
+def test_check_release_only_skips_branch_head(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    # Seed a stale commit sha, then switch the channel to releases-only.
+    state.update_state(lambda s: setattr(s, "latest_commit_sha", "a" * 40))
+    client.post("/api/upgrade/settings", json={"track_commits": False})
+
+    tags = [
+        remote_tags.RemoteTag(name="0.4.0", raw_ref="refs/tags/v0.4.0", commit_sha="f" * 40),
+    ]
+
+    def _head_must_not_be_called(_url: str, **_kw: object) -> str:
+        raise AssertionError("release-only mode must not call fetch_branch_head")
+
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_release_tags", lambda _url: tags
+    )
+    monkeypatch.setattr(
+        "api.services.upgrade.remote_tags.fetch_branch_head", _head_must_not_be_called
+    )
+
+    body = client.post("/api/upgrade/check").json()
+    assert body["latest_version"] == "0.4.0"
+    assert body["latest_commit_sha"] == ""
 
 
 def test_check_marks_remote_failure_without_setting_error_field(

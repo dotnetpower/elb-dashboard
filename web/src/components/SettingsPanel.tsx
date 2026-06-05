@@ -21,6 +21,7 @@ import {
 import { Link } from "react-router-dom";
 
 import { formatApiError } from "@/api/client";
+import { isCommitUpdateAvailable, upgradeApi } from "@/api/upgrade";
 import { useUpgradeAvailability } from "@/hooks/useUpgradeAvailability";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { clearConfig, loadSavedConfig, type ResourceConfig } from "@/components/SetupWizard";
@@ -31,6 +32,7 @@ import {
   Row,
   Section,
   StatusLine,
+  Toggle,
 } from "@/components/settings/primitives";
 import {
   AppearanceSection,
@@ -263,8 +265,10 @@ function formatCheckedAt(iso: string): string {
  * throttle. The full start/rollback flow lives on the `/upgrade` page.
  */
 function UpdatesSection({ onClose }: { onClose: () => void }) {
-  const { status, loading, error, available, phase, checkNow } = useUpgradeAvailability();
+  const { status, loading, error, available, phase, checkNow, applyStatus } =
+    useUpgradeAvailability();
   const [checking, setChecking] = useState(false);
+  const [savingChannel, setSavingChannel] = useState(false);
   const [actionMessage, setActionMessage] = useState<
     { kind: "info" | "success" | "error"; text: string } | null
   >(null);
@@ -273,6 +277,9 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
   const inProgress = phase === "active";
   const failed = phase === "failed";
   const rolledBack = phase === "rolled_back";
+  const trackCommits = status?.track_commits ?? true;
+  const commitAvailable = isCommitUpdateAvailable(status, __APP_COMMIT__);
+  const releaseAvailable = available && !commitAvailable;
 
   const handleCheck = useCallback(async () => {
     setChecking(true);
@@ -307,7 +314,38 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
     }
   }, [checkNow]);
 
+  const handleToggleChannel = useCallback(
+    async (next: boolean) => {
+      setSavingChannel(true);
+      setActionMessage(null);
+      try {
+        const fresh = await upgradeApi.setTrackCommits(next);
+        applyStatus(fresh);
+        // Re-discover with the new channel so the badge reflects it
+        // immediately (best-effort — the periodic poll catches up if the
+        // check is throttled).
+        try {
+          await checkNow();
+        } catch {
+          /* throttled / transient — ignore */
+        }
+        setActionMessage({
+          kind: "success",
+          text: next
+            ? "Tracking new commits (preview) and releases."
+            : "Tracking releases only.",
+        });
+      } catch (err) {
+        setActionMessage({ kind: "error", text: formatApiError(err) });
+      } finally {
+        setSavingChannel(false);
+      }
+    },
+    [applyStatus, checkNow],
+  );
+
   const checkedAt = formatCheckedAt(status?.latest_checked_at || "");
+  const shortLatestCommit = (status?.latest_commit_sha || "").slice(0, 7);
 
   return (
     <Section heading="Updates">
@@ -331,9 +369,13 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
               <Badge tone="muted">Loading…</Badge>
             ) : !configured ? (
               <Badge tone="muted">Not configured</Badge>
-            ) : available ? (
+            ) : releaseAvailable ? (
               <Badge tone="warning" icon={<ArrowUpCircle size={12} strokeWidth={1.8} />}>
                 v{status?.latest_version}
+              </Badge>
+            ) : commitAvailable ? (
+              <Badge tone="warning" icon={<ArrowUpCircle size={12} strokeWidth={1.8} />}>
+                new commit {shortLatestCommit}
               </Badge>
             ) : (
               <Badge tone="success" icon={<CheckCircle2 size={12} strokeWidth={1.8} />}>
@@ -357,8 +399,20 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
 
       <Group>
         <Row
+          label="Allow updates from new commits"
+          hint="Preview channel. When on, new commits on the main branch are surfaced too; when off, only tagged releases are checked."
+          control={
+            <Toggle
+              checked={trackCommits}
+              disabled={savingChannel || loading}
+              onChange={handleToggleChannel}
+              label="Allow updates from new commits"
+            />
+          }
+        />
+        <Row
           label="Check for updates"
-          hint="Polls the configured git remote for a newer release tag. Throttled to protect upstream."
+          hint="Polls the git remote for a newer release tag (and new commits when the preview channel is on). Throttled to protect upstream."
           control={
             <button
               className="glass-button"
@@ -402,8 +456,8 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
 
       {!configured && !loading && (
         <StatusLine kind="info">
-          No upgrade remote is configured (<code>UPGRADE_GIT_REMOTE</code>). The control plane
-          will not surface new releases until an operator sets it.
+          No upgrade remote is available. Set <code>UPGRADE_GIT_REMOTE</code> on the Container App
+          to point the control plane at a different upstream.
         </StatusLine>
       )}
       {failed && (

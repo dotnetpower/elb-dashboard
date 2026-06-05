@@ -386,6 +386,8 @@ containing: motivation, user-facing change, API/IaC diff summary, validation evi
 ### GitHub issue closure hygiene
 When work is tied to a registered GitHub issue, do not leave the issue silent. Before marking the task done, verify the issue's acceptance criteria against the implemented diff and validation evidence. If the criteria are met, add an issue comment summarising the shipped change and validation, then close the issue. If anything remains, leave the issue open and comment with the completed work, validation evidence, and explicit remaining gap.
 
+**Commit-reference trigger (do not skip).** Whenever a commit message references an issue (`(#N)`, `fixes #N`, `closes #N`, `refs #N`), that issue MUST be updated in the same session — a referenced-but-silent issue is a process violation. Concretely: after committing work that names an issue, run `gh issue view <N>` to re-read its acceptance criteria, then either (a) comment + `gh issue close <N>` when every criterion is met, or (b) comment with the completed subset, validation evidence, and the explicit remaining gaps when only part of the issue shipped (keep it open). Partial work that closes only one of several acceptance criteria never closes the issue.
+
 ### Validation before marking done
 * Backend changes (`api/`): `uv run pytest -q api/tests` + a local smoke test (`uv run uvicorn api.main:app --reload` for HTTP routes; `uv run celery -A api.celery_app worker -l info` for task changes). Curl the new route or trigger the new task with evidence in the change note.
 * Frontend changes: `npm run build` (in `web/`) + screenshot of the affected page.

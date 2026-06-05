@@ -9,10 +9,11 @@ Responsibility: Read-only git remote ref discovery for the upgrade flow.
 Edit boundaries: HTTP I/O against the git smart-protocol endpoint lives here;
   no Azure SDK imports, no Storage writes, no Celery wiring.
 Key entry points: `RemoteTag`, `configured_remote`, `mask_remote_url`,
-  `fetch_release_tags`, `filter_candidates`, `RemoteTagsError`.
+  `fetch_release_tags`, `fetch_branch_head`, `filter_candidates`,
+  `RemoteTagsError`, `DEFAULT_GIT_REMOTE`, `DEFAULT_TRACK_BRANCH`.
 Risky contracts: The remote URL MUST originate from the `UPGRADE_GIT_REMOTE`
-  env — never from a request body / query param — because this function
-  issues anonymous HTTPS GETs against the operator-supplied URL.
+  env or the in-code `DEFAULT_GIT_REMOTE` — never from a request body / query
+  param — because this function issues anonymous HTTPS GETs against that URL.
   Additional in-code guards: regex shape check, refusal of the Azure
   Instance Metadata Service IP (`169.254.169.254`), response-body cap at
   `MAX_RESPONSE_BYTES`, and URL credential masking before logging.
@@ -41,7 +42,17 @@ HTTP_TIMEOUT_SECONDS = 10.0
 MAX_TAGS = 20
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024  # 4 MiB — generous for any real refs list.
 
+# Default upstream so the update-check flow works with zero configuration.
+# Operators can still override or disable via `UPGRADE_GIT_REMOTE`. This is
+# the project's own public HTTPS git remote — trusted, anonymous, read-only.
+# It is read through the module attribute (not captured) so tests can blank
+# it to exercise the legacy "no remote configured" branch.
+DEFAULT_GIT_REMOTE = "https://github.com/dotnetpower/elb-dashboard.git"
+# Branch the "new commits" channel tracks when `track_commits` is on.
+DEFAULT_TRACK_BRANCH = "main"
+
 _RELEASE_TAG = re.compile(r"^refs/tags/v(\d+\.\d+\.\d+)$")
+_HEAD_REF_PREFIX = "refs/heads/"
 _REMOTE_URL_RE = re.compile(r"^https?://[\w.\-:@/]+\.git$")
 # Hosts that must never be reachable through this module. Limited to
 # cloud-provider metadata services and loopback — the primary SSRF
@@ -71,20 +82,28 @@ class RemoteTag:
 
 
 def configured_remote() -> str | None:
-    """Return the operator-configured git remote URL, or ``None`` when unset.
+    """Return the effective git remote URL, or ``None`` when none is set.
 
-    Reads ``UPGRADE_GIT_REMOTE`` from the environment. No default is supplied:
-    the upgrade flow stays inert until an operator opts in by setting the
-    env variable on the Container App. This avoids accidentally fetching
-    from an upstream the operator does not control.
+    Resolution order:
+      1. ``UPGRADE_GIT_REMOTE`` env (operator override) when non-empty.
+      2. :data:`DEFAULT_GIT_REMOTE` — the project's own public remote, so
+         the update-check flow works out of the box with zero configuration.
 
-    SECURITY: This is the ONLY supported input channel for the remote URL.
-    Routes and tasks must never accept a remote URL from request bodies,
-    query parameters, or other caller-controlled inputs — doing so would
-    open a server-side request forgery (SSRF) hole through this module.
+    Returns ``None`` only when both are empty (i.e. an operator has blanked
+    the default in code). The historical "inert until opted in" behaviour is
+    therefore reachable by setting ``DEFAULT_GIT_REMOTE = ""``.
+
+    SECURITY: env and the in-code default are the ONLY supported input
+    channels for the remote URL. Routes and tasks must never accept a remote
+    URL from request bodies, query parameters, or other caller-controlled
+    inputs — doing so would open a server-side request forgery (SSRF) hole
+    through this module.
     """
     value = os.environ.get(UPGRADE_GIT_REMOTE_ENV, "").strip()
-    return value or None
+    if value:
+        return value
+    default = (DEFAULT_GIT_REMOTE or "").strip()
+    return default or None
 
 
 def mask_remote_url(url: str) -> str:
@@ -140,22 +159,17 @@ def _validate_url(url: str) -> str:
     return url
 
 
-def fetch_release_tags(
+def _advertise_refs(
     remote_url: str,
     *,
-    timeout_seconds: float = HTTP_TIMEOUT_SECONDS,
-    max_tags: int = MAX_TAGS,
-    max_response_bytes: int = MAX_RESPONSE_BYTES,
-    http_client_factory: type[httpx.Client] = httpx.Client,
-) -> list[RemoteTag]:
-    """Return semver tags advertised by the remote, newest first.
+    timeout_seconds: float,
+    max_response_bytes: int,
+    http_client_factory: type[httpx.Client],
+) -> list[tuple[str, str]]:
+    """Fetch + parse the smart-protocol advertisement into (sha, ref) pairs.
 
-    Speaks the git smart HTTP discovery endpoint
-    (``GET <remote>/info/refs?service=git-upload-pack``) and parses the
-    pkt-line stream. Only ``refs/tags/vX.Y.Z`` entries are returned; other
-    refs (heads, peeled tag entries with ``^{}``, GitHub PR refs) are
-    skipped. Anonymous request only — private remotes are out of scope for
-    this PR.
+    Shared by :func:`fetch_release_tags` and :func:`fetch_refs` so the
+    network call (and its SSRF / size guards) lives in exactly one place.
     """
     url = _validate_url(remote_url)
     endpoint = f"{url.rstrip('/')}/info/refs"
@@ -183,9 +197,11 @@ def fetch_release_tags(
         raise RemoteTagsError(
             f"git ls-remote response from {masked} exceeded {max_response_bytes} bytes"
         )
+    return _parse_pkt_lines(content)
 
-    refs = _parse_pkt_lines(content)
 
+def _tags_from_refs(refs: list[tuple[str, str]], *, max_tags: int) -> list[RemoteTag]:
+    """Filter advertisement (sha, ref) pairs to sorted semver release tags."""
     tags: list[RemoteTag] = []
     seen: set[str] = set()
     for sha, ref in refs:
@@ -204,6 +220,70 @@ def fetch_release_tags(
 
     tags.sort(key=lambda t: Version(t.name), reverse=True)
     return tags[:max_tags]
+
+
+def _branch_head_from_refs(refs: list[tuple[str, str]], *, branch: str) -> str:
+    """Return the lowercased commit sha advertised for ``refs/heads/<branch>``.
+
+    Returns ``""`` when the branch is not advertised (so the caller can treat
+    a missing branch as "no commit channel target" rather than an error).
+    """
+    target = f"{_HEAD_REF_PREFIX}{branch}"
+    for sha, ref in refs:
+        if ref == target:
+            return sha.lower()
+    return ""
+
+
+def fetch_release_tags(
+    remote_url: str,
+    *,
+    timeout_seconds: float = HTTP_TIMEOUT_SECONDS,
+    max_tags: int = MAX_TAGS,
+    max_response_bytes: int = MAX_RESPONSE_BYTES,
+    http_client_factory: type[httpx.Client] = httpx.Client,
+) -> list[RemoteTag]:
+    """Return semver tags advertised by the remote, newest first.
+
+    Speaks the git smart HTTP discovery endpoint
+    (``GET <remote>/info/refs?service=git-upload-pack``) and parses the
+    pkt-line stream. Only ``refs/tags/vX.Y.Z`` entries are returned; other
+    refs (heads, peeled tag entries with ``^{}``, GitHub PR refs) are
+    skipped. Anonymous request only — private remotes are out of scope for
+    this PR.
+    """
+    refs = _advertise_refs(
+        remote_url,
+        timeout_seconds=timeout_seconds,
+        max_response_bytes=max_response_bytes,
+        http_client_factory=http_client_factory,
+    )
+    return _tags_from_refs(refs, max_tags=max_tags)
+
+
+def fetch_branch_head(
+    remote_url: str,
+    *,
+    branch: str = DEFAULT_TRACK_BRANCH,
+    timeout_seconds: float = HTTP_TIMEOUT_SECONDS,
+    max_response_bytes: int = MAX_RESPONSE_BYTES,
+    http_client_factory: type[httpx.Client] = httpx.Client,
+) -> str:
+    """Return the tracking branch's HEAD commit sha, or ``""`` when absent.
+
+    Used by the "new commits" channel as a best-effort augmentation of the
+    release-tag check: the caller fetches release tags first (the primary,
+    well-tested path) and then calls this to learn whether the tracking
+    branch has moved past the running commit. Returns ``""`` when the branch
+    is not advertised so a missing branch degrades to "no commit target".
+    """
+    refs = _advertise_refs(
+        remote_url,
+        timeout_seconds=timeout_seconds,
+        max_response_bytes=max_response_bytes,
+        http_client_factory=http_client_factory,
+    )
+    return _branch_head_from_refs(refs, branch=branch)
 
 
 def _parse_pkt_lines(raw: bytes) -> list[tuple[str, str]]:

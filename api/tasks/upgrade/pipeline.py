@@ -96,10 +96,13 @@ def _set_latest(
     remote: str,
     latest: remote_tags.RemoteTag,
     checked_at: str,
+    *,
+    commit_sha: str = "",
 ) -> None:
     s.git_remote = remote
     s.latest_version = latest.name
     s.latest_sha = latest.commit_sha
+    s.latest_commit_sha = commit_sha
     s.latest_checked_at = checked_at
     _record_running_version(s)
 
@@ -108,12 +111,23 @@ def _clear_latest(s: state.UpgradeState, remote: str, checked_at: str) -> None:
     s.git_remote = remote
     s.latest_version = ""
     s.latest_sha = ""
+    s.latest_commit_sha = ""
     s.latest_checked_at = checked_at
     _record_running_version(s)
 
 
 def check_latest_inline() -> state.UpgradeState:
-    """Run one discovery round and persist the result."""
+    """Run one discovery round and persist the result.
+
+    Channel-aware: the newest release tag is always discovered (the primary,
+    well-tested path). When the persisted row has ``track_commits`` on (the
+    default), the tracking-branch HEAD commit is additionally discovered
+    (best-effort) so the SPA can surface a new commit even between releases.
+    A branch-head discovery failure never fails the release check — it just
+    leaves ``latest_commit_sha`` empty. When the channel is off, the commit
+    sha is cleared.
+    """
+    track = bool(state.get_state().track_commits)
     remote = remote_tags.configured_remote()
     checked_at = datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -126,11 +140,33 @@ def check_latest_inline() -> state.UpgradeState:
         LOGGER.warning("upgrade.check_latest: remote %s failed: %s", remote, exc)
         return state.update_state(lambda s: _clear_latest(s, remote, checked_at))
 
-    if not tags:
-        return state.update_state(lambda s: _clear_latest(s, remote, checked_at))
+    head = ""
+    if track:
+        try:
+            head = remote_tags.fetch_branch_head(
+                remote, branch=remote_tags.DEFAULT_TRACK_BRANCH
+            )
+        except remote_tags.RemoteTagsError as exc:
+            # Best-effort: a branch-head failure must not sink the release
+            # check. Leave the commit indicator empty for this round.
+            LOGGER.warning(
+                "upgrade.check_latest: branch-head discovery failed for %s: %s",
+                remote,
+                exc,
+            )
+            head = ""
 
-    latest = tags[0]
-    return state.update_state(lambda s: _set_latest(s, remote, latest, checked_at))
+    latest = tags[0] if tags else None
+
+    def mutate(s: state.UpgradeState) -> None:
+        s.git_remote = remote
+        s.latest_checked_at = checked_at
+        s.latest_version = latest.name if latest else ""
+        s.latest_sha = latest.commit_sha if latest else ""
+        s.latest_commit_sha = head
+        _record_running_version(s)
+
+    return state.update_state(mutate)
 
 
 @shared_task(name="api.tasks.upgrade.check_latest")

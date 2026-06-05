@@ -233,7 +233,11 @@ where the failure was found, but knowing them up front saves a lot of time.
   before each behaviour-changing commit.
 - **GitHub issue hygiene**: if a change implements a registered issue, comment with
    the completed work and validation; close it only after acceptance criteria are met,
-   otherwise leave it open with the remaining gap.
+   otherwise leave it open with the remaining gap. **A commit that references an issue
+   (`(#N)` / `fixes #N` / `closes #N`) MUST update that issue in the same session** —
+   `gh issue view <N>` to re-check acceptance criteria, then comment + close when all
+   criteria are met, or comment with the shipped subset + explicit remaining gaps when
+   only part of it landed. A referenced-but-silent issue is a process violation.
 - **No new dependency without justification** in the PR description.
 - **Tests live next to their code** (`api/tests/`); cross-cutting only at root `tests/`.
 

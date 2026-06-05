@@ -57,6 +57,11 @@ DEFAULT_SCRIPTS_CONFIGMAP_PREFIX = "elb-prepare-db"
 # azcopy; the entrypoint script downloads it from aka.ms.
 DEFAULT_AZCOPY_IMAGE = "mcr.microsoft.com/azure-cli:2.81.0"
 DEFAULT_AZCOPY_CONCURRENCY = 16
+# Per-INDEX retry budget (wired to the Job's `backoffLimitPerIndex`, NOT the
+# global `backoffLimit`). Each shard independently retries up to this many
+# times; a transient failure in one shard never counts against the others.
+# 2 → each shard gets 3 attempts, which absorbs the occasional OOM / SNAT
+# reset / NCBI 5xx / node preemption over a multi-hour download.
 DEFAULT_BACKOFF_LIMIT = 2
 DEFAULT_TTL_SECONDS_AFTER_FINISHED = 3600
 # 4 hours: `nt` (~4.8k files) and `core_nt` genuinely take well over an hour
@@ -215,8 +220,9 @@ fi
 # list, so a killed transfer never leaves a partial committed blob. azcopy
 # prints its own "% Done/Failed/Total" progress to stdout for live
 # `kubectl logs`. A non-zero exit (any failed transfer) fails the shard so
-# the Job's backoffLimit relaunches a fresh pod; azcopy's own retry handles
-# transient NCBI/S3 hiccups within a run.
+# the Job's per-index backoff (`backoffLimitPerIndex`) relaunches a fresh
+# pod for THIS shard only, without counting against the other shards;
+# azcopy's own retry handles transient NCBI/S3 hiccups within a run.
 #
 # azcopy version is pinned to 10.28.0 above: aka.ms now serves 10.32.4,
 # which panics on every --from-to=S3Blob copy.
@@ -388,6 +394,12 @@ def build_prepare_db_job_manifest(
     success condition. ``ttlSecondsAfterFinished`` ensures the K8s TTL
     controller reaps the Job + pods even if the Celery worker dies before
     its explicit delete call lands.
+
+    ``backoff_limit`` is wired to ``backoffLimitPerIndex`` (per-shard retry
+    budget), NOT the global ``backoffLimit``. Combined with
+    ``maxFailedIndexes == shard_count`` this isolates pod failures to their
+    own shard so a few transient blips can no longer fail the whole Job and
+    kill every in-flight pod — see the inline note on ``job_spec``.
     """
     if not _SAFE_DB_RE.match(db_name):
         raise ValueError(f"invalid db_name: {db_name!r}")
@@ -517,7 +529,38 @@ def build_prepare_db_job_manifest(
         "completionMode": "Indexed",
         "completions": shard_count,
         "parallelism": shard_count,
-        "backoffLimit": backoff_limit,
+        # PER-INDEX backoff, not a global budget. `backoffLimitPerIndex`
+        # (Kubernetes >= 1.33 stable; AKS here is 1.34) gives each shard its
+        # OWN retry budget, so a transient pod failure in one shard does not
+        # count against the others.
+        #
+        # Why this matters: the previous spec set only the global
+        # `backoffLimit`, which is a TOTAL failure budget across ALL indexes
+        # ("the number of Pods with phase=Failed; if it reaches backoffLimit
+        # the Job is failed and any running Pods are terminated"). With 10
+        # shards each streaming ~486 NCBI files for hours, just `backoffLimit`
+        # transient blips ANYWHERE (a single OOM / SNAT reset / NCBI 5xx /
+        # node preemption per shard) tripped the global budget, marked the
+        # whole Job Failed, and KILLED every still-running pod — discarding
+        # nearly-complete work. The next retry re-downloaded everything and
+        # died the same way: the unconverging "partial · succeeded=0/10"
+        # loop. The almost-complete blob count (e.g. 4866/4874) was just the
+        # in-flight files of the killed pods, not an independent failure.
+        #
+        # When `backoffLimitPerIndex` is set, K8s defaults the global
+        # `backoffLimit` to MaxInt32, so it no longer acts as a cross-shard
+        # guillotine — we intentionally omit it here.
+        "backoffLimitPerIndex": backoff_limit,
+        # Keep every healthy shard running to completion even if some shards
+        # exhaust their per-index retries. K8s terminates the remaining pods
+        # only once the number of failed indexes EXCEEDS `maxFailedIndexes`;
+        # pinning it to `shard_count` makes that impossible, so a genuinely
+        # broken shard never kills its healthy peers (their blobs persist and
+        # those indexes are marked succeeded). The Job is still marked Failed
+        # at the end if any index ultimately failed — correctly surfaced as a
+        # partial by the Celery task — but transient blips now self-heal via
+        # the per-index retry instead of failing the whole download.
+        "maxFailedIndexes": shard_count,
         "ttlSecondsAfterFinished": ttl_seconds_after_finished,
         "activeDeadlineSeconds": active_deadline_seconds,
         "template": pod_template,

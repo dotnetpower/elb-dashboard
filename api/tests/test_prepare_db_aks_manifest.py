@@ -81,8 +81,16 @@ def test_manifest_safety_fields() -> None:
     assert spec["ttlSecondsAfterFinished"] == DEFAULT_TTL_SECONDS_AFTER_FINISHED
     assert spec["ttlSecondsAfterFinished"] == 3600  # issue #7 acceptance #6
     assert spec["activeDeadlineSeconds"] >= 60
-    assert spec["backoffLimit"] >= 0
-    assert spec["backoffLimit"] <= 5  # don't burn budget retrying forever
+    # Per-INDEX backoff so a transient blip in one shard never trips a global
+    # budget and kills every in-flight pod (the unconverging retry loop). The
+    # global `backoffLimit` is intentionally omitted: K8s defaults it to
+    # MaxInt32 when `backoffLimitPerIndex` is set.
+    assert "backoffLimit" not in spec
+    assert spec["backoffLimitPerIndex"] >= 0
+    assert spec["backoffLimitPerIndex"] <= 5  # don't burn budget retrying forever
+    # `maxFailedIndexes == shard_count` keeps healthy shards running to
+    # completion even if a broken shard exhausts its retries.
+    assert spec["maxFailedIndexes"] == spec["completions"]
 
 
 def test_manifest_env_includes_downward_api() -> None:

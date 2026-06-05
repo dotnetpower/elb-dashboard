@@ -9,6 +9,7 @@
  *  - GET    /upgrade/status                     (any caller)
  *  - GET    /upgrade/candidates                 (any caller)
  *  - POST   /upgrade/check                      (any caller; throttled)
+ *  - POST   /upgrade/settings                   (any caller; channel toggle)
  *  - GET    /upgrade/history?limit=N            (any caller)
  *  - POST   /upgrade/start                      (UpgradeAdmin)
  *  - POST   /upgrade/rollback                   (UpgradeAdmin)
@@ -43,7 +44,11 @@ export interface UpgradeStatus {
   latest_version: string;
   latest_sha: string;
   latest_checked_at: string;
+  /** Tracking-branch HEAD commit sha (40-hex) when the commit channel is on; else "". */
+  latest_commit_sha: string;
   git_remote: string;
+  /** Update channel: when true, new commits on the tracking branch are surfaced too. */
+  track_commits: boolean;
   state: UpgradeStateName;
   target_version: string;
   target_sha: string;
@@ -116,6 +121,8 @@ export const upgradeApi = {
   status: () => api.get<UpgradeStatus>("/upgrade/status"),
   candidates: () => api.get<UpgradeCandidatesResponse>("/upgrade/candidates"),
   check: () => api.post<UpgradeStatus>("/upgrade/check", {}),
+  setTrackCommits: (trackCommits: boolean) =>
+    api.post<UpgradeStatus>("/upgrade/settings", { track_commits: trackCommits }),
   start: (body: UpgradeStartRequest) => api.post<UpgradeStatus>("/upgrade/start", body),
   rollback: () => api.post<UpgradeStatus>("/upgrade/rollback", {}),
   rollbackPreflight: () => api.get<UpgradeRollbackPreflight>("/upgrade/rollback-preflight"),
@@ -140,6 +147,26 @@ export function isUpgradeAvailable(status: UpgradeStatus | null | undefined): bo
   if (!status) return false;
   if (!status.latest_version || !status.running_version) return false;
   return compareSemver(status.latest_version, status.running_version) > 0;
+}
+
+/**
+ * Return true when the commit channel is on and the tracking-branch HEAD
+ * commit differs from the running commit. `runningCommit` is the build-time
+ * commit stamp (`__APP_COMMIT__`), which may be a 7-char short sha while
+ * `latest_commit_sha` is the full 40-hex from the remote, so the comparison
+ * is prefix-based. Returns false when either side is unknown.
+ */
+export function isCommitUpdateAvailable(
+  status: UpgradeStatus | null | undefined,
+  runningCommit: string | null | undefined,
+): boolean {
+  if (!status || !status.track_commits) return false;
+  const latest = (status.latest_commit_sha || "").toLowerCase();
+  const running = (runningCommit || "").toLowerCase();
+  if (!latest || running.length < 7 || running === "dev" || running === "unknown") {
+    return false;
+  }
+  return !latest.startsWith(running);
 }
 
 export function compareSemver(a: string, b: string): number {

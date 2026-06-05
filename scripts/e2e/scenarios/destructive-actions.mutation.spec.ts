@@ -51,6 +51,8 @@ test("Upgrade start, remote check, rollback, and escape commands are mocked", as
         latest_sha: "2222222",
         latest_checked_at: "2026-05-24T10:00:00.000Z",
         git_remote: "origin",
+        track_commits: true,
+        latest_commit_sha: "",
         state: "succeeded",
         target_version: "0.3.0",
         target_sha: "2222222",

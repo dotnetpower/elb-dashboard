@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { formatApiError } from "@/api/client";
 import {
+  isCommitUpdateAvailable,
   isUpgradeAvailable,
   statePhase,
   upgradeApi,
@@ -37,7 +38,7 @@ export interface UpgradeAvailability {
   loading: boolean;
   /** Last `/status` (or `/check`) error message, or null when healthy. */
   error: string | null;
-  /** True when `latest_version` > `running_version`. */
+  /** True when a newer release tag, or (when the commit channel is on) a new tracking-branch commit, is available. */
   available: boolean;
   phase: UpgradePhase;
   /**
@@ -48,6 +49,8 @@ export interface UpgradeAvailability {
   attention: boolean;
   /** Force a `/upgrade/check`; resolves to the fresh status or throws (caller handles 429). */
   checkNow: () => Promise<UpgradeStatus>;
+  /** Apply an externally-fetched status (e.g. after a settings change) and fan it out across tabs. */
+  applyStatus: (next: UpgradeStatus) => void;
 }
 
 export function useUpgradeAvailability(): UpgradeAvailability {
@@ -107,11 +110,19 @@ export function useUpgradeAvailability(): UpgradeAvailability {
     return fresh;
   }, []);
 
-  const available = isUpgradeAvailable(status);
+  const applyStatus = useCallback((next: UpgradeStatus) => {
+    setStatus(next);
+    setError(null);
+    setLoading(false);
+    channelRef.current?.postMessage(next);
+  }, []);
+
+  const available =
+    isUpgradeAvailable(status) || isCommitUpdateAvailable(status, __APP_COMMIT__);
   const phase: UpgradePhase = status ? statePhase(status.state) : "idle";
   const attention =
     Boolean(status?.git_remote) &&
     (available || phase === "active" || phase === "failed" || phase === "rolled_back");
 
-  return { status, loading, error, available, phase, attention, checkNow };
+  return { status, loading, error, available, phase, attention, checkNow, applyStatus };
 }

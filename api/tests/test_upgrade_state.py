@@ -75,6 +75,28 @@ def test_to_public_dict_expands_json_fields() -> None:
     assert "etag" not in pub
 
 
+def test_track_commits_defaults_on_and_round_trips() -> None:
+    pub = state.UpgradeState().to_public_dict()
+    assert pub["track_commits"] is True
+    assert pub["latest_commit_sha"] == ""
+
+    s = state.UpgradeState(track_commits=False, latest_commit_sha="a" * 40)
+    entity = state._state_to_entity(s)
+    assert entity["track_commits"] is False
+    back = state._entity_to_state(entity)
+    assert back.track_commits is False
+    assert back.latest_commit_sha == "a" * 40
+
+
+def test_track_commits_defaults_on_for_legacy_row_without_column() -> None:
+    # A row written before the column existed has the attribute absent; the
+    # reader defaults the toggle on so the preview channel stays enabled.
+    legacy = {"PartitionKey": "control-plane", "RowKey": "current", "state": "idle"}
+    back = state._entity_to_state(legacy)
+    assert back.track_commits is True
+    assert back.latest_commit_sha == ""
+
+
 def test_cas_detects_concurrent_writer() -> None:
     state.update_state(lambda s: setattr(s, "phase_detail", "initial"))
 

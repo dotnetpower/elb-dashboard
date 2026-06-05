@@ -1,12 +1,21 @@
 name: Deploy to Container App
 
-# Manual deployment of pre-built images to the bundled Container App.
-# Builds happen in `build-images.yml` on every push to main; this workflow
-# only patches the running `ca-elb-dashboard` to a chosen tag.
+# Deployment of pre-built images to the bundled Container App. Builds happen in
+# `build-images.yml` on every push to main; this workflow only patches the
+# running `ca-elb-dashboard` to a chosen tag (no rebuild).
 #
-# The `production` environment carries a required reviewer rule — after you
-# click "Run workflow", a maintainer (you) must approve the deployment from
-# the Actions UI before `az containerapp update` runs.
+# Two ways to start a deploy, both gated by the same `production` approval:
+#   1. Automatic — after "Build Images" succeeds on main, this workflow is
+#      triggered via `workflow_run`. It deploys ALL sidecars at the immutable
+#      `gha-<sha>` tag the build just produced.
+#   2. Manual — `workflow_dispatch` from the Actions UI, choosing the sidecar
+#      and tag yourself (the original behaviour).
+#
+# In BOTH cases the job targets the `production` environment, whose required
+# reviewer rule makes GitHub e-mail the reviewer (you) for approval before
+# `az containerapp update` runs. Nothing reaches Azure until you click Approve
+# in the run's "Review deployments" prompt (or the e-mail link). Reject to
+# discard an auto-deploy you don't want.
 #
 # Configure the environment once at:
 #   https://github.com/dotnetpower/elb-dashboard/settings/environments
@@ -42,6 +51,13 @@ on:
         required: false
         default: false
         type: boolean
+  # Auto-deploy path: fire after a successful Build Images run on main. The
+  # job still stops at the production approval gate (e-mail), so this only
+  # *offers* a deploy of the freshly built images — it never deploys on its own.
+  workflow_run:
+    workflows: ["Build Images"]
+    types: [completed]
+    branches: [main]
 
 permissions:
   id-token: write
@@ -57,6 +73,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Manual dispatch always runs; the auto path only runs when the triggering
+    # Build Images run succeeded (a failed/cancelled build never offers a deploy).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     environment:
       name: production
       # CONTAINER_APP_FQDN should be a repo variable; the env link lets the
@@ -72,8 +91,31 @@ jobs:
       CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
       CONTAINER_APP_FQDN: ${{ vars.CONTAINER_APP_FQDN }}
     steps:
+      - name: Resolve deploy parameters
+        # Manual dispatch carries explicit inputs; the auto (workflow_run) path
+        # has none, so default to ALL sidecars at the immutable gha-<sha> tag
+        # the triggering build produced. Both paths feed the same steps below.
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            sha='${{ github.event.workflow_run.head_sha }}'
+            echo "DEPLOY_SIDECAR=all" >> "$GITHUB_ENV"
+            echo "DEPLOY_TAG=gha-${sha:0:7}" >> "$GITHUB_ENV"
+            echo "DEPLOY_SKIP_HEALTH=false" >> "$GITHUB_ENV"
+            echo "Auto-deploy offer after build of ${sha:0:7} (all sidecars)"
+          else
+            echo "DEPLOY_SIDECAR=${{ inputs.sidecar }}" >> "$GITHUB_ENV"
+            echo "DEPLOY_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+            echo "DEPLOY_SKIP_HEALTH=${{ inputs.skip_health_check }}" >> "$GITHUB_ENV"
+            echo "Manual deploy: ${{ inputs.sidecar }} @ ${{ inputs.tag }}"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # For the auto path, pin the build's commit so the deploy scripts
+          # match the image that was built; manual dispatch uses the ref's HEAD.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -91,8 +133,8 @@ jobs:
       - name: Verify chosen image tag exists in ACR
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag }}"
-          sidecar="${{ inputs.sidecar }}"
+          tag="${DEPLOY_TAG}"
+          sidecar="${DEPLOY_SIDECAR}"
           case "$sidecar" in
             all)      images=(elb-api elb-frontend elb-terminal) ;;
             api|worker|beat) images=(elb-api) ;;
@@ -117,10 +159,10 @@ jobs:
           SKIP_PROVIDER_REGISTRATION: "true"
         run: |
           set -euo pipefail
-          bash scripts/dev/quick-deploy.sh "${{ inputs.sidecar }}" "${{ inputs.tag }}" --no-build --yes
+          bash scripts/dev/quick-deploy.sh "${DEPLOY_SIDECAR}" "${DEPLOY_TAG}" --no-build --yes
 
       - name: Smoke test /api/health
-        if: ${{ inputs.skip_health_check != true }}
+        if: ${{ env.DEPLOY_SKIP_HEALTH != 'true' }}
         run: |
           set -euo pipefail
           url="https://${CONTAINER_APP_FQDN}/api/health"
@@ -147,8 +189,9 @@ jobs:
             echo ""
             echo "| field | value |"
             echo "|---|---|"
-            echo "| sidecar | \`${{ inputs.sidecar }}\` |"
-            echo "| tag | \`${{ inputs.tag }}\` |"
+            echo "| trigger | \`${{ github.event_name }}\` |"
+            echo "| sidecar | \`${DEPLOY_SIDECAR}\` |"
+            echo "| tag | \`${DEPLOY_TAG}\` |"
             echo "| container app | \`${CONTAINER_APP_NAME}\` (${AZURE_RESOURCE_GROUP}) |"
             echo "| url | https://${CONTAINER_APP_FQDN}/ |"
           } >> "$GITHUB_STEP_SUMMARY"

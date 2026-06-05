@@ -116,7 +116,17 @@ class UpgradeState:
     latest_version: str = ""
     latest_sha: str = ""
     latest_checked_at: str = ""
+    # Tracking-branch HEAD commit sha discovered when the "new commits"
+    # channel is on (`track_commits=True`). Empty when the channel is off
+    # or the branch is not advertised. Drives the SPA's commit-update
+    # indicator independently of the semver release comparison.
+    latest_commit_sha: str = ""
     git_remote: str = ""
+    # Update channel toggle. When True (default), discovery also surfaces new
+    # commits on the tracking branch (preview channel); when False, only
+    # release tags are checked. Persisted so the beat discovery job honours
+    # the operator's choice across revisions.
+    track_commits: bool = True
     state: str = STATE_IDLE
     target_version: str = ""
     target_sha: str = ""
@@ -169,6 +179,25 @@ class UpgradeState:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    """Coerce an Azure Tables attribute to ``bool``, tolerating legacy rows.
+
+    Azure Tables represents a boolean column natively, but a row written
+    before this column existed has the attribute absent (``None``), and a
+    row round-tripped through a stringly-typed path may carry ``"false"`` /
+    ``"0"``. Missing → ``default`` so an old row defaults the new toggle on.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "false", "0", "no", "off"}
+    return bool(value)
 
 
 def _load_json_dict(raw: str) -> dict[str, str]:
@@ -411,7 +440,9 @@ def _entity_to_state(entity: Any) -> UpgradeState:
         latest_version=str(entity.get("latest_version", "")),
         latest_sha=str(entity.get("latest_sha", "")),
         latest_checked_at=str(entity.get("latest_checked_at", "")),
+        latest_commit_sha=str(entity.get("latest_commit_sha", "")),
         git_remote=str(entity.get("git_remote", "")),
+        track_commits=_coerce_bool(entity.get("track_commits"), default=True),
         state=raw_state,
         target_version=str(entity.get("target_version", "")),
         target_sha=str(entity.get("target_sha", "")),
@@ -445,7 +476,9 @@ def _state_to_entity(state: UpgradeState) -> dict[str, Any]:
         "latest_version": state.latest_version,
         "latest_sha": state.latest_sha,
         "latest_checked_at": state.latest_checked_at,
+        "latest_commit_sha": state.latest_commit_sha,
         "git_remote": state.git_remote,
+        "track_commits": bool(state.track_commits),
         "state": state.state,
         "target_version": state.target_version,
         "target_sha": state.target_sha,

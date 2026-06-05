@@ -243,6 +243,7 @@ def test_execute_without_remote_marks_failed_pre(
 ) -> None:
     after_start = _start()
     monkeypatch.delenv("UPGRADE_GIT_REMOTE", raising=False)
+    monkeypatch.setattr("api.services.upgrade.remote_tags.DEFAULT_GIT_REMOTE", "")
     runner = _FakeRunner()
     aca = _FakeAca()
     after_exec = upgrade_task.execute_upgrade_inline(

@@ -230,10 +230,49 @@ def test_filter_candidates_with_invalid_running_returns_all() -> None:
 
 
 def test_configured_remote_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With the env unset, configured_remote falls back to the in-code default
+    # so the update-check flow works with zero configuration.
     monkeypatch.delenv(remote_tags.UPGRADE_GIT_REMOTE_ENV, raising=False)
-    assert remote_tags.configured_remote() is None
+    assert remote_tags.configured_remote() == remote_tags.DEFAULT_GIT_REMOTE
+    # An explicit env value overrides the default (and is stripped).
     monkeypatch.setenv(remote_tags.UPGRADE_GIT_REMOTE_ENV, "  https://example.test/foo.git ")
     assert remote_tags.configured_remote() == "https://example.test/foo.git"
+
+
+def test_configured_remote_none_when_default_blanked(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Blanking the in-code default reaches the legacy "inert until opted in"
+    # branch — the only way configured_remote returns None.
+    monkeypatch.delenv(remote_tags.UPGRADE_GIT_REMOTE_ENV, raising=False)
+    monkeypatch.setattr(remote_tags, "DEFAULT_GIT_REMOTE", "")
+    assert remote_tags.configured_remote() is None
+
+
+def test_fetch_branch_head_returns_tracking_branch_sha() -> None:
+    tag_sha = "a" * 40
+    head_sha = "b" * 40
+    payload = _advertisement(
+        [
+            (tag_sha, "refs/tags/v0.3.0"),
+            (head_sha, "refs/heads/main"),
+            ("c" * 40, "refs/heads/feature"),
+        ]
+    )
+    head = remote_tags.fetch_branch_head(
+        "https://example.test/foo.git",
+        branch="main",
+        http_client_factory=_client_with(payload),
+    )
+    assert head == head_sha
+
+
+def test_fetch_branch_head_empty_when_branch_absent() -> None:
+    payload = _advertisement([("a" * 40, "refs/tags/v0.3.0")])
+    head = remote_tags.fetch_branch_head(
+        "https://example.test/foo.git",
+        branch="main",
+        http_client_factory=_client_with(payload),
+    )
+    assert head == ""
 
 
 def test_max_tags_caps_result() -> None:

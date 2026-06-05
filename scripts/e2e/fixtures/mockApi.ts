@@ -182,6 +182,8 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     latest_sha: "2222222",
     latest_checked_at: now,
     git_remote: "origin",
+    track_commits: true,
+    latest_commit_sha: "",
     state: "idle",
     target_version: "",
     target_sha: "",

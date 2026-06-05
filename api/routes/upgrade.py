@@ -12,7 +12,7 @@ Edit boundaries: Add new endpoints here; their business logic goes into
   services/tasks. Keep MSAL bearer enforcement on every route and the
   upgrade-admin gate on every mutating route.
 Key entry points: `router`, `upgrade_status`, `upgrade_candidates`,
-  `upgrade_check`, `upgrade_start`, `upgrade_build_log`,
+  `upgrade_check`, `upgrade_settings`, `upgrade_start`, `upgrade_build_log`,
   `reset_check_throttle_for_tests`.
 Risky contracts: `/check` is throttled to avoid amplifying an upstream-git
   DOS. `/start` requires the UpgradeAdmin gate plus an explicit
@@ -113,7 +113,26 @@ class UpgradeRollbackRequest(BaseModel):
     )
 
 
+class UpgradeSettingsRequest(BaseModel):
+    track_commits: bool = Field(
+        ...,
+        description=(
+            "When true (default for new deployments), the discovery flow also "
+            "surfaces new commits on the tracking branch (preview channel). "
+            "When false, only release tags are checked."
+        ),
+    )
+
+
 def _mask_state(payload: dict[str, Any]) -> dict[str, Any]:
+    # Surface the *effective* remote so the SPA never shows "not configured"
+    # when a default remote is active but no discovery check has populated
+    # the persisted `git_remote` yet (cold-start chicken-and-egg). The
+    # persisted row is unchanged; only the response is enriched.
+    if not payload.get("git_remote"):
+        effective = remote_tags.configured_remote()
+        if effective:
+            payload["git_remote"] = effective
     if payload.get("git_remote"):
         payload["git_remote"] = remote_tags.mask_remote_url(str(payload["git_remote"]))
     return payload
@@ -177,6 +196,24 @@ def upgrade_check(_caller: CallerIdentity = Depends(require_caller)) -> dict[str
             )
         _last_check_at = now
     updated = check_latest_inline()
+    return _mask_state(updated.to_public_dict())
+
+
+@router.post("/settings")
+def upgrade_settings(
+    body: UpgradeSettingsRequest,
+    _caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Persist the update-channel toggle and return the refreshed state row.
+
+    This only changes which refs the read-only discovery flow surfaces; it
+    cannot trigger a deployment (that still requires `/start`, the
+    UpgradeAdmin gate, and an explicit `confirm_downtime`). It is therefore
+    gated by `require_caller` rather than `require_upgrade_admin` so any
+    authenticated operator can pick their update channel.
+    """
+    track = bool(body.track_commits)
+    updated = state.update_state(lambda s: setattr(s, "track_commits", track))
     return _mask_state(updated.to_public_dict())
 
 
