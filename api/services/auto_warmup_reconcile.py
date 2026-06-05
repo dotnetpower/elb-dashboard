@@ -84,7 +84,15 @@ def auto_warmup_ready_gate(
             cluster_name,
         )
     except Exception as exc:
-        LOGGER.warning(
+        # Beat reconciler runs every 120 s; a sustained AKS outage would
+        # otherwise emit a fresh WARNING per tick. Key by (cluster, exc
+        # class) so a new failure class still surfaces; repeats drop to
+        # DEBUG.
+        from api.services.log_dedup import dedup_log_warning
+
+        dedup_log_warning(
+            LOGGER,
+            ("auto_warmup_node_readiness", cluster_name, type(exc).__name__),
             "auto warmup node readiness lookup failed cluster=%s expected=%d: %s",
             cluster_name,
             expected_node_count,

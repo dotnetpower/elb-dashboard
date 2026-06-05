@@ -156,7 +156,20 @@ def _classify_exception(exc: Exception) -> str:
 
 def _graceful(op: str, exc: Exception, *, empty: Any) -> Any:
     code = _classify_exception(exc)
-    LOGGER.warning("%s gracefully degraded: %s (%s)", op, code, sanitise(str(exc))[:200])
+    # Dashboard polls every 5-30 s, so a sustained AKS / Storage degrade
+    # would emit a fresh WARNING per route per tick without dedup. Key by
+    # (op, classification) so a NEW failure class still surfaces inside
+    # the dedup window; repeats drop to DEBUG.
+    from api.services.log_dedup import dedup_log_warning
+
+    dedup_log_warning(
+        LOGGER,
+        ("monitor_graceful", op, code),
+        "%s gracefully degraded: %s (%s)",
+        op,
+        code,
+        sanitise(str(exc))[:200],
+    )
     try:
         _get_degraded_counter().add(1, {"op": op, "reason": code})
     except Exception as counter_exc:  # pragma: no cover - never fail a degrade path

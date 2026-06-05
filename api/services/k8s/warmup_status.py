@@ -375,7 +375,19 @@ def k8s_warmup_status(
 
         return result
     except Exception as exc:
-        LOGGER.warning("k8s_warmup_status failed for %s: %s", cluster_name, str(exc)[:200])
+        # Dashboard polls warmup status every few seconds, so a sustained
+        # AKS read-timeout / DNS hiccup would emit a fresh WARNING per
+        # tick without dedup. Key by (cluster, exc class) so a new error
+        # class still surfaces; repeats drop to DEBUG.
+        from api.services.log_dedup import dedup_log_warning
+
+        dedup_log_warning(
+            LOGGER,
+            ("k8s_warmup_status", cluster_name, type(exc).__name__),
+            "k8s_warmup_status failed for %s: %s",
+            cluster_name,
+            str(exc)[:200],
+        )
         return {
             "warm": False,
             "workspace_ready": 0,

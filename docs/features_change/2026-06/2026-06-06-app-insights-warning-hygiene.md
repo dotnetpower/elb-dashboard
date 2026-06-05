@@ -48,6 +48,8 @@ ceiling was effectively lost).
 
 No public API change. Internal helper additions:
 
+### Round 1 — direct fixes for the three observed families
+
 - `api/services/ncbi/_eutils.py` — new `_is_noscript_error(exc)`
   classifier (type-first, substring-fallback); `_consume_token_redis_until`
   uses it so EVAL fallback fires on `redis.exceptions.NoScriptError`.
@@ -62,11 +64,39 @@ No public API change. Internal helper additions:
   logs WARNING, repeats inside the window degrade to DEBUG. Reset
   helper `_reset_redis_unavailable_dedup()` exposed for tests.
 
+### Round 2 — preventative hardening for the same defect class
+
+User asked to reinforce more broadly so other latent versions of the
+same problem do not surface later. Added:
+
+- `api/services/log_dedup.py` — **new shared helper**
+  `dedup_log_warning(logger, key, msg, *args, window_seconds=300,
+  exc_info=False)`. TTL-window dedup with a bounded tracked-key map
+  (cap 1024) so a pathological caller emitting unique keys cannot grow
+  the dict without bound. `exc_info=True` is forwarded only on the
+  first emission per window so App Insights gets at most one
+  exception row per outage class per window.
+- `api/routes/monitor/common.py` `_graceful(...)` — dedup keyed by
+  `(op, classification)`. Covers ~20 `/api/monitor/*` route call
+  sites in one place, so a sustained AKS / Storage / ACR degrade
+  now emits one WARNING per (route, classification) per window
+  instead of one per polling tick.
+- `api/services/k8s/warmup_status.py` — `k8s_warmup_status failed`
+  warning now keyed by `(cluster, exc class)`. Was logging once per
+  monitor tick during AKS read-timeout bursts.
+- `api/services/auto_warmup_reconcile.py` — `auto warmup node readiness
+  lookup failed` warning now keyed by `(cluster, exc class)`. Was
+  logging once per 120 s beat tick during a sustained outage.
+- `api/services/storage/blob_io.py` — `read_blob_text` now also
+  catches HTTP 416 / `InvalidRange` and returns `""` for consistency
+  with `read_metadata_blob_bytes`. Affects BLAST FAILURE.txt /
+  runtime-out / metadata stub reads that may legitimately be 0 bytes.
+
 ## Validation
 
-- Lint: `uv run ruff check api/services/ncbi/_eutils.py api/services/peering_nsg_lock.py api/services/storage/blob_io.py api/services/sidecar_metrics.py` — clean.
-- Focused tests (4 new + 1 existing): `uv run pytest -q api/tests/test_ncbi_nuccore.py::test_redis_token_bucket_recovers_from_noscript_eviction api/tests/test_peering_nsg_lock.py::test_redis_release_handles_redis_py_noscript_error api/tests/test_peering_nsg_lock.py::test_redis_release_falls_back_to_eval_on_noscript api/tests/test_blob_io_metadata.py api/tests/test_sidecar_metrics.py::test_collect_snapshot_dedups_redis_unavailable_warning` — 8 passed.
-- Full backend suite: `uv run pytest -q api/tests` — **2932 passed, 3 skipped** in 61 s. No regressions.
+- Lint: `uv run ruff check api/services/log_dedup.py api/services/storage/blob_io.py api/routes/monitor/common.py api/services/k8s/warmup_status.py api/services/auto_warmup_reconcile.py api/services/ncbi/_eutils.py api/services/peering_nsg_lock.py api/services/sidecar_metrics.py` — clean.
+- Focused tests (15 new across rounds): `uv run pytest -q api/tests/test_log_dedup.py api/tests/test_monitor_graceful.py api/tests/test_blob_io_metadata.py api/tests/test_sidecar_metrics.py api/tests/test_peering_nsg_lock.py api/tests/test_ncbi_nuccore.py` — **119 passed**.
+- Full backend suite: `uv run pytest -q api/tests` — **2939 passed, 3 skipped** in 36 s. No regressions.
 - Repro confirmation (NoScriptError str): `python -c "from redis.exceptions import NoScriptError; print('NOSCRIPT' in str(NoScriptError('No matching script. Please use [E]VAL.')).upper())"` → `False`, confirming the silent-miss bug.
 
 ## Risk / follow-ups
@@ -74,9 +104,17 @@ No public API change. Internal helper additions:
 - The dedup helper is per-process; a deployment with multiple `api`
   replicas would still emit one WARNING per replica per window. The
   current single-replica `minReplicas: 1, maxReplicas: 1` charter
-  means there is exactly one emitter, so no aggregation needed.
+  means there is exactly one emitter, so no aggregation needed. If
+  the topology ever moves to `maxReplicas > 1`, consider folding the
+  dedup map into Redis db 2 (the same ops Redis already used by
+  `sidecar_metrics`).
 - The `InvalidRange` collapse to empty intentionally only fires for
   status 416 / error_code `InvalidRange`. Other 4xx/5xx still raise
   so genuine failures (auth, throttling, network) remain visible.
+- The existing dedup logic in `api/services/monitor_cache.py` and
+  `api/services/sidecar_metrics.py` was left in place rather than
+  refactored to use the new shared helper — both are well-tested
+  and functionally equivalent. A follow-up may consolidate them
+  into the shared helper if further dedup sites are added.
 - Will re-run the same KQL sweep 24 h after the next deploy to
-  confirm the three families dropped to near-zero.
+  confirm the listed families dropped to near-zero.

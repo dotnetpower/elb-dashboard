@@ -106,11 +106,25 @@ def read_blob_text(
     blob_path: str,
     max_bytes: int = 4096,
 ) -> str:
-    """Read the first max_bytes of a text blob. Returns UTF-8 text."""
+    """Read the first max_bytes of a text blob. Returns UTF-8 text.
+
+    A 0-byte blob (e.g. BLAST FAILURE.txt that exists but is empty,
+    metadata stub from a partial upload) makes Azure Storage return
+    HTTP 416 InvalidRange for any explicit byte range — surface it as
+    an empty string so callers don't have to special-case 416 separately
+    from the more common ``ResourceNotFoundError``.
+    """
     _validate_blob_path(blob_path)
     svc = _blob_service(credential, account_name)
     blob = svc.get_blob_client(container, blob_path)
-    data = blob.download_blob(offset=0, length=max_bytes).readall()
+    try:
+        data = blob.download_blob(offset=0, length=max_bytes).readall()
+    except HttpResponseError as exc:
+        status = getattr(exc, "status_code", None)
+        error_code = getattr(exc, "error_code", None)
+        if status == 416 or error_code == "InvalidRange":
+            return ""
+        raise
     return data.decode("utf-8", errors="replace")
 
 

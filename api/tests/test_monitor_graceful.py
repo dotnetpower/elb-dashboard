@@ -196,3 +196,32 @@ def test_graceful_counter_failure_never_breaks_degrade(monkeypatch: pytest.Monke
     out: Any = _graceful("aks_list", _http_error(403), empty={"clusters": []})
     assert out == {"clusters": [], "degraded": True, "degraded_reason": "forbidden"}
 
+
+def test_graceful_dedups_repeated_warnings_per_op_and_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A sustained AKS / Storage outage must not flood App Insights with a
+    fresh WARNING / exception row per dashboard poll tick. The first
+    failure per (op, classification) inside the dedup window logs at
+    WARNING; subsequent identical failures drop to DEBUG so a true new
+    failure class still surfaces but per-poll noise stays out of
+    App Insights."""
+    from api.routes.monitor import common as common_module
+    from api.services import log_dedup
+
+    log_dedup.reset_dedup_state()
+    with caplog.at_level("DEBUG", logger=common_module.LOGGER.name):
+        for _ in range(4):
+            _graceful("aks_list", _http_error(503), empty={"clusters": []})
+        # Different op must still log a fresh WARNING — proving the
+        # dedup key includes op, not just reason.
+        _graceful("storage_summary", _http_error(503), empty={"containers": []})
+        # Same op, different classification, also fresh WARNING.
+        _graceful("aks_list", _http_error(403), empty={"clusters": []})
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+    # 3 distinct (op, classification) tuples → 3 WARNINGs.
+    assert len(warnings) == 3
+    # 3 repeats of the first tuple → 3 deduped DEBUGs.
+    assert sum("deduped" in r.getMessage() for r in debugs) == 3
