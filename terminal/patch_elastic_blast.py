@@ -581,6 +581,94 @@ def patch_init_shard_script(root: Path) -> None:
         path.write_text(_HARDENED_INIT_DB_SHARD_AKS_SCRIPT + "\n")
 
 
+# ---------------------------------------------------------------------------
+# blast-run-aks.sh: inject a vmtouch step immediately before the blastn
+# invocation.
+#
+# The upstream AKS variant of `blast-run-aks.sh` (unlike the NCBI reference
+# `splitq_download_db_search`) skips vmtouch entirely. That left every BLAST
+# search pod paying the full mmap-fault cost from cold SSD on the first
+# query — and the separate warmup-Job vmtouch step that this dashboard used
+# to ship was a 1-second noop on already-cached pages with no mmap holder
+# (see docs/features_change/2026-06/2026-06-06-warmup-drop-fake-vmtouch.md).
+#
+# Restoring vmtouch *inside* the search pod fixes both:
+#  * the pages it touches stay resident under memory pressure because the
+#    `blastn` process that follows holds an active mmap on the same files
+#    (the kernel deprioritises eviction of pages with active mappings);
+#  * the work is colocated with `blastn` on the same node by elastic-blast's
+#    own `nodeSelector: { ordinal: ${ELB_SHARD_IDX} }` pin, so the vmtouch
+#    cost is paid exactly once per shard per pod and applies to the right
+#    files.
+#
+# The patch is idempotent (guarded by the literal `ELB vmtouch warm step`
+# marker) so re-running `patch_elastic_blast.py` against an already-patched
+# tree is a no-op, matching the rest of this file's contract.
+# ---------------------------------------------------------------------------
+
+_BLAST_RUN_AKS_VMTOUCH_ANCHOR = 'start=$(date +%s)\necho "run start'
+_BLAST_RUN_AKS_VMTOUCH_BLOCK = r"""# ELB vmtouch warm step (added by patch_elastic_blast.py).
+# Touches the DB shard volume files into the page cache before BLAST starts so
+# the first mmap fault path is RAM-resident. `blastn` then holds those pages
+# under an active mapping for the duration of the search, which keeps the
+# kernel from reclaiming them. ELB_VMTOUCH_DISABLE=1 skips the step.
+if [ "${ELB_VMTOUCH_DISABLE:-0}" != "1" ] && command -v vmtouch >/dev/null 2>&1; then
+    if command -v blastdb_path >/dev/null 2>&1; then
+        vm_start=$(date +%s)
+        # vmtouch -m caps the per-FILE size it will touch (it skips any single
+        # volume file larger than this), not a cumulative cache budget. BLAST
+        # DB volumes are typically GB-scale per file so 60% of MemAvailable
+        # leaves any realistic volume well under the cap while still acting
+        # as a safety rail for a pathologically large single file.
+        elb_vmtouch_awk='/MemAvailable/ {printf "%dG", int($2/1024/1024*0.6)}'
+        ELB_VMTOUCH_MEM=${ELB_VMTOUCH_MEM:-$(awk "$elb_vmtouch_awk" /proc/meminfo)}
+        echo "vmtouch warm: db=${ELB_DB} mol=${ELB_DB_MOL_TYPE} budget=${ELB_VMTOUCH_MEM}"
+        # Touch volumes serially with -t (read into cache, no daemon, no
+        # mlock). The next `blastn` mmap reference is what actually keeps
+        # the pages resident.
+        blastdb_path -dbtype "$ELB_DB_MOL_TYPE" -db "$ELB_DB" -getvolumespath 2>/dev/null \
+            | tr ' ' '\n' \
+            | xargs -r -n1 vmtouch -tqm "$ELB_VMTOUCH_MEM" || true
+        vm_end=$(date +%s)
+        # Emit the runtime line BOTH on stdout (pod log) and into the
+        # $BLAST_RUNTIME file so it ships to Blob via the existing
+        # results-export-aks.sh `BLAST_RUNTIME-${JOB_NUM}.out` upload. That
+        # lets the SPA later surface per-shard vmtouch timing without
+        # plumbing a new artefact path.
+        vm_db_label="vmtouch-${ELB_DB//\//-}"
+        vm_runtime_line=$(printf 'RUNTIME %s %f seconds' "$vm_db_label" $((vm_end - vm_start)))
+        echo "$vm_runtime_line"
+        echo "$vm_runtime_line" >> "$BLAST_RUNTIME"
+    fi
+fi
+
+"""
+
+
+def _blast_run_aks_script_paths(root: Path) -> list[Path]:
+    source_path = root / "src/elastic_blast/templates/scripts/blast-run-aks.sh"
+    paths = [source_path]
+    for pattern in (
+        "venv/lib/python*/site-packages/elastic_blast/templates/scripts/blast-run-aks.sh",
+        ".venv/lib/python*/site-packages/elastic_blast/templates/scripts/blast-run-aks.sh",
+    ):
+        paths.extend(root.glob(pattern))
+    return sorted({path for path in paths if path.exists()})
+
+
+def patch_blast_run_aks_script(root: Path) -> None:
+    paths = _blast_run_aks_script_paths(root)
+    if not paths:
+        raise RuntimeError(f"blast-run-aks.sh not found under {root}")
+    for path in paths:
+        _replace_once_unless_present(
+            path,
+            _BLAST_RUN_AKS_VMTOUCH_ANCHOR,
+            _BLAST_RUN_AKS_VMTOUCH_BLOCK + _BLAST_RUN_AKS_VMTOUCH_ANCHOR,
+            "ELB vmtouch warm step",
+        )
+
+
 def patch_aks_workload_tolerations(root: Path) -> None:
     templates = {
         "blast-batch-job-aks.yaml.template": "OnFailure",
@@ -737,6 +825,7 @@ def main() -> int:
     patch_finalizer_template(root)
     patch_finalizer_script(root, merge_script_source)
     patch_init_shard_script(root)
+    patch_blast_run_aks_script(root)
     patch_aks_workload_tolerations(root)
     patch_unique_init_ssd_job_names(root)
     patch_create_workspace_daemonset_tolerations(root)

@@ -54,6 +54,25 @@ _RELEASE_LUA_SHA1 = hashlib.sha1(  # noqa: S324 - SHA1 is required by Redis EVAL
     _RELEASE_LUA.encode("utf-8")
 ).hexdigest()
 
+
+def _is_noscript_error(exc: BaseException) -> bool:
+    """Return True when ``exc`` represents a Redis NOSCRIPT response.
+
+    redis-py 5.x raises ``NoScriptError`` whose ``str()`` is just
+    ``"No matching script. Please use [E]VAL."`` (the "NOSCRIPT" prefix
+    is stripped by the parser), so substring checks on the message
+    silently miss the case. Match by type first, then fall back to the
+    legacy substring check for older clients / fakes that raise a plain
+    ``RuntimeError("NOSCRIPT ...")``.
+    """
+    try:
+        from redis.exceptions import NoScriptError
+    except ImportError:  # pragma: no cover - redis is a hard dep
+        NoScriptError = ()  # type: ignore[assignment]
+    if isinstance(exc, NoScriptError):
+        return True
+    return "NOSCRIPT" in str(exc).upper()
+
 # Short-circuit window after a Redis client lookup failure. Avoids paying
 # the import + try/except cost of ``get_broker_redis_client`` on every
 # acquire when Redis has been down for more than a few seconds. 1.0 s is
@@ -114,8 +133,7 @@ def _try_release_via_redis(client: Any, key: str, token: str) -> None:
             # Stripped-down fake without evalsha — fall through to eval.
             pass
         except Exception as exc:
-            message = str(exc).upper()
-            if "NOSCRIPT" not in message:
+            if not _is_noscript_error(exc):
                 raise
             LOGGER.debug("peering_nsg lock: EVALSHA NOSCRIPT, retrying via EVAL")
         client.eval(_RELEASE_LUA, 1, key, token)

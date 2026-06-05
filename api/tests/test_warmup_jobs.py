@@ -73,7 +73,15 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         assert "TAXDB_SKIP taxdb files not present in DB prefix" in container["args"][0]
         assert "valid_nsq_count=" in container["args"][0]
         assert "printf '%s' ok > .download-complete" in container["args"][0]
-        assert "blast-vmtouch-aks.sh" in container["args"][0]
+        # The warmup pod intentionally does NOT call blast-vmtouch-aks.sh any
+        # more — `azcopy` already populates the OS page cache as a side effect
+        # of the download, and with no mmap holder in this pod a follow-up
+        # vmtouch was a 1-second noop on already-cached pages. Pages will be
+        # actively referenced by the BLAST search pod's mmap when it lands on
+        # the same node. Keep the script in the ConfigMap for the
+        # equivalence-experiment shell scripts that exec it directly.
+        assert "blast-vmtouch-aks.sh" not in container["args"][0]
+        assert "STAGING_COMPLETE shard=" in container["args"][0]
 
 
 def test_single_shard_db_is_broadcast_to_every_node() -> None:
@@ -527,6 +535,54 @@ def test_attach_pod_progress_to_database_status_adds_phase_counts() -> None:
     assert databases[0]["phase_counts"] == {"copying_files": 1, "touching_memory": 1}
     assert databases[0]["progress_pct"] == 0
     assert len(databases[0]["pod_statuses"]) == 2
+
+
+def test_new_staging_complete_log_resolves_to_completed_phase() -> None:
+    # The new warmup pod no longer runs `/scripts/blast-vmtouch-aks.sh`, so its
+    # logs never contain "vmtouch memory limit" / "cache-blastdbs-to-ram". The
+    # final two lines are STAGING_COMPLETE + DONE; the existing "done shard="
+    # matcher in `_phase_from_warmup_log` must keep classifying that as the
+    # terminal "completed" phase.
+    databases = [
+        {
+            "name": "core_nt",
+            "nodes_ready": 0,
+            "nodes_failed": 0,
+            "nodes_active": 1,
+            "total_jobs": 1,
+            "shards": ["00"],
+            "progress_pct": 0,
+            "status": "Loading",
+        }
+    ]
+    pods = [
+        {
+            "metadata": {
+                "name": "warm-core-nt-00-abc",
+                "labels": {"db": "core_nt", "shard": "00"},
+            },
+            "spec": {"nodeName": "aks-blast-000001"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{"name": "warmup", "state": {"running": {}}}],
+            },
+        },
+    ]
+    log_text = (
+        "2026-06-06T00:00:00Z DOWNLOAD_SKIP existing shard=00\n"
+        "Database: core_nt\n"
+        "2026-06-06T00:00:01Z STAGING_COMPLETE shard=00\n"
+        "2026-06-06T00:00:01Z DONE shard=00 size=36G\n"
+    )
+    attach_pod_progress_to_database_status(
+        databases,
+        pods,
+        {"warm-core-nt-00-abc": log_text},
+    )
+
+    detail = databases[0]["pod_statuses"][0]
+    assert detail["phase"] == "completed"
+    assert databases[0]["active_phase"] == "completed"
 
 
 def test_attach_pod_progress_uses_latest_non_deleting_pod_per_shard() -> None:

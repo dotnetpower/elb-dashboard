@@ -176,3 +176,31 @@ def test_redis_cpu_sampler_uses_deltas() -> None:
 
     assert sampler.percent(now=10.0, cpu_total=4.0) == 0.0
     assert sampler.percent(now=12.0, cpu_total=5.0) == 50.0
+
+
+def test_collect_snapshot_dedups_redis_unavailable_warning(caplog) -> None:
+    """A sustained Redis sidecar restart (poll every ~5 s) must not emit
+    a fresh WARNING / AppInsights exception row per tick. The first
+    failure inside the dedup window logs at WARNING; subsequent identical
+    failures degrade to DEBUG so production telemetry stays honest about
+    NEW outage classes without drowning in repeats."""
+    from api.services import sidecar_metrics
+
+    sidecar_metrics._reset_redis_unavailable_dedup()
+    client = FakeRedis(fail_mget=True)
+
+    with caplog.at_level("DEBUG", logger=sidecar_metrics.LOGGER.name):
+        collect_snapshot(client=client)  # type: ignore[arg-type]
+        first_warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        caplog.clear()
+        for _ in range(5):
+            collect_snapshot(client=client)  # type: ignore[arg-type]
+        repeat_warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        repeat_debug = [r for r in caplog.records if r.levelname == "DEBUG"]
+
+    assert len(first_warnings) == 1
+    assert "mget failed" in first_warnings[0].getMessage()
+    # No new WARNINGs from repeats inside the dedup window; the per-tick
+    # noise drops to DEBUG so operators can still inspect it locally.
+    assert repeat_warnings == []
+    assert any("deduped" in r.getMessage() for r in repeat_debug)

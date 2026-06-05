@@ -264,3 +264,142 @@ def test_patch_create_workspace_daemonset_tolerations_is_idempotent(
 
     for path in paths:
         assert path.read_text() == snapshots[path]
+
+
+# ---------------------------------------------------------------------------
+# patch_blast_run_aks_script — vmtouch warm step inside the BLAST search pod
+# ---------------------------------------------------------------------------
+
+_BLAST_RUN_AKS_LEGACY = (
+    "#!/bin/bash\n"
+    "# blast-run-aks.sh — Execute BLAST search\n"
+    "echo \"BASH version ${BASH_VERSION}\"\n"
+    "ELB_DB_SAFE=\"${ELB_DB//\\//-}\"\n"
+    "BLAST_RUNTIME=$(mktemp)\n"
+    "ERROR_FILE=$(mktemp)\n"
+    "DATE_NOW=$(date -u +\"$ELB_TIMEFMT\")\n"
+    "if [[ ! -s \"$RESULTS_DIR/BLASTDB_LENGTH.out\" ]]; then\n"
+    "    blastdbcmd -info -db \"$ELB_DB\" \\\n"
+    "    | awk '/total/ {print $3}' \\\n"
+    "    | tr -d , > \"$RESULTS_DIR/BLASTDB_LENGTH.out\"\n"
+    "fi\n"
+    "\n"
+    "start=$(date +%s)\n"
+    "echo \"run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB\"\n"
+    "$ELB_BLAST_PROGRAM \\\n"
+    "-db \"$ELB_DB\" \\\n"
+    "-query \"$QUERY_DIR/batch_${JOB_NUM}.fa\" \\\n"
+    "-num_threads \"$ELB_NUM_CPUS\" \\\n"
+    "$ELB_BLAST_OPTIONS\n"
+    "exit $?\n"
+)
+
+
+def _write_blast_run_aks_script(tmp_path: Path) -> list[Path]:
+    source_dir = tmp_path / "src" / "elastic_blast" / "templates" / "scripts"
+    installed_dir = (
+        tmp_path
+        / "venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "elastic_blast"
+        / "templates"
+        / "scripts"
+    )
+    source_dir.mkdir(parents=True)
+    installed_dir.mkdir(parents=True)
+    paths = [
+        source_dir / "blast-run-aks.sh",
+        installed_dir / "blast-run-aks.sh",
+    ]
+    for path in paths:
+        path.write_text(_BLAST_RUN_AKS_LEGACY)
+    return paths
+
+
+def test_patch_blast_run_aks_script_injects_vmtouch_before_blastn(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    paths = _write_blast_run_aks_script(tmp_path)
+
+    patch_module.patch_blast_run_aks_script(tmp_path)
+
+    for path in paths:
+        text = path.read_text()
+        # Marker comment is present so the patch can detect re-runs.
+        assert "ELB vmtouch warm step" in text
+        # The vmtouch call uses blastdb_path to enumerate volume files, the
+        # serial `-t` (touch only) mode, and a memory budget driven by
+        # MemAvailable. We must NOT use `-l` (mlock) because the warmup pod
+        # exits immediately and BLAST's own mmap is what keeps the pages
+        # resident.
+        assert "blastdb_path -dbtype" in text
+        assert "vmtouch -tqm" in text
+        assert "vmtouch -l " not in text
+        assert "vmtouch -d " not in text
+        # Failure must not abort the BLAST search — vmtouch is a best-effort
+        # warm step, the search must still run if vmtouch is missing on the
+        # node or the volume list is empty.
+        assert "|| true" in text
+        # The step is inserted ABOVE the existing `start=$(date +%s)` /
+        # `echo "run start"` block (i.e. before BLAST is invoked), not after.
+        block_idx = text.index("ELB vmtouch warm step")
+        run_start_idx = text.index('echo "run start')
+        blastn_idx = text.index("$ELB_BLAST_PROGRAM \\")
+        assert block_idx < run_start_idx < blastn_idx
+        # The ELB_VMTOUCH_DISABLE escape hatch is documented + actually used.
+        assert "ELB_VMTOUCH_DISABLE" in text
+        # The RUNTIME metric line is emitted so the result-export step picks
+        # it up alongside the existing blast-job-NNN runtime line.
+        assert 'printf \'RUNTIME %s %f seconds' in text
+        # The runtime line is captured once via printf into a shell variable
+        # and then echoed twice: once to stdout (pod log) and once appended
+        # to $BLAST_RUNTIME so results-export-aks.sh ships it to Blob via
+        # the existing BLAST_RUNTIME-${JOB_NUM}.out upload. The SPA
+        # surfacing follow-up depends on that artefact being present.
+        assert "vm_runtime_line=" in text
+        assert text.count('echo "$vm_runtime_line"') == 2
+        assert '>> "$BLAST_RUNTIME"' in text
+
+
+def test_patch_blast_run_aks_script_is_idempotent(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    paths = _write_blast_run_aks_script(tmp_path)
+
+    patch_module.patch_blast_run_aks_script(tmp_path)
+    snapshots = {path: path.read_text() for path in paths}
+    patch_module.patch_blast_run_aks_script(tmp_path)
+
+    for path in paths:
+        text = path.read_text()
+        assert text == snapshots[path]
+        # The vmtouch block appears exactly once even after re-running.
+        assert text.count("ELB vmtouch warm step") == 1
+
+
+def test_patch_blast_run_aks_script_updates_installed_package_copy(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    paths = _write_blast_run_aks_script(tmp_path)
+
+    patch_module.patch_blast_run_aks_script(tmp_path)
+
+    for path in paths:
+        text = path.read_text()
+        assert "ELB vmtouch warm step" in text
+        # Original script content (legacy header) is preserved.
+        assert "blast-run-aks.sh — Execute BLAST search" in text
+
+
+def test_patch_blast_run_aks_script_missing_anchor_raises(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    source_dir = tmp_path / "src" / "elastic_blast" / "templates" / "scripts"
+    source_dir.mkdir(parents=True)
+    target = source_dir / "blast-run-aks.sh"
+    # A script without the upstream anchor must fail loudly rather than
+    # silently producing a half-patched file.
+    target.write_text("#!/bin/bash\necho hi\n")
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="expected one match"):
+        patch_module.patch_blast_run_aks_script(tmp_path)

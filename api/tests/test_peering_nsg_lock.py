@@ -374,6 +374,31 @@ def test_redis_release_falls_back_to_eval_on_noscript(
     assert len(fake.eval_calls) == 1
 
 
+def test_redis_release_handles_redis_py_noscript_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """redis-py 5.x raises ``NoScriptError`` whose ``str()`` no longer
+    starts with ``NOSCRIPT`` (the prefix is stripped during parsing).
+    The lock must detect the error by type and still fall back to EVAL —
+    otherwise every release after a Redis restart would re-raise instead
+    of auto-reloading the script."""
+    from redis.exceptions import NoScriptError
+
+    class _RedisPyEvictedFake(_FakeRedis):
+        def evalsha(self, sha: str, numkeys: int, key: str, token: str) -> int:
+            self.evalsha_calls.append((sha, key, token))
+            raise NoScriptError("No matching script. Please use [E]VAL.")
+
+    fake = _RedisPyEvictedFake()
+    monkeypatch.setattr(lock_mod, "_redis_client_or_none", lambda: fake)
+
+    handle = acquire_nsg_lock(_NSG_ID_A, timeout_seconds=0.05)
+    assert handle is not None
+    handle.release()
+    assert len(fake.evalsha_calls) == 1
+    assert len(fake.eval_calls) == 1
+
+
 def test_redis_lock_expires_after_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression guard: dropping ``ex=ttl_seconds`` would let the key
     linger forever and a second acquire would never succeed. The fake

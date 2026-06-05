@@ -814,6 +814,40 @@ def test_redis_token_bucket_falls_back_on_redis_failure(
     _eutils._consume_token(timeout_seconds=0.5)
 
 
+def test_redis_token_bucket_recovers_from_noscript_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the Lua script is evicted (e.g. Redis restart), EVALSHA raises
+    ``redis.exceptions.NoScriptError`` whose ``str()`` has the "NOSCRIPT"
+    prefix stripped by redis-py. The bucket must still fall back to EVAL
+    (which reloads + runs the script) instead of degrading to the
+    in-process bucket on every call."""
+    from api.services.ncbi import _eutils
+    from redis.exceptions import NoScriptError
+
+    class _EvictedRedis:
+        def __init__(self) -> None:
+            self.evalsha_calls = 0
+            self.eval_calls = 0
+
+        def evalsha(self, *_a: object, **_kw: object) -> list[int]:
+            self.evalsha_calls += 1
+            # Match what redis-py 5.x produces — the "NOSCRIPT" prefix
+            # is stripped during parsing, leaving only this message.
+            raise NoScriptError("No matching script. Please use [E]VAL.")
+
+        def eval(self, *_a: object, **_kw: object) -> list[int]:
+            self.eval_calls += 1
+            return [1, 0]
+
+    fake = _EvictedRedis()
+    monkeypatch.setattr(_eutils, "_redis_bucket_client", lambda: fake)
+    _eutils.reset_rate_limiter()
+    _eutils._consume_token(timeout_seconds=0.5)
+    assert fake.evalsha_calls == 1
+    assert fake.eval_calls == 1
+
+
 # ---------------------------------------------------------------------------
 # Per-caller quota (critique #10, #11, #13, #19)
 # ---------------------------------------------------------------------------

@@ -269,6 +269,25 @@ _REDIS_BUCKET_LUA_SHA1 = hashlib.sha1(  # noqa: S324 - SHA1 is the Redis EVALSHA
 ).hexdigest()
 
 
+def _is_noscript_error(exc: BaseException) -> bool:
+    """Return True when ``exc`` represents a Redis NOSCRIPT response.
+
+    redis-py 5.x raises ``NoScriptError`` whose ``str()`` is just
+    ``"No matching script. Please use [E]VAL."`` (the "NOSCRIPT" prefix
+    is stripped during parsing), so substring checks on the message
+    silently miss the case. Match by type first, then fall back to the
+    legacy substring check for older clients / hand-rolled fakes that
+    raise ``RuntimeError("NOSCRIPT ...")``.
+    """
+    try:
+        from redis.exceptions import NoScriptError
+    except ImportError:  # pragma: no cover - redis is a hard dep
+        NoScriptError = ()  # type: ignore[assignment]
+    if isinstance(exc, NoScriptError):
+        return True
+    return "NOSCRIPT" in str(exc).upper()
+
+
 class _RedisBucketUnavailable(Exception):
     """Internal sentinel — Redis bucket cannot be consulted right now."""
 
@@ -347,20 +366,22 @@ def _consume_token_redis_until(deadline: float) -> bool:
                     _REDIS_BUCKET_MAX_ELAPSED_SECONDS,
                 )
             except Exception as exc:
-                message = str(exc).upper()
-                if "NOSCRIPT" in message:
-                    result = client.eval(
-                        _REDIS_BUCKET_LUA,
-                        1,
-                        _REDIS_BUCKET_KEY,
-                        capacity,
-                        rate,
-                        now_ms,
-                        _REDIS_BUCKET_TTL_SECONDS,
-                        _REDIS_BUCKET_MAX_ELAPSED_SECONDS,
-                    )
-                else:
+                if not _is_noscript_error(exc):
                     raise
+                # Script was evicted (e.g. Redis restart / SCRIPT FLUSH).
+                # redis-py strips the "NOSCRIPT" prefix when constructing
+                # ``NoScriptError`` so a substring check on ``str(exc)``
+                # silently misses; classify by type instead.
+                result = client.eval(
+                    _REDIS_BUCKET_LUA,
+                    1,
+                    _REDIS_BUCKET_KEY,
+                    capacity,
+                    rate,
+                    now_ms,
+                    _REDIS_BUCKET_TTL_SECONDS,
+                    _REDIS_BUCKET_MAX_ELAPSED_SECONDS,
+                )
         except Exception as exc:
             LOGGER.warning(
                 "ncbi rate-limit: redis EVAL failed (%s) — falling back to in-process bucket",

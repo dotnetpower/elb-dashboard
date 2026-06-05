@@ -77,6 +77,31 @@ class RedisCpuSampler:
 
 _REDIS_CPU_SAMPLER = RedisCpuSampler()
 
+# Dedup window for the "sidecar metrics mget failed" warning. The /api/monitor
+# /sidecars route polls every few seconds; without dedup, a sustained Redis
+# sidecar restart produces one App Insights warning per poll tick. Re-emit
+# the WARNING (with stack) once per window so a real new outage class still
+# surfaces; repeats inside the window log at DEBUG only.
+_REDIS_UNAVAILABLE_DEDUP_WINDOW_SECONDS = 300.0
+_REDIS_UNAVAILABLE_LAST_WARNED: dict[str, float] = {}
+
+
+def _log_redis_unavailable(exc: BaseException) -> None:
+    """Log Redis-unreachable failures with per-error-class deduplication."""
+    key = type(exc).__name__
+    now = time.monotonic()
+    last = _REDIS_UNAVAILABLE_LAST_WARNED.get(key)
+    if last is None or (now - last) >= _REDIS_UNAVAILABLE_DEDUP_WINDOW_SECONDS:
+        LOGGER.warning("sidecar metrics mget failed: %s", exc)
+        _REDIS_UNAVAILABLE_LAST_WARNED[key] = now
+    else:
+        LOGGER.debug("sidecar metrics mget failed (deduped): %s", exc)
+
+
+def _reset_redis_unavailable_dedup() -> None:
+    """Test-only: clear the dedup map so tests are deterministic."""
+    _REDIS_UNAVAILABLE_LAST_WARNED.clear()
+
 
 def _redis_url() -> str:
     return os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
@@ -279,7 +304,7 @@ def collect_snapshot(
     try:
         raw_entries = list(_mget_reporters(redis_client))
     except redis.RedisError as exc:
-        LOGGER.warning("sidecar metrics mget failed: %s", exc)
+        _log_redis_unavailable(exc)
         return _all_down_snapshot(now, "redis_unavailable", str(exc))
 
     sidecars: dict[str, dict[str, Any]] = {}

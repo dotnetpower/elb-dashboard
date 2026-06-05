@@ -21,6 +21,7 @@ from collections.abc import Iterable, Iterator
 from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
+from azure.core.exceptions import HttpResponseError
 from azure.storage.blob import ContentSettings
 
 from api.services.storage.blob_ids import encode_blob_file_id
@@ -135,8 +136,20 @@ def read_metadata_blob_bytes(
     bytes across the network. Raises ``ValueError`` with the size in the
     message when the blob exceeds the cap so callers can log + degrade
     cleanly instead of OOM'ing the worker.
+
+    A 0-byte blob (e.g. a freshly-created append blob with no events yet)
+    makes Azure Storage return ``HTTP 416 InvalidRange`` for any
+    explicit byte range — collapse that to an empty ``b""`` so callers
+    don't have to special-case the empty-but-existing condition.
     """
-    raw = blob_client.download_blob(offset=0, length=max_bytes + 1).readall()
+    try:
+        raw = blob_client.download_blob(offset=0, length=max_bytes + 1).readall()
+    except HttpResponseError as exc:
+        status = getattr(exc, "status_code", None)
+        error_code = getattr(exc, "error_code", None)
+        if status == 416 or error_code == "InvalidRange":
+            return b""
+        raise
     if len(raw) > max_bytes:
         LOGGER.warning(
             "%s blob exceeds %d bytes (got %d); refusing to load",

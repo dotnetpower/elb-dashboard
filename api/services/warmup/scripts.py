@@ -14,6 +14,12 @@ Key entry points: `warmup_shell_command()`, `INIT_DB_SHARD_AKS_SCRIPT`,
 Risky contracts: The scripts reference the ConfigMap mount path
 `/scripts/init-db-shard-aks.sh` and `/scripts/blast-vmtouch-aks.sh`; keep
 those paths in lock-step with `build_warmup_scripts_configmap()`.
+The warmup Job entrypoint deliberately does NOT call `blast-vmtouch-aks.sh`
+any more (kept in ConfigMap only for the equivalence-experiment shell
+scripts that exec it directly): pages staged by ``azcopy`` already sit in
+the OS page cache as a side effect of the download, and with no mmap
+holder process in the warmup pod the vmtouch step was a 1-second noop on
+already-cached pages — see [docs/features_change/2026-06/].
 Validation: `uv run pytest -q api/tests/test_warmup_*.py`.
 """
 
@@ -68,7 +74,7 @@ else
   log "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
 fi
 blastdbcmd -db "$ELB_DB" -info | tee warmup-db-info.txt
-/scripts/blast-vmtouch-aks.sh | tee warmup-vmtouch.log
+log "STAGING_COMPLETE shard=${ELB_SHARD_IDX}"
 log "DONE shard=${ELB_SHARD_IDX} size=$(du -sh . | cut -f1)"
 """.strip()
 

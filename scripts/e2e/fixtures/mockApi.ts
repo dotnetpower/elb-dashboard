@@ -2,6 +2,20 @@ import type { Page, Route } from "@playwright/test";
 
 import { workspaceConfig } from "../scenarios/helpers/workspace";
 
+export interface CallerPermissionsFixture {
+  can_read: boolean;
+  can_write: boolean;
+  can_start_stop: boolean;
+  can_delete: boolean;
+  can_submit_blast: boolean;
+  can_build_acr: boolean;
+  can_grant_rbac: boolean;
+  degraded: boolean;
+  matched_roles: string[];
+  matched_role_names: string[];
+  reason: string;
+}
+
 export interface UiMockState {
   aksActions: Array<{ action: string; payload: Record<string, unknown> }>;
   buildRequests: Array<Record<string, unknown>>;
@@ -13,7 +27,53 @@ export interface UiMockState {
   scheduleDeletes: string[];
   upgradeRollbacks: number;
   upgradeStarts: Array<Record<string, unknown>>;
+  /** Effective RBAC capabilities served by the `/api/me/permissions` mock.
+   *  Defaults to a full-access (Owner-like) caller; override per-test with
+   *  `setPermissions` BEFORE navigating to exercise restricted-user UX. */
+  permissions: CallerPermissionsFixture;
+  /** Merge a partial capability set into the served permissions. Must be
+   *  called before `page.goto` so `usePermissions` reads the override on its
+   *  first fetch. */
+  setPermissions: (partial: Partial<CallerPermissionsFixture>) => void;
+  /** Per-endpoint response overrides for network / performance scenarios.
+   *  Keys: `databases`, `storage`, `topNodes`, `warmup`, `acr`, `startStats`.
+   *  When unset, the route serves its default payload, so existing scenarios
+   *  are unaffected. Set BEFORE navigating. */
+  responses: Record<string, unknown>;
+  setResponse: (key: string, value: unknown) => void;
 }
+
+/** Full-access caller (every capability granted, not degraded). */
+export const FULL_PERMISSIONS: CallerPermissionsFixture = {
+  can_read: true,
+  can_write: true,
+  can_start_stop: true,
+  can_delete: true,
+  can_submit_blast: true,
+  can_build_acr: true,
+  can_grant_rbac: true,
+  degraded: false,
+  matched_roles: [],
+  matched_role_names: ["Owner"],
+  reason: "",
+};
+
+/** Subscription Reader + Storage Blob Data Reader — can browse, cannot mutate.
+ *  `degraded:false` is essential: the SPA only disables a control when the
+ *  capability is false AND not degraded (a degraded enumeration fails open). */
+export const READER_PERMISSIONS: CallerPermissionsFixture = {
+  can_read: true,
+  can_write: false,
+  can_start_stop: false,
+  can_delete: false,
+  can_submit_blast: false,
+  can_build_acr: false,
+  can_grant_rbac: false,
+  degraded: false,
+  matched_roles: [],
+  matched_role_names: ["Reader", "Storage Blob Data Reader"],
+  reason: "",
+};
 
 const now = new Date("2026-05-24T10:00:00.000Z").toISOString();
 // The fixture job's timestamps must stay inside the user's local "today" so
@@ -107,6 +167,14 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     scheduleDeletes: [],
     upgradeRollbacks: 0,
     upgradeStarts: [],
+    permissions: { ...FULL_PERMISSIONS },
+    setPermissions(partial) {
+      Object.assign(this.permissions, partial);
+    },
+    responses: {},
+    setResponse(key, value) {
+      this.responses[key] = value;
+    },
   };
 
   const completedJob = {
@@ -205,6 +273,38 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
       name: "E2E User",
       roles: ["dashboard-user"],
     }),
+  );
+
+  // Effective RBAC capabilities. Defaults to full access; a restricted-user
+  // scenario calls `state.setPermissions({ ... })` before navigating to make
+  // the SPA disable Stop / Delete / Submit / Build for a Reader-only operator.
+  await page.route("**/api/me/permissions**", (route) =>
+    jsonResponse(route, state.permissions),
+  );
+
+  // Graceful read-only endpoints the dashboard polls when a cluster row is
+  // expanded. They are not asserted by any scenario, but leaving them unmocked
+  // lets the requests leak to a real api (cross-origin in the manual setup),
+  // so mock them with empty/degraded payloads to keep the ui-mock lane
+  // hermetic (no api dependency).
+  await page.route("**/api/aks/skus", (route) =>
+    jsonResponse(route, {
+      skus: [],
+      default: "",
+      default_sku: "",
+      default_system_sku: "",
+      degraded: true,
+      degraded_reason: "e2e fixture",
+    }),
+  );
+  await page.route("**/api/warmup/auto-preference**", (route) =>
+    jsonResponse(route, { enabled: false, databases: [] }),
+  );
+  await page.route("**/api/monitor/aks/top-nodes**", (route) =>
+    jsonResponse(route, state.responses.topNodes ?? { nodes: [] }),
+  );
+  await page.route("**/api/monitor/aks/start-stats**", (route) =>
+    jsonResponse(route, state.responses.startStats ?? { phases: {}, api_ready_seconds: 0 }),
   );
 
   await page.route("**/api/upgrade/status", (route) => jsonResponse(route, upgradeStatus));
@@ -310,25 +410,28 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     jsonResponse(route, { clusters: [e2eCluster] }),
   );
   await page.route("**/api/monitor/aks/warmup-status?**", (route) =>
-    jsonResponse(route, {
-      warm: true,
-      workspace_ready: 1,
-      workspace_desired: 1,
-      databases: [
-        {
-          name: "core_nt",
-          mol_type: "nucl",
-          status: "Ready",
-          sources: ["warmup"],
-          nodes_ready: 3,
-          nodes_failed: 0,
-          nodes_active: 0,
-          total_jobs: 3,
-        },
-      ],
-      vmtouch_ready: 3,
-      namespaces: ["default"],
-    }),
+    jsonResponse(
+      route,
+      state.responses.warmup ?? {
+        warm: true,
+        workspace_ready: 1,
+        workspace_desired: 1,
+        databases: [
+          {
+            name: "core_nt",
+            mol_type: "nucl",
+            status: "Ready",
+            sources: ["warmup"],
+            nodes_ready: 3,
+            nodes_failed: 0,
+            nodes_active: 0,
+            total_jobs: 3,
+          },
+        ],
+        vmtouch_ready: 3,
+        namespaces: ["default"],
+      },
+    ),
   );
   await page.route("**/api/monitor/aks/service-ip?**", (route) =>
     jsonResponse(route, { service_name: "elb-openapi", external_ip: "127.0.0.1" }),
@@ -340,43 +443,49 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     jsonResponse(route, { jobs: [], degraded: false }),
   );
   await page.route("**/api/monitor/storage?**", (route) =>
-    jsonResponse(route, {
-      name: workspaceConfig.storageAccountName,
-      region: workspaceConfig.region,
-      sku: "Standard_LRS",
-      kind: "StorageV2",
-      public_network_access: "Disabled",
-      is_hns_enabled: false,
-      containers: [
-        {
-          name: "blast-db",
-          public_access: null,
-          last_modified_time: now,
-          blob_count: 22,
-          size_bytes: 287_309_824,
-        },
-        {
-          name: "queries",
-          public_access: null,
-          last_modified_time: now,
-          blob_count: 2,
-          size_bytes: 2048,
-        },
-      ],
-    }),
+    jsonResponse(
+      route,
+      state.responses.storage ?? {
+        name: workspaceConfig.storageAccountName,
+        region: workspaceConfig.region,
+        sku: "Standard_LRS",
+        kind: "StorageV2",
+        public_network_access: "Disabled",
+        is_hns_enabled: false,
+        containers: [
+          {
+            name: "blast-db",
+            public_access: null,
+            last_modified_time: now,
+            blob_count: 22,
+            size_bytes: 287_309_824,
+          },
+          {
+            name: "queries",
+            public_access: null,
+            last_modified_time: now,
+            blob_count: 2,
+            size_bytes: 2048,
+          },
+        ],
+      },
+    ),
   );
   await page.route("**/api/monitor/acr?**", (route) =>
-    jsonResponse(route, {
-      name: workspaceConfig.acrName,
-      login_server: `${workspaceConfig.acrName}.azurecr.io`,
-      sku: "Basic",
-      expected_image_tags: {
-        "elastic-blast": "1.0.0",
-        "elb-openapi": "1.0.0",
+    jsonResponse(
+      route,
+      state.responses.acr ?? {
+        name: workspaceConfig.acrName,
+        login_server: `${workspaceConfig.acrName}.azurecr.io`,
+        sku: "Basic",
+        expected_image_tags: {
+          "elastic-blast": "1.0.0",
+          "elb-openapi": "1.0.0",
+        },
+        actual_tags: { "elastic-blast": ["1.0.0"], "elb-openapi": ["1.0.0"] },
+        build_details: [],
       },
-      actual_tags: { "elastic-blast": ["1.0.0"], "elb-openapi": ["1.0.0"] },
-      build_details: [],
-    }),
+    ),
   );
   await page.route("**/api/monitor/terminal?**", (route) =>
     jsonResponse(route, {
@@ -393,7 +502,10 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     }),
   );
   await page.route("**/api/blast/databases?**", (route) =>
-    jsonResponse(route, { databases: e2eDatabases, public_access_disabled: false }),
+    jsonResponse(
+      route,
+      state.responses.databases ?? { databases: e2eDatabases, public_access_disabled: false },
+    ),
   );
   await page.route("**/api/blast/databases/build", async (route) => {
     const payload = route.request().postDataJSON() as Record<string, unknown>;
