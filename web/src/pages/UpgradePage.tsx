@@ -8,8 +8,9 @@
  *
  * Auth: any signed-in user can see the status / candidates / history.
  * Mutating actions (start / rollback) and the escape-hatch view return
- * 403 unless the caller's oid is in `UPGRADE_ADMIN_OIDS` (or has the
- * UpgradeAdmin app role). The page degrades silently in that case.
+ * 403 unless the caller holds an Owner/Contributor role on the deployment
+ * (subscription or resource group), the `UpgradeAdmin` app role, or their oid
+ * is in `UPGRADE_ADMIN_OIDS` (break-glass). The page degrades silently then.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -536,9 +537,10 @@ export function UpgradePage() {
 
       {adminBlocked && (
         <div className="glass-card" role="status">
-          <TriangleAlert size={14} /> You are signed in but not on the upgrade-admin allowlist —
-          start/rollback/escape-hatch actions are disabled. Ask an operator to add your oid to
-          <code>UPGRADE_ADMIN_OIDS</code>.
+          <TriangleAlert size={14} /> You are signed in but lack permission for upgrade actions —
+          start/rollback/escape-hatch are disabled. You need an <strong>Owner</strong> or{" "}
+          <strong>Contributor</strong> role on the deployment (subscription or resource group).
+          Ask an operator to grant it, then reload.
         </div>
       )}
 

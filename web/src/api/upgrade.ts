@@ -11,7 +11,7 @@
  *  - POST   /upgrade/check                      (any caller; throttled)
  *  - POST   /upgrade/settings                   (any caller; channel toggle)
  *  - GET    /upgrade/history?limit=N            (any caller)
- *  - POST   /upgrade/start                      (UpgradeAdmin)
+ *  - POST   /upgrade/start                      (UpgradeAdmin: Owner/Contributor RBAC, app role, or allowlist)
  *  - POST   /upgrade/rollback                   (UpgradeAdmin)
  *  - GET    /upgrade/escape-hatch               (UpgradeAdmin)
  *  - GET    /upgrade/jobs/{job_id}/build-log/{component} (UpgradeAdmin)

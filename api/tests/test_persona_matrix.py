@@ -153,17 +153,70 @@ def test_owner_with_upgrade_role_is_upgrade_admin(
     assert is_upgrade_admin(owner_caller) is True
 
 
-def test_contributor_is_not_upgrade_admin(
+def _fake_perms(*, can_write: bool, degraded: bool = False) -> object:
+    """Minimal stand-in for `CallerPermissions` used by the RBAC-path tests."""
+    return type(
+        "_Perms",
+        (),
+        {"can_write": can_write, "degraded": degraded},
+    )()
+
+
+def test_contributor_is_upgrade_admin_via_rbac(
     monkeypatch: pytest.MonkeyPatch, contributor_caller: CallerIdentity
 ) -> None:
+    """A subscription/RG Contributor (write RBAC) is now an upgrade admin
+    without any `UpgradeAdmin` role or `UPGRADE_ADMIN_OIDS` entry."""
     monkeypatch.delenv(UPGRADE_ADMIN_OIDS_ENV, raising=False)
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-1")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-elb")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.me_permissions.compute_caller_permissions",
+        lambda *a, **k: _fake_perms(can_write=True),
+    )
+    assert is_upgrade_admin(contributor_caller) is True
+
+
+def test_contributor_without_rbac_scope_is_not_admin(
+    monkeypatch: pytest.MonkeyPatch, contributor_caller: CallerIdentity
+) -> None:
+    """With no platform subscription configured the RBAC path is inert, and a
+    Contributor with no app role / allowlist entry is not an admin."""
+    monkeypatch.delenv(UPGRADE_ADMIN_OIDS_ENV, raising=False)
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
     assert is_upgrade_admin(contributor_caller) is False
 
 
 def test_reader_is_not_upgrade_admin(
     monkeypatch: pytest.MonkeyPatch, reader_caller: CallerIdentity
 ) -> None:
+    """A subscription Reader (read-only RBAC) must NEVER be an upgrade admin,
+    even when the platform scope is configured and enumeration succeeds."""
     monkeypatch.delenv(UPGRADE_ADMIN_OIDS_ENV, raising=False)
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-1")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-elb")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.me_permissions.compute_caller_permissions",
+        lambda *a, **k: _fake_perms(can_write=False),
+    )
+    assert is_upgrade_admin(reader_caller) is False
+
+
+def test_degraded_rbac_enumeration_does_not_promote(
+    monkeypatch: pytest.MonkeyPatch, reader_caller: CallerIdentity
+) -> None:
+    """SECURITY: the RBAC path degrades CLOSED. A failed enumeration
+    (`degraded=True`, all caps opened for the SPA) must NOT make the caller an
+    admin via this gate."""
+    monkeypatch.delenv(UPGRADE_ADMIN_OIDS_ENV, raising=False)
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-1")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.me_permissions.compute_caller_permissions",
+        lambda *a, **k: _fake_perms(can_write=True, degraded=True),
+    )
     assert is_upgrade_admin(reader_caller) is False
 
 

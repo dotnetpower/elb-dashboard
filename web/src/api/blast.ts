@@ -626,6 +626,34 @@ export interface BlastCitation {
   search_space?: string | null;
 }
 
+/** One database suggestion (recommended or alternative) from the oracle. */
+export interface BlastDbSuggestion {
+  db: string;
+  label: string;
+  rationale: string;
+}
+
+/** Response of GET /api/blast/databases/recommend (R8 selection oracle). */
+export interface BlastDbRecommendation {
+  ruleset_version: string;
+  molecule: "dna" | "protein";
+  goal: string;
+  program: string;
+  taxon?: string | null;
+  recommended: BlastDbSuggestion;
+  alternative: BlastDbSuggestion;
+  notes: string[];
+}
+
+/** Search goals accepted by the recommendation oracle (mirrors SUPPORTED_GOALS). */
+export type BlastRecommendGoal =
+  | "identify"
+  | "highly_similar"
+  | "transcripts"
+  | "genomes"
+  | "well_characterized"
+  | "comprehensive";
+
 function filenameFromDisposition(value: string | null): string | null {
   if (!value) return null;
   const match = value.match(/filename\*?=(?:UTF-8''|\")?([^";]+)/i);
@@ -925,6 +953,28 @@ export const blastApi = {
     api.get<BlastCitation>(
       `/blast/jobs/${encodeURIComponent(jobId)}/citation?format=${encodeURIComponent(format)}`,
     ),
+
+  /**
+   * Recommend one NCBI database plus an alternative for a described search
+   * (R8 selection oracle). Pure decision logic on the backend — no Azure
+   * data-plane calls — so this is safe to call eagerly from the submit form.
+   */
+  getDatabaseRecommendation: (params: {
+    program?: string;
+    molecule?: "dna" | "protein";
+    goal?: BlastRecommendGoal;
+    taxon?: string;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params.program) qs.set("program", params.program);
+    if (params.molecule) qs.set("molecule", params.molecule);
+    if (params.goal) qs.set("goal", params.goal);
+    if (params.taxon) qs.set("taxon", params.taxon);
+    const query = qs.toString();
+    return api.get<BlastDbRecommendation>(
+      `/blast/databases/recommend${query ? `?${query}` : ""}`,
+    );
+  },
 
   listDatabases: (
     subscriptionId: string,

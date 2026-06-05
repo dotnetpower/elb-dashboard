@@ -87,9 +87,39 @@ export function deriveFullDbMemoryFit(args: {
     blockedReason: fits
       ? null
       : `'${database.name}' needs ${requiredGib.toFixed(1)} GB for a full-database ` +
-        `BLAST but the cluster node (${skuName}) provides only ${usableGib.toFixed(0)} GB ` +
-        `usable (${nodeRamGib.toFixed(0)} GB RAM minus ${SYSTEM_MEMORY_RESERVE_GIB} GB ` +
-        `system reserve). Switch to the Sharded throughput execution profile, or use a ` +
-        `cluster with a larger machine type.`,
+        `BLAST, which loads the entire database into a single node — adding more ` +
+        `nodes does not help. The cluster node (${skuName}) provides only ` +
+        `${usableGib.toFixed(0)} GB usable (${nodeRamGib.toFixed(0)} GB RAM minus ` +
+        `${SYSTEM_MEMORY_RESERVE_GIB} GB system reserve). Switch to the Sharded ` +
+        `throughput execution profile to spread the database across your nodes, or ` +
+        `use a cluster with a larger machine type.`,
   };
+}
+
+/**
+ * Alternate remediation for the full-DB memory block when the Sharded
+ * throughput profile is currently disabled *only* because the database is not
+ * warm yet (see `ShardingAvailability.canUnlockShardingByWarming`). The default
+ * `blockedReason` tells the user to "Switch to the Sharded throughput execution
+ * profile", but in this state that control is greyed out — a catch-22. This
+ * message instead steers them to the actionable step (warm the database, which
+ * enables sharding) while keeping the larger-machine alternative.
+ *
+ * Returns `null` unless `fit.fits === false` with known numbers, so callers can
+ * fall through to the default `blockedReason`.
+ */
+export function fullDbMemoryWarmupRemediation(
+  fit: FullDbMemoryFit,
+  dbName: string,
+): string | null {
+  if (fit.fits !== false || fit.requiredGib == null || fit.nodeRamGib == null) {
+    return null;
+  }
+  const usableGib = fit.nodeRamGib - SYSTEM_MEMORY_RESERVE_GIB;
+  return (
+    `'${dbName}' needs ${fit.requiredGib.toFixed(1)} GB and does not fit a single ` +
+    `node's ${usableGib.toFixed(0)} GB usable for a full-database BLAST. Warm this ` +
+    `database on the selected cluster to enable the Sharded throughput profile, ` +
+    `which spreads it across your nodes — or use a cluster with a larger machine type.`
+  );
 }

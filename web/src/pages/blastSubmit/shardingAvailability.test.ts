@@ -89,6 +89,61 @@ describe("deriveShardingAvailability", () => {
     expect(availability.options.precise.reason).toContain("Warm this database");
   });
 
+  it("flags canUnlockShardingByWarming when only the warm cache is missing", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: false,
+      outfmt: 5,
+    });
+
+    // Sharded modes are disabled, but warming alone would unlock them.
+    expect(availability.options.approximate.enabled).toBe(false);
+    expect(availability.canUnlockShardingByWarming).toBe(true);
+  });
+
+  it("does not flag canUnlockShardingByWarming once the DB is warm", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+
+    expect(availability.canUnlockShardingByWarming).toBe(false);
+  });
+
+  it("does not flag canUnlockShardingByWarming while warm status is unresolved", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: false,
+      isWarmupStatusResolved: false,
+      outfmt: 5,
+    });
+
+    // Still checking — we must not promise warming will help yet.
+    expect(availability.canUnlockShardingByWarming).toBe(false);
+  });
+
+  it("does not flag canUnlockShardingByWarming when sharding cannot help anyway", () => {
+    // No prepared shard layout → warming would still leave sharded modes off,
+    // so the full-DB memory block must keep its larger-machine remediation.
+    const availability = deriveShardingAvailability({
+      cluster,
+      database: {
+        ...database,
+        name: "18S_fungal_sequences",
+        sharded: false,
+        shard_sets: [],
+      },
+      isDbAlreadyWarm: false,
+      outfmt: 5,
+    });
+
+    expect(availability.canUnlockShardingByWarming).toBe(false);
+  });
+
   it("shows a neutral checking message while warm status is unresolved", () => {
     const availability = deriveShardingAvailability({
       cluster,

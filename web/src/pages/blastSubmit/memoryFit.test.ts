@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { AksClusterSummary, BlastDatabase } from "@/api/endpoints";
 
-import { deriveFullDbMemoryFit } from "./memoryFit";
+import { deriveFullDbMemoryFit, fullDbMemoryWarmupRemediation } from "./memoryFit";
 
 // core_nt's BLASTDB bytes-to-cache — the exact 251.7 GB figure ElasticBLAST
 // reports. Used to verify we block on E16s_v5 (128 GB) but NOT on E32s_v5
@@ -102,3 +102,40 @@ describe("deriveFullDbMemoryFit", () => {
     ).toBeNull();
   });
 });
+
+describe("fullDbMemoryWarmupRemediation", () => {
+  it("steers to warming (not the greyed-out Sharded control) when the run does not fit", () => {
+    const fit = deriveFullDbMemoryFit({
+      database: db(),
+      cluster: cluster("Standard_E16s_v5"), // 128 GB → 126 GB usable
+      shardingMode: "off",
+    });
+    const message = fullDbMemoryWarmupRemediation(fit, "core_nt");
+    expect(message).not.toBeNull();
+    expect(message).toContain("Warm this database");
+    expect(message).toContain("core_nt");
+    expect(message).toContain("126 GB usable");
+    // Must NOT tell the user to "Switch to the Sharded throughput profile" —
+    // that control is greyed out in this state (the catch-22 we are fixing).
+    expect(message).not.toContain("Switch to the Sharded");
+  });
+
+  it("returns null when the run fits (no block to remediate)", () => {
+    const fit = deriveFullDbMemoryFit({
+      database: db(),
+      cluster: cluster("Standard_E32s_v5"), // 256 GB > 251.7 GB
+      shardingMode: "off",
+    });
+    expect(fullDbMemoryWarmupRemediation(fit, "core_nt")).toBeNull();
+  });
+
+  it("returns null when the fit verdict is unknown", () => {
+    const fit = deriveFullDbMemoryFit({
+      database: db(),
+      cluster: cluster("Standard_E16s_v5"),
+      shardingMode: "precise", // sharded → fit is null
+    });
+    expect(fullDbMemoryWarmupRemediation(fit, "core_nt")).toBeNull();
+  });
+});
+

@@ -3429,6 +3429,110 @@ button.blast-db-table__row:focus-visible {
   color: var(--text-faint);
   font-size: 10px;
 }
+/* R8 "Help me choose" database recommendation panel. */
+.blast-db-reco {
+  margin: 8px 0 4px;
+}
+.blast-db-reco__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(122, 167, 255, 0.06);
+  border: 1px solid rgba(122, 167, 255, 0.16);
+  border-radius: 16px;
+  font-size: 11px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.blast-db-reco__toggle:hover {
+  background: rgba(122, 167, 255, 0.12);
+  border-color: var(--accent);
+}
+.blast-db-reco__body {
+  margin-top: 10px;
+  padding: 12px;
+  background: rgba(122, 167, 255, 0.04);
+  border: 1px solid rgba(122, 167, 255, 0.12);
+  border-radius: 10px;
+}
+.blast-db-reco__controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+.blast-db-reco__control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  min-width: 0;
+}
+.blast-db-reco__run {
+  min-height: 34px;
+  justify-content: center;
+}
+.blast-db-reco__results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+.blast-db-reco__row {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(122, 167, 255, 0.12);
+  background: rgba(255, 255, 255, 0.02);
+}
+.blast-db-reco__row--recommended {
+  border-color: rgba(122, 167, 255, 0.3);
+}
+.blast-db-reco__row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.blast-db-reco__badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.blast-db-reco__db {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.blast-db-reco__rationale {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.blast-db-reco__use {
+  font-size: 11px;
+}
+.blast-db-reco__missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--warning);
+}
+.blast-db-reco__notes {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+.blast-db-reco__version {
+  font-size: 10px;
+  color: var(--text-faint);
+}
 .blast-warning-box {
   display: flex;
   align-items: center;

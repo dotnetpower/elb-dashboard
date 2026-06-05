@@ -400,6 +400,53 @@ def test_start_enforces_admin_role(
     assert resp.status_code == 403
 
 
+def test_start_admin_via_platform_rbac_without_allowlist(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Owner/Contributor (write RBAC) can start an upgrade with no
+    UPGRADE_ADMIN_OIDS entry and no UpgradeAdmin app role."""
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.delenv("UPGRADE_ADMIN_OIDS", raising=False)
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-1")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-elb")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.me_permissions.compute_caller_permissions",
+        lambda *a, **k: type("_P", (), {"can_write": True, "degraded": False})(),
+    )
+    monkeypatch.setattr("api.tasks.upgrade.execute_upgrade.delay", lambda *args: None)
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_version": "0.4.1", "confirm_downtime": True},
+    )
+    assert resp.status_code == 202
+    assert resp.json()["state"] == "queued"
+
+
+def test_start_reader_rbac_is_rejected(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-only RBAC caller (no write role) is rejected even with the
+    platform scope configured."""
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.delenv("UPGRADE_ADMIN_OIDS", raising=False)
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-1")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.me_permissions.compute_caller_permissions",
+        lambda *a, **k: type("_P", (), {"can_write": False, "degraded": False})(),
+    )
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_version": "0.4.1", "confirm_downtime": True},
+    )
+    assert resp.status_code == 403
+
+
 def test_start_queues_and_enqueues(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

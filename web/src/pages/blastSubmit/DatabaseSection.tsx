@@ -7,6 +7,7 @@ import { buildDatabasePath } from "@/pages/blastSubmit/helpers";
 import { DB_DESCRIPTIONS } from "@/pages/blastSubmitModel";
 import type { DatabaseSectionProps } from "@/pages/blastSubmit/types";
 import { SectionHeader, Tip } from "@/pages/blastSubmit/ui";
+import { DatabaseRecommendPanel } from "@/pages/blastSubmit/DatabaseRecommendPanel";
 import { formatBytes } from "@/components/cards/storageDbCatalog";
 import {
   blastDbReadinessLabel,
@@ -154,6 +155,12 @@ export function DatabaseSection({
         icon={<Database size={16} strokeWidth={1.5} />}
         title="Choose Search Set"
         subtitle="Select a BLAST database from your storage"
+      />
+      <DatabaseRecommendPanel
+        program={form.program}
+        databases={databases}
+        taxonHint={form.taxid_label || form.taxid}
+        onSelect={(path) => set("db", path)}
       />
       <div>
         <span className="glass-label">

@@ -49,7 +49,23 @@ rollback buttons.
 |---|---|---|---|
 | `UPGRADE_GIT_REMOTE` | HTTPS git remote that publishes the release tags the dashboard should watch. Must end in `.git`. Anonymous read access only — private remotes are out of scope. | `https://github.com/dotnetpower/elb-dashboard.git` | Discovery, build, rollback |
 | `PLATFORM_ACR_NAME` | ACR name without the `.azurecr.io` suffix. Used as the `az acr build --registry` target and as the prefix when the reconciler compares image refs. | `myacr` | Build, rollback |
-| `UPGRADE_ADMIN_OIDS` | Comma-separated list of caller object IDs permitted to start / rollback / view the escape hatch. The MSAL `UpgradeAdmin` app role takes precedence when present. | `00000000-0000-0000-0000-000000000001,…` | Start, rollback, escape hatch |
+| `UPGRADE_ADMIN_OIDS` | **Optional break-glass override.** Comma-separated caller object IDs permitted to start / rollback / view the escape hatch. Not required: an **Owner** or **Contributor** on the deployment (subscription or resource group) is already authorised via Azure RBAC, as is the MSAL `UpgradeAdmin` app role. Use this only to grant a principal that holds neither. | `00000000-0000-0000-0000-000000000001,…` | (optional) |
+
+### Who can start / rollback / view the escape hatch
+
+Authorisation is granted by **any** of the following, checked in order:
+
+1. **Azure RBAC** — the caller holds a write role (**Owner** or **Contributor**,
+   including via Entra group membership) at the deployment's subscription or
+   resource group. This is the default path; no extra configuration is needed.
+2. **MSAL `UpgradeAdmin` app role** asserted in the caller's token.
+3. **`UPGRADE_ADMIN_OIDS`** allowlist (break-glass) for a principal that holds
+   neither of the above.
+
+The RBAC check fails closed: if role enumeration cannot be performed (the
+shared managed identity lacks `Microsoft.Authorization/roleAssignments/read`,
+or ARM is unreachable), the caller is **not** auto-promoted — fall back to the
+app role or the allowlist.
 
 The values are read on first use, not at startup — bumping them does
 not require a Container App restart.
@@ -63,11 +79,18 @@ az containerapp update \
   --name "$APP" --resource-group "$RG" \
   --set-env-vars \
     UPGRADE_GIT_REMOTE="https://github.com/dotnetpower/elb-dashboard.git" \
-    PLATFORM_ACR_NAME="$(azd env get-value PLATFORM_ACR_NAME)" \
-    UPGRADE_ADMIN_OIDS="$(az ad signed-in-user show --query id -o tsv)"
+    PLATFORM_ACR_NAME="$(azd env get-value PLATFORM_ACR_NAME)"
 ```
 
-The example above adds your own oid as the first admin. Add comma-separated entries for additional admins.
+`UPGRADE_ADMIN_OIDS` is intentionally omitted above — an Owner/Contributor on
+the deployment is already authorised via Azure RBAC. Add it only as a
+break-glass override for a principal that holds neither an RBAC write role nor
+the `UpgradeAdmin` app role:
+
+```bash
+az containerapp update --name "$APP" --resource-group "$RG" \
+  --set-env-vars UPGRADE_ADMIN_OIDS="$(az ad signed-in-user show --query id -o tsv)"
+```
 
 ## What the dashboard checks
 

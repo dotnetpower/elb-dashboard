@@ -43,6 +43,11 @@ def _env_baseline(
     monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
     monkeypatch.delenv("STORAGE_ACCOUNT_NAME", raising=False)
     monkeypatch.delenv("AZURE_RESOURCE_GROUP", raising=False)
+    # The upgrade-admin gate's RBAC path (api/services/upgrade/auth.py
+    # `caller_has_platform_write`) only fires when AZURE_SUBSCRIPTION_ID is
+    # set; drop any ambient value so tests stay network-free and deterministic
+    # unless they opt in explicitly.
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path_factory.mktemp("elb_state")))
 
 

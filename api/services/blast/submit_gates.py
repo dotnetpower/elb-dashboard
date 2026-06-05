@@ -558,8 +558,10 @@ def _gate_node_memory_fit(
                     error_code="node_memory_insufficient",
                     message=(
                         f"'{db_name}' needs {required_gib:.1f} GB for a full-database "
-                        f"BLAST but the workload node ({machine_type}) provides only "
-                        f"{usable_gib:.0f} GB usable ({node_ram_gib:.0f} GB RAM minus "
+                        "BLAST, which loads the entire database into a single node — "
+                        "adding more nodes does not help. The workload node "
+                        f"({machine_type}) provides only {usable_gib:.0f} GB usable "
+                        f"({node_ram_gib:.0f} GB RAM minus "
                         f"{_SYSTEM_MEMORY_RESERVE_GIB:.0f} GB system reserve)."
                     ),
                     action="Switch to the Sharded throughput profile (or use a larger-SKU cluster)",

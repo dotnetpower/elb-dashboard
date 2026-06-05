@@ -20,6 +20,18 @@ export interface ShardingAvailability {
   capacityPlan: ShardCapacityPlan | null;
   options: Record<ShardingMode, ShardingModeAvailability>;
   preferredMode: ShardingMode;
+  /**
+   * True when the sharded profiles are currently disabled SOLELY because the
+   * database is not warm yet on the selected cluster, and warming it would make
+   * at least the `approximate` profile available (prepared shard layout exists,
+   * capacity is feasible, outfmt is compatible). The submit form uses this to
+   * avoid the catch-22 where the full-DB memory block tells the user to switch
+   * to a Sharded profile that is greyed out — when this is true, the actionable
+   * step is to warm the database, not to pick a disabled control. False while
+   * warm status is still resolving, when the DB is already warm, or when warming
+   * alone would not unlock sharding.
+   */
+  canUnlockShardingByWarming: boolean;
 }
 
 export interface DeriveShardingAvailabilityArgs {
@@ -125,6 +137,21 @@ export function deriveShardingAvailability({
     capacityPlan,
   });
   const enabled = reason == null;
+  // Would the `approximate` profile be available if the only thing missing were
+  // the warm cache? Re-run the same precondition chain with warm forced on; a
+  // null result means every post-warm gate (prepared shards, capacity, outfmt)
+  // already passes, so warming alone unlocks sharding. Only meaningful once the
+  // real warm status has resolved to "cold".
+  const reasonIfWarm = unavailableReason({
+    cluster,
+    database,
+    isDbAlreadyWarm: true,
+    isWarmupStatusResolved: true,
+    outfmt,
+    capacityPlan,
+  });
+  const canUnlockShardingByWarming =
+    !isDbAlreadyWarm && isWarmupStatusResolved && reasonIfWarm == null;
   const hasVerifiedWebSearchSpace =
     typeof database?.web_blast_searchsp === "number" && database.web_blast_searchsp > 0;
   const preciseReason =
@@ -135,6 +162,7 @@ export function deriveShardingAvailability({
   return {
     capacityPlan,
     preferredMode: preciseReason == null ? "precise" : enabled ? "approximate" : "off",
+    canUnlockShardingByWarming,
     options: {
       off: {
         mode: "off",
