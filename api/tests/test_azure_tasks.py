@@ -687,6 +687,152 @@ def test_start_aks_stamps_last_started_at(monkeypatch, tmp_path) -> None:
     assert reloaded.last_started_at != ""
 
 
+def _arm_already_in_state_error(message: str) -> Exception:
+    """Build an ARM HttpResponseError shaped like the AKS power-state rejection."""
+    from azure.core.exceptions import HttpResponseError
+
+    exc = HttpResponseError(message=message)
+    exc.error = SimpleNamespace(code="OperationNotAllowed", message=message)
+    return exc
+
+
+def test_start_aks_treats_already_running_as_noop(monkeypatch) -> None:
+    """A start re-issued on a Running/Starting cluster (duplicate click or an
+    autoretry after a transient poll error) must converge to a no-op success,
+    NOT a hard ERROR — the LRO is not idempotent and ARM rejects it.
+    """
+    enqueued: list[str] = []
+
+    class FakePoller:
+        def result(self) -> None:
+            raise _arm_already_in_state_error(
+                "Operation not allowed: Cluster is not in a stopped state."
+            )
+
+    class FakeManagedClusters:
+        def begin_start(self, *_args: Any) -> FakePoller:
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    def fake_send_task(
+        task_name: str, *, kwargs: dict[str, Any], queue: str | None = None
+    ) -> AsyncResultStub:
+        enqueued.append(task_name)
+        return AsyncResultStub("task-openapi-noop")
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-aaa")
+    monkeypatch.delenv("ELB_AUTO_OPENAPI_DEPLOY", raising=False)
+
+    result = azure.start_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        auto_openapi={
+            "acr_name": "elbacr01",
+            "acr_resource_group": "rg-elbacr",
+            "storage_account": "elbstg01",
+            "storage_resource_group": "rg-storage",
+        },
+    )
+
+    assert result["status"] == "completed"
+    assert result["noop"] is True
+    # Follow-on side effects the user asked for still run on a no-op start.
+    assert "api.tasks.openapi.deploy_openapi_service" in enqueued
+
+
+def test_start_aks_reraises_transient_error(monkeypatch) -> None:
+    """A genuinely transient error (not the already-in-state marker) must
+    propagate so Celery's ``autoretry_for`` still retries the start.
+    """
+
+    class FakePoller:
+        def result(self) -> None:
+            raise RuntimeError("ARM 503 service unavailable")
+
+    class FakeManagedClusters:
+        def begin_start(self, *_args: Any) -> FakePoller:
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setenv("ELB_AUTO_OPENAPI_DEPLOY", "false")
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="503"):
+        azure.start_aks.run(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+        )
+
+
+def test_stop_aks_treats_already_stopped_as_noop(monkeypatch) -> None:
+    """Stopping an already Stopped/Stopping cluster (duplicate Stop, autoretry,
+    or a manual Stop racing the idle auto-stop) is a no-op success."""
+
+    class FakePoller:
+        def result(self) -> None:
+            raise _arm_already_in_state_error(
+                "Operation not allowed: Cluster is not in a running state."
+            )
+
+    class FakeManagedClusters:
+        def begin_stop(self, *_args: Any) -> FakePoller:
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+
+    result = azure.stop_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+    )
+
+    assert result["status"] == "completed"
+    assert result["noop"] is True
+
+
+def test_stop_aks_reraises_transient_error(monkeypatch) -> None:
+    """A transient stop error still propagates for autoretry."""
+
+    class FakePoller:
+        def result(self) -> None:
+            raise RuntimeError("ARM 429 throttled")
+
+    class FakeManagedClusters:
+        def begin_stop(self, *_args: Any) -> FakePoller:
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="429"):
+        azure.stop_aks.run(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+        )
+
+
 class _FakePoller:
     def result(self) -> None:
         return None

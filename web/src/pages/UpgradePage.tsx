@@ -17,6 +17,7 @@ import { ArrowUpCircle, Copy, History, RefreshCcw, RotateCcw, Terminal, Triangle
 
 import {
   compareSemver,
+  isCommitUpdateAvailable,
   statePhase,
   upgradeApi,
   type UpgradeCandidate,
@@ -30,6 +31,9 @@ import { BuildLogViewer } from "@/components/BuildLogViewer";
 
 const STATUS_POLL_MS = 5_000;
 const BROADCAST_CHANNEL_NAME = "elb-upgrade-status";
+// Sentinel encoding for the commit-channel option inside the single target
+// `<select>`: `commit:<full_sha>`. Release options use the bare semver.
+const COMMIT_TARGET_PREFIX = "commit:";
 
 export function UpgradePage() {
   const [status, setStatus] = useState<UpgradeStatus | null>(null);
@@ -127,6 +131,22 @@ export function UpgradePage() {
   }, [candidates, status]);
 
   /**
+   * The commit-channel install option. Present only when the operator has the
+   * commit channel on AND the discovered tracking-branch HEAD differs from the
+   * running build (`isCommitUpdateAvailable`). Selecting it installs the latest
+   * `main` commit rather than a tagged release. Encoded in `pickedTarget` as
+   * `commit:<full_sha>` so the single `<select>` can offer both kinds.
+   */
+  const commitOption = useMemo(() => {
+    if (!status?.track_commits) return null;
+    const sha = status.latest_commit_sha || "";
+    if (!sha || !isCommitUpdateAvailable(status, __APP_COMMIT__)) return null;
+    return { sha, short: sha.slice(0, 7) };
+  }, [status]);
+
+  const hasAnyTarget = newerCandidates.length > 0 || Boolean(commitOption);
+
+  /**
    * True when `pickedTarget`'s major segment is greater than the running
    * major. Major bumps may carry schema / infra changes that the in-app
    * upgrade can't reason about, so we require a second confirmation
@@ -162,10 +182,16 @@ export function UpgradePage() {
     setActionError(null);
     setSubmitting(true);
     try {
-      const updated = await upgradeApi.start({
-        target_version: pickedTarget,
-        confirm_downtime: true,
-      });
+      const isCommit = pickedTarget.startsWith(COMMIT_TARGET_PREFIX);
+      const updated = await upgradeApi.start(
+        isCommit
+          ? {
+              target_kind: "commit",
+              target_sha: pickedTarget.slice(COMMIT_TARGET_PREFIX.length),
+              confirm_downtime: true,
+            }
+          : { target_version: pickedTarget, confirm_downtime: true },
+      );
       setStatus(updated);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "start failed");
@@ -279,8 +305,11 @@ export function UpgradePage() {
           <p className="muted">
             Set <code>UPGRADE_GIT_REMOTE</code> on the Container App to enable upgrades.
           </p>
-        ) : newerCandidates.length === 0 ? (
-          <p className="muted">No newer release tags on {candidates?.remote ?? "the remote"}.</p>
+        ) : !hasAnyTarget ? (
+          <p className="muted">
+            No newer release tags on {candidates?.remote ?? "the remote"}
+            {status?.track_commits ? " and no new commits on the tracking branch." : "."}
+          </p>
         ) : (
           <>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -293,6 +322,11 @@ export function UpgradePage() {
                 onChange={(e) => setPickedTarget(e.target.value)}
               >
                 <option value="">— pick a version —</option>
+                {commitOption && (
+                  <option value={`${COMMIT_TARGET_PREFIX}${commitOption.sha}`}>
+                    main @ {commitOption.short} (latest commit)
+                  </option>
+                )}
                 {newerCandidates.map((c) => (
                   <option key={c.commit_sha} value={c.name}>
                     v{c.name} ({c.commit_sha.slice(0, 7)})
@@ -300,6 +334,14 @@ export function UpgradePage() {
                 ))}
               </select>
             </div>
+            {pickedTarget.startsWith(COMMIT_TARGET_PREFIX) && (
+              <p className="muted" style={{ margin: 0, fontSize: 11 }}>
+                Preview build: installs the latest <code>main</code> commit
+                (unreleased). It is built and deployed exactly like a release,
+                but carries no version tag — use a tagged release for production
+                stability.
+              </p>
+            )}
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <input
                 type="checkbox"

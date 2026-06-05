@@ -431,6 +431,75 @@ def test_start_queues_and_enqueues(
     assert submitted == ["called"]
 
 
+def test_start_commit_kind_derives_version_and_queues(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.setattr("api.tasks.upgrade.execute_upgrade.delay", lambda *args: None)
+    # Channel defaults on.
+    sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_kind": "commit", "target_sha": sha, "confirm_downtime": True},
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["state"] == "queued"
+    assert body["target_kind"] == "commit"
+    assert body["target_sha"] == sha
+    # Version derived server-side: <base>-commit.<short7>.
+    assert body["target_version"].endswith("-commit.a1b2c3d")
+
+
+def test_start_commit_rejected_when_channel_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.setattr("api.tasks.upgrade.execute_upgrade.delay", lambda *args: None)
+    client.post("/api/upgrade/settings", json={"track_commits": False})
+    sha = "a" * 40
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_kind": "commit", "target_sha": sha, "confirm_downtime": True},
+    )
+    assert resp.status_code == 409
+    assert "commit channel is off" in resp.json()["detail"]
+
+
+def test_start_commit_requires_full_sha(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.setattr("api.tasks.upgrade.execute_upgrade.delay", lambda *args: None)
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_kind": "commit", "target_sha": "a1b2c3d", "confirm_downtime": True},
+    )
+    assert resp.status_code == 422
+    assert "40-hex" in resp.json()["detail"]
+
+
+def test_start_release_requires_semver_version(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.setattr("api.tasks.upgrade.execute_upgrade.delay", lambda *args: None)
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_kind": "release", "confirm_downtime": True},
+    )
+    assert resp.status_code == 422
+    assert "semver" in resp.json()["detail"]
+
+
 def test_start_second_call_returns_409(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

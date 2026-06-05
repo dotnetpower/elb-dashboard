@@ -78,6 +78,27 @@
       "problemMatcher": []
     },
     {
+      "label": "debug-env: write",
+      "detail": "Resolve AZURE_TABLE/BLOB_ENDPOINT from azd env and write .vscode/.debug.env for the debugger envFile.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["debug-env"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "close": true
+      }
+    },
+    {
+      "label": "debug: prelaunch",
+      "detail": "Ensure Redis is up and the debug env file is fresh before launching the API/worker/beat debug sessions.",
+      "dependsOn": ["redis: ensure", "debug-env: write"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
       "label": "api: start",
       "type": "shell",
       "command": "${workspaceFolder}/scripts/dev/local-run.sh",

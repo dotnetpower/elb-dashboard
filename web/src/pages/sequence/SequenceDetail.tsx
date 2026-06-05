@@ -24,6 +24,8 @@ import {
 } from "@/api/ncbi";
 import { SViewerEmbed } from "./SViewerEmbed";
 import { SequenceBlocks } from "./SequenceBlocks";
+import { GenBankFlatBlock } from "./GenBankFlatBlock";
+import { TargetAnalysisCard } from "./TargetAnalysisCard";
 import { JobBackReferenceCard } from "./JobBackReferenceCard";
 import { ncbiTaxonomyUrl, ncbiNucleotideByOrganismUrl, ncbiOrganismClause } from "./ncbiLinks";
 
@@ -38,6 +40,11 @@ const NCBI_SVIEWER_BASE = "https://www.ncbi.nlm.nih.gov/projects/sviewer/";
 // before navigating to BLAST submit so researchers can opt out instead of
 // hitting the error after the round trip.
 const MAX_WHOLE_SEQUENCE_NT = 5_000_000;
+
+// Initial cap on rendered feature rows; "Show all" reveals the rest so a
+// feature-dense genome record does not produce a multi-thousand-row table on
+// first paint.
+const FEATURE_DISPLAY_LIMIT = 60;
 
 function externalNuccoreUrl(accession: string): string {
   return `${NCBI_NUCCORE_BASE}/${encodeURIComponent(accession)}`;
@@ -443,6 +450,8 @@ export function SequenceDetail() {
   const accession = (params.accession || "").trim();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const [hideGaps, setHideGaps] = useState(true);
+  const [showAllFeatures, setShowAllFeatures] = useState(false);
 
   const highlightStart = Number.parseInt(searchParams.get("hl_start") || "", 10);
   const highlightStop = Number.parseInt(searchParams.get("hl_stop") || "", 10);
@@ -489,6 +498,32 @@ export function SequenceDetail() {
   // backend fetch byte caps (MAX_FASTA_BYTES), so no display truncation here.
   const previewFasta = fasta;
 
+  // Whitespace-free residue string (deflines stripped) for the target-analysis
+  // card's composition / sub-range math. Null until the FASTA resolves.
+  const sequenceResidues = useMemo(() => {
+    if (!fasta) return null;
+    return fasta
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0 && !line.startsWith(">"))
+      .join("")
+      .replace(/\s+/g, "");
+  }, [fasta]);
+
+  // Features table: assembly_gap rows dominate draft genome records and bury
+  // the annotated gene/CDS features. Default to hiding them with a count chip
+  // to restore them, and cap the initial render so a feature-rich record does
+  // not produce an endless table.
+  const allFeatures = genbank?.features ?? [];
+  const gapFeatureCount = allFeatures.filter(
+    (f) => f.key === "assembly_gap" || f.key === "gap",
+  ).length;
+  const visibleFeatures = hideGaps
+    ? allFeatures.filter((f) => f.key !== "assembly_gap" && f.key !== "gap")
+    : allFeatures;
+  const shownFeatures = showAllFeatures
+    ? visibleFeatures
+    : visibleFeatures.slice(0, FEATURE_DISPLAY_LIMIT);
+
   const source = sourceFeature(genbank);
   const sourceRows = useMemo(
     () =>
@@ -510,6 +545,15 @@ export function SequenceDetail() {
     () => (genbank ? genbankFlatLines(genbank).join("\n") : null),
     [genbank],
   );
+  const flatLines = useMemo(
+    () => (genbank ? genbankFlatLines(genbank) : null),
+    [genbank],
+  );
+
+  const jumpToHit = () => {
+    const el = document.getElementById("sequence-section");
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const relatedResources = useMemo(() => {
     const { symbols, geneId } = collectGeneInfo(genbank);
@@ -654,6 +698,7 @@ export function SequenceDetail() {
               rel="noopener noreferrer"
             >
               <ExternalLink size={14} strokeWidth={1.5} /> Open in NCBI
+              <NewTabHint />
             </a>
             <CopyButton
               value={summary?.accession_version || accession}
@@ -677,8 +722,15 @@ export function SequenceDetail() {
           >
             <AlertTriangle size={13} strokeWidth={1.5} />
             <span>
-              One or more NCBI lookups failed. The dashboard does not cache
-              upstream outages — retry in a moment.
+              {[
+                summaryQuery.isError ? "summary" : null,
+                genbankQuery.isError ? "GenBank record" : null,
+                fastaQuery.isError ? "FASTA" : null,
+              ]
+                .filter(Boolean)
+                .join(", ")}{" "}
+              lookup failed. The dashboard does not cache upstream outages —
+              retry in a moment.
             </span>
           </div>
         )}
@@ -697,11 +749,11 @@ export function SequenceDetail() {
           <MetaCell label="Length (bp/aa)" value={formatInteger(summary?.length ?? genbank?.length ?? null)} />
           <MetaCell label="Molecule" value={summary?.moltype || genbank?.moltype} />
           <MetaCell label="Topology" value={summary?.topology || genbank?.topology} />
-          <MetaCell label="Strandedness" value={genbank?.strandedness} />
-          <MetaCell label="Biomol" value={summary?.biomol} />
-          <MetaCell label="Completeness" value={summary?.completeness} />
-          <MetaCell label="Division" value={genbank?.division} />
-          <MetaCell label="Source DB" value={summary?.source_db} />
+          <MetaCell label="Strandedness" value={genbank?.strandedness} hideEmpty />
+          <MetaCell label="Biomol" value={summary?.biomol} hideEmpty />
+          <MetaCell label="Completeness" value={summary?.completeness} hideEmpty />
+          <MetaCell label="Division" value={genbank?.division} hideEmpty />
+          <MetaCell label="Source DB" value={summary?.source_db} hideEmpty />
           <MetaCell label="Created" value={summary?.create_date || genbank?.create_date} />
           <MetaCell label="Updated" value={summary?.update_date || genbank?.update_date} />
         </dl>
@@ -709,10 +761,21 @@ export function SequenceDetail() {
 
       <JobBackReferenceCard accession={accession} />
 
-      {flatRecord && (
-        <div
+      <TargetAnalysisCard
+        accession={accession}
+        seq={sequenceResidues}
+        highlight={highlightRange}
+        features={genbank?.features ?? []}
+        summary={summary}
+        genbank={genbank}
+        onJumpToHit={hasHighlight ? jumpToHit : undefined}
+      />
+
+      {flatRecord && flatLines && (
+        <section
           className="glass-card glass-card--strong"
           style={{ padding: 16, display: "grid", gap: 10 }}
+          aria-labelledby="genbank-heading"
         >
           <div
             style={{
@@ -723,7 +786,9 @@ export function SequenceDetail() {
               flexWrap: "wrap",
             }}
           >
-            <h2 style={{ margin: 0, fontSize: 14 }}>GenBank record</h2>
+            <h2 id="genbank-heading" style={{ margin: 0, fontSize: 14 }}>
+              GenBank record
+            </h2>
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
               Header block in the NCBI flat-file layout
             </span>
@@ -733,23 +798,8 @@ export function SequenceDetail() {
           ) && (
             <TruncationNote href={externalNuccoreUrl(accession)} />
           )}
-          <pre
-            style={{
-              margin: 0,
-              padding: "12px 14px",
-              overflowX: "auto",
-              fontFamily: "var(--font-mono, monospace)",
-              fontSize: 12,
-              lineHeight: 1.6,
-              color: "var(--text)",
-              background: "var(--surface-2, rgba(255, 255, 255, 0.03))",
-              borderRadius: 8,
-              whiteSpace: "pre",
-            }}
-          >
-            {flatRecord}
-          </pre>
-        </div>
+          <GenBankFlatBlock lines={flatLines} rawText={flatRecord} />
+        </section>
       )}
 
       {(sourceRows.length > 0 || (genbank?.xrefs.length ?? 0) > 0) && (
@@ -816,17 +866,34 @@ export function SequenceDetail() {
       )}
 
       {lineage.length > 0 && (
-        <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 8 }}>
-          <h2 style={{ margin: 0, fontSize: 14 }}>Taxonomy</h2>
-          <div style={{ fontSize: 12, lineHeight: 1.7, color: "var(--text)" }}>
+        <section
+          className="glass-card glass-card--strong"
+          style={{ padding: 16, display: "grid", gap: 8 }}
+          aria-labelledby="taxonomy-heading"
+        >
+          <h2 id="taxonomy-heading" style={{ margin: 0, fontSize: 14 }}>
+            Taxonomy
+          </h2>
+          <div style={{ fontSize: 12, lineHeight: 1.9, color: "var(--text)" }}>
             {lineage.map((rank, idx) => (
               <span key={`${rank}-${idx}`}>
-                {idx > 0 && <span style={{ color: "var(--text-muted)" }}> › </span>}
-                {rank}
+                {idx > 0 && (
+                  <span aria-hidden="true" style={{ color: "var(--text-muted)" }}>
+                    {" › "}
+                  </span>
+                )}
+                <a
+                  href={`https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?name=${encodeURIComponent(rank)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {rank}
+                  <NewTabHint />
+                </a>
               </span>
             ))}
           </div>
-        </div>
+        </section>
       )}
 
       {relatedResources.length > 0 && (
@@ -919,8 +986,37 @@ export function SequenceDetail() {
         </div>
       )}
 
-      <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 10 }}>
-        <h2 style={{ margin: 0, fontSize: 14 }}>Features</h2>
+      <section
+        className="glass-card glass-card--strong"
+        style={{ padding: 16, display: "grid", gap: 10 }}
+        aria-labelledby="features-heading"
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <h2 id="features-heading" style={{ margin: 0, fontSize: 14 }}>
+            Features
+          </h2>
+          {gapFeatureCount > 0 && (
+            <button
+              type="button"
+              className="glass-button glass-button--ghost"
+              style={{ fontSize: 11, padding: "2px 8px" }}
+              aria-pressed={!hideGaps}
+              onClick={() => setHideGaps((v) => !v)}
+            >
+              {hideGaps
+                ? `Show ${gapFeatureCount} assembly gaps`
+                : `Hide ${gapFeatureCount} assembly gaps`}
+            </button>
+          )}
+        </div>
         {genbankQuery.isLoading && <p className="muted" style={{ margin: 0 }}>Loading features…</p>}
         {genbank && genbank.features.length === 0 && (
           <p className="muted" style={{ margin: 0 }}>No features reported.</p>
@@ -928,17 +1024,26 @@ export function SequenceDetail() {
         {genbank && genbank.features.length > 0 && (
           <div style={{ overflowX: "auto" }}>
             <table className="glass-table" style={{ width: "100%", fontSize: 12 }}>
+              <caption className="sr-only">
+                GenBank annotated features for {accession}: key, location, and
+                gene or product. Each row can be expanded to show its full
+                qualifier set.
+              </caption>
               <thead>
                 <tr>
-                  <th style={{ width: 28 }} />
-                  <th style={{ textAlign: "left" }}>Key</th>
-                  <th style={{ textAlign: "left" }}>Location</th>
-                  <th style={{ textAlign: "left" }}>Gene / Product</th>
-                  <th />
+                  <th scope="col" style={{ width: 28 }}>
+                    <span className="sr-only">Expand</span>
+                  </th>
+                  <th scope="col" style={{ textAlign: "left" }}>Key</th>
+                  <th scope="col" style={{ textAlign: "left" }}>Location</th>
+                  <th scope="col" style={{ textAlign: "left" }}>Gene / Product</th>
+                  <th scope="col">
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {genbank.features.map((feature, idx) => (
+                {shownFeatures.map((feature, idx) => (
                   <FeatureRow
                     key={`${feature.key}-${idx}`}
                     feature={feature}
@@ -955,9 +1060,19 @@ export function SequenceDetail() {
                 ))}
               </tbody>
             </table>
+            {!showAllFeatures && visibleFeatures.length > shownFeatures.length && (
+              <button
+                type="button"
+                className="glass-button glass-button--ghost"
+                style={{ fontSize: 11, padding: "4px 10px", marginTop: 8 }}
+                onClick={() => setShowAllFeatures(true)}
+              >
+                Show all {visibleFeatures.length.toLocaleString()} features
+              </button>
+            )}
           </div>
         )}
-      </div>
+      </section>
 
       {genbank && genbank.references.length > 0 && (
         <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 10 }}>
@@ -1009,9 +1124,14 @@ export function SequenceDetail() {
         </div>
       )}
 
-      <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 8 }}>
+      <section
+        id="sequence-section"
+        className="glass-card glass-card--strong"
+        style={{ padding: 16, display: "grid", gap: 8 }}
+        aria-labelledby="sequence-heading"
+      >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-          <h2 style={{ margin: 0, fontSize: 14 }}>Sequence</h2>
+          <h2 id="sequence-heading" style={{ margin: 0, fontSize: 14 }}>Sequence</h2>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {hasHighlight && (
               <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
@@ -1023,7 +1143,7 @@ export function SequenceDetail() {
         </div>
         {fastaQuery.isLoading && <p className="muted" style={{ margin: 0 }}>Loading FASTA…</p>}
         {previewFasta && <SequenceBlocks fasta={previewFasta} highlight={highlightRange} />}
-      </div>
+      </section>
 
       <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 8 }}>
         <h2 style={{ margin: 0, fontSize: 14 }}>
@@ -1051,17 +1171,36 @@ export function SequenceDetail() {
   );
 }
 
-function MetaCell({ label, value }: { label: string; value: string | null | undefined }) {
+// Screen-reader-only "(opens in new tab)" hint. Visually hidden; appended to
+// links that set ``target="_blank"`` so non-visual users are warned that the
+// link leaves the dashboard (WCAG 3.2.5).
+function NewTabHint() {
+  return <span className="sr-only"> (opens in new tab)</span>;
+}
+
+function MetaCell({
+  label,
+  value,
+  hideEmpty,
+}: {
+  label: string;
+  value: string | null | undefined;
+  hideEmpty?: boolean;
+}) {
+  const empty = value == null || value === "";
+  if (empty && hideEmpty) return null;
   return (
     <div style={{ display: "grid", gap: 2 }}>
-      <dt style={{ fontSize: 11, color: "var(--text-muted)" }}>{label}</dt>
+      <dt style={{ fontSize: 11, color: "var(--text-secondary, var(--text-muted))" }}>
+        {label}
+      </dt>
       <dd
         style={{
           margin: 0,
-          fontFamily: label === "Updated" ? "inherit" : "var(--font-mono, monospace)",
+          fontFamily: "var(--font-mono, monospace)",
         }}
       >
-        {value || "—"}
+        {empty ? "—" : value}
       </dd>
     </div>
   );
@@ -1225,6 +1364,7 @@ function FeatureRow({
               type="button"
               className="glass-button glass-button--ghost"
               style={{ fontSize: 11, padding: "2px 8px" }}
+              aria-label={`BLAST the ${featureLabel(feature)} feature range ${range.start} to ${range.stop}`}
               onClick={() => onBlastRange(range)}
             >
               BLAST range

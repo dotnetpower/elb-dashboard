@@ -84,8 +84,10 @@ export interface UpgradeCandidatesResponse {
 }
 
 export interface UpgradeStartRequest {
-  target_version: string;
+  target_version?: string;
   target_sha?: string;
+  /** "release" (a vX.Y.Z tag, default) or "commit" (latest tracking-branch commit). */
+  target_kind?: "release" | "commit";
   confirm_downtime: boolean;
 }
 

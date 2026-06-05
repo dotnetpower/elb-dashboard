@@ -56,6 +56,7 @@ test("Upgrade start, remote check, rollback, and escape commands are mocked", as
         state: "succeeded",
         target_version: "0.3.0",
         target_sha: "2222222",
+        target_kind: "release",
         job_id: "upgrade-e2e",
         started_by_oid: "e2e-user",
         started_at: "2026-05-24T10:00:00.000Z",

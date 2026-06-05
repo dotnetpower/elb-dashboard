@@ -54,10 +54,19 @@ class _FakeContainer:
         # per-name byte size feeds the download-speed signal.
         self.blob_names: list[str] = []
         self.blob_sizes: dict[str, int] = {}
+        # Optional per-blob `last_modified` (tz-aware datetime). Drives the
+        # `since`-filtered progress count; blobs without an entry behave as
+        # if `last_modified` is unset (always counted), matching the legacy
+        # fixtures that predate the timestamp filter.
+        self.blob_last_modified: dict[str, Any] = {}
 
     def list_blobs(self, name_starts_with: str = "") -> list[Any]:
         return [
-            _types.SimpleNamespace(name=name, size=self.blob_sizes.get(name, 0))
+            _types.SimpleNamespace(
+                name=name,
+                size=self.blob_sizes.get(name, 0),
+                last_modified=self.blob_last_modified.get(name),
+            )
             for name in self.blob_names
             if name.startswith(name_starts_with)
         ]
@@ -480,6 +489,84 @@ def test_on_job_progress_omits_bytes_total_when_unknown() -> None:
     assert "bytes_total" not in cs
     assert cs["bytes_done"] == 1000
 
+
+def test_on_job_progress_since_excludes_previous_snapshot_blobs() -> None:
+    """An update must not count the previous snapshot's blobs as instant progress.
+
+    The AKS pods upload one blob per file and re-fetch on update
+    (`--overwrite=true`). Counting every blob under `<db>/` made an update of
+    a DB that already had 12 of 15 files show "12 / 15" the moment it started.
+    Passing `since` (this run's start) excludes the stale blobs so the bar
+    climbs from 0; a blob without `last_modified` is still counted.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    run_start = datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC)
+    container = _FakeContainer({"db_name": "test16s"})
+    container.blob_names = [
+        "test16s/a.nhr",  # stale — from the previous snapshot
+        "test16s/b.nin",  # stale
+        "test16s/c.nsq",  # freshly re-committed this run
+        "test16s/d.nhr",  # no last_modified -> counted
+    ]
+    container.blob_sizes = {
+        "test16s/a.nhr": 100,
+        "test16s/b.nin": 200,
+        "test16s/c.nsq": 300,
+        "test16s/d.nhr": 400,
+    }
+    container.blob_last_modified = {
+        "test16s/a.nhr": run_start - timedelta(days=3),
+        "test16s/b.nin": run_start - timedelta(days=3),
+        "test16s/c.nsq": run_start + timedelta(seconds=5),
+        # "test16s/d.nhr" intentionally omitted -> counted as fresh.
+    }
+
+    task_module._on_job_progress(
+        container,
+        "test16s",
+        "stworkload",
+        [f"v/test16s.{i}" for i in range(15)],
+        {"active_pods": 1, "succeeded_pods": 0, "failed_pods": 0, "shard_count": 1},
+        mode_label="aks",
+        update_metadata=_fake_update_metadata,
+        since=run_start - timedelta(seconds=120),
+    )
+
+    cs = container.meta["copy_status"]
+    # Only the fresh blob + the timestamp-less blob count; the two stale
+    # previous-snapshot blobs are excluded.
+    assert cs["success"] == 2
+    assert cs["bytes_done"] == 300 + 400
+
+
+def test_on_job_progress_without_since_counts_all_blobs() -> None:
+    """`since=None` preserves the unfiltered inventory the orphan reconciler needs."""
+    from datetime import UTC, datetime, timedelta
+
+    old = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    container = _FakeContainer({"db_name": "test16s"})
+    container.blob_names = ["test16s/a.nhr", "test16s/b.nin"]
+    container.blob_sizes = {"test16s/a.nhr": 100, "test16s/b.nin": 200}
+    container.blob_last_modified = {
+        "test16s/a.nhr": old - timedelta(days=3),
+        "test16s/b.nin": old - timedelta(days=3),
+    }
+
+    task_module._on_job_progress(
+        container,
+        "test16s",
+        "stworkload",
+        ["v/test16s.0", "v/test16s.1"],
+        {"active_pods": 1, "succeeded_pods": 0, "failed_pods": 0, "shard_count": 1},
+        mode_label="aks",
+        update_metadata=_fake_update_metadata,
+        # since omitted -> None -> count everything regardless of age.
+    )
+
+    cs = container.meta["copy_status"]
+    assert cs["success"] == 2
+    assert cs["bytes_done"] == 300
 
 
 def test_on_job_progress_falls_back_when_listing_fails() -> None:

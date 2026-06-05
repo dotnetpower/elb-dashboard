@@ -130,6 +130,11 @@ class UpgradeState:
     state: str = STATE_IDLE
     target_version: str = ""
     target_sha: str = ""
+    # Which update channel this upgrade targets: "release" (a vX.Y.Z tag) or
+    # "commit" (a tracking-branch commit, target_version = <base>-commit.<sha>).
+    # Only the git clone strategy branches on this; the rest of the pipeline
+    # treats target_version uniformly.
+    target_kind: str = "release"
     job_id: str = ""
     started_by_oid: str = ""
     started_at: str = ""
@@ -446,6 +451,7 @@ def _entity_to_state(entity: Any) -> UpgradeState:
         state=raw_state,
         target_version=str(entity.get("target_version", "")),
         target_sha=str(entity.get("target_sha", "")),
+        target_kind=str(entity.get("target_kind", "") or "release"),
         job_id=str(entity.get("job_id", "")),
         started_by_oid=str(entity.get("started_by_oid", "")),
         started_at=str(entity.get("started_at", "")),
@@ -482,6 +488,7 @@ def _state_to_entity(state: UpgradeState) -> dict[str, Any]:
         "state": state.state,
         "target_version": state.target_version,
         "target_sha": state.target_sha,
+        "target_kind": state.target_kind or "release",
         "job_id": state.job_id,
         "started_by_oid": state.started_by_oid,
         "started_at": state.started_at,

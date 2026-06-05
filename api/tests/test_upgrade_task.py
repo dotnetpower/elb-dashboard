@@ -193,6 +193,38 @@ def test_start_then_execute_happy_path_reaches_rolling_out(env: None) -> None:
     assert snap["api"].endswith(":v0.2.1")
 
 
+def test_commit_execute_uses_commit_clone_and_reaches_rolling_out(env: None) -> None:
+    sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+    after_start = upgrade_task.start_upgrade_inline(
+        target_version="0.2.0-commit.a1b2c3d",
+        target_sha=sha,
+        target_kind="commit",
+        started_by_oid="oid-1",
+        enqueue=lambda *args: None,
+    )
+    assert after_start.target_kind == "commit"
+
+    aca = _FakeAca()
+    runner = _FakeRunner()
+    after_exec = upgrade_task.execute_upgrade_inline(
+        target_version="0.2.0-commit.a1b2c3d",
+        target_sha=sha,
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=runner,
+        aca=aca,
+    )
+    assert after_exec.state == state.STATE_ROLLING_OUT
+    # The clone used the commit strategy: blobless no-checkout + detach.
+    clone_argv = runner.run_calls[0]["argv"]
+    assert "--no-checkout" in clone_argv
+    assert any(
+        c["argv"][:1] == ["git"] and "checkout" in c["argv"] for c in runner.run_calls
+    )
+    # Images + swap carry the commit-versioned tag.
+    assert aca.swap_calls[0][0] == "0.2.0-commit.a1b2c3d"
+
+
 def test_failed_swap_marks_failed_rollout(env: None) -> None:
     after_start = _start()
     aca = _FakeAca(fail_swap=True)

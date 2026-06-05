@@ -11,8 +11,9 @@ Edit boundaries: argv construction + stream consumption live here.
 Key entry points: `BuildPlan`, `plan_builds`, `build`, `build_all`,
   `ImageBuilderError`, `ImageBuildResult`.
 Risky contracts: Reads the platform ACR name from `PLATFORM_ACR_NAME` env;
-  the image tag must already be a validated semver (`vA.B.0` form). The
-  injected `runner` defaults to `terminal_exec` and is replaced in tests.
+  the image tag must already be a validated target version (`A.B.C` release or
+  `A.B.C-commit.<sha>` commit form). The injected `runner` defaults to
+  `terminal_exec` and is replaced in tests.
 Validation: `uv run pytest -q api/tests/test_upgrade_image_builder.py`.
 """
 
@@ -31,7 +32,9 @@ LOGGER = logging.getLogger(__name__)
 
 PLATFORM_ACR_NAME_ENV = "PLATFORM_ACR_NAME"
 BUILD_TIMEOUT_SECONDS = 1800  # 30 min — `az acr build` is server-side anyway.
-_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# Accept a release target (0.4.0) or a commit target (0.2.0-commit.a1b2c3d).
+# Both produce a valid Docker tag once prefixed with "v".
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(-commit\.[0-9a-f]{7,40})?$")
 
 # Per-component build instructions. Mirrors postprovision.sh so an in-app
 # build of git ref vA.B.0 produces the same images that a fresh `azd up`
@@ -118,8 +121,18 @@ def _argv_for(plan: BuildPlan, *, target_version: str, source_dir: str) -> list[
         # every self-built image.
         "--build-arg",
         f"APP_VERSION={target_version}",
-        source_dir if plan.context == "." else f"{source_dir}/{plan.context}",
     ]
+    # For a commit build, also stamp the frontend bundle's commit hash so the
+    # SPA header shows the real commit and `isCommitUpdateAvailable` clears
+    # once the upgrade lands. web/Dockerfile declares the GIT_COMMIT ARG; the
+    # api/terminal Dockerfiles do not, so only pass it to the frontend to
+    # avoid an unused-build-arg warning on the other components.
+    from api.services.upgrade.version_target import commit_short_sha
+
+    short_sha = commit_short_sha(target_version)
+    if short_sha and plan.component == "frontend":
+        argv += ["--build-arg", f"GIT_COMMIT={short_sha}"]
+    argv.append(source_dir if plan.context == "." else f"{source_dir}/{plan.context}")
     return argv
 
 

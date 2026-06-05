@@ -187,6 +187,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     state: "idle",
     target_version: "",
     target_sha: "",
+    target_kind: "release",
     job_id: "",
     started_by_oid: "",
     started_at: "",

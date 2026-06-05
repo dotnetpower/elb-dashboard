@@ -21,11 +21,56 @@ import logging
 import time
 from typing import Any
 
+from azure.core.exceptions import HttpResponseError
 from celery import shared_task
 
 import api.tasks.azure as _facade
 
 LOGGER = logging.getLogger(__name__)
+
+
+# ARM rejects a `begin_start` on a cluster that is already Running/Starting and
+# a `begin_stop` on one that is already Stopped/Stopping. The rejection codes /
+# messages below identify exactly that "already in (or transitioning to) the
+# requested power state" condition.
+_ALREADY_IN_TARGET_STATE_MARKERS = (
+    "operationnotallowed",
+    "not in a stopped state",
+    "not in a running state",
+    "is already running",
+    "is already stopped",
+    "already in the desired",
+    "already being started",
+    "already being stopped",
+)
+
+
+def _is_already_in_target_power_state(exc: BaseException) -> bool:
+    """True when ARM rejected a start/stop because the cluster is already in
+    (or transitioning to) the requested power state.
+
+    Why this matters: ``start_aks`` / ``stop_aks`` carry
+    ``autoretry_for=(Exception,)`` but the AKS power LRO is **not** idempotent
+    — ARM rejects ``begin_start`` on a Running/Starting cluster (and
+    ``begin_stop`` on a Stopped/Stopping one) with ``OperationNotAllowed`` /
+    ``BadRequest`` ("… is not in a stopped state"). Without recognising that
+    condition, a transient blip during the multi-minute ``poller.result()``
+    poll — or a duplicate Start/Stop click, or a manual Stop racing the idle
+    auto-stop — re-issues the op on a now-transitioning cluster, turning an
+    *effective success* into a hard task ERROR plus up to 3 wasted retries.
+    Treating the marker as an idempotent no-op success makes the task
+    converge instead. Genuinely transient errors (network, 429/5xx before the
+    op is accepted) still raise and still autoretry.
+    """
+    if not isinstance(exc, HttpResponseError):
+        return False
+    code = ""
+    err = getattr(exc, "error", None)
+    if err is not None:
+        code = f"{getattr(err, 'code', '') or ''}".lower()
+    message = f"{getattr(exc, 'message', '') or ''}".lower()
+    blob = f"{code} {message}"
+    return any(marker in blob for marker in _ALREADY_IN_TARGET_STATE_MARKERS)
 
 
 def _record_lifecycle_timing(
@@ -101,15 +146,31 @@ def start_aks(
             exc,
         )
     poller = aks.managed_clusters.begin_start(resource_group, cluster_name)
-    poller.result()
-    LOGGER.info("AKS cluster %s started", cluster_name)
-    _record_lifecycle_timing(
-        "aks_start",
-        time.monotonic() - _started_at,
-        subscription_id=subscription_id,
-        resource_group=resource_group,
-        cluster_name=cluster_name,
-    )
+    started_now = True
+    try:
+        poller.result()
+        LOGGER.info("AKS cluster %s started", cluster_name)
+    except Exception as exc:
+        if not _is_already_in_target_power_state(exc):
+            raise
+        # Idempotent no-op: the cluster is already Running/Starting (duplicate
+        # Start click, an autoretry after a transient poll error, or a manual
+        # Start on a live cluster). Fall through to the follow-on enqueues so
+        # the warmup/OpenAPI side effects the user asked for still run — they
+        # are themselves idempotent.
+        started_now = False
+        LOGGER.info(
+            "AKS cluster %s already running/starting; treating start as no-op",
+            cluster_name,
+        )
+    if started_now:
+        _record_lifecycle_timing(
+            "aks_start",
+            time.monotonic() - _started_at,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
     auto_warmup_task_id = ""
     if auto_warmup:
         try:
@@ -153,6 +214,7 @@ def start_aks(
         "cluster_name": cluster_name,
         "action": "start",
         "status": "completed",
+        "noop": not started_now,
         "auto_warmup_task_id": auto_warmup_task_id,
         "openapi_task_id": openapi_task_id,
     }
@@ -179,16 +241,36 @@ def stop_aks(
     aks = _facade.aks_client(cred, subscription_id)
     _started_at = time.monotonic()
     poller = aks.managed_clusters.begin_stop(resource_group, cluster_name)
-    poller.result()
-    LOGGER.info("AKS cluster %s stopped", cluster_name)
-    _record_lifecycle_timing(
-        "aks_stop",
-        time.monotonic() - _started_at,
-        subscription_id=subscription_id,
-        resource_group=resource_group,
-        cluster_name=cluster_name,
-    )
-    return {"cluster_name": cluster_name, "action": "stop", "status": "completed"}
+    stopped_now = True
+    try:
+        poller.result()
+        LOGGER.info("AKS cluster %s stopped", cluster_name)
+    except Exception as exc:
+        if not _is_already_in_target_power_state(exc):
+            raise
+        # Idempotent no-op: already Stopped/Stopping (duplicate Stop, an
+        # autoretry after a transient poll error, or a manual Stop racing the
+        # idle auto-stop which the evaluator's provisioning-state guard did
+        # not catch). Converge to success instead of a hard ERROR + retries.
+        stopped_now = False
+        LOGGER.info(
+            "AKS cluster %s already stopped/stopping; treating stop as no-op",
+            cluster_name,
+        )
+    if stopped_now:
+        _record_lifecycle_timing(
+            "aks_stop",
+            time.monotonic() - _started_at,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+    return {
+        "cluster_name": cluster_name,
+        "action": "stop",
+        "status": "completed",
+        "noop": not stopped_now,
+    }
 
 
 @shared_task(

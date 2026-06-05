@@ -75,8 +75,26 @@ _COMPONENT_ALLOWED = frozenset({"api", "frontend", "terminal"})
 
 
 class UpgradeStartRequest(BaseModel):
-    target_version: str = Field(..., pattern=r"^\d+\.\d+\.\d+$")
+    target_version: str = Field(
+        "",
+        pattern=r"^(|\d+\.\d+\.\d+)$",
+        description=(
+            "Release target semver (e.g. 0.4.0). Required for "
+            "target_kind='release'; ignored for 'commit' (the server derives "
+            "the commit version string from the running release + target_sha)."
+        ),
+    )
     target_sha: str = Field("", pattern=r"^(|[0-9a-fA-F]{7,40})$")
+    target_kind: str = Field(
+        "release",
+        pattern=r"^(release|commit)$",
+        description=(
+            "Which update channel to install: 'release' (a vX.Y.Z tag, the "
+            "default) or 'commit' (the latest tracking-branch commit). A "
+            "commit upgrade is only honoured when the persisted track_commits "
+            "toggle is on, and requires a full 40-hex target_sha."
+        ),
+    )
     confirm_downtime: bool = Field(
         False,
         description=(
@@ -236,10 +254,55 @@ def upgrade_start(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="confirm_downtime must be true to start an upgrade",
         )
+    kind = body.target_kind or "release"
+    target_version = body.target_version
+    target_sha = body.target_sha
+    if kind == "commit":
+        # Defense in depth: a commit upgrade is only allowed when the operator
+        # has opted into the commit channel. The SPA hides the option when the
+        # toggle is off, but a direct API call must be rejected too.
+        if not state.get_state().track_commits:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="commit channel is off; enable 'Allow updates from new commits' first",
+            )
+        full_sha = (body.target_sha or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", full_sha):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="commit upgrade requires a full 40-hex target_sha",
+            )
+        # Derive the commit version string server-side from the running
+        # release base so the operator never fabricates a version. The base is
+        # the running api version reduced to bare semver (handles re-upgrading
+        # from an existing commit build).
+        from api import __version__ as running_version
+        from api.services.upgrade.version_target import (
+            base_release,
+            make_commit_version,
+        )
+
+        base = base_release(running_version)
+        if not re.fullmatch(r"\d+\.\d+\.\d+", base):
+            base = "0.0.0"
+        try:
+            target_version = make_commit_version(base, full_sha)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"invalid commit target: {sanitise(str(exc))[:160]}",
+            ) from exc
+        target_sha = full_sha
+    elif not re.fullmatch(r"\d+\.\d+\.\d+", target_version or ""):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="release upgrade requires a semver target_version (e.g. 0.4.0)",
+        )
     try:
         updated = start_upgrade_inline(
-            target_version=body.target_version,
-            target_sha=body.target_sha,
+            target_version=target_version,
+            target_sha=target_sha,
+            target_kind=kind,
             started_by_oid=caller.object_id,
             reason=body.reason,
             idempotency_key=body.idempotency_key,

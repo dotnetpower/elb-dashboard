@@ -31,7 +31,10 @@ from api.services import terminal_exec
 LOGGER = logging.getLogger(__name__)
 
 _CLONE_ROOT = "/tmp/elb-upgrade"  # noqa: S108 — terminal sidecar tmpfs
-_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# Accept either a release target (0.4.0) or a commit target
+# (0.2.0-commit.a1b2c3d). The commit clone strategy additionally requires a
+# full 40-hex target_sha (validated in `_clone_commit`).
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(-commit\.[0-9a-f]{7,40})?$")
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{4,64}$")
 CLONE_TIMEOUT_SECONDS = 300
 
@@ -61,9 +64,20 @@ def clone(
     git_remote: str,
     target_version: str,
     job_id: str,
+    target_kind: str = "release",
+    target_sha: str = "",
     runner: object = terminal_exec,
 ) -> WorkspacePath:
-    """Clone the requested tag into the terminal sidecar.
+    """Clone the requested release tag or commit into the terminal sidecar.
+
+    ``target_kind`` selects the checkout strategy:
+      * ``"release"`` — shallow ``git clone --depth 1 --branch v<ver>`` (fast,
+        the historical path). ``target_sha`` is ignored.
+      * ``"commit"`` — a blobless ``git clone --no-checkout`` of the whole
+        repo followed by ``git checkout --detach <full_sha>``. The full sha
+        (``target_sha``) is required because a shallow ``--branch <sha>`` is
+        not possible; blobless keeps it fast while preserving commit
+        reachability so any reachable commit can be checked out.
 
     The injected ``runner`` defaults to `api.services.terminal_exec` and is
     replaceable in tests so no terminal sidecar / network is required.
@@ -71,6 +85,40 @@ def clone(
     if not _VERSION_RE.match(target_version):
         raise WorkspaceError(f"invalid target_version shape: {target_version!r}")
     target_dir = target_dir_for_job(job_id)
+    if target_kind == "commit":
+        _clone_commit(
+            git_remote=git_remote,
+            target_sha=target_sha,
+            target_dir=target_dir,
+            runner=runner,
+        )
+    else:
+        _clone_release(
+            git_remote=git_remote,
+            target_version=target_version,
+            target_dir=target_dir,
+            runner=runner,
+        )
+    _scrub_remote_credentials(target_dir, runner=runner)
+    return WorkspacePath(target_dir=target_dir, target_version=target_version, job_id=job_id)
+
+
+def _run_git(argv: list[str], *, runner: object, what: str) -> dict:
+    """Run a git argv through the runner, raising WorkspaceError on failure."""
+    try:
+        result = runner.run(argv, cwd=None, timeout_seconds=CLONE_TIMEOUT_SECONDS)
+    except terminal_exec.TerminalExecError as exc:
+        raise WorkspaceError(f"terminal_exec {what} error: {exc}") from exc
+    exit_code = int(result.get("exit_code", -1))
+    if exit_code != 0:
+        stderr = str(result.get("stderr", ""))[:1024]
+        raise WorkspaceError(f"{what} failed (exit={exit_code}): {stderr}")
+    return result
+
+
+def _clone_release(
+    *, git_remote: str, target_version: str, target_dir: str, runner: object
+) -> None:
     argv = [
         "git",
         "clone",
@@ -85,18 +133,38 @@ def clone(
     LOGGER.info(
         "upgrade.git_workspace: cloning v%s into %s", target_version, target_dir
     )
-    try:
-        result = runner.run(argv, cwd=None, timeout_seconds=CLONE_TIMEOUT_SECONDS)
-    except terminal_exec.TerminalExecError as exc:
-        raise WorkspaceError(f"terminal_exec git clone error: {exc}") from exc
-    exit_code = int(result.get("exit_code", -1))
-    if exit_code != 0:
-        stderr = str(result.get("stderr", ""))[:1024]
+    _run_git(argv, runner=runner, what="git clone")
+
+
+def _clone_commit(
+    *, git_remote: str, target_sha: str, target_dir: str, runner: object
+) -> None:
+    sha = (target_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise WorkspaceError(
-            f"git clone failed (exit={exit_code}): {stderr}"
+            f"commit clone requires a full 40-hex target_sha, got {target_sha!r}"
         )
-    _scrub_remote_credentials(target_dir, runner=runner)
-    return WorkspacePath(target_dir=target_dir, target_version=target_version, job_id=job_id)
+    # Blobless full clone (no working tree yet) so any reachable commit can be
+    # checked out; `--no-checkout` avoids materialising the default branch's
+    # tree we are about to replace. GitHub/GitLab/gitea all support the
+    # `filter=blob:none` partial-clone capability.
+    clone_argv = [
+        "git",
+        "clone",
+        "--filter=blob:none",
+        "--no-checkout",
+        git_remote,
+        target_dir,
+    ]
+    LOGGER.info(
+        "upgrade.git_workspace: blobless-cloning %s into %s for commit %s",
+        git_remote,
+        target_dir,
+        sha[:12],
+    )
+    _run_git(clone_argv, runner=runner, what="git clone")
+    checkout_argv = ["git", "-C", target_dir, "checkout", "--detach", sha]
+    _run_git(checkout_argv, runner=runner, what="git checkout")
 
 
 def _scrub_remote_credentials(target_dir: str, *, runner: object) -> None:

@@ -185,15 +185,19 @@ def start_upgrade_inline(
     target_version: str,
     target_sha: str,
     started_by_oid: str,
+    target_kind: str = "release",
     reason: str = "",
     idempotency_key: str = "",
     enqueue: Callable[[str, str, str, str], object] | None = None,
 ) -> state.UpgradeState:
     """CAS the row from idle -> queued and enqueue the Celery task.
 
-    ``idempotency_key``: same key + same target_version → return the
-    existing row (no 409). Protects double-click / browser-retry.
-    """
+    ``target_kind`` is "release" (a vX.Y.Z tag) or "commit" (a tracking-branch
+    commit, in which case ``target_sha`` must be the full 40-hex sha and
+    ``target_version`` is the derived ``<base>-commit.<short>`` string). It is
+    persisted on the row so the worker's clone step picks the right strategy;
+    the Celery task signature is intentionally left unchanged so in-flight
+    tasks during a deploy keep deserialising."""
     if not target_version:
         raise UpgradeStartRefused("target_version required")
     if idempotency_key:
@@ -214,6 +218,7 @@ def start_upgrade_inline(
     def mutate(s: state.UpgradeState) -> None:
         s.target_version = target_version
         s.target_sha = target_sha or ""
+        s.target_kind = target_kind or "release"
         s.job_id = job_id
         s.started_by_oid = started_by_oid or ""
         s.started_at = now
@@ -324,11 +329,19 @@ def execute_upgrade_inline(
         LOGGER.warning("upgrade.execute: row not queued (%s); aborting", exc.current)
         return state.get_state()
 
+    # The clone strategy (release tag vs. commit checkout) and the full commit
+    # sha live on the persisted row, written by start_upgrade_inline. Reading
+    # them here keeps the Celery task signature unchanged (in-flight tasks
+    # during a deploy keep deserialising) while still letting the worker pick
+    # the right checkout path.
+    row = state.get_state()
     try:
         workspace = git_workspace.clone(
             git_remote=remote,
             target_version=target_version,
             job_id=job_id,
+            target_kind=row.target_kind or "release",
+            target_sha=row.target_sha or "",
             runner=runner,
         )
     except git_workspace.WorkspaceError as exc:

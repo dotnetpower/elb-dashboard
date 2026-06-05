@@ -24,6 +24,8 @@
  */
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
+import { IUPAC_AMBIGUOUS } from "./sequenceAnalysis";
+
 const ROW_WIDTH = 60;
 const GROUP_WIDTH = 10;
 // Colorize per-base automatically up to this length (≈ this many <span>s).
@@ -174,6 +176,19 @@ export function SequenceBlocks({
                   {base}
                 </span>
               ))}
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <span
+                style={{
+                  textDecoration: "underline dotted",
+                  textUnderlineOffset: "2px",
+                  color: "#f0a868",
+                  fontWeight: 600,
+                }}
+              >
+                N
+              </span>
+              N / ambiguous
+            </span>
           </span>
         )}
         {colorEligible && !colorize && seq.length <= COLOR_HARD_LIMIT && (
@@ -261,10 +276,19 @@ function renderColoredBases(
     const upper = ch.toUpperCase();
     const absPos = rowStart + i; // 1-based position of this residue
     const inHighlight = hlStart > 0 && absPos >= hlStart && absPos <= hlStop;
-    const color = NT_COLORS[upper] ?? "var(--text-muted)";
+    const isN = upper === "N";
+    const isAmbiguous = IUPAC_AMBIGUOUS.has(upper);
+    const color = NT_COLORS[upper] ?? (isN || isAmbiguous ? "#f0a868" : "var(--text-muted)");
     const style: CSSProperties = { color };
     // Lowercase = soft-masked (repeats); dim it the way genome browsers do.
     if (ch !== upper) style.opacity = 0.6;
+    // N / IUPAC-ambiguous residues are unusable for primer/probe design;
+    // mark them so they are not silently read as a normal base.
+    if (isN || isAmbiguous) {
+      style.textDecoration = "underline dotted";
+      style.textUnderlineOffset = "2px";
+      style.fontWeight = 600;
+    }
     if (inHighlight) {
       style.background = "rgba(245, 201, 123, 0.28)";
       style.borderRadius = "2px";

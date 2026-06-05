@@ -104,6 +104,37 @@ def test_build_rejects_invalid_target_version() -> None:
         )
 
 
+def test_build_commit_version_tags_image_and_stamps_frontend_commit() -> None:
+    # api: commit-versioned tag, APP_VERSION baked, no GIT_COMMIT (api Dockerfile
+    # does not declare it).
+    runner = _StreamingRunner(exit_code=0, lines=["ok"])
+    result = image_builder.build(
+        component="api",
+        target_version="0.2.0-commit.a1b2c3d",
+        source_dir="/tmp/elb-upgrade/jobCMT",  # noqa: S108
+        job_id="jobCMT",
+        runner=runner,
+    )
+    assert result.image_ref == "myacr.azurecr.io/elb-api:v0.2.0-commit.a1b2c3d"
+    argv = runner.calls[0]["argv"]
+    assert "elb-api:v0.2.0-commit.a1b2c3d" in argv
+    assert "APP_VERSION=0.2.0-commit.a1b2c3d" in argv
+    assert not any(a.startswith("GIT_COMMIT=") for a in argv)
+
+    # frontend: also stamps GIT_COMMIT=<short sha> so the SPA header + the
+    # commit-available check clear after the upgrade lands.
+    fe_runner = _StreamingRunner(exit_code=0, lines=["ok"])
+    image_builder.build(
+        component="frontend",
+        target_version="0.2.0-commit.a1b2c3d",
+        source_dir="/tmp/elb-upgrade/jobCMT",  # noqa: S108
+        job_id="jobCMT",
+        runner=fe_runner,
+    )
+    fe_argv = fe_runner.calls[0]["argv"]
+    assert "GIT_COMMIT=a1b2c3d" in fe_argv
+
+
 def test_build_requires_acr_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(image_builder.PLATFORM_ACR_NAME_ENV, raising=False)
     with pytest.raises(image_builder.ImageBuilderError):

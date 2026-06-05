@@ -50,6 +50,17 @@ export function StepRow({
           : "var(--text-faint)";
 
   const isInteractive = state !== "pending";
+  const stateLabel =
+    state === "done"
+      ? "completed"
+      : state === "active"
+        ? "in progress"
+        : state === "error"
+          ? "failed"
+          : state === "skipped"
+            ? "skipped"
+            : "pending";
+  const logId = `step-log-${step.key}`;
 
   return (
     <div
@@ -92,8 +103,11 @@ export function StepRow({
         </div>
       )}
       <button
+        className="step-row-toggle"
         onClick={isInteractive ? onToggle : undefined}
         disabled={!isInteractive}
+        aria-expanded={isInteractive ? isOpen : undefined}
+        aria-controls={isInteractive ? logId : undefined}
         style={{
           all: "unset",
           display: "flex",
@@ -106,7 +120,10 @@ export function StepRow({
           boxSizing: "border-box",
         }}
       >
-        <span style={{ color: "var(--text-faint)", width: 14, flexShrink: 0 }}>
+        <span
+          aria-hidden="true"
+          style={{ color: "var(--text-faint)", width: 14, flexShrink: 0 }}
+        >
           {isInteractive ? (
             isOpen ? (
               <ChevronDown size={14} />
@@ -115,7 +132,7 @@ export function StepRow({
             )
           ) : null}
         </span>
-        <span style={{ flexShrink: 0 }}>
+        <span aria-hidden="true" style={{ flexShrink: 0 }}>
           {state === "done" && (
             <CheckCircle2 size={16} style={{ color: "var(--success)" }} />
           )}
@@ -140,6 +157,7 @@ export function StepRow({
           }}
         >
           {step.label}
+          <span className="sr-only">{`, ${stateLabel}`}</span>
           <span
             style={{
               fontSize: 11,

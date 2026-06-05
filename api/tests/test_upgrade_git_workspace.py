@@ -159,6 +159,71 @@ def test_clone_propagates_non_zero_exit() -> None:
     assert "exit=128" in str(exc.value)
 
 
+def test_commit_clone_builds_blobless_clone_then_checkout() -> None:
+    rec = _Recorder(exit_code=0)
+    sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+    result = git_workspace.clone(
+        git_remote="https://example.test/foo.git",
+        target_version="0.2.0-commit.a1b2c3d",
+        job_id="jobCMT1",
+        target_kind="commit",
+        target_sha=sha,
+        runner=rec,
+    )
+    assert result.target_dir == "/tmp/elb-upgrade/jobCMT1"  # noqa: S108
+    # First: blobless no-checkout clone.
+    assert rec.calls[0]["argv"] == [
+        "git",
+        "clone",
+        "--filter=blob:none",
+        "--no-checkout",
+        "https://example.test/foo.git",
+        "/tmp/elb-upgrade/jobCMT1",  # noqa: S108
+    ]
+    # Second: detached checkout of the full sha.
+    assert rec.calls[1]["argv"] == [
+        "git",
+        "-C",
+        "/tmp/elb-upgrade/jobCMT1",  # noqa: S108
+        "checkout",
+        "--detach",
+        sha,
+    ]
+
+
+def test_commit_clone_requires_full_40_hex_sha() -> None:
+    with pytest.raises(git_workspace.WorkspaceError) as exc:
+        git_workspace.clone(
+            git_remote="https://example.test/foo.git",
+            target_version="0.2.0-commit.a1b2c3d",
+            job_id="jobCMT2",
+            target_kind="commit",
+            target_sha="a1b2c3d",  # short, not 40-hex
+            runner=_Recorder(),
+        )
+    assert "40-hex" in str(exc.value)
+
+
+def test_commit_clone_propagates_checkout_failure() -> None:
+    class _CheckoutFails(_Recorder):
+        def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
+            self.calls.append({"argv": argv, "cwd": cwd, "timeout_seconds": timeout_seconds})
+            if argv[:4] == ["git", "-C", "/tmp/elb-upgrade/jobCMT3", "checkout"]:  # noqa: S108
+                return {"exit_code": 1, "stdout": "", "stderr": "fatal: reference is not a tree"}
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    with pytest.raises(git_workspace.WorkspaceError) as exc:
+        git_workspace.clone(
+            git_remote="https://example.test/foo.git",
+            target_version="0.2.0-commit.a1b2c3d",
+            job_id="jobCMT3",
+            target_kind="commit",
+            target_sha="a" * 40,
+            runner=_CheckoutFails(),
+        )
+    assert "checkout" in str(exc.value).lower()
+
+
 def test_cleanup_refuses_paths_outside_upgrade_root() -> None:
     rec = _Recorder()
     workspace = git_workspace.WorkspacePath(

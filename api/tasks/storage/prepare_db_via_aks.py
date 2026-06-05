@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from celery import shared_task
@@ -159,6 +159,14 @@ def prepare_db_via_aks(
     from api.services.storage.data import _blob_service
 
     started_monotonic = time.monotonic()
+    # Wall-clock baseline for the live progress count. Blobs whose
+    # `last_modified` predates this instant belong to the *previous* snapshot
+    # (an update re-downloads on top of them with `--overwrite=true`), so the
+    # progress callback excludes them — otherwise the SPA would show e.g.
+    # "12 / 15 files" the moment an update starts. A small margin absorbs any
+    # worker/Storage clock skew (pre-existing blobs are days old, so the
+    # margin can never accidentally re-include them).
+    progress_since = datetime.now(UTC) - timedelta(seconds=120)
     LOGGER.info(
         "prepare_db_via_aks start oid=%s db=%s source=%s files=%d",
         caller_oid,
@@ -320,6 +328,7 @@ def prepare_db_via_aks(
                 mode_label="aks",
                 update_metadata=_update_metadata,
                 bytes_total=total_bytes_expected,
+                since=progress_since,
             ),
         )
         job_timed_out = bool(job_result.get("timed_out"))
@@ -466,7 +475,9 @@ def prepare_db_via_aks(
     }
 
 
-def _count_staged_blobs(container: Any, db_name: str) -> tuple[int, int] | None:
+def _count_staged_blobs(
+    container: Any, db_name: str, *, since: datetime | None = None
+) -> tuple[int, int] | None:
     """Best-effort ``(count, total_bytes)`` of fully-staged blobs under ``<db>/``.
 
     The AKS-fanout pods upload one blob per source file at
@@ -478,12 +489,28 @@ def _count_staged_blobs(container: Any, db_name: str) -> tuple[int, int] | None:
     elapsed time to render a real download throughput (MB/s). Returns ``None``
     when the listing fails so the caller can fall back to pod-level counts
     rather than reporting a wrong/zero file count.
+
+    ``since`` restricts the count to blobs committed at/after that instant
+    (by ``last_modified``). This is what the live progress callback passes so
+    an **update** does not count the previous snapshot's already-staged blobs
+    as instant progress — otherwise a re-download of a DB that already had,
+    say, 12 of 15 files on disk shows ``12 / 15`` (~80%) the moment it starts
+    and barely moves while azcopy re-fetches (``--overwrite=true``). Pods
+    re-commit each file as they go, so a ``since``-filtered count climbs from
+    0 honestly for both fresh and update runs. A blob whose ``last_modified``
+    is missing is counted (real Azure always sets it; this only matters for
+    tests/fakes). ``since=None`` preserves the unfiltered total used by the
+    orphan reconciler, which wants the full on-disk inventory.
     """
     try:
         prefix = f"{db_name}/"
         count = 0
         total_bytes = 0
         for blob in container.list_blobs(name_starts_with=prefix):
+            if since is not None:
+                last_modified = getattr(blob, "last_modified", None)
+                if last_modified is not None and last_modified < since:
+                    continue
             count += 1
             total_bytes += int(getattr(blob, "size", 0) or 0)
         return count, total_bytes
@@ -504,14 +531,16 @@ def _on_job_progress(
     mode_label: str,
     update_metadata: Any,
     bytes_total: int = 0,
+    since: datetime | None = None,
 ) -> None:
     """Mirror the server-side `_record_progress` shape so the SPA can render."""
 
     # Live per-file signal so the SPA shows a moving "N / total files" bar, a
     # throughput ETA, and a download speed (bytes landed / elapsed) instead of
     # "0 / 10 shards · 0%" while every shard is still mid-flight. Falls back to
-    # pod-level counts when the listing fails.
-    staged = _count_staged_blobs(container, db_name)
+    # pod-level counts when the listing fails. ``since`` (this run's start)
+    # excludes blobs left by a previous snapshot so an update counts from 0.
+    staged = _count_staged_blobs(container, db_name, since=since)
 
     def _mut(meta: dict[str, Any]) -> dict[str, Any]:
         copy_status: dict[str, Any] = {

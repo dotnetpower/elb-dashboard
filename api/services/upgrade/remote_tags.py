@@ -332,9 +332,17 @@ def filter_candidates(
     *,
     running_version: str,
 ) -> list[RemoteTag]:
-    """Return tags strictly greater than ``running_version`` (semver compare)."""
+    """Return tags strictly greater than ``running_version`` (semver compare).
+
+    ``running_version`` may be a commit target (``<base>-commit.<sha>``) when
+    the running image was built from the commit channel; it is reduced to its
+    bare-semver base before the compare so ``packaging.version.Version`` never
+    sees the non-PEP-440 commit suffix.
+    """
+    from api.services.upgrade.version_target import base_release
+
     try:
-        cur = Version(running_version)
+        cur = Version(base_release(running_version))
     except InvalidVersion:
         return list(tags)
     return [t for t in tags if Version(t.name) > cur]
