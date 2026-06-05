@@ -197,6 +197,187 @@ def test_blast_database_gate_unknown_when_storage_unreachable(
     assert result.status == "unknown"
 
 
+# --------------------------- node_memory_fit gate ----------------------------
+
+# ElasticBLAST reports core_nt's full-DB requirement as ~251.7 GB, which is
+# ``bytes_to_cache_gib + SYSTEM_MEMORY_RESERVE`` (2 GB). Using 251.7 GB directly
+# as ``bytes_to_cache`` slightly overstates the raw value but lands in the same
+# verdict band (far over a 128 GB node, comfortably under a 256 GB node), which
+# is all these tests assert.
+_CORE_NT_BYTES_TO_CACHE = int(251.7 * (1024**3))
+# Standard_E16s_v5 has 128 GB nominal RAM; ElasticBLAST fits a DB into
+# (RAM - 2 GB) = 126 GB usable. These two flank that boundary to lock in that
+# the gate subtracts the system reserve exactly like ElasticBLAST.
+_JUST_OVER_E16_USABLE = 127 * (1024**3)  # 127 > 126 → reject
+_JUST_UNDER_E16_USABLE = 125 * (1024**3)  # 125 <= 126 → accept
+
+
+def test_node_memory_fit_gate_skipped_when_sharded() -> None:
+    # Sharded execution profile partitions the DB across nodes — the full-DB
+    # memory check does not apply and must not even touch Storage.
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_E16s_v5", "sharding_mode": "precise"},
+    )
+    assert result.status == "ok"
+    assert "Sharded" in result.message
+
+
+def test_node_memory_fit_gate_skipped_when_auto_partition_without_explicit_mode() -> None:
+    # Regression: a script/OpenAPI submit may omit ``sharding_mode`` but set
+    # ``db_auto_partition`` — the INI generator normalises that to a sharded run,
+    # so the gate must NOT false-block it as a full-DB run. (No Storage call.)
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_E16s_v5", "db_auto_partition": True},
+    )
+    assert result.status == "ok"
+    assert result.error_code != "node_memory_insufficient"
+
+
+def test_node_memory_fit_gate_skipped_when_options_invalid() -> None:
+    # An invalid option combo (off + db_partitions) makes ``normalize_sharding_mode``
+    # raise; the INI generator will reject the submit with a precise error, so the
+    # memory gate must skip rather than block.
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={
+            "machine_type": "Standard_E16s_v5",
+            "sharding_mode": "off",
+            "db_partitions": 4,
+        },
+    )
+    assert result.status == "ok"
+    assert result.error_code != "node_memory_insufficient"
+
+
+def test_node_memory_fit_gate_blocks_when_db_exceeds_node_ram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_blastdb_json_metadata",
+        lambda *_a, **_k: {"bytes_to_cache": _CORE_NT_BYTES_TO_CACHE},
+    )
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_E16s_v5", "sharding_mode": "off"},  # 128 GB
+    )
+    assert result.status == "fail"
+    assert result.severity == "critical"
+    assert result.error_code == "node_memory_insufficient"
+    assert result.action_type == "use_sharded_throughput"
+
+
+def test_node_memory_fit_gate_passes_when_db_fits_larger_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 251.7 GB fits a Standard_E32s_v5 (256 GB) — must NOT false-block, exactly
+    # as ElasticBLAST's own pre-flight would allow it.
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_blastdb_json_metadata",
+        lambda *_a, **_k: {"bytes_to_cache": _CORE_NT_BYTES_TO_CACHE},
+    )
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_E32s_v5", "sharding_mode": "off"},  # 256 GB
+    )
+    assert result.status == "ok"
+
+
+def test_node_memory_fit_gate_blocks_just_over_usable_after_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 127 GB on a 128 GB node: ElasticBLAST rejects because usable RAM is
+    # 128 - 2 = 126 GB. The gate must subtract the same reserve and block too —
+    # comparing against raw 128 GB would false-PASS this and let the runtime fail.
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_blastdb_json_metadata",
+        lambda *_a, **_k: {"bytes_to_cache": _JUST_OVER_E16_USABLE},
+    )
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_E16s_v5", "sharding_mode": "off"},
+    )
+    assert result.status == "fail"
+    assert result.error_code == "node_memory_insufficient"
+    assert "system reserve" in result.message
+
+
+def test_node_memory_fit_gate_passes_just_under_usable_after_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 125 GB on a 128 GB node fits the 126 GB usable budget — must pass, exactly
+    # like ElasticBLAST.
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_blastdb_json_metadata",
+        lambda *_a, **_k: {"bytes_to_cache": _JUST_UNDER_E16_USABLE},
+    )
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_E16s_v5", "sharding_mode": "off"},
+    )
+    assert result.status == "ok"
+
+
+def test_node_memory_fit_gate_does_not_block_when_requirement_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No bytes-to-cache metadata → no authoritative requirement → never block
+    # (the user's policy: never false-block on an unknown number).
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_blastdb_json_metadata",
+        lambda *_a, **_k: None,
+    )
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_E16s_v5", "sharding_mode": "off"},
+    )
+    assert result.status == "ok"
+
+
+def test_node_memory_fit_gate_does_not_block_when_sku_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_blastdb_json_metadata",
+        lambda *_a, **_k: {"bytes_to_cache": _CORE_NT_BYTES_TO_CACHE},
+    )
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_Unknown_Sku", "sharding_mode": "off"},
+    )
+    assert result.status == "ok"
+
+
+def test_node_memory_fit_gate_probe_error_is_non_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise RuntimeError("Storage unreachable")
+
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_blastdb_json_metadata", _boom
+    )
+    result = submit_gates._gate_node_memory_fit(
+        storage_account="elbstg01",
+        database="core_nt",
+        options={"machine_type": "Standard_E16s_v5", "sharding_mode": "off"},
+    )
+    # A probe failure must never block submit — warning severity keeps it out
+    # of ``blocking`` even though status is "unknown".
+    assert result.status == "unknown"
+    assert result.severity == "warning"
+
+
 # --------------------------- openapi_ready gate ------------------------------
 
 
@@ -389,9 +570,16 @@ def _stub_all_ok(monkeypatch: pytest.MonkeyPatch) -> None:
             "marker_blob": "core_nt/core_nt.nsq",
         },
     )
-    # _gate_openapi_ready is opt-in via ELB_OPENAPI_BASE_URL; the default
-    # stub leaves it skipped (status=ok with "not configured" message).
+    # _gate_openapi_ready is opt-in via ELB_OPENAPI_BASE_URL; force the
+    # "not configured -> skipped" path so the gate does not depend on a stray
+    # ELB_OPENAPI_BASE_URL env var or a populated runtime-endpoint cache in the
+    # developer's workspace (otherwise it probes a real /v1/ready and blocks).
     monkeypatch.delenv("ELB_OPENAPI_BASE_URL", raising=False)
+
+    def _no_openapi_base(*_a: object, **_k: object) -> str:
+        raise RuntimeError("elb-openapi not configured")
+
+    monkeypatch.setattr("api.services.external_blast._base_url", _no_openapi_base)
 
 
 def test_evaluate_ok_when_all_gates_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,6 +600,7 @@ def test_evaluate_ok_when_all_gates_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         "aks_cluster",
         "openapi_ready",
         "blast_database",
+        "node_memory_fit",
         "acr_images",
     }
 

@@ -29,7 +29,7 @@ Use this page as the first architecture map. It explains the major boundaries an
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "primaryColor": "#f5f7fb", "primaryBorderColor": "#6d5bd0", "primaryTextColor": "#172033", "lineColor": "#64748b", "secondaryColor": "#eef6ff", "tertiaryColor": "#f7f3ff", "clusterBkg": "#fbfcff", "clusterBorder": "#cbd5e1", "fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif"}, "flowchart": {"curve": "basis", "padding": 18}}}%%
 flowchart TB
-  researcher([Researcher]) --> browser["Browser SPA<br/>Dashboard / New Search / Jobs / Results / API Reference / Terminal"]
+  researcher([Researcher]) --> browser["Browser SPA<br/>Dashboard / New Search / Jobs / Results / Analytics / API Reference / Settings / Terminal"]
 
   subgraph app["Azure Container App: ca-elb-dashboard"]
     direction TB
@@ -81,7 +81,7 @@ flowchart TB
   worker --> monitor
   app -. VNet integration .-> pe
 
-  api -->|discover / proxy OpenAPI| openapi
+  api -->|discover / proxy OpenAPI<br/>over VNet peering| openapi
   openapi --> aks
   aks --> blast
   blast --> db
@@ -107,7 +107,7 @@ The system has three practical boundaries.
 
 | Boundary | What Lives There | Why It Matters |
 |----------|------------------|----------------|
-| Browser workflow | Dashboard, New Search, Jobs, Results, API Reference, Terminal | Researchers operate from one browser session instead of stitching together local commands. |
+| Browser workflow | Dashboard, New Search, Jobs, Results, Analytics, API Reference, Settings (incl. self-upgrade), and the preview-gated Terminal / Database Builder / Tools pages | Researchers operate from one browser session instead of stitching together local commands. |
 | Control plane | One Azure Container App with `frontend`, `api`, `worker`, `beat`, `redis`, and `terminal` sidecars | Operational work is coordinated in one low-cost, always-on revision. |
 | Workload plane | AKS, ElasticBLAST jobs, OpenAPI execution service, BLAST databases, queries, and results | Search execution remains isolated from the control plane that manages it. |
 
@@ -121,10 +121,13 @@ Small read operations return directly from the API. Long-running work is queued 
 
 1. The researcher submits a search from New Search or uses the API Reference / OpenAPI route.
 2. The API validates the request, normalizes it, and dispatches the work.
-3. The workload plane runs ElasticBLAST jobs on [AKS][aks].
-4. Job state, events, and audit history are written to [Azure Storage][azure-storage].
-5. Result files stay in Storage and are streamed back through the API sidecar.
-6. The browser opens the Jobs and Results pages to inspect completion, logs, files, and result analytics.
+3. When the target database is not yet staged, a prepare-DB step runs as an [AKS][aks] job that downloads and verifies the BLAST database before the search starts.
+4. The workload plane runs ElasticBLAST jobs on AKS, started on demand and stopped automatically when the cluster goes idle to keep compute cost low.
+5. Job state, events, and audit history are written to [Azure Storage][azure-storage].
+6. Result files stay in Storage and are streamed back through the API sidecar.
+7. The browser opens the Jobs, Results, and Analytics pages to inspect completion, logs, files, and result analytics.
+
+The AKS cluster has its own lifecycle. The dashboard starts it on demand and the `beat` reconciler evaluates idle time, so a cluster left running auto-stops once no live BLAST activity remains. The Jobs and cluster cards surface a live countdown to the next auto-stop.
 
 ## Storage And Network Model
 
@@ -132,11 +135,21 @@ The browser never receives Storage SAS tokens and never downloads directly from 
 
 Every workload Storage account stays `publicNetworkAccess: Disabled` from day one. The [Container App][azure-container-apps] reaches Storage through [private endpoints][private-endpoints] inside the platform network. Developers iterating from a laptop use the explicit local-debug helper (`scripts/dev/storage-public-access.sh on|off`) which opens an IP-allowlisted window for the caller and refuses to run inside a deployed Container App. There is no deployed code path that flips public access on.
 
-## Terminal Model
+## Workload Connectivity
+
+The `api` sidecar discovers and proxies the [OpenAPI][openapi] execution service that fronts ElasticBLAST on AKS. That service is reached on its private IP, so the control-plane platform VNet is peered with the AKS cluster VNet. When the cluster runs in bring-your-own (BYO) subnet mode the AKS VNet is the dashboard platform VNet itself, so the api sidecar already reaches the private IP directly and peering is skipped as a no-op.
+
+The OpenAPI surface is private by default. Operators who need an externally reachable HTTPS endpoint can opt into Public HTTPS, which provisions an ingress controller with a cert-manager Let's Encrypt certificate and reconciles the node-subnet NSG so the inbound 80/443 path works on BYO-subnet clusters. Calls still carry the `X-ELB-API-Token` admin header and are rate-limited by the api sidecar.
 
 The browser terminal is not a VM. It is the `terminal` sidecar in the same Container App revision. The browser opens a [WebSocket][websocket] to the API sidecar, and the API proxies it to loopback [`ttyd`][ttyd] inside the terminal sidecar after authentication.
 
 Advanced operators can still run `az`, `kubectl`, `azcopy`, and `elastic-blast`, but the default research path stays in the UI.
+
+## Self-Managed Lifecycle
+
+The control plane can upgrade itself from the browser. Settings &rarr; Updates polls release availability and the Upgrade page drives the upgrade. With native [Container App][azure-container-apps] blue/green enabled (`STRICT_BLUEGREEN`), an upgrade stages a green revision at 0% traffic, health-checks it, cuts traffic over with a confirm window, and keeps the previous blue revision warm so rollback is a seconds-fast traffic-weight flip with no image re-pull. Superseded revisions are garbage-collected. With the flag off, the legacy in-place single-revision recreate runs unchanged.
+
+AKS compute is also self-managed for cost: clusters start on demand and the `beat` reconciler stops them when idle (see [BLAST Job Flow](#blast-job-flow)).
 
 ## Why This Shape
 
@@ -171,6 +184,7 @@ What the architecture deliberately does **not** include:
 [celery]: https://docs.celeryq.dev/en/stable/
 [managed-identity]: https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview
 [msal]: https://learn.microsoft.com/entra/msal/javascript/browser/
+[openapi]: https://www.openapis.org/
 [private-endpoints]: https://learn.microsoft.com/azure/private-link/private-endpoint-overview
 [redis]: https://redis.io/docs/latest/
 [ttyd]: https://github.com/tsl0922/ttyd

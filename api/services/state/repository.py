@@ -61,6 +61,30 @@ def _clamp_page_size(limit: int) -> int:
     return min(limit, _AZURE_TABLES_MAX_PAGE_SIZE)
 
 
+# Hard cap on how many rows a user-facing "most recent N" listing
+# (`list_for_owner` / `list_all` / `list_for_scope`) will scan before
+# sorting. Azure Table Storage has no server-side ordering and jobstate rows
+# use a random-uuid PartitionKey, so the only way to return the genuinely
+# most-recent `limit` rows is to read the full filtered set and sort it in
+# process. This cap bounds the memory / latency of that scan; beyond it the
+# ordering is best-effort and a time-ordered secondary index would be the
+# proper fix (logged at WARNING when hit). Override with
+# ``JOBSTATE_LIST_SCAN_CAP``.
+_LIST_SCAN_HARD_CAP_DEFAULT = 5000
+
+
+def _list_scan_hard_cap() -> int:
+    raw = os.environ.get("JOBSTATE_LIST_SCAN_CAP", "")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return _LIST_SCAN_HARD_CAP_DEFAULT
+        if value > 0:
+            return value
+    return _LIST_SCAN_HARD_CAP_DEFAULT
+
+
 # Keys whose value is an Entra OID, UPN, or email address. Used by the
 # `STRICT_AUDIT_HASH` gate to hash PII out of `jobhistory.payload_json`
 # at write time. Lower-cased substrings — matched with `.endswith()` or
@@ -314,27 +338,50 @@ class JobStateRepository:
             except ResourceNotFoundError as exc:
                 self._ensure_table("jobstate")
                 raise KeyError(job_id) from exc
+            # Submit only the changed properties (a MERGE *patch*) rather than
+            # the whole read-back snapshot. ``UpdateMode.MERGE`` overwrites just
+            # the properties present in the submitted entity, so writing back
+            # the full snapshot reverted every field a concurrent writer had
+            # changed since our read — e.g. the submit route's
+            # ``update(job_id, task_id=...)`` racing the worker's
+            # ``update(job_id, status="running")`` clobbered the fresh status
+            # back to the stale "queued". The patch keeps PartitionKey/RowKey so
+            # the SDK still targets the right row. Same-field writes remain
+            # last-writer-wins (unchanged semantics); only cross-field
+            # lost-updates are eliminated. ``e`` is still mutated in full so the
+            # returned ``JobState`` reflects this call's changes.
+            patch: dict[str, Any] = {"PartitionKey": job_id, "RowKey": "current"}
             if status is not None:
                 e["status"] = status
+                patch["status"] = status
             if phase is not None:
                 e["phase"] = phase
+                patch["phase"] = phase
             if task_id is not None:
                 e["task_id"] = task_id
+                patch["task_id"] = task_id
             if error_code is not None:
                 e["error_code"] = error_code
+                patch["error_code"] = error_code
             if payload is not None:
                 import json
 
-                e["payload_json"] = json.dumps(payload, default=str)
+                payload_json = json.dumps(payload, default=str)
+                e["payload_json"] = payload_json
+                patch["payload_json"] = payload_json
                 canonical = canonical_job_metadata(
                     payload,
                     job_id=job_id,
                     state_type=str(e.get("type") or ""),
                 )
                 e["schema_version"] = _JOB_SCHEMA_VERSION
+                patch["schema_version"] = _JOB_SCHEMA_VERSION
                 e.update(canonical)
-            e["updated_at"] = updated_at or _now_iso()
-            t.update_entity(e, mode=UpdateMode.MERGE)
+                patch.update(canonical)
+            ts = updated_at or _now_iso()
+            e["updated_at"] = ts
+            patch["updated_at"] = ts
+            t.update_entity(patch, mode=UpdateMode.MERGE)
         updated = JobState.from_entity(e)
         self.append_history(
             job_id,
@@ -347,6 +394,47 @@ class JobStateRepository:
             },
         )
         return updated
+
+    def _list_recent_sorted(
+        self,
+        filter_expr: str,
+        *,
+        limit: int,
+        include_payload: bool,
+    ) -> list[JobState]:
+        """Return the genuinely most-recent ``limit`` rows matching ``filter_expr``.
+
+        Azure Table Storage has no server-side ordering and jobstate rows use a
+        random-uuid PartitionKey, so reading a single ``results_per_page=limit``
+        page returns an arbitrary subset — sorting only that page silently drops
+        the newest rows once the filter matches more than ``limit`` of them. This
+        reads the full filtered set (bounded by :func:`_list_scan_hard_cap`, with
+        ``$top`` clamped to the Azure page-size ceiling so the SDK paginates)
+        before sorting by ``created_at`` descending and truncating to ``limit``.
+        """
+        scan_cap = _list_scan_hard_cap()
+        rows: list[JobState] = []
+        with self._state_client() as t:
+            try:
+                kwargs: dict[str, Any] = {"results_per_page": _clamp_page_size(scan_cap)}
+                if not include_payload:
+                    kwargs["select"] = _JOBSTATE_SUMMARY_SELECT
+                entities = t.query_entities(filter_expr, **kwargs)
+                for e in entities:
+                    rows.append(JobState.from_entity(dict(e)))
+                    if len(rows) >= scan_cap:
+                        LOGGER.warning(
+                            "jobstate list scan hit hard cap=%d (filter=%r); "
+                            "most-recent ordering is best-effort beyond the cap — "
+                            "consider a time-ordered secondary index",
+                            scan_cap,
+                            filter_expr,
+                        )
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+        rows.sort(key=lambda r: r.created_at or "", reverse=True)
+        return rows[:limit]
 
     def list_for_owner(
         self,
@@ -370,27 +458,17 @@ class JobStateRepository:
         delete route flips the row to that tombstone so a subsequent
         external sync skips re-creating it, but the user MUST NOT see
         the row in lists after they have asked to delete it.
+
+        Ordering: the genuinely most-recent ``limit`` rows are returned even
+        when the owner has more than ``limit`` jobs — see
+        :meth:`_list_recent_sorted` for why a page-sized read is not enough.
         """
         safe_oid = _sanitise_odata_value(owner_oid)
-        with self._state_client() as t:
-            rows = []
-            try:
-                kwargs: dict[str, Any] = {"results_per_page": limit}
-                if not include_payload:
-                    kwargs["select"] = _JOBSTATE_SUMMARY_SELECT
-                entities = t.query_entities(
-                    f"(owner_oid eq '{safe_oid}' or owner_oid eq '') "
-                    "and status ne 'deleted'",
-                    **kwargs,
-                )
-                for e in entities:
-                    rows.append(JobState.from_entity(dict(e)))
-                    if len(rows) >= limit:
-                        break
-            except ResourceNotFoundError:
-                self._ensure_table("jobstate")
-        rows.sort(key=lambda r: r.created_at or "", reverse=True)
-        return rows
+        return self._list_recent_sorted(
+            f"(owner_oid eq '{safe_oid}' or owner_oid eq '') and status ne 'deleted'",
+            limit=limit,
+            include_payload=include_payload,
+        )
 
     def list_all(
         self,
@@ -405,22 +483,15 @@ class JobStateRepository:
         shows all jobs regardless of which caller submitted them. The route
         layer still enforces ``require_caller``. Production (flag off) keeps
         using :meth:`list_for_owner` so dashboard-submitted jobs stay private.
+
+        Ordering follows :meth:`_list_recent_sorted`: the true most-recent
+        ``limit`` rows, not an arbitrary first page.
         """
-        with self._state_client() as t:
-            rows = []
-            try:
-                kwargs: dict[str, Any] = {"results_per_page": limit}
-                if not include_payload:
-                    kwargs["select"] = _JOBSTATE_SUMMARY_SELECT
-                entities = t.query_entities("status ne 'deleted'", **kwargs)
-                for e in entities:
-                    rows.append(JobState.from_entity(dict(e)))
-                    if len(rows) >= limit:
-                        break
-            except ResourceNotFoundError:
-                self._ensure_table("jobstate")
-        rows.sort(key=lambda r: r.created_at or "", reverse=True)
-        return rows
+        return self._list_recent_sorted(
+            "status ne 'deleted'",
+            limit=limit,
+            include_payload=include_payload,
+        )
 
     def list_for_scope(
         self,
@@ -468,21 +539,11 @@ class JobStateRepository:
             # Refuse an owner-agnostic global scan by accident.
             return []
 
-        with self._state_client() as table:
-            rows = []
-            try:
-                kwargs: dict[str, Any] = {"results_per_page": limit}
-                if not include_payload:
-                    kwargs["select"] = _JOBSTATE_SUMMARY_SELECT
-                entities = table.query_entities(" and ".join(clauses), **kwargs)
-                for entity in entities:
-                    rows.append(JobState.from_entity(dict(entity)))
-                    if len(rows) >= limit:
-                        break
-            except ResourceNotFoundError:
-                self._ensure_table("jobstate")
-        rows.sort(key=lambda row: row.created_at or "", reverse=True)
-        return rows
+        return self._list_recent_sorted(
+            " and ".join(clauses),
+            limit=limit,
+            include_payload=include_payload,
+        )
 
     def list_children(self, parent_job_id: str, limit: int = 100) -> list[JobState]:
         safe_parent = _sanitise_odata_value(parent_job_id)

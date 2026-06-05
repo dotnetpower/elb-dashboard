@@ -430,6 +430,55 @@ def test_list_for_owner_includes_cluster_shared_rows(monkeypatch) -> None:
     ]
 
 
+def test_list_for_owner_returns_newest_beyond_first_page(monkeypatch) -> None:
+    """``list_for_owner`` MUST return the genuinely most-recent ``limit`` rows.
+
+    jobstate uses a random-uuid PartitionKey, so Azure returns rows in an
+    order unrelated to ``created_at``. The previous implementation read only
+    the first ``results_per_page=limit`` page and then sorted it, which
+    silently dropped the newest jobs once an owner had more than ``limit`` of
+    them. Here the newest rows are deliberately placed LAST in iteration
+    order: a first-page read would miss them, so asserting they come back
+    proves the full-scan-then-sort fix.
+    """
+    # Iteration order = oldest -> newest (newest last).
+    rows = [
+        JobState(
+            job_id=f"job-{i}",
+            type="blast",
+            status="completed",
+            owner_oid="owner-1",
+            created_at=f"2026-06-0{i}T00:00:00Z",
+        ).to_entity()
+        for i in range(1, 6)
+    ]
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, _query_filter: str, **_kwargs: object):
+            # Emulate the SDK paginating iterator: every matching row is
+            # yielded regardless of results_per_page (page size only affects
+            # round-trip batching, not the total set).
+            return list(rows)
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    result = repo.list_for_owner("owner-1", limit=3)
+
+    assert [row.job_id for row in result] == ["job-5", "job-4", "job-3"]
+
+
 def test_get_many_batches_into_single_query(monkeypatch) -> None:
     """get_many MUST issue a single OData query covering all ids."""
     captured: list[str] = []
@@ -526,6 +575,62 @@ def test_create_returns_existing_on_resource_exists(monkeypatch) -> None:
     # Existing row wins; the caller's "queued" status is not persisted.
     assert returned.job_id == "raced"
     assert returned.status == "running"
+
+
+def test_update_submits_only_the_changed_fields(monkeypatch) -> None:
+    """``update`` MUST submit a MERGE patch, not the full read-back snapshot.
+
+    Writing the whole snapshot back reverted any field a concurrent writer
+    changed since our read (e.g. submit's ``task_id`` update clobbering the
+    worker's fresh ``status="running"`` back to the stale ``"queued"``). The
+    patch must carry PartitionKey/RowKey plus only the fields this call set.
+    """
+    submitted: list[dict[str, object]] = []
+    existing_entity = JobState(
+        job_id="job-merge",
+        type="blast",
+        status="queued",
+        phase="queued",
+        owner_oid="owner-1",
+        payload={"job_title": "Panel search"},
+    ).to_entity()
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, *, partition_key: str, row_key: str) -> dict[str, object]:
+            assert partition_key == "job-merge"
+            assert row_key == "current"
+            return dict(existing_entity)
+
+        def update_entity(self, entity: dict[str, object], **_kwargs: object) -> None:
+            submitted.append(entity)
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    repo.update("job-merge", task_id="celery-123")
+
+    assert len(submitted) == 1
+    patch = submitted[0]
+    # Only the routing keys, the changed field, and the always-bumped
+    # updated_at — NOT status/phase/payload_json from the stale snapshot.
+    assert patch["PartitionKey"] == "job-merge"
+    assert patch["RowKey"] == "current"
+    assert patch["task_id"] == "celery-123"
+    assert "updated_at" in patch
+    assert "status" not in patch
+    assert "phase" not in patch
+    assert "payload_json" not in patch
 
 
 def test_list_active_filters_to_in_flight_states(monkeypatch) -> None:

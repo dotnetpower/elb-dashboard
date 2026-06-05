@@ -55,8 +55,9 @@ export interface Preferences {
   previewLiveWallEnabled: boolean;
   /**
    * Preview opt-in: show the browser terminal route, navigation entry,
-   * dashboard card, and keyboard shortcut. Disabled by default; the
-   * terminal is an optional surface, not part of the core flow.
+   * dashboard card, and keyboard shortcut. Enabled by default so the
+   * terminal is available out of the box; operators can hide it from the
+   * Settings → Preview section.
    */
   previewTerminalEnabled: boolean;
 }
@@ -75,7 +76,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   previewCustomDbEnabled: false,
   previewLabToolsEnabled: false,
   previewLiveWallEnabled: false,
-  previewTerminalEnabled: false,
+  previewTerminalEnabled: true,
 };
 
 export const PREVIEW_PREF_KEYS = {

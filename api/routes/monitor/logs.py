@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import time
 from collections.abc import AsyncGenerator
@@ -36,7 +37,43 @@ from api.services.sidecar_logs import (
 router = APIRouter()
 
 _LOG_TICKET_TTL_SEC = 30
+# Adaptive poll backoff. A file-tail SSE has no event source, so the stream
+# polls `read_lines_since`. A fixed 1 s tick meant every idle connection woke
+# the shared AnyIO threadpool once a second forever — and in Log-Analytics
+# fallback mode the snapshot only refreshes every ~5 s, so most of those wakeups
+# returned nothing. The loop now starts fast (responsive while logs flow) and
+# backs off toward `_LOG_POLL_MAX_INTERVAL_SEC` while idle, resetting to the
+# minimum the instant a line arrives. Setting the max equal to the min restores
+# the legacy fixed-interval behaviour.
 _LOG_POLL_INTERVAL_SEC = 1.0
+_LOG_POLL_BACKOFF_FACTOR = 1.5
+
+
+def _log_poll_max_interval_sec() -> float:
+    raw = os.environ.get("LIVE_WALL_LOG_POLL_MAX_INTERVAL_SEC", "")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return 5.0
+        if value >= _LOG_POLL_INTERVAL_SEC:
+            return value
+        return _LOG_POLL_INTERVAL_SEC
+    return 5.0
+
+
+def _next_poll_interval(current: float, *, had_lines: bool, max_interval: float) -> float:
+    """Return the next poll interval for the log SSE loop.
+
+    Reset to the minimum the instant a line arrives (stay responsive while
+    logs flow); otherwise back off geometrically toward ``max_interval`` so an
+    open-but-quiet tail stops waking the shared threadpool every second.
+    """
+    if had_lines:
+        return _LOG_POLL_INTERVAL_SEC
+    return min(current * _LOG_POLL_BACKOFF_FACTOR, max_interval)
+
+
 _LOG_HEARTBEAT_INTERVAL_SEC = 25.0
 
 
@@ -120,15 +157,20 @@ async def logs_events(
             yield _sse("line", line)
         offset = await asyncio.to_thread(end_offset, sidecar)
         last_heartbeat = time.monotonic()
+        poll_interval = _LOG_POLL_INTERVAL_SEC
+        max_interval = _log_poll_max_interval_sec()
         while True:
             lines, offset = await asyncio.to_thread(read_lines_since, sidecar, offset)
             for line in lines:
                 yield _sse("line", line)
+            poll_interval = _next_poll_interval(
+                poll_interval, had_lines=bool(lines), max_interval=max_interval
+            )
             now = time.monotonic()
             if now - last_heartbeat >= _LOG_HEARTBEAT_INTERVAL_SEC:
                 yield ": heartbeat\n\n"
                 last_heartbeat = now
-            await asyncio.sleep(_LOG_POLL_INTERVAL_SEC)
+            await asyncio.sleep(poll_interval)
 
     return StreamingResponse(
         event_stream(),

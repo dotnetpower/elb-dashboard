@@ -20,14 +20,18 @@ Risky contracts: The per-pod script lives in `PREPARE_DB_AKS_SCRIPT` and
     supported AKS versions). `azcopy login --identity` resolves the
     kubelet-attached managed identity, which must already carry
     `Storage Blob Data Contributor` on the workload Storage account (the
-    existing warmup RBAC grant covers this). The pod-side download flow
-    (`curl … | azcopy copy --from-to=PipeBlob`) is what actually achieves
-    the per-pod NAT parallelism — server-side `azcopy copy <url> <url>`
-    would re-use Azure's backend IP and gain no speedup. The script
-    bootstraps `azcopy` from `aka.ms/downloadazcopy-v10-linux` at pod
-    start because the pinned `mcr.microsoft.com/azure-cli:2.81.0` image
-    does not bundle it; the download depends on egress to `aka.ms` and
-    `github.com` (release redirect) being reachable from the pod NIC.
+    existing warmup RBAC grant covers this). Each pod runs a SINGLE
+    `azcopy copy --from-to=S3Blob` over its shard's files (selected via an
+    `--include-pattern` built from the shard basenames); azcopy reads the
+    public NCBI bucket anonymously and writes through the kubelet MI to the
+    Storage private endpoint, so the account stays
+    `publicNetworkAccess: Disabled`. azcopy is PINNED to 10.28.0 because the
+    `aka.ms` redirect now serves 10.32.4, which panics on every S3Blob copy
+    (override via `ELB_AZCOPY_URL`); the download depends on egress to
+    `github.com` from the pod NIC. The trailing `/*` source + include-pattern
+    is what yields the FLAT `blast-db/<db>/<file>` layout elastic-blast
+    requires — azcopy's list-of-files mode nests `<snapshot>/` and must
+    not be used.
 Validation: `uv run pytest -q api/tests/test_prepare_db_aks_planner.py
     api/tests/test_prepare_db_aks_manifest.py`.
 """
@@ -89,18 +93,30 @@ _SAFE_IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$")
 
 # Pod-side shell script. Each pod is one completion of an Indexed Job; its
 # shard index comes from `JOB_COMPLETION_INDEX` (kubelet downward-API env).
-# The script reads its assigned NCBI keys from `/scripts/shard-NN.txt`,
-# streams each file through `curl | azcopy copy --from-to=PipeBlob` so the
-# pod NIC -> AKS node's outbound NAT IP is what NCBI sees (per-node distinct
-# source IPs = real parallelism), and the bytes never touch the pod's
-# filesystem. Server-side `azcopy copy <url> <url>` would reuse Azure's
-# backend IP and yield no NCBI-side speedup.
+# The script reads its assigned NCBI keys from `/scripts/shard-NN.txt`, then
+# runs a SINGLE `azcopy copy --from-to=S3Blob` over exactly those files
+# (selected via an `--include-pattern` built from the shard's basenames).
+# azcopy fetches the public NCBI S3 objects anonymously and streams them
+# into the workload Storage account through the kubelet managed identity.
+# This replaced the old per-file serial `curl | azcopy --from-to=PipeBlob`
+# loop, which threw away azcopy's native multi-file/multi-connection
+# parallelism (one file at a time, no per-file resume) and could never
+# converge for `nt`/`core_nt` within the Job deadline. A single azcopy call
+# was measured live at ~172 MB/s on one 1Gi pod (5x3GB nt volumes, peak RSS
+# 143 MiB) — see docs/features_change for the proof.
 #
-# The base image (`mcr.microsoft.com/azure-cli`) does NOT ship `azcopy`, so
-# the script downloads the official build from aka.ms once per pod and
-# extracts the single `azcopy` binary using Python's `tarfile` (the image
-# does not have GNU `tar` either). Install size is ~30 MiB tgz on the
-# container's writable rootfs; no extra emptyDir is needed.
+# azcopy version is PINNED to 10.28.0: the current `aka.ms` redirect serves
+# 10.32.4, which panics (nil deref in getSourceServiceClient) on every
+# `--from-to=S3Blob` copy. 10.28.0 handles S3Blob correctly. Override the
+# download URL with `ELB_AZCOPY_URL` only if a newer build is verified to
+# fix the S3Blob crash.
+#
+# The base image (`mcr.microsoft.com/azure-cli`) does NOT ship `azcopy`,
+# GNU `tar`, or other GNU text tools (it is Azure Linux / Mariner), so the
+# script downloads azcopy once per pod and extracts the single binary using
+# Python's stdlib `tarfile`. It also avoids GNU text tools and `head` in
+# pipefail pipelines (`head` SIGPIPEs the upstream and fails the shard);
+# `python3` is always present because the azure-cli image is a python app.
 PREPARE_DB_AKS_SCRIPT = r"""#!/bin/bash
 set -euo pipefail
 
@@ -122,12 +138,16 @@ TOTAL=$(grep -cve '^[[:space:]]*$' "$FILE_LIST" || true)
 log "START shard=${SHARD_INDEX} db=${DB_NAME} files=${TOTAL}"
 
 # Bootstrap azcopy. The azure-cli image does not bundle it (and does not
-# ship GNU `tar`), so download the official linux build and pull the single
-# `azcopy` binary out using Python's stdlib tarfile module.
+# ship GNU `tar`), so download a PINNED linux build and pull the single
+# `azcopy` binary out using Python's stdlib tarfile module. The version is
+# pinned to 10.28.0 because aka.ms now serves 10.32.4, which crashes on
+# `--from-to=S3Blob`. Override with ELB_AZCOPY_URL only after verifying a
+# newer build fixes the S3Blob crash.
+AZCOPY_URL="${ELB_AZCOPY_URL:-https://github.com/Azure/azure-storage-azcopy/releases/download/v10.28.0/azcopy_linux_amd64_10.28.0.tar.gz}"
 if ! command -v azcopy >/dev/null 2>&1; then
-    log "Installing azcopy from aka.ms..."
-    curl -fsSL --retry 5 --retry-delay 5 --max-time 120 \
-        https://aka.ms/downloadazcopy-v10-linux -o /tmp/azcopy.tgz
+    log "Installing pinned azcopy from ${AZCOPY_URL}..."
+    curl -fsSL --retry 5 --retry-delay 5 --max-time 180 \
+        "$AZCOPY_URL" -o /tmp/azcopy.tgz
     python3 - <<'PY'
 import os
 import shutil
@@ -155,246 +175,64 @@ if ! azcopy login --identity >/tmp/azcopy-login.log 2>&1; then
 fi
 export AZCOPY_CONCURRENCY_VALUE="${AZCOPY_CONCURRENCY_VALUE:-16}"
 
-# Intentionally NOT exporting AZCOPY_BUFFER_GB: the container memory
-# limit is 1Gi (see build_prepare_db_job_manifest) and azcopy auto-tunes
-# the in-memory block buffer to 25% of the cgroup limit (~256 MiB), which
-# stays safely under the limit even with concurrency=16 and 64MiB blocks.
-# A larger explicit value risks OOMKilled mid-shard.
+# Intentionally NOT exporting AZCOPY_BUFFER_GB: the container memory limit
+# is 1Gi (see build_prepare_db_job_manifest) and azcopy auto-tunes the
+# in-memory block buffer to ~25% of the cgroup limit. With the 64 MiB block
+# size below, a live 1Gi pod peaked at 143 MiB RSS while streaming five
+# parallel 3 GB nt volumes, so there is ample headroom. A larger explicit
+# value risks OOMKilled mid-shard.
 
 DEST_BASE="https://${STORAGE_ACCOUNT}.${BLOB_SUFFIX}/blast-db/${DB_NAME}"
+SOURCE_VERSION="${ELB_SOURCE_VERSION:?ELB_SOURCE_VERSION required}"
+BLOCK_MB="${ELB_AZCOPY_BLOCK_MB:-64}"
 
-# Integrity verification cadence. Every Nth uploaded file gets a full
-# round-trip check (NCBI Content-Length captured pre-flight + `azcopy
-# list` post-upload). Each verify costs ~1-2s (RBAC token refresh +
-# ARM call), so 1/10 keeps wall time bounded while still catching
-# NCBI rolling-restart truncations within a single shard. Override
-# with `ELB_VERIFY_EVERY_N=1` to verify every file (debug) or `=0`
-# to disable verify entirely (azcopy's own Content-MD5 check is the
-# only safety net then).
-VERIFY_EVERY_N="${ELB_VERIFY_EVERY_N:-10}"
-
-# Echo the integer ContentLength of a single blob to stdout, or nothing
-# if the blob is absent. Emits the literal "PARSE_FAIL" when azcopy
-# returns a shape we don't understand (version/schema drift) so callers
-# can distinguish "blob missing" (empty) from "can't tell" (PARSE_FAIL).
-# Shared by the per-file idempotency check and the post-upload verify.
-blob_content_length() {
-    azcopy list "$1" --output-type=json 2>/dev/null \
-        | python3 -c 'import json,re,sys
-def to_bytes(v):
-    # azcopy <= ~10.31 emitted ContentLength as a raw integer byte count;
-    # azcopy >= 10.32 emits a human-readable string ("2.79 GiB", "512 B").
-    # Normalize BOTH to an integer byte count so the verify step can
-    # compare against the raw NCBI Content-Length. Returns None on shapes
-    # we cannot interpret so the caller falls back to PARSE_FAIL.
-    if v is None:
-        return None
-    if isinstance(v, (int, float)):
-        return int(v)
-    s = str(v).strip()
-    if not s:
-        return None
-    if s.isdigit():
-        return int(s)
-    m = re.match(r"^([0-9]*\.?[0-9]+)\s*([KMGTPE]?i?B)$", s, re.IGNORECASE)
-    if not m:
-        return None
-    mult = {
-        "B": 1,
-        "KIB": 1024, "MIB": 1024 ** 2, "GIB": 1024 ** 3,
-        "TIB": 1024 ** 4, "PIB": 1024 ** 5,
-        "KB": 1000, "MB": 1000 ** 2, "GB": 1000 ** 3,
-        "TB": 1000 ** 4, "PB": 1000 ** 5,
-    }.get(m.group(2).upper())
-    if mult is None:
-        return None
-    return int(float(m.group(1)) * mult)
-got = False
-for line in sys.stdin:
-    line=line.strip()
-    if not line:
-        continue
-    try:
-        obj=json.loads(line)
-    except Exception:
-        continue
-    msg=obj.get("MessageContent") or obj.get("messageContent")
-    cl=None
-    if isinstance(msg, str) and msg:
-        try:
-            inner=json.loads(msg)
-        except Exception:
-            inner=None
-        if isinstance(inner, dict):
-            cl=inner.get("ContentLength") or inner.get("contentLength")
-    if cl is None:
-        cl=obj.get("ContentLength") or obj.get("contentLength")
-    if cl is not None:
-        b=to_bytes(cl)
-        if b is not None:
-            print(b); got=True; break
-if not got:
-    print("PARSE_FAIL")'
-}
-
-ok=0
-fail=0
-skip=0
-file_index=0
-# Read the shard file list on fd 3, NOT stdin. azcopy subcommands invoked
-# inside the loop without an explicit stdin redirect (e.g. `azcopy remove`)
-# will otherwise DRAIN fd 0 — when that fd is the FILE_LIST, the very first
-# such call swallows every remaining line and the loop ends silently after
-# one file. Isolating the list on fd 3 keeps the loop fed regardless of what
-# any in-loop process does to stdin.
-while IFS= read -r KEY <&3; do
-    [ -z "$KEY" ] && continue
-    file_index=$((file_index + 1))
-    file_basename="${KEY##*/}"
-    src_url="${NCBI_BASE}/${KEY}"
-    dst_url="${DEST_BASE}/${file_basename}"
-    # Per-file idempotency: skip ONLY blobs that are already FULLY
-    # uploaded. A previous attempt (or an aborted server-side copy from
-    # the legacy prepare path) can leave a 0-byte placeholder whose
-    # ContentLength KEY exists but whose value is 0 — the old key-presence
-    # check skipped those too, leaving a corrupt BLAST database. Require
-    # ContentLength > 0; missing blobs (empty), 0-byte placeholders, and
-    # parse-fail all fall through to a clean re-download (azcopy
-    # overwrites).
-    existing_len=$(blob_content_length "$dst_url")
-    if [ -n "$existing_len" ] && [ "$existing_len" != "PARSE_FAIL" ] \
-            && [ "$existing_len" -gt 0 ] 2>/dev/null ; then
-        skip=$((skip + 1))
-        # Throttled heartbeat for resume runs. Re-checking thousands of
-        # already-staged blobs (one `azcopy list` per file) is silent and
-        # can take minutes for a big DB like `nt`; emit a line every 50
-        # skips so the pod still looks alive while it scans.
-        if [ $((skip % 50)) -eq 0 ]; then
-            log "[${file_index}/${TOTAL}] scanned; ${skip} already staged, ${ok} copied"
-        fi
-        continue
-    fi
-    # Decide upfront whether THIS file is one of the sampled ones. We
-    # only pay the pre-flight HEAD + post-upload verify cost on the
-    # sampled subset; the rest trust the curl|azcopy pipeline exit
-    # code (already gated by `set -euo pipefail`).
-    verify_this=""
-    if [ "$VERIFY_EVERY_N" != "0" ] && [ $((file_index % VERIFY_EVERY_N)) -eq 0 ]; then
-        verify_this="1"
-    fi
-    expected_size=""
-    if [ -n "$verify_this" ]; then
-        # Pre-flight: NCBI Content-Length tells us how many bytes to expect.
-        # Captured here so the post-upload verification step can compare
-        # apples to apples without trusting curl's exit code alone (a HTTP
-        # 200 + truncated body would otherwise upload silently).
-        #
-        # Parse with python3 (always present — this is the azure-cli image,
-        # and the script already relies on python3 above). The
-        # mcr.microsoft.com/azure-cli base image ships no GNU text tools,
-        # so a `BEGIN{IGNORECASE=1}`-style one-liner would abort the pod
-        # under `set -euo pipefail` on the first sampled file (command not
-        # found) and fail the whole shard. curl -sIL follows redirects and
-        # prints headers for EVERY hop, so take the LAST content-length seen
-        # (the final 200 response's real size), not the first (a 301/302 hop
-        # has none or the wrong one).
-        expected_size=$(curl -sIL --retry 3 --retry-delay 10 --max-time 60 \
-            "$src_url" \
-            | python3 -c 'import re,sys
-val=""
-for line in sys.stdin:
-    m=re.match(r"(?i)^content-length:\s*([0-9]+)\s*$", line.strip())
-    if m:
-        val=m.group(1)
-print(val)')
-        if [ -z "${expected_size:-}" ] || [ "$expected_size" = "0" ]; then
-            log "WARN no Content-Length for ${KEY}; integrity check will be skipped"
-            expected_size=""
-        fi
-    fi
-    # Progress heartbeat. The copy itself runs with `--log-level=ERROR
-    # >/dev/null`, so a healthy multi-GB file (e.g. an `nt` shard) would
-    # otherwise emit ZERO output for several minutes, making `kubectl logs`
-    # look hung even though azcopy is streaming at full NIC speed. Logging
-    # the file index/total + name before each copy turns that opaque
-    # silence into a visibly-advancing counter so operators can tell a
-    # slow-but-healthy run from a genuine stall. One line per file
-    # (<= a few hundred per shard) is cheap for `kubectl logs`.
-    log "[${file_index}/${TOTAL}] copy ${file_basename}${expected_size:+ (~${expected_size} bytes)}"
-    # Stream NCBI -> pod NIC -> Azure Blob with no on-disk staging. Peak
-    # memory ≈ block-size-mb × azcopy's internal buffer count (~200 MiB),
-    # well under the 1 GiB container memory limit even for 10+ GiB files.
-    # `set -euo pipefail` makes the pipeline fail if either side errors.
-    #
-    # PipeBlob takes the destination as a SINGLE positional argument
-    # (`azcopy copy "<dst>" --from-to=PipeBlob`); stdin is the implicit
-    # source. The older two-positional form `azcopy copy --from-to=PipeBlob
-    # "" "<dst>"` is rejected by azcopy >= 10.32 (the empty first positional
-    # is parsed as the source and the copy aborts immediately with no
-    # transfer and a non-zero exit), which silently uploaded 0 bytes for
-    # every file. Keep the destination first and do NOT reintroduce the
-    # empty `""` placeholder.
-    if curl -sSfL --retry 5 --retry-delay 30 --retry-all-errors \
-            --max-time 1800 "$src_url" \
-        | azcopy copy "$dst_url" --from-to=PipeBlob \
-            --block-size-mb=64 --log-level=ERROR >/dev/null ; then
-        # Post-upload integrity check ONLY on sampled files (see
-        # VERIFY_EVERY_N). Mismatch means NCBI gave us a truncated body
-        # or served an HTML error with status 200 — both have been
-        # observed during NCBI rolling restarts. Delete the bad blob
-        # so the next retry of this shard re-fetches it cleanly rather
-        # than leaving garbage to confuse BLAST.
-        #
-        # The parser emits one of:
-        #   "<int>"      — uploaded ContentLength successfully extracted
-        #   "PARSE_FAIL" — azcopy list returned a shape we don't
-        #                  understand (azcopy version upgrade, schema
-        #                  drift); skip verify and assume the upload is
-        #                  good rather than enter a delete-and-retry
-        #                  loop that would burn through the backoffLimit
-        if [ -n "$expected_size" ]; then
-            uploaded_size=$(blob_content_length "$dst_url")
-            if [ "$uploaded_size" = "PARSE_FAIL" ] || [ -z "$uploaded_size" ]; then
-                log "WARN verify parse-fail ${KEY}; trusting upload exit code"
-                ok=$((ok + 1))
-                continue
-            fi
-            # blob_content_length normalizes the uploaded size to an integer
-            # byte count even when azcopy >= 10.32 reports a human-readable
-            # "2.79 GiB" string. That conversion keeps only ~3 significant
-            # figures, so an EXACT compare against the raw NCBI byte count
-            # would false-fail every multi-GB file (2999987448 vs 2.79 GiB =
-            # 2995639357 after round-trip). Accept a 1% / 1 KiB tolerance: a
-            # genuinely truncated body or an HTML error page is orders of
-            # magnitude smaller and still trips the check.
-            if ! python3 -c 'import sys
-up=int(sys.argv[1]); exp=int(sys.argv[2])
-sys.exit(0 if abs(up - exp) <= max(1024, exp // 100) else 1)' \
-                    "$uploaded_size" "$expected_size"; then
-                log "ERROR size mismatch ${KEY} exp=${expected_size} got=${uploaded_size}"
-                # </dev/null so azcopy cannot drain the loop's fd-3 list.
-                azcopy remove "$dst_url" --log-level=ERROR </dev/null >/dev/null 2>&1 || true
-                fail=$((fail + 1))
-                continue
-            fi
-        fi
-        ok=$((ok + 1))
-    else
-        log "ERROR pipeline failed for ${KEY}"
-        fail=$((fail + 1))
-    fi
-done 3< "$FILE_LIST"
-
-log "DONE shard=${SHARD_INDEX} ok=${ok} fail=${fail} skip=${skip}"
-
-# backoffLimit launches a fresh pod with a clean emptyDir for retries
-# (restartPolicy=Never + emptyDir{medium: Memory}), so no per-pod
-# cleanup is needed before exit.
-
-if [ "$fail" -gt 0 ]; then
-    exit 1
+# Build the azcopy --include-pattern from this shard's basenames. The shard
+# file holds full NCBI keys ("<snapshot>/nt.000.nsq"); azcopy matches the
+# include-pattern against the object NAME, so strip each key to its basename
+# and join with ';'. python3 is used because the azure-cli image ships no GNU
+# text tools, and `head` inside a `set -o pipefail` pipeline would SIGPIPE the
+# upstream and fail the shard.
+PATTERN=$(python3 -c '
+import sys
+names = [ln.strip().split("/")[-1] for ln in open(sys.argv[1]) if ln.strip()]
+sys.stdout.write(";".join(names))
+' "$FILE_LIST")
+if [ -z "$PATTERN" ]; then
+    log "ERROR shard ${SHARD_INDEX} has no files to copy"
+    exit 2
 fi
-exit 0
+
+# Single azcopy S3Blob copy of EXACTLY this shard's files. azcopy reads the
+# public NCBI bucket anonymously (no AWS creds needed) and writes through
+# the kubelet managed identity to the workload Storage account's private
+# endpoint, so the account stays publicNetworkAccess=Disabled. The trailing
+# "/*" on the source yields the FLAT "blast-db/<db>/<file>" layout
+# elastic-blast requires (azcopy's list-of-files mode would instead nest
+# "<snapshot>/" under the destination and break that layout).
+# `--overwrite=true` re-fetches
+# every file so a re-run heals any truncated/0-byte blob left by an earlier
+# interrupted download; azcopy commits each blob atomically via its block
+# list, so a killed transfer never leaves a partial committed blob. azcopy
+# prints its own "% Done/Failed/Total" progress to stdout for live
+# `kubectl logs`. A non-zero exit (any failed transfer) fails the shard so
+# the Job's backoffLimit relaunches a fresh pod; azcopy's own retry handles
+# transient NCBI/S3 hiccups within a run.
+#
+# azcopy version is pinned to 10.28.0 above: aka.ms now serves 10.32.4,
+# which panics on every --from-to=S3Blob copy.
+SRC="${NCBI_BASE}/${SOURCE_VERSION}/*"
+log "COPY shard=${SHARD_INDEX} files=${TOTAL} src=${SOURCE_VERSION} block=${BLOCK_MB}MiB"
+set +e
+azcopy copy "$SRC" "${DEST_BASE}/" \
+    --from-to=S3Blob \
+    --include-pattern "$PATTERN" \
+    --block-size-mb="$BLOCK_MB" \
+    --overwrite=true \
+    --log-level=WARNING
+rc=$?
+set -e
+log "DONE shard=${SHARD_INDEX} azcopy_exit=${rc}"
+exit "$rc"
 """
 
 

@@ -36,6 +36,13 @@ export interface SubmitValidationArgs {
   warmupBlocked: boolean;
   selectedDbPlan: BlastWarmupPlan | null | undefined;
   shardingBlockedReason?: string | null;
+  /**
+   * Reason a full-database (non-sharded) run cannot fit the cluster node's RAM,
+   * computed by `deriveFullDbMemoryFit`. Non-null blocks submit and steers the
+   * user to the Sharded throughput profile. Null when the run fits, the profile
+   * is sharded, or the requirement is unknown (never false-block).
+   */
+  fullDbMemoryBlockedReason?: string | null;
   dataLoading?: boolean;
   submitPending: boolean;
 }
@@ -72,6 +79,7 @@ export function deriveSubmitValidation({
   warmupBlocked,
   selectedDbPlan,
   shardingBlockedReason,
+  fullDbMemoryBlockedReason,
   dataLoading = false,
   submitPending,
 }: SubmitValidationArgs): SubmitValidationResult {
@@ -112,6 +120,7 @@ export function deriveSubmitValidation({
     !dbNotReady &&
     !warmupBlocked &&
     !shardingBlockedReason &&
+    !fullDbMemoryBlockedReason &&
     !dataLoading &&
     taxonomyReady &&
     !submitPending,
@@ -151,6 +160,7 @@ export function deriveSubmitValidation({
         "Warmup is not feasible on this cluster — disable warmup or upgrade the cluster",
     });
   if (shardingBlockedReason) missing.push({ text: shardingBlockedReason });
+  if (fullDbMemoryBlockedReason) missing.push({ text: fullDbMemoryBlockedReason });
   if (dataLoading) missing.push({ text: "Runtime data is still loading" });
   if (!taxidValid) missing.push({ text: "Taxonomy taxid must be a positive integer" });
   if (taxidOptionConflict) {

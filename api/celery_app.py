@@ -129,6 +129,13 @@ celery_app.conf.update(
             "schedule": float(os.environ.get("CELERY_BEAT_AUTO_WARMUP_SECONDS", "120")),
             "options": {"queue": "reconcile"},
         },
+        "prepare-db-orphan-reconcile": {
+            "task": "api.tasks.storage.reconcile_orphaned_prepare_db",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_PREPARE_DB_ORPHAN_SECONDS", "300")
+            ),
+            "options": {"queue": "reconcile"},
+        },
         "blast-reconcile-stale-jobs": {
             "task": "api.tasks.blast.reconcile_stale_jobs",
             "schedule": float(os.environ.get("CELERY_BEAT_BLAST_RECONCILE_SECONDS", "90")),

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from time import monotonic
 from typing import Any, Literal
@@ -49,6 +50,17 @@ _BLAST_REQUIRED_REPOS = (
     "ncbi/elasticblast-job-submit",
     "ncbi/elasticblast-query-split",
 )
+
+# Memory (GiB) ElasticBLAST reserves for the OS before fitting a database into a
+# node. Mirrors ``SYSTEM_MEMORY_RESERVE`` in the sibling repo
+# (``elastic-blast-azure`` src/elastic_blast/constants.py — currently an interim
+# value of 2). ElasticBLAST's full-DB submit pre-flight rejects when
+# ``node_ram_gib - SYSTEM_MEMORY_RESERVE < bytes_to_cache_gib``; the
+# ``node_memory_fit`` gate subtracts the same value so its verdict matches
+# ElasticBLAST's exactly. Keep in sync if the sibling repo bumps the constant
+# (charter §13 cross-repo consistency); the SPA mirror lives in
+# ``web/src/pages/blastSubmit/memoryFit.ts``.
+_SYSTEM_MEMORY_RESERVE_GIB = 2.0
 
 
 @dataclass(frozen=True)
@@ -401,6 +413,174 @@ def _gate_blast_database(*, storage_account: str, database: str) -> GateResult:
     return result
 
 
+def _gate_node_memory_fit(
+    *,
+    storage_account: str,
+    database: str,
+    options: Mapping[str, Any] | None,
+) -> GateResult:
+    """For a full-database (non-sharded) BLAST, verify the database fits node RAM.
+
+    ElasticBLAST's own submit pre-flight rejects a full-DB run whose memory
+    requirement exceeds the workload node's RAM::
+
+        ERROR: BLAST database .../core_nt memory requirements exceed memory
+        available on selected machine type "Standard_E16s_v5". Please select
+        machine type with at least 251.7GB available memory.
+
+    The DB's ``bytes-to-cache`` (from the BLASTDB ``.njs`` metadata) is the exact
+    number ElasticBLAST compares against the node RAM, so mirroring that
+    comparison here neither false-blocks a DB ElasticBLAST would accept
+    (e.g. core_nt 251.7 GB on Standard_E32s_v5 / 256 GB) nor lets through one it
+    would reject. The sharded execution profile partitions the DB so each shard
+    fits node memory — this gate only applies to the ``off`` (full-DB) profile.
+
+    Non-blocking by design except for a definitive over-RAM verdict:
+
+    * ``sharding_mode != "off"`` → ``ok`` (sharded path handles capacity).
+    * ``bytes-to-cache`` unknown, or the node SKU's RAM is unknown → ``ok``
+      (no authoritative number → do not false-block; ElasticBLAST's pre-flight
+      and the post-failure guidance remain the safety net).
+    * Storage / probe error → ``unknown`` + ``warning`` severity so it never
+      blocks the submit.
+    * Requirement exceeds node RAM → ``fail`` + ``critical`` (blocks, steers to
+      the Sharded throughput execution profile or a larger cluster).
+
+    Cached per (storage_account, database, machine_type) for 5s like the other
+    data-plane gates.
+    """
+    opts = options or {}
+    machine_type = str(opts.get("machine_type") or "")
+    # Resolve the sharding mode through the SAME normaliser the INI generator
+    # uses (``api.services.blast.config.generate_config`` → ``normalize_sharding_mode``)
+    # so a caller that omits ``sharding_mode`` but sets ``db_auto_partition`` /
+    # ``allow_approximate_sharding`` / ``db_partitions`` is treated as sharded
+    # here too. Reading the raw ``sharding_mode`` string would mis-classify those
+    # as ``off`` and false-block a run that actually auto-shards. Invalid option
+    # combinations raise here; the INI generator will reject them with a precise
+    # error, so skip the memory check rather than pre-empt it with a block.
+    try:
+        from api.services.sharding_precision import normalize_sharding_mode
+
+        mode = normalize_sharding_mode(opts)
+    except Exception:
+        return GateResult(
+            id="node_memory_fit",
+            status="ok",
+            severity="critical",
+            error_code="",
+            message="Sharding options invalid; full-DB memory check skipped.",
+        )
+    if mode != "off":
+        return GateResult(
+            id="node_memory_fit",
+            status="ok",
+            severity="critical",
+            error_code="",
+            message="Sharded execution profile — full-DB memory check skipped.",
+        )
+    cache_key = f"memfit:{storage_account}:{database}:{machine_type}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        from api.services.aks_skus import SKU_BY_NAME, normalize_sku_name
+        from api.services.blast.db_metadata import (
+            extract_db_name,
+            resolve_blastdb_json_metadata,
+        )
+
+        db_name = extract_db_name(database)
+        node_ram_gib: float | None = None
+        if machine_type:
+            sku = SKU_BY_NAME.get(normalize_sku_name(machine_type))
+            if sku is not None:
+                node_ram_gib = float(sku.memory_gib)
+
+        if node_ram_gib is None or not db_name:
+            # Unknown node RAM (or no DB name) — we cannot evaluate the fit, so
+            # skip without a Storage round-trip and never block.
+            result = GateResult(
+                id="node_memory_fit",
+                status="ok",
+                severity="critical",
+                error_code="",
+                message=(
+                    "Workload node memory is unknown; full-DB memory check skipped."
+                ),
+            )
+            _cache_set(cache_key, result)
+            return result
+
+        meta = resolve_blastdb_json_metadata(storage_account, db_name)
+        bytes_to_cache = int(meta.get("bytes_to_cache") or 0) if meta else 0
+
+        if bytes_to_cache <= 0 or node_ram_gib is None:
+            # No authoritative memory requirement, or unknown node RAM — do not
+            # block (the user chose: never false-block on an unknown number).
+            result = GateResult(
+                id="node_memory_fit",
+                status="ok",
+                severity="critical",
+                error_code="",
+                message=(
+                    "Full-DB memory requirement could not be determined; skipped."
+                ),
+            )
+        else:
+            # Mirror ElasticBLAST's submit pre-flight exactly
+            # (elastic-blast-azure src/elastic_blast/elb_config.py: it rejects when
+            # ``instance_props.memory - SYSTEM_MEMORY_RESERVE < bytes_to_cache_gb``).
+            # Comparing against the raw node RAM would false-PASS a DB in the
+            # ``(RAM - reserve, RAM]`` band that ElasticBLAST still rejects, so the
+            # guard would not actually prevent the runtime error. Subtracting the
+            # same reserve keeps us in lockstep — no false-block (we allow exactly
+            # what ElasticBLAST allows) and no false-pass.
+            required_gib = bytes_to_cache / float(1024**3)
+            usable_gib = node_ram_gib - _SYSTEM_MEMORY_RESERVE_GIB
+            if required_gib <= usable_gib:
+                result = GateResult(
+                    id="node_memory_fit",
+                    status="ok",
+                    severity="critical",
+                    error_code="",
+                    message=(
+                        f"'{db_name}' needs {required_gib:.1f} GB and fits the "
+                        f"{usable_gib:.0f} GB usable on a {node_ram_gib:.0f} GB "
+                        "workload node."
+                    ),
+                )
+            else:
+                result = GateResult(
+                    id="node_memory_fit",
+                    status="fail",
+                    severity="critical",
+                    error_code="node_memory_insufficient",
+                    message=(
+                        f"'{db_name}' needs {required_gib:.1f} GB for a full-database "
+                        f"BLAST but the workload node ({machine_type}) provides only "
+                        f"{usable_gib:.0f} GB usable ({node_ram_gib:.0f} GB RAM minus "
+                        f"{_SYSTEM_MEMORY_RESERVE_GIB:.0f} GB system reserve)."
+                    ),
+                    action="Switch to the Sharded throughput profile (or use a larger-SKU cluster)",
+                    action_type="use_sharded_throughput",
+                )
+    except Exception as exc:
+        LOGGER.warning("submit gate: node memory probe failed: %s", type(exc).__name__)
+        # Advisory gate — a probe failure must not block submit (ElasticBLAST's
+        # own pre-flight still catches a genuine over-RAM run). Warning severity
+        # keeps it out of ``blocking``.
+        result = GateResult(
+            id="node_memory_fit",
+            status="unknown",
+            severity="warning",
+            error_code="node_memory_check_unavailable",
+            message=f"Could not verify node memory fit ({type(exc).__name__}).",
+        )
+    _cache_set(cache_key, result)
+    return result
+
+
 def _readiness_action_for_code(code: str) -> tuple[str | None, str | None]:
     """Map a readiness/availability error_code to the SPA's remediation hint."""
     if code == "database_not_ready":
@@ -576,6 +756,7 @@ def evaluate_submit_gates(
     storage_account: str,
     database: str,
     acr_name: str = "",
+    submit_options: Mapping[str, Any] | None = None,
     allow_unverified: bool = False,
 ) -> SubmitGatesReport:
     """Run every critical submit gate and return an aggregated report.
@@ -584,6 +765,12 @@ def evaluate_submit_gates(
     (i.e. could not be evaluated because of an upstream error) to ``warning``
     severity so it does not block the submit. Definitive ``fail`` results
     always block.
+
+    ``submit_options`` carries the submit ``options`` dict (machine type +
+    sharding flags). The node-memory-fit gate normalises the sharding mode from
+    it the same way the INI generator does, so it skips the full-DB check for a
+    sharded run; ``None`` simply skips that advisory check (it never
+    false-blocks on missing inputs).
     """
 
     gates: list[GateResult] = [
@@ -599,6 +786,11 @@ def evaluate_submit_gates(
         _gate_blast_database(
             storage_account=storage_account,
             database=database,
+        ),
+        _gate_node_memory_fit(
+            storage_account=storage_account,
+            database=database,
+            options=submit_options,
         ),
         _gate_acr_images(acr_name=acr_name),
     ]

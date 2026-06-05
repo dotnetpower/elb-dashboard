@@ -170,3 +170,118 @@ def test_me_permissions_requires_subscription_id(
 ) -> None:
     res = client.get("/api/me/permissions")
     assert res.status_code == 422  # FastAPI Query(...) required validation
+
+
+def test_me_access_review_groups_per_resource_group(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """`/api/me/access-review` returns one group per requested RG with
+    inheritance metadata so the SPA can render an IAM-style table."""
+    from api.services import access_review as svc
+
+    svc.reset_access_review_cache_for_tests()
+    monkeypatch.setattr(
+        svc,
+        "_enumerate",
+        lambda credential, sub, oid: (
+            [
+                (
+                    "8e3af657-a8ff-443c-a75c-2fe8c4bcb635",  # Owner
+                    f"/subscriptions/{sub}".lower(),
+                    (
+                        f"/subscriptions/{sub}/providers/Microsoft.Authorization/"
+                        "roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
+                    ).lower(),
+                )
+            ],
+            None,
+        ),
+    )
+
+    res = client.get(
+        "/api/me/access-review?subscription_id=SUB"
+        "&resource_group=rg-dashboard&resource_group=rg-cluster"
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["subscription_id"] == "SUB"
+    assert body["principal"]["kind"] == "user"
+    assert body["principal"]["available"] is True
+    groups = {g["resource_group"]: g for g in body["groups"]}
+    assert set(groups) == {"rg-dashboard", "rg-cluster"}
+    row = groups["rg-dashboard"]["assignments"][0]
+    assert row["role_name"] == "Owner"
+    assert row["inherited"] is True
+    assert row["scope_level"] == "subscription"
+
+
+def test_me_access_review_dashboard_target_uses_mi_principal(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """`target=dashboard` reviews the shared managed identity's access, using
+    SHARED_IDENTITY_PRINCIPAL_ID as the principal."""
+    from api.services import access_review as svc
+
+    svc.reset_access_review_cache_for_tests()
+    monkeypatch.setenv(
+        "SHARED_IDENTITY_PRINCIPAL_ID",
+        "99999999-8888-7777-6666-555555555555",
+    )
+    seen: dict[str, str] = {}
+
+    def _fake_enumerate(credential, sub, oid):  # type: ignore[no-untyped-def]
+        seen["oid"] = oid
+        return (
+            [
+                (
+                    "b24988ac-6180-42a0-ab88-20f7382dd24c",  # Contributor
+                    f"/subscriptions/{sub}/resourcegroups/rg-cluster".lower(),
+                    (
+                        f"/subscriptions/{sub}/providers/Microsoft.Authorization/"
+                        "roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c"
+                    ).lower(),
+                )
+            ],
+            None,
+        )
+
+    monkeypatch.setattr(svc, "_enumerate", _fake_enumerate)
+
+    res = client.get(
+        "/api/me/access-review?subscription_id=SUB"
+        "&resource_group=rg-cluster&target=dashboard"
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["principal"]["kind"] == "dashboard_identity"
+    assert body["principal"]["object_id"] == "99999999-8888-7777-6666-555555555555"
+    assert body["principal"]["available"] is True
+    assert seen["oid"] == "99999999-8888-7777-6666-555555555555"
+    assert body["groups"][0]["assignments"][0]["role_name"] == "Contributor"
+
+
+def test_me_access_review_dashboard_unavailable_without_mi(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """`target=dashboard` in a shell with no MI principal id reports the
+    identity as unavailable rather than a misleading empty access table."""
+    from api.services import access_review as svc
+
+    svc.reset_access_review_cache_for_tests()
+    monkeypatch.delenv("SHARED_IDENTITY_PRINCIPAL_ID", raising=False)
+
+    res = client.get(
+        "/api/me/access-review?subscription_id=SUB"
+        "&resource_group=rg-cluster&target=dashboard"
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["principal"]["kind"] == "dashboard_identity"
+    assert body["principal"]["available"] is False
+    assert body["groups"] == []
+
+
+def test_me_access_review_requires_subscription_id(client: TestClient) -> None:
+    res = client.get("/api/me/access-review?resource_group=rg-elb")
+    assert res.status_code == 422
+

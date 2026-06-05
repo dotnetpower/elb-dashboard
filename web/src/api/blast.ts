@@ -294,6 +294,15 @@ export interface BlastDatabase {
   total_bytes?: number;
   total_letters?: number;
   total_sequences?: number;
+  /**
+   * BLASTDB `bytes-to-cache` — the database's in-memory footprint that
+   * ElasticBLAST compares against the workload node's RAM during a full-DB
+   * (non-sharded) submit. When it exceeds node RAM, ElasticBLAST's pre-flight
+   * rejects the run ("memory requirements exceed memory available..."). The
+   * submit form uses it to block a full-DB run that cannot fit. Optional —
+   * absent for DBs whose `.njs` metadata has not been read.
+   */
+  bytes_to_cache?: number;
   web_blast_searchsp?: number;
   web_blast_searchsp_scope?: string;
   web_blast_searchsp_evidence?: string;

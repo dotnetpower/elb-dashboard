@@ -159,3 +159,40 @@ def test_graceful_propagates_wrong_tenant_reason() -> None:
 def test_graceful_status_table(status: int, expected: str) -> None:
     out: Any = _graceful("op", _http_error(status), empty={"items": []})
     assert out["degraded_reason"] == expected
+
+
+def test_graceful_increments_degraded_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every degraded response MUST increment the OTel route-degraded counter,
+    labelled by op + reason, so operators can alert on user-visible monitor
+    degradation independently of the cache-layer loader-failure counter."""
+    from api.routes.monitor import common as common_module
+
+    common_module._reset_degraded_counter()
+    recorded: list[tuple[int, dict[str, object]]] = []
+
+    class _RecordingCounter:
+        def add(self, value: int, attributes: dict[str, object] | None = None) -> None:
+            recorded.append((value, dict(attributes or {})))
+
+    monkeypatch.setattr(common_module, "_get_degraded_counter", lambda: _RecordingCounter())
+
+    _graceful("aks_list", _http_error(403), empty={"clusters": []})
+
+    assert recorded == [(1, {"op": "aks_list", "reason": "forbidden"})]
+
+
+def test_graceful_counter_failure_never_breaks_degrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken meter must not turn a graceful degrade into a 500."""
+    from api.routes.monitor import common as common_module
+
+    common_module._reset_degraded_counter()
+
+    class _ExplodingCounter:
+        def add(self, value: int, attributes: dict[str, object] | None = None) -> None:
+            raise RuntimeError("meter exporter down")
+
+    monkeypatch.setattr(common_module, "_get_degraded_counter", lambda: _ExplodingCounter())
+
+    out: Any = _graceful("aks_list", _http_error(403), empty={"clusters": []})
+    assert out == {"clusters": [], "degraded": True, "degraded_reason": "forbidden"}
+

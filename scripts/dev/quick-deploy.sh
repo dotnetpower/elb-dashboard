@@ -266,6 +266,82 @@ preflight_permission_check() {
 }
 
 # ---------------------------------------------------------------------------
+# ensure_workspace_tags -- add the elb-* workspace discovery tags to the
+# deployment resource group when they are missing.
+#
+# The SPA's first-run auto-discovery (web/src/pages/Dashboard/configFromTags.ts)
+# only treats a resource group as a BLAST workspace when it carries at least
+# one `elb-*` tag, and reads `elb-storage` / `elb-acr` / `elb-region` from
+# those tags to populate the dashboard. The full `azd up` path applies these
+# via postprovision.sh `tag_workspace_resource_group`, but a fast
+# `quick-deploy.sh` cycle never ran provisioning, so a resource group that
+# was only ever touched by quick-deploy (or had its tags stripped) leaves
+# every signed-in user stuck on the Setup Wizard even when they hold read
+# access. This closes that gap.
+#
+# "Add if missing" semantics: each desired key is written ONLY when it is
+# absent (or empty) on the RG, so a pre-existing correct value is never
+# clobbered by a stale shell variable. Keys whose value cannot be resolved
+# from the environment are skipped rather than written empty. The merge is
+# best-effort — a caller without tag-write permission (Reader) gets a warn
+# line, not a failed deploy. Skip entirely with ELB_SKIP_WORKSPACE_TAGS=1.
+# ---------------------------------------------------------------------------
+ensure_workspace_tags() {
+  if [[ "${ELB_SKIP_WORKSPACE_TAGS:-0}" == "1" ]]; then
+    ts "Skipping workspace RG tagging (ELB_SKIP_WORKSPACE_TAGS=1)"
+    return 0
+  fi
+
+  local rg_id
+  rg_id="$(az group show -n "$AZURE_RESOURCE_GROUP" --query id -o tsv --only-show-errors 2>/dev/null || true)"
+  if [[ -z "$rg_id" ]]; then
+    ts "    ! cannot resolve resource group id for tagging; skipping workspace tags"
+    return 0
+  fi
+
+  # Desired discovery tags, mirroring postprovision.sh tag_workspace_resource_group.
+  # An empty value means "could not resolve" — we never write an empty tag.
+  local -a keys=(elb-workload-rg elb-acr-rg elb-acr elb-storage elb-region)
+  local -A desired=(
+    [elb-workload-rg]="$AZURE_RESOURCE_GROUP"
+    [elb-acr-rg]="$AZURE_RESOURCE_GROUP"
+    [elb-acr]="${ACR_NAME:-}"
+    [elb-storage]="${STORAGE_ACCOUNT_NAME:-}"
+    [elb-region]="${AZURE_LOCATION:-}"
+  )
+
+  local -a merge_args=()
+  local k v present
+  for k in "${keys[@]}"; do
+    v="${desired[$k]}"
+    [[ -n "$v" ]] || continue
+    # Query the single tag value; az prints empty (not "None") for an
+    # absent key with `-o tsv`.
+    present="$(az group show -n "$AZURE_RESOURCE_GROUP" \
+      --query "tags.\"$k\"" -o tsv --only-show-errors 2>/dev/null || true)"
+    if [[ -z "$present" || "$present" == "None" ]]; then
+      merge_args+=("$k=$v")
+    fi
+  done
+
+  if [[ ${#merge_args[@]} -eq 0 ]]; then
+    ts "==> Workspace RG discovery tags already present; nothing to add"
+    return 0
+  fi
+
+  ts "==> Adding missing dashboard workspace tags: ${merge_args[*]}"
+  if az tag update \
+      --resource-id "$rg_id" \
+      --operation Merge \
+      --tags "${merge_args[@]}" \
+      --only-show-errors >/dev/null 2>&1; then
+    ts "    ✓ workspace discovery tags merged onto $AZURE_RESOURCE_GROUP"
+  else
+    ts "    ! tag merge failed (need 'Tag Contributor' or 'Contributor' on the RG); auto-discovery may keep showing the Setup Wizard"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # resolve_image_digest -- pin a mutable tag to its immutable digest.
 #
 # Azure Container Apps only rolls a NEW revision when the template's image
@@ -378,6 +454,7 @@ if [[ "$SIDECAR" == "all" ]]; then
   confirm_deploy_target
   preflight_permission_check
   ensure_provider_registration_once
+  ensure_workspace_tags
 
   NEW_API="${ACR_LOGIN_SERVER}/elb-api:${TAG}"
   NEW_FRONTEND="${ACR_LOGIN_SERVER}/elb-frontend:${TAG}"
@@ -663,6 +740,7 @@ done
 confirm_deploy_target
 preflight_permission_check
 ensure_provider_registration_once
+ensure_workspace_tags
 
 NEW_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${TAG}"
 API_CLIENT_ID_VAL="${VITE_AZURE_CLIENT_ID:-${API_CLIENT_ID:-}}"

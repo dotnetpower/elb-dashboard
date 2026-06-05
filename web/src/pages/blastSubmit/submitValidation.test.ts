@@ -32,6 +32,61 @@ function validate(form: FormState) {
   });
 }
 
+describe("blast submit full-DB node memory guard", () => {
+  it("blocks submit when a full-DB run does not fit node memory", () => {
+    const result = deriveSubmitValidation({
+      form: makeForm(),
+      programMeta: PROGRAMS[0],
+      subId: "sub-1",
+      workloadRg: "rg-elb",
+      storageAccount: "elbstg01",
+      selectedCluster: {
+        name: "elb-cluster",
+        power_state: "Running",
+        provisioning_state: "Succeeded",
+      } as never,
+      dbQueryData: { databases: [{ name: "core_nt", file_count: 800 }] } as never,
+      dbQueryIsSuccess: true,
+      warmupBlocked: false,
+      selectedDbPlan: null,
+      fullDbMemoryBlockedReason:
+        "'core_nt' needs 251.7 GB for a full-database BLAST but the cluster node (Standard_E16s_v5) has only 128 GB. Switch to the Sharded throughput execution profile, or use a cluster with a larger machine type.",
+      submitPending: false,
+    });
+
+    expect(result.canSubmit).toBe(false);
+    expect(
+      result.missing.map((item) => item.text).some((text) => /Sharded throughput/.test(text)),
+    ).toBe(true);
+  });
+
+  it("does not block when the memory reason is null", () => {
+    const result = deriveSubmitValidation({
+      form: makeForm(),
+      programMeta: PROGRAMS[0],
+      subId: "sub-1",
+      workloadRg: "rg-elb",
+      storageAccount: "elbstg01",
+      selectedCluster: {
+        name: "elb-cluster",
+        power_state: "Running",
+        provisioning_state: "Succeeded",
+      } as never,
+      dbQueryData: { databases: [{ name: "core_nt", file_count: 800 }] } as never,
+      dbQueryIsSuccess: true,
+      warmupBlocked: false,
+      selectedDbPlan: null,
+      fullDbMemoryBlockedReason: null,
+      submitPending: false,
+    });
+
+    expect(result.canSubmit).toBe(true);
+    expect(
+      result.missing.map((item) => item.text).some((text) => /Sharded throughput/.test(text)),
+    ).toBe(false);
+  });
+});
+
 describe("blast submit taxonomy readiness", () => {
   it("treats an empty optional taxonomy filter as ready", () => {
     const result = validate(makeForm({ taxid: "", taxid_label: "" }));

@@ -20,6 +20,7 @@ import {
   type ExportableFormFields,
 } from "@/pages/blastSubmit/configSerializer";
 import { deriveSubmitValidation } from "@/pages/blastSubmit/submitValidation";
+import { deriveFullDbMemoryFit } from "@/pages/blastSubmit/memoryFit";
 import {
   decideProgramSwitch,
   deriveDbAvailabilityByType,
@@ -271,6 +272,16 @@ export function BlastSubmit() {
     : shardingAvailability.preferredMode;
   const effectiveShardingEnabled = effectiveShardingMode !== "off";
 
+  // Block a full-database (non-sharded) submit that cannot fit the cluster
+  // node's RAM before ElasticBLAST rejects it at submit pre-flight. Uses the
+  // *effective* sharding mode so an auto-promoted sharded run is never blocked,
+  // and never blocks when the requirement is unknown.
+  const fullDbMemoryFit = deriveFullDbMemoryFit({
+    database: selectedDbInfo,
+    cluster: selectedCluster,
+    shardingMode: effectiveShardingMode,
+  });
+
   useEffect(() => {
     if (runtimeDataLoading) return;
     setForm((current) =>
@@ -340,6 +351,7 @@ export function BlastSubmit() {
     warmupBlocked,
     selectedDbPlan,
     shardingBlockedReason,
+    fullDbMemoryBlockedReason: fullDbMemoryFit.blockedReason,
     dataLoading: runtimeDataLoading,
     submitPending: submitMutation.isPending,
   });

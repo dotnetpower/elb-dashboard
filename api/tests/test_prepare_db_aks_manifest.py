@@ -202,105 +202,75 @@ def test_manifest_default_active_deadline_is_4_hours() -> None:
     assert manifest["spec"]["activeDeadlineSeconds"] == 4 * 60 * 60
 
 
-def test_script_streams_via_pipeblob() -> None:
-    """The pod script must stream NCBI -> Azure Blob via
-    `azcopy --from-to=PipeBlob`. Anything else (server-side
-    `--from-to=BlobBlob`, on-disk staging via `mktemp`) reintroduces
-    the OOM or per-node-NAT regressions."""
-    assert "--from-to=PipeBlob" in PREPARE_DB_AKS_SCRIPT
-    # The old on-disk path used `mktemp /tmp/prepare-db-XXXXXX` — must be
-    # gone now or the `/tmp` emptyDir would still be required.
+def test_script_uses_single_azcopy_s3blob() -> None:
+    """The pod script must transfer each shard with a SINGLE
+    `azcopy copy --from-to=S3Blob` over an `--include-pattern`, not the old
+    per-file `curl | azcopy --from-to=PipeBlob` serial loop (which threw
+    away azcopy's native multi-file parallelism and could never converge
+    for `nt`/`core_nt` within the Job deadline)."""
+    assert "--from-to=S3Blob" in PREPARE_DB_AKS_SCRIPT
+    assert "--include-pattern" in PREPARE_DB_AKS_SCRIPT
+    # The old per-file PipeBlob loop and its machinery must be gone.
+    assert "PipeBlob" not in PREPARE_DB_AKS_SCRIPT
+    assert "blob_content_length" not in PREPARE_DB_AKS_SCRIPT
+    assert "while IFS= read" not in PREPARE_DB_AKS_SCRIPT
     assert "mktemp" not in PREPARE_DB_AKS_SCRIPT
-    # `set -euo pipefail` is what makes a curl-side failure fail the
-    # shard cleanly.
+    # `set -euo pipefail` is what makes a setup failure fail the shard.
     assert "set -euo pipefail" in PREPARE_DB_AKS_SCRIPT
 
 
-def test_pipeblob_destination_is_single_positional() -> None:
-    """PipeBlob copy must pass the destination as the only positional
-    argument (`azcopy copy "<dst>" --from-to=PipeBlob`).
-
-    Regression guard for the 0-byte-upload outage: azcopy >= 10.32 rejects
-    the two-positional form `azcopy copy --from-to=PipeBlob "" "<dst>"` —
-    it treats the empty first positional as the source and aborts the copy
-    immediately with a non-zero exit and no transfer, so every shard
-    "ran" but uploaded nothing. Pin the destination-first form and forbid
-    the empty `""` placeholder so the broken syntax can never come back."""
-    assert 'azcopy copy "$dst_url" --from-to=PipeBlob' in PREPARE_DB_AKS_SCRIPT
-    assert '--from-to=PipeBlob "" "$dst_url"' not in PREPARE_DB_AKS_SCRIPT
+def test_script_overwrites_to_heal_partial_blobs() -> None:
+    """`--overwrite=true` re-fetches every file so a re-run heals any
+    truncated / 0-byte blob left by an earlier interrupted download. azcopy
+    commits each blob atomically via its block list, so a killed transfer
+    never leaves a partial committed blob (no per-file verify needed)."""
+    assert "--overwrite=true" in PREPARE_DB_AKS_SCRIPT
 
 
-def test_script_skips_already_uploaded_blobs() -> None:
-    """Per-file idempotency: `azcopy list` against the destination URL,
-    skip if it already has a ContentLength. This makes a backoffLimit
-    retry replay only the failed files instead of refetching all 750+."""
-    assert "azcopy list" in PREPARE_DB_AKS_SCRIPT
-    assert "ContentLength" in PREPARE_DB_AKS_SCRIPT
-    # `skip` counter is what the DONE log line surfaces, so the user can
-    # tell "0 skipped on first run vs N skipped on retry" at a glance.
-    assert "skip=$((skip + 1))" in PREPARE_DB_AKS_SCRIPT
-    assert "skip=${skip}" in PREPARE_DB_AKS_SCRIPT
+def test_script_builds_include_pattern_from_basenames() -> None:
+    """The include-pattern is built from the shard file's basenames via
+    python3 (the image ships no GNU text tools, and `head` in a pipefail
+    pipeline would SIGPIPE the shard). It must NOT use `--list-of-files`,
+    which nests `<snapshot>/` under the destination and breaks the flat
+    `blast-db/<db>/<file>` layout elastic-blast requires."""
+    assert "PATTERN=$(python3 -c" in PREPARE_DB_AKS_SCRIPT
+    assert 'split("/")[-1]' in PREPARE_DB_AKS_SCRIPT
+    assert "--list-of-files" not in PREPARE_DB_AKS_SCRIPT
 
 
-def test_idempotency_skip_requires_nonzero_content_length() -> None:
-    """Idempotency must skip ONLY fully-uploaded blobs, never 0-byte
-    placeholders.
-
-    Regression guard for the corrupt-DB outage: an aborted server-side
-    copy (legacy prepare path) leaves a 0-byte blob whose ContentLength
-    KEY exists but whose value is 0. The old `grep -q '"ContentLength"'`
-    check skipped those too, so the AKS rerun left ~1000 truncated blobs
-    and a corrupt BLAST database. The skip decision must therefore gate on
-    ContentLength > 0, with missing / 0-byte / parse-fail all falling
-    through to a clean re-download."""
-    # The brittle key-presence grep must be gone.
-    assert "grep -q '\"ContentLength\"'" not in PREPARE_DB_AKS_SCRIPT
-    # Skip is gated on a strictly-positive size via the shared helper.
-    assert "blob_content_length" in PREPARE_DB_AKS_SCRIPT
-    assert 'existing_len=$(blob_content_length "$dst_url")' in PREPARE_DB_AKS_SCRIPT
-    assert '[ "$existing_len" -gt 0 ]' in PREPARE_DB_AKS_SCRIPT
-    # PARSE_FAIL (azcopy schema drift) must NOT count as "already uploaded".
-    assert '"$existing_len" != "PARSE_FAIL"' in PREPARE_DB_AKS_SCRIPT
+def test_script_flat_destination_layout() -> None:
+    """Trailing `/*` source + `blast-db/<db>/` destination yields the flat
+    layout `blast-db/<db>/<file>` that elastic-blast resolves."""
+    assert 'SRC="${NCBI_BASE}/${SOURCE_VERSION}/*"' in PREPARE_DB_AKS_SCRIPT
+    assert (
+        'DEST_BASE="https://${STORAGE_ACCOUNT}.${BLOB_SUFFIX}/blast-db/${DB_NAME}"'
+        in PREPARE_DB_AKS_SCRIPT
+    )
 
 
 def test_script_uses_no_awk() -> None:
     """The prepare-db script must not shell out to awk.
 
-    Regression guard for the shard-wide failure found 2026-06-04: the
-    Content-Length pre-flight parsed `curl -sIL` output with
-    `awk 'BEGIN{IGNORECASE=1} /^content-length:/ {...}'`. The job runs in
-    `mcr.microsoft.com/azure-cli` (Azure Linux / Mariner), which ships NO
-    awk, so the first sampled file (every VERIFY_EVERY_N-th) hit
-    `awk: command not found` and `set -euo pipefail` killed the pod. With
-    the verify sampling at 1/10 this failed every shard on its 10th file,
-    backoffLimit was exhausted, and the Job reported `Failed 0/10` while
-    ~77% of nt was already staged. The image guarantees python3 (azure-cli
-    is a python app and the script already uses python3), so the parser
-    must stay awk-free."""
+    The job runs in `mcr.microsoft.com/azure-cli` (Azure Linux / Mariner),
+    which ships no awk, so any awk call aborts the pod under
+    `set -euo pipefail`. The image guarantees python3 (azure-cli is a python
+    app), so all text munging must stay python3-based."""
     assert "awk" not in PREPARE_DB_AKS_SCRIPT
 
 
-def test_content_length_preflight_uses_python3() -> None:
-    """The NCBI Content-Length pre-flight must parse with python3.
+def test_script_pins_azcopy_1028() -> None:
+    """azcopy must be pinned to 10.28.0 from GitHub releases, NOT the
+    `aka.ms` redirect.
 
-    Pins the awk-free replacement: `curl -sIL` follows redirects and emits
-    a `content-length` header for every hop, so the parser keeps the LAST
-    value seen (the final 200 response's real size) rather than the first
-    (a 301/302 hop carries the wrong size or none). This is the value the
-    post-upload verify compares against to catch NCBI truncations."""
-    assert "content-length:" in PREPARE_DB_AKS_SCRIPT.lower()
-    # The pre-flight feeds curl's header dump into a python3 parser.
-    assert 'curl -sIL --retry 3 --retry-delay 10 --max-time 60 \\' in (
-        PREPARE_DB_AKS_SCRIPT
-    )
-    assert "python3 -c" in PREPARE_DB_AKS_SCRIPT
-
-
-def test_script_bootstraps_azcopy_from_aka_ms() -> None:
-    """The pinned azure-cli image does not bundle azcopy or GNU tar, so
-    the script must download azcopy from aka.ms and extract it via
-    Python's stdlib tarfile module. Both pieces are load-bearing."""
-    assert "aka.ms/downloadazcopy-v10-linux" in PREPARE_DB_AKS_SCRIPT
+    Regression guard for the version crash found live 2026-06-05: aka.ms now
+    serves azcopy 10.32.4, which panics (nil deref in getSourceServiceClient)
+    on EVERY `--from-to=S3Blob` copy. 10.28.0 handles S3Blob correctly. The
+    pin is overridable via `ELB_AZCOPY_URL` once a newer build is verified to
+    fix the S3Blob crash. The single binary is still extracted via stdlib
+    tarfile because the image ships no GNU tar."""
+    assert "azcopy_linux_amd64_10.28.0.tar.gz" in PREPARE_DB_AKS_SCRIPT
+    assert "ELB_AZCOPY_URL" in PREPARE_DB_AKS_SCRIPT
+    assert "aka.ms/downloadazcopy-v10-linux" not in PREPARE_DB_AKS_SCRIPT
     assert "import tarfile" in PREPARE_DB_AKS_SCRIPT
     assert "/usr/local/bin/azcopy" in PREPARE_DB_AKS_SCRIPT
 
@@ -317,138 +287,3 @@ def test_labels_are_k8s_safe() -> None:
     for v in pod_labels.values():
         assert label_re.match(v), v
 
-
-def _extract_blob_content_length_parser() -> str:
-    """Pull the python3 -c body out of the `blob_content_length` helper so
-    the real shipped parser (not a copy) can be exercised against sample
-    azcopy-list JSON."""
-    import re
-
-    m = re.search(
-        r"blob_content_length\(\) \{.*?python3 -c '(.*?)'\n\}",
-        PREPARE_DB_AKS_SCRIPT,
-        re.DOTALL,
-    )
-    assert m, "blob_content_length python parser not found in script"
-    return m.group(1)
-
-
-def _run_blob_parser(stdin_text: str) -> str:
-    import subprocess
-    import sys
-
-    proc = subprocess.run(  # noqa: S603
-        [sys.executable, "-c", _extract_blob_content_length_parser()],
-        input=stdin_text,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout.strip()
-
-
-def test_blob_content_length_normalizes_human_readable_size() -> None:
-    """Regression guard for the 2026-06-04 nt outage: azcopy 10.32.4's
-    `azcopy list --output-type=json` reports ContentLength as a human
-    string ("2.79 GiB"), not raw bytes. The shipped helper must convert it
-    back to an integer byte count so the verify step can compare against
-    the raw NCBI Content-Length instead of false-failing every multi-GB
-    file and deleting the (correct) blob."""
-    import json
-
-    line = json.dumps(
-        {
-            "MessageType": "ListObject",
-            "MessageContent": json.dumps({"ContentLength": "2.79 GiB"}),
-        }
-    )
-    out = _run_blob_parser(line + "\n")
-    # 2.79 * 1024^3 = 2995639357 (within 1% of the real 2999987448 bytes).
-    assert out == str(int(2.79 * 1024**3))
-
-
-def test_blob_content_length_accepts_raw_integer_and_units() -> None:
-    """The parser must stay backward-compatible with older azcopy builds
-    that emit a raw integer, and handle the common binary units."""
-    import json
-
-    def _wrap(cl: object) -> str:
-        return json.dumps(
-            {"MessageContent": json.dumps({"ContentLength": cl})}
-        )
-
-    assert _run_blob_parser(_wrap(2999987448) + "\n") == "2999987448"
-    assert _run_blob_parser(_wrap("2999987448") + "\n") == "2999987448"
-    assert _run_blob_parser(_wrap("512 B") + "\n") == "512"
-    assert _run_blob_parser(_wrap("1 KiB") + "\n") == str(1024)
-    assert _run_blob_parser(_wrap("1 MiB") + "\n") == str(1024**2)
-
-
-def test_blob_content_length_reports_parse_fail_on_unknown_shape() -> None:
-    """Unparseable / absent ContentLength must yield PARSE_FAIL so callers
-    fall through to a clean re-download (idempotency) or trust the upload
-    exit code (verify), never silently treat garbage as a valid size."""
-    assert _run_blob_parser('{"MessageType":"Init"}\n') == "PARSE_FAIL"
-    assert _run_blob_parser("not json at all\n") == "PARSE_FAIL"
-    assert _run_blob_parser("") == "PARSE_FAIL"
-
-
-def test_verify_uses_tolerant_byte_comparison() -> None:
-    """The post-upload verify must NOT compare the uploaded size to the
-    expected size with exact string equality.
-
-    azcopy 10.32's human-readable ContentLength keeps only ~3 significant
-    figures, so an exact compare false-fails every multi-GB file. The
-    shipped script compares with a 1% / 1 KiB tolerance via python3."""
-    # The brittle exact compare must be gone.
-    assert '[ "$uploaded_size" != "$expected_size" ]' not in PREPARE_DB_AKS_SCRIPT
-    # The tolerant byte compare is present.
-    assert "exp // 100" in PREPARE_DB_AKS_SCRIPT
-
-
-def test_verify_tolerance_formula_passes_rounded_size() -> None:
-    """Exercise the exact tolerance expression the script ships: a value
-    rounded to GiB precision passes, a truncated body fails."""
-    import re
-    import subprocess
-    import sys
-
-    m = re.search(
-        r"if ! python3 -c '(import sys\nup=int.*?else 1\))'",
-        PREPARE_DB_AKS_SCRIPT,
-        re.DOTALL,
-    )
-    assert m, "tolerance comparison snippet not found"
-    snippet = m.group(1)
-
-    def _cmp(up: int, exp: int) -> int:
-        return subprocess.run(  # noqa: S603
-            [sys.executable, "-c", snippet, str(up), str(exp)],
-            timeout=30,
-        ).returncode
-
-    expected = 2999987448
-    rounded = int(2.79 * 1024**3)  # 2995639357, what azcopy round-trips to
-    assert _cmp(rounded, expected) == 0  # within 1% -> pass
-    assert _cmp(expected, expected) == 0  # identical -> pass
-    assert _cmp(expected // 2, expected) == 1  # truncated body -> fail
-
-
-def test_loop_reads_file_list_on_dedicated_fd() -> None:
-    """The shard loop must read the file list on fd 3, not stdin.
-
-    Regression guard for the early-termination half of the 2026-06-04 nt
-    outage: `azcopy remove` (run on a verify mismatch) inherits fd 0, and
-    azcopy drains stdin. When the loop reads the file list from stdin, the
-    first remove swallows every remaining line and the shard stops after
-    one file. Reading on fd 3 + redirecting azcopy remove's stdin keeps the
-    loop fed."""
-    assert "read -r KEY <&3" in PREPARE_DB_AKS_SCRIPT
-    assert 'done 3< "$FILE_LIST"' in PREPARE_DB_AKS_SCRIPT
-    assert "while IFS= read -r KEY;" not in PREPARE_DB_AKS_SCRIPT
-    # azcopy remove must not be able to drain the loop's input.
-    assert (
-        'azcopy remove "$dst_url" --log-level=ERROR </dev/null'
-        in PREPARE_DB_AKS_SCRIPT
-    )

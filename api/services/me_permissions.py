@@ -194,13 +194,41 @@ def _build_scope(
 
 def _is_ancestor_or_equal(assignment_scope: str, target_scope: str) -> bool:
     """Return True when ``assignment_scope`` is the same as ``target_scope``
-    or one of its parent paths (sub > rg > resource). Lowercase comparison
-    so Azure's mixed casing does not cause false negatives."""
+    or one of its parent paths. Lowercase comparison so Azure's mixed
+    casing does not cause false negatives.
+
+    The scope hierarchy Azure inherits down is::
+
+        tenant root "/"  >  management group  >  subscription  >  rg  >  resource
+
+    The ``/`` and management-group tiers are NOT string prefixes of a
+    ``/subscriptions/...`` target, so a naive ``startswith`` check drops
+    them and a subscription Owner who holds the role through a management
+    group (or tenant-root) assignment is wrongly seen as having no role.
+    Because the enumeration that produced ``assignment_scope`` is already
+    scoped to this subscription (``list_for_subscription`` + ``assignedTo``),
+    any root/management-group assignment returned here is, by construction,
+    inherited by the target subscription and everything below it — so we
+    accept it for any subscription-or-below target without re-walking the
+    management-group hierarchy."""
+    raw_a = (assignment_scope or "").strip()
     a = assignment_scope.lower().rstrip("/")
     t = target_scope.lower().rstrip("/")
-    if not a or not t:
+    if not t:
+        return False
+    # Tenant root scope ("/") is an ancestor of every resource. ``rstrip``
+    # collapses it to an empty string, so detect it on the raw value before
+    # the generic empty-guard below rejects it.
+    if raw_a == "/":
+        return True
+    if not a:
         return False
     if a == t:
+        return True
+    # Management-group scope is an ancestor of any subscription-or-below
+    # target (see the docstring: the enumeration is already sub-scoped, so
+    # only MGs this subscription inherits are returned).
+    if a.startswith("/providers/microsoft.management/managementgroups/"):
         return True
     return t.startswith(a + "/")
 
@@ -223,6 +251,17 @@ def _enumerate_role_assignments(
     ``oid`` is already a UUID, but we reject anything non-UUID
     defensively so a future caller that bypasses the JWT layer cannot
     smuggle OData.
+
+    Filter choice: ``assignedTo('{oid}')`` (NOT ``principalId eq
+    '{oid}'``). ``principalId eq`` only matches assignments whose
+    principal IS the caller's own object id, so a user who holds Reader
+    /Contributor purely through Entra **group** membership (the
+    assignment's principal is the group's object id) gets ZERO rows and
+    is wrongly treated as having no role. ``assignedTo()`` is the filter
+    the Azure CLI uses for ``--include-groups``: it returns the user's
+    direct assignments AND every assignment inherited transitively from
+    the groups the user belongs to, which is what "effective access"
+    means here.
     """
     if not _OID_RE.match(caller_oid):
         return [], "invalid_oid_format"
@@ -235,11 +274,13 @@ def _enumerate_role_assignments(
     try:
         client = AuthorizationManagementClient(credential, subscription_id)
         rows: list[tuple[str, str]] = []
-        # ``list_for_subscription`` includes inherited assignments from
-        # tenant root and management groups, which is exactly what we
-        # want to evaluate effective access at sub-or-below scopes.
+        # ``list_for_subscription`` + ``assignedTo()`` includes inherited
+        # assignments from tenant root / management groups AND those the
+        # caller holds transitively through Entra group membership, which
+        # is exactly what we want to evaluate effective access at
+        # sub-or-below scopes.
         for r in client.role_assignments.list_for_subscription(
-            filter=f"principalId eq '{caller_oid}'"
+            filter=f"assignedTo('{caller_oid}')"
         ):
             role_def_id = (getattr(r, "role_definition_id", None) or "").lower()
             scope = (getattr(r, "scope", None) or "").lower()

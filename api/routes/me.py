@@ -26,6 +26,10 @@ from fastapi import APIRouter, Depends, Query
 
 from api.auth import CallerIdentity, require_caller
 from api.services import get_credential
+from api.services.access_review import (
+    dashboard_identity_principal_id,
+    review_resource_group_access,
+)
 from api.services.me_permissions import compute_caller_permissions
 from api.services.sanitise import sanitise
 
@@ -157,4 +161,57 @@ def me_permissions(
         cluster_name=cluster_name,
     )
     return perms.to_dict()
+
+
+@router.get("/me/access-review")
+def me_access_review(
+    subscription_id: str = Query(..., description="Azure subscription id"),
+    resource_group: list[str] = Query(
+        default=[],
+        description=(
+            "Resource group(s) to review. Repeat the query parameter to "
+            "review several at once (e.g. the dashboard RG and the cluster RG)."
+        ),
+    ),
+    target: str = Query(
+        default="me",
+        description=(
+            "Whose access to review: 'me' (the signed-in caller, default) or "
+            "'dashboard' (the shared managed identity the Container App runs "
+            "as). The dashboard identity is what actually performs ARM / "
+            "Storage writes, so its missing role is the usual root cause of a "
+            "tenant onboarding failure."
+        ),
+    ),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Reproduce the portal \"View my access\" per resource group.
+
+    Lists a principal's effective Azure role assignments (direct plus
+    Entra-group-inherited) grouped by each requested resource group, with an
+    inheritance flag so the SPA can render an IAM-style table when diagnosing
+    why an action fails in a freshly-onboarded tenant. ``target`` selects the
+    signed-in caller or the dashboard managed identity.
+
+    Unlike ``/me/permissions``, this surface does NOT degrade open: when
+    role enumeration fails (the principal likely lacks
+    ``Microsoft.Authorization/roleAssignments/read``) the affected groups
+    are returned with ``degraded=true`` and an explicit reason, because a
+    fabricated \"you have access\" would defeat the diagnostic.
+    """
+    if target == "dashboard":
+        principal_oid = dashboard_identity_principal_id()
+        principal_kind = "dashboard_identity"
+    else:
+        principal_oid = caller.object_id
+        principal_kind = "user"
+
+    review = review_resource_group_access(
+        get_credential(),
+        principal_oid=principal_oid,
+        subscription_id=subscription_id,
+        resource_groups=list(resource_group),
+        principal_kind=principal_kind,
+    )
+    return review.to_dict()
 

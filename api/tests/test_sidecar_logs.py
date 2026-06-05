@@ -152,3 +152,41 @@ def test_log_routes_precede_frontend_catchall() -> None:
     assert positions[("POST", "/api/monitor/logs/ticket")] < frontend
     assert positions[("GET", "/api/monitor/logs/{container}/recent")] < frontend
     assert positions[("GET", "/api/monitor/logs/{container}/events")] < frontend
+
+
+def test_next_poll_interval_resets_on_lines_and_backs_off_when_idle() -> None:
+    from api.routes.monitor import logs as logs_module
+
+    base = logs_module._LOG_POLL_INTERVAL_SEC
+    factor = logs_module._LOG_POLL_BACKOFF_FACTOR
+
+    # Idle ticks grow geometrically toward the cap and never exceed it.
+    i1 = logs_module._next_poll_interval(base, had_lines=False, max_interval=5.0)
+    assert i1 == pytest.approx(min(base * factor, 5.0))
+    i2 = logs_module._next_poll_interval(i1, had_lines=False, max_interval=5.0)
+    assert i2 == pytest.approx(min(i1 * factor, 5.0))
+    capped = logs_module._next_poll_interval(100.0, had_lines=False, max_interval=5.0)
+    assert capped == 5.0
+
+    # A line arriving snaps the interval straight back to the minimum.
+    assert logs_module._next_poll_interval(5.0, had_lines=True, max_interval=5.0) == base
+
+
+def test_log_poll_max_interval_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routes.monitor import logs as logs_module
+
+    monkeypatch.delenv("LIVE_WALL_LOG_POLL_MAX_INTERVAL_SEC", raising=False)
+    assert logs_module._log_poll_max_interval_sec() == 5.0
+
+    # Explicit override is honoured.
+    monkeypatch.setenv("LIVE_WALL_LOG_POLL_MAX_INTERVAL_SEC", "12")
+    assert logs_module._log_poll_max_interval_sec() == 12.0
+
+    # A value below the floor collapses to the minimum (restores fixed cadence).
+    monkeypatch.setenv("LIVE_WALL_LOG_POLL_MAX_INTERVAL_SEC", "0.2")
+    assert logs_module._log_poll_max_interval_sec() == logs_module._LOG_POLL_INTERVAL_SEC
+
+    # Garbage falls back to the safe default.
+    monkeypatch.setenv("LIVE_WALL_LOG_POLL_MAX_INTERVAL_SEC", "not-a-number")
+    assert logs_module._log_poll_max_interval_sec() == 5.0
+

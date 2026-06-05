@@ -6,7 +6,7 @@ Responsibility: Re-export the public task entry points and helpers that external
 Edit boundaries: Imports and re-exports only. Add new tasks in dedicated sibling modules
     and re-export them here; do not grow this file with logic.
 Key entry points: `warmup_database`, `check_database_updates`, `reconcile_auto_warmup`,
-    plus the helpers and constants exported below.
+    `reconcile_orphaned_prepare_db`, plus the helpers and constants exported below.
 Risky contracts: Several tests monkeypatch attributes on this package directly
     (`api.tasks.storage.get_credential`, `_autowarmup_inflight_acquire`, `_update_state`,
     `_record_task_progress`). These names must remain importable from the package and
@@ -50,6 +50,7 @@ from api.tasks.storage.helpers import (
 )
 from api.tasks.storage.prepare_db_via_aks import prepare_db_via_aks
 from api.tasks.storage.reconcile import reconcile_auto_warmup
+from api.tasks.storage.reconcile_orphan_prepare_db import reconcile_orphaned_prepare_db
 from api.tasks.storage.update_check import check_database_updates
 from api.tasks.storage.warmup import warmup_database
 
@@ -68,5 +69,6 @@ __all__ = (
     "get_credential",
     "prepare_db_via_aks",
     "reconcile_auto_warmup",
+    "reconcile_orphaned_prepare_db",
     "warmup_database",
 )

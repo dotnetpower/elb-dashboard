@@ -124,6 +124,128 @@ def test_reader_at_rg_scope_grants_read_but_blocks_writes(
     assert "Reader" in perms.matched_role_names
 
 
+def test_enumeration_uses_assigned_to_filter_for_group_transitivity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The OData filter MUST be ``assignedTo('<oid>')`` and NOT
+    ``principalId eq '<oid>'``.
+
+    ``principalId eq`` only matches assignments whose principal is the
+    caller's own object id, so a user who holds a role purely through
+    Entra group membership gets zero rows and is wrongly treated as
+    having no access. ``assignedTo()`` is the Azure-CLI ``--include-groups``
+    filter that expands transitive group membership. This test pins the
+    filter string so a future refactor cannot silently regress to the
+    direct-only form (which broke group-granted Reader/Contributor)."""
+    fake = _patch_client(
+        monkeypatch,
+        [_row("acdd72a7-3385-48ef-bd42-f606fba81ae7", "/subscriptions/SUB")],
+    )
+
+    compute_caller_permissions(
+        object(),
+        caller_oid="11111111-2222-3333-4444-555555555555",
+        subscription_id="SUB",
+        resource_group="rg-elb",
+    )
+
+    assert fake.role_assignments.calls, "enumeration did not call ARM"
+    sent_filter = fake.role_assignments.calls[0][1] or ""
+    assert sent_filter == "assignedTo('11111111-2222-3333-4444-555555555555')"
+    assert "principalId eq" not in sent_filter
+
+
+def test_group_inherited_reader_is_recognized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end behaviour of the group fix: when ARM returns (via
+    ``assignedTo``) a Reader assignment the caller holds through a group
+    at the workload RG scope, the resolver must recognise read access
+    instead of falling through to ``no_role_at_scope``."""
+    _patch_client(
+        monkeypatch,
+        [_row("acdd72a7-3385-48ef-bd42-f606fba81ae7", "/subscriptions/SUB/resourceGroups/rg-elb")],
+    )
+
+    perms = compute_caller_permissions(
+        object(),
+        caller_oid="11111111-2222-3333-4444-555555555555",
+        subscription_id="SUB",
+        resource_group="rg-elb",
+    )
+
+    assert perms.can_read is True
+    assert perms.degraded is False
+    assert "Reader" in perms.matched_role_names
+    assert perms.reason == ""
+
+
+def test_owner_inherited_from_management_group_grants_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subscription Owner who holds Owner at a MANAGEMENT-GROUP scope
+    (the common pattern for the tenant's global admins) must be
+    recognised at a cluster scope inside the subscription.
+
+    ``list_for_subscription`` + ``assignedTo`` returns the inherited MG
+    assignment, but its scope
+    (``/providers/Microsoft.Management/managementGroups/<id>``) is not a
+    string prefix of the ``/subscriptions/<sub>/...`` target, so the old
+    prefix-only ancestor check dropped it and the operator was wrongly
+    told they hold ``no Azure RBAC role at this scope``. This pins the
+    fix so the regression cannot return."""
+    _patch_client(
+        monkeypatch,
+        [
+            _row(
+                "8e3af657-a8ff-443c-a75c-2fe8c4bcb635",
+                "/providers/Microsoft.Management/managementGroups/00000000-1111-2222-3333-444444444444",
+            )
+        ],
+    )
+
+    perms = compute_caller_permissions(
+        object(),
+        caller_oid="11111111-2222-3333-4444-555555555555",
+        subscription_id="SUB",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert perms.can_delete is True
+    assert perms.can_read is True
+    assert perms.degraded is False
+    assert "Owner" in perms.matched_role_names
+    assert perms.reason == ""
+
+
+def test_owner_inherited_from_tenant_root_grants_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same as the management-group case but for an Owner assignment at
+    the tenant ROOT scope (``/``). ``rstrip('/')`` collapses the root
+    scope to an empty string, which the old guard treated as a malformed
+    row and rejected — wrongly hiding Delete from a tenant-root Owner."""
+    _patch_client(
+        monkeypatch,
+        [_row("8e3af657-a8ff-443c-a75c-2fe8c4bcb635", "/")],
+    )
+
+    perms = compute_caller_permissions(
+        object(),
+        caller_oid="11111111-2222-3333-4444-555555555555",
+        subscription_id="SUB",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert perms.can_delete is True
+    assert perms.can_read is True
+    assert perms.degraded is False
+    assert "Owner" in perms.matched_role_names
+    assert perms.reason == ""
+
+
 def test_contributor_grants_writes_but_not_delete_or_grant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

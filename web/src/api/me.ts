@@ -57,6 +57,61 @@ export interface CallerPermissionsResponse {
   reason: string;
 }
 
+/** One effective role assignment as seen from a target resource group.
+ *
+ *  Returned inside ``AccessReviewResponse``. Mirrors the Azure portal
+ *  "View my access" rows: the role display name, where the assignment
+ *  actually lives (``scope_level``), and whether the resource group
+ *  inherits it from a broader scope.
+ */
+export interface AccessReviewRow {
+  role_name: string;
+  role_guid: string;
+  scope_level: "subscription" | "management_group" | "resource_group" | "resource" | "other";
+  inherited: boolean;
+  assignment_scope: string;
+}
+
+/** Effective access for the calling user at one resource group. */
+export interface AccessReviewGroup {
+  resource_group: string;
+  scope: string;
+  assignments: AccessReviewRow[];
+  /** True when enumeration failed — the SPA must NOT read this as
+   *  "has access". It usually means the caller lacks
+   *  ``Microsoft.Authorization/roleAssignments/read``, which is itself a
+   *  finding worth surfacing during tenant onboarding. */
+  degraded: boolean;
+  reason: string;
+}
+
+/** Whose access an access review describes. */
+export interface AccessReviewPrincipal {
+  /** ``"user"`` (signed-in caller) or ``"dashboard_identity"`` (the shared
+   *  managed identity the Container App runs as). */
+  kind: "user" | "dashboard_identity";
+  object_id: string;
+  /** False when the principal could not be resolved — e.g. the dashboard
+   *  managed identity's principal id is not exported in local dev. */
+  available: boolean;
+}
+
+/** Per-resource-group access review for the calling user.
+ *
+ *  Returned by ``GET /api/me/access-review?subscription_id=…&resource_group=…``
+ *  (repeat ``resource_group`` to review several at once; ``target=me|dashboard``
+ *  selects the signed-in caller or the dashboard managed identity). Reproduces
+ *  the portal "View my access" experience so an operator can diagnose why an
+ *  action fails in a freshly-onboarded tenant. Unlike ``permissions`` this
+ *  does NOT degrade open. */
+export interface AccessReviewResponse {
+  subscription_id: string;
+  principal: AccessReviewPrincipal;
+  groups: AccessReviewGroup[];
+}
+
+export type AccessReviewTarget = "me" | "dashboard";
+
 export const meApi = {
   get: () => api.get<CallerIdentityResponse>("/me"),
   permissions: (
@@ -72,4 +127,20 @@ export const meApi = {
       `/me/permissions?${qs.toString()}`,
     );
   },
+  accessReview: (
+    subscriptionId: string,
+    resourceGroups: string[],
+    target: AccessReviewTarget = "me",
+  ) => {
+    const qs = new URLSearchParams();
+    qs.set("subscription_id", subscriptionId);
+    for (const rg of resourceGroups) {
+      if (rg) qs.append("resource_group", rg);
+    }
+    if (target !== "me") qs.set("target", target);
+    return api.get<AccessReviewResponse>(
+      `/me/access-review?${qs.toString()}`,
+    );
+  },
 };
+

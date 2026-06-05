@@ -5,6 +5,7 @@ import {
   ArrowUpCircle,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Copy,
   ExternalLink,
@@ -22,9 +23,12 @@ import {
   RefreshCw,
   RotateCcw,
   Settings as SettingsIcon,
+  ShieldCheck,
+  Stethoscope,
   Sun,
   Trash2,
   Upload,
+  User,
   X,
 } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -32,6 +36,12 @@ import { Link } from "react-router-dom";
 import { formatApiError } from "@/api/client";
 import { aksApi, type OpenApiPublicHttpsStatus } from "@/api/aks";
 import { meApi } from "@/api/me";
+import type {
+  AccessReviewGroup,
+  AccessReviewPrincipal,
+  AccessReviewRow,
+  AccessReviewTarget,
+} from "@/api/me";
 import { msalInstance } from "@/auth/msal";
 import {
   listResourceGroups,
@@ -70,6 +80,7 @@ type SectionId =
   | "public-https"
   | "vnet-peering"
   | "sizing"
+  | "diagnostics"
   | "resources";
 type TaskState = {
   taskId: string;
@@ -123,6 +134,17 @@ const KNOWN_AZURE_REGIONS = [
 const RETENTION_DAYS_OPTIONS = [7, 14, 30, 60, 90, 120, 180, 270, 365, 550, 730] as const;
 const DEFAULT_RETENTION_DAYS = 30;
 
+// Mirror of the Layout header's build-version formatter (A.B.<buildNumber>).
+// Kept local so the Settings footer can show the same stamp without importing
+// Layout's internal helper.
+function formatBuildVersion(releaseVersion: string, buildNumber: string): string {
+  const parts = releaseVersion.split(".");
+  if (parts.length !== 3 || !/^\d+$/.test(buildNumber)) {
+    return releaseVersion;
+  }
+  return `${parts[0]}.${parts[1]}.${buildNumber}`;
+}
+
 const SUBSCRIPTION_GUID_RE = /^[0-9a-fA-F-]{36}$/;
 const RG_NAME_RE = /^[-\w._()]{1,90}$/;
 const RESOURCE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._\-]{1,254}$/;
@@ -138,6 +160,7 @@ const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> =
   { id: "public-https", label: "Public HTTPS", icon: <Globe size={14} strokeWidth={1.5} /> },
   { id: "vnet-peering", label: "VNet peering", icon: <Network size={14} strokeWidth={1.5} /> },
   { id: "sizing", label: "Sizing", icon: <Gauge size={14} strokeWidth={1.5} /> },
+  { id: "diagnostics", label: "Diagnose & solve problems", icon: <Stethoscope size={14} strokeWidth={1.5} /> },
   { id: "resources", label: "Resources", icon: <SettingsIcon size={14} strokeWidth={1.5} /> },
 ];
 
@@ -300,6 +323,7 @@ export function SettingsPanel({ open, onClose }: Props) {
             {active === "public-https" && <PublicHttpsSection config={config} />}
             {active === "vnet-peering" && <VnetPeeringSection config={config} />}
             {active === "sizing" && <SizingSection />}
+            {active === "diagnostics" && <DiagnosticsSection config={config} />}
             {active === "resources" && <ResourcesSection config={config} />}
           </main>
         </div>
@@ -314,7 +338,14 @@ export function SettingsPanel({ open, onClose }: Props) {
             gap: 12,
           }}
         >
-          <span style={{ color: "var(--text-faint)", fontSize: 11 }}>
+          <span style={{ color: "var(--text-faint)", fontSize: 11, display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <span
+              title={`Release: v${__APP_VERSION__}\nBuild: v${formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__)}\nCommit: ${__APP_COMMIT__}`}
+              style={{ color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}
+            >
+              v{formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__)} · {__APP_COMMIT__}
+            </span>
+            <span style={{ opacity: 0.5 }}>·</span>
             Stored locally · <code>elb-prefs</code>
           </span>
           {showFooterActions && (
@@ -458,9 +489,19 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
     setChecking(true);
     setActionMessage(null);
     try {
-      await checkNow();
-      // Don't repeat the availability badge here — just confirm the action ran.
-      setActionMessage({ kind: "success", text: "Checked just now." });
+      const fresh = await checkNow();
+      if (!fresh.git_remote) {
+        // The check ran but no upgrade remote is configured, so there is
+        // nothing upstream to compare against. Say so plainly instead of a
+        // misleading "checked" success.
+        setActionMessage({
+          kind: "info",
+          text: "No upgrade remote is configured — nothing to check.",
+        });
+      } else {
+        // Don't repeat the availability badge here — just confirm the action ran.
+        setActionMessage({ kind: "success", text: "Checked just now." });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // `/check` is throttled (429) to protect the upstream git remote.
@@ -484,15 +525,11 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
       <Group>
         <Row
           label="Current version"
-          hint={status?.running_sha ? `Commit ${status.running_sha.slice(0, 7)}` : undefined}
+          hint={`Release v${__APP_VERSION__}`}
           control={
-            loading ? (
-              <Badge tone="muted">Loading…</Badge>
-            ) : (
-              <code style={{ fontSize: 12, color: "var(--text-primary)" }}>
-                v{status?.running_version || "—"}
-              </code>
-            )
+            <code style={{ fontSize: 12, color: "var(--text-primary)" }}>
+              v{formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__)} · {__APP_COMMIT__}
+            </code>
           }
         />
         <Row
@@ -537,7 +574,7 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
             <button
               className="glass-button"
               onClick={handleCheck}
-              disabled={checking || !configured}
+              disabled={checking}
               style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
             >
               {checking ? (
@@ -3608,6 +3645,695 @@ function SizingPill({ severity, children }: { severity: SizingSeverity; children
     <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em", borderRadius: 999, padding: "2px 8px", border: "1px solid var(--border-weak)", color, background: "var(--bg-tertiary)", whiteSpace: "nowrap" }}>
       {children}
     </span>
+  );
+}
+
+interface RgTarget {
+  rg: string;
+  labels: string[];
+}
+
+interface SignedInIdentity {
+  name: string;
+  username: string;
+  tenantId: string;
+  objectId: string;
+}
+
+const SCOPE_LEVEL_LABEL: Record<AccessReviewRow["scope_level"], string> = {
+  subscription: "Subscription",
+  management_group: "Management group",
+  resource_group: "Resource group",
+  resource: "Resource",
+  other: "Scope",
+};
+
+/**
+ * "Diagnose & solve problems" — Azure-portal-style landing that lists
+ * diagnostic categories as cards. Clicking an available category opens its
+ * detail view inside the Settings panel. Today only "Identity and Security"
+ * (RBAC access review + signed-in account) is implemented; Connectivity,
+ * Reliability, and Availability are placeholders for future diagnostics.
+ */
+type DiagnosticCategoryId = "identity" | "connectivity" | "reliability" | "availability";
+
+interface DiagnosticCategory {
+  id: DiagnosticCategoryId;
+  label: string;
+  description: string;
+  icon: React.ReactNode;
+  available: boolean;
+}
+
+const DIAGNOSTIC_CATEGORIES: DiagnosticCategory[] = [
+  {
+    id: "identity",
+    label: "Identity and Security",
+    description:
+      "Signed-in account and your effective Azure RBAC role assignments per resource group.",
+    icon: <ShieldCheck size={18} strokeWidth={1.5} />,
+    available: true,
+  },
+  {
+    id: "connectivity",
+    label: "Connectivity Issues",
+    description:
+      "Private endpoints, VNet peering, and storage network access reachability checks.",
+    icon: <Network size={18} strokeWidth={1.5} />,
+    available: false,
+  },
+  {
+    id: "reliability",
+    label: "Reliability",
+    description:
+      "Sidecar health, Celery queue depth, and recent task failure patterns.",
+    icon: <Activity size={18} strokeWidth={1.5} />,
+    available: false,
+  },
+  {
+    id: "availability",
+    label: "Availability and Performance",
+    description:
+      "AKS cluster state, node capacity, and control-plane responsiveness.",
+    icon: <Gauge size={18} strokeWidth={1.5} />,
+    available: false,
+  },
+];
+
+function DiagnosticsSection({ config }: { config: ResourceConfig | null }) {
+  const [activeCategory, setActiveCategory] = useState<DiagnosticCategoryId | null>(null);
+
+  if (activeCategory === "identity") {
+    return (
+      <IdentitySecurityDetail config={config} onBack={() => setActiveCategory(null)} />
+    );
+  }
+
+  return (
+    <Section heading="Diagnose & solve problems">
+      <div style={{ fontSize: 12, color: "var(--text-faint)", lineHeight: 1.6, margin: "-4px 0 14px" }}>
+        Pick a category to investigate. Each opens a focused diagnostic view —
+        more categories will be added over time.
+      </div>
+      <div style={{ display: "grid", gap: 10 }}>
+        {DIAGNOSTIC_CATEGORIES.map((cat) => (
+          <DiagnosticCategoryCard
+            key={cat.id}
+            category={cat}
+            onOpen={() => setActiveCategory(cat.id)}
+          />
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+function DiagnosticCategoryCard({
+  category,
+  onOpen,
+}: {
+  category: DiagnosticCategory;
+  onOpen: () => void;
+}) {
+  const { available } = category;
+  return (
+    <button
+      type="button"
+      onClick={available ? onOpen : undefined}
+      disabled={!available}
+      aria-disabled={!available}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 14,
+        width: "100%",
+        textAlign: "left",
+        padding: "14px 16px",
+        borderRadius: 8,
+        border: "1px solid var(--border-weak)",
+        background: "var(--bg-secondary)",
+        cursor: available ? "pointer" : "default",
+        opacity: available ? 1 : 0.6,
+        transition: "background 150ms ease, border-color 150ms ease",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 36,
+          height: 36,
+          borderRadius: 8,
+          background: "var(--bg-tertiary)",
+          border: "1px solid var(--border-weak)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text-muted)",
+          flexShrink: 0,
+        }}
+      >
+        {category.icon}
+      </span>
+      <span style={{ minWidth: 0, flex: 1 }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+            {category.label}
+          </span>
+          {!available && (
+            <span
+              style={{
+                fontSize: 10,
+                padding: "1px 7px",
+                borderRadius: 999,
+                border: "1px solid var(--border-weak)",
+                color: "var(--text-faint)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Coming soon
+            </span>
+          )}
+        </span>
+        <span style={{ display: "block", fontSize: 11, color: "var(--text-faint)", marginTop: 2, lineHeight: 1.5 }}>
+          {category.description}
+        </span>
+      </span>
+      {available && (
+        <ChevronRight size={16} strokeWidth={1.5} style={{ color: "var(--text-faint)", flexShrink: 0 }} />
+      )}
+    </button>
+  );
+}
+
+/**
+ * Identity and Security detail — reproduces the Azure portal IAM "View my
+ * access" view per resource group plus the signed-in account. The user's
+ * effective role assignments (direct + Entra-group-inherited) are listed for
+ * each RG the dashboard depends on, with an inheritance flag, so permission
+ * gaps in a freshly-onboarded tenant are obvious. Read-only diagnostic —
+ * backed by `GET /api/me/access-review`, which (unlike `/me/permissions`)
+ * does NOT degrade open: an enumeration failure is surfaced as a finding,
+ * not hidden.
+ */
+function IdentitySecurityDetail({
+  config,
+  onBack,
+}: {
+  config: ResourceConfig | null;
+  onBack: () => void;
+}) {
+  const [clusterRgs, setClusterRgs] = useState<string[]>([]);
+  const [groups, setGroups] = useState<AccessReviewGroup[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [identity, setIdentity] = useState<SignedInIdentity | null>(null);
+  const [target, setTarget] = useState<AccessReviewTarget>("me");
+  const [principal, setPrincipal] = useState<AccessReviewPrincipal | null>(null);
+
+  const subscriptionId = config?.subscriptionId ?? "";
+
+  // Resolve the signed-in user's account info. MSAL's active account is the
+  // immediate source (name / username / tenant / object id); the backend
+  // `/api/me` confirms the validated token's claims (upn / tenant / oid) and
+  // wins when present so the displayed identity matches what the API enforces.
+  useEffect(() => {
+    let cancelled = false;
+    const account = msalInstance.getActiveAccount() ?? msalInstance.getAllAccounts()[0];
+    const base: SignedInIdentity = {
+      name: account?.name ?? "",
+      username: account?.username ?? "",
+      tenantId: account?.tenantId ?? "",
+      objectId: account?.localAccountId ?? "",
+    };
+    setIdentity(base);
+    void (async () => {
+      try {
+        const me = await meApi.get();
+        if (cancelled) return;
+        setIdentity({
+          name: base.name,
+          username: (me.upn ?? base.username ?? "").trim(),
+          tenantId: (me.tenant_id ?? base.tenantId ?? "").trim(),
+          objectId: (me.object_id ?? base.objectId ?? "").trim(),
+        });
+      } catch {
+        // Keep the MSAL-derived identity on failure.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+
+  // Collect the resource groups the dashboard touches. Config carries the
+  // workload / ACR / terminal RGs; AKS cluster RGs are discovered sub-wide
+  // (a workload cluster commonly lives outside the dashboard anchor RG).
+  const targets = useMemo<RgTarget[]>(() => {
+    const byRg = new Map<string, RgTarget>();
+    const add = (rg: string | undefined, label: string) => {
+      const name = (rg ?? "").trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      const existing = byRg.get(key);
+      if (existing) {
+        if (!existing.labels.includes(label)) existing.labels.push(label);
+      } else {
+        byRg.set(key, { rg: name, labels: [label] });
+      }
+    };
+    add(config?.workloadResourceGroup, "Workload / dashboard");
+    add(config?.acrResourceGroup, "Container registry");
+    add(config?.terminalResourceGroup, "Terminal");
+    for (const rg of clusterRgs) add(rg, "AKS cluster");
+    return [...byRg.values()];
+  }, [config?.workloadResourceGroup, config?.acrResourceGroup, config?.terminalResourceGroup, clusterRgs]);
+
+  // Discover cluster RGs once a subscription is known.
+  useEffect(() => {
+    if (!subscriptionId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await monitoringApi.aks(subscriptionId);
+        if (cancelled) return;
+        const rgs = (response.clusters ?? [])
+          .map((c: AksClusterSummary) => c.resource_group)
+          .filter((rg): rg is string => Boolean(rg));
+        setClusterRgs(rgs);
+      } catch {
+        // Cluster discovery is best-effort; the config RGs are still reviewed.
+        if (!cancelled) setClusterRgs([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [subscriptionId]);
+
+  const targetKey = useMemo(
+    () => targets.map((t) => t.rg.toLowerCase()).sort().join(","),
+    [targets],
+  );
+
+  const review = useCallback(async () => {
+    if (!subscriptionId || targets.length === 0) {
+      setGroups([]);
+      setPrincipal(null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await meApi.accessReview(
+        subscriptionId,
+        targets.map((t) => t.rg),
+        target,
+      );
+      setGroups(response.groups ?? []);
+      setPrincipal(response.principal ?? null);
+    } catch (err) {
+      setError(formatApiError(err, "me"));
+    } finally {
+      setLoading(false);
+    }
+  }, [subscriptionId, targets, targetKey, target]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    void review();
+  }, [review]);
+
+  // Clear the previous principal's rows the instant the target toggles, so a
+  // diagnostic whose whole point is "whose access" never renders the user's
+  // RBAC rows under the "Dashboard identity" header (or vice-versa) during the
+  // in-flight refetch. A same-target Refresh does not hit this.
+  useEffect(() => {
+    setGroups([]);
+    setPrincipal(null);
+  }, [target]);
+
+  const labelFor = useCallback(
+    (rg: string) =>
+      targets.find((t) => t.rg.toLowerCase() === rg.toLowerCase())?.labels.join(" · ") ?? "",
+    [targets],
+  );
+
+  if (!subscriptionId) {
+    return (
+      <Section heading="Identity and Security">
+        <DiagnosticDetailHeader onBack={onBack} title="Identity and Security" />
+        <SignedInAccountCard identity={identity} />
+        <Group>
+          <div style={{ padding: "16px 0", fontSize: 12, color: "var(--text-faint)" }}>
+            Select a subscription in the Setup Wizard first — access review needs a
+            subscription to enumerate role assignments.
+          </div>
+        </Group>
+      </Section>
+    );
+  }
+
+  const dashboardUnavailable =
+    target === "dashboard" && principal !== null && principal.available === false;
+
+  return (
+    <Section heading="Identity and Security">
+      <DiagnosticDetailHeader onBack={onBack} title="Identity and Security" />
+
+      <div style={{ marginBottom: 12 }}>
+        <Segmented
+          ariaLabel="Whose access to review"
+          value={target}
+          onChange={setTarget}
+          options={[
+            { value: "me", label: "My access" },
+            { value: "dashboard", label: "Dashboard identity" },
+          ]}
+        />
+      </div>
+
+      {target === "me" ? (
+        <SignedInAccountCard identity={identity} />
+      ) : (
+        <DashboardIdentityCard principal={principal} />
+      )}
+
+      <div style={{ fontSize: 12, color: "var(--text-faint)", lineHeight: 1.6, margin: "-4px 0 12px" }}>
+        {target === "me" ? (
+          <>
+            Your effective Azure RBAC role assignments per resource group — the same
+            view as the portal's IAM <strong>“View my access”</strong>. Includes roles
+            inherited from the subscription, management groups, and your Entra groups.
+            Use this to spot a missing role when onboarding a new tenant.
+          </>
+        ) : (
+          <>
+            The shared <strong>managed identity</strong> the dashboard runs as — this is
+            the principal that actually performs ARM and Storage writes. A missing role
+            here is the usual root cause of a tenant onboarding failure even when{" "}
+            <em>your</em> access looks fine.
+          </>
+        )}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+        <button className="glass-button" onClick={() => void review()} disabled={loading}>
+          {loading ? <Loader2 size={12} strokeWidth={1.5} className="spin" /> : <RefreshCw size={12} strokeWidth={1.5} />}
+          {loading ? "Checking…" : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "flex-start",
+            padding: "10px 12px",
+            marginBottom: 12,
+            borderRadius: 8,
+            border: "1px solid var(--border-weak)",
+            background: "var(--bg-secondary)",
+            fontSize: 12,
+            color: "var(--text-muted)",
+          }}
+        >
+          <AlertCircle size={14} strokeWidth={1.5} style={{ marginTop: 1, flexShrink: 0 }} />
+          <span style={{ wordBreak: "break-word" }}>{error}</span>
+        </div>
+      )}
+
+      {dashboardUnavailable ? (
+        <Group>
+          <div style={{ padding: "16px 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+            The dashboard managed identity's principal id is not available in this
+            environment (no <code style={{ fontSize: 11 }}>SHARED_IDENTITY_PRINCIPAL_ID</code>).
+            This is expected in local development — the identity only exists in the
+            deployed Container App.
+          </div>
+        </Group>
+      ) : (
+        <>
+          {groups.length === 0 && !loading && !error && (
+            <Group>
+              <div style={{ padding: "16px 0", fontSize: 12, color: "var(--text-faint)" }}>
+                No resource groups configured to review yet.
+              </div>
+            </Group>
+          )}
+
+          {groups.map((grp) => (
+            <RgAccessCard key={grp.resource_group} group={grp} label={labelFor(grp.resource_group)} />
+          ))}
+        </>
+      )}
+    </Section>
+  );
+}
+
+function DiagnosticDetailHeader({ onBack, title }: { onBack: () => void; title: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onBack}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        background: "none",
+        border: "none",
+        padding: "0 0 12px",
+        margin: 0,
+        cursor: "pointer",
+        color: "var(--text-faint)",
+        fontSize: 12,
+      }}
+      aria-label={`Back to diagnostics — leave ${title}`}
+    >
+      <ChevronLeft size={14} strokeWidth={1.5} /> Diagnose &amp; solve problems
+    </button>
+  );
+}
+
+function DashboardIdentityCard({ principal }: { principal: AccessReviewPrincipal | null }) {
+  const objectId = principal?.object_id || "";
+  const rows: Array<[string, string]> = [
+    ["Identity", "Shared user-assigned managed identity"],
+    ["Object ID", objectId || "—"],
+  ];
+  return (
+    <Group>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 0 10px" }}>
+        <div
+          aria-hidden
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: "50%",
+            background: "var(--bg-tertiary)",
+            border: "1px solid var(--border-weak)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--text-muted)",
+            flexShrink: 0,
+          }}
+        >
+          <ShieldCheck size={16} strokeWidth={1.5} />
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+            Dashboard managed identity
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-faint)" }}>
+            The principal the control plane uses for ARM &amp; Storage
+          </div>
+        </div>
+      </div>
+      <div style={{ paddingBottom: 12 }}>
+        {rows.map(([k, v]) => (
+          <div
+            key={k}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "92px 1fr",
+              gap: 12,
+              padding: "5px 0",
+              fontSize: 12,
+              borderTop: "1px solid var(--border-weak)",
+            }}
+          >
+            <span style={{ color: "var(--text-faint)" }}>{k}</span>
+            <span
+              style={{
+                color: v === "—" ? "var(--text-faint)" : "var(--text-muted)",
+                wordBreak: "break-all",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {v}
+            </span>
+          </div>
+        ))}
+      </div>
+    </Group>
+  );
+}
+
+function SignedInAccountCard({ identity }: { identity: SignedInIdentity | null }) {
+  const initials = (identity?.name || identity?.username || "U")
+    .split(/[\s@.]+/)
+    .filter(Boolean)
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+  const rows: Array<[string, string]> = [
+    ["Account", identity?.username || "—"],
+    ["Tenant ID", identity?.tenantId || "—"],
+    ["Object ID", identity?.objectId || "—"],
+  ];
+
+  return (
+    <Group>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 0 10px" }}>
+        <div
+          aria-hidden
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: "50%",
+            background: "var(--bg-tertiary)",
+            border: "1px solid var(--border-weak)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--text-muted)",
+            flexShrink: 0,
+          }}
+        >
+          {initials || <User size={16} strokeWidth={1.5} />}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", wordBreak: "break-word" }}>
+            {identity?.name || identity?.username || "Signed-in user"}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-faint)" }}>Signed in to the dashboard</div>
+        </div>
+      </div>
+      <div style={{ paddingBottom: 12 }}>
+        {rows.map(([k, v]) => (
+          <div
+            key={k}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "92px 1fr",
+              gap: 12,
+              padding: "5px 0",
+              fontSize: 12,
+              borderTop: "1px solid var(--border-weak)",
+            }}
+          >
+            <span style={{ color: "var(--text-faint)" }}>{k}</span>
+            <span
+              style={{
+                color: v === "—" ? "var(--text-faint)" : "var(--text-muted)",
+                wordBreak: "break-all",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {v}
+            </span>
+          </div>
+        ))}
+      </div>
+    </Group>
+  );
+}
+
+function RgAccessCard({ group, label }: { group: AccessReviewGroup; label: string }) {
+  return (
+    <Group>
+      <div style={{ padding: "12px 0 8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", wordBreak: "break-all" }}>
+            {group.resource_group}
+          </div>
+          {label && <div style={{ fontSize: 11, color: "var(--text-faint)" }}>{label}</div>}
+        </div>
+        {group.degraded ? (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--warning, #d08a3a)", flexShrink: 0 }}>
+            <AlertCircle size={13} strokeWidth={1.5} /> Cannot read
+          </span>
+        ) : group.assignments.length > 0 ? (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--text-faint)", flexShrink: 0 }}>
+            <CheckCircle2 size={13} strokeWidth={1.5} /> {group.assignments.length} role
+            {group.assignments.length === 1 ? "" : "s"}
+          </span>
+        ) : (
+          <span style={{ fontSize: 11, color: "var(--text-faint)", flexShrink: 0 }}>No access</span>
+        )}
+      </div>
+
+      {group.degraded ? (
+        <div style={{ padding: "4px 0 14px", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+          Could not enumerate role assignments. You likely lack{" "}
+          <code style={{ fontSize: 11 }}>Microsoft.Authorization/roleAssignments/read</code> on this
+          scope — which is itself why management actions here may fail. Ask a subscription Owner /
+          User Access Administrator to grant at least Reader.
+          <div style={{ marginTop: 6, color: "var(--text-faint)", fontSize: 11, wordBreak: "break-word" }}>
+            {group.reason}
+          </div>
+        </div>
+      ) : group.assignments.length === 0 ? (
+        <div style={{ padding: "4px 0 14px", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+          You have no Azure RBAC role at this scope. Dashboard actions that touch this resource group
+          will fail until a role (Reader to browse, Contributor to manage) is assigned.
+        </div>
+      ) : (
+        <div style={{ paddingBottom: 8 }}>
+          {group.assignments.map((row) => (
+            <div
+              key={`${row.role_guid}:${row.assignment_scope}`}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto",
+                alignItems: "center",
+                gap: 12,
+                padding: "8px 0",
+                borderTop: "1px solid var(--border-weak)",
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12, color: "var(--text-primary)", wordBreak: "break-word" }}>
+                  {row.role_name}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-faint)" }}>
+                  {SCOPE_LEVEL_LABEL[row.scope_level]}
+                </div>
+              </div>
+              <span
+                style={{
+                  fontSize: 10,
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: "1px solid var(--border-weak)",
+                  color: "var(--text-faint)",
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
+                }}
+              >
+                {row.inherited ? "Inherited" : "Direct"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Group>
   );
 }
 

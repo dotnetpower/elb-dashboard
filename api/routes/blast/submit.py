@@ -339,6 +339,7 @@ def blast_submit(
         storage_account=req.storage_account,
         database=req.database,
         acr_name=str(normalised_body.get("acr_name") or ""),
+        submit_options=req.options,
         allow_unverified=allow_unverified,
     )
     if gates_report.blocking:
