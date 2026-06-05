@@ -141,6 +141,14 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
   const pollTimer = useRef<number | null>(null);
   const taskRunning = runningTask !== null;
 
+  // Keep the latest "which cluster is this task for" identifier in a ref
+  // so `pollTask` can read it without depending on `clusterName` /
+  // `runningTask` — pollTask is intentionally stable (only depends on
+  // `refresh`) because the resume-on-mount effect below assumes it does
+  // not change per render.
+  const clusterRef = useRef("");
+  clusterRef.current = runningTask?.cluster || clusterName;
+
   // Tick the elapsed counter while a task is running.
   useEffect(() => {
     if (!runningTask) return;
@@ -302,7 +310,7 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
             // to the success state.
             const dictFailed = result.output?.status === "failed";
             const taskFailed = runtime !== "Completed" || dictFailed;
-            const completedCluster = runningTask?.cluster || clusterName;
+            const completedCluster = clusterRef.current;
             clearRunningPublicHttpsTask(completedCluster);
             setRunningTask(null);
             if (!taskFailed) {
@@ -336,7 +344,7 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
           // mid-install.
           const message = formatApiError(err, "aks");
           if (/404|not[_ -]?found/i.test(message)) {
-            clearRunningPublicHttpsTask(runningTask?.cluster || clusterName);
+            clearRunningPublicHttpsTask(clusterRef.current);
             setRunningTask(null);
           }
           setError(message);
