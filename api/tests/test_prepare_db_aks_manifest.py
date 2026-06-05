@@ -228,11 +228,37 @@ def test_script_uses_single_azcopy_s3blob() -> None:
 
 
 def test_script_overwrites_to_heal_partial_blobs() -> None:
-    """`--overwrite=true` re-fetches every file so a re-run heals any
-    truncated / 0-byte blob left by an earlier interrupted download. azcopy
+    """The first copy attempt uses `--overwrite=true` so a re-run heals any
+    truncated / legacy blob left by an earlier interrupted download. azcopy
     commits each blob atomically via its block list, so a killed transfer
     never leaves a partial committed blob (no per-file verify needed)."""
-    assert "--overwrite=true" in PREPARE_DB_AKS_SCRIPT
+    assert 'overwrite="true"' in PREPARE_DB_AKS_SCRIPT
+    assert '--overwrite="$overwrite"' in PREPARE_DB_AKS_SCRIPT
+
+
+def test_script_resumes_in_pod_instead_of_full_redownload() -> None:
+    """A single transient per-file failure (azcopy exit 1 /
+    CompletedWithErrors) must NOT bubble out of the pod on the first attempt.
+
+    At ~200 GB / ~486 files per shard, one transient S3/SNAT/timeout blip is
+    near-certain, and exiting non-zero would make the Job's
+    `backoffLimitPerIndex` relaunch a fresh pod that re-downloads the WHOLE
+    shard from scratch (`--overwrite=true`) — which hits another blip near
+    the end and never converges (the historical "partial · N failed" loop
+    that kept nt/core_nt from finishing). The fix is a bounded in-pod resume
+    loop: retries use `--overwrite=ifSourceNewer` so the already-committed
+    blobs are skipped and only the failed files are re-fetched, converging in
+    seconds. The pod only exits non-zero after ELB_AZCOPY_MAX_ATTEMPTS
+    in-pod attempts all fail."""
+    assert "ELB_AZCOPY_MAX_ATTEMPTS" in PREPARE_DB_AKS_SCRIPT
+    # Retries skip already-committed blobs and re-fetch only what failed.
+    assert 'overwrite="ifSourceNewer"' in PREPARE_DB_AKS_SCRIPT
+    # The retry loop wraps the azcopy call.
+    assert 'while [ "$attempt" -le "$MAX_ATTEMPTS" ]' in PREPARE_DB_AKS_SCRIPT
+    # Success short-circuits the loop; the trailing `exit "$rc"` only fires
+    # after the attempt budget is exhausted.
+    assert 'exit 0' in PREPARE_DB_AKS_SCRIPT
+    assert 'attempt=$((attempt + 1))' in PREPARE_DB_AKS_SCRIPT
 
 
 def test_script_builds_include_pattern_from_basenames() -> None:

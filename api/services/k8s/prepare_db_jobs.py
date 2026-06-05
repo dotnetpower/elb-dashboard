@@ -20,12 +20,16 @@ Risky contracts: The per-pod script lives in `PREPARE_DB_AKS_SCRIPT` and
     supported AKS versions). `azcopy login --identity` resolves the
     kubelet-attached managed identity, which must already carry
     `Storage Blob Data Contributor` on the workload Storage account (the
-    existing warmup RBAC grant covers this). Each pod runs a SINGLE
+    existing warmup RBAC grant covers this). Each pod runs an
     `azcopy copy --from-to=S3Blob` over its shard's files (selected via an
-    `--include-pattern` built from the shard basenames); azcopy reads the
-    public NCBI bucket anonymously and writes through the kubelet MI to the
-    Storage private endpoint, so the account stays
-    `publicNetworkAccess: Disabled`. azcopy is PINNED to 10.28.0 because the
+    `--include-pattern` built from the shard basenames) inside a bounded
+    in-pod resume loop: the first attempt heals with `--overwrite=true`, then
+    up to `ELB_AZCOPY_MAX_ATTEMPTS-1` retries use `--overwrite=ifSourceNewer`
+    so a single transient per-file failure re-fetches only the missing files
+    instead of triggering a full-shard re-download (the historical
+    non-convergence). azcopy reads the public NCBI bucket anonymously and
+    writes through the kubelet MI to the Storage private endpoint, so the
+    account stays `publicNetworkAccess: Disabled`. azcopy is PINNED to 10.28.0 because the
     `aka.ms` redirect now serves 10.32.4, which panics on every S3Blob copy
     (override via `ELB_AZCOPY_URL`); the download depends on egress to
     `github.com` from the pod NIC. The trailing `/*` source + include-pattern
@@ -207,37 +211,65 @@ if [ -z "$PATTERN" ]; then
     exit 2
 fi
 
-# Single azcopy S3Blob copy of EXACTLY this shard's files. azcopy reads the
-# public NCBI bucket anonymously (no AWS creds needed) and writes through
-# the kubelet managed identity to the workload Storage account's private
-# endpoint, so the account stays publicNetworkAccess=Disabled. The trailing
-# "/*" on the source yields the FLAT "blast-db/<db>/<file>" layout
-# elastic-blast requires (azcopy's list-of-files mode would instead nest
-# "<snapshot>/" under the destination and break that layout).
-# `--overwrite=true` re-fetches
-# every file so a re-run heals any truncated/0-byte blob left by an earlier
-# interrupted download; azcopy commits each blob atomically via its block
-# list, so a killed transfer never leaves a partial committed blob. azcopy
+# azcopy S3Blob copy of EXACTLY this shard's files, wrapped in a bounded
+# in-pod resume loop. azcopy reads the public NCBI bucket anonymously (no
+# AWS creds needed) and writes through the kubelet managed identity to the
+# workload Storage account's private endpoint, so the account stays
+# publicNetworkAccess=Disabled. The trailing "/*" on the source yields the
+# FLAT "blast-db/<db>/<file>" layout elastic-blast requires (azcopy's
+# list-of-files mode would instead nest "<snapshot>/" under the destination
+# and break that layout). azcopy commits each blob atomically via its block
+# list, so a killed transfer never leaves a partial committed blob, and it
 # prints its own "% Done/Failed/Total" progress to stdout for live
-# `kubectl logs`. A non-zero exit (any failed transfer) fails the shard so
-# the Job's per-index backoff (`backoffLimitPerIndex`) relaunches a fresh
-# pod for THIS shard only, without counting against the other shards;
-# azcopy's own retry handles transient NCBI/S3 hiccups within a run.
+# `kubectl logs`.
+#
+# WHY THE LOOP: a single shard streams ~200 GB / ~486 NCBI files over ~20
+# min, so one transient per-file hiccup (S3 503 / SNAT reset / read timeout)
+# is near-certain at this scale, and azcopy reports the whole run as exit 1
+# (CompletedWithErrors) even when 485/486 committed fine. Exiting on that
+# first non-zero would make the Job's per-index backoff relaunch a FRESH pod
+# that re-downloads the WHOLE shard from scratch with --overwrite=true --
+# which then hits another single-file blip near the end and never converges
+# (the historical "partial · N failed" loop that kept nt/core_nt from ever
+# finishing). Instead we re-run azcopy IN-PLACE: the first attempt uses
+# `--overwrite=true` to heal any truncated/legacy blob, and every retry uses
+# `--overwrite=ifSourceNewer` so the already-committed blobs (dest LMT newer
+# than the source snapshot) are SKIPPED and only the handful of failed files
+# are re-fetched -- converging in seconds, not another full download. Only
+# after ELB_AZCOPY_MAX_ATTEMPTS in-pod attempts still fail does the pod exit
+# non-zero, letting `backoffLimitPerIndex` relaunch the shard and ultimately
+# surface an honest failure for a genuinely unreachable file.
 #
 # azcopy version is pinned to 10.28.0 above: aka.ms now serves 10.32.4,
 # which panics on every --from-to=S3Blob copy.
 SRC="${NCBI_BASE}/${SOURCE_VERSION}/*"
-log "COPY shard=${SHARD_INDEX} files=${TOTAL} src=${SOURCE_VERSION} block=${BLOCK_MB}MiB"
-set +e
-azcopy copy "$SRC" "${DEST_BASE}/" \
-    --from-to=S3Blob \
-    --include-pattern "$PATTERN" \
-    --block-size-mb="$BLOCK_MB" \
-    --overwrite=true \
-    --log-level=WARNING
-rc=$?
-set -e
-log "DONE shard=${SHARD_INDEX} azcopy_exit=${rc}"
+MAX_ATTEMPTS="${ELB_AZCOPY_MAX_ATTEMPTS:-5}"
+log "COPY shard=${SHARD_INDEX} files=${TOTAL} src=${SOURCE_VERSION} attempts=${MAX_ATTEMPTS}"
+attempt=1
+overwrite="true"
+rc=1
+while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+    log "COPY attempt=${attempt}/${MAX_ATTEMPTS} shard=${SHARD_INDEX} overwrite=${overwrite}"
+    set +e
+    azcopy copy "$SRC" "${DEST_BASE}/" \
+        --from-to=S3Blob \
+        --include-pattern "$PATTERN" \
+        --block-size-mb="$BLOCK_MB" \
+        --overwrite="$overwrite" \
+        --log-level=WARNING
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+        log "DONE shard=${SHARD_INDEX} azcopy_exit=0 attempt=${attempt}"
+        exit 0
+    fi
+    log "RETRY shard=${SHARD_INDEX} azcopy_exit=${rc} attempt=${attempt}"
+    # Re-fetch only the files that did not commit; skip the completed blobs.
+    overwrite="ifSourceNewer"
+    attempt=$((attempt + 1))
+    sleep 5
+done
+log "DONE shard=${SHARD_INDEX} azcopy_exit=${rc} attempts_exhausted=${MAX_ATTEMPTS}"
 exit "$rc"
 """
 
