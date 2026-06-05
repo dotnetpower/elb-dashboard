@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Info } from "lucide-react";
 
@@ -63,7 +63,35 @@ export function ClusterCard({
   // longer hides clusters that live outside the dashboard's anchor RG, so
   // a multi-cluster deployment (heavy + light + gpu) renders inline.
   const enabled = Boolean(subscriptionId);
-  const refetchInterval = useAutoRefreshInterval();
+  const baseRefetchInterval = useAutoRefreshInterval();
+  // While a cluster is provisioning / starting / stopping we must keep
+  // polling even if the dashboard tab is backgrounded, and refetch the
+  // moment the tab regains focus. Otherwise the global QueryClient defaults
+  // (`refetchIntervalInBackground: false`, `refetchOnWindowFocus: false` in
+  // main.tsx) freeze the row at "Starting…" until the user manually reloads.
+  //
+  // The row's "Starting…" label is an *optimistic transition chip* held in
+  // localStorage; it is only cleared once a poll observes the settled
+  // `power_state=Running` + `provisioning_state=Succeeded` (see
+  // `transitionTargetReached`). So chip removal depends entirely on the
+  // cluster-list query actually refetching. Seeded from the persisted-
+  // transition store so a reload mid-transition resumes hot polling before
+  // the first response lands; an effect below keeps it in sync with
+  // provisioning rows + live transitions. When nothing is in flight this
+  // stays `false`, so idle dashboards keep the calm, cost-minimised posture.
+  const [activePolling, setActivePolling] = useState<boolean>(() =>
+    hasActiveClusterTransitions(subscriptionId, resourceGroup),
+  );
+  // Mirror of `activePolling` for the stable `queryFn` closure to read the
+  // *current* hot state at call time (it must not be re-created every render).
+  const activePollingRef = useRef(activePolling);
+  // While in flight, force a fast 5 s poll (capped below the user's chosen
+  // auto-refresh) so the optimistic chip clears within seconds of Azure
+  // settling, instead of waiting out a 30–60 s interval. Idle keeps the
+  // user's chosen cadence.
+  const refetchInterval = activePolling
+    ? Math.min(baseRefetchInterval, 5_000)
+    : baseRefetchInterval;
   const query = useQuery({
     queryKey: ["aks", subscriptionId, "sub"],
     // Empty RG arg => backend uses subscription-wide path with ElasticBLAST
@@ -78,12 +106,32 @@ export function ClusterCard({
     // promptly: the lifecycle task runs in the `worker` sidecar and cannot
     // invalidate the `api` sidecar's in-process cache. Once the transition
     // chip clears, `fresh` falls back to false and normal caching resumes.
+    // `fresh` bypasses the backend's 30 s monitor cache and re-queries ARM
+    // synchronously. It is read at call time (not capture time) from the
+    // persisted-transition store OR the current hot state, so any
+    // provisioning cluster — including one started outside this browser
+    // (portal / CLI) where no local transition was recorded — still gets the
+    // settled `provisioning_state` the moment ARM flips, instead of waiting
+    // out the cache TTL. The lifecycle task runs in the `worker` sidecar and
+    // cannot invalidate the `api` sidecar's in-process cache, so this fresh
+    // read is the only cross-process-safe path to authoritative state. Once
+    // everything settles `activePolling` falls back to false and normal
+    // caching resumes.
     queryFn: () =>
       monitoringApi.aks(subscriptionId, undefined, {
-        fresh: hasActiveClusterTransitions(subscriptionId, resourceGroup),
+        fresh:
+          hasActiveClusterTransitions(subscriptionId, resourceGroup) ||
+          activePollingRef.current,
       }),
     enabled,
     refetchInterval,
+    // Keep the interval ticking even when the tab is hidden, and force a
+    // refetch on focus return, but only while something is in flight. With
+    // `staleTime: 0` during that window the focus refetch is never skipped as
+    // "still fresh", so returning to the tab always pulls the settled state.
+    refetchIntervalInBackground: activePolling,
+    refetchOnWindowFocus: activePolling,
+    staleTime: activePolling ? 0 : undefined,
   });
 
   // Existing resource group names — fed into the provision modal so the user
@@ -251,6 +299,21 @@ export function ClusterCard({
     terminalResourceGroup,
     terminalVmName,
   });
+
+  // Drive `activePolling` from authoritative signals: any cluster ARM
+  // `provisioning_state` still in a transient phase (Creating / Starting /
+  // Stopping / Updating / Deleting) OR a live in-browser start/stop/delete
+  // transition. This survives a page reload (provisioning is read from the
+  // refreshed cluster list, transitions from localStorage) so an externally
+  // started cluster or a post-reload create also keeps hot-polling. Settles
+  // back to `false` once everything is steady, restoring the idle posture.
+  // The ref is updated synchronously so the next `queryFn` call (which may
+  // fire before the state-driven re-render) reads the current hot state.
+  useEffect(() => {
+    const hot = hasProvisioningCluster || actions.transitioning.size > 0;
+    activePollingRef.current = hot;
+    setActivePolling((prev) => (prev === hot ? prev : hot));
+  }, [hasProvisioningCluster, actions.transitioning]);
 
   // Gate "Add Cluster" behind the caller's write capability at the
   // subscription scope: provisioning creates a new resource group + AKS
