@@ -66,32 +66,43 @@ export function UpgradePage() {
       setStatus(s);
       setCandidates(c);
       setHistory(h.events);
-      // Probe escape-hatch first: when it 403s the caller is not an
-      // upgrade admin and we skip the rollback-preflight probe entirely
-      // so the SPA does not spam the browser console with 403s.
+      // The escape-hatch / rollback-preflight probes are only meaningful once
+      // a rollback snapshot exists (i.e. at least one upgrade has run). On a
+      // fresh / never-upgraded deployment `rollback_target` is empty and
+      // `GET /upgrade/escape-hatch` returns a benign 404 — probing it on every
+      // refresh just burns a round-trip and pollutes the failed-request metric.
+      // Gate both probes on a non-empty snapshot.
+      const hasRollbackSnapshot = Object.keys(s.rollback_target ?? {}).length > 0;
       let blocked = false;
-      try {
-        const e = await upgradeApi.escapeHatch();
-        setEscape(e);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("403")) {
-          blocked = true;
-          setEscape(null);
-        } else {
+      if (hasRollbackSnapshot) {
+        // Probe escape-hatch first: when it 403s the caller is not an
+        // upgrade admin and we skip the rollback-preflight probe entirely
+        // so the SPA does not spam the browser console with 403s.
+        try {
+          const e = await upgradeApi.escapeHatch();
+          setEscape(e);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "";
+          if (msg.includes("403")) {
+            blocked = true;
+          }
           setEscape(null);
         }
-      }
-      setAdminBlocked(blocked);
-      if (!blocked) {
-        try {
-          const p = await upgradeApi.rollbackPreflight();
-          setPreflight(p);
-        } catch {
+        setAdminBlocked(blocked);
+        if (!blocked) {
+          try {
+            const p = await upgradeApi.rollbackPreflight();
+            setPreflight(p);
+          } catch {
+            setPreflight(null);
+          }
+        } else {
           setPreflight(null);
         }
       } else {
+        setEscape(null);
         setPreflight(null);
+        setAdminBlocked(false);
       }
     } finally {
       setRefreshing(false);

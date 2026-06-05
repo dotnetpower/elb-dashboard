@@ -319,6 +319,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
           name: "core_nt",
           mol_type: "nucl",
           status: "Ready",
+          sources: ["warmup"],
           nodes_ready: 3,
           nodes_failed: 0,
           nodes_active: 0,
@@ -565,6 +566,22 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/aks/delete", async (route) => {
     state.aksActions.push({ action: "delete", payload: route.request().postDataJSON() as Record<string, unknown> });
     await jsonResponse(route, { cluster_name: e2eCluster.name, task_id: "task-delete-e2e", status: "queued" });
+  });
+
+  // After a queued AKS/start/stop/delete action the SPA polls the Celery task
+  // status endpoint until the task is ready. Without this stub the poll falls
+  // through to the real backend (cross-origin in dev), so mock a terminal
+  // SUCCESS so the destructive-action flows resolve deterministically.
+  await page.route(/\/api\/tasks\/[^/?]+(\?.*)?$/, (route) => {
+    const taskId = decodeURIComponent(
+      new URL(route.request().url()).pathname.split("/").pop() ?? "",
+    );
+    return jsonResponse(route, {
+      task_id: taskId,
+      status: "SUCCESS",
+      ready: true,
+      result: { ok: true },
+    });
   });
 
   await page.route("**/api/storage/prepare-db", async (route) => {

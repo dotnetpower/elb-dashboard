@@ -9,6 +9,9 @@ test("Dashboard destructive controls are isolated behind mocked mutations", asyn
 
   await uiPage.getByRole("button", { name: "Delete" }).click();
   await expect(uiPage.getByRole("dialog", { name: /Delete cluster/i })).toBeVisible();
+  // The delete dialog requires typing the cluster name to enable the confirm
+  // button (type-to-confirm guard on irreversible AKS deletion).
+  await uiPage.getByRole("textbox").fill("aks-e2e");
   await uiPage.getByRole("button", { name: /Permanently delete/i }).click();
   await expect.poll(() => uiMocks.aksActions.map((row) => row.action)).toContain("delete");
 });

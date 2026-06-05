@@ -12,7 +12,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { getFailureText } from "./predicates";
+import { getFailureText, inferFailedStepKey } from "./predicates";
 
 describe("getFailureText", () => {
   it("prefers job.error over step.last_output", () => {
@@ -44,5 +44,32 @@ describe("getFailureText", () => {
     expect(getFailureText(undefined, null, null, {})).toBe(
       "No detailed error was recorded by the orchestrator.",
     );
+  });
+});
+
+describe("inferFailedStepKey", () => {
+  it("maps a K8s-stage failure to the BLAST Run step, not Submit Job", () => {
+    // Regression: a search that failed at the K8s running stage (after submit
+    // succeeded) used to default to "submitting" and render "Submit Job".
+    const steps = {
+      submitting: { phase: "submitting", status: "completed", success: true },
+      running: {
+        phase: "running",
+        status: "failed",
+        success: false,
+        error: "BLAST search exited with code 2",
+      },
+    };
+    expect(inferFailedStepKey("failed", steps, null, null)).toBe("running");
+  });
+
+  it("honors an explicit failed_step hint from the backend", () => {
+    expect(
+      inferFailedStepKey("failed", {}, { failed_step: "running" }, null),
+    ).toBe("running");
+  });
+
+  it("falls back to submitting only when no step ran", () => {
+    expect(inferFailedStepKey("failed", {}, null, null)).toBe("submitting");
   });
 });

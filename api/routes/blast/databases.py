@@ -765,7 +765,7 @@ def blast_databases_check_updates(
 
     # Per-DB enrichment — only runs when the caller passes storage scope.
     from api.services import get_credential
-    from api.services.storage.data import list_databases
+    from api.services.storage.database_catalog_cache import list_databases_cached
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -776,7 +776,12 @@ def blast_databases_check_updates(
         context="blast_databases_check_updates",
     )
     try:
-        downloaded = list_databases(cred, storage_account)
+        # Reuse the shared catalogue cache (same as GET /api/blast/databases)
+        # instead of re-enumerating the blast-db container. The enumeration is
+        # the heavy N+1 path (full blob list + per-DB .njs/metadata reads); the
+        # NCBI signature comparison below is what actually drives this route, so
+        # the downloaded-DB list is fine to serve from the 300s TTL cache.
+        downloaded = list_databases_cached(cred, storage_account)
     except Exception as exc:
         LOGGER.warning("check-updates list_databases failed: %s", type(exc).__name__)
         return base

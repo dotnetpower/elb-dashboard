@@ -393,6 +393,17 @@ def _local_to_blast_job(
             "phase": state.phase or state.status,
             "steps": progress.get("steps", {}),
         }
+        # Surface the terminal-failure hints the K8s refresh records in the
+        # payload so the SPA banner resolves the correct failed step ("BLAST
+        # Run", not the default "Submit Job") and shows the real cluster-side
+        # error instead of the last benign helper log line.
+        if isinstance(payload, dict):
+            failed_step = payload.get("failed_step")
+            if failed_step:
+                out["output"]["failed_step"] = failed_step
+            payload_error = payload.get("error")
+            if payload_error:
+                out["output"]["error"] = payload_error
     if include_database_metadata:
         from api.services.blast.db_metadata import extract_trusted_storage_account
 
@@ -609,6 +620,41 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
             LOGGER.debug("blast results-pending update skipped job_id=%s: %s", state.job_id, exc)
             return state
     try:
+        if k8s_status == "failed":
+            # Map the failure to the real execution step the row was on so the
+            # dashboard says "BLAST Run failed" (not the default "Submit Job"),
+            # and surface the cluster-side blastn diagnostics instead of the
+            # last benign helper log line.
+            failed_step_key = "exporting_results" if phase == "results_pending" else "running"
+            error_detail = _read_blast_runtime_failure(storage_account, str(state.job_id)) or (
+                f"BLAST job failed on the cluster ({int(k8s.get('failed') or 0)} pod(s) failed)."
+            )
+            updated = repo.update(
+                state.job_id,
+                status="failed",
+                phase="failed",
+                error_code="blast_search_failed",
+                payload=_payload_with_refresh_progress(
+                    payload,
+                    phase="failed",
+                    status="failed",
+                    k8s=k8s,
+                    failed_step_key=failed_step_key,
+                    error_detail=error_detail,
+                ),
+            )
+            repo.append_history(
+                state.job_id,
+                "k8s_status_refreshed",
+                {
+                    "status": "failed",
+                    "phase": "failed",
+                    "failed_step": failed_step_key,
+                    "error": error_detail,
+                    "k8s": k8s,
+                },
+            )
+            return updated
         updated = repo.update(
             state.job_id,
             status=k8s_status,
@@ -721,6 +767,8 @@ def _payload_with_refresh_progress(
     phase: str,
     status: str,
     k8s: dict[str, Any],
+    failed_step_key: str | None = None,
+    error_detail: str = "",
 ) -> dict[str, Any]:
     out = dict(payload)
     elastic_blast_job_id = str(k8s.get("job_id") or "")
@@ -730,7 +778,17 @@ def _payload_with_refresh_progress(
     progress = dict(_raw_progress) if isinstance(_raw_progress, dict) else {}
     _raw_steps = progress.get("steps")
     steps = dict(_raw_steps) if isinstance(_raw_steps, dict) else {}
-    step_key = "exporting_results" if phase == "results_pending" else phase
+    # On a K8s-stage failure the bare phase is ``failed`` — not a real timeline
+    # step. Record the failure against the actual execution step (the search /
+    # export step the row was on) so the dashboard says "BLAST Run failed",
+    # not the default "Submit Job", and surfaces the real cluster-side error
+    # instead of the last benign helper log line.
+    if status == "failed":
+        step_key = failed_step_key or "running"
+    elif phase == "results_pending":
+        step_key = "exporting_results"
+    else:
+        step_key = phase
     _raw_step = steps.get(step_key)
     step = dict(_raw_step) if isinstance(_raw_step, dict) else {}
     from datetime import UTC, datetime
@@ -741,8 +799,17 @@ def _payload_with_refresh_progress(
     if status == "completed":
         step["success"] = True
         step.setdefault("completed_at", updated_at)
+    elif status == "failed":
+        step["success"] = False
+        step.setdefault("completed_at", updated_at)
+        if error_detail:
+            step["error"] = error_detail
     steps[step_key] = step
-    if status != "failed" and step_key in _PROGRESS_STEP_ORDER:
+    # Steps that ran before the terminal step succeeded (submit reached the
+    # cluster), so mark any that are still ``running`` as completed — both on
+    # success and on a later-stage failure — so the timeline stops spinning on
+    # an earlier step.
+    if step_key in _PROGRESS_STEP_ORDER:
         current_idx = _PROGRESS_STEP_ORDER.index(step_key)
         for previous_key in _PROGRESS_STEP_ORDER[:current_idx]:
             previous = steps.get(previous_key)
@@ -761,7 +828,86 @@ def _payload_with_refresh_progress(
             steps[previous_key] = normalised
     progress.update({"phase": phase, "status": status, "steps": steps})
     out["_progress"] = progress
+    if status == "failed":
+        out["failed_step"] = step_key
+        if error_detail:
+            out["error"] = error_detail
     return out
+
+
+def _read_blast_runtime_failure(storage_account: str, job_id: str) -> str:
+    """Best-effort cluster-side blastn failure detail for a failed job.
+
+    On a K8s search failure the dashboard otherwise only sees the generic
+    ``status=failed`` pod/Job summary. The elastic-blast runner writes the real
+    diagnostics into the results container:
+
+    * ``.../logs/BLAST_RUNTIME-NNN.out`` ends with ``run exitCode NNN <code>``.
+    * ``.../metadata/FAILURE.txt`` carries the captured blastn stderr (best-
+      effort upload by the runner; frequently absent).
+
+    Returns a concise one-line message, or ``""`` when nothing is readable so
+    the caller can fall back to a generic message.
+    """
+    if not storage_account or not job_id:
+        return ""
+    try:
+        from api.services import get_credential
+        from api.services.storage.blob_io import list_result_blobs, read_blob_text
+
+        credential = get_credential()
+        blobs = list_result_blobs(
+            credential, storage_account, "results", f"{job_id}/", max_results=2000
+        )
+    except Exception as exc:
+        LOGGER.debug(
+            "blast failure-detail listing skipped job_id=%s: %s", job_id, type(exc).__name__
+        )
+        return ""
+
+    failure_path = ""
+    runtime_path = ""
+    for blob in blobs:
+        name = str(blob.get("name") or "")
+        if name.endswith("/metadata/FAILURE.txt"):
+            failure_path = name
+        elif "/logs/BLAST_RUNTIME-" in name and name.endswith(".out") and not runtime_path:
+            runtime_path = name
+
+    exit_code = ""
+    if runtime_path:
+        try:
+            text = read_blob_text(
+                credential, storage_account, "results", runtime_path, max_bytes=4096
+            )
+            for line in text.splitlines():
+                if "run exitCode" in line:
+                    exit_code = line.split()[-1]
+        except Exception as exc:
+            LOGGER.debug("blast runtime read skipped job_id=%s: %s", job_id, type(exc).__name__)
+
+    stderr_text = ""
+    if failure_path:
+        try:
+            stderr_text = read_blob_text(
+                credential, storage_account, "results", failure_path, max_bytes=4096
+            ).strip()
+        except Exception as exc:
+            LOGGER.debug("blast FAILURE.txt read skipped job_id=%s: %s", job_id, type(exc).__name__)
+
+    if stderr_text:
+        head = stderr_text.replace("\n", " ").strip()[:500]
+        if exit_code and exit_code not in {"0", ""}:
+            return f"BLAST search exited with code {exit_code}: {head}"
+        return f"BLAST search failed on the cluster: {head}"
+    if exit_code and exit_code not in {"0", ""}:
+        return (
+            f"BLAST search exited with code {exit_code} on the cluster "
+            "(no stderr was captured by the runner). A common cause is the "
+            "database not being staged on the assigned node — re-run the DB "
+            "warmup for this database and resubmit."
+        )
+    return ""
 
 
 def _state_has_parseable_result_artifact(state: Any, payload: dict[str, Any]) -> bool:

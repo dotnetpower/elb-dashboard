@@ -105,6 +105,29 @@ describe("githubCompareUrl", () => {
     expect(githubCompareUrl(status, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBeNull();
   });
 
+  it("rejects a placeholder running stamp and falls back to running_sha", () => {
+    const status = makeStatus({
+      running_sha: "ffffffffffffffffffffffffffffffffffffffff",
+      latest_commit_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+    expect(githubCompareUrl(status, "dev")).toBe(
+      "https://github.com/dotnetpower/elb-dashboard/compare/ffffffffffffffffffffffffffffffffffffffff...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+  });
+
+  it("returns null when the running ref is a placeholder and running_sha is empty", () => {
+    const status = makeStatus({
+      running_sha: "",
+      latest_commit_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+    expect(githubCompareUrl(status, "unknown")).toBeNull();
+  });
+
+  it("returns null when the target ref is non-hex", () => {
+    const status = makeStatus({ latest_version: "1.5.0", latest_sha: "not-a-sha" });
+    expect(githubCompareUrl(status, "aaaaaaa")).toBeNull();
+  });
+
   it("returns null when there is no target ref", () => {
     expect(githubCompareUrl(makeStatus(), "aaaaaaa")).toBeNull();
   });

@@ -270,6 +270,64 @@ def test_split_child_summaries_uses_owner_batch_query():
     assert out["parent-1"]["children_by_status"] == {"completed": 1}
 
 
+def test_read_blast_runtime_failure_prefers_stderr(monkeypatch):
+    blobs = [
+        {"name": "job-1/job-elastic/logs/BLAST_RUNTIME-000.out"},
+        {"name": "job-1/job-elastic/metadata/FAILURE.txt"},
+    ]
+    texts = {
+        "job-1/job-elastic/logs/BLAST_RUNTIME-000.out": (
+            "1780 run start 000 blastn db 0.62 0.05 0.01 10%\n"
+            "1780 run exitCode 000 2\n"
+            "1780 run end 000\n"
+        ),
+        "job-1/job-elastic/metadata/FAILURE.txt": "BLAST engine error: bad option\n",
+    }
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage.blob_io.list_result_blobs",
+        lambda *_a, **_k: blobs,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.blob_io.read_blob_text",
+        lambda _c, _a, _ct, path, **_k: texts[path],
+    )
+
+    detail = blast_job_state._read_blast_runtime_failure("stelb", "job-1")
+
+    assert detail == "BLAST search exited with code 2: BLAST engine error: bad option"
+
+
+def test_read_blast_runtime_failure_generic_when_no_stderr(monkeypatch):
+    blobs = [{"name": "job-1/job-elastic/logs/BLAST_RUNTIME-000.out"}]
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage.blob_io.list_result_blobs",
+        lambda *_a, **_k: blobs,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.blob_io.read_blob_text",
+        lambda *_a, **_k: "1780 run exitCode 000 2\n",
+    )
+
+    detail = blast_job_state._read_blast_runtime_failure("stelb", "job-1")
+
+    assert "exited with code 2" in detail
+    assert "not being staged on the assigned node" in detail
+
+
+def test_read_blast_runtime_failure_empty_when_unreadable(monkeypatch):
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    def _raise(*_a, **_k):
+        raise RuntimeError("network blocked")
+
+    monkeypatch.setattr("api.services.storage.blob_io.list_result_blobs", _raise)
+
+    assert blast_job_state._read_blast_runtime_failure("stelb", "job-1") == ""
+    assert blast_job_state._read_blast_runtime_failure("", "job-1") == ""
+
+
 def test_refresh_running_blast_state_waits_for_result_artifacts(monkeypatch):
     state = _state(
         status="running",
@@ -371,6 +429,125 @@ def test_refresh_running_blast_state_completes_prior_running_steps(monkeypatch):
     assert progress["steps"]["submitting"]["last_output"] == "elastic-blast submit log"
     assert progress["steps"]["completed"]["status"] == "completed"
     assert progress["steps"]["completed"]["success"] is True
+
+
+def test_refresh_running_blast_state_failure_marks_running_step_with_detail(monkeypatch):
+    # A K8s-stage search failure (after submit succeeded) must be recorded
+    # against the real execution step ("running") with the cluster-side blastn
+    # detail — not the bare "failed" phase that the SPA mislabels as
+    # "Submit Job" while showing a benign helper log line.
+    state = _state(
+        status="running",
+        phase="submitted",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+            "elastic_blast_job_id": "job-elastic",
+            "_progress": {
+                "phase": "submitting",
+                "status": "running",
+                "steps": {
+                    "submitting": {
+                        "phase": "submitting",
+                        "status": "running",
+                        "last_output": "[parallel-prep] running 4 azcopy checks concurrently",
+                    }
+                },
+            },
+        },
+    )
+
+    class Repo:
+        def __init__(self) -> None:
+            self.updated = None
+            self.history = []
+
+        def update(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return _state(**{**state.__dict__, **kwargs})
+
+        def append_history(self, job_id, event, payload):
+            self.history.append((job_id, event, payload))
+
+    repo = Repo()
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {"status": "failed", "job_id": "job-elastic", "failed": 1},
+    )
+    monkeypatch.setattr(
+        blast_job_state,
+        "_read_blast_runtime_failure",
+        lambda *_args, **_kwargs: "BLAST search exited with code 2: bad option",
+    )
+
+    refreshed = blast_job_state._refresh_running_blast_state(repo, state)
+
+    assert refreshed.status == "failed"
+    assert refreshed.phase == "failed"
+    assert refreshed.error_code == "blast_search_failed"
+    payload = repo.updated[1]["payload"]
+    steps = payload["_progress"]["steps"]
+    # The running step carries the failure, and prior steps are completed.
+    assert steps["running"]["status"] == "failed"
+    assert steps["running"]["success"] is False
+    assert steps["running"]["error"] == "BLAST search exited with code 2: bad option"
+    assert steps["submitting"]["status"] == "completed"
+    assert steps["submitting"]["success"] is True
+    # Top-level hints for the SPA banner.
+    assert payload["failed_step"] == "running"
+    assert payload["error"] == "BLAST search exited with code 2: bad option"
+    # The serialized job exposes the hints to the frontend.
+    out = _local_to_blast_job(refreshed)
+    assert out["output"]["failed_step"] == "running"
+    assert out["output"]["error"] == "BLAST search exited with code 2: bad option"
+
+
+def test_refresh_running_blast_state_failure_falls_back_to_generic_detail(monkeypatch):
+    # When the runner captured no stderr / runtime artifact, the failure still
+    # reports a concise generic message instead of an empty banner.
+    state = _state(
+        status="running",
+        phase="running",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+            "elastic_blast_job_id": "job-elastic",
+            "_progress": {"phase": "running", "status": "running", "steps": {}},
+        },
+    )
+
+    class Repo:
+        def __init__(self) -> None:
+            self.updated = None
+
+        def update(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return _state(**{**state.__dict__, **kwargs})
+
+        def append_history(self, *_args, **_kwargs):
+            pass
+
+    repo = Repo()
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {"status": "failed", "job_id": "job-elastic", "failed": 2},
+    )
+    monkeypatch.setattr(
+        blast_job_state, "_read_blast_runtime_failure", lambda *_args, **_kwargs: ""
+    )
+
+    refreshed = blast_job_state._refresh_running_blast_state(repo, state)
+
+    assert refreshed.status == "failed"
+    steps = repo.updated[1]["payload"]["_progress"]["steps"]
+    assert steps["running"]["status"] == "failed"
+    assert "2 pod(s) failed" in steps["running"]["error"]
 
 
 def test_refresh_running_blast_state_uses_discovered_elastic_blast_job_id(monkeypatch):

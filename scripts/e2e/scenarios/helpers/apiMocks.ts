@@ -123,6 +123,7 @@ export async function installNewSearchApiMocks(page: Page): Promise<MockSubmitCa
           name: "core_nt",
           mol_type: "nucl",
           status: "Ready",
+          sources: ["warmup"],
           nodes_ready: 3,
           nodes_failed: 0,
           nodes_active: 0,

@@ -177,10 +177,13 @@ export function isCommitUpdateAvailable(
  * read exactly which commits an update would bring in.
  *
  * Returns `null` unless the remote is a GitHub HTTPS/SSH `.git` URL and both
- * endpoints of the range are known. The "to" end prefers the full
- * `latest_commit_sha` (commit channel) and falls back to `latest_sha` (the
- * release tag's commit); the "from" end is the running commit stamp.
- * Credentials in the remote URL (if any) are stripped.
+ * endpoints of the range resolve to a commit sha. The "to" end prefers the
+ * full `latest_commit_sha` (commit channel) and falls back to `latest_sha`
+ * (the release tag's commit); the "from" end prefers the running commit stamp
+ * (`__APP_COMMIT__`) and falls back to the persisted `running_sha`. Placeholder
+ * stamps (`dev` / `unknown` / non-hex) are rejected so we never emit a broken
+ * `compare/dev...<sha>` link in a local/un-stamped build. Credentials in the
+ * remote URL (if any) are stripped.
  */
 export function githubCompareUrl(
   status: UpgradeStatus | null | undefined,
@@ -189,11 +192,24 @@ export function githubCompareUrl(
   if (!status) return null;
   const base = githubRepoBaseUrl(status.git_remote);
   if (!base) return null;
-  const from = (runningCommit || status.running_sha || "").trim();
-  const to = (status.latest_commit_sha || status.latest_sha || "").trim();
+  const from = pickCommitRef(runningCommit, status.running_sha);
+  const to = pickCommitRef(status.latest_commit_sha, status.latest_sha);
   if (!from || !to) return null;
   if (from.toLowerCase() === to.toLowerCase()) return null;
   return `${base}/compare/${encodeURIComponent(from)}...${encodeURIComponent(to)}`;
+}
+
+/**
+ * Return the first candidate that looks like a git commit sha (≥7 hex chars),
+ * or `null` when none do. Guards against placeholder stamps such as `dev` /
+ * `unknown` that a non-release build injects into `__APP_COMMIT__`.
+ */
+function pickCommitRef(...candidates: Array<string | null | undefined>): string | null {
+  for (const candidate of candidates) {
+    const value = (candidate || "").trim();
+    if (/^[0-9a-f]{7,40}$/i.test(value)) return value;
+  }
+  return null;
 }
 
 /**

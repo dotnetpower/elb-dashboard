@@ -33,6 +33,13 @@ export function NodeResourcesSection({ query }: { query: NodeResourcesQuery }) {
   const [collapsed, setCollapsed] = useState(false);
   const metrics = query.data?.nodes ?? [];
 
+  // True when at least one node reported reclaimable file cache (kubelet
+  // /stats/summary reachable). Drives the two-colour legend; when false the
+  // bars render working-set-only exactly as before.
+  const anyCache = metrics.some(
+    (n) => typeof n.cache_ki === "number" && n.cache_ki > 0,
+  );
+
   // Cluster aggregate — sum all nodes for the header summary line.
   const totals = metrics.reduce(
     (acc, n) => {
@@ -186,6 +193,41 @@ export function NodeResourcesSection({ query }: { query: NodeResourcesQuery }) {
           )}
           {metrics.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {anyCache && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 14,
+                    fontSize: 10,
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                    <span
+                      style={{
+                        width: 10,
+                        height: 6,
+                        borderRadius: 2,
+                        background: "var(--purple)",
+                      }}
+                    />
+                    In use (working set)
+                  </span>
+                  <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                    <span
+                      style={{
+                        width: 10,
+                        height: 6,
+                        borderRadius: 2,
+                        background: "var(--teal)",
+                        opacity: 0.7,
+                      }}
+                    />
+                    File cache (warm BLAST DB · reclaimable)
+                  </span>
+                </div>
+              )}
               {orderedPools.map(([pool, rows]) => (
                 <div key={pool}>
                   <div
@@ -252,6 +294,9 @@ function NodeRow({ metric }: { metric: K8sNodeMetrics }) {
   const cpuTotal = formatCores(metric.cpu_capacity_m);
   const memGiB = formatMemoryGiB(metric.mem_ki);
   const memTotal = formatMemoryGiB(metric.mem_capacity_ki);
+  const hasCache = typeof metric.cache_ki === "number" && metric.cache_ki > 0;
+  const cacheGiB = hasCache ? formatMemoryGiB(metric.cache_ki) : null;
+  const cachePct = hasCache ? (metric.cache_pct ?? 0) : 0;
   return (
     <div
       style={{
@@ -337,16 +382,29 @@ function NodeRow({ metric }: { metric: K8sNodeMetrics }) {
       <UsageBar
         pct={metric.memory_pct}
         color={memColor}
+        overlay={
+          hasCache ? { pct: cachePct, color: "var(--teal)" } : undefined
+        }
         title={`${metric.memory} of ${metric.memory_total}`}
         label={
           <>
             <span style={{ color: "var(--text-primary)" }}>{memGiB}</span>
             <span style={{ color: "var(--text-faint)" }}> / {memTotal} GiB</span>{" "}
             <span style={{ color: "var(--text-faint)" }}>({metric.memory_pct}%)</span>
+            {hasCache && (
+              <>
+                {" "}
+                <span style={{ color: "var(--teal)" }}>+{cacheGiB} cache</span>
+              </>
+            )}
           </>
         }
         labelMinWidth={100}
-        labelTitle={`${metric.memory} (raw ${metric.mem_ki ?? 0}Ki of ${metric.mem_capacity_ki ?? 0}Ki)`}
+        labelTitle={
+          hasCache
+            ? `working set ${metric.memory} (${metric.mem_ki ?? 0}Ki) · file cache ${cacheGiB} GiB (${metric.cache_ki ?? 0}Ki, ${cachePct}%) of ${metric.mem_capacity_ki ?? 0}Ki — cache holds the warm BLAST DB and is reclaimable`
+            : `${metric.memory} (raw ${metric.mem_ki ?? 0}Ki of ${metric.mem_capacity_ki ?? 0}Ki)`
+        }
       />
     </div>
   );
@@ -355,6 +413,7 @@ function NodeRow({ metric }: { metric: K8sNodeMetrics }) {
 function UsageBar({
   pct,
   color,
+  overlay,
   title,
   label,
   labelMinWidth,
@@ -362,11 +421,18 @@ function UsageBar({
 }: {
   pct: number;
   color: string;
+  overlay?: { pct: number; color: string };
   title: string;
   label: React.ReactNode;
   labelMinWidth: number;
   labelTitle: string;
 }) {
+  const basePct = Math.max(Math.min(pct, 100), pct > 0 ? 4 : 0);
+  // Clamp the overlay (cache) to whatever width remains so the two stacked
+  // segments never exceed the 100% track.
+  const overlayPct = overlay
+    ? Math.max(0, Math.min(overlay.pct, 100 - basePct))
+    : 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <div
@@ -377,19 +443,30 @@ function UsageBar({
           borderRadius: 4,
           overflow: "hidden",
           position: "relative",
+          display: "flex",
         }}
         title={title}
       >
         <div
           style={{
-            width: `${Math.max(Math.min(pct, 100), pct > 0 ? 4 : 0)}%`,
+            width: `${basePct}%`,
             minWidth: pct > 0 ? 4 : undefined,
             height: "100%",
-            borderRadius: 4,
             background: color,
             transition: "width 0.5s ease-out",
           }}
         />
+        {overlay && overlayPct > 0 && (
+          <div
+            style={{
+              width: `${overlayPct}%`,
+              height: "100%",
+              background: overlay.color,
+              opacity: 0.7,
+              transition: "width 0.5s ease-out",
+            }}
+          />
+        )}
       </div>
       <span
         style={{

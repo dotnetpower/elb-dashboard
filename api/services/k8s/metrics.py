@@ -65,9 +65,38 @@ def k8s_top_nodes(
                     "conditions": meta.get("conditions", {}),
                 }
             )
+        _enrich_with_page_cache(session, server, nodes)
         return nodes
     finally:
         session.close()
+
+
+def _enrich_with_page_cache(
+    session: Any, server: str, nodes: list[dict[str, Any]]
+) -> None:
+    """Add ``cache_ki`` / ``cache_pct`` to each node when the kubelet exposes it.
+
+    Best-effort: the metrics.k8s.io ``usage`` only carries working set, which
+    excludes the reclaimable file (page) cache where a warmed BLAST DB actually
+    lives. We sample the kubelet ``/stats/summary`` proxy to surface that cache
+    as a distinct bar segment. Any failure (e.g. ``nodes/proxy`` denied) leaves
+    the nodes untouched so the panel renders working-set-only, exactly as before.
+    """
+    if not nodes:
+        return
+    try:
+        from api.services.k8s.node_cache import fetch_node_cache_ki
+
+        cache_by_node = fetch_node_cache_ki(session, server, [n["name"] for n in nodes])
+    except Exception:
+        return
+    for node in nodes:
+        cache_ki = cache_by_node.get(node["name"])
+        if cache_ki is None:
+            continue
+        mem_cap = node.get("mem_capacity_ki") or 0
+        node["cache_ki"] = cache_ki
+        node["cache_pct"] = round(cache_ki / mem_cap * 100) if mem_cap else 0
 
 
 def _node_capacity(session: Any, server: str) -> dict[str, dict[str, int]]:

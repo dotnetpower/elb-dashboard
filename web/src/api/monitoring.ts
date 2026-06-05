@@ -255,6 +255,15 @@ export interface K8sNodeMetrics {
   cpu_capacity_m?: number;
   /** Node capacity in KiB. */
   mem_capacity_ki?: number;
+  /**
+   * Reclaimable file (page) cache in KiB, sampled from the kubelet
+   * `/stats/summary` proxy. This is where a warmed BLAST DB actually lives;
+   * the metrics.k8s.io working set (`mem_ki`) deliberately excludes it.
+   * Absent when the kubelet proxy is unavailable — render working-set-only then.
+   */
+  cache_ki?: number;
+  /** `cache_ki` as a percentage of node capacity (same denominator as `memory_pct`). */
+  cache_pct?: number;
   /** AKS agent pool name (`agentpool` label). Empty when missing. */
   pool?: string;
   /** True when the node's `Ready` condition is `True`. */

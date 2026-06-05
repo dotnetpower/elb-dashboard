@@ -130,6 +130,10 @@ def build_warmup_job_plan(
     The generated jobs mount a node-local hostPath at ``/blast/blastdb`` so the
     shard ``.nal`` files produced by ``api.services.db.sharding`` point at the
     same paths BLAST sees inside the container.
+
+    Single-shard DBs are the *full* database and are broadcast to every Ready
+    node (one Job per node, all staging shard-00 content) because an unsharded
+    search batch can land on any ``workload=blast`` node.
     """
 
     _validate_common(
@@ -152,6 +156,13 @@ def build_warmup_job_plan(
         )
 
     prefix = partition_prefix_for(storage_account, db_name, num_shards, container=container)
+    # A single-shard DB is the *full* database — the search batch can land on any
+    # ``workload=blast`` node, so the full DB must be staged on every Ready node,
+    # not just node 0. Broadcast one Job per node (all staging shard-00 content)
+    # so an unsharded search never fails with "database not found" on an
+    # un-warmed node. Multi-shard DBs keep one-shard-per-node placement.
+    broadcast_full_db = num_shards == 1 and len(nodes) > 1
+    job_count = len(nodes) if broadcast_full_db else num_shards
     jobs = tuple(
         _build_job(
             db_name=db_name,
@@ -167,15 +178,16 @@ def build_warmup_job_plan(
             azcopy_concurrency=azcopy_concurrency,
             azcopy_buffer_gb=azcopy_buffer_gb,
             source_version=source_version,
+            db_content_shard_idx=0 if broadcast_full_db else idx,
         )
-        for idx in range(num_shards)
+        for idx in range(job_count)
     )
     return WarmupJobPlan(
         db_name=db_name,
         mol_type=mol_type,
         storage_account=storage_account,
         num_shards=num_shards,
-        nodes=tuple(nodes[:num_shards]),
+        nodes=tuple(nodes[:job_count]),
         image=image,
         namespace=namespace,
         jobs=jobs,
@@ -629,9 +641,19 @@ def _build_job(
     azcopy_concurrency: int,
     azcopy_buffer_gb: int,
     source_version: str,
+    db_content_shard_idx: int | None = None,
 ) -> dict[str, Any]:
+    # ``shard_idx`` is the *tracking* ordinal used for the Job name, labels, and
+    # one-job-per-node pinning. ``db_content_shard_idx`` selects the DB *content*
+    # the node stages. For a normal sharded warmup the two are identical (node N
+    # holds shard N). For a single-shard "full DB" broadcast they differ: every
+    # node stages the same shard-00 content (the full DB) but carries a distinct
+    # tracking ordinal so the Job names stay unique and the status aggregation
+    # counts each node separately.
+    content_idx = shard_idx if db_content_shard_idx is None else db_content_shard_idx
     shard = f"{shard_idx:02d}"
-    shard_db = f"{db_name}_shard_{shard}"
+    content_shard = f"{content_idx:02d}"
+    shard_db = f"{db_name}_shard_{content_shard}"
     job_name = f"warm-{_job_name_fragment(db_name)}-{shard}"
     host_path = node_db_path.rstrip("/")
     command = _warmup_shell_command()
@@ -678,7 +700,7 @@ def _build_job(
                             "command": ["bash", "-lc"],
                             "args": [command],
                             "env": [
-                                {"name": "ELB_SHARD_IDX", "value": shard},
+                                {"name": "ELB_SHARD_IDX", "value": content_shard},
                                 {"name": "ELB_PARTITION_PREFIX", "value": partition_prefix},
                                 {"name": "ELB_DB", "value": shard_db},
                                 {"name": "ELB_DB_SOURCE_VERSION", "value": source_version},

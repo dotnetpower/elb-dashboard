@@ -424,6 +424,100 @@ def test_list_databases_reads_blastdb_json_display_metadata(
     assert databases["core_nt"]["total_letters"] == 1_234_567_890
 
 
+def test_list_databases_downloads_one_njs_per_multivolume_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multi-volume DB must trigger exactly one .njs download, not one per volume.
+
+    Regression for the N+1 blob-download bottleneck: previously every volume's
+    ``.njs`` (core_nt.00.njs … core_nt.NN.njs) was downloaded even though only
+    the last lexicographic one is kept. App Insights showed ~600
+    BlobClient.download_blob calls for a single /api/blast/databases load on a
+    large DB. The fix defers a single download per base after enumeration; the
+    "last volume wins" content contract is preserved.
+    """
+
+    class CountingContainerClient(FakeContainerClient):
+        def __init__(self, blobs: list[SimpleNamespace], payloads: dict[str, str]) -> None:
+            super().__init__(blobs, payloads)
+            self.downloaded: list[str] = []
+
+        def get_blob_client(self, blob_name: str) -> FakeDownloadBlobClient:
+            self.downloaded.append(blob_name)
+            return super().get_blob_client(blob_name)
+
+    # 12 volumes, each with a .nsq data file and its own .njs sidecar.
+    blobs: list[SimpleNamespace] = []
+    payloads: dict[str, str] = {}
+    for i in range(12):
+        blobs.append(_blob(f"core_nt/core_nt.{i:02d}.nsq"))
+        njs_name = f"core_nt/core_nt.{i:02d}.njs"
+        blobs.append(_blob(njs_name))
+        # Distinct letter count per volume so we can assert "last wins".
+        payloads[njs_name] = json.dumps({"number-of-letters": 1_000 + i})
+
+    fake_container = CountingContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    databases = {
+        item["name"]: item for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+    }
+
+    # Exactly one .njs downloaded (the highest-numbered volume — list order).
+    njs_downloads = [n for n in fake_container.downloaded if n.endswith(".njs")]
+    assert njs_downloads == ["core_nt/core_nt.11.njs"]
+    # Content contract preserved: last lexicographic volume wins.
+    assert databases["core_nt"]["total_letters"] == 1_011
+    # All 24 volume files still counted (12 .nsq + 12 .njs; .njs is also a
+    # recognised BLAST extension, so it counts toward file_count as before).
+    assert databases["core_nt"]["file_count"] == 24
+
+
+def test_list_databases_skips_njs_for_filtered_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A .njs whose base is filtered out (shards layout) is never downloaded."""
+
+    class CountingContainerClient(FakeContainerClient):
+        def __init__(self, blobs: list[SimpleNamespace], payloads: dict[str, str]) -> None:
+            super().__init__(blobs, payloads)
+            self.downloaded: list[str] = []
+
+        def get_blob_client(self, blob_name: str) -> FakeDownloadBlobClient:
+            self.downloaded.append(blob_name)
+            return super().get_blob_client(blob_name)
+
+    blobs = [
+        _blob("core_nt/core_nt.nsq"),
+        _blob("core_nt/core_nt.njs"),
+        # A shard-layout .njs whose base ("16S_shard_00") is filtered out.
+        _blob("1shards/16S_shard_00/16S_shard_00.njs"),
+    ]
+    payloads = {
+        "core_nt/core_nt.njs": json.dumps({"number-of-letters": 42}),
+        "1shards/16S_shard_00/16S_shard_00.njs": json.dumps({"number-of-letters": 9}),
+    }
+    fake_container = CountingContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    databases = {
+        item["name"]: item for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+    }
+
+    assert "core_nt" in databases
+    # Only core_nt's .njs is downloaded; the shard-layout one is skipped.
+    njs_downloads = [n for n in fake_container.downloaded if n.endswith(".njs")]
+    assert njs_downloads == ["core_nt/core_nt.njs"]
+
+
 def test_list_databases_surfaces_db_order_oracle_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

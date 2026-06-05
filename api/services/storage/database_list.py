@@ -77,6 +77,16 @@ def list_databases(
     oracle_status_blobs: dict[str, str] = {}  # db_name -> oracle status json content
     oracle_part_counts: dict[str, int] = {}
     blastdb_json_blobs: dict[str, str] = {}  # db_name -> BLAST v5 .njs content
+    # Per-base name of the .njs blob we will download for display metadata.
+    # A multi-volume DB (e.g. core_nt.00.njs … core_nt.99.njs) has one .njs per
+    # volume; historically we downloaded EVERY one and kept only the last (the
+    # classic N+1 — App Insights showed ~600 BlobClient.download_blob calls for
+    # a single /api/blast/databases load). list_blobs() returns names in
+    # lexicographic order, so "last wins" == the highest-numbered volume's .njs.
+    # We record only the name here and defer the single download to after the
+    # enumeration loop, preserving the exact "last wins" content while paying
+    # one download per base instead of one per volume.
+    blastdb_json_names: dict[str, str] = {}  # db_name -> .njs blob name (last wins)
     for blob in cc.list_blobs():
         parts = blob.name.split("/")
         name = parts[-1]  # file name without directory prefix
@@ -117,11 +127,10 @@ def list_databases(
             continue
         if name.endswith(".njs"):
             base = re.sub(r"\.\d+$", "", name[:-4])
-            try:
-                bc = cc.get_blob_client(blob.name)
-                blastdb_json_blobs[base] = read_metadata_blob_text(bc, label="blast-db-njs")
-            except Exception as exc:
-                LOGGER.debug("BLAST DB metadata read skipped for %s: %s", blob.name, exc)
+            # Defer the download: record the name (last lexicographic volume
+            # wins, matching the previous behaviour). The actual read happens
+            # once per base after the loop.
+            blastdb_json_names[base] = blob.name
         # Skip staging artifacts
         if parts[0] in ("custom-db-build",) or (len(parts) >= 2 and parts[1] == ".staging"):
             continue
@@ -165,6 +174,19 @@ def list_databases(
                         if not prev or mod_str > prev:
                             db_info[base]["last_modified"] = mod_str
                 break
+    # Deferred single .njs download per base (see blastdb_json_names above).
+    # Only read the .njs for bases that actually registered as a database;
+    # the enrichment loop below reads blastdb_json_blobs[db_name] only for
+    # db_name in db_info, so a .njs whose base was filtered out (staging,
+    # shards, …) would be a wasted round-trip.
+    for base, njs_name in blastdb_json_names.items():
+        if base not in db_info:
+            continue
+        try:
+            bc = cc.get_blob_client(njs_name)
+            blastdb_json_blobs[base] = read_metadata_blob_text(bc, label="blast-db-njs")
+        except Exception as exc:
+            LOGGER.debug("BLAST DB metadata read skipped for %s: %s", njs_name, exc)
     # Enrich with metadata (source_version, downloaded_at, sharding info)
     import json as _json
 

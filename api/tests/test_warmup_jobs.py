@@ -76,6 +76,57 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         assert "blast-vmtouch-aks.sh" in container["args"][0]
 
 
+def test_single_shard_db_is_broadcast_to_every_node() -> None:
+    # A single-shard DB is the full database. The search batch can land on any
+    # workload=blast node, so the full DB must be staged on every Ready node —
+    # not just node 0. Regression for blastn exit 2 ("BLAST database not found")
+    # when the search lands on an un-warmed node.
+    plan = build_warmup_job_plan(
+        db_name="16S_ribosomal_RNA",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=1,
+        nodes=_nodes(9),
+        image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+    )
+
+    # One Job per node, each pinned to a distinct node.
+    assert len(plan.jobs) == 9
+    assert plan.nodes == tuple(_nodes(9))
+    pinned_nodes = [job["spec"]["template"]["spec"]["nodeName"] for job in plan.jobs]
+    assert pinned_nodes == _nodes(9)
+
+    names = [job["metadata"]["name"] for job in plan.jobs]
+    # Names are unique (one per node ordinal) so all Jobs can coexist.
+    assert len(set(names)) == 9
+    assert names[0] == "warm-16s-ribosomal-rna-00"
+    assert names[8] == "warm-16s-ribosomal-rna-08"
+
+    for job in plan.jobs:
+        env = {
+            item["name"]: item["value"]
+            for item in job["spec"]["template"]["spec"]["containers"][0]["env"]
+        }
+        # Every node stages the same full-DB (shard-00) content.
+        assert env["ELB_DB"] == "16S_ribosomal_RNA_shard_00"
+        assert env["ELB_SHARD_IDX"] == "00"
+
+
+def test_single_shard_single_node_keeps_one_job() -> None:
+    # A 1-node cluster keeps the original single-Job placement.
+    plan = build_warmup_job_plan(
+        db_name="16S_ribosomal_RNA",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=1,
+        nodes=_nodes(1),
+        image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+    )
+
+    assert len(plan.jobs) == 1
+    assert plan.jobs[0]["metadata"]["name"] == "warm-16s-ribosomal-rna-00"
+
+
 def test_plan_tags_warmup_jobs_with_source_version() -> None:
     plan = build_warmup_job_plan(
         db_name="core_nt",
