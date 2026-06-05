@@ -90,10 +90,17 @@ render_colour() {
   if [[ "$animate" == "animated" && "${ELB_TERMINAL_BANNER_FORCE_COLOR:-0}" != "1" ]]; then
     printf '%s' "$HIDE_CURSOR"
     for prompt in '▛' '▛▀▀▙' '▛▀▀▙ ╱ ElasticBlast CLI'; do
-      printf '  %s%s%s %sopening ElasticBLAST CLI%s\n' "$BOLD$AQUA_TRUE" "$prompt" "$RESET" "$DIM$BLUE_TRUE" "$RESET"
+      # Redraw each frame in place on a single line: carriage-return to column 0
+      # then clear the whole line (\033[2K). The previous newline + cursor-up
+      # (\033[1A\033[J) approach was fragile in a browser xterm.js terminal —
+      # when a frame split across WebSocket writes or wrapped, the cursor-up
+      # undid one logical line but left the stale frame on screen, so all three
+      # "opening ElasticBLAST CLI" frames stacked up instead of overwriting.
+      printf '\r\033[2K  %s%s%s %sopening ElasticBLAST CLI%s' "$BOLD$AQUA_TRUE" "$prompt" "$RESET" "$DIM$BLUE_TRUE" "$RESET"
       sleep 0.035
-      printf '\033[1A\033[J'
     done
+    # Wipe the final animation frame so the compact banner starts on a clean line.
+    printf '\r\033[2K'
     printf '%s' "$SHOW_CURSOR"
   fi
 
