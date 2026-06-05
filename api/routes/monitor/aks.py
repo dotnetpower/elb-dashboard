@@ -38,6 +38,7 @@ def list_aks(
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     include_unmanaged: bool = Query(default=False),
+    fresh: bool = Query(default=False),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """List AKS clusters. When `resource_group` is empty, returns every
@@ -47,7 +48,15 @@ def list_aks(
     filter — diagnostics only; the dashboard never sets this in normal use
     because foreign clusters would surface BLAST controls on unrelated
     workloads. When `resource_group` is provided, returns the RG-scoped list
-    unchanged (every cluster in that RG, no tag filter)."""
+    unchanged (every cluster in that RG, no tag filter).
+
+    Pass `fresh=true` to bypass the monitor snapshot cache and re-query ARM
+    synchronously. The SPA sets this only while a cluster lifecycle transition
+    (start/stop) is in flight so the `provisioning_state` label settles to
+    `Succeeded` the moment ARM flips, instead of waiting out the 30 s cache TTL.
+    The monitor cache is per-process, so the `worker` sidecar that runs the
+    lifecycle task cannot invalidate the `api` sidecar's cache; the fresh read
+    is the cross-process-safe path to authoritative state."""
     sub = subscription_id or _sub_default()
     if not sub:
         raise HTTPException(400, "subscription_id required")
@@ -59,6 +68,7 @@ def list_aks(
             return cached_snapshot(
                 _cache_key("monitor", "aks", sub, resource_group),
                 lambda: {"clusters": monitoring_svc.list_aks_clusters(cred, sub, resource_group)},
+                force=fresh,
             )
         except Exception as exc:
             return cast(dict[str, Any], _graceful("aks_list", exc, empty={"clusters": []}))
@@ -72,6 +82,7 @@ def list_aks(
                 ),
                 "scope": "subscription",
             },
+            force=fresh,
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_list", exc, empty={"clusters": []}))

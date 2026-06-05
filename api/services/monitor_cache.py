@@ -252,12 +252,21 @@ def cached_snapshot(
     *,
     ttl_seconds: float | None = None,
     stale_seconds: float | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Return a cached monitor payload, refreshing stale entries in background.
 
     Fresh hit: return immediately.
     Stale hit: return immediately and refresh in a background thread.
     Cold miss / expired beyond stale window: refresh synchronously.
+
+    ``force=True`` bypasses the fresh/stale cache read and always refreshes
+    synchronously from ``loader`` (still storing the result for subsequent
+    normal reads). This is the cross-process-safe way for the SPA to get an
+    authoritative ARM reading the moment a lifecycle transition settles: the
+    monitor cache is per-process (the ``worker`` sidecar cannot invalidate the
+    ``api`` sidecar's cache), so an in-flight transition asks the api process
+    to re-query ARM directly instead of waiting out the TTL.
     """
     ttl = _coerced_seconds(
         ttl_seconds,
@@ -285,7 +294,7 @@ def cached_snapshot(
     with _LOCK:
         generation = _GENERATION
         entry = _CACHE.get(cache_key)
-        if entry is not None and entry.expires_at > now:
+        if not force and entry is not None and entry.expires_at > now:
             return _with_cache_meta(
                 entry.payload_bytes,
                 state="fresh",
@@ -293,7 +302,7 @@ def cached_snapshot(
                 refreshed_at=entry.refreshed_at,
                 ttl_seconds=ttl,
             )
-        if entry is not None and entry.stale_until > now:
+        if not force and entry is not None and entry.stale_until > now:
             value = _with_cache_meta(
                 entry.payload_bytes,
                 state="stale",

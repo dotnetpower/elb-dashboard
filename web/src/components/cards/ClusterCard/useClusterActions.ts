@@ -64,6 +64,21 @@ function readPersistedTransitions(
   }
 }
 
+/**
+ * True when at least one start/stop/delete transition is currently persisted
+ * (and not past its deadline) for the given scope. The AKS cluster-list query
+ * reads this to decide whether to ask the backend for a cache-bypassed
+ * (`fresh=true`) ARM read: while a transition is in flight the SPA must learn
+ * the settled `provisioning_state` the moment ARM flips, not after the 30 s
+ * monitor cache TTL. Cheap localStorage read; safe to call on every poll.
+ */
+export function hasActiveClusterTransitions(
+  subscriptionId: string,
+  resourceGroup: string,
+): boolean {
+  return readPersistedTransitions(subscriptionId, resourceGroup).size > 0;
+}
+
 function readPersistedTransitionTaskIds(
   subscriptionId: string,
   resourceGroup: string,
@@ -459,7 +474,13 @@ export function useClusterActions(args: {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [transitioning, transitionTaskIds, transitionDeadlines, query]);
+    // `query.refetch` is referentially stable in React Query v5, so depending
+    // on it (instead of the whole `query` object, which is a fresh reference
+    // every render) keeps the 5 s interval alive across re-renders. Depending
+    // on `query` re-created the interval on every parent render, so the 5 s
+    // tick rarely fired — part of the "UI stays Starting until refresh" bug.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transitioning, transitionTaskIds, transitionDeadlines, query.refetch]);
 
   // Poll faster (10s) while clusters are transitioning.
   const isTransitioning = transitioning.size > 0;
@@ -467,7 +488,12 @@ export function useClusterActions(args: {
     if (!isTransitioning) return;
     const t = setInterval(() => query.refetch(), 10_000);
     return () => clearInterval(t);
-  }, [isTransitioning, query]);
+    // Depend on the stable `query.refetch`, not `query` — see the 5 s poll
+    // effect above. With `query` in the deps this interval was torn down and
+    // recreated on every render, so the 10 s fast-poll almost never fired and
+    // the SPA fell back to the 30 s base poll while a cluster was starting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTransitioning, query.refetch]);
 
   // Auto-dismiss actionError after 8s.
   useEffect(() => {

@@ -25,7 +25,7 @@ import { ClusterListSkeleton } from "./ClusterListSkeleton";
 import { ProvisionDoneBanner, ProvisioningBanner } from "./ProvisioningBanner";
 import { ProvisionModal } from "./ProvisionModal";
 import { ProvisionErrorCard } from "./ProvisionErrorCard";
-import { useClusterActions } from "./useClusterActions";
+import { hasActiveClusterTransitions, useClusterActions } from "./useClusterActions";
 import {
   nextElbClusterName,
   useClusterProvisioning,
@@ -70,7 +70,18 @@ export function ClusterCard({
     // tag filter (managedBy=elb-dashboard OR app=elastic-blast OR the legacy
     // blastpool+`workload=blast` taint fingerprint). Foreign clusters in
     // the same subscription are intentionally excluded.
-    queryFn: () => monitoringApi.aks(subscriptionId),
+    //
+    // `fresh` is read from persisted transitions at call time (not capture
+    // time) so that while a start/stop is in flight every poll asks the
+    // backend to bypass its 30 s monitor cache and re-query ARM. That is the
+    // only cross-process-safe way to surface the settled `provisioning_state`
+    // promptly: the lifecycle task runs in the `worker` sidecar and cannot
+    // invalidate the `api` sidecar's in-process cache. Once the transition
+    // chip clears, `fresh` falls back to false and normal caching resumes.
+    queryFn: () =>
+      monitoringApi.aks(subscriptionId, undefined, {
+        fresh: hasActiveClusterTransitions(subscriptionId, resourceGroup),
+      }),
     enabled,
     refetchInterval,
   });

@@ -289,10 +289,16 @@ export const monitoringApi = {
    * legacy fallback, so foreign workloads in the same subscription are not
    * pulled in. Pass `rg` explicitly to constrain to a single resource group
    * (the legacy RG-scoped behaviour; no tag filter).
+   *
+   * Pass `{ fresh: true }` to make the backend bypass its 30 s monitor cache
+   * and re-query ARM synchronously. The dashboard sets this only while a
+   * cluster start/stop transition is in flight so the `provisioning_state`
+   * label settles to `Succeeded` immediately instead of lagging the cache TTL.
    */
-  aks: (subscriptionId: string, rg?: string) => {
+  aks: (subscriptionId: string, rg?: string, options?: { fresh?: boolean }) => {
     const params = new URLSearchParams({ subscription_id: subscriptionId });
     if (rg) params.set("resource_group", rg);
+    if (options?.fresh) params.set("fresh", "true");
     return api.get<{
       clusters: AksClusterSummary[];
       scope?: "subscription";

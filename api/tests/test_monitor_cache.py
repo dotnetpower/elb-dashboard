@@ -247,6 +247,72 @@ def test_invalidate_prefix_empty_is_noop() -> None:
     assert hit["a"] == 1
 
 
+def test_force_bypasses_fresh_hit_and_requeries() -> None:
+    """``force=True`` must re-run the loader even within the TTL window.
+
+    This is the cross-process-safe path the SPA uses while a cluster start/stop
+    is in flight: it cannot rely on the worker invalidating the api process's
+    cache, so it asks the api to re-query ARM directly.
+    """
+    calls = 0
+
+    def loader() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"clusters": [{"provisioning_state": "Starting" if calls == 1 else "Succeeded"}]}
+
+    first = monitor_cache.cached_snapshot("monitor:aks:sub:rg", loader, ttl_seconds=30)
+    assert first["clusters"][0]["provisioning_state"] == "Starting"
+    assert first["cache"]["state"] == "refreshed"
+
+    # A normal read within TTL would serve the cached "Starting" reading.
+    cached = monitor_cache.cached_snapshot("monitor:aks:sub:rg", loader, ttl_seconds=30)
+    assert cached["cache"]["state"] == "fresh"
+    assert cached["clusters"][0]["provisioning_state"] == "Starting"
+    assert calls == 1
+
+    # force=True bypasses the fresh hit, re-queries, and stores the new reading.
+    forced = monitor_cache.cached_snapshot(
+        "monitor:aks:sub:rg", loader, ttl_seconds=30, force=True
+    )
+    assert forced["cache"]["state"] == "refreshed"
+    assert forced["clusters"][0]["provisioning_state"] == "Succeeded"
+    assert calls == 2
+
+    # The forced refresh updated the cache, so the next normal read is fresh.
+    after = monitor_cache.cached_snapshot("monitor:aks:sub:rg", loader, ttl_seconds=30)
+    assert after["cache"]["state"] == "fresh"
+    assert after["clusters"][0]["provisioning_state"] == "Succeeded"
+    assert calls == 2
+
+
+def test_force_bypasses_stale_hit_synchronously(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``force=True`` must not return a stale entry or defer to a bg refresh."""
+    now = 1000.0
+    monkeypatch.setattr(monitor_cache, "_monotonic", lambda: now)
+    bg_refreshes: list = []
+    monkeypatch.setattr(
+        monitor_cache, "_start_refresh_thread", lambda target: bg_refreshes.append(target)
+    )
+
+    monitor_cache.cached_snapshot(
+        "monitor:aks:sub:rg", lambda: {"v": "old"}, ttl_seconds=10, stale_seconds=300
+    )
+    now = 1015.0  # past TTL, within stale window.
+
+    forced = monitor_cache.cached_snapshot(
+        "monitor:aks:sub:rg",
+        lambda: {"v": "new"},
+        ttl_seconds=10,
+        stale_seconds=300,
+        force=True,
+    )
+    assert forced["v"] == "new"
+    assert forced["cache"]["state"] == "refreshed"
+    # force must refresh synchronously, never queue a background refresh.
+    assert bg_refreshes == []
+
+
 # ---------------------------------------------------------------------------
 # Transient-failure telemetry suppression (App Insights noise reduction).
 # Anchors:
