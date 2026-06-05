@@ -14,10 +14,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowUpCircle, Copy, History, RefreshCcw, RotateCcw, Terminal, TriangleAlert } from "lucide-react";
+import { ArrowUpCircle, Copy, ExternalLink, History, RefreshCcw, RotateCcw, Terminal, TriangleAlert } from "lucide-react";
 
 import {
   compareSemver,
+  githubCompareUrl,
   isCommitUpdateAvailable,
   statePhase,
   upgradeApi,
@@ -29,6 +30,7 @@ import {
   type UpgradeStatus,
 } from "@/api/upgrade";
 import { BuildLogViewer } from "@/components/BuildLogViewer";
+import { useToast } from "@/components/Toast";
 
 const STATUS_POLL_MS = 5_000;
 const BROADCAST_CHANNEL_NAME = "elb-upgrade-status";
@@ -50,6 +52,8 @@ export function UpgradePage() {
   const [confirmBreaking, setConfirmBreaking] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const { toast } = useToast();
 
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
@@ -148,6 +152,16 @@ export function UpgradePage() {
   const hasAnyTarget = newerCandidates.length > 0 || Boolean(commitOption);
 
   /**
+   * GitHub "compare" URL (running build → latest discovered ref) so the
+   * operator can read exactly which commits an update brings in. Null when
+   * the remote is not GitHub or the range endpoints are unknown.
+   */
+  const compareUrl = useMemo(
+    () => githubCompareUrl(status, __APP_COMMIT__),
+    [status],
+  );
+
+  /**
    * True when `pickedTarget`'s major segment is greater than the running
    * major. Major bumps may carry schema / infra changes that the in-app
    * upgrade can't reason about, so we require a second confirmation
@@ -216,9 +230,26 @@ export function UpgradePage() {
 
   const forceCheck = async () => {
     setActionError(null);
+    setChecking(true);
     try {
       const updated = await upgradeApi.check();
-      setStatus(updated);
+      // The check refreshes the status row, but the target picker and history
+      // read from `candidates` / `history` — refresh those too so a newly
+      // discovered release is actually selectable, not just shown in a stat.
+      await refreshAll();
+      const latest = updated.latest_version;
+      const newerThanRunning =
+        latest &&
+        (!updated.running_version ||
+          compareSemver(latest, updated.running_version) > 0);
+      toast(
+        latest
+          ? newerThanRunning
+            ? `Checked remote — v${latest} is available to upgrade.`
+            : `Checked remote — you are on the latest (v${latest}).`
+          : "Checked remote — no releases found for the configured remote.",
+        newerThanRunning ? "success" : "info",
+      );
     } catch (err) {
       const raw = err instanceof Error ? err.message : "check failed";
       // Surface "throttled; retry in Xs" cleanly so the user knows they
@@ -227,6 +258,8 @@ export function UpgradePage() {
       setActionError(
         match ? `Check throttled — try again in ${match[1]} seconds.` : raw,
       );
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -259,8 +292,13 @@ export function UpgradePage() {
           >
             <RefreshCcw size={14} strokeWidth={1.5} /> Refresh
           </button>
-          <button type="button" className="glass-button" onClick={() => void forceCheck()}>
-            Check remote
+          <button
+            type="button"
+            className="glass-button"
+            onClick={() => void forceCheck()}
+            disabled={checking}
+          >
+            {checking ? "Checking…" : "Check remote"}
           </button>
         </div>
       </header>
@@ -335,6 +373,24 @@ export function UpgradePage() {
                 ))}
               </select>
             </div>
+            {compareUrl && (
+              <a
+                href={compareUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="glass-button"
+                style={{
+                  alignSelf: "start",
+                  fontSize: 12,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  textDecoration: "none",
+                }}
+              >
+                <ExternalLink size={13} strokeWidth={1.7} /> View changes on GitHub
+              </a>
+            )}
             {pickedTarget.startsWith(COMMIT_TARGET_PREFIX) && (
               <p className="muted" style={{ margin: 0, fontSize: 11 }}>
                 Preview build: installs the latest <code>main</code> commit

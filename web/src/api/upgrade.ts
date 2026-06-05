@@ -171,6 +171,49 @@ export function isCommitUpdateAvailable(
   return !latest.startsWith(running);
 }
 
+/**
+ * Build a GitHub "compare" URL (`<base>/compare/<from>...<to>`) for the range
+ * between the running build and the latest discovered ref, so an operator can
+ * read exactly which commits an update would bring in.
+ *
+ * Returns `null` unless the remote is a GitHub HTTPS/SSH `.git` URL and both
+ * endpoints of the range are known. The "to" end prefers the full
+ * `latest_commit_sha` (commit channel) and falls back to `latest_sha` (the
+ * release tag's commit); the "from" end is the running commit stamp.
+ * Credentials in the remote URL (if any) are stripped.
+ */
+export function githubCompareUrl(
+  status: UpgradeStatus | null | undefined,
+  runningCommit: string | null | undefined,
+): string | null {
+  if (!status) return null;
+  const base = githubRepoBaseUrl(status.git_remote);
+  if (!base) return null;
+  const from = (runningCommit || status.running_sha || "").trim();
+  const to = (status.latest_commit_sha || status.latest_sha || "").trim();
+  if (!from || !to) return null;
+  if (from.toLowerCase() === to.toLowerCase()) return null;
+  return `${base}/compare/${encodeURIComponent(from)}...${encodeURIComponent(to)}`;
+}
+
+/**
+ * Normalise a GitHub remote (`https://github.com/owner/repo.git`,
+ * `git@github.com:owner/repo.git`, with or without a trailing `.git`, and any
+ * embedded credentials) to its canonical browseable base
+ * `https://github.com/owner/repo`. Returns `null` for non-GitHub or
+ * unparseable remotes.
+ */
+export function githubRepoBaseUrl(remote: string | null | undefined): string | null {
+  const raw = (remote || "").trim();
+  if (!raw) return null;
+  // Match `owner/repo` after a github.com host in either HTTPS or SCP-like SSH.
+  const match = /github\.com[/:]+([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(raw);
+  if (!match) return null;
+  const [, owner, repo] = match;
+  if (!owner || !repo) return null;
+  return `https://github.com/${owner}/${repo}`;
+}
+
 export function compareSemver(a: string, b: string): number {
   const aa = a.split(".").map((n) => parseInt(n, 10) || 0);
   const bb = b.split(".").map((n) => parseInt(n, 10) || 0);

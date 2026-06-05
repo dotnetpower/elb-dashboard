@@ -21,7 +21,7 @@ import {
 import { Link } from "react-router-dom";
 
 import { formatApiError } from "@/api/client";
-import { isCommitUpdateAvailable, upgradeApi } from "@/api/upgrade";
+import { isCommitUpdateAvailable, githubCompareUrl, upgradeApi } from "@/api/upgrade";
 import { useUpgradeAvailability } from "@/hooks/useUpgradeAvailability";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { clearConfig, loadSavedConfig, type ResourceConfig } from "@/components/SetupWizard";
@@ -86,6 +86,12 @@ const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> =
   { id: "resources", label: "Resources", icon: <SettingsIcon size={14} strokeWidth={1.5} /> },
 ];
 
+// Sections whose state lives in `localStorage["elb-prefs"]` and is therefore
+// what the footer "Reset" button actually clears. Keep this in sync with the
+// sections that consume `usePreferences` / `useTheme` (Appearance, Preview,
+// Telemetry).
+const PREF_BACKED_SECTIONS = new Set<SectionId>(["appearance", "preview", "telemetry"]);
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -96,7 +102,12 @@ export function SettingsPanel({ open, onClose }: Props) {
   const [active, setActive] = useState<SectionId>("appearance");
   const { reset } = usePreferences();
   const config = useMemo<ResourceConfig | null>(() => (open ? loadSavedConfig() : null), [open]);
-  const showFooterActions = active !== "preview";
+  // The Reset button clears the browser-local preferences in
+  // `localStorage["elb-prefs"]` (theme, preview flags, telemetry/connection
+  // string). Only show it on the sections that are actually backed by those
+  // preferences — on the other sections (Resources, Updates, AKS, …) it would
+  // appear to do nothing, which reads as "the button is broken".
+  const showFooterActions = PREF_BACKED_SECTIONS.has(active);
   const [resetOpen, setResetOpen] = useState(false);
 
   useEffect(() => {
@@ -280,6 +291,8 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
   const trackCommits = status?.track_commits ?? true;
   const commitAvailable = isCommitUpdateAvailable(status, __APP_COMMIT__);
   const releaseAvailable = available && !commitAvailable;
+  const updateAvailable = releaseAvailable || commitAvailable;
+  const compareUrl = githubCompareUrl(status, __APP_COMMIT__);
 
   const handleCheck = useCallback(async () => {
     setChecking(true);
@@ -384,6 +397,30 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
             )
           }
         />
+        {updateAvailable && compareUrl && (
+          <Row
+            label="What's new"
+            hint="See the commits this update would bring in, on GitHub."
+            control={
+              <a
+                href={compareUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="glass-button"
+                style={{
+                  fontSize: 12,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  textDecoration: "none",
+                }}
+              >
+                <ExternalLink size={13} strokeWidth={1.7} />
+                View changes
+              </a>
+            }
+          />
+        )}
         {inProgress && (
           <Row
             label="Upgrade in progress"
@@ -429,29 +466,37 @@ function UpdatesSection({ onClose }: { onClose: () => void }) {
             </button>
           }
         />
-        {configured && (
-          <Row
-            label="Manage upgrade"
-            hint="Open the full self-upgrade page to start, monitor, or roll back an update."
-            control={
-              <Link
-                to="/upgrade"
-                onClick={onClose}
-                className="glass-button"
-                style={{
-                  fontSize: 12,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  textDecoration: "none",
-                }}
-              >
+        <Row
+          label={updateAvailable ? "Update now" : "Manage upgrade"}
+          hint={
+            updateAvailable
+              ? "Open the self-upgrade page to start the update, watch progress, or roll back."
+              : "Open the self-upgrade page to start, monitor, or roll back an update."
+          }
+          control={
+            <Link
+              to="/upgrade"
+              onClick={onClose}
+              className={
+                updateAvailable ? "glass-button glass-button--primary" : "glass-button"
+              }
+              style={{
+                fontSize: 12,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                textDecoration: "none",
+              }}
+            >
+              {updateAvailable ? (
+                <ArrowUpCircle size={13} strokeWidth={1.7} />
+              ) : (
                 <ExternalLink size={13} strokeWidth={1.7} />
-                Open
-              </Link>
-            }
-          />
-        )}
+              )}
+              {updateAvailable ? "Update now" : "Open"}
+            </Link>
+          }
+        />
       </Group>
 
       {!configured && !loading && (
