@@ -110,14 +110,36 @@ A user can hold multiple roles; the union applies.
 
 ## #2 — Per-ticket tmux session in the browser terminal
 
+> **Status (2026-06-05): largely RESOLVED — per-*operator* isolation shipped.**
+> [terminal/entrypoint.sh](../../terminal/entrypoint.sh) now starts `ttyd` with
+> `-a` (`--url-arg`) launching [terminal/tmux-attach.sh](../../terminal/tmux-attach.sh)
+> instead of a fixed `tmux new-session -A -s elb`. The api proxy
+> ([api/routes/terminal/ws.py](../../api/routes/terminal/ws.py) `_session_arg` /
+> `_build_upstream_url`) derives a non-reversible per-owner token
+> (`u<sha256(object_id)[:16]>`) and appends it as `?arg=<token>`; the wrapper
+> turns it into a per-operator session `elb-<token>` **and** a per-operator
+> `AZURE_CONFIG_DIR=$HOME/.azure-<token>` so the `az login` token cache is no
+> longer shared either. Distinct operators never share a PTY, scrollback, or
+> credential cache; the same operator re-attaches their own session on refresh.
+>
+> The design below proposed per-*ticket* sessions and a `--client-option`
+> mechanism. We shipped per-*operator* instead (so "resume after refresh"
+> keeps working without a UI affordance), and `--client-option` turned out to
+> be the wrong primitive — it sets xterm.js *client* options, not the child
+> process environment; `--url-arg` is the correct ttyd mechanism.
+>
+> **Remaining follow-up (not yet shipped):** a reaper to kill idle per-operator
+> sessions. Today they are bounded only by revision restart (ephemeral `$HOME`,
+> `minReplicas=1`). Track as a beat schedule entry (original PR2 below).
+
 ### Problem
-[terminal/entrypoint.sh](../../terminal/entrypoint.sh) starts `ttyd` with
+[terminal/entrypoint.sh](../../terminal/entrypoint.sh) started `ttyd` with
 `tmux new-session -A -s elb`. The `-A` flag attaches to the existing session
-when one already exists. Result: **every operator who opens the browser
-terminal shares the same PTY, the same scrollback, and the same `az login`
-context**. Anyone watching the session sees device codes typed by another
-user, sees commands typed by another user, and can take over the input
-stream.
+when one already exists. Result: **every operator who opened the browser
+terminal shared the same PTY, the same scrollback, and the same `az login`
+context**. Anyone watching the session saw device codes typed by another
+user, saw commands typed by another user, and could take over the input
+stream. (Fixed 2026-06-05 — see the status banner above.)
 
 ### Design
 

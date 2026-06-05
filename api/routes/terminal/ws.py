@@ -13,6 +13,7 @@ Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import secrets
@@ -106,6 +107,41 @@ def _log_identity_hash(value: str | None) -> str | None:
     See [api/services/sanitise.py](../../services/sanitise.py) `redact_oid`.
     """
     return redact_oid(value)
+
+
+def _session_arg(owner_oid: str | None) -> str:
+    """Derive a stable, non-reversible per-operator tmux session token.
+
+    ttyd is started with `--url-arg`, so the value returned here is appended
+    to the upstream WebSocket URL as `?arg=<token>` and ttyd forwards it as
+    the first argument to the `elb-tmux-attach` wrapper, which uses it as the
+    tmux session-name suffix.
+
+    Hashing the object id (instead of passing it raw) keeps the OID off the
+    ttyd command line / process table (charter §11 audit rule) while staying
+    deterministic: the same operator always re-attaches to their own session
+    after a browser refresh, and two different operators can never collide
+    into a shared shell. The token is ``u`` + 16 hex chars, i.e. only
+    ``[a-z0-9]``, which the wrapper accepts verbatim.
+    """
+    digest = hashlib.sha256((owner_oid or "anonymous").encode("utf-8")).hexdigest()
+    return "u" + digest[:16]
+
+
+def _build_upstream_url(owner_oid: str | None) -> str:
+    """Build the loopback ttyd WebSocket URL for an operator.
+
+    The ONLY input is the server-side `owner_oid` from the validated ticket;
+    nothing the browser sends (its `?ticket=` query, headers, sub-protocol)
+    reaches this URL. That is the load-bearing security property — if a
+    browser-controlled value ever flowed into the `arg` here, a caller could
+    attach to an arbitrary (or a known victim's) tmux session. The
+    `test_terminal_session_arg.py` guard tests lock this down.
+    """
+    base = (
+        TERMINAL_UPSTREAM.rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
+    )
+    return f"{base}/ws?arg={_session_arg(owner_oid)}"
 
 
 # ---------------------------------------------------------------------------
@@ -361,10 +397,7 @@ async def ws_terminal(
         await websocket.close(code=4403, reason="origin not allowed")
         return
 
-    upstream_url = (
-        TERMINAL_UPSTREAM.rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
-        + "/ws"
-    )
+    upstream_url = _build_upstream_url(ticket_entry.owner_oid)
 
     # Retry upstream connect briefly to absorb the DNS / port-not-yet-listening
     # race that always follows a `terminal` sidecar restart (compose's embedded
@@ -411,8 +444,9 @@ async def ws_terminal(
 
     await websocket.accept(subprotocol="tty")  # ttyd uses "tty" subprotocol.
     LOGGER.info(
-        "terminal session connected session_id=%s owner_hash=%s upn_hash=%s",
+        "terminal session connected session_id=%s tmux_session=%s owner_hash=%s upn_hash=%s",
         ticket_entry.session_id,
+        _session_arg(ticket_entry.owner_oid),
         _log_identity_hash(ticket_entry.owner_oid),
         _log_identity_hash(ticket_entry.owner_upn),
     )

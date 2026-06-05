@@ -151,19 +151,25 @@ EXEC_PID=$!
 
 # ---------------------------------------------------------------------------
 # Start ttyd (background). -W = writable shell. -p 7681 -i 127.0.0.1 = loopback.
-# Each browser session attaches (or creates) a tmux session named "elb" so
-# refreshing the browser does not lose work. Do not pass tmux `-D` here: a
-# reconnect would detach the previous ttyd client, whose close handler would
-# schedule another reconnect and create a self-sustaining reconnect loop.
+# -a = url-arg: ttyd forwards the WebSocket `?arg=<token>` query parameter as
+# an argument to the launched command. The api proxy derives <token> from the
+# authenticated caller's object id (api/routes/terminal/ws.py `_session_arg`),
+# so `elb-tmux-attach` creates / re-attaches a PER-OPERATOR tmux session — one
+# person never drops into another person's shell, scrollback, or `az login`
+# context, while the same person re-attaches their own session after a browser
+# refresh. Do not pass tmux `-D`: a reconnect would detach the previous ttyd
+# client, whose close handler would schedule another reconnect and create a
+# self-sustaining reconnect loop.
 # ---------------------------------------------------------------------------
 TTYD_HOST="${TTYD_HOST:-127.0.0.1}"
 /usr/local/bin/ttyd \
   -p 7681 \
   -i "$TTYD_HOST" \
   -W \
+  -a \
   -t enableZmodem=false \
   -t fontSize=14 \
-  /usr/bin/tmux new-session -A -s elb /bin/bash --login &
+  /usr/local/bin/elb-tmux-attach &
 TTYD_PID=$!
 
 echo "elb-supervisor: ttyd host=$TTYD_HOST pid=$TTYD_PID exec_server pid=$EXEC_PID reporter pid=$REPORTER_PID" >&2
