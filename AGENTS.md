@@ -200,6 +200,7 @@ where the failure was found, but knowing them up front saves a lot of time.
 | Layer | Command |
 |-------|---------|
 | Backend tests | `uv run pytest -q api/tests` |
+| Backend tests (incremental) | `scripts/dev/test-inc.sh` (pytest-testmon — runs only tests affected by working-tree changes; local convenience, CI still runs the full suite) |
 | Backend smoke | `AUTH_DEV_BYPASS=true uv run uvicorn api.main:app --reload --port 8080` then `curl :8080/api/health` |
 | Backend lint | `uv run ruff check api` |
 | Worker | `uv run celery -A api.celery_app worker -l info` (needs local Redis) |

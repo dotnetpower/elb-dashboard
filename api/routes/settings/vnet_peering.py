@@ -9,7 +9,7 @@ Edit boundaries: HTTP validation + response shaping only. All Azure SDK work
 is delegated to `api.tasks.azure.peering` and `api.tasks.azure.peering_nsg`;
 the guaranteed terminal-event audit lifecycle lives in
 `api.services.peering_nsg_audit`.
-Key entry points: `peer_vnet`, `apply_peering_nsg_rule`.
+Key entry points: `peer_vnet`, `list_existing_peerings`, `apply_peering_nsg_rule`.
 Risky contracts: The helper already absorbs per-peering failures into the
 returned payload. This route only turns hard helper failures into a stable
 502 so the SPA can show a recoverable error instead of a raw 500. The
@@ -27,7 +27,7 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from api.auth import CallerIdentity, require_caller
 from api.services.peering_nsg_audit import (
@@ -56,6 +56,55 @@ def _require(value: Any, pattern: re.Pattern[str], label: str) -> str:
     if not isinstance(value, str) or not pattern.match(text):
         raise HTTPException(400, f"invalid {label}")
     return text
+
+
+@router.get("/vnet-peering/existing")
+def list_existing_peerings(
+    subscription_id: str = Query(...),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """List the peerings already present on the cluster's AKS VNet (read-only).
+
+    Best-effort: the helper never raises on an Azure fault, so this route only
+    converts a hard helper failure into a stable 502. Routine RBAC denials /
+    skip cases are surfaced inside the 200 payload (``error`` / ``skipped``) so
+    the Settings panel can render an explanatory banner instead of breaking.
+    """
+    sub = _require(subscription_id, _RE_SUB, "subscription_id")
+    rg = _require(resource_group, _RE_RG, "resource_group")
+    cluster = _require(cluster_name, _RE_NAME, "cluster_name")
+
+    LOGGER.info(
+        "settings/vnet-peering/existing requested cluster=%s rg=%s caller_oid=%s",
+        cluster,
+        rg,
+        redact_oid(caller.object_id),
+    )
+
+    from api.services import get_credential
+    from api.tasks.azure.peering import list_vnet_peerings_for_cluster
+
+    try:
+        return list_vnet_peerings_for_cluster(
+            get_credential(),
+            subscription_id=sub,
+            cluster_resource_group=rg,
+            cluster_name=cluster,
+        )
+    except Exception as exc:
+        LOGGER.exception("settings/vnet-peering/existing helper failed")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "vnet_peering_unavailable",
+                "message": (
+                    "Existing VNet peerings could not be listed: "
+                    f"{type(exc).__name__}: {str(exc)[:200]}"
+                ),
+            },
+        ) from exc
 
 
 @router.post("/vnet-peering")

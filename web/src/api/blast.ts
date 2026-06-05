@@ -931,6 +931,7 @@ export const blastApi = {
     storageAccount: string,
     resourceGroup: string,
     clusterTopology?: { numNodes: number; machineType: string },
+    options?: { fresh?: boolean },
   ) => {
     let qs =
       `/blast/databases?subscription_id=${encodeURIComponent(subscriptionId)}` +
@@ -940,6 +941,12 @@ export const blastApi = {
       qs +=
         `&num_nodes=${encodeURIComponent(String(clusterTopology.numNodes))}` +
         `&machine_type=${encodeURIComponent(clusterTopology.machineType)}`;
+    }
+    if (options?.fresh) {
+      // Bypass the backend catalogue cache and re-enumerate Storage. Used by
+      // the Database Builder "Refresh" affordance so an out-of-band change is
+      // reflected immediately instead of waiting out the cache TTL.
+      qs += `&fresh=1`;
     }
     return api.get<{
       databases: BlastDatabase[];

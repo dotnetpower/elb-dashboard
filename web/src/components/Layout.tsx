@@ -1,6 +1,7 @@
-import { type PropsWithChildren, useState, useRef, useEffect } from "react";
+import { type PropsWithChildren, useState, useRef, useEffect, useCallback } from "react";
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn, Dna, Settings as SettingsIcon } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
@@ -15,6 +16,7 @@ import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useSettingsPanel } from "@/hooks/useSettingsPanel";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { useUpgradeAvailability } from "@/hooks/useUpgradeAvailability";
+import { prefetchBlastDatabasesQuery } from "@/hooks/usePrefetchBlastDatabases";
 
 import "./Layout.css";
 
@@ -204,6 +206,20 @@ export function Layout({ children }: PropsWithChildren) {
   const isMobileNav = useMediaQuery("(max-width: 720px)");
   const useToolsDropdown = isCompactNav && !isMobileNav;
   const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
+
+  // Hover/focus prefetch for the New Search database listing. Warming the
+  // cache when the pointer lands on the nav item means the "Choose Search
+  // Set" step is already populated by the time the page mounts.
+  const queryClient = useQueryClient();
+  const prefetchNewSearchDatabases = useCallback(() => {
+    const cfg = loadSavedConfig();
+    if (!cfg) return;
+    void prefetchBlastDatabasesQuery(queryClient, {
+      subscriptionId: cfg.subscriptionId,
+      storageAccount: cfg.storageAccountName,
+      workloadResourceGroup: cfg.workloadResourceGroup,
+    });
+  }, [queryClient]);
   const clusterNeedsAttention = !cluster.isLoading && !cluster.isError && !cluster.hasRunningCluster;
   const clusterAttentionTitle = clusterNeedsAttention
     ? cluster.hasAnyCluster
@@ -285,6 +301,8 @@ export function Layout({ children }: PropsWithChildren) {
             to="/blast/submit"
             className="layout__nav-item"
             onClick={() => setMobileNavOpen(false)}
+            onMouseEnter={prefetchNewSearchDatabases}
+            onFocus={prefetchNewSearchDatabases}
           >
             <Search size={14} strokeWidth={1.5} /> New Search
           </NavLink>

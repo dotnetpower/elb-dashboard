@@ -258,6 +258,40 @@ export interface VnetPeeringNsgRuleResponse {
   dry_run?: boolean;
 }
 
+export interface VnetPeeringRemoteVnet {
+  id: string;
+  name: string;
+  resource_group: string;
+  subscription_id: string;
+}
+
+export interface VnetPeeringExistingItem {
+  name: string;
+  /** Connected / Initiated / Disconnected / Unknown. */
+  peering_state: string;
+  /** Succeeded / Updating / Failed / Unknown. */
+  provisioning_state: string;
+  remote_vnet: VnetPeeringRemoteVnet | null;
+  remote_address_prefixes: string[];
+  allow_virtual_network_access: boolean;
+  allow_forwarded_traffic: boolean;
+  allow_gateway_transit: boolean;
+  use_remote_gateways: boolean;
+}
+
+export interface VnetPeeringExistingResponse {
+  /** ARM id of the cluster's AKS VNet whose peerings were listed. */
+  aks_vnet: string;
+  aks_vnet_name: string;
+  node_resource_group: string;
+  peerings: VnetPeeringExistingItem[];
+  /** True when there is genuinely no AKS VNet to inspect (BYO self-VNet, etc.). */
+  skipped: boolean;
+  reason: string | null;
+  /** Non-null when the listing call itself failed (e.g. RBAC denial). */
+  error: string | null;
+}
+
 function querystring(params: Record<string, string>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) usp.set(k, v);
@@ -328,6 +362,22 @@ export const settingsApi = {
    *  backend returns the summary payload (peerings + probe) in one shot. */
   peerVnet: (body: VnetPeeringRequest) =>
     api.post<VnetPeeringResponse>("/settings/vnet-peering", body),
+
+  /** List the peerings already present on a cluster's AKS VNet (read-only).
+   *  Never throws on a routine Azure fault — the backend folds RBAC denials
+   *  and BYO self-VNet skips into the 200 payload's `error` / `skipped`. */
+  listExistingPeerings: (
+    subscriptionId: string,
+    resourceGroup: string,
+    clusterName: string,
+  ) =>
+    api.get<VnetPeeringExistingResponse>(
+      `/settings/vnet-peering/existing?${querystring({
+        subscription_id: subscriptionId,
+        resource_group: resourceGroup,
+        cluster_name: clusterName,
+      })}`,
+    ),
 
   /** Explicit follow-up action when the probe is unreachable: write an
    *  inbound-allow rule on the target subnet's NSG (source = AKS VNet

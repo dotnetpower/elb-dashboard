@@ -52,6 +52,10 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+# pytest-testmon incremental-run database (local dev only; see
+# scripts/dev/test-inc.sh). Never committed — it is host/working-tree specific.
+.testmondata
+.testmondata-journal
 
 # Translations
 *.mo
@@ -225,6 +229,10 @@ node_modules/
 dist/
 .vite/
 *.local
+# Vite writes these temp files while loading vite.config.ts; never commit them.
+vite.config.ts.timestamp-*.mjs
+# TypeScript incremental build cache (host/working-tree specific, regenerated).
+*.tsbuildinfo
 
 # Azure Functions / azd
 local.settings.json

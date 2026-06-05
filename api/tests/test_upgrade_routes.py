@@ -51,8 +51,14 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     from api.routes.upgrade import reset_check_throttle_for_tests
 
     reset_check_throttle_for_tests()
-    with TestClient(app) as c:
-        yield c
+    # Plain TestClient (no `with`) deliberately skips the app lifespan. These
+    # are route tests with fully stubbed backends; the lifespan only pre-warms
+    # the managed-identity credential (a real get_token through the
+    # DefaultAzureCredential chain) and drains the SSE broadcaster — neither is
+    # needed here, and the credential warm-up alone adds ~1.5 s of teardown
+    # latency per lifespan-bearing test.
+    client = TestClient(app)
+    yield client
     reset_check_throttle_for_tests()
     acr_inventory.set_client_factory_for_tests(None)
     history.set_backend(None)
@@ -89,8 +95,10 @@ def test_status_requires_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     try:
         from api.main import app
 
-        with TestClient(app) as c:
-            resp = c.get("/api/upgrade/status")
+        # No `with`: skip the lifespan credential warm-up (see the `client`
+        # fixture). A 401 is produced by the auth dependency before any route
+        # body runs, so the lifespan is irrelevant to this assertion.
+        resp = TestClient(app).get("/api/upgrade/status")
         assert resp.status_code == 401
     finally:
         state.set_backend(None)
@@ -493,8 +501,10 @@ def test_history_requires_auth(
     try:
         from api.main import app
 
-        with TestClient(app) as c:
-            resp = c.get("/api/upgrade/history")
+        # No `with`: skip the lifespan credential warm-up (see the `client`
+        # fixture). The 401 comes from the auth dependency before the route
+        # body, so the lifespan is irrelevant to this assertion.
+        resp = TestClient(app).get("/api/upgrade/history")
         assert resp.status_code == 401
     finally:
         state.set_backend(None)

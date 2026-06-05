@@ -368,6 +368,26 @@ def publish_blast_db_metadata_invalidate(
         )
         return False
 
+def _invalidate_blast_db_listing_cache_local(storage_account: str | None) -> None:
+    """Drop the account-scoped catalogue listing cache, best-effort.
+
+    Lazily imported to avoid a hard module cycle (``database_catalog_cache``
+    delegates to ``storage.data`` which has no dependency on this module).
+    The catalogue listing is account-wide, so the ``db_name`` is irrelevant
+    here — any DB change invalidates the whole account's listing.
+    """
+    try:
+        from api.services.storage.database_catalog_cache import (
+            invalidate_blast_db_listing_cache,
+        )
+
+        invalidate_blast_db_listing_cache(storage_account)
+    except Exception as exc:
+        LOGGER.debug(
+            "blast db listing cache invalidate skipped: %s",
+            type(exc).__name__,
+        )
+
 
 def notify_blast_db_metadata_changed(
     storage_account: str | None = None,
@@ -380,6 +400,7 @@ def notify_blast_db_metadata_changed(
     of which sidecar serves it.
     """
     invalidate_blast_db_metadata_cache(storage_account, db_name)
+    _invalidate_blast_db_listing_cache_local(storage_account)
     publish_blast_db_metadata_invalidate(storage_account, db_name)
 
 
@@ -440,6 +461,7 @@ def start_invalidate_subscriber() -> threading.Thread | None:
                         account = (str(payload.get("account") or "")).strip() or None
                         db = (str(payload.get("db") or "")).strip() or None
                         invalidate_blast_db_metadata_cache(account, db)
+                        _invalidate_blast_db_listing_cache_local(account)
                 except Exception as exc:
                     LOGGER.info(
                         "blast db metadata invalidate subscriber retry: %s",

@@ -168,6 +168,26 @@ uv run pytest -q api/tests/test_terminal_exec.py     # focused
 Use for: anything that doesn't need a live HTTP server (sanitisation, auth
 caching, image tag dict, terminal exec contract).
 
+#### Incremental loop with testmon (sub-second reruns)
+
+When the full ~30 s suite is too slow for a tight edit-test cycle, use
+[`test-inc.sh`](./test-inc.sh) — it runs **only** the tests whose covered code
+changed in your working tree (via `pytest-testmon`):
+
+```bash
+scripts/dev/test-inc.sh                    # whole suite, incremental
+scripts/dev/test-inc.sh api/tests/test_foo.py   # scope the coverage map
+ELB_TESTMON_RESET=1 scripts/dev/test-inc.sh     # rebuild the .testmondata map
+```
+
+The first run builds a git-ignored `.testmondata` coverage map (one full run);
+every later run deselects unaffected tests automatically ("N deselected /
+K selected" in <1 s). testmon uses AST-level fingerprints, so comment/whitespace
+edits do not trigger reruns. The wrapper clears `pytest.ini`'s addopts because
+testmon silently disables itself under `-m` (marker exclusion) and is
+incompatible with `-n auto` (xdist). **This is a local convenience only** — CI
+and the pre-push hook still run the full `uv run pytest -q api/tests`.
+
 ### Tier 2 — Local 6-sidecar compose (~30 s first build, ~5 s thereafter)
 
 ```bash

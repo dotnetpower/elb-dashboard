@@ -184,6 +184,7 @@ def _seed_auto_warmup_job_state(
     num_nodes: int,
     program: str,
     expected_node_count: int,
+    force_rewarm: bool = False,
 ) -> bool:
     """Create the `JobState` row for an auto-warmup task before enqueue.
 
@@ -219,6 +220,7 @@ def _seed_auto_warmup_job_state(
         "require_all_warmup_nodes": True,
         "auto_warmup": True,
         "expected_node_count": expected_node_count,
+        "force_rewarm": force_rewarm,
     }
     state = JobState(
         job_id=job_id,
@@ -395,7 +397,32 @@ def reconcile_auto_warmup_preferences(
                 elif len(warm_generations) > 1 or str(warm_meta.get("status") or "") == "Stale":
                     warm_meta = {}
                 warm_state = str(warm_meta.get("status") or "")
-                if warm_state in {"Ready", "Loading"}:
+                # A lingering "Ready"/"Loading" warmup Job normally means the DB
+                # is already warm and is skipped. After an `az aks stop`/`start`
+                # the node RAM page cache is always cold, yet on a `node_disk`
+                # cluster the Managed OS disk keeps VMSS instance names stable,
+                # so the pre-stop Jobs are NOT flagged Stale and the DB still
+                # reports "Ready". `start_aks` enqueues this reconcile with
+                # `force=True` precisely to re-warm in that case, so a forced
+                # pass must not skip — it re-enqueues with `force_rewarm` so the
+                # warmup task replaces the stale Jobs (download is skipped on
+                # node_disk, only the vmtouch re-runs).
+                #
+                # `force_rewarm` must fire whenever same-generation warmup Jobs
+                # are still present (`warm_meta` truthy after the generation /
+                # Stale resets above), because `k8s_ensure_job_manifests` skips
+                # any Job name that already exists. There are two triggers:
+                #   * `force` — the post stop/start re-warm of a still-"Ready"
+                #     (or "Loading") DB on node_disk.
+                #   * `warm_state == "Failed"` — a prior warmup left Failed Jobs
+                #     pinned to LIVE nodes. On node_disk their names are stable,
+                #     so the node-staleness sweep keeps them and ensure would
+                #     skip recreating forever (the DB stays "Failed" and the
+                #     reconcile busy-loops). Force-releasing clears them so the
+                #     retry actually re-runs. (Ephemeral self-heals via node
+                #     rotation; node_disk needs this explicit release.)
+                forced_rewarm = bool(warm_meta) and (force or warm_state == "Failed")
+                if warm_state in {"Ready", "Loading"} and not force:
                     result["skipped"].append({"db": db_name, "reason": warm_state})
                     continue
                 if not inflight_acquire(
@@ -418,6 +445,7 @@ def reconcile_auto_warmup_preferences(
                     num_nodes=num_nodes,
                     program=program,
                     expected_node_count=num_nodes,
+                    force_rewarm=forced_rewarm,
                 )
                 task = send_task(
                     "api.tasks.storage.warmup_database",
@@ -443,6 +471,12 @@ def reconcile_auto_warmup_preferences(
                         "program": program,
                         "caller_oid": pref.owner_oid,
                         "require_all_warmup_nodes": True,
+                        # When a forced (post stop/start) reconcile re-enqueues a
+                        # DB that still reports "Ready", the warmup task must drop
+                        # the pre-stop Jobs before it recreates them — otherwise
+                        # `k8s_ensure_job_manifests` sees the existing names and
+                        # no-ops, leaving the RAM cache cold on node_disk.
+                        "force_rewarm": forced_rewarm,
                     },
                     queue="storage",
                 )

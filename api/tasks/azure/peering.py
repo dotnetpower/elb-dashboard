@@ -8,6 +8,7 @@ Edit boundaries: All VNet-peering writes belong here. Routes and the `provision_
     orchestrator only call into `ensure_vnet_peering_with_cluster`; everything Azure SDK
     related stays in this module.
 Key entry points: `ensure_vnet_peering_with_cluster`,
+    `ensure_vnet_peering_with_target`, `list_vnet_peerings_for_cluster`,
     `_dashboard_vnet_id_from_env`, `_recovery_command`, `probe_private_ip`.
 Risky contracts: Treats `AlreadyExists` / `Conflict` as success. Any other failure is
     recorded into ``error`` and the caller (typically `provision_aks`) does **not**
@@ -483,6 +484,119 @@ def _peer_vnets(
         "peerings": peerings,
         "error": "; ".join(error_parts) if error_parts else None,
     }
+
+
+def _normalise_existing_peering(peering: Any) -> dict[str, Any]:
+    """Project an Azure ``VirtualNetworkPeering`` into a UI-safe dict.
+
+    Uses only attributes the peering object already carries (no extra ARM
+    round-trip): ``remote_address_space`` and ``remote_virtual_network.id``
+    are embedded in the peering, so a cross-subscription remote VNet does not
+    require a second (possibly RBAC-denied) ``get`` against the peer.
+    """
+    remote_ref = getattr(peering, "remote_virtual_network", None)
+    remote_id = (getattr(remote_ref, "id", None) or "").strip()
+    remote: dict[str, Any] | None = None
+    if remote_id:
+        remote = {"id": remote_id, "name": "", "resource_group": "", "subscription_id": ""}
+        try:
+            sub, rg, name = _parse_vnet_id(remote_id)
+            remote.update({"name": name, "resource_group": rg, "subscription_id": sub})
+        except ValueError:
+            # Keep the raw id so the UI can still render something useful.
+            pass
+
+    remote_space = getattr(peering, "remote_address_space", None)
+    remote_prefixes = list(getattr(remote_space, "address_prefixes", None) or [])
+
+    return {
+        "name": getattr(peering, "name", None) or "",
+        "peering_state": str(getattr(peering, "peering_state", None) or "Unknown"),
+        "provisioning_state": str(getattr(peering, "provisioning_state", None) or "Unknown"),
+        "remote_vnet": remote,
+        "remote_address_prefixes": remote_prefixes,
+        "allow_virtual_network_access": bool(
+            getattr(peering, "allow_virtual_network_access", False)
+        ),
+        "allow_forwarded_traffic": bool(getattr(peering, "allow_forwarded_traffic", False)),
+        "allow_gateway_transit": bool(getattr(peering, "allow_gateway_transit", False)),
+        "use_remote_gateways": bool(getattr(peering, "use_remote_gateways", False)),
+    }
+
+
+def list_vnet_peerings_for_cluster(
+    cred: Any,
+    *,
+    subscription_id: str,
+    cluster_resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any]:
+    """List the peerings already present on a cluster's AKS VNet (read-only).
+
+    Best-effort like the write path: never raises on an Azure fault. Returns
+    ``{"aks_vnet", "aks_vnet_name", "node_resource_group", "peerings",
+    "skipped", "reason", "error"}``. ``skipped`` marks the cases where there is
+    genuinely no AKS VNet to inspect (cluster not found, no node RG, BYO-subnet
+    self-VNet); ``error`` carries a sanitised string when the listing call
+    itself fails (e.g. an RBAC denial on the cluster VNet) so the SPA can degrade
+    to an explanatory banner instead of a 500.
+    """
+    from api.services.azure_clients import aks_client
+
+    base: dict[str, Any] = {
+        "aks_vnet": "",
+        "aks_vnet_name": "",
+        "node_resource_group": "",
+        "peerings": [],
+        "skipped": False,
+        "reason": None,
+        "error": None,
+    }
+
+    aks_cl = aks_client(cred, subscription_id)
+    try:
+        cluster = aks_cl.managed_clusters.get(cluster_resource_group, cluster_name)
+    except Exception as exc:
+        return {
+            **base,
+            "error": f"aks_client.managed_clusters.get failed: {type(exc).__name__}",
+        }
+
+    node_rg = (getattr(cluster, "node_resource_group", None) or "").strip()
+    base["node_resource_group"] = node_rg
+    if not node_rg:
+        return {**base, "skipped": True, "reason": "cluster has no node_resource_group"}
+
+    aks_vnet_id = _resolve_aks_vnet_id(
+        cred,
+        subscription_id=subscription_id,
+        node_resource_group=node_rg,
+        cluster=cluster,
+    )
+    if not aks_vnet_id:
+        return {**base, "skipped": True, "reason": "aks_node_rg_has_no_vnet"}
+
+    base["aks_vnet"] = aks_vnet_id
+    try:
+        local_sub, local_rg, local_vnet = _parse_vnet_id(aks_vnet_id)
+    except ValueError as exc:
+        return {**base, "error": f"could not parse AKS VNet id: {str(exc)[:200]}"}
+    base["aks_vnet_name"] = local_vnet
+
+    nc = network_client(cred, local_sub)
+    try:
+        items = list(nc.virtual_network_peerings.list(local_rg, local_vnet))
+    except Exception as exc:
+        return {
+            **base,
+            "error": (
+                "virtual_network_peerings.list failed: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ),
+        }
+
+    base["peerings"] = [_normalise_existing_peering(p) for p in items]
+    return base
 
 
 def ensure_vnet_peering_with_target(

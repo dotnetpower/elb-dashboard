@@ -44,6 +44,13 @@ export function useDatabaseBuilderState() {
         cfg?.subscriptionId ?? "",
         cfg?.storageAccountName ?? "",
         cfg?.workloadResourceGroup ?? "",
+        undefined,
+        // The Database Builder is the admin surface for preparing/deleting DBs,
+        // so it must show the true Storage state — bypass the backend catalogue
+        // cache. This also makes the "Refresh" button (a refetch of this query)
+        // an authoritative re-enumeration, and refreshes the shared backend
+        // cache that New Search reads.
+        { fresh: true },
       ),
     enabled: !!cfg?.subscriptionId && !!cfg?.storageAccountName,
     staleTime: 30_000,

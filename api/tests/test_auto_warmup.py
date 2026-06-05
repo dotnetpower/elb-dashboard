@@ -446,7 +446,185 @@ def test_reconcile_auto_warmup_reenqueues_stale_warm_generation(
     assert calls[0]["kwargs"]["database_name"] == "core_nt"
 
 
-def test_reconcile_auto_warmup_skips_until_cluster_ready(monkeypatch, tmp_path) -> None:
+def _patch_ready_db_warm_status(
+    monkeypatch, *, source_version: str, warm_status: str = "Ready"
+) -> None:
+    """Patch the reconcile reads so a downloaded DB reports a matching warm Job.
+
+    Models the post `az aks stop`/`start` state on a `node_disk` cluster: the
+    pre-stop warmup Jobs survive (node names stay stable) so the DB reports
+    ``Ready`` with the same generation as storage. There is no pending NCBI
+    update, so the only thing standing between the reconcile and a re-warm is
+    the ``Ready`` skip. ``warm_status`` lets a test model a lingering
+    ``Failed`` Job instead.
+    """
+
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 10,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 10)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda credential, subscription_id, resource_group, cluster_name: {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": warm_status,
+                    "source_version": source_version,
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda credential, storage_account: [
+            {"name": "core_nt", "source_version": source_version}
+        ],
+    )
+    monkeypatch.setattr(
+        "api.routes.storage.common._resolve_latest_dir",
+        lambda: source_version,
+    )
+
+
+def test_reconcile_auto_warmup_force_reenqueues_ready_db(monkeypatch, tmp_path) -> None:
+    """A forced (post stop/start) reconcile must re-warm a DB that still
+    reports ``Ready``.
+
+    Root cause this guards: on a ``node_disk`` cluster the Managed OS disk
+    keeps VMSS instance names stable across `az aks stop`/`start`, so the
+    pre-stop warmup Jobs are not flagged ``Stale`` and the DB reports
+    ``Ready`` even though the node RAM page cache is cold. ``start_aks``
+    enqueues this reconcile with ``force=True`` to re-warm — which only works
+    if ``force`` actually bypasses the ``Ready`` skip and the task is told to
+    drop the stale Jobs (``force_rewarm``).
+    """
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    _patch_ready_db_warm_status(monkeypatch, source_version="2026-05-20-00-00-00")
+
+    calls, fake_send_task = make_send_task_recorder("warmup-task-force")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
+
+    assert result["clusters"][0]["status"] == "triggered"
+    assert result["clusters"][0]["enqueued"] == [{"db": "core_nt", "task_id": "warmup-task-force"}]
+    # The task must be told this is a forced re-warm so it drops the lingering
+    # Jobs before ensure (otherwise ensure no-ops on the existing names).
+    assert calls[0]["kwargs"]["force_rewarm"] is True
+
+
+def test_reconcile_auto_warmup_skips_ready_db_without_force(monkeypatch, tmp_path) -> None:
+    """The periodic (un-forced) reconcile must keep skipping a warm DB.
+
+    Counterpart to the forced re-warm: a routine beat tick that finds the DB
+    already ``Ready`` with a matching generation must not re-enqueue, so the
+    `force` bypass stays scoped to the post stop/start path.
+    """
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    _patch_ready_db_warm_status(monkeypatch, source_version="2026-05-20-00-00-00")
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.celery_app.celery_app.send_task",
+        lambda *args, **kwargs: calls.append({"args": args, "kwargs": kwargs}),
+    )
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict())
+
+    assert result["clusters"][0]["status"] == "ready_noop"
+    assert result["clusters"][0]["skipped"] == [{"db": "core_nt", "reason": "Ready"}]
+    assert calls == []
+
+
+def test_reconcile_auto_warmup_force_rewarms_failed_db_without_force_flag(
+    monkeypatch, tmp_path
+) -> None:
+    """A lingering ``Failed`` warmup Job must be force-released even on a
+    periodic (un-forced) reconcile.
+
+    On a ``node_disk`` cluster the Failed Jobs are pinned to LIVE nodes with
+    stable names, so the node-staleness sweep keeps them and
+    ``k8s_ensure_job_manifests`` would skip recreating them forever — the DB
+    would stay ``Failed`` and the reconcile would busy-loop every beat tick
+    without ever converging. The reconcile must therefore set
+    ``force_rewarm=True`` for a Failed DB regardless of the ``force`` flag.
+    """
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    _patch_ready_db_warm_status(
+        monkeypatch, source_version="2026-05-20-00-00-00", warm_status="Failed"
+    )
+
+    calls, fake_send_task = make_send_task_recorder("warmup-task-failed-recover")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+    )
+
+    # Note: force is NOT passed — this is the periodic beat path.
+    result = reconcile_auto_warmup.run(preference=pref.to_dict())
+
+    assert result["clusters"][0]["status"] == "triggered"
+    assert result["clusters"][0]["enqueued"] == [
+        {"db": "core_nt", "task_id": "warmup-task-failed-recover"}
+    ]
+    # The Failed Jobs must be force-released so the retry actually re-runs.
+    assert calls[0]["kwargs"]["force_rewarm"] is True
+
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
     monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
@@ -666,6 +844,242 @@ def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
     assert build_calls == []
     assert any(update["phase"] == "waiting_for_warmup_nodes" for update in state_updates)
     assert any(progress["phase"] == "waiting_for_warmup_nodes" for progress in task_progress)
+
+
+def test_warmup_database_force_rewarm_drops_existing_jobs(monkeypatch, tmp_path) -> None:
+    """A forced re-warm must drop the database's existing warmup Jobs first.
+
+    On a ``node_disk`` cluster the warmup Jobs survive `az aks stop`/`start`
+    (stable node names) so ``k8s_ensure_job_manifests`` would skip recreating
+    them and the RAM cache would stay cold. ``force_rewarm=True`` must call
+    ``k8s_release_warmup_cache`` for the DB before ensure so fresh Jobs run.
+
+    The job-ensure step is stubbed to fail so the task stops deterministically
+    right after the release/ensure pair — the assertion is about the *ordering*
+    (release happened, then ensure ran), not the full warmup completion.
+    """
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda credential, storage_account: [
+            {
+                "name": "core_nt",
+                "file_count": 12,
+                "sharded": True,
+                "shard_sets": [4],
+                "source_version": "2026-05-20-00-00-00",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 4)
+
+    class _Plan:
+        nodes = ("aks-blast-000000",)
+        jobs = ({"metadata": {"name": "warm-core-nt-00", "namespace": "default"}},)
+
+    monkeypatch.setattr(
+        "api.services.warmup.jobs.build_warmup_job_plan",
+        lambda **kwargs: _Plan(),
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_ensure_warmup_scripts_configmap",
+        lambda *a, **k: {"status": "unchanged"},
+    )
+
+    order: list[str] = []
+    release_calls: list[tuple[Any, Any]] = []
+
+    def _record_release(cred, sub, rg, cluster, db_name, *a, **k):
+        order.append("release")
+        release_calls.append((cluster, db_name))
+        return {"status": "released", "database": db_name}
+
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_release_warmup_cache", _record_release
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_release_stale_warmup_jobs",
+        lambda *a, **k: {"status": "released", "deleted": []},
+    )
+
+    def _ensure(*a, **k):
+        order.append("ensure")
+        return {"error_count": 1, "errors": ["stop-here"], "created_count": 0}
+
+    monkeypatch.setattr("api.services.k8s.monitoring.k8s_ensure_job_manifests", _ensure)
+    monkeypatch.setattr("api.tasks.storage._update_state", lambda *a, **k: None)
+    monkeypatch.setattr("api.tasks.storage._record_task_progress", lambda *a, **k: None)
+
+    result = warmup_database.run(
+        job_id="auto-warmup-elb-cluster-core_nt-1",
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        storage_account="elbstg01",
+        database_name="core_nt",
+        storage_resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        machine_type="Standard_E16s_v5",
+        num_nodes=1,
+        acr_name="elbacr01",
+        acr_resource_group="rg-acr",
+        require_all_warmup_nodes=True,
+        force_rewarm=True,
+    )
+
+    # The forced re-warm released the DB's existing Jobs and that release ran
+    # BEFORE ensure recreated them.
+    assert release_calls == [("elb-cluster", "core_nt")]
+    assert order == ["release", "ensure"]
+    # ensure was stubbed to fail, so the task surfaces that as a failure.
+    assert result["status"] == "failed"
+
+
+def test_warmup_database_force_rewarm_defaults_off(monkeypatch, tmp_path) -> None:
+    """Without force_rewarm the task must NOT blanket-release the DB Jobs."""
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda credential, storage_account: [
+            {
+                "name": "core_nt",
+                "file_count": 12,
+                "sharded": True,
+                "shard_sets": [4],
+                "source_version": "2026-05-20-00-00-00",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 4)
+
+    class _Plan:
+        nodes = ("aks-blast-000000",)
+        jobs = ({"metadata": {"name": "warm-core-nt-00", "namespace": "default"}},)
+
+    monkeypatch.setattr(
+        "api.services.warmup.jobs.build_warmup_job_plan",
+        lambda **kwargs: _Plan(),
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_ensure_warmup_scripts_configmap",
+        lambda *a, **k: {"status": "unchanged"},
+    )
+
+    release_calls: list[Any] = []
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_release_warmup_cache",
+        lambda *a, **k: release_calls.append(a) or {"status": "released"},
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_release_stale_warmup_jobs",
+        lambda *a, **k: {"status": "released", "deleted": []},
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_ensure_job_manifests",
+        lambda *a, **k: {"error_count": 1, "errors": ["stop-here"], "created_count": 0},
+    )
+    monkeypatch.setattr("api.tasks.storage._update_state", lambda *a, **k: None)
+    monkeypatch.setattr("api.tasks.storage._record_task_progress", lambda *a, **k: None)
+
+    warmup_database.run(
+        job_id="auto-warmup-elb-cluster-core_nt-1",
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        storage_account="elbstg01",
+        database_name="core_nt",
+        storage_resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        machine_type="Standard_E16s_v5",
+        num_nodes=1,
+        acr_name="elbacr01",
+        acr_resource_group="rg-acr",
+        require_all_warmup_nodes=True,
+    )
+
+    assert release_calls == [], "k8s_release_warmup_cache must not run without force_rewarm"
+
+
+def test_warmup_database_force_rewarm_partial_release_fails_loudly(
+    monkeypatch, tmp_path
+) -> None:
+    """A partial forced release must abort before ensure (no silent subset warm).
+
+    If `k8s_release_warmup_cache` returns ``status="partial"`` a stale Job
+    survived; its name still exists so `k8s_ensure_job_manifests` would skip
+    recreating it, leaving that shard cold. The task must raise instead of
+    reporting success so Celery autoretry re-runs the release.
+    """
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda credential, storage_account: [
+            {
+                "name": "core_nt",
+                "file_count": 12,
+                "sharded": True,
+                "shard_sets": [4],
+                "source_version": "2026-05-20-00-00-00",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 4)
+
+    class _Plan:
+        nodes = ("aks-blast-000000",)
+        jobs = ({"metadata": {"name": "warm-core-nt-00", "namespace": "default"}},)
+
+    monkeypatch.setattr(
+        "api.services.warmup.jobs.build_warmup_job_plan",
+        lambda **kwargs: _Plan(),
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_ensure_warmup_scripts_configmap",
+        lambda *a, **k: {"status": "unchanged"},
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_release_warmup_cache",
+        lambda *a, **k: {"status": "partial", "errors": [{"kind": "jobs", "status_code": 500}]},
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_release_stale_warmup_jobs",
+        lambda *a, **k: {"status": "released", "deleted": []},
+    )
+    ensure_calls: list[Any] = []
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_ensure_job_manifests",
+        lambda *a, **k: ensure_calls.append(a) or {"created_count": 1, "error_count": 0},
+    )
+    monkeypatch.setattr("api.tasks.storage._update_state", lambda *a, **k: None)
+    monkeypatch.setattr("api.tasks.storage._record_task_progress", lambda *a, **k: None)
+
+    result = warmup_database.run(
+        job_id="auto-warmup-elb-cluster-core_nt-1",
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        storage_account="elbstg01",
+        database_name="core_nt",
+        storage_resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        machine_type="Standard_E16s_v5",
+        num_nodes=1,
+        acr_name="elbacr01",
+        acr_resource_group="rg-acr",
+        require_all_warmup_nodes=True,
+        force_rewarm=True,
+    )
+
+    # A partial release must abort the warmup: ensure must NOT run and the
+    # task must surface failure (so autoretry re-runs the release).
+    assert ensure_calls == [], "ensure must not run after a partial forced release"
+    assert result["status"] == "failed"
 
 
 def test_warmup_database_fails_fast_when_storage_resource_group_missing(

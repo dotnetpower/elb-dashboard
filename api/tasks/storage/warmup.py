@@ -90,6 +90,7 @@ def warmup_database(
     warmup_timeout_seconds: int = 4 * 60 * 60,
     caller_oid: str = "",
     require_all_warmup_nodes: bool = False,
+    force_rewarm: bool = False,
 ) -> dict[str, Any]:
     """Download a BLAST database from NCBI to the workload storage account.
 
@@ -97,6 +98,15 @@ def warmup_database(
     BLAST database files into the `blast-db` container. Falls back to direct
     Azure SDK blob operations for the download if the terminal sidecar is
     unavailable.
+
+    ``force_rewarm`` is set by the post stop/start auto-warmup reconcile. A
+    ``node_disk`` cluster keeps VMSS instance names stable across
+    `az aks stop`/`start`, so the pre-stop ``warm-<db>-<shard>`` Jobs are not
+    flagged Stale and ``k8s_ensure_job_manifests`` would skip recreating them,
+    leaving the node RAM page cache cold. When ``force_rewarm`` is true the
+    task drops the database's existing warmup Jobs before ensure so fresh Jobs
+    actually run (the on-disk DB survives on node_disk, so only the vmtouch
+    re-runs and the download is skipped).
     """
     _record_task_progress(self, "starting", database=database_name)
     _update_state(job_id, "starting")
@@ -457,6 +467,25 @@ def warmup_database(
                 # would then skip recreating it because the name still
                 # exists. Drop those stale Jobs first so ensure creates
                 # fresh ones on the current ready nodes.
+                #
+                # On a `node_disk` cluster the Managed OS disk keeps the
+                # instance names stable across stop/start, so the pre-stop
+                # Jobs are NOT node-stale and the staleness sweep below would
+                # keep them — leaving the RAM page cache cold. A forced
+                # re-warm (post stop/start reconcile) therefore drops ALL of
+                # the database's warmup Jobs first so ensure recreates them
+                # and the vmtouch re-runs.
+                force_release_summary: dict[str, Any] | None = None
+                if force_rewarm:
+                    from api.services.k8s.monitoring import k8s_release_warmup_cache
+
+                    force_release_summary = k8s_release_warmup_cache(
+                        cred,
+                        subscription_id,
+                        resource_group,
+                        cluster_name,
+                        database_name,
+                    )
                 stale_summary = k8s_release_stale_warmup_jobs(
                     cred,
                     subscription_id,
@@ -476,6 +505,7 @@ def warmup_database(
                     rbac=role_summary,
                     scripts_configmap=configmap_summary,
                     stale_jobs=stale_summary,
+                    force_released_jobs=force_release_summary,
                 )
                 _update_state(
                     job_id,
@@ -486,7 +516,22 @@ def warmup_database(
                     rbac=role_summary,
                     scripts_configmap=configmap_summary,
                     stale_jobs=stale_summary,
+                    force_released_jobs=force_release_summary,
                 )
+                # Partial-failure guard for the forced re-warm: if any old Job
+                # survived the release (delete returned a non-2xx/404), its name
+                # still exists and `k8s_ensure_job_manifests` below will SKIP
+                # recreating it — leaving that shard cold while the task would
+                # otherwise report success. Fail loudly so Celery autoretry runs
+                # the release again instead of silently warming a subset.
+                if (
+                    force_release_summary is not None
+                    and force_release_summary.get("status") != "released"
+                ):
+                    raise RuntimeError(
+                        "forced warmup Job release did not fully succeed: "
+                        f"{force_release_summary.get('errors')}"
+                    )
                 apply_summary = k8s_ensure_job_manifests(
                     cred,
                     subscription_id,

@@ -38,6 +38,7 @@ _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.azure.peering.ensure_vnet_peering_with_cluster",
     "api.tasks.azure.peering.ensure_vnet_peering_with_target",
     "api.tasks.azure.peering.httpx.get",
+    "api.tasks.azure.peering.list_vnet_peerings_for_cluster",
     "api.tasks.azure.peering_nsg.apply_inbound_allow_rule",
     "api.tasks.azure.peering_nsg.has_nsg_write_permission",
     "api.tasks.azure.peering_nsg.resolve_nsg_context",

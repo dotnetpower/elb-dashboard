@@ -653,3 +653,148 @@ def test_apply_nsg_uses_per_nsg_lock(monkeypatch) -> None:
             "providers/Microsoft.Network/networkSecurityGroups/nsg-frontend",
         ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# GET /vnet-peering/existing
+# ---------------------------------------------------------------------------
+
+
+def test_existing_route_rejects_bad_parameters(monkeypatch) -> None:
+    app = _build_app(monkeypatch)
+    client = TestClient(app)
+
+    resp = client.get(
+        "/vnet-peering/existing",
+        params={
+            "subscription_id": "not-a-guid",
+            "resource_group": "rg",
+            "cluster_name": "elb-cluster-01",
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_existing_route_returns_helper_summary(monkeypatch) -> None:
+    app = _build_app(monkeypatch)
+    client = TestClient(app)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_list(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "aks_vnet": (
+                "/subscriptions/sub-1/resourceGroups/MC_rg/"
+                "providers/Microsoft.Network/virtualNetworks/aks-vnet"
+            ),
+            "aks_vnet_name": "aks-vnet",
+            "node_resource_group": "MC_rg",
+            "peerings": [
+                {
+                    "name": "peer-aks-vnet-to-vnet-target",
+                    "peering_state": "Connected",
+                    "provisioning_state": "Succeeded",
+                    "remote_vnet": {
+                        "id": (
+                            "/subscriptions/sub-2/resourceGroups/rg-target/"
+                            "providers/Microsoft.Network/virtualNetworks/vnet-target"
+                        ),
+                        "name": "vnet-target",
+                        "resource_group": "rg-target",
+                        "subscription_id": "sub-2",
+                    },
+                    "remote_address_prefixes": ["10.10.0.0/16"],
+                    "allow_virtual_network_access": True,
+                    "allow_forwarded_traffic": False,
+                    "allow_gateway_transit": False,
+                    "use_remote_gateways": False,
+                }
+            ],
+            "skipped": False,
+            "reason": None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.list_vnet_peerings_for_cluster", _fake_list
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    resp = client.get(
+        "/vnet-peering/existing",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-workload",
+            "cluster_name": "elb-cluster-01",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["aks_vnet_name"] == "aks-vnet"
+    assert body["peerings"][0]["peering_state"] == "Connected"
+    assert body["peerings"][0]["remote_vnet"]["name"] == "vnet-target"
+    # Route forwards validated kwargs to the helper verbatim.
+    assert captured["cluster_resource_group"] == "rg-workload"
+    assert captured["cluster_name"] == "elb-cluster-01"
+
+
+def test_existing_route_forwards_degraded_payload(monkeypatch) -> None:
+    """A helper-side RBAC denial is folded into a 200 payload (error set)."""
+
+    app = _build_app(monkeypatch)
+    client = TestClient(app)
+
+    def _fake_list(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "aks_vnet": "",
+            "aks_vnet_name": "",
+            "node_resource_group": "MC_rg",
+            "peerings": [],
+            "skipped": False,
+            "reason": None,
+            "error": "virtual_network_peerings.list failed: HttpResponseError",
+        }
+
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.list_vnet_peerings_for_cluster", _fake_list
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    resp = client.get(
+        "/vnet-peering/existing",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-workload",
+            "cluster_name": "elb-cluster-01",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["error"].startswith("virtual_network_peerings.list failed")
+
+
+def test_existing_route_returns_502_when_helper_raises(monkeypatch) -> None:
+    app = _build_app(monkeypatch)
+    client = TestClient(app)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("ARM down")
+
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.list_vnet_peerings_for_cluster", _boom
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    resp = client.get(
+        "/vnet-peering/existing",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-workload",
+            "cluster_name": "elb-cluster-01",
+        },
+    )
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"]["code"] == "vnet_peering_unavailable"

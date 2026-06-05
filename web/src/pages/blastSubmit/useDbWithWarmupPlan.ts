@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { AksClusterSummary } from "@/api/endpoints";
 import { blastApi } from "@/api/endpoints";
@@ -73,6 +73,8 @@ export function useDbWithWarmupPlan({
     ? getWorkloadNodeSku(selectedCluster) ?? ""
     : "";
 
+  const queryClient = useQueryClient();
+
   const dbQuery = useQuery({
     queryKey: [
       "blast-databases",
@@ -91,6 +93,32 @@ export function useDbWithWarmupPlan({
           : undefined,
       ),
     enabled: Boolean(subId && storageAccount && workloadRg),
+    // The catalogue changes rarely and the backend now serves it from an
+    // event-invalidated cache, so keep the listing fresh for two minutes and
+    // retain it for half an hour. This lets a Dashboard prefetch (and a
+    // re-visit / cluster switch) reuse the cache without re-showing the
+    // "Choose Search Set" skeleton.
+    staleTime: 120_000,
+    gcTime: 30 * 60_000,
+    // When the cluster picker resolves, the query key flips from the
+    // topology-free shape (numNodes=0, sku="") to the topology-scoped shape.
+    // That new key has no client-cache entry yet, which would re-show the
+    // picker skeleton on first visit. Seed it with the topology-free base
+    // listing (prefetched on the Dashboard / nav hover, or fetched on this
+    // page's first render before the cluster resolved) so the picker renders
+    // immediately while the warmup_plan-enriched rows load in the background.
+    // Only the per-row ``warmup_plan`` differs between the two shapes, and it
+    // degrades gracefully when momentarily absent.
+    placeholderData: () => {
+      if (!(clusterNodeCount > 0 && clusterNodeSku)) return undefined;
+      return queryClient.getQueryData<{ databases: BlastDatabase[] }>([
+        "blast-databases",
+        subId,
+        storageAccount,
+        0,
+        "",
+      ]);
+    },
   });
 
   const databases = useMemo(

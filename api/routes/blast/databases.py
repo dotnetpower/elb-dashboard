@@ -55,12 +55,14 @@ def blast_databases(
     resource_group: str = Query(default=""),
     num_nodes: int = Query(default=0, ge=0, le=1000),
     machine_type: str = Query(default=""),
+    fresh: bool = Query(default=False),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     if not storage_account or not resource_group:
         return {"databases": []}
     from api.services import get_credential
-    from api.services.storage.data import classify_storage_failure, list_databases
+    from api.services.storage.data import classify_storage_failure
+    from api.services.storage.database_catalog_cache import list_databases_cached
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -71,7 +73,7 @@ def blast_databases(
         context="blast_databases",
     )
     try:
-        databases = list_databases(cred, storage_account)
+        databases = list_databases_cached(cred, storage_account, force_refresh=fresh)
     except Exception as exc:
         LOGGER.warning("blast_databases failed: %s", type(exc).__name__)
         return {
@@ -365,6 +367,23 @@ def blast_database_shard(
                 return meta
 
             _update_md(cc2, db_name, account_name, _ok_mut)
+            # Sharding rewrote {db}-metadata.json (sharded / shard_sets /
+            # shard_source_version). Invalidate the display + catalogue
+            # listing caches so New Search reflects the new chip state on the
+            # next read instead of waiting out the TTL. Best-effort: a failed
+            # invalidate must not fail the shard.
+            try:
+                from api.services.blast.db_metadata import (
+                    notify_blast_db_metadata_changed,
+                )
+
+                notify_blast_db_metadata_changed(account_name, db_name)
+            except Exception as exc_inv:
+                LOGGER.debug(
+                    "blast_database_shard cache invalidate skipped db=%s: %s",
+                    db_name,
+                    type(exc_inv).__name__,
+                )
             LOGGER.info(
                 "blast_database_shard daemon ok db=%s shard_sets=%s",
                 db_name,

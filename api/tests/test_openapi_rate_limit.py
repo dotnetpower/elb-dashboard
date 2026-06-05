@@ -19,23 +19,46 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _stub_slow_proxy_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the proxied ``/api/aks/openapi/proxy`` route fast.
+
+    Under-quota requests in these tests actually execute ``aks_openapi_proxy``,
+    which resolves Azure credentials and calls the K8s API for a cluster that
+    does not exist — ~0.5 s/request of real credential-chain + ARM-failure
+    latency, and this file is the long pole under ``--dist loadfile``. These
+    tests only assert on the rate-limit middleware (429 vs not-429), so stub the
+    Service-IP lookup to fail fast: the route returns 503 (still ``!= 429``)
+    without the network round-trip. ``k8s_get_service_ip`` is imported inside
+    the route body, so patch it at its source module.
+    """
+    import api.services.k8s.monitoring as k8s_mon
+
+    monkeypatch.setattr(k8s_mon, "k8s_get_service_ip", lambda *a, **k: None)
+
+
 def _build_client(
     monkeypatch: pytest.MonkeyPatch, *, limit: int, window: float = 60.0
 ) -> TestClient:
-    """Build a fresh FastAPI app with the rate-limit middleware tuned for tests."""
+    """Build a TestClient with the rate-limit middleware tuned for tests.
+
+    The middleware re-reads ``OPENAPI_RATE_LIMIT_*`` on every request (see
+    ``api/app/openapi_rate_limit.py``) and conftest resets the in-memory
+    sliding-window counter between tests, so the shared module-level
+    ``api.main.app`` needs no ``importlib.reload`` — setting the env vars
+    before issuing requests is sufficient. Reloading rebuilt the whole
+    FastAPI app (every router + middleware) per call and dominated this
+    file's wall-clock under ``--dist loadfile``.
+    """
     monkeypatch.setenv("OPENAPI_RATE_LIMIT_REQUESTS_PER_WINDOW", str(limit))
     monkeypatch.setenv("OPENAPI_RATE_LIMIT_WINDOW_SECONDS", str(window))
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     # Make sure the rate-limit middleware is enabled even if a previous test
     # turned it off.
     monkeypatch.delenv("OPENAPI_RATE_LIMIT_DISABLED", raising=False)
-    # Re-import api.main so the middleware picks up the new env values.
-    import importlib
+    from api.main import app
 
-    import api.main as api_main
-
-    importlib.reload(api_main)
-    return TestClient(api_main.app)
+    return TestClient(app)
 
 
 def test_rate_limit_passes_when_under_quota(monkeypatch: pytest.MonkeyPatch) -> None:

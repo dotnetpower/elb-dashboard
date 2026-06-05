@@ -900,3 +900,138 @@ def test_provision_aks_includes_vnet_peering_in_completion(monkeypatch) -> None:
     completed = [p for p in publishes if p["meta"].get("phase") == "completed"]
     assert completed, publishes
     assert "vnet_peering" in completed[-1]["meta"]
+
+
+# ---------------------------------------------------------------------------
+# list_vnet_peerings_for_cluster (read-only)
+# ---------------------------------------------------------------------------
+
+
+def _install_list_clients(monkeypatch, *, peerings=None, list_raises=None, cluster_obj=None):
+    from api.services import azure_clients
+    from api.tasks.azure import peering as peering_mod
+
+    class _FakePeeringsList:
+        def list(self, rg: str, vnet: str):
+            if list_raises is not None:
+                raise list_raises
+            return list(peerings or [])
+
+    class _FakeNetworkClient:
+        virtual_network_peerings = _FakePeeringsList()
+
+    class _FakeAksClient:
+        managed_clusters = SimpleNamespace(
+            get=lambda _rg, _name: cluster_obj or _make_cluster()
+        )
+
+    monkeypatch.setattr(peering_mod, "network_client", lambda _c, _s: _FakeNetworkClient())
+    monkeypatch.setattr(azure_clients, "aks_client", lambda _c, _s: _FakeAksClient())
+
+
+def test_list_peerings_happy_path(monkeypatch) -> None:
+    from api.tasks.azure import peering as peering_mod
+
+    aks_vnet_id = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet"
+    )
+    monkeypatch.setattr(peering_mod, "_resolve_aks_vnet_id", lambda *a, **k: aks_vnet_id)
+
+    peering = SimpleNamespace(
+        name="peer-aks-vnet-to-vnet-target",
+        peering_state="Connected",
+        provisioning_state="Succeeded",
+        remote_virtual_network=SimpleNamespace(
+            id=(
+                "/subscriptions/sub-2/resourceGroups/rg-target/"
+                "providers/Microsoft.Network/virtualNetworks/vnet-target"
+            )
+        ),
+        remote_address_space=SimpleNamespace(address_prefixes=["10.10.0.0/16"]),
+        allow_virtual_network_access=True,
+        allow_forwarded_traffic=False,
+        allow_gateway_transit=False,
+        use_remote_gateways=False,
+    )
+    _install_list_clients(monkeypatch, peerings=[peering])
+
+    result = peering_mod.list_vnet_peerings_for_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+    )
+
+    assert result["error"] is None
+    assert result["skipped"] is False
+    assert result["aks_vnet_name"] == "aks-vnet"
+    assert len(result["peerings"]) == 1
+    item = result["peerings"][0]
+    assert item["peering_state"] == "Connected"
+    assert item["remote_vnet"]["name"] == "vnet-target"
+    assert item["remote_vnet"]["subscription_id"] == "sub-2"
+    assert item["remote_address_prefixes"] == ["10.10.0.0/16"]
+    assert item["allow_virtual_network_access"] is True
+
+
+def test_list_peerings_skips_byo_self_vnet(monkeypatch) -> None:
+    from api.tasks.azure import peering as peering_mod
+
+    monkeypatch.setattr(peering_mod, "_resolve_aks_vnet_id", lambda *a, **k: "")
+    _install_list_clients(monkeypatch, peerings=[])
+
+    result = peering_mod.list_vnet_peerings_for_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+    )
+
+    assert result["skipped"] is True
+    assert result["reason"] == "aks_node_rg_has_no_vnet"
+    assert result["peerings"] == []
+
+
+def test_list_peerings_folds_list_error(monkeypatch) -> None:
+    from api.tasks.azure import peering as peering_mod
+
+    aks_vnet_id = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet"
+    )
+    monkeypatch.setattr(peering_mod, "_resolve_aks_vnet_id", lambda *a, **k: aks_vnet_id)
+    _install_list_clients(monkeypatch, list_raises=RuntimeError("AuthorizationFailed"))
+
+    result = peering_mod.list_vnet_peerings_for_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+    )
+
+    assert result["skipped"] is False
+    assert result["peerings"] == []
+    assert "virtual_network_peerings.list failed" in result["error"]
+
+
+def test_list_peerings_never_raises_when_cluster_get_fails(monkeypatch) -> None:
+    from api.services import azure_clients
+    from api.tasks.azure import peering as peering_mod
+
+    class _BoomAks:
+        managed_clusters = SimpleNamespace(
+            get=lambda _rg, _name: (_ for _ in ()).throw(RuntimeError("not found"))
+        )
+
+    monkeypatch.setattr(azure_clients, "aks_client", lambda _c, _s: _BoomAks())
+
+    result = peering_mod.list_vnet_peerings_for_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+    )
+
+    assert result["peerings"] == []
+    assert "managed_clusters.get failed" in result["error"]

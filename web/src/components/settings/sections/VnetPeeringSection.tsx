@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Copy, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, Copy, Loader2, Network, RefreshCw, X } from "lucide-react";
 
 import {
   listResourceGroups,
@@ -13,6 +13,8 @@ import { formatApiError } from "@/api/client";
 import { type AksClusterSummary, monitoringApi } from "@/api/monitoring";
 import {
   settingsApi,
+  type VnetPeeringExistingItem,
+  type VnetPeeringExistingResponse,
   type VnetPeeringNsgRuleResponse,
   type VnetPeeringResponse,
 } from "@/api/settings";
@@ -59,6 +61,13 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
   const [nsgRunning, setNsgRunning] = useState(false);
   const [nsgError, setNsgError] = useState<string | null>(null);
   const [nsgResult, setNsgResult] = useState<VnetPeeringNsgRuleResponse | null>(null);
+
+  // Read-only view of the peerings already present on the selected cluster's
+  // AKS VNet. Auto-loaded on cluster change and re-loaded after any write so
+  // the operator sees the live state without leaving the panel.
+  const [existing, setExisting] = useState<VnetPeeringExistingResponse | null>(null);
+  const [existingLoading, setExistingLoading] = useState(false);
+  const [existingError, setExistingError] = useState<string | null>(null);
 
   const subscriptionId = config?.subscriptionId ?? "";
   const selectedClusterRg =
@@ -230,6 +239,44 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
     };
   }, [subscriptionId, selectedClusterRg, clusterName]);
 
+  // Load the read-only "already peered" list for the selected cluster. The
+  // helper never raises on a routine Azure fault — it folds RBAC denials and
+  // BYO self-VNet skips into the 200 payload — so a thrown error here is a
+  // hard transport/5xx failure worth surfacing as a banner. A monotonic token
+  // guards against a rapid cluster switch landing a stale response last.
+  const existingSeqRef = useRef(0);
+  const loadExisting = useCallback(async () => {
+    if (!subscriptionId || !selectedClusterRg || !clusterName) {
+      existingSeqRef.current += 1;
+      setExisting(null);
+      setExistingError(null);
+      setExistingLoading(false);
+      return;
+    }
+    const token = (existingSeqRef.current += 1);
+    setExistingLoading(true);
+    setExistingError(null);
+    try {
+      const response = await settingsApi.listExistingPeerings(
+        subscriptionId,
+        selectedClusterRg,
+        clusterName,
+      );
+      if (token !== existingSeqRef.current) return;
+      setExisting(response);
+    } catch (err) {
+      if (token !== existingSeqRef.current) return;
+      setExisting(null);
+      setExistingError(formatApiError(err, "settings"));
+    } finally {
+      if (token === existingSeqRef.current) setExistingLoading(false);
+    }
+  }, [subscriptionId, selectedClusterRg, clusterName]);
+
+  useEffect(() => {
+    void loadExisting();
+  }, [loadExisting]);
+
   const canSubmit = Boolean(
     subscriptionId &&
       selectedClusterRg &&
@@ -251,6 +298,7 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
     try {
       const response = await callPeer();
       setResult(response);
+      void loadExisting();
     } catch (err) {
       setError(formatApiError(err, "settings"));
     } finally {
@@ -311,6 +359,7 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
         }
         setResult(response);
         if (!response.rbac_remediation) {
+          void loadExisting();
           setRetryNote(
             response.error
               ? "Peering no longer blocked by RBAC; see the result above."
@@ -351,6 +400,7 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
       });
       setNsgResult(response);
       if (!dryRun && response.applied) {
+        void loadExisting();
         // Re-run the probe so the operator sees the unblocked state in one go.
         try {
           const reProbe = await callPeer();
@@ -390,6 +440,13 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
           is created idempotently; the dashboard&apos;s managed identity needs
           <code> Network Contributor</code> on both sides.
         </StatusLine>
+        <ExistingPeerings
+          loading={existingLoading}
+          error={existingError}
+          data={existing}
+          clusterName={clusterName}
+          onRefresh={() => void loadExisting()}
+        />
         <Field
           label="AKS cluster"
           hint={
@@ -633,6 +690,218 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
         {error && <StatusLine kind="error">{error}</StatusLine>}
       </Group>
     </Section>
+  );
+}
+
+function peeringStateTone(state: string): "success" | "warning" | "muted" {
+  const normalised = state.toLowerCase();
+  if (normalised === "connected") return "success";
+  if (normalised === "initiated") return "warning";
+  return "muted";
+}
+
+function PeeringFlag({ on, label }: { on: boolean; label: string }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 10,
+        textTransform: "uppercase",
+        letterSpacing: "0.04em",
+        color: on ? "var(--text-muted)" : "var(--text-faint)",
+        opacity: on ? 1 : 0.55,
+      }}
+      title={`${label}: ${on ? "allowed" : "blocked"}`}
+    >
+      {on ? <Check size={10} /> : <X size={10} />}
+      {label}
+    </span>
+  );
+}
+
+function ExistingPeeringRow({ item }: { item: VnetPeeringExistingItem }) {
+  const remote = item.remote_vnet;
+  const remoteLabel = remote?.name || item.name || "(unknown VNet)";
+  const subShort = remote?.subscription_id ? `${remote.subscription_id.slice(0, 8)}…` : "";
+  const locationBits = [remote?.resource_group, subShort].filter(Boolean).join(" · ");
+  const prefixes = item.remote_address_prefixes.join(", ");
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        padding: "10px 12px",
+        borderRadius: 8,
+        background: "var(--bg-tertiary)",
+        border: "1px solid var(--border-weak)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: 13,
+              color: "var(--text-primary)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={remote?.id || item.name}
+          >
+            {remoteLabel}
+          </div>
+          {locationBits && (
+            <div style={{ fontSize: 11, color: "var(--text-faint)" }}>{locationBits}</div>
+          )}
+        </div>
+        <Badge tone={peeringStateTone(item.peering_state)}>{item.peering_state}</Badge>
+      </div>
+      {prefixes && (
+        <div
+          style={{
+            fontSize: 11,
+            color: "var(--text-muted)",
+            fontFamily: "var(--font-mono, monospace)",
+            wordBreak: "break-word",
+          }}
+        >
+          {prefixes}
+        </div>
+      )}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+        <PeeringFlag on={item.allow_virtual_network_access} label="vnet access" />
+        <PeeringFlag on={item.allow_forwarded_traffic} label="forwarded" />
+        <PeeringFlag on={item.allow_gateway_transit} label="gw transit" />
+        <PeeringFlag on={item.use_remote_gateways} label="remote gw" />
+      </div>
+    </div>
+  );
+}
+
+function ExistingPeerings({
+  loading,
+  error,
+  data,
+  clusterName,
+  onRefresh,
+}: {
+  loading: boolean;
+  error: string | null;
+  data: VnetPeeringExistingResponse | null;
+  clusterName: string;
+  onRefresh: () => void;
+}) {
+  const peerings = data?.peerings ?? [];
+  const showRefresh = Boolean(clusterName);
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        padding: 12,
+        marginTop: 4,
+        marginBottom: 12,
+        borderRadius: 8,
+        background: "var(--surface-2, var(--bg-secondary))",
+        border: "1px solid var(--border-subtle, var(--border-weak))",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+        }}
+      >
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            fontSize: 12,
+            fontWeight: 600,
+            color: "var(--text-muted)",
+          }}
+        >
+          <Network size={13} strokeWidth={1.5} /> Existing peerings
+          {data?.aks_vnet_name ? (
+            <span style={{ fontWeight: 400, color: "var(--text-faint)" }}>
+              on {data.aks_vnet_name}
+            </span>
+          ) : null}
+        </span>
+        {showRefresh && (
+          <button
+            type="button"
+            className="glass-button"
+            onClick={onRefresh}
+            disabled={loading}
+            aria-label="Refresh existing peerings"
+            title="Refresh"
+            style={{
+              fontSize: 11,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "4px 8px",
+            }}
+          >
+            <RefreshCw size={11} className={loading ? "spin" : undefined} />
+            Refresh
+          </button>
+        )}
+      </div>
+
+      {!clusterName ? (
+        <StatusLine kind="info">
+          Select an AKS cluster to see the peerings already on its VNet.
+        </StatusLine>
+      ) : loading && !data ? (
+        <StatusLine kind="loading">Loading existing peerings…</StatusLine>
+      ) : error ? (
+        <StatusLine kind="error">{error}</StatusLine>
+      ) : data?.error ? (
+        <StatusLine kind="error">
+          Could not list peerings: {data.error}. The dashboard managed identity
+          may lack <code>Network Contributor</code> read access on this
+          cluster&apos;s VNet.
+        </StatusLine>
+      ) : data?.skipped ? (
+        <StatusLine kind="info">
+          No AKS auto-VNet to inspect
+          {data.reason === "aks_node_rg_has_no_vnet"
+            ? " — this cluster runs in a BYO subnet (no peering needed; VMs in that VNet reach the OpenAPI IP directly)."
+            : data.reason
+              ? ` (${data.reason}).`
+              : "."}
+        </StatusLine>
+      ) : peerings.length === 0 ? (
+        <StatusLine kind="info">
+          No peerings on this cluster&apos;s AKS VNet yet. Use the form below to
+          create one.
+        </StatusLine>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {peerings.map((item) => (
+            <ExistingPeeringRow key={item.name} item={item} />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

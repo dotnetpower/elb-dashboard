@@ -150,6 +150,28 @@ def test_warmup_plan_attached_when_cluster_supplied(
 
 
 # ---------------------------------------------------------------------------
+# fresh=1 — cache-bypass affordance
+# ---------------------------------------------------------------------------
+def test_fresh_param_accepted_and_returns_listing(
+    client: TestClient, fake_list_databases: None
+) -> None:
+    """The Database Builder's cache-bypass flag must be accepted and return the
+    same listing shape as a normal request."""
+    r = client.get(
+        "/api/blast/databases",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_account": "stfake",
+            "resource_group": "rg-fake",
+            "fresh": "1",
+        },
+    )
+    assert r.status_code == 200
+    names = {db["name"] for db in r.json()["databases"]}
+    assert {"16S_ribosomal_RNA", "core_nt", "nr_huge"} <= names
+
+
+# ---------------------------------------------------------------------------
 # Validation — node count guard
 # ---------------------------------------------------------------------------
 def test_negative_num_nodes_rejected_by_query_validation(

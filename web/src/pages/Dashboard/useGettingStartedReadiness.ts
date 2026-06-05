@@ -5,6 +5,7 @@ import { monitoringApi } from "@/api/endpoints";
 import type { ResourceConfig } from "@/components/SetupWizard";
 import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import { usePrefetchApiReference } from "@/hooks/usePrefetchApiReference";
+import { usePrefetchBlastDatabases } from "@/hooks/usePrefetchBlastDatabases";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 
 const MOBILE_MEDIA_QUERY = "(max-width: 760px)";
@@ -91,6 +92,16 @@ export function useGettingStartedReadiness({
     workloadResourceGroup: config.workloadResourceGroup,
     acrResourceGroup: config.acrResourceGroup,
     acrName: config.acrName,
+  });
+
+  // Pre-warm the New Search database listing so the "Choose Search Set" step
+  // renders instantly instead of showing a loading skeleton while the
+  // `blast-db` container is enumerated — especially noticeable when the
+  // workspace has many databases.
+  usePrefetchBlastDatabases({
+    subscriptionId: config.subscriptionId,
+    storageAccount: config.storageAccountName,
+    workloadResourceGroup: config.workloadResourceGroup,
   });
 
   const hasCluster = (aksQuery.data?.clusters?.length ?? 0) > 0;
