@@ -22,14 +22,19 @@ Risky contracts: The per-pod script lives in `PREPARE_DB_AKS_SCRIPT` and
     `Storage Blob Data Contributor` on the workload Storage account (the
     existing warmup RBAC grant covers this). Each pod runs an
     `azcopy copy --from-to=S3Blob` over its shard's files (selected via an
-    `--include-pattern` built from the shard basenames) inside a bounded
-    in-pod resume loop: the first attempt heals with `--overwrite=true`, then
-    up to `ELB_AZCOPY_MAX_ATTEMPTS-1` retries use `--overwrite=ifSourceNewer`
-    so a single transient per-file failure re-fetches only the missing files
-    instead of triggering a full-shard re-download (the historical
-    non-convergence). azcopy reads the public NCBI bucket anonymously and
-    writes through the kubelet MI to the Storage private endpoint, so the
-    account stays `publicNetworkAccess: Disabled`. azcopy is PINNED to 10.28.0 because the
+    `--include-pattern` built from the shard basenames). When the glob copy
+    reports failed transfers (typically a destination blob left with a
+    corrupt UNCOMMITTED block list by an earlier interrupted upload ->
+    `400 InvalidBlobOrBlock`), the script extracts ONLY the failed files via
+    `azcopy jobs show <jid> --with-status=Failed`, DELETES each bad dest blob
+    to clear its block list, and re-copies that single file directly -- no
+    glob re-scan and no re-download of the good blobs (`--overwrite` does NOT
+    skip already-committed S3->Blob blobs, so a full re-run would re-download
+    the whole ~200 GB shard). Bounded by `ELB_AZCOPY_MAX_ATTEMPTS` repair
+    rounds on the shrinking failed set. azcopy reads the public NCBI bucket
+    anonymously and writes through the kubelet MI to the Storage private
+    endpoint, so the account stays `publicNetworkAccess: Disabled`. azcopy is
+    PINNED to 10.28.0 because the
     `aka.ms` redirect now serves 10.32.4, which panics on every S3Blob copy
     (override via `ELB_AZCOPY_URL`); the download depends on egress to
     `github.com` from the pod NIC. The trailing `/*` source + include-pattern
@@ -211,66 +216,110 @@ if [ -z "$PATTERN" ]; then
     exit 2
 fi
 
-# azcopy S3Blob copy of EXACTLY this shard's files, wrapped in a bounded
-# in-pod resume loop. azcopy reads the public NCBI bucket anonymously (no
-# AWS creds needed) and writes through the kubelet managed identity to the
-# workload Storage account's private endpoint, so the account stays
-# publicNetworkAccess=Disabled. The trailing "/*" on the source yields the
-# FLAT "blast-db/<db>/<file>" layout elastic-blast requires (azcopy's
-# list-of-files mode would instead nest "<snapshot>/" under the destination
-# and break that layout). azcopy commits each blob atomically via its block
-# list, so a killed transfer never leaves a partial committed blob, and it
-# prints its own "% Done/Failed/Total" progress to stdout for live
-# `kubectl logs`.
+# azcopy S3Blob copy of EXACTLY this shard's files. azcopy reads the public
+# NCBI bucket anonymously (no AWS creds) and writes through the kubelet
+# managed identity to the workload Storage account's private endpoint, so
+# the account stays publicNetworkAccess=Disabled. The trailing "/*" on the
+# source + include-pattern yields the FLAT "blast-db/<db>/<file>" layout
+# elastic-blast requires (azcopy's list-of-files mode would nest
+# "<snapshot>/" under the destination and break that layout).
 #
-# WHY THE LOOP: a single shard streams ~200 GB / ~486 NCBI files over ~20
-# min, so one transient per-file hiccup (S3 503 / SNAT reset / read timeout)
-# is near-certain at this scale, and azcopy reports the whole run as exit 1
-# (CompletedWithErrors) even when 485/486 committed fine. Exiting on that
-# first non-zero would make the Job's per-index backoff relaunch a FRESH pod
-# that re-downloads the WHOLE shard from scratch with --overwrite=true --
-# which then hits another single-file blip near the end and never converges
-# (the historical "partial · N failed" loop that kept nt/core_nt from ever
-# finishing). Instead we re-run azcopy IN-PLACE: the first attempt uses
-# `--overwrite=true` to heal any truncated/legacy blob, and every retry uses
-# `--overwrite=ifSourceNewer` so the already-committed blobs (dest LMT newer
-# than the source snapshot) are SKIPPED and only the handful of failed files
-# are re-fetched -- converging in seconds, not another full download. Only
-# after ELB_AZCOPY_MAX_ATTEMPTS in-pod attempts still fail does the pod exit
-# non-zero, letting `backoffLimitPerIndex` relaunch the shard and ultimately
-# surface an honest failure for a genuinely unreachable file.
+# ROOT CAUSE this handles (verified live 2026-06-05): some destination blobs
+# carry a corrupt UNCOMMITTED block list left by an earlier interrupted
+# upload (a legacy streamed run, or a killed transfer). azcopy's server-side
+# "Put Block From URL" then fails on that blob with `400 InvalidBlobOrBlock`
+# -- a PERMANENT per-blob error that `--overwrite=true` does NOT clear (it
+# stages MORE blocks onto the bad list). azcopy returns exit 1
+# (CompletedWithErrors) for the whole shard even when 485/486 committed
+# fine. Re-running the whole glob just re-downloads the ~200 GB shard
+# (azcopy does NOT skip the committed blobs -- the if-source-newer overwrite
+# mode reports Skipped=0 for S3->Blob) and hits the same poisoned blob again
+# => the historical non-convergent loop.
+#
+# FIX: after the glob copy, if any transfers failed, extract ONLY the failed
+# files from `azcopy jobs show <jid> --with-status=Failed`, DELETE each bad
+# destination blob to clear its block list, then re-copy that single file
+# directly (no glob, no re-scan, no re-download of the good blobs). Verified
+# live: delete + single-file copy of a poisoned blob succeeds in ~37 s.
+# Bounded by ELB_AZCOPY_MAX_ATTEMPTS repair rounds on the shrinking failed
+# set; the pod exits non-zero only if a file still fails after all rounds.
 #
 # azcopy version is pinned to 10.28.0 above: aka.ms now serves 10.32.4,
 # which panics on every --from-to=S3Blob copy.
 SRC="${NCBI_BASE}/${SOURCE_VERSION}/*"
 MAX_ATTEMPTS="${ELB_AZCOPY_MAX_ATTEMPTS:-5}"
-log "COPY shard=${SHARD_INDEX} files=${TOTAL} src=${SOURCE_VERSION} attempts=${MAX_ATTEMPTS}"
-attempt=1
-overwrite="true"
-rc=1
-while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
-    log "COPY attempt=${attempt}/${MAX_ATTEMPTS} shard=${SHARD_INDEX} overwrite=${overwrite}"
-    set +e
-    azcopy copy "$SRC" "${DEST_BASE}/" \
-        --from-to=S3Blob \
-        --include-pattern "$PATTERN" \
-        --block-size-mb="$BLOCK_MB" \
-        --overwrite="$overwrite" \
-        --log-level=WARNING
-    rc=$?
-    set -e
-    if [ "$rc" -eq 0 ]; then
-        log "DONE shard=${SHARD_INDEX} azcopy_exit=0 attempt=${attempt}"
-        exit 0
-    fi
-    log "RETRY shard=${SHARD_INDEX} azcopy_exit=${rc} attempt=${attempt}"
-    # Re-fetch only the files that did not commit; skip the completed blobs.
-    overwrite="ifSourceNewer"
-    attempt=$((attempt + 1))
-    sleep 5
+log "COPY shard=${SHARD_INDEX} files=${TOTAL} src=${SOURCE_VERSION} repair_rounds=${MAX_ATTEMPTS}"
+set +e
+azcopy copy "$SRC" "${DEST_BASE}/" \
+    --from-to=S3Blob \
+    --include-pattern "$PATTERN" \
+    --block-size-mb="$BLOCK_MB" \
+    --overwrite=true \
+    --log-level=WARNING | tee /tmp/glob-copy.out
+rc=${PIPESTATUS[0]}
+set -e
+if [ "$rc" -eq 0 ]; then
+    log "DONE shard=${SHARD_INDEX} azcopy_exit=0 phase=glob"
+    exit 0
+fi
+JID=$(grep -oE 'Job [0-9a-f-]{36}' /tmp/glob-copy.out | head -1 | sed 's/^Job //')
+log "GLOB shard=${SHARD_INDEX} azcopy_exit=${rc} jid=${JID:-none} repair"
+if [ -z "$JID" ]; then
+    log "ERROR shard=${SHARD_INDEX} could not capture azcopy job id; cannot repair"
+    exit "$rc"
+fi
+
+# Seed the failed-file set from the glob job, then repair it in shrinking
+# rounds. Each pair is "<s3-source>\t<blob-destination>".
+azcopy jobs show "$JID" --with-status=Failed > /tmp/failed.txt 2>&1 || true
+mapfile -t PAIRS < <(python3 - /tmp/failed.txt <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+for m in re.finditer(
+    r"source:\s+(\S+)\s+destination:\s+(\S+)\s+status\s+Failed", text
+):
+    sys.stdout.write(m.group(1) + "\t" + m.group(2) + "\n")
+PY
+)
+round=1
+while [ "${#PAIRS[@]}" -gt 0 ] && [ "$round" -le "$MAX_ATTEMPTS" ]; do
+    log "REPAIR shard=${SHARD_INDEX} round=${round}/${MAX_ATTEMPTS} files=${#PAIRS[@]}"
+    STILL=()
+    for pair in "${PAIRS[@]}"; do
+        s="${pair%%$'\t'*}"
+        d="${pair##*$'\t'}"
+        base="${d##*/}"
+        # Delete the destination blob to clear any corrupt uncommitted block
+        # list (Delete Blob removes committed + uncommitted blocks). A 404
+        # (blob absent) is fine -- the copy recreates it.
+        azcopy remove "$d" --log-level=ERROR >/dev/null 2>&1 || true
+        set +e
+        azcopy copy "$s" "$d" \
+            --from-to=S3Blob \
+            --block-size-mb="$BLOCK_MB" \
+            --overwrite=true \
+            --log-level=ERROR >/tmp/one.out 2>&1
+        orc=$?
+        set -e
+        if [ "$orc" -eq 0 ]; then
+            log "REPAIR ok shard=${SHARD_INDEX} file=${base}"
+        else
+            log "REPAIR fail shard=${SHARD_INDEX} file=${base} rc=${orc}"
+            STILL+=("$pair")
+        fi
+    done
+    PAIRS=("${STILL[@]}")
+    round=$((round + 1))
+    [ "${#PAIRS[@]}" -gt 0 ] && sleep 5
 done
-log "DONE shard=${SHARD_INDEX} azcopy_exit=${rc} attempts_exhausted=${MAX_ATTEMPTS}"
-exit "$rc"
+if [ "${#PAIRS[@]}" -eq 0 ]; then
+    log "DONE shard=${SHARD_INDEX} azcopy_exit=0 phase=repair"
+    exit 0
+fi
+log "DONE shard=${SHARD_INDEX} FAILED files_remaining=${#PAIRS[@]} after ${MAX_ATTEMPTS} rounds"
+exit 1
 """
 
 
