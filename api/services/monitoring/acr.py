@@ -75,9 +75,7 @@ def _augment_actual_tags_from_manifests(
 
         results = acr_inventory.lookup_images(refs)
     except Exception as exc:
-        LOGGER.debug(
-            "acr manifest probe skipped (%s)", type(exc).__name__
-        )
+        LOGGER.debug("acr manifest probe skipped (%s)", type(exc).__name__)
         return
     for info in results:
         if not info.exists:
@@ -126,9 +124,7 @@ def list_acr_repositories(
         pending_by_run_id = acr_build_state.load_pending_builds(registry_name)
         pruner = acr_build_state.prune_terminal_builds
     except Exception as exc:
-        LOGGER.debug(
-            "acr_build_state load skipped (%s)", type(exc).__name__
-        )
+        LOGGER.debug("acr_build_state load skipped (%s)", type(exc).__name__)
 
     terminal_run_ids: set[str] = set()
     try:
@@ -137,9 +133,7 @@ def list_acr_repositories(
         preview = ContainerRegistryManagementClient(
             credential, subscription_id, api_version="2019-06-01-preview"
         )
-        for run in islice(
-            preview.runs.list(resource_group, registry_name), _ACR_RUNS_LIST_LIMIT
-        ):
+        for run in islice(preview.runs.list(resource_group, registry_name), _ACR_RUNS_LIST_LIMIT):
             status = run.status or ""
             run_id = run.run_id or ""
             if status == "Succeeded":
@@ -164,9 +158,7 @@ def list_acr_repositories(
                     full = f"{mapping['image']}:{mapping['tag']}"
                     if full not in building_images:
                         building_images.append(full)
-                        build_details.append(
-                            {"image": full, "status": status, "run_id": run_id}
-                        )
+                        build_details.append({"image": full, "status": status, "run_id": run_id})
             elif status in ("Failed", "Canceled", "Error", "Timeout"):
                 if run_id:
                     terminal_run_ids.add(run_id)
@@ -181,9 +173,7 @@ def list_acr_repositories(
             try:
                 pruner(registry_name, stale_run_ids)
             except Exception as exc:
-                LOGGER.debug(
-                    "acr_build_state prune skipped (%s)", type(exc).__name__
-                )
+                LOGGER.debug("acr_build_state prune skipped (%s)", type(exc).__name__)
 
     # Ground-truth pass: the run-history loop above only sees a bounded
     # window of recent ACR Task runs, so images built once at provisioning
@@ -199,4 +189,50 @@ def list_acr_repositories(
         "actual_tags": actual_tags,
         "building_images": building_images,
         "build_details": build_details,
+    }
+
+
+def get_acr_registry_detail(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    registry_name: str,
+) -> dict[str, Any]:
+    """Rich Well-Architected / CAF configuration surface for one ACR registry.
+
+    Single management call (`registries.get`). Policy fields require the Premium
+    SKU to be meaningful; the rules treat a `None` policy as "not available on
+    this SKU" and skip rather than fabricate.
+    """
+    management = acr_client(credential, subscription_id)
+    registry = management.registries.get(resource_group, registry_name)
+
+    policies = getattr(registry, "policies", None)
+    quarantine = getattr(policies, "quarantine_policy", None) if policies else None
+    trust = getattr(policies, "trust_policy", None) if policies else None
+    retention = getattr(policies, "retention_policy", None) if policies else None
+    export = getattr(policies, "export_policy", None) if policies else None
+    encryption = getattr(registry, "encryption", None)
+
+    def _status_enabled(obj: Any) -> bool | None:
+        if obj is None:
+            return None
+        status = getattr(obj, "status", None)
+        if status is None:
+            return None
+        return str(status).lower() == "enabled"
+
+    return {
+        "name": registry.name,
+        "sku": registry.sku.name if registry.sku else None,
+        "admin_user_enabled": getattr(registry, "admin_user_enabled", None),
+        "public_network_access": getattr(registry, "public_network_access", None),
+        "zone_redundancy": getattr(registry, "zone_redundancy", None),
+        "anonymous_pull_enabled": getattr(registry, "anonymous_pull_enabled", None),
+        "data_endpoint_enabled": getattr(registry, "data_endpoint_enabled", None),
+        "quarantine_policy": _status_enabled(quarantine),
+        "trust_policy": _status_enabled(trust),
+        "retention_policy": _status_enabled(retention),
+        "export_policy": _status_enabled(export),
+        "cmk_enabled": _status_enabled(encryption),
     }

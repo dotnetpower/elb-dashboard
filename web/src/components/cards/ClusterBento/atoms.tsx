@@ -1,11 +1,11 @@
 /**
  * Reusable visual atoms for the cluster bento layout.
  *
- * These are the production counterparts of the prototype atoms in
- * `web/src/pages/mockups/AksCardMockupsPremium.tsx`. They are kept
- * deliberately self-contained — no contextual state, no fetches —
- * so they remain easy to reuse from other dashboard surfaces (per-job
- * details, modal, BLAST analytics).
+ * Originally derived from a design-exploration prototype (the `mockups`
+ * pages were retired in issue #24). They are kept deliberately
+ * self-contained — no contextual state, no fetches — so they remain easy
+ * to reuse from other dashboard surfaces (per-job details, modal, BLAST
+ * analytics).
  */
 
 import {

@@ -446,54 +446,13 @@ def _try_dispatch_aks_mode(
                 sanitise(str(exc))[:200],
             )
 
-        max_pods_env = os.environ.get("PREPARE_DB_AKS_MAX_PARALLELISM", "10")
-        files_per_pod_env = os.environ.get("PREPARE_DB_AKS_FILES_PER_POD", "50")
-        image_env = os.environ.get(
-            "PREPARE_DB_AKS_AZCOPY_IMAGE", "mcr.microsoft.com/azure-cli:2.81.0"
-        )
-        timeout_env = os.environ.get("PREPARE_DB_AKS_JOB_TIMEOUT_SECONDS", str(4 * 60 * 60))
-        # New since Phase 1.5: per-shard azcopy buffer concurrency, K8s
-        # backoffLimit override, and ttlSecondsAfterFinished. Defaults
-        # come from `api.services.k8s.prepare_db_jobs` if the env var
-        # is unset / unparsable, so omitting them keeps the existing
-        # behaviour.
-        azcopy_concurrency_env = os.environ.get(
-            "PREPARE_DB_AKS_AZCOPY_CONCURRENCY", ""
-        )
-        backoff_limit_env = os.environ.get("PREPARE_DB_AKS_BACKOFF_LIMIT", "")
-        ttl_seconds_env = os.environ.get("PREPARE_DB_AKS_TTL_SECONDS", "")
-        try:
-            max_pods = max(1, int(max_pods_env))
-        except ValueError:
-            max_pods = 10
-        try:
-            files_per_pod = max(1, int(files_per_pod_env))
-        except ValueError:
-            files_per_pod = 50
-        try:
-            active_deadline = max(60, int(timeout_env))
-        except ValueError:
-            active_deadline = 4 * 60 * 60
-        try:
-            azcopy_concurrency: int | None = (
-                max(1, min(512, int(azcopy_concurrency_env)))
-                if azcopy_concurrency_env
-                else None
-            )
-        except ValueError:
-            azcopy_concurrency = None
-        try:
-            backoff_limit: int | None = (
-                max(0, int(backoff_limit_env)) if backoff_limit_env else None
-            )
-        except ValueError:
-            backoff_limit = None
-        try:
-            ttl_seconds_after_finished: int | None = (
-                max(60, int(ttl_seconds_env)) if ttl_seconds_env else None
-            )
-        except ValueError:
-            ttl_seconds_after_finished = None
+        # Kubernetes Job tuning knobs (env-driven) are resolved by the
+        # reusable, side-effect-free service helper — the route keeps only the
+        # dispatch + HTTP concerns. Unset / unparsable overrides stay None so
+        # the prepare_db_jobs builder defaults apply.
+        from api.services.storage.prepare_db_aks_params import resolve_aks_job_limits
+
+        limits = resolve_aks_job_limits()
 
         try:
             task_kwargs: dict[str, Any] = dict(
@@ -508,18 +467,13 @@ def _try_dispatch_aks_mode(
                 aks_resource_group=aks_rg,
                 cluster_name=cluster_name,
                 namespace=aks_namespace,
-                max_pods=max_pods,
-                files_per_pod=files_per_pod,
-                image=image_env,
-                active_deadline_seconds=active_deadline,
+                max_pods=limits.max_pods,
+                files_per_pod=limits.files_per_pod,
+                image=limits.image,
+                active_deadline_seconds=limits.active_deadline_seconds,
                 caller_oid=caller.object_id,
             )
-            if azcopy_concurrency is not None:
-                task_kwargs["azcopy_concurrency"] = azcopy_concurrency
-            if backoff_limit is not None:
-                task_kwargs["backoff_limit"] = backoff_limit
-            if ttl_seconds_after_finished is not None:
-                task_kwargs["ttl_seconds_after_finished"] = ttl_seconds_after_finished
+            task_kwargs.update(limits.task_overrides())
             result = _safe_send_task(
                 "api.tasks.storage.prepare_db_via_aks",
                 queue="storage",

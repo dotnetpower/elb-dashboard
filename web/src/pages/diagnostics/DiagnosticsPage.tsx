@@ -21,6 +21,7 @@ import {
   ChevronRight,
   ExternalLink,
   Gauge,
+  HeartPulse,
   HelpCircle,
   Info,
   Loader2,
@@ -45,17 +46,32 @@ import {
   sortBySeverity,
 } from "@/pages/diagnostics/diagnosticsModel";
 
-type CategoryId = "identity" | "reliability" | "availability" | "connectivity";
+type CategoryId =
+  | "identity"
+  | "reliability"
+  | "availability"
+  | "security"
+  | "operational"
+  | "connectivity";
 
 const RAIL: { id: CategoryId; label: string; icon: React.ReactNode; available: boolean }[] = [
   { id: "identity", label: "Identity and Security", icon: <ShieldCheck size={16} strokeWidth={1.5} />, available: true },
+  { id: "operational", label: "Operational health", icon: <HeartPulse size={16} strokeWidth={1.5} />, available: true },
   { id: "reliability", label: "Reliability", icon: <Activity size={16} strokeWidth={1.5} />, available: true },
   { id: "availability", label: "Availability and Performance", icon: <Gauge size={16} strokeWidth={1.5} />, available: true },
+  { id: "security", label: "Security posture", icon: <ShieldCheck size={16} strokeWidth={1.5} />, available: true },
   { id: "connectivity", label: "Connectivity Issues", icon: <Network size={16} strokeWidth={1.5} />, available: false },
 ];
 
 function isCategoryId(value: string | undefined): value is CategoryId {
-  return value === "identity" || value === "reliability" || value === "availability" || value === "connectivity";
+  return (
+    value === "identity" ||
+    value === "reliability" ||
+    value === "availability" ||
+    value === "security" ||
+    value === "operational" ||
+    value === "connectivity"
+  );
 }
 
 export default function DiagnosticsPage() {
@@ -115,7 +131,7 @@ export default function DiagnosticsPage() {
           {active === "identity" && (
             <IdentitySecurityDetail config={config} onBack={() => navigate("/")} />
           )}
-          {(active === "reliability" || active === "availability") && (
+          {(active === "reliability" || active === "availability" || active === "security" || active === "operational") && (
             <FindingsView category={active} config={config} />
           )}
           {active === "connectivity" && (
@@ -197,6 +213,11 @@ function FindingsView({
     void run(true);
   }, [run]);
 
+  // Practicality: a category has ~20-60 checks, most of them passing. Lead with
+  // the actionable ones (critical / warning / indeterminate) and hide the
+  // passing/info rows behind a toggle so green checkmarks never bury a problem.
+  const [showPassing, setShowPassing] = useState(false);
+
   if (!subscriptionId) {
     return (
       <div style={{ fontSize: 13, color: "var(--text-muted)", padding: "24px 0", lineHeight: 1.6 }}>
@@ -207,16 +228,38 @@ function FindingsView({
   }
 
   const findings = report?.findings ?? [];
-  const groups = groupByResource(findings);
+  const ACTIONABLE = new Set<Severity>(["critical", "warning", "indeterminate"]);
+  const passingCount = findings.filter((f) => !ACTIONABLE.has(f.severity)).length;
+  const visibleFindings = showPassing ? findings : findings.filter((f) => ACTIONABLE.has(f.severity));
+  const groups = groupByResource(visibleFindings);
 
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
         <RollupChips rollup={report?.rollup ?? {}} />
-        <button className="glass-button" onClick={handleRerun} disabled={loading}>
-          {loading ? <Loader2 size={12} strokeWidth={1.5} className="spin" /> : <RefreshCw size={12} strokeWidth={1.5} />}
-          {loading ? "Checking…" : "Re-run"}
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {passingCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowPassing((v) => !v)}
+              aria-pressed={showPassing}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                color: "var(--text-faint)",
+                fontSize: 11,
+                padding: 0,
+              }}
+            >
+              {showPassing ? "Hide" : "Show"} {passingCount} passing
+            </button>
+          )}
+          <button className="glass-button" onClick={handleRerun} disabled={loading}>
+            {loading ? <Loader2 size={12} strokeWidth={1.5} className="spin" /> : <RefreshCw size={12} strokeWidth={1.5} />}
+            {loading ? "Checking…" : "Re-run"}
+          </button>
+        </div>
       </div>
 
       {report?.has_indeterminate && (
@@ -274,6 +317,22 @@ function FindingsView({
       {!loading && !error && findings.length === 0 && (
         <div style={{ fontSize: 12, color: "var(--text-faint)", padding: "20px 0" }}>
           No findings for the configured resources.
+        </div>
+      )}
+
+      {!loading && !error && findings.length > 0 && visibleFindings.length === 0 && (
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            fontSize: 13,
+            color: "var(--text-muted)",
+            padding: "20px 0",
+          }}
+        >
+          <CheckCircle2 size={16} strokeWidth={1.5} style={{ color: "var(--success, #4c9a6a)" }} />
+          No issues found — all {passingCount} checks passed.
         </div>
       )}
 

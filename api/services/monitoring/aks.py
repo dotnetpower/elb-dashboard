@@ -175,5 +175,141 @@ def _kubelet_object_id(cluster: Any) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Rich detail serialisation for the diagnostics engine.
+#
+# `serialise_cluster_detail` is a SUPERSET of `_serialise_cluster`: it keeps
+# every key the monitor card relies on and adds the Well-Architected /
+# Cloud-Adoption-Framework configuration fields the diagnostics rule catalog
+# inspects (SKU tier, AAD/RBAC, private cluster, addons, auto-upgrade, OIDC,
+# security profile, per-pool zones/disk). Kept separate from `_serialise_cluster`
+# so the monitor `AksClusterSummary` contract stays frozen.
+# ---------------------------------------------------------------------------
+
+
+def _pool_detail(pool: Any) -> dict[str, Any]:
+    return {
+        "name": getattr(pool, "name", None),
+        "mode": getattr(pool, "mode", None),
+        "count": getattr(pool, "count", None),
+        "min_count": getattr(pool, "min_count", None),
+        "max_count": getattr(pool, "max_count", None),
+        "enable_auto_scaling": getattr(pool, "enable_auto_scaling", None),
+        "vm_size": getattr(pool, "vm_size", None),
+        "os_type": getattr(pool, "os_type", None),
+        "os_disk_type": getattr(pool, "os_disk_type", None),
+        "availability_zones": list(getattr(pool, "availability_zones", None) or []),
+        "max_pods": getattr(pool, "max_pods", None),
+        "orchestrator_version": getattr(pool, "orchestrator_version", None),
+    }
+
+
+def _addon_enabled(cluster: Any, addon_name: str) -> bool | None:
+    """Return True/False if the addon profile is present, else None (unknown).
+
+    Addon profile keys are case-insensitive in practice across API versions
+    (`omsagent` / `omsAgent`), so match case-folded.
+    """
+    profiles = getattr(cluster, "addon_profiles", None) or {}
+    if not profiles:
+        return None
+    target = addon_name.casefold()
+    for key, value in profiles.items():
+        if str(key).casefold() == target:
+            return bool(getattr(value, "enabled", False))
+    return False
+
+
+def serialise_cluster_detail(cluster: Any, *, resource_group: str) -> dict[str, Any]:
+    base = _serialise_cluster(cluster, resource_group=resource_group)
+    sku = getattr(cluster, "sku", None)
+    network = getattr(cluster, "network_profile", None)
+    api_access = getattr(cluster, "api_server_access_profile", None)
+    aad = getattr(cluster, "aad_profile", None)
+    auto_upgrade = getattr(cluster, "auto_upgrade_profile", None)
+    oidc = getattr(cluster, "oidc_issuer_profile", None)
+    security = getattr(cluster, "security_profile", None)
+    identity = getattr(cluster, "identity", None)
+    pools = cluster.agent_pool_profiles or []
+
+    workload_identity = None
+    defender = None
+    image_cleaner = None
+    if security is not None:
+        wi = getattr(security, "workload_identity", None)
+        workload_identity = bool(getattr(wi, "enabled", False)) if wi is not None else None
+        df = getattr(security, "defender", None)
+        # Defender is enabled when a Log Analytics workspace is wired in.
+        defender = bool(getattr(df, "security_monitoring", None)) if df is not None else None
+        ic = getattr(security, "image_cleaner", None)
+        image_cleaner = bool(getattr(ic, "enabled", False)) if ic is not None else None
+
+    base.update(
+        {
+            "sku_tier": getattr(sku, "tier", None) if sku is not None else None,
+            "pool_details": [_pool_detail(p) for p in pools],
+            "network_policy": getattr(network, "network_policy", None) if network else None,
+            "network_plugin_mode": (
+                getattr(network, "network_plugin_mode", None) if network else None
+            ),
+            "load_balancer_sku": getattr(network, "load_balancer_sku", None) if network else None,
+            "outbound_type": getattr(network, "outbound_type", None) if network else None,
+            "private_cluster": (
+                bool(getattr(api_access, "enable_private_cluster", False))
+                if api_access is not None
+                else None
+            ),
+            "authorized_ip_ranges": list(getattr(api_access, "authorized_ip_ranges", None) or [])
+            if api_access is not None
+            else [],
+            "disable_run_command": (
+                bool(getattr(api_access, "disable_run_command", False))
+                if api_access is not None
+                else None
+            ),
+            "aad_managed": bool(getattr(aad, "managed", False)) if aad is not None else None,
+            "azure_rbac": (
+                bool(getattr(aad, "enable_azure_rbac", False)) if aad is not None else None
+            ),
+            "disable_local_accounts": getattr(cluster, "disable_local_accounts", None),
+            "identity_type": getattr(identity, "type", None) if identity is not None else None,
+            "upgrade_channel": (
+                getattr(auto_upgrade, "upgrade_channel", None) if auto_upgrade else None
+            ),
+            "node_os_upgrade_channel": (
+                getattr(auto_upgrade, "node_os_upgrade_channel", None) if auto_upgrade else None
+            ),
+            "oidc_issuer_enabled": (
+                bool(getattr(oidc, "enabled", False)) if oidc is not None else None
+            ),
+            "workload_identity": workload_identity,
+            "defender_enabled": defender,
+            "image_cleaner_enabled": image_cleaner,
+            "addon_monitoring": _addon_enabled(cluster, "omsagent"),
+            "addon_azure_policy": _addon_enabled(cluster, "azurepolicy"),
+            "addon_keyvault_secrets": _addon_enabled(cluster, "azureKeyvaultSecretsProvider"),
+        }
+    )
+    return base
+
+
+def list_aks_clusters_detail_in_subscription(
+    credential: TokenCredential, subscription_id: str
+) -> list[dict[str, Any]]:
+    """Subscription-wide list of ELB-managed clusters with rich WAF/CAF detail.
+
+    Same managed-cluster filter as `list_aks_clusters_in_subscription`, but each
+    entry carries the configuration surface the diagnostics rules inspect.
+    """
+    client = aks_client(credential, subscription_id)
+    clusters: list[dict[str, Any]] = []
+    for cluster in client.managed_clusters.list():
+        if not _is_elb_managed_cluster(cluster):
+            continue
+        rg = _parse_rg_from_arm_id(getattr(cluster, "id", None))
+        clusters.append(serialise_cluster_detail(cluster, resource_group=rg))
+    return clusters
+
+
+# ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------

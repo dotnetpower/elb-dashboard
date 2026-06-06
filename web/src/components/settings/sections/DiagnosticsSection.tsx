@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Gauge,
+  HeartPulse,
   Loader2,
   Network,
   RefreshCw,
@@ -54,7 +55,13 @@ const SCOPE_LEVEL_LABEL: Record<AccessReviewRow["scope_level"], string> = {
  * to the dedicated `/diagnostics/:category` page. Identity and Security, plus
  * the Reliability and Availability best-practice checks, all live on that page.
  */
-type DiagnosticCategoryId = "identity" | "connectivity" | "reliability" | "availability";
+type DiagnosticCategoryId =
+  | "identity"
+  | "connectivity"
+  | "reliability"
+  | "availability"
+  | "security"
+  | "operational";
 
 interface DiagnosticCategory {
   id: DiagnosticCategoryId;
@@ -74,10 +81,18 @@ const DIAGNOSTIC_CATEGORIES: DiagnosticCategory[] = [
     available: true,
   },
   {
+    id: "operational",
+    label: "Operational health",
+    description:
+      "Live production-incident tracking — Kubernetes warning events, pod restarts / crash loops, node pressure, failed Jobs, failed/stuck BLAST searches, and API route errors, each traceable to the failing object.",
+    icon: <HeartPulse size={18} strokeWidth={1.5} />,
+    available: true,
+  },
+  {
     id: "reliability",
     label: "Reliability",
     description:
-      "AKS health, autoscaling, Kubernetes version, Storage redundancy, and registry SKU against Well-Architected best practices.",
+      "AKS health, autoscaling, availability zones, Kubernetes version, Storage redundancy / data protection, and registry SKU against Well-Architected best practices.",
     icon: <Activity size={18} strokeWidth={1.5} />,
     available: true,
   },
@@ -85,8 +100,16 @@ const DIAGNOSTIC_CATEGORIES: DiagnosticCategory[] = [
     id: "availability",
     label: "Availability and Performance",
     description:
-      "AKS node pressure, sidecar resource headroom, and API latency / error-rate against Well-Architected best practices.",
+      "AKS node pressure, network plugin / load balancer SKU, monitoring, sidecar headroom, and API latency / error-rate against Well-Architected best practices.",
     icon: <Gauge size={18} strokeWidth={1.5} />,
+    available: true,
+  },
+  {
+    id: "security",
+    label: "Security posture",
+    description:
+      "AKS / Storage / ACR resource hardening against the Well-Architected Security pillar — Entra integration, network access, TLS, shared-key, anonymous access, and encryption.",
+    icon: <ShieldCheck size={18} strokeWidth={1.5} />,
     available: true,
   },
   {

@@ -133,6 +133,95 @@ def get_storage_summary(
     return out
 
 
+def get_storage_account_detail(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    account_name: str,
+) -> dict[str, Any]:
+    """Rich Well-Architected / CAF configuration surface for one Storage account.
+
+    Reads the management properties plus the blob-service properties (soft
+    delete / versioning / point-in-time restore live there, a second call). The
+    blob-service read is best-effort: if it fails the account-level fields are
+    still returned and the blob-service fields are left ``None`` (the rule then
+    skips, never fabricates).
+    """
+    client = storage_client(credential, subscription_id)
+    account = client.storage_accounts.get_properties(resource_group, account_name)
+
+    encryption = getattr(account, "encryption", None)
+    key_source = getattr(encryption, "key_source", None) if encryption is not None else None
+    require_infra = (
+        getattr(encryption, "require_infrastructure_encryption", None)
+        if encryption is not None
+        else None
+    )
+    network = getattr(account, "network_rule_set", None)
+    pe = list(getattr(account, "private_endpoint_connections", None) or [])
+
+    detail: dict[str, Any] = {
+        "name": account.name,
+        "region": account.location,
+        "sku": account.sku.name if account.sku else None,
+        "kind": account.kind,
+        "access_tier": getattr(account, "access_tier", None),
+        "public_network_access": account.public_network_access,
+        "is_hns_enabled": account.is_hns_enabled,
+        "https_only": getattr(account, "enable_https_traffic_only", None),
+        "min_tls_version": getattr(account, "minimum_tls_version", None),
+        "allow_blob_public_access": getattr(account, "allow_blob_public_access", None),
+        "allow_shared_key_access": getattr(account, "allow_shared_key_access", None),
+        "default_to_oauth": getattr(account, "default_to_o_auth_authentication", None),
+        "cross_tenant_replication": getattr(account, "allow_cross_tenant_replication", None),
+        "cmk": (str(key_source) == "Microsoft.Keyvault") if key_source is not None else None,
+        "infrastructure_encryption": require_infra,
+        "default_network_action": (
+            getattr(network, "default_action", None) if network is not None else None
+        ),
+        "private_endpoint_count": len(pe),
+        # Blob-service-level fields, filled below (best-effort).
+        "blob_soft_delete": None,
+        "container_soft_delete": None,
+        "versioning": None,
+        "point_in_time_restore": None,
+        "change_feed": None,
+    }
+
+    try:
+        props = client.blob_services.get_service_properties(resource_group, account_name)
+        del_policy = getattr(props, "delete_retention_policy", None)
+        cont_policy = getattr(props, "container_delete_retention_policy", None)
+        restore = getattr(props, "restore_policy", None)
+        change_feed = getattr(props, "change_feed", None)
+        detail.update(
+            {
+                "blob_soft_delete": bool(getattr(del_policy, "enabled", False))
+                if del_policy is not None
+                else None,
+                "container_soft_delete": bool(getattr(cont_policy, "enabled", False))
+                if cont_policy is not None
+                else None,
+                "versioning": getattr(props, "is_versioning_enabled", None),
+                "point_in_time_restore": bool(getattr(restore, "enabled", False))
+                if restore is not None
+                else None,
+                "change_feed": bool(getattr(change_feed, "enabled", False))
+                if change_feed is not None
+                else None,
+            }
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "storage blob-service props failed account=%s rg=%s: %s",
+            account_name,
+            resource_group,
+            type(exc).__name__,
+        )
+
+    return detail
+
+
 def set_storage_public_access(
     credential: TokenCredential,
     subscription_id: str,

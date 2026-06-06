@@ -46,6 +46,23 @@ def test_unknown_category_is_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_operational_category_is_supported(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import monitoring as monitoring_svc
+
+    monkeypatch.setattr(
+        monitoring_svc, "list_aks_clusters_detail_in_subscription", lambda *a, **k: []
+    )
+    resp = client.get("/api/diagnostics/operational?subscription_id=sub-1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["category"] == "operational"
+    ids = {f["id"] for f in body["findings"]}
+    # No clusters → aks.runtime info finding present.
+    assert "aks.runtime" in ids
+
+
 def test_missing_subscription_is_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
     resp = client.get("/api/diagnostics/reliability")
@@ -57,7 +74,7 @@ def test_reliability_report_shape(client: TestClient, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(
         monitoring_svc,
-        "list_aks_clusters_in_subscription",
+        "list_aks_clusters_detail_in_subscription",
         lambda *a, **k: [
             {
                 "name": "elb-cluster-01",
@@ -71,12 +88,12 @@ def test_reliability_report_shape(client: TestClient, monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(
         monitoring_svc,
-        "get_storage_summary",
+        "get_storage_account_detail",
         lambda *a, **k: {"name": "stelb", "sku": "Standard_LRS"},
     )
     monkeypatch.setattr(
         monitoring_svc,
-        "list_acr_repositories",
+        "get_acr_registry_detail",
         lambda *a, **k: {"name": "acrelb", "sku": "Basic"},
     )
 
@@ -109,9 +126,9 @@ def test_fetch_failure_becomes_indeterminate_not_500(
         err.status_code = 403
         raise err
 
-    monkeypatch.setattr(monitoring_svc, "list_aks_clusters_in_subscription", _boom)
-    monkeypatch.setattr(monitoring_svc, "get_storage_summary", _boom)
-    monkeypatch.setattr(monitoring_svc, "list_acr_repositories", _boom)
+    monkeypatch.setattr(monitoring_svc, "list_aks_clusters_detail_in_subscription", _boom)
+    monkeypatch.setattr(monitoring_svc, "get_storage_account_detail", _boom)
+    monkeypatch.setattr(monitoring_svc, "get_acr_registry_detail", _boom)
 
     resp = client.get(_url())
     assert resp.status_code == 200
@@ -137,7 +154,7 @@ def test_availability_report_shape(client: TestClient, monkeypatch: pytest.Monke
 
     monkeypatch.setattr(
         monitoring_svc,
-        "list_aks_clusters_in_subscription",
+        "list_aks_clusters_detail_in_subscription",
         lambda *a, **k: [],  # no clusters → info finding, exercises the path
     )
 
@@ -151,3 +168,48 @@ def test_availability_report_shape(client: TestClient, monkeypatch: pytest.Monke
     # api + container_app are local reads, always present; aks present via the
     # no-clusters info finding.
     assert "aks.node_pressure" in ids
+
+
+def test_reliability_and_security_share_one_fetch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Performance contract: Reliability and Security use the same gatherer, so
+    viewing both must hit ARM only once (shared snapshot cache, not per-category).
+    """
+    from api.services import monitoring as monitoring_svc
+
+    calls = {"aks": 0, "storage": 0, "acr": 0}
+
+    def _aks(*a, **k):
+        calls["aks"] += 1
+        return [
+            {
+                "name": "c1",
+                "resource_group": "rg-elb",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "k8s_version": "1.30.4",
+                "agent_pools": [{"mode": "User", "enable_auto_scaling": True}],
+                "aad_managed": True,
+            }
+        ]
+
+    def _storage(*a, **k):
+        calls["storage"] += 1
+        return {"name": "stelb", "sku": "Standard_GRS"}
+
+    def _acr(*a, **k):
+        calls["acr"] += 1
+        return {"name": "acrelb", "sku": "Premium"}
+
+    monkeypatch.setattr(monitoring_svc, "list_aks_clusters_detail_in_subscription", _aks)
+    monkeypatch.setattr(monitoring_svc, "get_storage_account_detail", _storage)
+    monkeypatch.setattr(monitoring_svc, "get_acr_registry_detail", _acr)
+
+    assert client.get(_url("reliability")).status_code == 200
+    assert client.get(_url("security")).status_code == 200
+
+    # One fetch total across both categories — the second served from the
+    # shared snapshot cache.
+    assert calls == {"aks": 1, "storage": 1, "acr": 1}
+

@@ -186,3 +186,69 @@ def test_no_clusters_is_info() -> None:
     snap = {"aks": ResourceSnapshot(kind="aks", data={"clusters": []})}
     findings = _by_id(evaluate_reliability(snap))
     assert findings["aks.present"].severity == "info"
+
+
+def test_expanded_aks_reliability_specs() -> None:
+    cluster = {
+        "name": "c1",
+        "provisioning_state": "Succeeded",
+        "power_state": "Running",
+        "k8s_version": "1.30.0",
+        "agent_pools": [{"mode": "User", "enable_auto_scaling": True}],
+        "pool_details": [
+            {"mode": "System", "availability_zones": ["1", "2", "3"]},
+            {"mode": "User", "availability_zones": ["1", "2", "3"]},
+        ],
+        "sku_tier": "Standard",
+        "upgrade_channel": "patch",
+        "node_os_upgrade_channel": "NodeImage",
+    }
+    findings = _by_id(
+        evaluate_reliability({"aks": ResourceSnapshot(kind="aks", data={"clusters": [cluster]})})
+    )
+    assert findings["aks.sku_tier"].severity == "ok"
+    assert findings["aks.availability_zones"].severity == "ok"
+    assert findings["aks.pool_isolation"].severity == "ok"
+    assert findings["aks.auto_upgrade_channel"].severity == "ok"
+
+
+def test_free_tier_and_no_zones_warn() -> None:
+    cluster = {
+        "name": "c1",
+        "provisioning_state": "Succeeded",
+        "power_state": "Running",
+        "k8s_version": "1.30.0",
+        "agent_pools": [{"mode": "User", "enable_auto_scaling": True}],
+        "pool_details": [{"mode": "System", "availability_zones": []}],
+        "sku_tier": "Free",
+    }
+    findings = _by_id(
+        evaluate_reliability({"aks": ResourceSnapshot(kind="aks", data={"clusters": [cluster]})})
+    )
+    assert findings["aks.sku_tier"].severity == "warning"
+    assert findings["aks.availability_zones"].severity == "warning"
+    # System-only cluster (no user pool) → isolation warning.
+    assert findings["aks.pool_isolation"].severity == "warning"
+
+
+def test_storage_data_protection_specs() -> None:
+    data = {
+        "name": "st",
+        "sku": "Standard_GRS",
+        "versioning": True,
+        "blob_soft_delete": True,
+        "container_soft_delete": False,
+    }
+    findings = _by_id(
+        evaluate_reliability({"storage": ResourceSnapshot(kind="storage", data=data)})
+    )
+    assert findings["storage.versioning"].severity == "ok"
+    assert findings["storage.blob_soft_delete"].severity == "ok"
+    assert findings["storage.container_soft_delete"].severity == "warning"
+
+
+def test_acr_reliability_specs() -> None:
+    data = {"name": "acr", "sku": "Premium", "zone_redundancy": "Enabled", "retention_policy": True}
+    findings = _by_id(evaluate_reliability({"acr": ResourceSnapshot(kind="acr", data=data)}))
+    assert findings["acr.zone_redundancy"].severity == "ok"
+    assert findings["acr.retention_policy"].severity == "ok"

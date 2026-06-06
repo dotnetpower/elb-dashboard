@@ -14,7 +14,7 @@
 import { api } from "@/api/client";
 
 export type Severity = "ok" | "info" | "warning" | "critical" | "indeterminate";
-export type DiagnosticCategory = "reliability" | "availability";
+export type DiagnosticCategory = "reliability" | "availability" | "security" | "operational";
 export type ResourceKind =
   | "aks"
   | "storage"

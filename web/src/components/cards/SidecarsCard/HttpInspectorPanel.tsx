@@ -1,7 +1,7 @@
 /**
  * HttpInspectorPanel — production wrapper around the critique-hardened
- * Variant A from `web/src/pages/mockups/SidecarInspectorMockups.tsx`,
- * fed by the live `/api/monitor/sidecar-requests` endpoint.
+ * Variant A in `./sidecarRequestInspector.tsx`, fed by the live
+ * `/api/monitor/sidecar-requests` endpoint.
  *
  * Shape of the upstream response is documented in
  * `api/services/request_metrics.py` (`_DetailSample.to_dict`); sensitive
@@ -25,7 +25,7 @@ import {
 import {
   type InspectorRequest,
   VariantA,
-} from "@/pages/mockups/SidecarInspectorMockups";
+} from "@/components/cards/SidecarsCard/sidecarRequestInspector";
 
 const REFRESH_INTERVAL_MS = 5_000;
 const REQUEST_LIMIT = 200;
@@ -59,12 +59,18 @@ function degradedSignalFromBody(
       record.degraded_reason,
       record.external_degraded_reason,
       record.message,
-    ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    ].filter(
+      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    );
     return { degraded: true, degradedReasons: reasons };
   }
 
   if (/"(?:external_)?degraded"\s*:\s*true/.test(body)) {
-    const reasons = [...body.matchAll(/"(?:degraded_reason|external_degraded_reason|message)"\s*:\s*"((?:\\.|[^"\\])*)"/g)]
+    const reasons = [
+      ...body.matchAll(
+        /"(?:degraded_reason|external_degraded_reason|message)"\s*:\s*"((?:\\.|[^"\\])*)"/g,
+      ),
+    ]
       .map((match) => match[1].replace(/\\"/g, '"'))
       .filter((value) => value.trim().length > 0);
     return { degraded: true, degradedReasons: reasons };
@@ -118,9 +124,7 @@ function mapSampleToInspector(s: SidecarRequestSample): InspectorRequest {
 
 export function HttpInspectorPanel() {
   const [data, setData] = useState<InspectorRequest[]>([]);
-  const [meta, setMeta] = useState<{ count: number; capacity: number } | null>(
-    null,
-  );
+  const [meta, setMeta] = useState<{ count: number; capacity: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState<number | null>(null);
@@ -128,9 +132,8 @@ export function HttpInspectorPanel() {
   const fetchOnce = useCallback(async () => {
     setLoading(true);
     try {
-      const resp: SidecarRequestsResponse = await monitoringApi.sidecarRequests(
-        REQUEST_LIMIT,
-      );
+      const resp: SidecarRequestsResponse =
+        await monitoringApi.sidecarRequests(REQUEST_LIMIT);
       setData(resp.items.map(mapSampleToInspector));
       setMeta({ count: resp.count, capacity: resp.capacity });
       setError(null);
@@ -243,15 +246,13 @@ export function HttpInspectorPanel() {
             textAlign: "center",
           }}
         >
-          No requests captured yet. The inspector buffer is per-process and
-          filters streaming/self-inspection routes; it starts populating when
-          non-streaming API traffic flows through this api process.
+          No requests captured yet. The inspector buffer is per-process and filters
+          streaming/self-inspection routes; it starts populating when non-streaming API
+          traffic flows through this api process.
         </div>
       )}
 
-      {!error && data.length > 0 && (
-        <VariantA data={data} />
-      )}
+      {!error && data.length > 0 && <VariantA data={data} />}
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>

@@ -59,6 +59,27 @@ explain itself and link to the fix.
 
 ## 3. Severity model
 
+> **Catalog scope (WAF/CAF + live operations).** The config catalogs apply every
+> Well-Architected / Cloud-Adoption-Framework recommendation that maps to a
+> **single fetchable configuration field** on the resources this control plane
+> provisions (AKS, Storage, ACR, Container App, API) — ~60 checks across
+> **Reliability**, **Availability and Performance**, and **Security posture**
+> (WAF Security pillar, distinct from the IAM access-review view). A fourth
+> category, **Operational health**, reads **live runtime signals** — Kubernetes
+> Warning events (aggregated by reason class), pod restarts / crash loops /
+> stuck-Pending / Failed, node NotReady + disk/memory/PID pressure + cordon,
+> under-replicated/down Deployments, Failed/retrying Jobs, failed & stale BLAST
+> job-state rows, and per-route API 5xx / latency hot spots — ~30 checks that an
+> operator can **trace to the specific failing object** (each finding carries
+> the offending pod/node/job/reason + a sample message in `observed`). Config
+> checks are declarative (`rules/specs.py` `RuleSpec`); operational checks are
+> aggregations capped per reason-class so a noisy cluster cannot flood the page.
+> WAF items that are design/process guidance (multi-region, chaos testing, IaC)
+> or need a separate resource/call (backup vault, diagnostic settings, Azure
+> Policy evaluation, Key Vault) are intentionally **out of scope** — surfacing
+> them would mean fabricating an `ok`/`warning`.
+
+
 | Severity | Meaning | Example |
 |---|---|---|
 | `ok` | Checked, best practice met | AKS autoscaler enabled |

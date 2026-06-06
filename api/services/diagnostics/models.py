@@ -25,7 +25,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Severity = Literal["ok", "info", "warning", "critical", "indeterminate"]
-DiagnosticCategory = Literal["reliability", "availability"]
+DiagnosticCategory = Literal["reliability", "availability", "security", "operational"]
 ResourceKind = Literal["aks", "storage", "acr", "container_app", "api", "queue"]
 
 # Severity ordering for sorting/rollup. Higher = more attention. `indeterminate`

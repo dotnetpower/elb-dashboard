@@ -23,6 +23,12 @@ from typing import Any
 
 from api.services.diagnostics.models import Finding, ResourceSnapshot
 from api.services.diagnostics.rules.common import indeterminate_for, short_name
+from api.services.diagnostics.rules.specs import (
+    RuleSpec,
+    evaluate_specs,
+    set_and_not,
+    want_true,
+)
 
 _PILLAR = "Reliability"
 _CATEGORY = "reliability"
@@ -31,8 +37,17 @@ _CATEGORY = "reliability"
 _DOC_AKS = "https://learn.microsoft.com/azure/aks/best-practices"
 _DOC_AKS_UPGRADE = "https://learn.microsoft.com/azure/aks/supported-kubernetes-versions"
 _DOC_AKS_SCALE = "https://learn.microsoft.com/azure/aks/cluster-autoscaler-overview"
+_DOC_AKS_ZONES = "https://learn.microsoft.com/azure/aks/availability-zones"
+_DOC_AKS_SLA = "https://learn.microsoft.com/azure/aks/free-standard-pricing-tiers"
+_DOC_AKS_UPGRADE_CHANNEL = "https://learn.microsoft.com/azure/aks/auto-upgrade-cluster"
+_DOC_AKS_POOLS = "https://learn.microsoft.com/azure/aks/use-system-pools"
 _DOC_STORAGE_REDUNDANCY = "https://learn.microsoft.com/azure/storage/common/storage-redundancy"
+_DOC_STORAGE_PROTECT = "https://learn.microsoft.com/azure/storage/blobs/data-protection-overview"
 _DOC_ACR_SKU = "https://learn.microsoft.com/azure/container-registry/container-registry-skus"
+_DOC_ACR_ZONE = "https://learn.microsoft.com/azure/container-registry/zone-redundancy"
+_DOC_ACR_RETENTION = (
+    "https://learn.microsoft.com/azure/container-registry/container-registry-retention-policy"
+)
 
 # k8s minor-version support floor, as a conservative cutoff. Versions below this
 # are flagged `warning` ("plan an upgrade"), NOT `critical`, because the exact
@@ -53,6 +68,228 @@ def evaluate_reliability(snapshots: dict[str, ResourceSnapshot]) -> list[Finding
 
 def _mk(**kwargs: Any) -> Finding:
     return Finding(category=_CATEGORY, pillar=_PILLAR, **kwargs)
+
+
+# Declarative reliability checks (single-field). Aggregations (zones, pool
+# isolation, k8s version) stay as custom functions below.
+_AKS_RELIABILITY_SPECS: list[RuleSpec] = [
+    RuleSpec(
+        id="aks.sku_tier",
+        resource_kind="aks",
+        pillar=_PILLAR,
+        field="sku_tier",
+        title_ok="Cluster uses a paid SKU tier with an uptime SLA",
+        title_bad="Cluster uses the Free tier (no uptime SLA)",
+        detail_ok="The Standard/Premium tier provides a financially-backed API server uptime SLA.",
+        detail_bad="The Free tier has no uptime SLA for the API server.",
+        recommendation="Use the Standard tier for a production-grade uptime SLA.",
+        doc_url=_DOC_AKS_SLA,
+        compliant=lambda v: None if v is None else str(v).lower() in {"standard", "premium"},
+    ),
+    RuleSpec(
+        id="aks.auto_upgrade_channel",
+        resource_kind="aks",
+        pillar=_PILLAR,
+        field="upgrade_channel",
+        title_ok="A cluster auto-upgrade channel is configured",
+        title_bad="No cluster auto-upgrade channel is configured",
+        detail_ok="The cluster receives Kubernetes patch/minor upgrades automatically.",
+        detail_bad="Without an auto-upgrade channel the cluster can drift out of support.",
+        recommendation="Set an auto-upgrade channel (e.g. patch or stable).",
+        doc_url=_DOC_AKS_UPGRADE_CHANNEL,
+        bad_severity="info",
+        compliant=set_and_not("none"),
+    ),
+    RuleSpec(
+        id="aks.node_os_upgrade_channel",
+        resource_kind="aks",
+        pillar=_PILLAR,
+        field="node_os_upgrade_channel",
+        title_ok="A node OS auto-upgrade channel is configured",
+        title_bad="No node OS auto-upgrade channel is configured",
+        detail_ok="Node OS security patches are applied automatically.",
+        detail_bad="Node OS security patches are not applied automatically.",
+        recommendation="Set a node OS upgrade channel (e.g. NodeImage).",
+        doc_url=_DOC_AKS_UPGRADE_CHANNEL,
+        bad_severity="info",
+        compliant=set_and_not("none"),
+    ),
+]
+
+_STORAGE_RELIABILITY_SPECS: list[RuleSpec] = [
+    RuleSpec(
+        id="storage.versioning",
+        resource_kind="storage",
+        pillar=_PILLAR,
+        field="versioning",
+        title_ok="Blob versioning is enabled",
+        title_bad="Blob versioning is not enabled",
+        detail_ok="Blob changes are versioned and can be restored to an earlier state.",
+        detail_bad="Without versioning, overwritten blobs cannot be restored.",
+        recommendation="Enable blob versioning for point-in-time recovery.",
+        doc_url=_DOC_STORAGE_PROTECT,
+        compliant=want_true,
+    ),
+    RuleSpec(
+        id="storage.blob_soft_delete",
+        resource_kind="storage",
+        pillar=_PILLAR,
+        field="blob_soft_delete",
+        title_ok="Blob soft delete is enabled",
+        title_bad="Blob soft delete is not enabled",
+        detail_ok="Deleted blobs can be recovered within the retention window.",
+        detail_bad="Deleted blobs cannot be recovered.",
+        recommendation="Enable blob soft delete with a retention window (>= 7 days).",
+        doc_url=_DOC_STORAGE_PROTECT,
+        compliant=want_true,
+    ),
+    RuleSpec(
+        id="storage.container_soft_delete",
+        resource_kind="storage",
+        pillar=_PILLAR,
+        field="container_soft_delete",
+        title_ok="Container soft delete is enabled",
+        title_bad="Container soft delete is not enabled",
+        detail_ok="Deleted containers can be recovered within the retention window.",
+        detail_bad="Deleted containers cannot be recovered.",
+        recommendation="Enable container soft delete with a retention window.",
+        doc_url=_DOC_STORAGE_PROTECT,
+        compliant=want_true,
+    ),
+    RuleSpec(
+        id="storage.point_in_time_restore",
+        resource_kind="storage",
+        pillar=_PILLAR,
+        field="point_in_time_restore",
+        title_ok="Point-in-time restore is enabled",
+        title_bad="Point-in-time restore is not enabled",
+        detail_ok="Block blob data can be restored to an earlier state.",
+        detail_bad="Point-in-time restore is not configured.",
+        recommendation="Enable point-in-time restore for block blob recovery (optional).",
+        doc_url=_DOC_STORAGE_PROTECT,
+        bad_severity="info",
+        compliant=want_true,
+    ),
+    RuleSpec(
+        id="storage.change_feed",
+        resource_kind="storage",
+        pillar=_PILLAR,
+        field="change_feed",
+        title_ok="Blob change feed is enabled",
+        title_bad="Blob change feed is not enabled",
+        detail_ok="An ordered, durable log of blob changes is recorded for audit/recovery.",
+        detail_bad="No change feed is recorded for blob change tracking.",
+        recommendation="Enable the blob change feed for change tracking (optional).",
+        doc_url=_DOC_STORAGE_PROTECT,
+        bad_severity="info",
+        compliant=want_true,
+    ),
+]
+
+_ACR_RELIABILITY_SPECS: list[RuleSpec] = [
+    RuleSpec(
+        id="acr.zone_redundancy",
+        resource_kind="acr",
+        pillar=_PILLAR,
+        field="zone_redundancy",
+        title_ok="Registry zone redundancy is enabled",
+        title_bad="Registry zone redundancy is not enabled",
+        detail_ok="The registry replicates across availability zones in the region.",
+        detail_bad="The registry is not zone-redundant.",
+        recommendation="Enable zone redundancy (Premium SKU) for in-region resilience.",
+        doc_url=_DOC_ACR_ZONE,
+        bad_severity="info",
+        compliant=lambda v: None if v is None else str(v).lower() == "enabled",
+    ),
+    RuleSpec(
+        id="acr.retention_policy",
+        resource_kind="acr",
+        pillar=_PILLAR,
+        field="retention_policy",
+        title_ok="An untagged-manifest retention policy is enabled",
+        title_bad="No untagged-manifest retention policy is enabled",
+        detail_ok="Untagged manifests are cleaned up automatically.",
+        detail_bad="Untagged manifests accumulate without a retention policy.",
+        recommendation="Enable a retention policy to clean up untagged manifests (Premium SKU).",
+        doc_url=_DOC_ACR_RETENTION,
+        bad_severity="info",
+        compliant=want_true,
+    ),
+]
+
+
+def _aks_zone_isolation_findings(cluster: dict[str, Any], name: str) -> list[Finding]:
+    """Custom multi-field AKS reliability checks (zones + system/user isolation)."""
+    pools: list[dict[str, Any]] = cluster.get("pool_details") or cluster.get("agent_pools") or []
+    out: list[Finding] = []
+
+    # Availability zones — any pool spread across >1 zone.
+    if pools:
+        zoned = any(len(p.get("availability_zones") or []) > 1 for p in pools)
+        # Only emit when we actually have zone data (detail snapshot).
+        if any("availability_zones" in p for p in pools):
+            out.append(
+                _mk(
+                    id="aks.availability_zones",
+                    resource_kind="aks",
+                    resource_name=name,
+                    severity="ok" if zoned else "warning",
+                    title=(
+                        f"Cluster '{name}' spans availability zones"
+                        if zoned
+                        else f"Cluster '{name}' does not use availability zones"
+                    ),
+                    detail=(
+                        "At least one node pool is spread across availability zones."
+                        if zoned
+                        else "No node pool is spread across availability zones."
+                    ),
+                    recommendation=(
+                        ""
+                        if zoned
+                        else "Spread node pools across availability zones for in-region resilience."
+                    ),
+                    doc_url=_DOC_AKS_ZONES,
+                    observed={
+                        "zoned_pools": str(
+                            sum(1 for p in pools if len(p.get("availability_zones") or []) > 1)
+                        )
+                    },
+                )
+            )
+
+    # System / user pool isolation.
+    if pools and any("mode" in p for p in pools):
+        modes = {str(p.get("mode") or "").lower() for p in pools}
+        isolated = "system" in modes and "user" in modes
+        out.append(
+            _mk(
+                id="aks.pool_isolation",
+                resource_kind="aks",
+                resource_name=name,
+                severity="ok" if isolated else "warning",
+                title=(
+                    f"Cluster '{name}' isolates system and user node pools"
+                    if isolated
+                    else f"Cluster '{name}' does not isolate system and user node pools"
+                ),
+                detail=(
+                    "Dedicated system and user node pools keep AKS system pods isolated."
+                    if isolated
+                    else "System and workload pods may share a node pool."
+                ),
+                recommendation=(
+                    ""
+                    if isolated
+                    else (
+                        "Add a dedicated user node pool so system pods stay "
+                        "isolated from workloads."
+                    )
+                ),
+                doc_url=_DOC_AKS_POOLS,
+            )
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- AKS
@@ -191,6 +428,12 @@ def _aks_cluster_rules(cluster: dict[str, Any]) -> list[Finding]:
 
     # Kubernetes version support floor (conservative — warning, not critical).
     findings.append(_aks_version_finding(name, cluster.get("k8s_version")))
+    # Availability zones + system/user pool isolation (custom multi-field).
+    findings.extend(_aks_zone_isolation_findings(cluster, name))
+    # Declarative single-field reliability checks (SKU tier, auto-upgrade).
+    findings.extend(
+        evaluate_specs(_AKS_RELIABILITY_SPECS, cluster, category=_CATEGORY, resource_name=name)
+    )
     return findings
 
 
@@ -310,6 +553,12 @@ def _storage_rules(snap: ResourceSnapshot | None) -> list[Finding]:
                 observed={"sku": sku},
             )
         )
+    # Declarative data-protection checks (versioning, soft delete, PITR).
+    findings.extend(
+        evaluate_specs(
+            _STORAGE_RELIABILITY_SPECS, snap.data, category=_CATEGORY, resource_name=name
+        )
+    )
     return findings
 
 
@@ -333,8 +582,9 @@ def _acr_rules(snap: ResourceSnapshot | None) -> list[Finding]:
         ]
     name = short_name(snap.data.get("name"))
     sku = (snap.data.get("sku") or "").strip()
+    findings: list[Finding] = []
     if sku.lower() == "basic":
-        return [
+        findings.append(
             _mk(
                 id="acr.sku",
                 resource_kind="acr",
@@ -349,9 +599,9 @@ def _acr_rules(snap: ResourceSnapshot | None) -> list[Finding]:
                 doc_url=_DOC_ACR_SKU,
                 observed={"sku": sku},
             )
-        ]
-    if sku:
-        return [
+        )
+    elif sku:
+        findings.append(
             _mk(
                 id="acr.sku",
                 resource_kind="acr",
@@ -362,8 +612,12 @@ def _acr_rules(snap: ResourceSnapshot | None) -> list[Finding]:
                 doc_url=_DOC_ACR_SKU,
                 observed={"sku": sku},
             )
-        ]
-    return []
+        )
+    # Declarative ACR reliability checks (zone redundancy, retention).
+    findings.extend(
+        evaluate_specs(_ACR_RELIABILITY_SPECS, snap.data, category=_CATEGORY, resource_name=name)
+    )
+    return findings
 
 
 # ------------------------------------------------------------------- Container App

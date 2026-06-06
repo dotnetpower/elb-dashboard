@@ -13,7 +13,7 @@ export const RESOURCE_LABEL: Record<string, string> = {
   acr: "Container registry",
   container_app: "Control plane (Container App)",
   api: "API surface",
-  queue: "Task queue",
+  queue: "BLAST jobs",
 };
 
 /**

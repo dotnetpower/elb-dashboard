@@ -13,16 +13,12 @@ import { BlastResults } from "@/pages/BlastResults";
 import { BlastAnalytics } from "@/pages/BlastAnalytics";
 import { ApiReference } from "@/pages/ApiReference";
 import { UpgradePage } from "@/pages/UpgradePage";
-import { AksCardMockups } from "@/pages/mockups/AksCardMockups";
-import { AksCardMockupsRefined } from "@/pages/mockups/AksCardMockupsRefined";
-import { AksCardMockupsPremium } from "@/pages/mockups/AksCardMockupsPremium";
-import { AksCardMockupsSimple } from "@/pages/mockups/AksCardMockupsSimple";
-import { SidecarInspectorMockups } from "@/pages/mockups/SidecarInspectorMockups";
 import { configValue, isDevBypassEnabled, isUsableClientId } from "@/config/runtime";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 
 const DEV_BYPASS = isDevBypassEnabled();
-const CLIENT_ID_MISSING = !isUsableClientId(configValue("VITE_AZURE_CLIENT_ID")) && !DEV_BYPASS;
+const CLIENT_ID_MISSING =
+  !isUsableClientId(configValue("VITE_AZURE_CLIENT_ID")) && !DEV_BYPASS;
 
 const RemoteTerminal = lazy(() =>
   import("@/pages/RemoteTerminal").catch((error: unknown) => ({
@@ -60,25 +56,50 @@ function OptionalFeatureRoute({
 
 function RouteLoadingSkeleton() {
   return (
-    <div className="glass-card" aria-label="Loading page" style={{ display: "grid", gap: 12 }}>
-      <span className="skeleton" style={{ width: "38%", height: 16, borderRadius: 999 }} />
-      <span className="skeleton" style={{ width: "72%", height: 12, borderRadius: 999 }} />
-      <span className="skeleton" style={{ width: "54%", height: 12, borderRadius: 999 }} />
+    <div
+      className="glass-card"
+      aria-label="Loading page"
+      style={{ display: "grid", gap: 12 }}
+    >
+      <span
+        className="skeleton"
+        style={{ width: "38%", height: 16, borderRadius: 999 }}
+      />
+      <span
+        className="skeleton"
+        style={{ width: "72%", height: 12, borderRadius: 999 }}
+      />
+      <span
+        className="skeleton"
+        style={{ width: "54%", height: 12, borderRadius: 999 }}
+      />
     </div>
   );
 }
 
 function TerminalLoadUnavailable({ error }: { error: unknown }) {
-  const detail = error instanceof Error ? error.message : "Terminal bundle could not be loaded.";
+  const detail =
+    error instanceof Error ? error.message : "Terminal bundle could not be loaded.";
   return (
-    <div className="glass-card glass-card--strong" role="status" style={{ maxWidth: 720 }}>
+    <div
+      className="glass-card glass-card--strong"
+      role="status"
+      style={{ maxWidth: 720 }}
+    >
       <h2 style={{ marginTop: 0 }}>Terminal unavailable</h2>
       <p className="muted" style={{ lineHeight: 1.6 }}>
-        The browser terminal bundle did not load. Existing BLAST jobs and dashboard monitoring continue to run.
+        The browser terminal bundle did not load. Existing BLAST jobs and dashboard
+        monitoring continue to run.
       </p>
-      <p className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>{detail}</p>
+      <p className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
+        {detail}
+      </p>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
-        <button type="button" className="glass-button glass-button--primary" onClick={() => location.reload()}>
+        <button
+          type="button"
+          className="glass-button glass-button--primary"
+          onClick={() => location.reload()}
+        >
           Reload Terminal
         </button>
         <Link className="glass-button" to="/">
@@ -162,23 +183,6 @@ function AppRoutes() {
               </Suspense>
             }
           />
-          <Route path="/mockups/aks-card" element={<AksCardMockups />} />
-          <Route
-            path="/mockups/aks-card-refined"
-            element={<AksCardMockupsRefined />}
-          />
-          <Route
-            path="/mockups/aks-card-premium"
-            element={<AksCardMockupsPremium />}
-          />
-          <Route
-            path="/mockups/aks-card-simple"
-            element={<AksCardMockupsSimple />}
-          />
-          <Route
-            path="/mockups/sidecar-inspector"
-            element={<SidecarInspectorMockups />}
-          />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>
@@ -190,15 +194,29 @@ export function App() {
   // #67: Show visible error when client ID is missing
   if (CLIENT_ID_MISSING) {
     return (
-      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
-        <div className="glass-card glass-card--strong" style={{ width: "min(480px, 100%)", textAlign: "center" }}>
+      <div
+        style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}
+      >
+        <div
+          className="glass-card glass-card--strong"
+          style={{ width: "min(480px, 100%)", textAlign: "center" }}
+        >
           <h2 style={{ marginTop: 0, color: "var(--warning)" }}>Setup Required</h2>
           <p className="muted" style={{ lineHeight: 1.6 }}>
-            This app is not configured yet. An administrator needs to create an Azure App Registration
-            and set <code className="code-val">VITE_AZURE_CLIENT_ID</code> in the environment.
+            This app is not configured yet. An administrator needs to create an Azure App
+            Registration and set <code className="code-val">VITE_AZURE_CLIENT_ID</code> in
+            the environment.
           </p>
           <p className="muted" style={{ fontSize: 12 }}>
-            See the <a href="https://github.com/dotnetpower/elb-dashboard#readme" target="_blank" rel="noreferrer">README</a> for setup instructions.
+            See the{" "}
+            <a
+              href="https://github.com/dotnetpower/elb-dashboard#readme"
+              target="_blank"
+              rel="noreferrer"
+            >
+              README
+            </a>{" "}
+            for setup instructions.
           </p>
         </div>
       </div>

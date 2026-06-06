@@ -1,37 +1,29 @@
 /**
- * Sidecar HTTP inspector — three side-by-side design proposals.
+ * Sidecar HTTP request inspector (Variant A — the shipped design).
  *
- * Goal: surface real per-request detail on the `api` sidecar card so
- * users can answer:
- *   • "Is anything slow / failing right now?" (live chart on top)
- *   • "Which URL / who / how long / what status?" (table on bottom)
- *   • "What headers / body did that call carry?" (drill-down)
+ * Renders the live per-request detail panel on the `api` sidecar card:
+ *   • a latency/status scatter chart ("is anything slow / failing now?")
+ *   • a request table ("which URL / who / how long / what status?")
+ *   • a drill-down ("what headers / body did that call carry?")
  *
- * This page is a STATIC VISUAL PROTOTYPE driven by fake fixture data so
- * three interaction patterns can be compared on identical input. None
- * of the data below is fetched from the api sidecar. When a variant is
- * chosen, backend capture (header / body / caller, with redaction +
- * size caps) will be wired up separately. See
- * `api/services/request_metrics.py` for the existing per-request ring
- * buffer that currently only stores path / status / duration.
+ * Consumed by `HttpInspectorPanel.tsx`, which feeds it real captured
+ * traffic (`InspectorRequest[]`) from `GET /api/monitor/sidecar-requests`.
+ * The backend already masks `Authorization` / `Cookie` / `X-Api-Key` and
+ * caps bodies — see `api/services/request_metrics.py`. This module is
+ * pure presentation: it does not fetch.
  *
- * Security note for the eventual backend wiring (NOT applied here yet):
- *   - `Authorization`, `Cookie`, `X-Api-Key` and similar must be
- *     masked at capture time.
- *   - Request / response bodies must be capped (suggest 4 KiB) and
- *     captured only for `application/json` and `text/*` content types.
- *   - The mock data below demonstrates the intended masked shape.
+ * Provenance: extracted verbatim from the retired
+ * `pages/mockups/SidecarInspectorMockups.tsx` design-exploration page
+ * (issue #24). Only Variant A and its helpers are kept; the two
+ * unshipped variants and the demo fixture were removed.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertOctagon,
   Check,
-  ChevronDown,
   ChevronRight,
-  ChevronUp,
   Copy,
-  Filter,
   Pause,
   Play,
   Search,
@@ -39,7 +31,7 @@ import {
 } from "lucide-react";
 
 /* -------------------------------------------------------------------- */
-/* Shared fixture                                                       */
+/* Shared types                                                         */
 /* -------------------------------------------------------------------- */
 
 interface MockReq {
@@ -65,125 +57,6 @@ interface MockReq {
 // The shape is an internal contract between this file and that consumer —
 // keep them in sync when changing fields.
 export type InspectorRequest = MockReq;
-
-/** Deterministic pseudo-random so screenshots are reproducible. */
-function seededRandom(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 0x100000000;
-  };
-}
-
-function generateFixture(now: number): MockReq[] {
-  const rand = seededRandom(20260516);
-  const paths: { method: MockReq["method"]; path: string; weight: number; latencyP50: number; errorRate: number }[] = [
-    { method: "GET", path: "/api/health", weight: 30, latencyP50: 8, errorRate: 0 },
-    { method: "GET", path: "/api/monitor/aks", weight: 20, latencyP50: 220, errorRate: 0.02 },
-    { method: "GET", path: "/api/monitor/aks/nodes", weight: 15, latencyP50: 450, errorRate: 0.04 },
-    { method: "GET", path: "/api/monitor/aks/events", weight: 12, latencyP50: 180, errorRate: 0.0 },
-    { method: "GET", path: "/api/monitor/sidecars", weight: 18, latencyP50: 35, errorRate: 0 },
-    { method: "GET", path: "/api/blast/databases", weight: 10, latencyP50: 1200, errorRate: 0.10 },
-    { method: "GET", path: "/api/blast/jobs", weight: 8, latencyP50: 60, errorRate: 0.05 },
-    { method: "POST", path: "/api/blast/databases/{db}/shard", weight: 2, latencyP50: 2400, errorRate: 0.15 },
-    { method: "POST", path: "/api/blast/submit", weight: 2, latencyP50: 540, errorRate: 0.05 },
-    { method: "GET", path: "/api/blast/jobs/{id}", weight: 6, latencyP50: 95, errorRate: 0.02 },
-    { method: "DELETE", path: "/api/blast/jobs/{id}", weight: 1, latencyP50: 320, errorRate: 0 },
-  ];
-  const weighted: typeof paths = [];
-  for (const p of paths) for (let i = 0; i < p.weight; i++) weighted.push(p);
-
-  const callers = [
-    "moonchoi@contoso.onmicrosoft.com",
-    "researcher.kim@contoso.onmicrosoft.com",
-    "ops.lee@contoso.onmicrosoft.com",
-  ];
-  const ips = ["10.0.1.142", "10.0.1.143", "172.16.4.21"];
-
-  const out: MockReq[] = [];
-  for (let i = 0; i < 80; i++) {
-    const spec = weighted[Math.floor(rand() * weighted.length)];
-    // log-normal jitter around p50
-    const jitter = Math.exp((rand() - 0.5) * 1.6);
-    const durationMs = Math.round(spec.latencyP50 * jitter);
-    const isErr = rand() < spec.errorRate;
-    const status = isErr
-      ? rand() < 0.4
-        ? 500
-        : rand() < 0.5
-          ? 503
-          : 404
-      : rand() < 0.05
-        ? 304
-        : 200;
-    const caller = callers[Math.floor(rand() * callers.length)];
-    const clientIp = ips[Math.floor(rand() * ips.length)];
-    const ts = now - Math.floor(rand() * 5 * 60 * 1000); // last 5 min
-
-    let path = spec.path;
-    if (path.includes("{db}")) {
-      const dbs = ["16S_ribosomal_RNA", "ref_viruses_rep_genomes", "nt_prok"];
-      path = path.replace("{db}", dbs[Math.floor(rand() * dbs.length)]);
-    }
-    if (path.includes("{id}")) {
-      path = path.replace("{id}", "elb-" + Math.floor(rand() * 9999).toString(36));
-    }
-    const isDegraded = status === 200 && path === "/api/blast/jobs" && rand() < 0.7;
-
-    const id = "r-" + i.toString(36) + "-" + Math.floor(rand() * 99999).toString(36);
-    const requestId = "req_" + Math.random().toString(36).slice(2, 10);
-
-    out.push({
-      id,
-      ts,
-      method: spec.method,
-      path,
-      status,
-      durationMs,
-      caller,
-      clientIp,
-      requestId,
-      requestHeaders: {
-        Authorization: "Bearer ********** (redacted)",
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ElbDash/1.0",
-        Accept: "application/json",
-        "X-Request-Id": requestId,
-        "X-Caller-Upn": caller,
-      },
-      requestBody:
-        spec.method === "GET"
-          ? undefined
-          : spec.path.includes("/shard")
-            ? '{\n  "subscription_id": "00000000-0000-0000-0000-000000000000",\n  "resource_group": "rg-elb-01",\n  "account_name": "elbstg01"\n}'
-            : '{\n  "cluster_name": "elb-cluster",\n  "query": "@queries/sample.fasta",\n  "database": "16S_ribosomal_RNA"\n}',
-      responseHeaders: {
-        "Content-Type": "application/json",
-        "Content-Length": String(120 + Math.floor(rand() * 9000)),
-        "X-Request-Id": requestId,
-        "X-Process-Time-Ms": durationMs.toString(),
-      },
-      responseBody: isErr
-        ? `{\n  "detail": "${
-            status === 503 ? "Upstream unavailable" : status === 404 ? "Not found" : "Internal server error"
-          }",\n  "request_id": "${requestId}"\n}`
-        : isDegraded
-          ? `{
-  "degraded": true,
-  "degraded_reason": "Kubernetes job polling is unavailable",
-  "jobs": [],
-  "request_id": "${requestId}"
-}`
-        : '{\n  "ok": true,\n  "data": { /* … truncated … */ }\n}',
-      responseBytes: 120 + Math.floor(rand() * 9000),
-      degraded: isDegraded,
-      degradedReasons: isDegraded ? ["Kubernetes job polling is unavailable"] : undefined,
-    });
-  }
-  return out.sort((a, b) => b.ts - a.ts);
-}
-
-const NOW = Date.now();
-const FIXTURE = generateFixture(NOW);
 
 /* -------------------------------------------------------------------- */
 /* Shared atoms                                                         */
@@ -254,19 +127,29 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 function niceLatencyFloor(ms: number): number {
-  const candidates = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000];
+  const candidates = [
+    1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000,
+  ];
   for (let i = candidates.length - 1; i >= 0; i--) {
     if (candidates[i] <= ms) return candidates[i];
   }
   return candidates[0];
 }
 function niceLatencyCeil(ms: number): number {
-  const candidates = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000];
-  return candidates.find((candidate) => candidate >= ms) ?? candidates[candidates.length - 1];
+  const candidates = [
+    1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000,
+  ];
+  return (
+    candidates.find((candidate) => candidate >= ms) ?? candidates[candidates.length - 1]
+  );
 }
 function latencyTicks(minMs: number, maxMs: number): number[] {
-  const candidates = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000];
-  const ticks = candidates.filter((candidate) => candidate >= minMs && candidate <= maxMs);
+  const candidates = [
+    1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000,
+  ];
+  const ticks = candidates.filter(
+    (candidate) => candidate >= minMs && candidate <= maxMs,
+  );
   if (ticks.length <= 6) return ticks;
   const step = Math.ceil(ticks.length / 6);
   const sampled = ticks.filter((_, index) => index % step === 0);
@@ -396,9 +279,13 @@ function DetailContent({ r }: { r: MockReq }) {
             <StatusPill code={r.status} />
             {r.degraded && <DegradedPill />}
             <span style={{ color: "var(--text-muted)" }}>·</span>
-            <span style={{ fontVariantNumeric: "tabular-nums" }}>{fmtMs(r.durationMs)}</span>
+            <span style={{ fontVariantNumeric: "tabular-nums" }}>
+              {fmtMs(r.durationMs)}
+            </span>
             <span style={{ color: "var(--text-muted)" }}>·</span>
-            <span style={{ color: "var(--text-muted)" }}>{fmtBytes(r.responseBytes)}</span>
+            <span style={{ color: "var(--text-muted)" }}>
+              {fmtBytes(r.responseBytes)}
+            </span>
           </span>
         }
       />
@@ -436,7 +323,9 @@ function headerValue(headers: Record<string, string>, name: string): string | un
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
-      <span style={{ width: 110, color: "var(--text-muted)", fontSize: 11 }}>{label}</span>
+      <span style={{ width: 110, color: "var(--text-muted)", fontSize: 11 }}>
+        {label}
+      </span>
       <span style={{ fontSize: 12, color: "var(--text-primary)" }}>{value}</span>
     </div>
   );
@@ -472,7 +361,9 @@ function KvBlock({ entries }: { entries: Record<string, string> }) {
       {Object.entries(entries).map(([k, v]) => (
         <div key={k} style={{ display: "contents" }}>
           <span style={{ color: "var(--text-muted)" }}>{k}:</span>
-          <span style={{ color: "var(--text-primary)", wordBreak: "break-all" }}>{v}</span>
+          <span style={{ color: "var(--text-primary)", wordBreak: "break-all" }}>
+            {v}
+          </span>
         </div>
       ))}
     </div>
@@ -527,9 +418,21 @@ function CopyActionButton({
   const isCopied = state === "copied";
   const isFailed = state === "failed";
   const text = isCopied ? "Copied" : isFailed ? "Failed" : label;
-  const color = isCopied ? "var(--success)" : isFailed ? "var(--danger)" : "var(--text-primary)";
-  const borderColor = isCopied ? "rgba(106, 214, 163, 0.55)" : isFailed ? "rgba(224, 123, 138, 0.55)" : "var(--border-weak)";
-  const background = isCopied ? "rgba(106, 214, 163, 0.14)" : isFailed ? "rgba(224, 123, 138, 0.14)" : "rgba(255,255,255,0.04)";
+  const color = isCopied
+    ? "var(--success)"
+    : isFailed
+      ? "var(--danger)"
+      : "var(--text-primary)";
+  const borderColor = isCopied
+    ? "rgba(106, 214, 163, 0.55)"
+    : isFailed
+      ? "rgba(224, 123, 138, 0.55)"
+      : "var(--border-weak)";
+  const background = isCopied
+    ? "rgba(106, 214, 163, 0.14)"
+    : isFailed
+      ? "rgba(224, 123, 138, 0.14)"
+      : "rgba(255,255,255,0.04)";
 
   const handleClick = async () => {
     const ok = await writeClipboard(value);
@@ -567,7 +470,15 @@ function CopyActionButton({
 
 type BodyLanguage = "json" | "xml" | "text";
 
-function CodeBlock({ label, code, contentType }: { label: string; code: string; contentType?: string }) {
+function CodeBlock({
+  label,
+  code,
+  contentType,
+}: {
+  label: string;
+  code: string;
+  contentType?: string;
+}) {
   const language = detectBodyLanguage(code, contentType);
   const displayCode = formatBody(code, language);
   return (
@@ -586,7 +497,9 @@ function CodeBlock({ label, code, contentType }: { label: string; code: string; 
       >
         <span>
           {label}{" "}
-          <span style={{ marginLeft: 6, color: "var(--text-faint)", fontWeight: 600 }}>{language.toUpperCase()}</span>
+          <span style={{ marginLeft: 6, color: "var(--text-faint)", fontWeight: 600 }}>
+            {language.toUpperCase()}
+          </span>
         </span>
         <CopyActionButton value={displayCode} label="Copy" title="Copy body" />
       </div>
@@ -613,8 +526,13 @@ function CodeBlock({ label, code, contentType }: { label: string; code: string; 
 function detectBodyLanguage(code: string, contentType?: string): BodyLanguage {
   const type = contentType?.toLowerCase() ?? "";
   const trimmed = code.trimStart();
-  if (type.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[")) return "json";
-  if (type.includes("xml") || trimmed.startsWith("<?xml") || /^<[a-zA-Z_][\w:.-]*(\s|>|\/)/.test(trimmed)) {
+  if (type.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("["))
+    return "json";
+  if (
+    type.includes("xml") ||
+    trimmed.startsWith("<?xml") ||
+    /^<[a-zA-Z_][\w:.-]*(\s|>|\/)/.test(trimmed)
+  ) {
     return "xml";
   }
   return "text";
@@ -712,7 +630,8 @@ function highlightBody(code: string, language: BodyLanguage): React.ReactNode {
 }
 
 function renderJsonTokens(code: string): React.ReactNode {
-  const tokenPattern = /("(?:\\.|[^"\\])*"(?=\s*:))|("(?:\\.|[^"\\])*")|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|([{}\[\],:])/g;
+  const tokenPattern =
+    /("(?:\\.|[^"\\])*"(?=\s*:))|("(?:\\.|[^"\\])*")|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|([{}\[\],:])/g;
   const nodes: React.ReactNode[] = [];
   let cursor = 0;
   for (const match of code.matchAll(tokenPattern)) {
@@ -737,7 +656,8 @@ function renderJsonTokens(code: string): React.ReactNode {
 }
 
 function renderXmlTokens(code: string): React.ReactNode {
-  const tokenPattern = /(<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<\/?[A-Za-z_][\w:.-]*(?:\s+[A-Za-z_:][\w:.-]*(?:=(?:"[^"]*"|'[^']*'))?)*\s*\/?>|&[a-zA-Z0-9#]+;)/g;
+  const tokenPattern =
+    /(<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<\/?[A-Za-z_][\w:.-]*(?:\s+[A-Za-z_:][\w:.-]*(?:=(?:"[^"]*"|'[^']*'))?)*\s*\/?>|&[a-zA-Z0-9#]+;)/g;
   const nodes: React.ReactNode[] = [];
   let cursor = 0;
   for (const match of code.matchAll(tokenPattern)) {
@@ -745,11 +665,23 @@ function renderXmlTokens(code: string): React.ReactNode {
     if (index > cursor) nodes.push(code.slice(cursor, index));
     const token = match[0];
     if (token.startsWith("<!--")) {
-      nodes.push(<span key={`${index}-comment`} style={{ color: "var(--text-faint)" }}>{token}</span>);
+      nodes.push(
+        <span key={`${index}-comment`} style={{ color: "var(--text-faint)" }}>
+          {token}
+        </span>,
+      );
     } else if (token.startsWith("<![CDATA")) {
-      nodes.push(<span key={`${index}-cdata`} style={{ color: "var(--warning)" }}>{token}</span>);
+      nodes.push(
+        <span key={`${index}-cdata`} style={{ color: "var(--warning)" }}>
+          {token}
+        </span>,
+      );
     } else if (token.startsWith("&")) {
-      nodes.push(<span key={`${index}-entity`} style={{ color: "var(--success)" }}>{token}</span>);
+      nodes.push(
+        <span key={`${index}-entity`} style={{ color: "var(--success)" }}>
+          {token}
+        </span>,
+      );
     } else {
       nodes.push(renderXmlTag(token, index));
     }
@@ -760,13 +692,16 @@ function renderXmlTokens(code: string): React.ReactNode {
 }
 
 function renderXmlTag(tag: string, offset: number): React.ReactNode {
-  const parts = tag.match(/(<\/?|\/?>|[A-Za-z_][\w:.-]*|=|"[^"]*"|'[^']*'|\s+)/g) ?? [tag];
+  const parts = tag.match(/(<\/?|\/?>|[A-Za-z_][\w:.-]*|=|"[^"]*"|'[^']*'|\s+)/g) ?? [
+    tag,
+  ];
   let tagNameSeen = false;
   return (
     <span key={`${offset}-tag`}>
       {parts.map((part, index) => {
         let color = "var(--text-muted)";
-        if (part.startsWith("<") || part === ">" || part === "/>") color = "var(--text-muted)";
+        if (part.startsWith("<") || part === ">" || part === "/>")
+          color = "var(--text-muted)";
         else if (!tagNameSeen && /^\S+$/.test(part) && part !== "=") {
           color = "var(--accent)";
           tagNameSeen = true;
@@ -876,7 +811,14 @@ export function VariantA({ data }: { data: MockReq[] }) {
         eyebrow="API sidecar"
         title="HTTP requests"
         right={
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              flexWrap: "wrap",
+            }}
+          >
             <LiveIndicator paused={paused} />
             <CountChips counts={counts} />
             <button
@@ -962,11 +904,20 @@ export function VariantA({ data }: { data: MockReq[] }) {
         onShowMore={() => setTableLimit((n) => n + 50)}
       />
       {tableSelected && (
-        <div ref={tableDetailRef} tabIndex={-1} style={{ scrollMarginTop: 12, outline: "none" }}>
-          <InlineRequestDetail req={tableSelected} onClose={() => setTableSelected(null)} />
+        <div
+          ref={tableDetailRef}
+          tabIndex={-1}
+          style={{ scrollMarginTop: 12, outline: "none" }}
+        >
+          <InlineRequestDetail
+            req={tableSelected}
+            onClose={() => setTableSelected(null)}
+          />
         </div>
       )}
-      {graphSelected && <Drawer onClose={() => setGraphSelected(null)} req={graphSelected} />}
+      {graphSelected && (
+        <Drawer onClose={() => setGraphSelected(null)} req={graphSelected} />
+      )}
     </div>
   );
 }
@@ -1040,7 +991,13 @@ function SearchBar({
           </button>
         )}
       </div>
-      <span style={{ fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+      <span
+        style={{
+          fontSize: 10,
+          color: "var(--text-muted)",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
         {shown === total ? `${total} requests` : `${shown} of ${total}`}
       </span>
     </div>
@@ -1050,7 +1007,13 @@ function SearchBar({
 function CountChips({
   counts,
 }: {
-  counts: { ok: number; redirect: number; client: number; server: number; degraded: number };
+  counts: {
+    ok: number;
+    redirect: number;
+    client: number;
+    server: number;
+    degraded: number;
+  };
 }) {
   const items: { label: string; n: number; color: string }[] = [
     { label: "ok", n: counts.ok, color: statusTone(200).fg },
@@ -1075,8 +1038,13 @@ function CountChips({
       title="2xx · 3xx · 4xx · 5xx · degraded counts in current window"
     >
       {items.map((it, i) => (
-        <span key={it.label} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-          {i > 0 && <span style={{ color: "var(--text-faint, var(--text-muted))" }}>·</span>}
+        <span
+          key={it.label}
+          style={{ display: "inline-flex", alignItems: "center", gap: 3 }}
+        >
+          {i > 0 && (
+            <span style={{ color: "var(--text-faint, var(--text-muted))" }}>·</span>
+          )}
           {it.label === "degraded" ? (
             <span
               style={{
@@ -1089,7 +1057,15 @@ function CountChips({
               }}
             />
           ) : (
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: it.color, display: "inline-block" }} />
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: it.color,
+                display: "inline-block",
+              }}
+            />
           )}
           <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{it.n}</span>
           <span style={{ color: "var(--text-muted)" }}>{it.label}</span>
@@ -1104,7 +1080,11 @@ function LiveIndicator({ paused }: { paused: boolean }) {
     <span
       role="status"
       aria-live="polite"
-      title={paused ? "Stream paused — click Resume to continue" : "Live — capturing every request through the api sidecar"}
+      title={
+        paused
+          ? "Stream paused — click Resume to continue"
+          : "Live — capturing every request through the api sidecar"
+      }
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -1170,12 +1150,14 @@ function ScatterChart({
   const yMax = Math.log10(yDomainMax);
   const yMin = Math.log10(yDomainMin);
   const xOf = (ts: number) => PAD.l + ((ts - minTs) / tRange) * innerW;
-  const pointXOf = (ts: number) => clamp(xOf(ts), PAD.l + POINT_EDGE_GAP, W - PAD.r - POINT_EDGE_GAP);
+  const pointXOf = (ts: number) =>
+    clamp(xOf(ts), PAD.l + POINT_EDGE_GAP, W - PAD.r - POINT_EDGE_GAP);
   const yOf = (ms: number) => {
     const lv = Math.log10(Math.max(yDomainMin, Math.min(yDomainMax, ms)));
     return PAD.t + (1 - (lv - yMin) / (yMax - yMin)) * innerH;
   };
-  const pointYOf = (ms: number) => clamp(yOf(ms), PAD.t + POINT_EDGE_GAP, H - PAD.b - POINT_EDGE_GAP);
+  const pointYOf = (ms: number) =>
+    clamp(yOf(ms), PAD.t + POINT_EDGE_GAP, H - PAD.b - POINT_EDGE_GAP);
 
   const yTicks = latencyTicks(yDomainMin, yDomainMax);
   const xTickCount = 6;
@@ -1245,9 +1227,17 @@ function ScatterChart({
               strokeWidth={1}
               opacity={0.6}
             >
-              <title>SLA target — requests above this line breach the 2 s p95 budget</title>
+              <title>
+                SLA target — requests above this line breach the 2 s p95 budget
+              </title>
             </line>
-            <text x={W - PAD.r - 6} y={yOf(2000) - 4} fill="var(--danger)" fontSize="9" textAnchor="end">
+            <text
+              x={W - PAD.r - 6}
+              y={yOf(2000) - 4}
+              fill="var(--danger)"
+              fontSize="9"
+              textAnchor="end"
+            >
               SLA 2000 ms
             </text>
           </>
@@ -1445,106 +1435,107 @@ function ScatterChart({
           );
         })}
       </svg>
-      {hover && (() => {
-        const wrap = wrapRef.current;
-        const wrapW = wrap?.clientWidth ?? 800;
-        const wrapH = wrap?.clientHeight ?? 240;
-        const TIP_W = 260;
-        const TIP_H = 124;
-        // Flip horizontally if cursor is past the right midline (so tip
-        // never sits on top of dot or clips off the right edge).
-        const flipLeft = hover.x + 14 + TIP_W > wrapW;
-        const left = flipLeft
-          ? Math.max(hover.x - TIP_W - 14, 4)
-          : Math.min(hover.x + 14, wrapW - TIP_W - 4);
-        // Flip vertically if cursor is in the bottom half (so tip rises above).
-        const flipUp = hover.y + TIP_H + 12 > wrapH;
-        const top = flipUp
-          ? Math.max(hover.y - TIP_H - 12, 4)
-          : Math.min(hover.y + 14, wrapH - TIP_H - 4);
-        return (
-        <div
-          role="tooltip"
-          style={{
-            position: "absolute",
-            pointerEvents: "none",
-            left,
-            top,
-            background: "rgba(10,14,24,0.94)",
-            border: "1px solid var(--border-weak)",
-            borderRadius: 8,
-            padding: "8px 10px",
-            fontSize: 11,
-            color: "var(--text-primary)",
-            boxShadow: "0 6px 22px rgba(0,0,0,0.45)",
-            minWidth: 220,
-            maxWidth: TIP_W,
-            zIndex: 5,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              marginBottom: 4,
-            }}
-          >
-            <MethodPill method={hover.r.method} />
-            <StatusPill code={hover.r.status} />
-            {hover.r.degraded && <DegradedPill />}
-            <span
+      {hover &&
+        (() => {
+          const wrap = wrapRef.current;
+          const wrapW = wrap?.clientWidth ?? 800;
+          const wrapH = wrap?.clientHeight ?? 240;
+          const TIP_W = 260;
+          const TIP_H = 124;
+          // Flip horizontally if cursor is past the right midline (so tip
+          // never sits on top of dot or clips off the right edge).
+          const flipLeft = hover.x + 14 + TIP_W > wrapW;
+          const left = flipLeft
+            ? Math.max(hover.x - TIP_W - 14, 4)
+            : Math.min(hover.x + 14, wrapW - TIP_W - 4);
+          // Flip vertically if cursor is in the bottom half (so tip rises above).
+          const flipUp = hover.y + TIP_H + 12 > wrapH;
+          const top = flipUp
+            ? Math.max(hover.y - TIP_H - 12, 4)
+            : Math.min(hover.y + 14, wrapH - TIP_H - 4);
+          return (
+            <div
+              role="tooltip"
               style={{
-                marginLeft: "auto",
-                color: latencyTone(hover.r.durationMs),
-                fontSize: 10,
-                fontWeight: 600,
-                fontVariantNumeric: "tabular-nums",
+                position: "absolute",
+                pointerEvents: "none",
+                left,
+                top,
+                background: "rgba(10,14,24,0.94)",
+                border: "1px solid var(--border-weak)",
+                borderRadius: 8,
+                padding: "8px 10px",
+                fontSize: 11,
+                color: "var(--text-primary)",
+                boxShadow: "0 6px 22px rgba(0,0,0,0.45)",
+                minWidth: 220,
+                maxWidth: TIP_W,
+                zIndex: 5,
               }}
             >
-              {fmtMs(hover.r.durationMs)}
-            </span>
-          </div>
-          <div
-            style={{
-              fontFamily: "var(--font-mono, monospace)",
-              fontSize: 11,
-              color: "var(--text-primary)",
-              wordBreak: "break-all",
-              marginBottom: 4,
-              lineHeight: 1.35,
-            }}
-          >
-            {hover.r.path}
-          </div>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 8,
-              fontSize: 10,
-              color: "var(--text-muted)",
-            }}
-          >
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-              {hover.r.caller}
-            </span>
-            <span>{fmtTime(hover.r.ts)}</span>
-          </div>
-          <div
-            style={{
-              marginTop: 5,
-              fontSize: 10,
-              color: "var(--text-faint, var(--text-muted))",
-              borderTop: "1px solid var(--border-weak)",
-              paddingTop: 4,
-            }}
-          >
-            Click point for full request / response
-          </div>
-        </div>
-        );
-      })()}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  marginBottom: 4,
+                }}
+              >
+                <MethodPill method={hover.r.method} />
+                <StatusPill code={hover.r.status} />
+                {hover.r.degraded && <DegradedPill />}
+                <span
+                  style={{
+                    marginLeft: "auto",
+                    color: latencyTone(hover.r.durationMs),
+                    fontSize: 10,
+                    fontWeight: 600,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {fmtMs(hover.r.durationMs)}
+                </span>
+              </div>
+              <div
+                style={{
+                  fontFamily: "var(--font-mono, monospace)",
+                  fontSize: 11,
+                  color: "var(--text-primary)",
+                  wordBreak: "break-all",
+                  marginBottom: 4,
+                  lineHeight: 1.35,
+                }}
+              >
+                {hover.r.path}
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  fontSize: 10,
+                  color: "var(--text-muted)",
+                }}
+              >
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {hover.r.caller}
+                </span>
+                <span>{fmtTime(hover.r.ts)}</span>
+              </div>
+              <div
+                style={{
+                  marginTop: 5,
+                  fontSize: 10,
+                  color: "var(--text-faint, var(--text-muted))",
+                  borderTop: "1px solid var(--border-weak)",
+                  paddingTop: 4,
+                }}
+              >
+                Click point for full request / response
+              </div>
+            </div>
+          );
+        })()}
       <div
         style={{
           display: "flex",
@@ -1572,7 +1563,15 @@ function windowMinLabel(windowStart: number, windowEnd: number): string {
   return `${minutes} min`;
 }
 
-function LegendDot({ color, label, shape = "circle" }: { color: string; label: string; shape?: "circle" | "triangle" }) {
+function LegendDot({
+  color,
+  label,
+  shape = "circle",
+}: {
+  color: string;
+  label: string;
+  shape?: "circle" | "triangle";
+}) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
       {shape === "triangle" ? (
@@ -1588,7 +1587,13 @@ function LegendDot({ color, label, shape = "circle" }: { color: string; label: s
         />
       ) : (
         <span
-          style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" }}
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: color,
+            display: "inline-block",
+          }}
         />
       )}
       {label}
@@ -1623,7 +1628,15 @@ function TableA({
       }}
     >
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-        <thead style={{ position: "sticky", top: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", zIndex: 1 }}>
+        <thead
+          style={{
+            position: "sticky",
+            top: 0,
+            background: "rgba(0,0,0,0.6)",
+            backdropFilter: "blur(8px)",
+            zIndex: 1,
+          }}
+        >
           <tr style={{ color: "var(--text-muted)", textAlign: "left" }}>
             <Th>Time</Th>
             <Th>Method</Th>
@@ -1670,22 +1683,51 @@ function TableA({
               }}
             >
               <Td>{fmtTime(d.ts)}</Td>
-              <Td><MethodPill method={d.method} /></Td>
-              <Td><code style={{ fontSize: 11 }}>{d.path}</code></Td>
-              <Td><span style={{ color: "var(--text-muted)" }}>{d.caller.split("@")[0]}</span></Td>
+              <Td>
+                <MethodPill method={d.method} />
+              </Td>
+              <Td>
+                <code style={{ fontSize: 11 }}>{d.path}</code>
+              </Td>
+              <Td>
+                <span style={{ color: "var(--text-muted)" }}>
+                  {d.caller.split("@")[0]}
+                </span>
+              </Td>
               <Td align="right">
-                <span style={{ display: "inline-flex", justifyContent: "flex-end", gap: 4, flexWrap: "wrap" }}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    justifyContent: "flex-end",
+                    gap: 4,
+                    flexWrap: "wrap",
+                  }}
+                >
                   <StatusPill code={d.status} />
                   {d.degraded && <DegradedPill />}
                 </span>
               </Td>
               <Td align="right">
-                <span style={{ color: latencyTone(d.durationMs), fontVariantNumeric: "tabular-nums" }}>
+                <span
+                  style={{
+                    color: latencyTone(d.durationMs),
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
                   {fmtMs(d.durationMs)}
                 </span>
               </Td>
-              <Td align="right"><span style={{ color: "var(--text-muted)" }}>{fmtBytes(d.responseBytes)}</span></Td>
-              <Td align="right"><ChevronRight size={11} style={{ color: "var(--text-faint, var(--text-muted))" }} /></Td>
+              <Td align="right">
+                <span style={{ color: "var(--text-muted)" }}>
+                  {fmtBytes(d.responseBytes)}
+                </span>
+              </Td>
+              <Td align="right">
+                <ChevronRight
+                  size={11}
+                  style={{ color: "var(--text-faint, var(--text-muted))" }}
+                />
+              </Td>
             </tr>
           ))}
         </tbody>
@@ -1732,7 +1774,14 @@ function Th({ children, align }: { children?: React.ReactNode; align?: "right" }
 }
 function Td({ children, align }: { children?: React.ReactNode; align?: "right" }) {
   return (
-    <td style={{ padding: "6px 10px", whiteSpace: "nowrap", textAlign: align ?? "left", color: "var(--text-primary)" }}>
+    <td
+      style={{
+        padding: "6px 10px",
+        whiteSpace: "nowrap",
+        textAlign: align ?? "left",
+        color: "var(--text-primary)",
+      }}
+    >
       {children}
     </td>
   );
@@ -1749,7 +1798,8 @@ function InlineRequestDetail({ req, onClose }: { req: MockReq; onClose: () => vo
         padding: 12,
         border: "1px solid rgba(122,167,255,0.32)",
         borderRadius: 8,
-        background: "linear-gradient(180deg, rgba(122,167,255,0.10), rgba(255,255,255,0.045))",
+        background:
+          "linear-gradient(180deg, rgba(122,167,255,0.10), rgba(255,255,255,0.045))",
         boxShadow: "0 10px 28px rgba(0,0,0,0.24)",
       }}
     >
@@ -1816,7 +1866,12 @@ function InlineRequestDetail({ req, onClose }: { req: MockReq; onClose: () => vo
             onClick={onClose}
             aria-label="Close selected request detail"
             title="Close detail"
-            style={{ padding: 4, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+            style={{
+              padding: 4,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
           >
             <X size={12} />
           </button>
@@ -1848,7 +1903,14 @@ function Drawer({ req, onClose }: { req: MockReq; onClose: () => void }) {
         animation: "slideIn 180ms ease-out",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 10,
+        }}
+      >
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
           <MethodPill method={req.method} />
           <StatusPill code={req.status} />
@@ -1869,7 +1931,12 @@ function Drawer({ req, onClose }: { req: MockReq; onClose: () => void }) {
             onClick={onClose}
             aria-label="Close request detail (Esc)"
             title="Close (Esc)"
-            style={{ padding: 4, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+            style={{
+              padding: 4,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
           >
             <X size={12} />
           </button>
@@ -1898,448 +1965,6 @@ function buildCurl(r: MockReq): string {
 /* VARIANT B — Live lane stream + centered modal                        */
 /* ==================================================================== */
 
-function VariantB({ data }: { data: MockReq[] }) {
-  const [selected, setSelected] = useState<MockReq | null>(null);
-  return (
-    <div className="glass-card" style={{ padding: 14 }}>
-      <Header
-        eyebrow="Variant B"
-        title="Status lane stream + modal"
-        blurb="Three lanes (2xx / 4xx / 5xx). Bars flow right→left; bar length = latency. Card list below; click → centered modal with tabs."
-      />
-      <LaneStream data={data} onPick={setSelected} />
-      <CardListB data={data} onPick={setSelected} />
-      {selected && <Modal onClose={() => setSelected(null)} req={selected} />}
-    </div>
-  );
-}
-
-function LaneStream({ data, onPick }: { data: MockReq[]; onPick: (r: MockReq) => void }) {
-  const W = 880;
-  const LANE_H = 36;
-  const LANES = [
-    { key: "5xx", label: "5xx", color: statusTone(500).fg, predicate: (s: number) => s >= 500 },
-    { key: "4xx", label: "4xx", color: statusTone(400).fg, predicate: (s: number) => s >= 400 && s < 500 },
-    { key: "ok", label: "2xx / 3xx", color: statusTone(200).fg, predicate: (s: number) => s < 400 },
-  ];
-  const H = LANE_H * LANES.length + 24;
-  const PAD = { l: 70, r: 8, t: 4, b: 20 };
-  const innerW = W - PAD.l - PAD.r;
-  const minTs = Math.min(...data.map((d) => d.ts));
-  const maxTs = Math.max(...data.map((d) => d.ts));
-  const tRange = maxTs - minTs || 1;
-  const xOf = (ts: number) => PAD.l + ((ts - minTs) / tRange) * innerW;
-  const maxMs = Math.max(...data.map((d) => d.durationMs));
-  const barW = (ms: number) => 4 + (ms / maxMs) * 28;
-  const xTickCount = 5;
-  const xTicks = Array.from({ length: xTickCount }, (_, i) => minTs + (i / (xTickCount - 1)) * tRange);
-
-  return (
-    <div style={{ marginTop: 10, marginBottom: 12 }}>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
-        {LANES.map((lane, li) => {
-          const y = PAD.t + li * LANE_H;
-          return (
-            <g key={lane.key}>
-              <rect
-                x={PAD.l}
-                y={y}
-                width={innerW}
-                height={LANE_H - 4}
-                fill="rgba(255,255,255,0.02)"
-                stroke="var(--border-weak)"
-                strokeWidth={0.5}
-                rx={4}
-              />
-              <text x={8} y={y + LANE_H / 2 + 4} fill={lane.color} fontSize="11" fontWeight={600}>
-                {lane.label}
-              </text>
-              {data
-                .filter((d) => lane.predicate(d.status))
-                .map((d) => (
-                  <rect
-                    key={d.id}
-                    x={xOf(d.ts) - barW(d.durationMs)}
-                    y={y + 6}
-                    width={barW(d.durationMs)}
-                    height={LANE_H - 16}
-                    fill={lane.color}
-                    opacity={0.7}
-                    rx={2}
-                    style={{ cursor: "pointer" }}
-                    onClick={() => onPick(d)}
-                  >
-                    <title>{`${d.method} ${d.path}\n${d.status} · ${fmtMs(d.durationMs)} · ${d.caller}`}</title>
-                  </rect>
-                ))}
-            </g>
-          );
-        })}
-        {xTicks.map((t, i) => (
-          <text
-            key={i}
-            x={xOf(t)}
-            y={H - 4}
-            fill="var(--text-muted)"
-            fontSize="9"
-            textAnchor="middle"
-          >
-            {fmtTime(t)}
-          </text>
-        ))}
-      </svg>
-      <div style={{ display: "flex", gap: 12, fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
-        <span>Bar width ∝ latency</span>
-        <span style={{ marginLeft: "auto" }}>{data.length} samples · last 5 min</span>
-      </div>
-    </div>
-  );
-}
-
-function CardListB({ data, onPick }: { data: MockReq[]; onPick: (r: MockReq) => void }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto", paddingRight: 4 }}>
-      {data.slice(0, 18).map((d) => {
-        const t = statusTone(d.status);
-        return (
-          <button
-            key={d.id}
-            type="button"
-            onClick={() => onPick(d)}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "auto auto 1fr auto auto auto",
-              gap: 10,
-              alignItems: "center",
-              padding: "8px 10px",
-              background: "rgba(255,255,255,0.03)",
-              border: "1px solid var(--border-weak)",
-              borderLeft: `3px solid ${t.fg}`,
-              borderRadius: 6,
-              color: "var(--text-primary)",
-              fontSize: 11,
-              textAlign: "left",
-              cursor: "pointer",
-            }}
-          >
-            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{fmtTime(d.ts)}</span>
-            <MethodPill method={d.method} />
-            <code style={{ fontSize: 11 }}>{d.path}</code>
-            <span style={{ color: "var(--text-muted)" }}>{d.caller.split("@")[0]}</span>
-            <span style={{ fontVariantNumeric: "tabular-nums" }}>{fmtMs(d.durationMs)}</span>
-            <StatusPill code={d.status} />
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function Modal({ req, onClose }: { req: MockReq; onClose: () => void }) {
-  const [tab, setTab] = useState<"req" | "res">("req");
-  return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.55)",
-        display: "grid",
-        placeItems: "center",
-        zIndex: 50,
-        animation: "fadeIn 140ms ease-out",
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="glass-card glass-card--strong"
-        style={{
-          width: "min(640px, 92vw)",
-          maxHeight: "82vh",
-          overflowY: "auto",
-          padding: 18,
-          animation: "popIn 160ms ease-out",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <MethodPill method={req.method} />
-            <code style={{ fontSize: 12 }}>{req.path}</code>
-            <StatusPill code={req.status} />
-            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>· {fmtMs(req.durationMs)}</span>
-          </div>
-          <button type="button" className="glass-button" onClick={onClose} style={{ padding: 4 }}>
-            <X size={12} />
-          </button>
-        </div>
-        <div style={{ display: "flex", gap: 4, marginBottom: 10, borderBottom: "1px solid var(--border-weak)" }}>
-          {(["req", "res"] as const).map((k) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setTab(k)}
-              style={{
-                padding: "6px 12px",
-                background: "transparent",
-                border: "none",
-                color: tab === k ? "var(--accent)" : "var(--text-muted)",
-                borderBottom: tab === k ? "2px solid var(--accent)" : "2px solid transparent",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-              }}
-            >
-              {k === "req" ? "Request" : "Response"}
-            </button>
-          ))}
-        </div>
-        {tab === "req" ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <Row label="Caller" value={req.caller} />
-            <Row label="Client IP" value={<code>{req.clientIp}</code>} />
-            <Row label="Request ID" value={<code>{req.requestId}</code>} />
-            <SectionHeader title="Headers" />
-            <KvBlock entries={req.requestHeaders} />
-            {req.requestBody && <CodeBlock label="Body" code={req.requestBody} />}
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <Row label="Status" value={<StatusPill code={req.status} />} />
-            <Row label="Size" value={fmtBytes(req.responseBytes)} />
-            <SectionHeader title="Headers" />
-            <KvBlock entries={req.responseHeaders} />
-            {req.responseBody && <CodeBlock label="Body" code={req.responseBody} />}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ==================================================================== */
-/* VARIANT C — Density heatmap + inline accordion                       */
-/* ==================================================================== */
-
-function VariantC({ data }: { data: MockReq[] }) {
-  const [filter, setFilter] = useState<{ tCol: number; lRow: number } | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-
-  const COLS = 30; // time buckets
-  const ROWS = [
-    { label: "<50ms", lo: 0, hi: 50 },
-    { label: "50–200", lo: 50, hi: 200 },
-    { label: "200–500", lo: 200, hi: 500 },
-    { label: "500–2s", lo: 500, hi: 2000 },
-    { label: ">2s", lo: 2000, hi: Infinity },
-  ];
-  const minTs = Math.min(...data.map((d) => d.ts));
-  const maxTs = Math.max(...data.map((d) => d.ts));
-  const tRange = maxTs - minTs || 1;
-  const colOf = (ts: number) => Math.min(COLS - 1, Math.floor(((ts - minTs) / tRange) * COLS));
-  const rowOf = (ms: number) => {
-    for (let i = 0; i < ROWS.length; i++) {
-      if (ms >= ROWS[i].lo && ms < ROWS[i].hi) return i;
-    }
-    return ROWS.length - 1;
-  };
-
-  const grid: { count: number; errs: number }[][] = ROWS.map(() =>
-    Array.from({ length: COLS }, () => ({ count: 0, errs: 0 })),
-  );
-  for (const d of data) {
-    const c = grid[rowOf(d.durationMs)][colOf(d.ts)];
-    c.count++;
-    if (d.status >= 400) c.errs++;
-  }
-  const maxCount = Math.max(...grid.flat().map((c) => c.count), 1);
-
-  const filtered = data.filter((d) => {
-    if (filter) {
-      if (colOf(d.ts) !== filter.tCol || rowOf(d.durationMs) !== filter.lRow) return false;
-    }
-    if (query && !`${d.method} ${d.path} ${d.caller}`.toLowerCase().includes(query.toLowerCase())) return false;
-    return true;
-  });
-
-  return (
-    <div className="glass-card" style={{ padding: 14 }}>
-      <Header
-        eyebrow="Variant C"
-        title="Density heatmap + inline accordion"
-        blurb="Heatmap (x = time bucket, y = latency bucket) makes bursts/outliers obvious. Click a cell to filter; click a row to expand inline — no modal/drawer."
-        right={
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <Search size={11} color="var(--text-muted)" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="filter method/path/caller"
-              style={{
-                background: "rgba(0,0,0,0.25)",
-                border: "1px solid var(--border-weak)",
-                borderRadius: 4,
-                padding: "3px 6px",
-                fontSize: 11,
-                color: "var(--text-primary)",
-                width: 200,
-              }}
-            />
-          </div>
-        }
-      />
-      <Heatmap
-        grid={grid}
-        rows={ROWS}
-        maxCount={maxCount}
-        filter={filter}
-        onCellClick={(tCol, lRow) => {
-          setFilter((curr) => (curr && curr.tCol === tCol && curr.lRow === lRow ? null : { tCol, lRow }));
-          setExpanded(null);
-        }}
-      />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6, marginBottom: 6 }}>
-        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-          {filtered.length} of {data.length} shown
-          {filter && (
-            <button
-              type="button"
-              onClick={() => setFilter(null)}
-              className="glass-button"
-              style={{ marginLeft: 8, padding: "2px 6px", fontSize: 10 }}
-            >
-              <Filter size={9} /> clear filter
-            </button>
-          )}
-        </span>
-        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>Last 5 min · ~10s buckets</span>
-      </div>
-      <div style={{ maxHeight: 260, overflowY: "auto", borderRadius: 6, border: "1px solid var(--border-weak)" }}>
-        {filtered.slice(0, 25).map((d) => (
-          <AccordionRow key={d.id} req={d} expanded={expanded === d.id} onToggle={() => setExpanded(expanded === d.id ? null : d.id)} />
-        ))}
-        {filtered.length === 0 && (
-          <div style={{ padding: 16, textAlign: "center", color: "var(--text-faint)", fontSize: 11 }}>
-            No requests match the current filter.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Heatmap({
-  grid,
-  rows,
-  maxCount,
-  filter,
-  onCellClick,
-}: {
-  grid: { count: number; errs: number }[][];
-  rows: { label: string; lo: number; hi: number }[];
-  maxCount: number;
-  filter: { tCol: number; lRow: number } | null;
-  onCellClick: (tCol: number, lRow: number) => void;
-}) {
-  const cellW = 26;
-  const cellH = 22;
-  return (
-    <div style={{ marginTop: 10, marginBottom: 8 }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        {rows.map((row, ri) => (
-          <div key={row.label} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <span style={{ width: 60, fontSize: 10, color: "var(--text-muted)", textAlign: "right" }}>{row.label}</span>
-            <div style={{ display: "flex", gap: 2 }}>
-              {grid[ri].map((cell, ci) => {
-                const intensity = cell.count / maxCount;
-                const errFrac = cell.count === 0 ? 0 : cell.errs / cell.count;
-                const baseRgb = errFrac > 0.3 ? "224, 123, 138" : errFrac > 0 ? "240, 198, 116" : "122, 167, 255";
-                const bg = cell.count === 0 ? "rgba(255,255,255,0.03)" : `rgba(${baseRgb}, ${0.12 + intensity * 0.6})`;
-                const isSel = filter && filter.tCol === ci && filter.lRow === ri;
-                return (
-                  <button
-                    key={ci}
-                    type="button"
-                    onClick={() => onCellClick(ci, ri)}
-                    title={cell.count === 0 ? "no requests" : `${cell.count} req · ${cell.errs} err`}
-                    style={{
-                      width: cellW,
-                      height: cellH,
-                      background: bg,
-                      border: isSel ? "1.5px solid var(--accent)" : "1px solid var(--border-weak)",
-                      borderRadius: 3,
-                      cursor: "pointer",
-                      padding: 0,
-                      fontSize: 9,
-                      color: intensity > 0.5 ? "var(--text-primary)" : "var(--text-muted)",
-                    }}
-                  >
-                    {cell.count || ""}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginLeft: 64, marginTop: 4, fontSize: 9, color: "var(--text-muted)" }}>
-        <span>5 min ago</span>
-        <span>now</span>
-      </div>
-      <div style={{ display: "flex", gap: 12, marginTop: 6, marginLeft: 64, fontSize: 10, color: "var(--text-muted)" }}>
-        <LegendDot color="rgba(122,167,255,0.7)" label="ok" />
-        <LegendDot color="rgba(240,198,116,0.7)" label="some 4xx" />
-        <LegendDot color="rgba(224,123,138,0.7)" label="≥30% err" />
-        <span style={{ marginLeft: "auto" }}>cells: count · click to filter</span>
-      </div>
-    </div>
-  );
-}
-
-function AccordionRow({ req, expanded, onToggle }: { req: MockReq; expanded: boolean; onToggle: () => void }) {
-  const t = statusTone(req.status);
-  return (
-    <div style={{ borderTop: "1px solid var(--border-weak)" }}>
-      <button
-        type="button"
-        onClick={onToggle}
-        style={{
-          width: "100%",
-          display: "grid",
-          gridTemplateColumns: "auto auto 1fr auto auto auto auto",
-          gap: 10,
-          alignItems: "center",
-          padding: "6px 10px",
-          background: expanded ? "rgba(122,167,255,0.06)" : "transparent",
-          border: "none",
-          borderLeft: `3px solid ${t.fg}`,
-          color: "var(--text-primary)",
-          textAlign: "left",
-          cursor: "pointer",
-          fontSize: 11,
-        }}
-      >
-        <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{fmtTime(req.ts)}</span>
-        <MethodPill method={req.method} />
-        <code style={{ fontSize: 11 }}>{req.path}</code>
-        <span style={{ color: "var(--text-muted)" }}>{req.caller.split("@")[0]}</span>
-        <span style={{ fontVariantNumeric: "tabular-nums" }}>{fmtMs(req.durationMs)}</span>
-        <StatusPill code={req.status} />
-        {expanded ? <ChevronUp size={12} color="var(--text-muted)" /> : <ChevronDown size={12} color="var(--text-muted)" />}
-      </button>
-      {expanded && (
-        <div style={{ padding: "10px 14px 14px 28px", background: "rgba(0,0,0,0.2)" }}>
-          <DetailContent r={req} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------- */
-/* Page shell                                                           */
-/* -------------------------------------------------------------------- */
-
 function Header({
   eyebrow,
   title,
@@ -2352,7 +1977,15 @@ function Header({
   right?: React.ReactNode;
 }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 4 }}>
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "flex-start",
+        gap: 12,
+        marginBottom: 4,
+      }}
+    >
       <div>
         <div
           style={{
@@ -2368,7 +2001,15 @@ function Header({
         </div>
         <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{title}</h3>
         {blurb && (
-          <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--text-muted)", maxWidth: 720, lineHeight: 1.5 }}>
+          <p
+            style={{
+              margin: "2px 0 0",
+              fontSize: 11,
+              color: "var(--text-muted)",
+              maxWidth: 720,
+              lineHeight: 1.5,
+            }}
+          >
             {blurb}
           </p>
         )}
@@ -2377,39 +2018,3 @@ function Header({
     </div>
   );
 }
-
-export function SidecarInspectorMockups() {
-  const data = useMemo(() => FIXTURE, []);
-  return (
-    <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 18 }}>
-      <div>
-        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>
-          Sidecar HTTP inspector — design proposals
-        </h1>
-        <p style={{ margin: "6px 0 0", color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, maxWidth: 920 }}>
-          Three layouts driven by the same fake fixture so the interaction patterns can be
-          compared on identical input. Each variant has a top-of-card live chart and a
-          bottom request list with a drill-down detail surface. None of this is wired to
-          a real endpoint — once a variant is chosen, backend capture (with header / body
-          redaction + 4&nbsp;KiB caps) will be added to{" "}
-          <code>api/services/request_metrics.py</code>.
-        </p>
-      </div>
-      <VariantA data={data} />
-      <VariantB data={data} />
-      <VariantC data={data} />
-      <style>{`
-        @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes popIn { from { transform: scale(0.96); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-        @keyframes livePulse {
-          0%   { box-shadow: 0 0 0 0 rgba(106,214,163,0.55); }
-          70%  { box-shadow: 0 0 0 6px rgba(106,214,163,0); }
-          100% { box-shadow: 0 0 0 0 rgba(106,214,163,0); }
-        }
-      `}</style>
-    </div>
-  );
-}
-
-export default SidecarInspectorMockups;

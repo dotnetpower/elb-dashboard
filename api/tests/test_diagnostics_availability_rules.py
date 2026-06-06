@@ -165,3 +165,43 @@ def test_api_high_p95_is_warning() -> None:
 def test_api_no_traffic_is_info() -> None:
     snap = {"api": ResourceSnapshot(kind="api", data={"total": 0, "degraded": True})}
     assert _by_id(evaluate_availability(snap))["api.latency"].severity == "info"
+
+
+def test_aks_perf_config_specs() -> None:
+    entry = {
+        "cluster": "c1",
+        "power_state": "Running",
+        "pressure": _pressure(40, 50),
+        "config": {
+            "name": "c1",
+            "network_plugin": "azure",
+            "load_balancer_sku": "standard",
+            "addon_monitoring": True,
+        },
+    }
+    findings = _by_id(
+        evaluate_availability({"aks": ResourceSnapshot(kind="aks", data={"clusters": [entry]})})
+    )
+    assert findings["aks.network_plugin"].severity == "ok"
+    assert findings["aks.load_balancer_sku"].severity == "ok"
+    assert findings["aks.monitoring_addon"].severity == "ok"
+
+
+def test_aks_perf_config_warns_on_basic_lb_and_no_monitoring() -> None:
+    entry = {
+        "cluster": "c1",
+        "power_state": "Running",
+        "pressure": _pressure(40, 50),
+        "config": {
+            "name": "c1",
+            "network_plugin": "kubenet",
+            "load_balancer_sku": "basic",
+            "addon_monitoring": False,
+        },
+    }
+    findings = _by_id(
+        evaluate_availability({"aks": ResourceSnapshot(kind="aks", data={"clusters": [entry]})})
+    )
+    assert findings["aks.network_plugin"].severity == "info"
+    assert findings["aks.load_balancer_sku"].severity == "warning"
+    assert findings["aks.monitoring_addon"].severity == "warning"

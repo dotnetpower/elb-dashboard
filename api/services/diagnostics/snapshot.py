@@ -73,6 +73,7 @@ def _collect_isolated(
     kind: ResourceKind,
     future: concurrent.futures.Future,
     deadline_remaining: float,
+    fetch_timeout: float | None = None,
 ) -> ResourceSnapshot:
     """Collect one already-submitted fetch with isolation + a bounded wait.
 
@@ -80,7 +81,8 @@ def _collect_isolated(
     (the fetch overran the per-fetch cap or the run deadline) yields
     `access="timeout"`. Never raises and never blocks past the deadline.
     """
-    timeout = max(0.0, min(_FETCH_TIMEOUT_SECONDS, deadline_remaining))
+    cap = fetch_timeout if fetch_timeout is not None else _FETCH_TIMEOUT_SECONDS
+    timeout = max(0.0, min(cap, deadline_remaining))
     try:
         data = future.result(timeout=timeout)
         return ResourceSnapshot(kind=kind, available=True, data=data or {})
@@ -109,9 +111,7 @@ def _discover_clusters(credential: TokenCredential, subscription_id: str) -> lis
     """Best-effort list of ELB-managed clusters in the subscription."""
     from api.services import monitoring as monitoring_svc
 
-    return monitoring_svc.list_aks_clusters_in_subscription(
-        credential, subscription_id, include_unmanaged=False
-    )
+    return monitoring_svc.list_aks_clusters_detail_in_subscription(credential, subscription_id)
 
 
 def gather_reliability_snapshot(
@@ -127,11 +127,11 @@ def gather_reliability_snapshot(
         "aks": lambda: {"clusters": _discover_clusters(credential, sub)},
     }
     if target.storage_account_name and target.workload_resource_group:
-        fetches["storage"] = lambda: monitoring_svc.get_storage_summary(
+        fetches["storage"] = lambda: monitoring_svc.get_storage_account_detail(
             credential, sub, target.workload_resource_group, target.storage_account_name
         )
     if target.acr_name and target.acr_resource_group:
-        fetches["acr"] = lambda: monitoring_svc.list_acr_repositories(
+        fetches["acr"] = lambda: monitoring_svc.get_acr_registry_detail(
             credential, sub, target.acr_resource_group, target.acr_name
         )
 
@@ -164,6 +164,10 @@ def gather_availability_snapshot(
                     "cluster": name,
                     "power_state": cluster.get("power_state"),
                     "pressure": pressure,
+                    # Carry the cluster config so availability rules can check
+                    # performance-relevant settings (network plugin, LB SKU,
+                    # outbound type, monitoring add-on, ephemeral OS disks).
+                    "config": cluster,
                 }
             )
         return {"clusters": pools_by_cluster}
@@ -177,9 +181,145 @@ def gather_availability_snapshot(
     return snapshots
 
 
+# Operational-health fetch is heavier (5 K8s reads per cluster), so it gets a
+# longer per-fetch budget than the ARM config reads.
+_OPERATIONAL_FETCH_TIMEOUT_SECONDS = float(
+    os.environ.get("DIAGNOSTICS_OPERATIONAL_FETCH_TIMEOUT_SECONDS", "20")
+)
+
+
+def _cluster_runtime(credential: TokenCredential, sub: str, rg: str, name: str) -> dict[str, Any]:
+    """Fetch the five runtime K8s signals for one cluster, concurrently.
+
+    Each of events / pods / nodes / jobs / deployments is isolated: a failure
+    leaves that list empty with a per-list `*_error` marker instead of aborting
+    the whole cluster, so a partial read still surfaces the signals it could
+    get. Wall time is ~max(call), not the sum.
+    """
+    from api.services import monitoring as monitoring_svc
+
+    calls: dict[str, Callable[[], Any]] = {
+        "events": lambda: monitoring_svc.k8s_list_events(credential, sub, rg, name, limit=120),
+        "pods": lambda: monitoring_svc.k8s_get_pods(credential, sub, rg, name),
+        "nodes": lambda: monitoring_svc.k8s_get_nodes(credential, sub, rg, name),
+        "jobs": lambda: monitoring_svc.k8s_get_jobs(credential, sub, rg, name),
+        "deployments": lambda: monitoring_svc.k8s_get_deployments(credential, sub, rg, name),
+    }
+    out: dict[str, Any] = {"cluster": name}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(calls), thread_name_prefix="diag-runtime"
+    ) as pool:
+        futures = {key: pool.submit(fn) for key, fn in calls.items()}
+        for key, future in futures.items():
+            try:
+                out[key] = future.result(timeout=12) or []
+            except Exception as exc:  # one signal failing must not drop the rest
+                LOGGER.warning(
+                    "operational fetch failed cluster=%s signal=%s exc=%s",
+                    name,
+                    key,
+                    type(exc).__name__,
+                )
+                out[key] = []
+                out[f"{key}_error"] = type(exc).__name__
+    return out
+
+
+def _jobstate_snapshot() -> ResourceSnapshot:
+    """Recent BLAST job rows from the Storage state table (cheap, no ARM)."""
+    try:
+        from api.services.state.repository import get_state_repo
+
+        rows = get_state_repo().list_all(limit=100, include_payload=False)
+        jobs = [
+            {
+                "job_id": r.job_id,
+                "status": r.status,
+                "error_code": r.error_code or "",
+                "updated_at": r.updated_at or "",
+                "program": r.program or "",
+                "db": r.db or "",
+                "cluster_name": r.cluster_name or "",
+            }
+            for r in rows
+        ]
+        return ResourceSnapshot(kind="queue", available=True, data={"jobs": jobs})
+    except Exception as exc:
+        LOGGER.warning("diagnostics jobstate snapshot failed: %s", type(exc).__name__)
+        return ResourceSnapshot(kind="queue", available=False, reason="error", access="error")
+
+
+def gather_operational_snapshot(
+    credential: TokenCredential, target: DiagnosticTarget
+) -> dict[str, ResourceSnapshot]:
+    """Fetch live operational signals for the Operational-health category.
+
+    Per managed cluster: Warning events, pods, nodes (with pressure
+    conditions), jobs, deployments — the signals an operator uses to trace a
+    production incident (FailedScheduling, OOMKilled, CrashLoop, NotReady
+    nodes, failed Jobs). Plus recent BLAST job rows and per-route API metrics.
+    """
+    snapshots: dict[str, ResourceSnapshot] = {}
+    sub = target.subscription_id
+
+    def _aks_runtime() -> dict[str, Any]:
+        clusters = _discover_clusters(credential, sub)
+        # Split into the stopped clusters (no K8s reads) and the live ones whose
+        # runtime is fetched CONCURRENTLY — a single unreachable cluster must not
+        # serialise behind the others and blow the run deadline.
+        live: list[dict[str, Any]] = []
+        runtime: list[dict[str, Any]] = []
+        for cluster in clusters:
+            rg = cluster.get("resource_group") or ""
+            name = cluster.get("name") or ""
+            if not rg or not name:
+                continue
+            if str(cluster.get("power_state") or "").lower() == "stopped":
+                runtime.append({"cluster": name, "power_state": "Stopped"})
+                continue
+            live.append(cluster)
+        if live:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(live)), thread_name_prefix="diag-cluster"
+            ) as pool:
+                futures = {
+                    pool.submit(
+                        _cluster_runtime,
+                        credential,
+                        sub,
+                        cluster.get("resource_group") or "",
+                        cluster.get("name") or "",
+                    ): cluster
+                    for cluster in live
+                }
+                for future, cluster in futures.items():
+                    name = cluster.get("name") or ""
+                    try:
+                        entry = future.result(timeout=15)
+                    except Exception as exc:  # isolate one cluster's failure
+                        LOGGER.warning(
+                            "operational cluster fetch failed cluster=%s exc=%s",
+                            name,
+                            type(exc).__name__,
+                        )
+                        entry = {"cluster": name, "fetch_error": type(exc).__name__}
+                    entry["power_state"] = cluster.get("power_state")
+                    runtime.append(entry)
+        return {"clusters": runtime}
+
+    fetches: dict[ResourceKind, Callable[[], dict[str, Any]]] = {"aks": _aks_runtime}
+    _run_all(fetches, snapshots, fetch_timeout=_OPERATIONAL_FETCH_TIMEOUT_SECONDS)
+
+    snapshots["queue"] = _jobstate_snapshot()
+    snapshots["api"] = _api_metrics_snapshot()
+    return snapshots
+
+
 def _run_all(
     fetches: dict[ResourceKind, Callable[[], dict[str, Any]]],
     snapshots: dict[str, ResourceSnapshot],
+    *,
+    fetch_timeout: float | None = None,
 ) -> None:
     """Run a batch of fetches truly concurrently under the overall deadline.
 
@@ -189,6 +329,9 @@ def _run_all(
     blocked (despite its own socket timeout) cannot make the request hang past
     the deadline — the orphaned worker drains in the background and the route
     returns promptly with `timeout` snapshots for the stragglers.
+
+    ``fetch_timeout`` overrides the per-fetch cap for heavier batches (e.g. the
+    operational gather that does several K8s reads per cluster).
     """
     import time
 
@@ -202,7 +345,7 @@ def _run_all(
         futures = {kind: executor.submit(fetch) for kind, fetch in fetches.items()}
         for kind, future in futures.items():
             remaining = _RUN_DEADLINE_SECONDS - (time.monotonic() - started)
-            snapshots[kind] = _collect_isolated(kind, future, remaining)
+            snapshots[kind] = _collect_isolated(kind, future, remaining, fetch_timeout)
     finally:
         # Do NOT block on stragglers (wait=False); cancel any not-yet-started.
         executor.shutdown(wait=False, cancel_futures=True)

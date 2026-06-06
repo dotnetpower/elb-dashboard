@@ -33,10 +33,16 @@ from api.services.diagnostics.models import (
     roll_up,
     severity_rank,
 )
-from api.services.diagnostics.rules import evaluate_availability, evaluate_reliability
+from api.services.diagnostics.rules import (
+    evaluate_availability,
+    evaluate_operational,
+    evaluate_reliability,
+    evaluate_security,
+)
 from api.services.diagnostics.snapshot import (
     DiagnosticTarget,
     gather_availability_snapshot,
+    gather_operational_snapshot,
     gather_reliability_snapshot,
 )
 from api.services.monitor_cache import cached_snapshot
@@ -47,19 +53,79 @@ LOGGER = logging.getLogger(__name__)
 _Gatherer = Callable[[TokenCredential, DiagnosticTarget], dict[str, ResourceSnapshot]]
 _Evaluator = Callable[[dict[str, ResourceSnapshot]], list[Finding]]
 
-# Registry. Phase 3 adds "availability".
+# Registry. Security reuses the reliability gatherer (it needs the same rich
+# AKS / Storage / ACR detail snapshot).
 _CATEGORY_GATHERERS: dict[str, _Gatherer] = {
     "reliability": gather_reliability_snapshot,
     "availability": gather_availability_snapshot,
+    "security": gather_reliability_snapshot,
+    "operational": gather_operational_snapshot,
 }
 _CATEGORY_EVALUATORS: dict[str, _Evaluator] = {
     "reliability": evaluate_reliability,
     "availability": evaluate_availability,
+    "security": evaluate_security,
+    "operational": evaluate_operational,
+}
+
+# The expensive part of a run is the ARM/K8s FETCH, not the pure rule
+# evaluation. Categories that share a gatherer produce a byte-identical
+# snapshot, so they share ONE cached fetch keyed by the snapshot "group" (not
+# the category). This halves ARM load when an operator views Reliability and
+# then Security back-to-back. The pure evaluation runs per request (microseconds
+# over ~5 dicts) so each category still gets its own findings without a second
+# fetch.
+_SNAPSHOT_GROUP: dict[str, str] = {
+    "reliability": "config",
+    "security": "config",
+    "availability": "runtime",
+    "operational": "operational",
 }
 
 
 def supported_categories() -> list[str]:
     return sorted(_CATEGORY_GATHERERS)
+
+
+def _gather_cached(
+    category: str,
+    credential: TokenCredential,
+    target: DiagnosticTarget,
+    *,
+    fresh: bool,
+) -> dict[str, ResourceSnapshot]:
+    """Return the shared resource snapshot for ``category``, cached by group.
+
+    The snapshot (the ARM/K8s IO) is memoised under a category-independent group
+    key so categories sharing a gatherer (reliability + security) reuse one
+    fetch. ``cached_snapshot`` serialises to JSON, so the ``ResourceSnapshot``
+    objects are dumped on store and reconstructed on read; the injected ``cache``
+    meta key is skipped.
+    """
+    gather = _CATEGORY_GATHERERS[category]
+    group = _SNAPSHOT_GROUP.get(category, category)
+    key = ":".join(
+        [
+            "diagnostics-snap",
+            group,
+            target.subscription_id,
+            target.workload_resource_group,
+            target.acr_resource_group,
+            target.acr_name,
+            target.storage_account_name,
+        ]
+    )
+
+    def _loader() -> dict:
+        snaps = gather(credential, target)
+        return {kind: snap.model_dump() for kind, snap in snaps.items()}
+
+    raw = cached_snapshot(key, _loader, ttl_seconds=30.0, force=fresh)
+    return {
+        kind: ResourceSnapshot(**payload)
+        for kind, payload in raw.items()
+        if kind != "cache" and isinstance(payload, dict)
+    }
 
 
 def _sanitise_finding(finding: Finding) -> Finding:
@@ -79,10 +145,11 @@ def _sanitise_finding(finding: Finding) -> Finding:
     )
 
 
-def _build_report(category: str, credential: TokenCredential, target: DiagnosticTarget) -> dict:
-    gather = _CATEGORY_GATHERERS[category]
+def _build_report(
+    category: str,
+    snapshots: dict[str, ResourceSnapshot],
+) -> dict:
     evaluate = _CATEGORY_EVALUATORS[category]
-    snapshots = gather(credential, target)
     findings = [_sanitise_finding(f) for f in evaluate(snapshots)]
     # Most-actionable first: severity desc, then resource kind, then id.
     findings.sort(key=lambda f: (-severity_rank(f.severity), f.resource_kind, f.id))
@@ -122,20 +189,7 @@ def run_diagnostic(
     """
     if category not in _CATEGORY_GATHERERS:
         raise ValueError(f"unknown diagnostic category: {category}")
-    key = ":".join(
-        [
-            "diagnostics",
-            category,
-            target.subscription_id,
-            target.workload_resource_group,
-            target.acr_resource_group,
-            target.acr_name,
-            target.storage_account_name,
-        ]
-    )
-    return cached_snapshot(
-        key,
-        lambda: _build_report(category, credential, target),
-        ttl_seconds=30.0,
-        force=fresh,
-    )
+    # Cache the expensive fetch (shared across categories with the same
+    # gatherer); evaluate the rules per request (pure, microseconds).
+    snapshots = _gather_cached(category, credential, target, fresh=fresh)
+    return _build_report(category, snapshots)

@@ -54,7 +54,11 @@ from api.services.monitoring.provisioning import (
     STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID,
     _auto_assign_role,
 )
-from api.services.monitoring.storage import get_storage_summary, set_storage_public_access
+from api.services.monitoring.storage import (
+    get_storage_account_detail,
+    get_storage_summary,
+    set_storage_public_access,
+)
 from api.services.monitoring.vm import get_vm_status
 from api.services.storage.network import ensure_workload_storage_private_endpoints
 
@@ -75,6 +79,25 @@ def list_aks_clusters_in_subscription(
     _aks_module.aks_client = aks_client
     return _aks_module.list_aks_clusters_in_subscription(
         credential, subscription_id, include_unmanaged=include_unmanaged
+    )
+
+
+def list_aks_clusters_detail_in_subscription(
+    credential: TokenCredential, subscription_id: str
+) -> list[dict[str, Any]]:
+    _aks_module.aks_client = aks_client
+    return _aks_module.list_aks_clusters_detail_in_subscription(credential, subscription_id)
+
+
+def get_acr_registry_detail(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    registry_name: str,
+) -> dict[str, Any]:
+    _acr_module.acr_client = acr_client
+    return _acr_module.get_acr_registry_detail(
+        credential, subscription_id, resource_group, registry_name
     )
 
 
@@ -150,6 +173,8 @@ __all__ = [
     "ensure_acr",
     "ensure_storage_account",
     "ensure_workload_storage_private_endpoints",
+    "get_acr_registry_detail",
+    "get_storage_account_detail",
     "get_storage_summary",
     "get_vm_status",
     "k8s_cancel_blast_job",
@@ -174,6 +199,7 @@ __all__ = [
     "k8s_warmup_status",
     "list_acr_repositories",
     "list_aks_clusters",
+    "list_aks_clusters_detail_in_subscription",
     "list_aks_clusters_in_subscription",
     "set_storage_public_access",
     "storage_client",

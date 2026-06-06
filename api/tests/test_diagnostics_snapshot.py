@@ -93,3 +93,51 @@ def test_degraded_sidecar_metrics_become_unavailable_not_down(
     assert result.available is False
     assert result.access == "error"
     assert "redis" in result.reason
+
+
+def test_operational_gather_isolates_one_failing_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single unreachable cluster must not abort the operational snapshot —
+    its sibling's runtime is still returned, and the failing one carries a
+    `fetch_error` marker instead of raising."""
+    from api.services.diagnostics import snapshot as snap_mod
+    from api.services.diagnostics.snapshot import DiagnosticTarget
+
+    monkeypatch.setattr(
+        snap_mod,
+        "_discover_clusters",
+        lambda *a, **k: [
+            {"name": "good", "resource_group": "rg1", "power_state": "Running"},
+            {"name": "bad", "resource_group": "rg2", "power_state": "Running"},
+            {"name": "stopped", "resource_group": "rg3", "power_state": "Stopped"},
+        ],
+    )
+
+    def _runtime(credential, sub, rg, name):
+        if name == "bad":
+            raise RuntimeError("api server unreachable")
+        return {
+            "cluster": name,
+            "pods": [],
+            "nodes": [],
+            "events": [],
+            "jobs": [],
+            "deployments": [],
+        }
+
+    monkeypatch.setattr(snap_mod, "_cluster_runtime", _runtime)
+    monkeypatch.setattr(
+        snap_mod,
+        "_jobstate_snapshot",
+        lambda: snap_mod.ResourceSnapshot(kind="queue", data={"jobs": []}),
+    )
+    monkeypatch.setattr(
+        snap_mod, "_api_metrics_snapshot", lambda: snap_mod.ResourceSnapshot(kind="api", data={})
+    )
+
+    snaps = snap_mod.gather_operational_snapshot(object(), DiagnosticTarget(subscription_id="sub"))
+    clusters = {c["cluster"]: c for c in snaps["aks"].data["clusters"]}
+    assert clusters["good"].get("fetch_error") is None
+    assert clusters["bad"]["fetch_error"] == "RuntimeError"
+    assert clusters["stopped"]["power_state"] == "Stopped"

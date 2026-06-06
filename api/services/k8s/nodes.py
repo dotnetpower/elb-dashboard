@@ -55,6 +55,15 @@ def k8s_get_nodes(
                     "os_image": info.get("osImage", ""),
                     "kernel": info.get("kernelVersion", ""),
                     "runtime": info.get("containerRuntimeVersion", ""),
+                    # Additive operational signals for the diagnostics engine.
+                    # Pressure conditions report "True" when the node is under
+                    # disk / memory / PID pressure; `unschedulable` is True when
+                    # the node is cordoned. Kept additive so existing consumers
+                    # (monitor AKS card) ignore the extra keys.
+                    "disk_pressure": conditions.get("DiskPressure") == "True",
+                    "memory_pressure": conditions.get("MemoryPressure") == "True",
+                    "pid_pressure": conditions.get("PIDPressure") == "True",
+                    "unschedulable": bool(item.get("spec", {}).get("unschedulable", False)),
                 }
             )
         return nodes
