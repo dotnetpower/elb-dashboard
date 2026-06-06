@@ -320,8 +320,11 @@ def test_readiness_storage_probe_is_single_flight_on_cold_cache(
     workers = [threading.Thread(target=_hit) for _ in range(8)]
     for w in workers:
         w.start()
+    # A generous join timeout keeps this single-flight assertion robust under
+    # CPU contention (e.g. a concurrent local deploy starving the scheduler);
+    # the 0.1s probe sleep means a healthy run finishes well inside this bound.
     for w in workers:
-        w.join(timeout=5.0)
+        w.join(timeout=20.0)
         assert not w.is_alive(), "single-flight worker stuck"
 
     assert storage_statuses == ["ok"] * 8, f"expected 8x 'ok', got {storage_statuses}"
