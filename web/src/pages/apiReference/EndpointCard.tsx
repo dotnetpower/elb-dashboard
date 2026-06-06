@@ -13,9 +13,16 @@ import { ResponseViewer } from "@/pages/apiReference/ResponseViewer";
 import { SectionLabel } from "@/pages/apiReference/SectionLabel";
 import { getDefaultRequestExampleKey, isSimpleEndpoint } from "@/pages/apiReference/spec";
 import type { OpenApiProxyInfo, SpecEndpoint } from "@/pages/apiReference/types";
+import {
+  getPathIdHint,
+  responseBackground,
+  responseBorder,
+  responseTitle,
+  responseTone,
+  safeParseJson,
+  sortResponses,
+} from "@/pages/apiReference/endpointResponseHelpers";
 import { useOpenApiExecutor } from "@/hooks/useOpenApiExecutor";
-
-type ResponseEntry = [string, NonNullable<SpecEndpoint["responses"]>[string]];
 
 export function EndpointCard({
   ep,
@@ -707,15 +714,14 @@ export function EndpointCard({
                 {queryParameters.map((param) => {
                   const enumValues = Array.isArray(param.schema?.enum)
                     ? (param.schema?.enum as unknown[])
-                        .filter((v): v is string | number =>
-                          typeof v === "string" || typeof v === "number",
+                        .filter(
+                          (v): v is string | number =>
+                            typeof v === "string" || typeof v === "number",
                         )
                         .map(String)
                     : [];
                   const defaultValue =
-                    param.schema?.default != null
-                      ? String(param.schema.default)
-                      : "";
+                    param.schema?.default != null ? String(param.schema.default) : "";
                   const currentValue = paramValues[param.name] ?? "";
                   const sharedInputStyle: React.CSSProperties = {
                     flex: 1,
@@ -931,62 +937,3 @@ export function EndpointCard({
  *  JSON before display). Return parsed JSON for recovery-action detection,
  *  or null when the body is plain text / non-JSON — the caller treats null
  *  as "no recovery hint", which is the safe default. */
-function safeParseJson(text: string): unknown {
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function sortResponses(entries: ResponseEntry[]): ResponseEntry[] {
-  return [...entries].sort(([left], [right]) => {
-    const leftNumber = Number(left);
-    const rightNumber = Number(right);
-    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
-      return leftNumber - rightNumber;
-    }
-    if (Number.isFinite(leftNumber)) return -1;
-    if (Number.isFinite(rightNumber)) return 1;
-    return left.localeCompare(right);
-  });
-}
-
-function getPathIdHint(path: string): { label: string; title: string } | undefined {
-  if (!path.includes("{job_id}")) return undefined;
-  return {
-    label: "job_id = OpenAPI id",
-    title:
-      "Use the short OpenAPI job id returned by POST /v1/jobs, not the Dashboard UUID.",
-  };
-}
-
-function responseTitle(code: string, description?: string): string {
-  if (description && description !== "Successful Response") return description;
-  if (code.startsWith("2")) return "SuccessResponse";
-  if (code.startsWith("4")) return "ErrorResponse";
-  if (code.startsWith("5")) return "RuntimeFailure";
-  return `HTTP${code}`;
-}
-
-function responseTone(code: string): string {
-  if (code.startsWith("2")) return "var(--success)";
-  if (code === "409" || code === "429") return "var(--warning)";
-  if (code.startsWith("4") || code.startsWith("5")) return "var(--danger)";
-  return "var(--text-faint)";
-}
-
-function responseBackground(code: string): string {
-  if (code.startsWith("2")) return "rgba(115,191,105,0.08)";
-  if (code === "409" || code === "429") return "rgba(245,166,35,0.08)";
-  if (code.startsWith("4") || code.startsWith("5")) return "rgba(242,114,111,0.08)";
-  return "var(--bg-tertiary)";
-}
-
-function responseBorder(code: string): string {
-  if (code.startsWith("2")) return "rgba(115,191,105,0.16)";
-  if (code === "409" || code === "429") return "rgba(245,166,35,0.18)";
-  if (code.startsWith("4") || code.startsWith("5")) return "rgba(242,114,111,0.18)";
-  return "var(--border-weak)";
-}
