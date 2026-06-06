@@ -45,6 +45,7 @@ const SequenceDetail = lazy(() =>
     default: module.SequenceDetail,
   })),
 );
+const DiagnosticsPage = lazy(() => import("@/pages/diagnostics/DiagnosticsPage"));
 
 function OptionalFeatureRoute({
   enabled,
@@ -145,6 +146,22 @@ function AppRoutes() {
           />
           <Route path="/docs" element={<ApiReference />} />
           <Route path="/upgrade" element={<UpgradePage />} />
+          <Route
+            path="/diagnostics"
+            element={
+              <Suspense fallback={<RouteLoadingSkeleton />}>
+                <DiagnosticsPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/diagnostics/:category"
+            element={
+              <Suspense fallback={<RouteLoadingSkeleton />}>
+                <DiagnosticsPage />
+              </Suspense>
+            }
+          />
           <Route path="/mockups/aks-card" element={<AksCardMockups />} />
           <Route
             path="/mockups/aks-card-refined"

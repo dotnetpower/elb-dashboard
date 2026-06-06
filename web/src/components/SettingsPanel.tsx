@@ -208,7 +208,7 @@ export function SettingsPanel({ open, onClose }: Props) {
             {active === "public-https" && <PublicHttpsSection config={config} />}
             {active === "vnet-peering" && <VnetPeeringSection config={config} />}
             {active === "sizing" && <SizingSection />}
-            {active === "diagnostics" && <DiagnosticsSection config={config} />}
+            {active === "diagnostics" && <DiagnosticsSection config={config} onClose={onClose} />}
             {active === "resources" && <ResourcesSection config={config} />}
           </main>
         </div>

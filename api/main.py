@@ -48,6 +48,7 @@ from api.routes import (
     audit,
     blast,
     client_log,
+    diagnostics,
     elastic_blast,
     frontend_proxy,
     health,
@@ -357,6 +358,7 @@ def create_app() -> FastAPI:
     app.include_router(client_log.router)
     app.include_router(upgrade.router)
     app.include_router(settings.settings_router)
+    app.include_router(diagnostics.router)  # carries /api/diagnostics prefix
 
     # ---- Catch-all reverse proxy to the `frontend` sidecar ----
     app.include_router(frontend_proxy.router)

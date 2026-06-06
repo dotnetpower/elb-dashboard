@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Activity,
   AlertCircle,
@@ -47,11 +48,11 @@ const SCOPE_LEVEL_LABEL: Record<AccessReviewRow["scope_level"], string> = {
 };
 
 /**
- * "Diagnose & solve problems" — Azure-portal-style landing that lists
- * diagnostic categories as cards. Clicking an available category opens its
- * detail view inside the Settings panel. Today only "Identity and Security"
- * (RBAC access review + signed-in account) is implemented; Connectivity,
- * Reliability, and Availability are placeholders for future diagnostics.
+ * "Diagnose & solve problems" — Azure-portal-style launcher that lists
+ * diagnostic categories as cards. Because the Settings slide-over is too narrow
+ * for per-resource findings, clicking a category closes the panel and navigates
+ * to the dedicated `/diagnostics/:category` page. Identity and Security, plus
+ * the Reliability and Availability best-practice checks, all live on that page.
  */
 type DiagnosticCategoryId = "identity" | "connectivity" | "reliability" | "availability";
 
@@ -73,6 +74,22 @@ const DIAGNOSTIC_CATEGORIES: DiagnosticCategory[] = [
     available: true,
   },
   {
+    id: "reliability",
+    label: "Reliability",
+    description:
+      "AKS health, autoscaling, Kubernetes version, Storage redundancy, and registry SKU against Well-Architected best practices.",
+    icon: <Activity size={18} strokeWidth={1.5} />,
+    available: true,
+  },
+  {
+    id: "availability",
+    label: "Availability and Performance",
+    description:
+      "AKS node pressure, sidecar resource headroom, and API latency / error-rate against Well-Architected best practices.",
+    icon: <Gauge size={18} strokeWidth={1.5} />,
+    available: true,
+  },
+  {
     id: "connectivity",
     label: "Connectivity Issues",
     description:
@@ -80,46 +97,35 @@ const DIAGNOSTIC_CATEGORIES: DiagnosticCategory[] = [
     icon: <Network size={18} strokeWidth={1.5} />,
     available: false,
   },
-  {
-    id: "reliability",
-    label: "Reliability",
-    description:
-      "Sidecar health, Celery queue depth, and recent task failure patterns.",
-    icon: <Activity size={18} strokeWidth={1.5} />,
-    available: false,
-  },
-  {
-    id: "availability",
-    label: "Availability and Performance",
-    description:
-      "AKS cluster state, node capacity, and control-plane responsiveness.",
-    icon: <Gauge size={18} strokeWidth={1.5} />,
-    available: false,
-  },
 ];
 
-export function DiagnosticsSection({ config }: { config: ResourceConfig | null }) {
-  const [activeCategory, setActiveCategory] = useState<DiagnosticCategoryId | null>(null);
+export function DiagnosticsSection({
+  config,
+  onClose,
+}: {
+  config: ResourceConfig | null;
+  onClose?: () => void;
+}) {
+  const navigate = useNavigate();
+  void config; // config is read by the dedicated page, not the launcher.
 
-  if (activeCategory === "identity") {
-    return (
-      <IdentitySecurityDetail config={config} onBack={() => setActiveCategory(null)} />
-    );
-  }
+  const open = useCallback(
+    (id: DiagnosticCategoryId) => {
+      onClose?.();
+      navigate(`/diagnostics/${id}`);
+    },
+    [navigate, onClose],
+  );
 
   return (
     <Section heading="Diagnose & solve problems">
       <div style={{ fontSize: 12, color: "var(--text-faint)", lineHeight: 1.6, margin: "-4px 0 14px" }}>
-        Pick a category to investigate. Each opens a focused diagnostic view —
+        Pick a category to investigate. Each opens a focused diagnostic page —
         more categories will be added over time.
       </div>
       <div style={{ display: "grid", gap: 10 }}>
         {DIAGNOSTIC_CATEGORIES.map((cat) => (
-          <DiagnosticCategoryCard
-            key={cat.id}
-            category={cat}
-            onOpen={() => setActiveCategory(cat.id)}
-          />
+          <DiagnosticCategoryCard key={cat.id} category={cat} onOpen={() => open(cat.id)} />
         ))}
       </div>
     </Section>
@@ -213,7 +219,7 @@ function DiagnosticCategoryCard({
  * does NOT degrade open: an enumeration failure is surfaced as a finding,
  * not hidden.
  */
-function IdentitySecurityDetail({
+export function IdentitySecurityDetail({
   config,
   onBack,
 }: {
