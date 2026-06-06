@@ -137,6 +137,34 @@ def test_build_commit_version_tags_image_and_stamps_frontend_commit() -> None:
     assert "GIT_COMMIT=a1b2c3d" in fe_argv
 
 
+def test_build_terminal_passes_acr_base_image_arg() -> None:
+    """The terminal runtime image FROMs a base image that must be pulled from
+    ACR; without the registry-qualified TERMINAL_BASE_IMAGE build-arg the ACR
+    build fails with 'pull access denied for elb-terminal-base'."""
+    runner = _StreamingRunner(exit_code=0, lines=["ok"])
+    image_builder.build(
+        component="terminal",
+        target_version="0.2.0-commit.a1b2c3d",
+        source_dir="/tmp/elb-upgrade/jobCMT",  # noqa: S108
+        job_id="jobCMT",
+        runner=runner,
+    )
+    argv = runner.calls[0]["argv"]
+    assert "TERMINAL_BASE_IMAGE=myacr.azurecr.io/elb-terminal-base:latest" in argv
+    # api / frontend never get the terminal base-image arg.
+    api_runner = _StreamingRunner(exit_code=0, lines=["ok"])
+    image_builder.build(
+        component="api",
+        target_version="0.2.0-commit.a1b2c3d",
+        source_dir="/tmp/elb-upgrade/jobCMT",  # noqa: S108
+        job_id="jobCMT",
+        runner=api_runner,
+    )
+    assert not any(
+        a.startswith("TERMINAL_BASE_IMAGE=") for a in api_runner.calls[0]["argv"]
+    )
+
+
 def test_build_requires_acr_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(image_builder.PLATFORM_ACR_NAME_ENV, raising=False)
     with pytest.raises(image_builder.ImageBuilderError):

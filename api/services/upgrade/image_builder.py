@@ -170,6 +170,16 @@ def _argv_for(plan: BuildPlan, *, target_version: str, source_dir: str) -> list[
     short_sha = commit_short_sha(target_version)
     if short_sha and plan.component == "frontend":
         argv += ["--build-arg", f"GIT_COMMIT={short_sha}"]
+    # The terminal runtime image is a thin overlay on a heavy toolchain base
+    # (terminal/Dockerfile.runtime: `FROM ${TERMINAL_BASE_IMAGE}`). Its default
+    # ARG value `elb-terminal-base:latest` has no registry prefix, so an ACR
+    # build cannot pull it ("pull access denied for elb-terminal-base"). Point
+    # it at the ACR-hosted base image (deploy keeps the `latest` tag current).
+    if plan.component == "terminal":
+        argv += [
+            "--build-arg",
+            f"TERMINAL_BASE_IMAGE={acr}.azurecr.io/elb-terminal-base:latest",
+        ]
     # SOURCE_LOCATION is "." — the build runs with cwd set to the context dir
     # (see `build`). Passing an ABSOLUTE source dir here made `az acr build`
     # report "Unable to find 'api/Dockerfile'" on the terminal sidecar even
