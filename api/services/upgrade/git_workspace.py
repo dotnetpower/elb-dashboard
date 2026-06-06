@@ -170,7 +170,7 @@ def _verify_build_files_materialised(target_dir: str, *, runner: object) -> None
             "cloned working tree is missing build files "
             f"({', '.join(_EXPECTED_BUILD_FILES)}): the checkout did not "
             "materialise the tree. This usually means the terminal sidecar's "
-            "git is too old for a blobless commit clone — redeploy the terminal "
+            "git is too old or the checkout failed — redeploy the terminal "
             f"sidecar and retry. git status: {'; '.join(missing)[:300]}"
         )
 
@@ -203,20 +203,29 @@ def _clone_commit(
         raise WorkspaceError(
             f"commit clone requires a full 40-hex target_sha, got {target_sha!r}"
         )
-    # Blobless full clone (no working tree yet) so any reachable commit can be
-    # checked out; `--no-checkout` avoids materialising the default branch's
-    # tree we are about to replace. GitHub/GitLab/gitea all support the
-    # `filter=blob:none` partial-clone capability.
+    # Full clone (all blobs), no working tree yet, then a detached checkout of
+    # the target commit.
+    #
+    # IMPORTANT: do NOT use `--filter=blob:none` here. `az acr build <dir>`
+    # detects the `.git` directory and uploads the build context via
+    # `git archive` (the committed tree), NOT by tarring the working tree. A
+    # blobless partial clone only lazy-fetches the blobs that `git checkout`
+    # touches, so `git archive` sees an incomplete object store and silently
+    # omits files — the build then fails with "Unable to find 'api/Dockerfile'"
+    # even though the working tree (which our `_verify_build_files_materialised`
+    # check inspects) is complete. A full clone keeps both the working tree and
+    # the object store complete so `git archive` ships every file. The repo is
+    # small, so the extra history download is cheap. `--no-checkout` still
+    # avoids materialising the default branch's tree we are about to replace.
     clone_argv = [
         "git",
         "clone",
-        "--filter=blob:none",
         "--no-checkout",
         git_remote,
         target_dir,
     ]
     LOGGER.info(
-        "upgrade.git_workspace: blobless-cloning %s into %s for commit %s",
+        "upgrade.git_workspace: cloning %s into %s for commit %s",
         git_remote,
         target_dir,
         sha[:12],

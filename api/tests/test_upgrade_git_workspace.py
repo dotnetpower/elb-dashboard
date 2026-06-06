@@ -171,11 +171,12 @@ def test_commit_clone_builds_blobless_clone_then_checkout() -> None:
         runner=rec,
     )
     assert result.target_dir == "/tmp/elb-upgrade/jobCMT1"  # noqa: S108
-    # First: blobless no-checkout clone.
+    # First: full (non-blobless) no-checkout clone. Blobless is intentionally
+    # avoided so `az acr build`'s `git archive` upload sees a complete object
+    # store (see _clone_commit).
     assert rec.calls[0]["argv"] == [
         "git",
         "clone",
-        "--filter=blob:none",
         "--no-checkout",
         "https://example.test/foo.git",
         "/tmp/elb-upgrade/jobCMT1",  # noqa: S108
