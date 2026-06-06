@@ -150,6 +150,31 @@ AZURE_CONFIG_DIR="${EXEC_AZURE_CONFIG_DIR:-/tmp/elb-exec-azure}" \
 EXEC_PID=$!
 
 # ---------------------------------------------------------------------------
+# Bootstrap a managed-identity `az login` into the EXEC Azure CLI cache (the
+# separate config dir the exec server uses — NOT the interactive shell's
+# /home/azureuser/.azure). Programmatic exec calls like the self-upgrade
+# `az acr build` need an `az` account context; without this they fail with
+# "Please run 'az login' to setup account." azcopy / kubectl authenticate via
+# MSI directly and are unaffected, which is why this gap only surfaced for the
+# `az acr build` path. Best-effort + backgrounded: a login hiccup must never
+# block ttyd / exec_server startup, and `az acr build` re-checks the account
+# at call time. AZURE_CLIENT_ID is the shared user-assigned MI (set in the
+# Container App template); fall back to a system-assigned login when unset.
+# ---------------------------------------------------------------------------
+(
+  _exec_cfg="${EXEC_AZURE_CONFIG_DIR:-/tmp/elb-exec-azure}"
+  if [ -n "${AZURE_CLIENT_ID:-}" ]; then
+    AZURE_CONFIG_DIR="$_exec_cfg" az login --identity --username "$AZURE_CLIENT_ID" \
+      --allow-no-subscriptions >/dev/null 2>&1 \
+      || echo "elb-supervisor: exec az login --identity (UAMI) failed; az acr build may need it" >&2
+  else
+    AZURE_CONFIG_DIR="$_exec_cfg" az login --identity \
+      --allow-no-subscriptions >/dev/null 2>&1 \
+      || echo "elb-supervisor: exec az login --identity (system) failed" >&2
+  fi
+) &
+
+# ---------------------------------------------------------------------------
 # Start ttyd (background). -W = writable shell. -p 7681 -i 127.0.0.1 = loopback.
 # -a = url-arg: ttyd forwards the WebSocket `?arg=<token>` query parameter as
 # an argument to the launched command. The api proxy derives <token> from the

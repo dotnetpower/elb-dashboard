@@ -409,6 +409,11 @@ def execute_upgrade_inline(
     except state.StateTransitionRefused as exc:
         return _fail_pre(job_id, f"state moved during fetch: {exc.current}")
 
+    # Ensure the terminal sidecar's exec Azure CLI cache has an account context
+    # before the first `az acr build` (closes the entrypoint-bootstrap race
+    # that otherwise fails with "Please run 'az login' to setup account.").
+    image_builder.ensure_exec_az_login(runner=runner)
+
     built: list[image_builder.ImageBuildResult] = []
     components = ("api", "frontend", "terminal")
     for idx, component in enumerate(components):

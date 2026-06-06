@@ -101,6 +101,41 @@ def _acr_name() -> str:
     return name
 
 
+def ensure_exec_az_login(*, runner: object = terminal_exec) -> None:
+    """Best-effort `az login --identity` into the terminal sidecar's exec cache.
+
+    `az acr build` requires an `az` account context. The exec server runs with
+    a dedicated AZURE_CONFIG_DIR that the entrypoint bootstraps with a
+    managed-identity login, but that bootstrap is async — a build fired
+    immediately after a terminal restart can race it and fail with
+    "Please run 'az login' to setup account.". Running the login here, just
+    before the build loop, closes that race deterministically.
+
+    Idempotent: `az login --identity` is a no-op refresh when already logged
+    in. Failures are swallowed (logged) so a transient IMDS hiccup does not
+    mask the real `az acr build` outcome — the build itself surfaces a clear
+    error if the account context is still missing. The login runs IN the
+    terminal sidecar (same place as the build) via the injected runner.
+    """
+    client_id = os.environ.get("AZURE_CLIENT_ID", "").strip()
+    argv = ["az", "login", "--identity", "--allow-no-subscriptions"]
+    if client_id:
+        argv += ["--username", client_id]
+    try:
+        result = runner.run(argv, cwd=None, timeout_seconds=120)
+    except Exception as exc:  # best-effort; the build re-checks the account
+        LOGGER.warning(
+            "upgrade.image_builder: exec az login --identity failed: %s",
+            type(exc).__name__,
+        )
+        return
+    exit_code = int(result.get("exit_code", -1)) if isinstance(result, dict) else -1
+    if exit_code != 0:
+        LOGGER.warning(
+            "upgrade.image_builder: exec az login --identity exit=%s", exit_code
+        )
+
+
 def _argv_for(plan: BuildPlan, *, target_version: str, source_dir: str) -> list[str]:
     acr = _acr_name()
     tag = f"v{target_version}"

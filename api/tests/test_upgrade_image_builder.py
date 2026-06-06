@@ -158,3 +158,51 @@ def test_build_all_iterates_components_in_order() -> None:
         )
     )
     assert [r.component for r in results] == ["api", "frontend", "terminal"]
+
+
+class _RunRecorder:
+    def __init__(self, *, exit_code: int = 0) -> None:
+        self._exit_code = exit_code
+        self.calls: list[list[str]] = []
+        self.TerminalExecError = terminal_exec.TerminalExecError
+
+    def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
+        self.calls.append(argv)
+        return {"exit_code": self._exit_code, "stdout": "", "stderr": ""}
+
+
+def test_ensure_exec_az_login_uses_uami_client_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AZURE_CLIENT_ID", "11111111-2222-3333-4444-555555555555")
+    rec = _RunRecorder(exit_code=0)
+    image_builder.ensure_exec_az_login(runner=rec)
+    assert rec.calls == [
+        [
+            "az",
+            "login",
+            "--identity",
+            "--allow-no-subscriptions",
+            "--username",
+            "11111111-2222-3333-4444-555555555555",
+        ]
+    ]
+
+
+def test_ensure_exec_az_login_system_identity_when_no_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
+    rec = _RunRecorder(exit_code=0)
+    image_builder.ensure_exec_az_login(runner=rec)
+    assert rec.calls == [["az", "login", "--identity", "--allow-no-subscriptions"]]
+
+
+def test_ensure_exec_az_login_swallows_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A login failure must not raise — the build itself re-checks the account."""
+    monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
+
+    class _Boom(_RunRecorder):
+        def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
+            raise terminal_exec.TerminalExecError("imds unreachable")
+
+    # Should not raise.
+    image_builder.ensure_exec_az_login(runner=_Boom())
