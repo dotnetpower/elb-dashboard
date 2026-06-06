@@ -187,6 +187,23 @@ def build(
     plan = plan_builds([component])[0]
     argv = _argv_for(plan, target_version=target_version, source_dir=source_dir)
     writer = build_logs.open_writer(job_id, plan.component)
+    # Diagnostic: confirm the Dockerfile is physically present in the cloned
+    # context right before `az acr build` checks `os.path.isfile`. Helps
+    # distinguish a clone/checkout gap from an az-side path issue. Best-effort.
+    try:
+        probe = runner.run(
+            ["git", "-C", source_dir, "ls-files", "--", plan.dockerfile],
+            cwd=None,
+            timeout_seconds=30,
+        )
+        if isinstance(probe, dict):
+            tracked = str(probe.get("stdout", "")).strip()
+            writer.write_line(
+                f"# context check: git ls-files {plan.dockerfile!r} -> "
+                f"{tracked or '(empty)'} (exit={probe.get('exit_code')})"
+            )
+    except Exception as exc:  # diagnostic only
+        writer.write_line(f"# context check skipped: {type(exc).__name__}")
     writer.write_line(f"$ {' '.join(argv)}")
     exit_code = -1
     try:
