@@ -77,6 +77,16 @@ _RUNNING_STATE_TERMINAL_FAILURES = frozenset(
     {"degraded", "unhealthy", "failed", "deactivating"}
 )
 
+# ACA reports a healthy, serving revision's `runningState` as either
+# `Running` OR `RunningAtMaxScale` (the latter is the steady state for a
+# pinned minReplicas==maxReplicas==1 revision — which is exactly our
+# topology). Treating only `running` as healthy made `_green_health`
+# classify a perfectly healthy new revision as "booting" forever, so the
+# rollout budget eventually failed an upgrade that had actually succeeded.
+# Match any `running*` state so future ACA scale-state spellings stay
+# healthy; the terminal-failure set above still catches degraded/failed.
+_RUNNING_STATE_HEALTHY_PREFIX = "running"
+
 # Blue/green-only budgets (charter §12a STRICT_BLUEGREEN gate). The green
 # revision must reach a healthy running state within this window or the
 # rollout aborts (green never took traffic, so blue is untouched).
@@ -195,9 +205,11 @@ def reconcile_rolling_out_inline(
     # reconcile.
     version_matches = bool(row.target_version) and _api.__version__ == row.target_version
     image_matches = False
+    deployed_api_ref = ""
     if row.target_version and not version_matches:
         try:
             deployed = aca_mod.read_current_images()
+            deployed_api_ref = deployed.api
             image_matches = _image_matches_version(deployed.api, row.target_version)
         except aca_template.TemplateError as exc:
             LOGGER.warning(
@@ -205,6 +217,22 @@ def reconcile_rolling_out_inline(
                 "success check: %s",
                 exc,
             )
+    # Decisive diagnostic: dump the exact inputs to the success/budget decision
+    # so a stuck `rolling_out` row can be diagnosed from the worker logs without
+    # another guess-and-redeploy cycle.
+    LOGGER.info(
+        "upgrade.reconcile decision job=%s state=%s target=%s inproc_version=%s "
+        "version_matches=%s image_matches=%s deployed_api_ref=%s "
+        "rolling_out_started_at=%s",
+        row.job_id,
+        row.state,
+        row.target_version,
+        _api.__version__,
+        version_matches,
+        image_matches,
+        deployed_api_ref,
+        row.rolling_out_started_at,
+    )
 
     def _stuck_over_budget() -> state.UpgradeState | None:
         """Fail the row if the rollout window is exhausted.
@@ -249,6 +277,27 @@ def reconcile_rolling_out_inline(
                 "upgrade.reconcile: health probe failed (%s); assuming healthy",
                 exc,
             )
+        LOGGER.info(
+            "upgrade.reconcile health job=%s latest_revision=%s health=%s "
+            "running_state=%s provisioning=%s replicas=%s active=%s",
+            row.job_id,
+            getattr(health_status, "name", "")
+            if health_status is not None
+            else "",
+            health,
+            getattr(health_status, "running_state", "")
+            if health_status is not None
+            else "",
+            getattr(health_status, "provisioning_state", "")
+            if health_status is not None
+            else "",
+            getattr(health_status, "replicas", "")
+            if health_status is not None
+            else "",
+            getattr(health_status, "active", "")
+            if health_status is not None
+            else "",
+        )
         if health == "failed":
             # Preserve the specific diagnostic (running_state / replica-zero)
             # so the operator gets an actionable signal, not a generic message.
@@ -353,7 +402,7 @@ def reconcile_rolling_out_inline(
         LOGGER.warning("upgrade.reconcile: cannot read revision status: %s", exc)
         return row
     if (
-        status.running_state.lower() == "running"
+        status.running_state.lower().startswith(_RUNNING_STATE_HEALTHY_PREFIX)
         and status.provisioning_state.lower() == "provisioned"
     ):
         # Replica-zero guard: Running+Provisioned but pods crashed
@@ -398,7 +447,7 @@ def _green_health(status: rollout_watcher.RevisionStatus) -> str:
         return "failed"
     if running in _RUNNING_STATE_TERMINAL_FAILURES:
         return "failed"
-    if running == "running" and provisioning == "provisioned":
+    if running.startswith(_RUNNING_STATE_HEALTHY_PREFIX) and provisioning == "provisioned":
         # `replicas == 0 and not active` is a crashed/never-came-up pod;
         # `replicas == -1` (SDK did not report) is treated as not-zero.
         if status.replicas == 0 and not status.active:

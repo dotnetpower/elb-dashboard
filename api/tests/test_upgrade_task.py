@@ -917,6 +917,38 @@ def test_reconciler_healthy_revision_over_budget_still_succeeds(
     assert after.running_version == "0.3.0"
 
 
+def test_reconciler_succeeds_with_running_at_max_scale(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ACA reports a healthy, serving revision pinned at
+    minReplicas==maxReplicas==1 with runningState `RunningAtMaxScale`, NOT
+    `Running`. `_green_health` must treat any `running*` state as healthy;
+    otherwise a perfectly healthy new revision is classified `booting`
+    forever and the rollout budget eventually fails an upgrade that actually
+    succeeded (the real production failure: four runs failed at ~960s with the
+    revision Active/RunningAtMaxScale/Provisioned).
+    """
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    import api
+
+    monkeypatch.setattr(api, "__version__", "0.2.1")
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="RunningAtMaxScale", provisioning="Provisioned"),
+    )
+    assert after.state == state.STATE_SUCCEEDED
+    assert after.running_version == "0.3.0"
+
+
 def test_reconciler_pre_warm_defers_when_revision_not_ready(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

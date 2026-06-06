@@ -120,7 +120,11 @@ def wait_for_revision(
 def _is_healthy(status: RevisionStatus) -> bool:
     running = status.running_state.lower()
     provisioning = status.provisioning_state.lower()
-    return running == "running" and provisioning == "provisioned"
+    # ACA reports a healthy, serving revision as `Running` OR
+    # `RunningAtMaxScale` (the steady state for a pinned
+    # minReplicas==maxReplicas==1 revision). Match any `running*` so the
+    # at-max-scale spelling is not misread as "still booting".
+    return running.startswith("running") and provisioning == "provisioned"
 
 
 def _is_terminal_failure(status: RevisionStatus) -> bool:
