@@ -78,3 +78,26 @@ pre-flight.
   top-level, and undefined-prefix fallback (28 tests pass).
 - `cd web && npm run build` → built in 9.22s.
 - `uv run ruff check` on touched files → all checks passed.
+
+### Live verification (deployed)
+
+The `nt/nt_euk` blob layout that triggers this bug only exists in the deployed
+storage account, so the fix was verified against the live control plane after
+deploying the `api` sidecar (revision `ca-elb-dashboard--0000184`, image tag
+`20260606214808`):
+
+- `GET /api/blast/databases` now returns `prefix: "nt"` for `nt_euk`,
+  `nt_others`, `nt_prok`, and `nt_viruses` (was the filename base before).
+- `POST /api/blast/pre-flight` with `storage_account` set runs the real
+  file-existence gate `validate_blast_database_ready`. Contrast proves the fix:
+  - new path `blast-db/nt/nt_viruses` → `database` check **pass** —
+    "Database 'blast-db/nt/nt_viruses' is available (nt/nt_viruses.00.nsq)".
+  - old path `blast-db/nt_viruses/nt_viruses` → `database` check **fail** with
+    the original `database_not_found` error, confirming the bug was real.
+
+Only the `api` sidecar was redeployed: the deployed frontend already builds
+`blast-db/nt/nt_viruses` correctly for non-empty prefixes, so the api-only
+deploy fully fixes the user-facing "Downloaded but not available" failure. The
+`buildDatabasePath` empty-segment change is defensive for hypothetical
+top-level DB files (none exist in this environment) and ships with the next
+routine frontend build.
