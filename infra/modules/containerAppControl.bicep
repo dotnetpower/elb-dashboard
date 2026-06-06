@@ -216,6 +216,12 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'FRONTEND_UPSTREAM', value: 'http://127.0.0.1:8081' }
             { name: 'TERMINAL_UPSTREAM', value: 'http://127.0.0.1:7681' }
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
+            // Platform ACR name. Surfaced to the api/worker/beat sidecars so
+            // the self-upgrade image builder (api.services.upgrade.image_builder
+            // `_acr_name()`) and the beat reconciler revision GC can run
+            // `az acr build` / resolve image tags. Without it the self-upgrade
+            // fails pre-flight with "PLATFORM_ACR_NAME is not set".
+            { name: 'PLATFORM_ACR_NAME', value: platformAcrName }
             // Live Wall log-tail fallback target. When non-empty,
             // `api.services.sidecar_logs` switches from local file tailing
             // to KQL against the LA workspace. Empty disables the fallback
@@ -368,6 +374,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // shared secret as the api sidecar.
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
             { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
+            // Platform ACR name. The worker runs the self-upgrade pipeline
+            // (api.tasks.upgrade.execute_upgrade), whose image builder calls
+            // `az acr build` against this registry. Without it the upgrade
+            // fails pre-flight with "PLATFORM_ACR_NAME is not set".
+            { name: 'PLATFORM_ACR_NAME', value: platformAcrName }
             // BLAST capacity gate (issue #23) — must match the api sidecar.
             // Default OFF preserves the existing submit-lock path.
             { name: 'BLAST_GATE_ENABLED', value: 'false' }
@@ -407,6 +418,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
+            // Platform ACR name. The beat reconciler revision GC
+            // (api.tasks.upgrade.revision_gc) resolves image tags against this
+            // registry; keep it in sync with the api/worker sidecars.
+            { name: 'PLATFORM_ACR_NAME', value: platformAcrName }
             // BLAST capacity gate (issue #23) — must match the api sidecar.
             // Default OFF preserves the existing submit-lock path.
             { name: 'BLAST_GATE_ENABLED', value: 'false' }

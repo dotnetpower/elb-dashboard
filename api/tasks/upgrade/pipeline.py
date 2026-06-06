@@ -55,6 +55,27 @@ class UpgradeStartRefused(RuntimeError):
     """Raised when the upgrade-start CAS cannot proceed (already in progress)."""
 
 
+# States from which a fresh upgrade may be (re)started. IDLE is the normal
+# entry point; the terminal failure / success / rolled-back states are also
+# restartable because a new upgrade run does a clean git clone + acr build +
+# patch that fully replaces any prior attempt. Without this a single pre-build
+# failure (e.g. a missing PLATFORM_ACR_NAME env) wedged the row in `failed_pre`
+# forever: the SPA enabled the Start button (phase "failed"/"rolled_back" is not
+# disabled) but the backend cas (IDLE -> QUEUED) rejected it with 409
+# "upgrade already in progress". Only the genuinely in-flight states (queued,
+# fetching, building, patching, rolling_out, validating, confirming,
+# rolling_back) still block a concurrent start. IDLE is tried first because it
+# is the common case.
+_RESTARTABLE_START_STATES = (
+    state.STATE_IDLE,
+    state.STATE_FAILED_PRE,
+    state.STATE_FAILED_ROLLOUT,
+    state.STATE_ROLLED_BACK,
+    state.STATE_ROLLBACK_FAILED,
+    state.STATE_SUCCEEDED,
+)
+
+
 STATE_TRANSITION_TIMELINE = (
     state.STATE_IDLE,
     state.STATE_QUEUED,
@@ -180,6 +201,38 @@ def check_latest() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _cas_start_from_restartable(
+    mutate: Callable[[state.UpgradeState], None],
+) -> state.UpgradeState:
+    """CAS the row to QUEUED from any restartable state.
+
+    Tries each restartable state in turn (IDLE first). The first that matches
+    the live row wins atomically. When none match the row is in an in-flight
+    state, so the final ``StateTransitionRefused`` (carrying the real current
+    state) propagates to the caller as a 409. Mirrors the multi-state CAS loop
+    in ``_fail_pre``.
+    """
+    last_refused: state.StateTransitionRefused | None = None
+    for expected in _RESTARTABLE_START_STATES:
+        try:
+            return state.cas_state(
+                expected_state=expected,
+                new_state=state.STATE_QUEUED,
+                mutate=mutate,
+            )
+        except state.StateTransitionRefused as exc:
+            last_refused = exc
+            continue
+    # Unreachable in practice: at least one StateTransitionRefused is raised
+    # above when the row is in an in-flight state. Re-raise the last one so the
+    # caller sees the true current state.
+    if last_refused is not None:
+        raise last_refused
+    raise state.StateTransitionRefused(
+        "unknown", state.STATE_IDLE, state.STATE_QUEUED
+    )
+
+
 def start_upgrade_inline(
     *,
     target_version: str,
@@ -229,11 +282,7 @@ def start_upgrade_inline(
         s.idempotency_key = idempotency_key or ""
 
     try:
-        updated = state.cas_state(
-            expected_state=state.STATE_IDLE,
-            new_state=state.STATE_QUEUED,
-            mutate=mutate,
-        )
+        updated = _cas_start_from_restartable(mutate)
     except state.StateTransitionRefused as exc:
         raise UpgradeStartRefused(
             f"upgrade already in progress (state={exc.current})"

@@ -247,6 +247,79 @@ def test_double_start_is_refused(env: None) -> None:
         _start()
 
 
+def test_start_recovers_from_failed_pre(env: None) -> None:
+    """Regression: a pre-build failure (e.g. a missing PLATFORM_ACR_NAME env)
+    wedged the row in ``failed_pre`` forever — the SPA enabled the Start button
+    but the backend cas (IDLE -> QUEUED) rejected the restart with 409. A fresh
+    start from ``failed_pre`` must now re-queue the upgrade."""
+    _start()
+    # Drive the row into failed_pre the way the pipeline does.
+    state.cas_state(
+        expected_state=state.STATE_QUEUED,
+        new_state=state.STATE_FAILED_PRE,
+        mutate=lambda s: setattr(s, "phase_detail", "PLATFORM_ACR_NAME is not set"),
+    )
+    assert state.get_state().state == state.STATE_FAILED_PRE
+
+    retry = _start()
+    assert retry.state == state.STATE_QUEUED
+
+
+@pytest.mark.parametrize(
+    "terminal_state",
+    [
+        state.STATE_FAILED_PRE,
+        state.STATE_FAILED_ROLLOUT,
+        state.STATE_ROLLED_BACK,
+        state.STATE_ROLLBACK_FAILED,
+        state.STATE_SUCCEEDED,
+    ],
+)
+def test_start_recovers_from_any_terminal_state(
+    env: None, terminal_state: str
+) -> None:
+    """Every terminal (non-active) state is restartable so the upgrade flow can
+    never get permanently wedged after a failed or completed run."""
+    _start()
+    state.cas_state(
+        expected_state=state.STATE_QUEUED,
+        new_state=terminal_state,
+        mutate=lambda s: setattr(
+            s, "phase_progress", 100 if terminal_state == state.STATE_SUCCEEDED else 0
+        ),
+    )
+    assert state.get_state().state == terminal_state
+
+    retry = _start()
+    assert retry.state == state.STATE_QUEUED
+
+
+@pytest.mark.parametrize(
+    "active_state",
+    [
+        state.STATE_QUEUED,
+        state.STATE_FETCHING,
+        state.STATE_BUILDING,
+        state.STATE_PATCHING,
+        state.STATE_ROLLING_OUT,
+        state.STATE_VALIDATING,
+        state.STATE_CONFIRMING,
+        state.STATE_ROLLING_BACK,
+    ],
+)
+def test_start_refused_while_active(env: None, active_state: str) -> None:
+    """An in-flight upgrade still blocks a concurrent start (409)."""
+    _start()
+    if active_state != state.STATE_QUEUED:
+        state.cas_state(
+            expected_state=state.STATE_QUEUED,
+            new_state=active_state,
+        )
+    assert state.get_state().state == active_state
+    with pytest.raises(upgrade_task.UpgradeStartRefused):
+        _start()
+
+
 def test_start_enqueue_failure_does_not_leak_broker_credentials(env: None) -> None:
     """Regression: a Celery broker exception whose repr embeds the broker
     URL (e.g. `redis://:password@host`) must not have that password copied
