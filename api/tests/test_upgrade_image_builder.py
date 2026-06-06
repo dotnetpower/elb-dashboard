@@ -30,8 +30,10 @@ class _StreamingRunner:
         self.calls: list[dict[str, Any]] = []
         self.TerminalExecError = terminal_exec.TerminalExecError
 
-    def stream(self, argv: list[str], *, timeout_seconds: int) -> Iterator[dict[str, Any]]:
-        self.calls.append({"argv": argv, "timeout_seconds": timeout_seconds})
+    def stream(
+        self, argv: list[str], *, cwd: str | None = None, timeout_seconds: int
+    ) -> Iterator[dict[str, Any]]:
+        self.calls.append({"argv": argv, "cwd": cwd, "timeout_seconds": timeout_seconds})
         for line in self._lines:
             yield {"stream": "stdout", "line": line}
         yield {"exit_code": self._exit_code, "duration_ms": 100, "timed_out": False}

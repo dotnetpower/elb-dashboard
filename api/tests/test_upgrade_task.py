@@ -51,8 +51,10 @@ class _FakeRunner:
         self.run_calls.append({"argv": argv})
         return {"exit_code": self._clone_exit, "stdout": "", "stderr": ""}
 
-    def stream(self, argv: list[str], *, timeout_seconds: int) -> Iterator[dict[str, Any]]:
-        self.stream_calls.append({"argv": argv})
+    def stream(
+        self, argv: list[str], *, cwd: str | None = None, timeout_seconds: int
+    ) -> Iterator[dict[str, Any]]:
+        self.stream_calls.append({"argv": argv, "cwd": cwd})
         yield {"stream": "stdout", "line": "step 1: ok"}
         yield {"exit_code": self._build_exit, "duration_ms": 1, "timed_out": False}
 
@@ -654,7 +656,7 @@ def test_failed_pre_records_orphan_acr_tags_when_partial_build(
             super().__init__()
             self._calls = 0
 
-        def stream(self, argv, *, timeout_seconds):
+        def stream(self, argv, *, cwd=None, timeout_seconds):
             self._calls += 1
             if self._calls >= 2:
                 yield {"line": "build failed"}
@@ -790,7 +792,7 @@ def test_orphan_tag_cleanup_results_recorded_in_audit(env: None) -> None:
             super().__init__()
             self._calls = 0
 
-        def stream(self, argv, *, timeout_seconds):
+        def stream(self, argv, *, cwd=None, timeout_seconds):
             self._calls += 1
             if self._calls >= 2:
                 yield {"line": "build failed"}

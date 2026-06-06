@@ -54,7 +54,9 @@ class _FakeRunner:
     def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
         return {"exit_code": 0, "stdout": "", "stderr": ""}
 
-    def stream(self, argv: list[str], *, timeout_seconds: int) -> Iterator[dict[str, Any]]:
+    def stream(
+        self, argv: list[str], *, cwd: str | None = None, timeout_seconds: int
+    ) -> Iterator[dict[str, Any]]:
         yield {"stream": "stdout", "line": "step 1: ok"}
         yield {"exit_code": 0, "duration_ms": 1, "timed_out": False}
 

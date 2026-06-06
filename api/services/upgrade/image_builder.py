@@ -170,7 +170,14 @@ def _argv_for(plan: BuildPlan, *, target_version: str, source_dir: str) -> list[
     short_sha = commit_short_sha(target_version)
     if short_sha and plan.component == "frontend":
         argv += ["--build-arg", f"GIT_COMMIT={short_sha}"]
-    argv.append(source_dir if plan.context == "." else f"{source_dir}/{plan.context}")
+    # SOURCE_LOCATION is "." — the build runs with cwd set to the context dir
+    # (see `build`). Passing an ABSOLUTE source dir here made `az acr build`
+    # report "Unable to find 'api/Dockerfile'" on the terminal sidecar even
+    # though the file was tracked and on disk; running from inside the context
+    # with a relative "." mirrors the standard `docker build .` invocation and
+    # resolves the Dockerfile relative to cwd.
+    context = "." if plan.context == "." else plan.context
+    argv.append(context)
     return argv
 
 
@@ -209,7 +216,9 @@ def build(
     writer.write_line(f"$ {' '.join(argv)}")
     exit_code = -1
     try:
-        for entry in runner.stream(argv, timeout_seconds=BUILD_TIMEOUT_SECONDS):
+        for entry in runner.stream(
+            argv, cwd=source_dir, timeout_seconds=BUILD_TIMEOUT_SECONDS
+        ):
             if "line" in entry:
                 writer.write_line(str(entry.get("line", "")))
             if "exit_code" in entry:
