@@ -188,6 +188,17 @@ def test_commit_clone_builds_blobless_clone_then_checkout() -> None:
         "--detach",
         sha,
     ]
+    # Third: force-hydrate the working tree from the index so the Dockerfiles
+    # are physically on disk for `az acr build`.
+    assert rec.calls[2]["argv"] == [
+        "git",
+        "-C",
+        "/tmp/elb-upgrade/jobCMT1",  # noqa: S108
+        "checkout",
+        "--force",
+        "--",
+        ".",
+    ]
 
 
 def test_commit_clone_requires_full_40_hex_sha() -> None:

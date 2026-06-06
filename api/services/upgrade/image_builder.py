@@ -188,19 +188,21 @@ def build(
     argv = _argv_for(plan, target_version=target_version, source_dir=source_dir)
     writer = build_logs.open_writer(job_id, plan.component)
     # Diagnostic: confirm the Dockerfile is physically present in the cloned
-    # context right before `az acr build` checks `os.path.isfile`. Helps
-    # distinguish a clone/checkout gap from an az-side path issue. Best-effort.
+    # context right before `az acr build` checks `os.path.isfile`. `git status`
+    # reflects the WORKING TREE (disk), unlike `git ls-files` (the index), so a
+    # ` D <file>` line means the file is tracked but missing from disk — the
+    # checkout did not hydrate the working tree. Best-effort.
     try:
         probe = runner.run(
-            ["git", "-C", source_dir, "ls-files", "--", plan.dockerfile],
+            ["git", "-C", source_dir, "status", "--porcelain", "--", plan.dockerfile],
             cwd=None,
             timeout_seconds=30,
         )
         if isinstance(probe, dict):
-            tracked = str(probe.get("stdout", "")).strip()
+            porcelain = str(probe.get("stdout", "")).strip()
             writer.write_line(
-                f"# context check: git ls-files {plan.dockerfile!r} -> "
-                f"{tracked or '(empty)'} (exit={probe.get('exit_code')})"
+                f"# context check: git status --porcelain {plan.dockerfile!r} -> "
+                f"{porcelain or '(clean/present)'} (exit={probe.get('exit_code')})"
             )
     except Exception as exc:  # diagnostic only
         writer.write_line(f"# context check skipped: {type(exc).__name__}")

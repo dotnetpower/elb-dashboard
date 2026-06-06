@@ -229,6 +229,15 @@ def _clone_commit(
     _run_git(clone_argv, runner=runner, what="git clone")
     checkout_argv = ["git", "-C", target_dir, "checkout", "--detach", sha]
     _run_git(checkout_argv, runner=runner, what="git checkout")
+    # Force-hydrate the working tree from the index. `az acr build` reads the
+    # Dockerfile from disk (`os.path.isfile`), not from git, so the working
+    # tree MUST be materialised. A plain clone+detached-checkout has been
+    # observed to leave the working tree unpopulated on the terminal sidecar
+    # (the index is correct, `git ls-files` lists the file, but the file is not
+    # on disk), making `az acr build` fail with "Unable to find api/Dockerfile".
+    # `git checkout --force -- .` writes every tracked path to the working tree.
+    hydrate_argv = ["git", "-C", target_dir, "checkout", "--force", "--", "."]
+    _run_git(hydrate_argv, runner=runner, what="git worktree hydrate")
 
 
 def _scrub_remote_credentials(target_dir: str, *, runner: object) -> None:
