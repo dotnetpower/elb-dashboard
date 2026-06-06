@@ -195,9 +195,67 @@ def reconcile_rolling_out_inline(
     # the ACA revision being Running+Provisioned avoids a brief window
     # where the SPA flips to `succeeded` while other sidecars are
     # still rebooting.
-    if row.target_version and _api.__version__ == row.target_version:
-        ready = _new_revision_is_ready(row, aca_mod, watcher_mod)
-        if not ready:
+    #
+    # `_api.__version__` reflects THIS process's version. In ACA Single mode
+    # the reconciler (beat) can still be running on the OLD revision while the
+    # new revision is already live, so `__version__` never flips to the target
+    # and the row would wedge at 95% until the 15-min budget fails it — even
+    # though the upgrade actually succeeded. So ALSO accept success when the
+    # deployed ACA template's api image is tagged for the target version; that
+    # is authoritative regardless of which revision runs this reconcile.
+    version_matches = bool(row.target_version) and _api.__version__ == row.target_version
+    image_matches = False
+    if row.target_version and not version_matches:
+        try:
+            deployed = aca_mod.read_current_images()
+            image_matches = _image_matches_version(deployed.api, row.target_version)
+        except aca_template.TemplateError as exc:
+            LOGGER.warning(
+                "upgrade.reconcile: could not read deployed images for "
+                "success check: %s",
+                exc,
+            )
+    if row.target_version and (version_matches or image_matches):
+        # Classify the new revision's health so a hard failure (provisioning
+        # failed, terminal running_state, replica-zero crash) is escalated to
+        # `failed_rollout` instead of being masked by the success branch — the
+        # image/version match only says "the right image is deployed", not
+        # "it is healthy". `_green_health` returns healthy | booting | failed.
+        health = "healthy"
+        health_status = None
+        try:
+            latest = aca_mod.latest_revision_name()
+            health_status = watcher_mod.revision_status(latest)
+            health = _green_health(health_status)
+        except aca_template.TemplateError as exc:
+            # Open-fail: a transient ARM glitch should not block forever; the
+            # stuck-guard above remains the upper bound.
+            LOGGER.warning(
+                "upgrade.reconcile: health probe failed (%s); assuming healthy",
+                exc,
+            )
+        if health == "failed":
+            # Preserve the specific diagnostic (running_state / replica-zero)
+            # so the operator gets an actionable signal, not a generic message.
+            if (
+                health_status is not None
+                and health_status.replicas == 0
+                and not health_status.active
+            ):
+                detail = "new revision has 0 replicas; new pods never came up"
+            elif health_status is not None and health_status.provisioning_state.lower() in {
+                "failed",
+                "canceled",
+            }:
+                detail = (
+                    f"new revision provisioning {health_status.provisioning_state}"
+                )
+            elif health_status is not None:
+                detail = f"new revision running_state={health_status.running_state}"
+            else:
+                detail = "new revision unhealthy after image swap"
+            return _fail_rollout(row.job_id, detail)
+        if health == "booting":
             try:
                 state.update_state(
                     lambda s: (
@@ -212,20 +270,23 @@ def reconcile_rolling_out_inline(
             except state.RowEtagMismatch:
                 pass
             return state.get_state()
+        # The running_version we can prove: this process's version if it
+        # matched, else the target (the deployed image is tagged for it).
+        proven_version = _api.__version__ if version_matches else row.target_version
         try:
             after = state.cas_state(
                 expected_state=state.STATE_ROLLING_OUT,
                 new_state=state.STATE_SUCCEEDED,
-                mutate=lambda s: (
-                    setattr(s, "phase_detail", f"new revision running v{_api.__version__}"),
+                mutate=lambda s, v=proven_version: (
+                    setattr(s, "phase_detail", f"new revision running v{v}"),
                     setattr(s, "phase_progress", 100),
-                    setattr(s, "running_version", _api.__version__),
+                    setattr(s, "running_version", v),
                 )[-1],
             )
             history.record_event(
                 "succeeded",
                 job_id=row.job_id,
-                running_version=_api.__version__,
+                running_version=proven_version,
             )
             return after
         except (state.StateTransitionRefused, state.RowEtagMismatch):

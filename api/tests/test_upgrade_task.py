@@ -737,6 +737,41 @@ def test_reconciler_replica_zero_escalates_after_grace(
     assert "0 replicas" in after.phase_detail
 
 
+def test_reconciler_succeeds_on_image_match_when_version_lags(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In ACA Single mode the reconciler (beat) can keep running on the OLD
+    revision after the new revision is live, so `_api.__version__` never
+    flips to the target and the success branch would never fire — wedging
+    the row at 95% until the 15-min budget fails it. The reconciler must
+    ALSO accept success when the deployed ACA api image is tagged for the
+    target version, which is authoritative regardless of which revision
+    runs this reconcile.
+    """
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    # `__version__` still reflects the OLD revision (beat not yet replaced),
+    # but the PATCH already swapped the deployed image to v0.3.0
+    # (`_FakeAca.swap_images` updated `_current`).
+    import api
+    monkeypatch.setattr(api, "__version__", "0.2.1")
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="Running", provisioning="Provisioned"),
+    )
+    assert after.state == state.STATE_SUCCEEDED
+    assert after.running_version == "0.3.0"
+    assert "v0.3.0" in after.phase_detail
+
+
 def test_reconciler_pre_warm_defers_when_revision_not_ready(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
