@@ -9,6 +9,7 @@ import {
   toJobRowView,
 } from "@/components/cards/ClusterBento/jobMapping";
 import type { DisplayJobState } from "@/components/cards/ClusterBento/jobTypes";
+import { summariseNote } from "@/components/cards/ClusterPulse/helpers";
 import { queueReasonText, statusColor } from "@/constants";
 
 import { timeAgo } from "./dateGroup";
@@ -70,7 +71,10 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
   const shortUser = isApiSubmit ? "api" : upn ? upn.split("@")[0] : null;
   const splitChildren = job.split_children;
   const splitLabel = splitChildren ? `${splitChildren.child_count} child jobs` : null;
-
+  // A failed job's `note` carries the raw (often multi-line, 700+ char) BLAST
+  // runtime error. Clamp it to a single short line here so it cannot blow out
+  // the table row; the full text stays available on hover via `title`.
+  const noteSummary = summariseNote(view.note);
   return (
     <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
       <td style={{ padding: "8px 0" }}>
@@ -116,7 +120,19 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
                 {job.program} · {view.db}
               </span>
               {view.query && view.query !== view.title && <span>{view.query}</span>}
-              {view.note && <span>{view.note}</span>}
+              {noteSummary && (
+                <span
+                  title={view.note ?? undefined}
+                  style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 320,
+                  }}
+                >
+                  {noteSummary}
+                </span>
+              )}
               {cluster && (
                 <span
                   style={{

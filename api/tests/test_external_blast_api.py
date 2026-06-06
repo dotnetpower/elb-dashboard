@@ -2072,3 +2072,44 @@ def test_canonical_jobs_list_marks_running_row_stale_when_cluster_stopped(monkey
     assert job["cluster_power_state"] == "Stopped"
     # The K8s refresh is skipped for the blocked row (no ~10 s timeout).
     assert refresh_calls == []
+
+
+def test_external_error_message_rejects_long_body_as_code():
+    """An elastic-blast failure arrives as a free-form string (or a dict whose
+    `code` is the whole multi-line error body incl. a REDACTED x-ms-* header
+    dump). `error_code` must stay a short token; the long text becomes the
+    (length-capped) message instead."""
+    from api.services.blast.external_jobs import _external_error_message
+
+    long_body = (
+        "'x-ms-owner': 'REDACTED'\n'x-ms-acl': 'REDACTED'\n"
+        "2026-06-04T22:16:10Z ERROR: BLAST database "
+        "https://acct.blob.core.windows.net/blast-db/core_nt/core_nt memory "
+        "requirements exceed memory available on selected machine type "
+        '"Standard_E16s_v5". ' * 6
+    )
+
+    # (1) Plain string error → no code, message clamped + whitespace-collapsed.
+    code, message = _external_error_message(long_body)
+    assert code is None
+    assert message is not None
+    assert "\n" not in message
+    assert len(message) <= 2000
+
+    # (2) Dict whose "code" is actually the long body → code rejected, body
+    # preserved as the message.
+    code2, message2 = _external_error_message({"code": long_body})
+    assert code2 is None
+    assert message2 is not None
+    assert len(message2) <= 2000
+
+    # (3) A real short code is preserved.
+    code3, message3 = _external_error_message(
+        {"code": "database_not_found", "message": "BLAST DB missing"}
+    )
+    assert code3 == "database_not_found"
+    assert message3 == "BLAST DB missing"
+
+    # (4) Empty / falsy error → both None.
+    assert _external_error_message(None) == (None, None)
+    assert _external_error_message("") == (None, None)

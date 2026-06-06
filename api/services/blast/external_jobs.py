@@ -323,14 +323,60 @@ def _short_external_db_name(*values: Any) -> str:
 
 
 def _external_error_message(error: Any) -> tuple[str | None, str | None]:
+    """Split an external job's ``error`` into ``(error_code, error_message)``.
+
+    ``error_code`` is meant to be a short, greppable identifier (e.g.
+    ``database_not_found``), never a full multi-line error body. elastic-blast
+    failures arrive as a free-form string (or a dict whose ``code`` is actually
+    the whole error text including a REDACTED Azure ``x-ms-*`` header dump), so
+    we guard: a "code" candidate is only accepted when it is a single short
+    token. Anything else is treated as the message. The message itself is
+    newline-collapsed and length-capped so a 700+ char dump cannot bloat the
+    Table row or the jobs-list response.
+    """
     if not error:
         return None, None
     if isinstance(error, dict):
-        code = str(error.get("code") or "").strip() or None
-        message = str(error.get("message") or code or "").strip() or None
+        raw_code = str(error.get("code") or "").strip()
+        raw_message = str(error.get("message") or "").strip()
+        code = _normalise_error_code(raw_code)
+        # When the dict's "code" was actually a long body (not a real code),
+        # fall back to it as the message so the detail is not lost.
+        message_source = raw_message or (raw_code if code is None else "")
+        message = _clamp_error_message(message_source) or (
+            _clamp_error_message(raw_code) if raw_code else None
+        )
         return code, message
-    message = str(error).strip()
-    return None, message or None
+    return None, _clamp_error_message(str(error))
+
+
+# A real error code is a short single token (no spaces/newlines), e.g.
+# ``database_not_found`` / ``ImagePullBackOff`` / ``worker_lost``.
+_MAX_ERROR_CODE_LEN = 80
+# Stored error messages are capped so an elastic-blast dump (which can embed a
+# full REDACTED HTTP header block) cannot bloat the Table row. The SPA clamps
+# further for display; this is the storage-side ceiling.
+_MAX_ERROR_MESSAGE_LEN = 2000
+
+
+def _normalise_error_code(raw: str) -> str | None:
+    """Return ``raw`` only when it looks like a short single-token code."""
+    token = raw.strip()
+    if not token:
+        return None
+    if len(token) > _MAX_ERROR_CODE_LEN or any(c.isspace() for c in token):
+        return None
+    return token
+
+
+def _clamp_error_message(raw: str) -> str | None:
+    """Collapse whitespace and cap the length of a free-form error message."""
+    collapsed = " ".join(str(raw).split())
+    if not collapsed:
+        return None
+    if len(collapsed) > _MAX_ERROR_MESSAGE_LEN:
+        return collapsed[: _MAX_ERROR_MESSAGE_LEN - 1].rstrip() + "\u2026"
+    return collapsed
 
 
 def _external_execution_summary(job: dict[str, Any]) -> dict[str, int]:
