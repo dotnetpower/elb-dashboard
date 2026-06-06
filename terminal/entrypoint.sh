@@ -164,7 +164,7 @@ EXEC_PID=$!
 (
   _exec_cfg="${EXEC_AZURE_CONFIG_DIR:-/tmp/elb-exec-azure}"
   if [ -n "${AZURE_CLIENT_ID:-}" ]; then
-    AZURE_CONFIG_DIR="$_exec_cfg" az login --identity --username "$AZURE_CLIENT_ID" \
+    AZURE_CONFIG_DIR="$_exec_cfg" az login --identity --client-id "$AZURE_CLIENT_ID" \
       --allow-no-subscriptions >/dev/null 2>&1 \
       || echo "elb-supervisor: exec az login --identity (UAMI) failed; az acr build may need it" >&2
   else

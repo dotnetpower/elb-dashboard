@@ -181,7 +181,7 @@ def test_ensure_exec_az_login_uses_uami_client_id(monkeypatch: pytest.MonkeyPatc
             "login",
             "--identity",
             "--allow-no-subscriptions",
-            "--username",
+            "--client-id",
             "11111111-2222-3333-4444-555555555555",
         ]
     ]

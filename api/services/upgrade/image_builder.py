@@ -120,7 +120,10 @@ def ensure_exec_az_login(*, runner: object = terminal_exec) -> None:
     client_id = os.environ.get("AZURE_CLIENT_ID", "").strip()
     argv = ["az", "login", "--identity", "--allow-no-subscriptions"]
     if client_id:
-        argv += ["--username", client_id]
+        # User-assigned MI: modern Azure CLI uses `--client-id` (the old
+        # `--username` alias was removed), so passing `--username` here fails
+        # with exit 1 ("unrecognized arguments") on current CLI builds.
+        argv += ["--client-id", client_id]
     try:
         result = runner.run(argv, cwd=None, timeout_seconds=120)
     except Exception as exc:  # best-effort; the build re-checks the account
