@@ -58,7 +58,13 @@ _PLANS: dict[str, BuildPlan] = {
     ),
     "terminal": BuildPlan(
         component="terminal", image_name="elb-terminal",
-        dockerfile="terminal/Dockerfile.runtime", context=".",
+        # The terminal runtime Dockerfile COPYs files (profile.sh, motd, …) that
+        # live in `terminal/`, so its build CONTEXT must be `terminal/`, not the
+        # repo root — otherwise `COPY profile.sh …` fails with "file not found in
+        # build context". The `--file` path stays repo-root-relative because the
+        # build runs with cwd=<clone root> (mirrors scripts/dev/quick-deploy.sh:
+        # `az acr build --file terminal/Dockerfile.runtime terminal/`).
+        dockerfile="terminal/Dockerfile.runtime", context="terminal",
     ),
 }
 
