@@ -52,6 +52,35 @@ describe("resolveDbMoleculeType", () => {
   });
 });
 
+describe("buildDatabasePath", () => {
+  it("joins container/prefix/name for folder-layout DBs", () => {
+    expect(buildDatabasePath(makeDb("core_nt", { prefix: "core_nt" }))).toBe(
+      "blast-db/core_nt/core_nt",
+    );
+  });
+
+  it("uses the real directory for nested subset DBs (nt/nt_euk)", () => {
+    // Regression: nt_euk files live under the nt/ folder, so the prefix is the
+    // directory `nt`, not the base `nt_euk`. The path must resolve to the
+    // actual blob stem the submit pre-flight checks.
+    expect(buildDatabasePath(makeDb("nt_euk", { prefix: "nt" }))).toBe("blast-db/nt/nt_euk");
+  });
+
+  it("preserves multi-segment custom prefixes", () => {
+    expect(buildDatabasePath(makeDb("labdb", { prefix: "custom_db/labdb" }))).toBe(
+      "blast-db/custom_db/labdb/labdb",
+    );
+  });
+
+  it("drops an empty prefix for top-level DB files (no double slash)", () => {
+    expect(buildDatabasePath(makeDb("standalone", { prefix: "" }))).toBe("blast-db/standalone");
+  });
+
+  it("falls back to the DB name when prefix is undefined", () => {
+    expect(buildDatabasePath(makeDb("legacy"))).toBe("blast-db/legacy/legacy");
+  });
+});
+
 describe("deriveDbAvailabilityByType", () => {
   it("stays permissive when the list has not loaded", () => {
     expect(deriveDbAvailabilityByType(undefined)).toEqual({ nucl: true, prot: true });

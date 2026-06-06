@@ -150,8 +150,18 @@ def list_databases(
                 base = re.sub(r"\.\d+$", "", base)
                 if base:
                     if base not in db_info:
-                        # Build the blob prefix so the frontend can reconstruct the full path
-                        prefix = f"custom_db/{base}" if is_custom else base
+                        # Build the blob prefix so the frontend can reconstruct
+                        # the full path. The prefix is the *directory* the DB
+                        # files actually live in, NOT the filename base. Using
+                        # the base broke nested subset DBs such as
+                        # ``nt/nt_euk.*`` (folder ``nt`` != base ``nt_euk``):
+                        # the old prefix ``nt_euk`` produced the path
+                        # ``blast-db/nt_euk/nt_euk`` which does not exist, so
+                        # the submit pre-flight reported the DB as missing even
+                        # though the dashboard listed it as "Downloaded".
+                        # ``parts[:-1]`` is the real directory (empty for a
+                        # top-level file, ``custom_db/<db>`` for custom builds).
+                        prefix = "/".join(parts[:-1])
                         db_info[base] = {
                             "name": base,
                             "container": container,

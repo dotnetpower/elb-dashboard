@@ -8,8 +8,12 @@ export function getDbBaseName(dbPath: string): string {
 }
 
 export function buildDatabasePath(db: BlastDatabase): string {
+  // `prefix` is the blob directory the DB files live in. It can be an empty
+  // string for a top-level DB file (no directory), so drop empty segments to
+  // avoid producing a `blast-db//name` double slash. When the backend omits
+  // `prefix` entirely (older responses) fall back to the DB name.
   const prefix = db.prefix ?? db.name;
-  return `${db.container}/${prefix}/${db.name}`;
+  return [db.container, prefix, db.name].filter(Boolean).join("/");
 }
 
 export function databaseExists(databases: BlastDatabase[], dbPath: string): boolean {

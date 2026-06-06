@@ -355,6 +355,43 @@ def _blob(name: str, size: int = 1) -> SimpleNamespace:
     return SimpleNamespace(name=name, size=size, last_modified=None)
 
 
+def test_list_databases_prefix_is_blob_directory_not_filename_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`prefix` must be the directory the DB files live in, not the file base.
+
+    Regression for nested subset DBs such as ``nt/nt_euk.*`` staged inside the
+    ``nt/`` folder. The old code set ``prefix = base`` (``nt_euk``), so the
+    frontend built ``blast-db/nt_euk/nt_euk`` — a path that does not exist —
+    and the submit pre-flight reported the DB as missing even though the
+    dashboard listed it as "Downloaded". The prefix must encode the real
+    directory so ``container/prefix/name`` resolves to the actual blob stem.
+    """
+    blobs = [
+        _blob("nt/nt.00.nsq"),  # folder == base
+        _blob("nt/nt_euk.000.nsq"),  # nested subset: folder (nt) != base (nt_euk)
+        _blob("core_nt/core_nt.00.nin"),  # folder == base
+        _blob("custom_db/labdb/labdb.nsq"),  # custom build layout
+        _blob("standalone.nsq"),  # top-level file, no directory
+    ]
+    fake_container = FakeContainerClient(blobs, {})
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    databases = {
+        item["name"]: item for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+    }
+
+    assert databases["nt"]["prefix"] == "nt"
+    assert databases["nt_euk"]["prefix"] == "nt"
+    assert databases["core_nt"]["prefix"] == "core_nt"
+    assert databases["labdb"]["prefix"] == "custom_db/labdb"
+    assert databases["standalone"]["prefix"] == ""
+
+
 def test_list_databases_only_marks_verified_defaults_as_web_blast_searchsp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
