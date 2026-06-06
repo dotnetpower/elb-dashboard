@@ -871,6 +871,52 @@ def test_reconciler_rolling_out_budget_falls_back_to_started_at(
     assert "exceeded budget" in after.phase_detail
 
 
+def test_reconciler_healthy_revision_over_budget_still_succeeds(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real Single-mode failure: the revision swap tears down the beat
+    that was reconciling, and the new beat (on the swapped-in revision) only
+    fires its first reconcile after redis + the beat schedule rebuild — which
+    can be >15 min after the PATCH even though the new revision came up healthy
+    within minutes. The success/health check MUST run before the stuck-budget
+    guard so a healthy, correctly-tagged revision is marked succeeded
+    regardless of elapsed time; the budget only fails a revision that is
+    genuinely still booting.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    now = datetime.now(UTC)
+    # PATCH landed 20 min ago (well over the 15-min budget), but the new
+    # revision is healthy and its image is tagged for the target.
+    state.update_state(
+        lambda s: (
+            setattr(s, "started_at", (now - timedelta(minutes=33)).isoformat()),
+            setattr(
+                s, "rolling_out_started_at", (now - timedelta(minutes=20)).isoformat()
+            ),
+        )[-1]
+    )
+    import api
+
+    monkeypatch.setattr(api, "__version__", "0.2.1")
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="Running", provisioning="Provisioned"),
+    )
+    assert after.state == state.STATE_SUCCEEDED
+    assert after.running_version == "0.3.0"
+
+
 def test_reconciler_pre_warm_defers_when_revision_not_ready(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

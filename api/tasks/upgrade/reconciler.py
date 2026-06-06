@@ -176,39 +176,23 @@ def reconcile_rolling_out_inline(
 
     aca_mod = aca or aca_template
 
-    # Stuck guard: rolling_out > 15 min → fail_rollout so the operator
-    # can rollback or use the escape-hatch. Anchored to `rolling_out_started_at`
-    # (the ARM PATCH moment), NOT `started_at`: the clone+build phases consume
-    # ~10-13 min of `started_at`'s budget, so measuring the rollout window from
-    # `started_at` would false-abort a healthy new revision seconds into
-    # booting. Fall back to `started_at` for rows created before the field
-    # existed (in-flight upgrades during the deploy that adds it).
-    rollout_anchor = row.rolling_out_started_at or row.started_at
-    if rollout_anchor:
-        try:
-            started = datetime.fromisoformat(rollout_anchor)
-            elapsed = (clock() - started).total_seconds()
-            if elapsed > ROLLING_OUT_TIMEOUT_SECONDS:
-                return _fail_rollout(
-                    row.job_id,
-                    f"rolling_out exceeded budget ({elapsed:.0f}s); "
-                    "rollback or escape-hatch",
-                )
-        except ValueError:
-            pass
-
-    # Pre-warm gate: api `__version__` matching `target_version` plus
-    # the ACA revision being Running+Provisioned avoids a brief window
-    # where the SPA flips to `succeeded` while other sidecars are
-    # still rebooting.
+    # Order matters: evaluate SUCCESS (deployed image tagged for the target +
+    # the new revision healthy) BEFORE the stuck-budget guard. In ACA Single
+    # mode the revision swap tears down the beat that was reconciling and the
+    # new beat (on the swapped-in revision) only starts after redis + the beat
+    # schedule rebuild. Its FIRST reconcile can therefore fire >15 min after
+    # the PATCH even though the new revision came up healthy within minutes —
+    # if the budget check ran first it would fail an upgrade that actually
+    # succeeded. So a healthy, correctly-tagged revision is marked succeeded
+    # regardless of elapsed time; the budget only fails a revision that is
+    # genuinely still booting or whose image never deployed.
     #
-    # `_api.__version__` reflects THIS process's version. In ACA Single mode
-    # the reconciler (beat) can still be running on the OLD revision while the
-    # new revision is already live, so `__version__` never flips to the target
-    # and the row would wedge at 95% until the 15-min budget fails it — even
-    # though the upgrade actually succeeded. So ALSO accept success when the
-    # deployed ACA template's api image is tagged for the target version; that
-    # is authoritative regardless of which revision runs this reconcile.
+    # `_api.__version__` reflects THIS process's version. The reconciler (beat)
+    # can still be running on the OLD revision while the new revision is already
+    # live, so `__version__` never flips to the target. So ALSO accept success
+    # when the deployed ACA template's api image is tagged for the target
+    # version; that is authoritative regardless of which revision runs this
+    # reconcile.
     version_matches = bool(row.target_version) and _api.__version__ == row.target_version
     image_matches = False
     if row.target_version and not version_matches:
@@ -221,6 +205,31 @@ def reconcile_rolling_out_inline(
                 "success check: %s",
                 exc,
             )
+
+    def _stuck_over_budget() -> state.UpgradeState | None:
+        """Fail the row if the rollout window is exhausted.
+
+        Anchored to `rolling_out_started_at` (the ARM PATCH moment), NOT
+        `started_at`: the clone+build phases consume ~10-13 min of
+        `started_at`'s budget. Falls back to `started_at` for rows created
+        before the field existed.
+        """
+        anchor = row.rolling_out_started_at or row.started_at
+        if not anchor:
+            return None
+        try:
+            started = datetime.fromisoformat(anchor)
+        except ValueError:
+            return None
+        elapsed = (clock() - started).total_seconds()
+        if elapsed > ROLLING_OUT_TIMEOUT_SECONDS:
+            return _fail_rollout(
+                row.job_id,
+                f"rolling_out exceeded budget ({elapsed:.0f}s); "
+                "rollback or escape-hatch",
+            )
+        return None
+
     if row.target_version and (version_matches or image_matches):
         # Classify the new revision's health so a hard failure (provisioning
         # failed, terminal running_state, replica-zero crash) is escalated to
@@ -235,7 +244,7 @@ def reconcile_rolling_out_inline(
             health = _green_health(health_status)
         except aca_template.TemplateError as exc:
             # Open-fail: a transient ARM glitch should not block forever; the
-            # stuck-guard above remains the upper bound.
+            # stuck-guard below remains the upper bound.
             LOGGER.warning(
                 "upgrade.reconcile: health probe failed (%s); assuming healthy",
                 exc,
@@ -262,6 +271,12 @@ def reconcile_rolling_out_inline(
                 detail = "new revision unhealthy after image swap"
             return _fail_rollout(row.job_id, detail)
         if health == "booting":
+            # The right image is deployed but the revision is not ready yet.
+            # NOW apply the budget: a revision that never finishes booting
+            # within the window is a genuine stuck rollout.
+            stuck = _stuck_over_budget()
+            if stuck is not None:
+                return stuck
             try:
                 state.update_state(
                     lambda s: (
@@ -297,6 +312,14 @@ def reconcile_rolling_out_inline(
             return after
         except (state.StateTransitionRefused, state.RowEtagMismatch):
             return state.get_state()
+
+    # The target image is not deployed yet (PATCH in flight / never landed).
+    # Apply the stuck-budget guard so a row whose PATCH silently failed does
+    # not spin forever.
+    stuck = _stuck_over_budget()
+    if stuck is not None:
+        return stuck
+
 
     # Fast-fail when the ARM PATCH evidently never landed.
     if row.target_version and row.started_at:
