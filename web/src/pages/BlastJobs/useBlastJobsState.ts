@@ -71,6 +71,11 @@ export function useBlastJobsState() {
   const cluster = useClusterReadiness();
   const { jobsQuery, clusterName } = useScopedBlastJobs({
     clusterName: clusterFilter,
+    // Recent searches is a history view: list the caller's jobs across every
+    // cluster (unless the URL pins one via ?cluster=). Pinning to a single
+    // discovered cluster hid the user's recent jobs whenever the fleet was
+    // all-Stopped and the alphabetically-first cluster was the stale one.
+    autoSelectCluster: false,
     refetchInterval: 20_000,
   });
 

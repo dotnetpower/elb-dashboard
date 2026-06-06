@@ -28,6 +28,10 @@ export function useLatestBlastJob(): UseLatestBlastJobResult {
   const activeJobId = exactJobMatch?.params.jobId ?? nestedJobMatch?.params.jobId ?? "";
 
   const { jobsQuery } = useScopedBlastJobs({
+    // The topbar chip shows the single most recent job. List across every
+    // cluster so a job on a peer cluster isn't masked by an auto-pinned
+    // (often Stopped, often stale) cluster.
+    autoSelectCluster: false,
     refetchInterval: 15_000,
   });
 
