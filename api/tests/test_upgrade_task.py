@@ -215,12 +215,15 @@ def test_commit_execute_uses_commit_clone_and_reaches_rolling_out(env: None) -> 
         aca=aca,
     )
     assert after_exec.state == state.STATE_ROLLING_OUT
-    # The clone used the commit strategy: full clone (default checkout) + a
-    # detached checkout of the target sha.
+    # The clone used the commit strategy: shallow clone (--depth 1) + a shallow
+    # fetch + a detached checkout of the target sha.
     clone_argv = runner.run_calls[0]["argv"]
     assert clone_argv[:2] == ["git", "clone"]
-    assert "--no-checkout" not in clone_argv
+    assert "--depth" in clone_argv
     assert "--filter=blob:none" not in clone_argv
+    assert any(
+        c["argv"][:1] == ["git"] and "fetch" in c["argv"] for c in runner.run_calls
+    )
     assert any(
         c["argv"][:1] == ["git"] and "checkout" in c["argv"] for c in runner.run_calls
     )

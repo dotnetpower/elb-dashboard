@@ -171,33 +171,36 @@ def test_commit_clone_builds_blobless_clone_then_checkout() -> None:
         runner=rec,
     )
     assert result.target_dir == "/tmp/elb-upgrade/jobCMT1"  # noqa: S108
-    # First: full clone (no blob filter, default checkout) so az acr build's
-    # git-based context upload sees a complete tree (see _clone_commit).
+    # First: shallow no-checkout clone (mirrors the working release path's
+    # --depth 1 shape, see _clone_commit).
     assert rec.calls[0]["argv"] == [
         "git",
         "clone",
+        "--depth",
+        "1",
+        "--no-checkout",
         "https://example.test/foo.git",
         "/tmp/elb-upgrade/jobCMT1",  # noqa: S108
     ]
-    # Second: detached checkout of the full sha.
+    # Second: shallow fetch of the exact target commit.
     assert rec.calls[1]["argv"] == [
+        "git",
+        "-C",
+        "/tmp/elb-upgrade/jobCMT1",  # noqa: S108
+        "fetch",
+        "--depth",
+        "1",
+        "origin",
+        sha,
+    ]
+    # Third: detached checkout of the full sha.
+    assert rec.calls[2]["argv"] == [
         "git",
         "-C",
         "/tmp/elb-upgrade/jobCMT1",  # noqa: S108
         "checkout",
         "--detach",
         sha,
-    ]
-    # Third: force-hydrate the working tree from the index so the Dockerfiles
-    # are physically on disk for `az acr build`.
-    assert rec.calls[2]["argv"] == [
-        "git",
-        "-C",
-        "/tmp/elb-upgrade/jobCMT1",  # noqa: S108
-        "checkout",
-        "--force",
-        "--",
-        ".",
     ]
 
 

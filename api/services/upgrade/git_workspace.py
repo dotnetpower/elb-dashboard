@@ -203,41 +203,45 @@ def _clone_commit(
         raise WorkspaceError(
             f"commit clone requires a full 40-hex target_sha, got {target_sha!r}"
         )
-    # Full clone followed by a detached checkout of the target commit.
-    #
-    # IMPORTANT: do NOT use `--filter=blob:none` (a blobless partial clone)
-    # AND do NOT use `--no-checkout`. `az acr build <dir>` detects the `.git`
-    # directory and builds the upload context from git (the committed tree),
-    # so the clone must leave BOTH a complete object store AND a checked-out
-    # working tree on the target commit — exactly like the working `release`
-    # path (`git clone --depth 1 --branch v<ver>`, which checks out by
-    # default). A blobless or no-checkout clone left git's view of the tree
-    # incomplete and `az acr build` failed with "Unable to find
-    # 'api/Dockerfile'". The repo is small, so a full clone is cheap.
+    # Shallow-clone the default branch (gets a working `.git` + remote), then
+    # shallow-fetch the exact target commit and check it out. This mirrors the
+    # WORKING release path (`git clone --depth 1 --branch v<ver>`) as closely
+    # as possible — the release path produces a shallow repo whose `az acr
+    # build` context upload works, while a full clone + detached checkout did
+    # not (az reported "Unable to find api/Dockerfile" even though the file was
+    # tracked AND on disk per `git status`). The only material difference that
+    # made release work was the shallow single-commit shape, so reproduce it.
     clone_argv = [
         "git",
         "clone",
+        "--depth",
+        "1",
+        "--no-checkout",
         git_remote,
         target_dir,
     ]
     LOGGER.info(
-        "upgrade.git_workspace: cloning %s into %s for commit %s",
+        "upgrade.git_workspace: shallow-cloning %s into %s for commit %s",
         git_remote,
         target_dir,
         sha[:12],
     )
     _run_git(clone_argv, runner=runner, what="git clone")
+    # Fetch the exact target commit at depth 1 so the detached checkout below
+    # resolves even when it is not the default-branch HEAD.
+    fetch_argv = [
+        "git",
+        "-C",
+        target_dir,
+        "fetch",
+        "--depth",
+        "1",
+        "origin",
+        sha,
+    ]
+    _run_git(fetch_argv, runner=runner, what="git fetch")
     checkout_argv = ["git", "-C", target_dir, "checkout", "--detach", sha]
     _run_git(checkout_argv, runner=runner, what="git checkout")
-    # Force-hydrate the working tree from the index. `az acr build` reads the
-    # Dockerfile from disk (`os.path.isfile`), not from git, so the working
-    # tree MUST be materialised. A plain clone+detached-checkout has been
-    # observed to leave the working tree unpopulated on the terminal sidecar
-    # (the index is correct, `git ls-files` lists the file, but the file is not
-    # on disk), making `az acr build` fail with "Unable to find api/Dockerfile".
-    # `git checkout --force -- .` writes every tracked path to the working tree.
-    hydrate_argv = ["git", "-C", target_dir, "checkout", "--force", "--", "."]
-    _run_git(hydrate_argv, runner=runner, what="git worktree hydrate")
 
 
 def _scrub_remote_credentials(target_dir: str, *, runner: object) -> None:
