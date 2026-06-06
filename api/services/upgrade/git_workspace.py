@@ -38,6 +38,20 @@ _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(-commit\.[0-9a-f]{7,40})?$")
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{4,64}$")
 CLONE_TIMEOUT_SECONDS = 300
 
+# Files the build pipeline (api.services.upgrade.image_builder._PLANS) feeds to
+# `az acr build --file <path>`. After a clone+checkout these MUST exist in the
+# working tree; if they do not, `az acr build` fails later with a confusing
+# "Unable to find '<path>'" instead of pointing at the real cause (a checkout
+# that exited 0 but left an empty working tree — seen with an old `git` in a
+# stale terminal sidecar doing a `--filter=blob:none --no-checkout` commit
+# clone). Kept in sync with the image_builder plans by
+# `test_upgrade_git_workspace.py`.
+_EXPECTED_BUILD_FILES = (
+    "api/Dockerfile",
+    "web/Dockerfile",
+    "terminal/Dockerfile.runtime",
+)
+
 
 class WorkspaceError(RuntimeError):
     """Raised when the clone fails or the request shape is invalid."""
@@ -100,6 +114,7 @@ def clone(
             runner=runner,
         )
     _scrub_remote_credentials(target_dir, runner=runner)
+    _verify_build_files_materialised(target_dir, runner=runner)
     return WorkspacePath(target_dir=target_dir, target_version=target_version, job_id=job_id)
 
 
@@ -114,6 +129,50 @@ def _run_git(argv: list[str], *, runner: object, what: str) -> dict:
         stderr = str(result.get("stderr", ""))[:1024]
         raise WorkspaceError(f"{what} failed (exit={exit_code}): {stderr}")
     return result
+
+
+def _verify_build_files_materialised(target_dir: str, *, runner: object) -> None:
+    """Fail fast when the clone produced an empty / un-checked-out working tree.
+
+    A `git clone --filter=blob:none --no-checkout` followed by a
+    `git checkout --detach <sha>` can, with an old `git` (e.g. a stale terminal
+    sidecar), exit 0 yet leave the working tree unpopulated. The next step
+    (`az acr build --file api/Dockerfile`) then fails with a misleading
+    "Unable to find 'api/Dockerfile'". We surface the real cause here by asking
+    git whether the build Dockerfiles are present-and-unmodified in the working
+    tree: `git status --porcelain -- <files>` prints a ` D ` (deleted) line for
+    any tracked file missing from the working tree, and nothing when they are
+    materialised. Uses only the allowlisted `git` binary (no `test`/`ls`).
+    """
+    argv = ["git", "-C", target_dir, "status", "--porcelain", "--", *_EXPECTED_BUILD_FILES]
+    try:
+        result = runner.run(argv, cwd=None, timeout_seconds=30)
+    except terminal_exec.TerminalExecError as exc:
+        raise WorkspaceError(
+            f"could not verify cloned working tree: {exc}"
+        ) from exc
+    if int(result.get("exit_code", -1)) != 0:
+        stderr = str(result.get("stderr", ""))[:512]
+        raise WorkspaceError(
+            f"could not verify cloned working tree (git status exit="
+            f"{result.get('exit_code')}): {stderr}"
+        )
+    porcelain = str(result.get("stdout", "") or "")
+    # Any line whose XY status code contains 'D' (index/worktree deletion) means
+    # a build Dockerfile is tracked but absent from the working tree.
+    missing = [
+        line.strip()
+        for line in porcelain.splitlines()
+        if line[:2].strip().upper().find("D") != -1
+    ]
+    if missing:
+        raise WorkspaceError(
+            "cloned working tree is missing build files "
+            f"({', '.join(_EXPECTED_BUILD_FILES)}): the checkout did not "
+            "materialise the tree. This usually means the terminal sidecar's "
+            "git is too old for a blobless commit clone — redeploy the terminal "
+            f"sidecar and retry. git status: {'; '.join(missing)[:300]}"
+        )
 
 
 def _clone_release(

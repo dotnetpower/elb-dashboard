@@ -224,6 +224,62 @@ def test_commit_clone_propagates_checkout_failure() -> None:
     assert "checkout" in str(exc.value).lower()
 
 
+def test_clone_runs_build_file_verification_after_clone() -> None:
+    """The happy path issues a `git status --porcelain` over the build files."""
+    rec = _Recorder(exit_code=0)
+    git_workspace.clone(
+        git_remote="https://example.test/foo.git",
+        target_version="0.3.0",
+        job_id="jobVER1",
+        runner=rec,
+    )
+    status_calls = [
+        c
+        for c in rec.calls
+        if c["argv"][:1] == ["git"]
+        and "status" in c["argv"]
+        and "--porcelain" in c["argv"]
+    ]
+    assert len(status_calls) == 1
+    for expected in git_workspace._EXPECTED_BUILD_FILES:
+        assert expected in status_calls[0]["argv"]
+
+
+def test_clone_fails_when_working_tree_missing_build_files() -> None:
+    """A checkout that exits 0 but leaves an empty working tree (git status
+    reports the Dockerfiles as deleted) must abort the clone with a clear
+    message instead of letting `az acr build` fail later with a confusing
+    "Unable to find 'api/Dockerfile'"."""
+
+    class _EmptyWorkingTree(_Recorder):
+        def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
+            self.calls.append({"argv": argv, "cwd": cwd, "timeout_seconds": timeout_seconds})
+            if "status" in argv and "--porcelain" in argv:
+                return {
+                    "exit_code": 0,
+                    "stdout": (
+                        " D api/Dockerfile\n"
+                        " D web/Dockerfile\n"
+                        " D terminal/Dockerfile.runtime\n"
+                    ),
+                    "stderr": "",
+                }
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    with pytest.raises(git_workspace.WorkspaceError) as exc:
+        git_workspace.clone(
+            git_remote="https://example.test/foo.git",
+            target_version="0.2.0-commit.a1b2c3d",
+            job_id="jobVER2",
+            target_kind="commit",
+            target_sha="a" * 40,
+            runner=_EmptyWorkingTree(),
+        )
+    msg = str(exc.value)
+    assert "missing build files" in msg
+    assert "terminal sidecar" in msg
+
+
 def test_cleanup_refuses_paths_outside_upgrade_root() -> None:
     rec = _Recorder()
     workspace = git_workspace.WorkspacePath(
