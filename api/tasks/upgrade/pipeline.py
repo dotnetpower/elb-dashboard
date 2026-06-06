@@ -489,12 +489,18 @@ def execute_upgrade_inline(
     )
 
     try:
+        rolling_out_entered = _utc_now()
         state.cas_state(
             expected_state=state.STATE_PATCHING,
             new_state=state.STATE_ROLLING_OUT,
-            mutate=lambda s: (
+            mutate=lambda s, t=rolling_out_entered: (
                 setattr(s, "phase_detail", "ARM PATCH submitted"),
                 setattr(s, "phase_progress", 90),
+                # Anchor the rolling_out budget to NOW, not `started_at` (which
+                # already absorbed the ~10-13 min clone+build phases). Measuring
+                # the rollout window from `started_at` false-aborts a healthy new
+                # revision seconds into booting — the exact failed_rollout bug.
+                setattr(s, "rolling_out_started_at", t),
             )[-1],
         )
     except state.StateTransitionRefused as exc:

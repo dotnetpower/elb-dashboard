@@ -772,6 +772,105 @@ def test_reconciler_succeeds_on_image_match_when_version_lags(
     assert "v0.3.0" in after.phase_detail
 
 
+def test_reconciler_rolling_out_budget_anchored_to_patch_not_start(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rolling_out budget must be measured from `rolling_out_started_at`
+    (the ARM PATCH moment), NOT `started_at`. The clone+build phases consume
+    ~10-13 min of `started_at`'s budget, so anchoring the 15-min rollout
+    window to `started_at` false-aborts a healthy new revision seconds into
+    booting (the observed `failed_rollout` at 985s). A row whose overall
+    upgrade started 14 min ago but whose PATCH landed 30 s ago must still be
+    given the full rollout window when the new revision is merely booting.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    # pipeline set rolling_out_started_at ~now; verify it is populated and
+    # then simulate the build phase having consumed `started_at`'s budget.
+    assert state.get_state().rolling_out_started_at
+    now = datetime.now(UTC)
+    state.update_state(
+        lambda s: (
+            setattr(s, "started_at", (now - timedelta(minutes=14)).isoformat()),
+            setattr(
+                s, "rolling_out_started_at", (now - timedelta(seconds=30)).isoformat()
+            ),
+        )[-1]
+    )
+    import api
+
+    monkeypatch.setattr(api, "__version__", "0.2.1")
+    # New revision still booting; the budget must NOT fire because the PATCH
+    # was 30 s ago (well within the 15-min rollout window).
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="Activating", provisioning="InProgress"),
+    )
+    assert after.state == state.STATE_ROLLING_OUT
+    assert after.phase_progress == 95
+
+    # When the PATCH itself is older than the budget, it DOES fail.
+    state.update_state(
+        lambda s: setattr(
+            s, "rolling_out_started_at", (now - timedelta(minutes=16)).isoformat()
+        )
+    )
+    failed = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="Activating", provisioning="InProgress"),
+    )
+    assert failed.state == state.STATE_FAILED_ROLLOUT
+    assert "exceeded budget" in failed.phase_detail
+
+
+def test_reconciler_rolling_out_budget_falls_back_to_started_at(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows created before `rolling_out_started_at` existed (in-flight during
+    the deploy that adds the field) carry an empty value; the reconciler must
+    fall back to `started_at` so those legacy rows still get a stuck-guard.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    now = datetime.now(UTC)
+    # Legacy row: no rolling_out_started_at, started_at 16 min ago.
+    state.update_state(
+        lambda s: (
+            setattr(s, "started_at", (now - timedelta(minutes=16)).isoformat()),
+            setattr(s, "rolling_out_started_at", ""),
+        )[-1]
+    )
+    import api
+
+    monkeypatch.setattr(api, "__version__", "0.2.1")
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="Activating", provisioning="InProgress"),
+    )
+    assert after.state == state.STATE_FAILED_ROLLOUT
+    assert "exceeded budget" in after.phase_detail
+
+
 def test_reconciler_pre_warm_defers_when_revision_not_ready(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

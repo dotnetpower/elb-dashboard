@@ -177,10 +177,16 @@ def reconcile_rolling_out_inline(
     aca_mod = aca or aca_template
 
     # Stuck guard: rolling_out > 15 min → fail_rollout so the operator
-    # can rollback or use the escape-hatch.
-    if row.started_at:
+    # can rollback or use the escape-hatch. Anchored to `rolling_out_started_at`
+    # (the ARM PATCH moment), NOT `started_at`: the clone+build phases consume
+    # ~10-13 min of `started_at`'s budget, so measuring the rollout window from
+    # `started_at` would false-abort a healthy new revision seconds into
+    # booting. Fall back to `started_at` for rows created before the field
+    # existed (in-flight upgrades during the deploy that adds it).
+    rollout_anchor = row.rolling_out_started_at or row.started_at
+    if rollout_anchor:
         try:
-            started = datetime.fromisoformat(row.started_at)
+            started = datetime.fromisoformat(rollout_anchor)
             elapsed = (clock() - started).total_seconds()
             if elapsed > ROLLING_OUT_TIMEOUT_SECONDS:
                 return _fail_rollout(

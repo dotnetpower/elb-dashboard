@@ -160,6 +160,14 @@ class UpgradeState:
     # most of `started_at`'s budget, so measuring the green readiness window
     # from `started_at` would false-abort a healthy green before it boots.
     validating_started_at: str = ""
+    # ISO timestamp the row entered Single-mode `rolling_out` (i.e. the ARM
+    # PATCH was submitted). The `rolling_out` budget is anchored here, NOT to
+    # `started_at`: the clone+build phases consume ~10-13 min of `started_at`'s
+    # budget, so measuring the rollout window from `started_at` would false-
+    # abort a healthy new revision seconds after it begins booting. Empty for
+    # rows created before this field existed (the reconciler falls back to
+    # `started_at` for those).
+    rolling_out_started_at: str = ""
     idempotency_key: str = ""
     updated_at: str = ""
     etag: str = field(default="", compare=False)
@@ -465,6 +473,7 @@ def _entity_to_state(entity: Any) -> UpgradeState:
         confirm_deadline=str(entity.get("confirm_deadline", "")),
         traffic_serving=str(entity.get("traffic_serving", "")),
         validating_started_at=str(entity.get("validating_started_at", "")),
+        rolling_out_started_at=str(entity.get("rolling_out_started_at", "")),
         idempotency_key=str(entity.get("idempotency_key", "")),
         updated_at=str(entity.get("updated_at", "")),
         etag=etag,
@@ -502,6 +511,7 @@ def _state_to_entity(state: UpgradeState) -> dict[str, Any]:
         "confirm_deadline": state.confirm_deadline,
         "traffic_serving": state.traffic_serving,
         "validating_started_at": state.validating_started_at,
+        "rolling_out_started_at": state.rolling_out_started_at,
         "idempotency_key": state.idempotency_key,
         "updated_at": state.updated_at,
     }
