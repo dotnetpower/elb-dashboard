@@ -203,24 +203,20 @@ def _clone_commit(
         raise WorkspaceError(
             f"commit clone requires a full 40-hex target_sha, got {target_sha!r}"
         )
-    # Full clone (all blobs), no working tree yet, then a detached checkout of
-    # the target commit.
+    # Full clone followed by a detached checkout of the target commit.
     #
-    # IMPORTANT: do NOT use `--filter=blob:none` here. `az acr build <dir>`
-    # detects the `.git` directory and uploads the build context via
-    # `git archive` (the committed tree), NOT by tarring the working tree. A
-    # blobless partial clone only lazy-fetches the blobs that `git checkout`
-    # touches, so `git archive` sees an incomplete object store and silently
-    # omits files — the build then fails with "Unable to find 'api/Dockerfile'"
-    # even though the working tree (which our `_verify_build_files_materialised`
-    # check inspects) is complete. A full clone keeps both the working tree and
-    # the object store complete so `git archive` ships every file. The repo is
-    # small, so the extra history download is cheap. `--no-checkout` still
-    # avoids materialising the default branch's tree we are about to replace.
+    # IMPORTANT: do NOT use `--filter=blob:none` (a blobless partial clone)
+    # AND do NOT use `--no-checkout`. `az acr build <dir>` detects the `.git`
+    # directory and builds the upload context from git (the committed tree),
+    # so the clone must leave BOTH a complete object store AND a checked-out
+    # working tree on the target commit — exactly like the working `release`
+    # path (`git clone --depth 1 --branch v<ver>`, which checks out by
+    # default). A blobless or no-checkout clone left git's view of the tree
+    # incomplete and `az acr build` failed with "Unable to find
+    # 'api/Dockerfile'". The repo is small, so a full clone is cheap.
     clone_argv = [
         "git",
         "clone",
-        "--no-checkout",
         git_remote,
         target_dir,
     ]
