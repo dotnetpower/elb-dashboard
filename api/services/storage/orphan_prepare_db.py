@@ -222,10 +222,14 @@ def reconcile_orphaned_prepare_db(
 
     # Deferred imports keep the import graph free of route<->service cycles and
     # avoid importing azure/k8s SDKs at module import time (tests inject fakes).
-    from api.routes.storage.prepare_db import (
+    from api.services.storage.prepare_db_metadata import (
         _PREPARE_DB_STALE_SECONDS,
-        _download_blob_with_etag,
-        _update_metadata,
+    )
+    from api.services.storage.prepare_db_metadata import (
+        download_blob_with_etag as _download_blob_with_etag,
+    )
+    from api.services.storage.prepare_db_metadata import (
+        update_metadata as _update_metadata,
     )
     from api.tasks.storage.prepare_db_via_aks import _count_staged_blobs
 

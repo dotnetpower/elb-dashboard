@@ -38,8 +38,10 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
     # Default min nodes for AKS — small so tests with a single fake node pass.
     monkeypatch.setenv("PREPARE_DB_AKS_MIN_IDLE_NODES", "1")
-    with prepare_db_module._PREPARE_DB_LOCK_REGISTRY_GUARD:
-        prepare_db_module._PREPARE_DB_LOCK_REGISTRY.clear()
+    from api.services.storage import prepare_db_locks as _locks
+
+    with _locks._PREPARE_DB_LOCK_REGISTRY_GUARD:
+        _locks._PREPARE_DB_LOCK_REGISTRY.clear()
     from api.main import app
 
     return TestClient(app)

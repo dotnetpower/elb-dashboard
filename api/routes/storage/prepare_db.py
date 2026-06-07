@@ -1,10 +1,10 @@
 """Storage prepare-db route for NCBI BLAST database copies.
 
-Responsibility: Storage prepare-db route for NCBI BLAST database copies
-Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
-services or tasks.
-Key entry points: `_read_db_metadata`, `_write_db_metadata`, `_update_metadata`,
-`_poll_copy_completion`, `prepare_db`
+Responsibility: Storage prepare-db routes (start / cancel / delete) for NCBI BLAST database copies
+Edit boundaries: Keep HTTP validation, dispatch orchestration, and response shaping here; the
+reusable data-plane layer (lock registry, metadata.json read-modify-write, copy.status poller)
+lives in `api/services/storage/prepare_db_{locks,metadata,copy_poller}.py`.
+Key entry points: `prepare_db`, `prepare_db_cancel`, `prepare_db_delete`, `_try_dispatch_aks_mode`
 Risky contracts: Never issue browser SAS URLs; local public Storage access remains debug-only
 and IP-allowlisted. Concurrent prepare_db calls for the same (account, db) MUST be serialised
 by `_PREPARE_DB_LOCK_REGISTRY` so the metadata.json is never raced. `source_version` is
@@ -16,17 +16,14 @@ api/tests/test_storage_public_access.py api/tests/test_prepare_db_hardening.py`.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import threading
 import time
 from datetime import UTC, datetime
 from threading import Thread
 from typing import Any
 
-from azure.core import MatchConditions
-from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
+from azure.core.exceptions import ResourceNotFoundError
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.auth import CallerIdentity, require_caller
@@ -43,88 +40,42 @@ from api.routes.storage.common import (
 )
 from api.services import get_credential
 from api.services.sanitise import redact_oid, sanitise
+from api.services.storage.prepare_db_copy_poller import _COPY_POLL_MAX_SECONDS
+from api.services.storage.prepare_db_copy_poller import (
+    poll_copy_completion as _poll_copy_completion,
+)
+from api.services.storage.prepare_db_locks import prepare_db_lock as _prepare_db_lock
+from api.services.storage.prepare_db_metadata import (
+    download_blob_with_etag as _download_blob_with_etag,
+)
+from api.services.storage.prepare_db_metadata import (
+    is_stale_prepare_marker as _is_stale_prepare_marker,
+)
+from api.services.storage.prepare_db_metadata import (
+    update_metadata as _update_metadata,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-# Per-(account, db) lock registry. Mirrors the pattern used by
-# /api/blast/databases/{db}/shard so a re-clicked Download cannot spawn two
-# daemons that race the same metadata.json blob.
-#
-# Soft-GC: the registry caps at ``_PREPARE_DB_LOCK_REGISTRY_MAX`` entries and
-# evicts any currently-unlocked entry when full. This keeps memory bounded
-# even for deployments that prepare hundreds of custom databases over time.
-_PREPARE_DB_LOCK_REGISTRY: dict[str, threading.Lock] = {}
-_PREPARE_DB_LOCK_REGISTRY_GUARD = threading.Lock()
-_PREPARE_DB_LOCK_REGISTRY_MAX = 256
-# Cooperative shutdown event — checked by ``_poll_copy_completion`` between
-# batches so the api sidecar can exit cleanly on SIGTERM instead of waiting
-# the full poll interval. The event stays unset in normal operation; the
-# main process can call ``_SHUTDOWN_EVENT.set()`` from its lifespan shutdown
-# hook (not yet wired — opt-in).
-_SHUTDOWN_EVENT = threading.Event()
-# An older `update_in_progress=true` marker than this is treated as a crashed
-# previous daemon. Large enough to cover the worst-case copy initiation for
-# `nt`/`sra` but small enough that real crashes recover same-hour.
-_PREPARE_DB_STALE_SECONDS = 2 * 60 * 60
-# Copy-status poll cadence and cap. The api sidecar wakes once a minute to
-# poll BlobProperties.copy.status for every staged file. Bounded so that an
-# orphaned daemon cannot run indefinitely; on hitting the cap we mark the
-# update failed with timed_out reason so the SPA shows an honest state.
-_COPY_POLL_INTERVAL_SECONDS = 60.0
-_COPY_POLL_MAX_SECONDS = 24 * 60 * 60
-_COPY_POLL_BATCH_SIZE = max(32, int(os.environ.get("PREPARE_DB_COPY_POLL_BATCH_SIZE", "256")))
 # When true (default), prepare-db also stages the snapshot-root taxonomy
 # files (`taxdb.btd`, `taxdb.bti`, `taxonomy4blast.sqlite3`) under
 # `blast-db/<db>/` so the warmup script finds them in the same folder. Set
 # to "false" to skip — useful only when the workload's blastn invocations
 # do not request taxonomy columns AND the dataset is v5-only (per-DB
 # `.nhi/.ntf/.nto` are still copied via `_list_keys`).
+#
+# Data-plane helpers (per-(account, db) lock registry, metadata.json
+# read-modify-write, and the copy.status poller) were extracted into
+# `api/services/storage/prepare_db_{locks,metadata,copy_poller}.py` so this
+# route keeps HTTP validation + orchestration; they are re-imported above
+# under their original private names so internal call sites and the
+# `prepare_db_via_aks` task / tests keep their existing import surface.
 _INCLUDE_SHARED_TAXONOMY = (
     os.environ.get("PREPARE_DB_INCLUDE_TAXONOMY", "true").lower() != "false"
 )
-
-
-def _prepare_db_lock(account_name: str, db_name: str) -> threading.Lock:
-    key = f"{account_name.lower()}|{db_name}"
-    with _PREPARE_DB_LOCK_REGISTRY_GUARD:
-        lock = _PREPARE_DB_LOCK_REGISTRY.get(key)
-        if lock is not None:
-            return lock
-        # Soft GC — evict any free locks if we're at the cap. Locked entries
-        # are kept so a live daemon's lock is never silently lost.
-        if len(_PREPARE_DB_LOCK_REGISTRY) >= _PREPARE_DB_LOCK_REGISTRY_MAX:
-            for stale_key in list(_PREPARE_DB_LOCK_REGISTRY):
-                candidate = _PREPARE_DB_LOCK_REGISTRY[stale_key]
-                if candidate.acquire(blocking=False):
-                    candidate.release()
-                    _PREPARE_DB_LOCK_REGISTRY.pop(stale_key, None)
-                    if (
-                        len(_PREPARE_DB_LOCK_REGISTRY)
-                        < _PREPARE_DB_LOCK_REGISTRY_MAX
-                    ):
-                        break
-        lock = threading.Lock()
-        _PREPARE_DB_LOCK_REGISTRY[key] = lock
-        return lock
-
-
-def _is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
-    """Return True if the metadata's update_in_progress flag is old enough to
-    be treated as a crashed previous daemon."""
-    if not metadata.get("update_in_progress"):
-        return True
-    started = str(metadata.get("update_started_at") or "")
-    if not started:
-        return True
-    try:
-        started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
-        age = (datetime.now(UTC) - started_dt).total_seconds()
-    except Exception:
-        return True
-    return age >= _PREPARE_DB_STALE_SECONDS
 
 
 def _try_dispatch_aks_mode(
@@ -573,296 +524,6 @@ def _try_dispatch_aks_mode(
             "off_hint": access.get("off_hint"),
         }
     return response
-
-
-def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
-    metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
-    try:
-        from api.services.storage.data import read_metadata_blob_text
-
-        payload = read_metadata_blob_text(
-            metadata_blob, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
-        )
-        parsed = json.loads(payload)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception as exc:
-        LOGGER.debug("DB metadata read skipped for %s: %s", db_name, type(exc).__name__)
-    return {"db_name": db_name}
-
-
-def _download_blob_with_etag(container: Any, db_name: str) -> tuple[dict[str, Any], str]:
-    """Read metadata + its current ETag for optimistic concurrency writes."""
-    blob = container.get_blob_client(f"{db_name}-metadata.json")
-    try:
-        # ``length=`` here caps the download server-side; we accept the
-        # `etag` lookup may run twice (download then properties) but the
-        # blob is small (<4 MiB) so latency is fine.
-        max_bytes = 4 * 1024 * 1024
-        stream = blob.download_blob(offset=0, length=max_bytes + 1)
-        payload_bytes = stream.readall()
-        if len(payload_bytes) > max_bytes:
-            LOGGER.warning(
-                "db-metadata.json blob exceeds %d bytes (got %d); treating as missing",
-                max_bytes,
-                len(payload_bytes),
-            )
-            return {"db_name": db_name}, ""
-        payload = payload_bytes.decode("utf-8")
-        try:
-            parsed = json.loads(payload) if payload else {}
-            if not isinstance(parsed, dict):
-                parsed = {"db_name": db_name}
-        except json.JSONDecodeError:
-            parsed = {"db_name": db_name}
-        etag = ""
-        try:
-            etag = getattr(stream, "properties", None).etag if stream.properties else ""  # type: ignore[union-attr]
-        except Exception:
-            etag = ""
-        return parsed, etag or ""
-    except ResourceNotFoundError:
-        return {"db_name": db_name}, ""
-    except Exception as exc:
-        LOGGER.debug("DB metadata read skipped for %s: %s", db_name, type(exc).__name__)
-        return {"db_name": db_name}, ""
-
-
-def _write_db_metadata(
-    container: Any,
-    db_name: str,
-    payload: dict[str, Any],
-    *,
-    account_name: str,
-    etag: str | None = None,
-) -> str:
-    """Write metadata.json. When ``etag`` is set, the upload uses
-    ``If-Match`` so a concurrent writer cannot clobber unrelated fields.
-    Returns the resulting blob's new ETag (or empty string)."""
-    metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
-    kwargs: dict[str, Any] = {"overwrite": True}
-    if etag:
-        kwargs["etag"] = etag
-        kwargs["match_condition"] = MatchConditions.IfNotModified
-    result = metadata_blob.upload_blob(
-        json.dumps(payload, sort_keys=True).encode("utf-8"),
-        **kwargs,
-    )
-    # Drop the merged display-metadata cache so /api/blast/jobs/{id} picks up
-    # the new title / sequence count / sharded badge on the next read instead
-    # of waiting up to ``BLAST_DB_METADATA_CACHE_TTL`` (default 24 h). Invoked
-    # for every prepare-db write — start, success, failure — so the UI never
-    # shows stale state after an admin action. Best-effort: cache invalidation
-    # must not fail the metadata write. ``notify_*`` also publishes to the
-    # Redis pub/sub channel so the worker / beat sidecars (and any peer api
-    # replica) drop their copies too.
-    try:
-        from api.services.blast.db_metadata import notify_blast_db_metadata_changed
-
-        notify_blast_db_metadata_changed(account_name, db_name)
-    except Exception as exc:
-        LOGGER.debug(
-            "db metadata cache invalidate skipped db=%s: %s",
-            db_name,
-            type(exc).__name__,
-        )
-    if isinstance(result, dict):
-        return str(result.get("etag", "") or "").strip('"')
-    return ""
-
-
-def _update_metadata(
-    container: Any,
-    db_name: str,
-    account_name: str,
-    mutator: Any,
-    *,
-    max_attempts: int = 5,
-) -> dict[str, Any]:
-    """Read-modify-write metadata.json with ETag retry.
-
-    ``mutator(meta_copy) -> dict`` must be a pure function over the snapshot
-    (it should not depend on external state). On 412 Precondition Failed
-    (concurrent writer) we re-read and retry up to ``max_attempts``. Final
-    fall-back is a blind overwrite — only reached when the concurrent writer
-    is itself in a loop, which we accept rather than failing the caller.
-    """
-    last: dict[str, Any] = {}
-    for attempt in range(max_attempts):
-        current, etag = _download_blob_with_etag(container, db_name)
-        try:
-            mutated = mutator(dict(current))
-        except Exception:
-            raise
-        try:
-            _write_db_metadata(
-                container,
-                db_name,
-                mutated,
-                account_name=account_name,
-                etag=etag or None,
-            )
-            return mutated
-        except ResourceModifiedError:
-            LOGGER.debug(
-                "metadata ETag retry db=%s attempt=%d",
-                db_name,
-                attempt + 1,
-            )
-            last = mutated
-            continue
-        except Exception:
-            raise
-    # Final blind write — we already exhausted retries; better to land the
-    # mutation and accept that a peer's interleaved field may be lost than to
-    # leave the metadata silently un-updated.
-    _write_db_metadata(container, db_name, last, account_name=account_name)
-    return last
-
-
-def _poll_copy_completion(
-    container: Any,
-    blob_names: list[str],
-    *,
-    db_name: str,
-    on_progress: Any = None,
-) -> dict[str, Any]:
-    """Poll each staged blob's copy.status until every copy reaches a terminal
-    state. Returns ``{success, failed, aborted, pending, failed_files,
-    timed_out, elapsed_seconds}``.
-
-    Why this exists: ``start_copy_from_url`` only ACKs that Azure accepted the
-    copy job; the actual transfer happens asynchronously and can fail with
-    ``copy.status='failed'`` (NCBI throttling, source 404 mid-snapshot,
-    transient network blip). The pre-hardening UI inferred completion from
-    the file_count >= 90% heuristic which let partial successes show as
-    "Ready" — see Critique items 6 & 7.
-    """
-    pending = set(blob_names)
-    success = 0
-    failed = 0
-    aborted = 0
-    failed_files: list[dict[str, str]] = []
-    deadline = time.monotonic() + _COPY_POLL_MAX_SECONDS
-    while pending and time.monotonic() < deadline:
-        prefix = f"{db_name}/"
-        copy_include_supported = True
-        try:
-            try:
-                blobs = container.list_blobs(name_starts_with=prefix, include=["copy"])
-            except TypeError:
-                copy_include_supported = False
-                blobs = container.list_blobs(name_starts_with=prefix)
-            copy_by_name = {str(blob.name): getattr(blob, "copy", None) for blob in blobs}
-        except Exception as exc:
-            LOGGER.debug(
-                "copy status batch probe failed db=%s: %s",
-                db_name,
-                type(exc).__name__,
-            )
-            copy_by_name = None
-        # Iterate in deterministic order so logs stay diff-friendly.
-        for name in sorted(pending)[:_COPY_POLL_BATCH_SIZE]:
-            if copy_by_name is None:
-                continue
-            if name not in copy_by_name:
-                # The destination blob disappeared (eg an admin deleted the
-                # container mid-flight). Surface as a copy failure rather
-                # than hanging forever.
-                failed += 1
-                failed_files.append(
-                    {"blob": name, "status": "missing", "reason": "blob not found"}
-                )
-                pending.discard(name)
-                continue
-            copy = copy_by_name[name]
-            if copy is None and not copy_include_supported:
-                try:
-                    copy = getattr(
-                        container.get_blob_client(name).get_blob_properties(),
-                        "copy",
-                        None,
-                    )
-                except ResourceNotFoundError:
-                    failed += 1
-                    failed_files.append(
-                        {"blob": name, "status": "missing", "reason": "blob not found"}
-                    )
-                    pending.discard(name)
-                    continue
-                except Exception as exc:
-                    LOGGER.debug(
-                        "copy status fallback probe failed db=%s blob=%s: %s",
-                        db_name,
-                        name,
-                        type(exc).__name__,
-                    )
-                    continue
-            status = ""
-            description = ""
-            if copy is not None:
-                status = str(getattr(copy, "status", "") or "").lower()
-                description = str(getattr(copy, "status_description", "") or "")
-            if not status:
-                # No copy metadata = the blob existed before this prepare_db
-                # call (e.g. shard alias). Treat as success.
-                success += 1
-                pending.discard(name)
-                continue
-            if status == "success":
-                success += 1
-                pending.discard(name)
-            elif status == "failed":
-                failed += 1
-                failed_files.append(
-                    {"blob": name, "status": "failed", "reason": description[:200]}
-                )
-                pending.discard(name)
-            elif status == "aborted":
-                aborted += 1
-                failed_files.append(
-                    {"blob": name, "status": "aborted", "reason": description[:200]}
-                )
-                pending.discard(name)
-            # "pending" stays in the set for the next sweep.
-        if pending:
-            if callable(on_progress):
-                try:
-                    on_progress(
-                        {
-                            "success": success,
-                            "failed": failed,
-                            "aborted": aborted,
-                            "pending": len(pending),
-                        }
-                    )
-                except Exception as exc:
-                    LOGGER.debug(
-                        "copy progress callback raised db=%s: %s",
-                        db_name,
-                        type(exc).__name__,
-                    )
-            # Cooperative sleep — Event.wait returns True if shutdown was
-            # signalled, in which case we exit the poll loop early so the
-            # api sidecar can drain before its grace period ends. The next
-            # process restart picks the work up via stale-flag recovery.
-            if _SHUTDOWN_EVENT.wait(timeout=_COPY_POLL_INTERVAL_SECONDS):
-                LOGGER.info(
-                    "copy poll exiting early on shutdown db=%s pending=%d",
-                    db_name,
-                    len(pending),
-                )
-                break
-    timed_out = bool(pending) and not _SHUTDOWN_EVENT.is_set()
-    return {
-        "success": success,
-        "failed": failed,
-        "aborted": aborted,
-        "pending": len(pending),
-        "failed_files": failed_files[:50],
-        "timed_out": timed_out,
-        "elapsed_seconds": int(time.monotonic() - (deadline - _COPY_POLL_MAX_SECONDS)),
-    }
 
 
 @router.post("/prepare-db")

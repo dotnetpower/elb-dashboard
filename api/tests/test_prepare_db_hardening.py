@@ -76,8 +76,12 @@ class _FakeContainerClient:
 
 @pytest.fixture(autouse=True)
 def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Drop the inter-batch sleep so unit tests don't actually wait.
-    monkeypatch.setattr(prepare_db_module,  "_COPY_POLL_INTERVAL_SECONDS", 0.0, raising=True)
+    # Drop the inter-batch sleep so unit tests don't actually wait. The poller
+    # (and its `_COPY_POLL_*` constants) now lives in the copy_poller service
+    # module, so the patch targets that module rather than the route facade.
+    from api.services.storage import prepare_db_copy_poller as _copy_poller
+
+    monkeypatch.setattr(_copy_poller, "_COPY_POLL_INTERVAL_SECONDS", 0.0, raising=True)
 
 
 def test_poll_marks_all_success() -> None:
@@ -125,7 +129,9 @@ def test_poll_returns_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
             "nt/a": ("pending", ""),
         }
     )
-    monkeypatch.setattr(prepare_db_module,  "_COPY_POLL_MAX_SECONDS", 0.0, raising=True)
+    from api.services.storage import prepare_db_copy_poller as _copy_poller
+
+    monkeypatch.setattr(_copy_poller, "_COPY_POLL_MAX_SECONDS", 0.0, raising=True)
     out = prepare_db_module._poll_copy_completion(container, ["nt/a"], db_name="nt")
     assert out["timed_out"] is True
     assert out["pending"] >= 1
@@ -161,9 +167,11 @@ def test_poll_falls_back_when_list_copy_include_is_unsupported() -> None:
 
 
 def test_stale_marker_recovers() -> None:
+    from api.services.storage import prepare_db_metadata as _metadata
+
     fresh = datetime.now(UTC).isoformat()
     old = (
-        datetime.now(UTC) - timedelta(seconds=prepare_db_module._PREPARE_DB_STALE_SECONDS + 60)
+        datetime.now(UTC) - timedelta(seconds=_metadata._PREPARE_DB_STALE_SECONDS + 60)
     ).isoformat()
     assert (
         prepare_db_module._is_stale_prepare_marker(
