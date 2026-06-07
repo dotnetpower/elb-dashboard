@@ -332,6 +332,20 @@ def upgrade_build_log(
     try:
         payload = build_logs.read_blob(job_id, component)
     except KeyError as exc:
+        # The per-component blob is created only when that component's
+        # `az acr build` actually starts. While an upgrade is mid-flight the
+        # SPA polls all three components every 3 s, so the not-yet-built ones
+        # (e.g. frontend/terminal during the api build) would otherwise return
+        # 404 on every poll — observed as ~2k "failed request" rows / day in
+        # App Insights plus a browser console error per poll. For the *current*
+        # job that 404 is a benign "no log yet" state, so return an empty 200.
+        # Reserve 404 for a genuinely unknown job_id (e.g. a pruned old job).
+        try:
+            current_job = state.get_state().job_id
+        except Exception:  # pragma: no cover - state read best-effort
+            current_job = ""
+        if current_job and job_id == current_job:
+            return Response(content=b"", media_type="text/plain; charset=utf-8")
         raise HTTPException(status_code=404, detail="build log not found") from exc
     return Response(content=payload, media_type="text/plain; charset=utf-8")
 

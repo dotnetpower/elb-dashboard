@@ -587,6 +587,22 @@ def test_build_log_endpoint_404_for_missing(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_build_log_endpoint_empty_200_for_current_job_not_yet_built(
+    client: TestClient,
+) -> None:
+    """While an upgrade is mid-flight, a not-yet-built component's missing blob
+    must return an empty 200 (benign "no log yet") for the *current* job — not a
+    404 that the SPA polls every 3 s and that floods App Insights / the browser
+    console."""
+    state.update_state(lambda s: setattr(s, "job_id", "jobLIVE1"))
+    resp = client.get("/api/upgrade/jobs/jobLIVE1/build-log/terminal")
+    assert resp.status_code == 200
+    assert resp.text == ""
+    # A different (unknown) job id still 404s.
+    other = client.get("/api/upgrade/jobs/jobOTHER/build-log/terminal")
+    assert other.status_code == 404
+
+
 def test_build_log_endpoint_rejects_invalid_component(client: TestClient) -> None:
     resp = client.get("/api/upgrade/jobs/jobABCD/build-log/redis")
     assert resp.status_code == 400
