@@ -124,6 +124,9 @@ def _candidate_warmup_node_names(
         for name, pool, mode in candidates
         if mode.lower() != "system" and pool.lower() not in {"system", "systempool"}
     ]
-    if user_nodes:
-        return sorted(user_nodes)
-    return sorted(name for name, _pool, _mode in candidates)
+    # Never fall back to system-pool nodes: AKS system nodes carry the
+    # `CriticalAddonsOnly` taint, so a warmup Job pinned to one stays Pending
+    # forever and the wait loop times the whole warmup out. A cluster with only
+    # system nodes has no valid warmup target — return an empty list so the
+    # caller defers with "no Ready warmup nodes" instead of placing doomed Jobs.
+    return sorted(user_nodes)

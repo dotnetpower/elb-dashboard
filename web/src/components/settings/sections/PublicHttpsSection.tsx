@@ -14,7 +14,7 @@ import {
   saveRunningPublicHttpsTask,
   type RunningPublicHttpsTask,
 } from "@/components/settings/publicHttpsStorage";
-import { INPUT_STYLE } from "@/components/settings/styles";
+import { INPUT_STYLE, SELECT_STYLE } from "@/components/settings/styles";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
 
 // Let's Encrypt rejects ACME account registration when the contact
@@ -456,7 +456,7 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
             <select
               value={clusterName}
               onChange={(event) => setClusterName(event.target.value)}
-              style={INPUT_STYLE}
+              style={SELECT_STYLE}
             >
               {availableClusters.map((c) => (
                 <option key={`${c.resource_group}/${c.name}`} value={c.name}>

@@ -500,11 +500,18 @@ export function AutoStopPanel({
             onChange={(e) => handleIdleChange(Number(e.target.value))}
             style={{
               fontSize: 12,
-              padding: "2px 6px",
+              padding: "2px 24px 2px 6px",
               background: "transparent",
               border: "1px solid var(--border-weak)",
               borderRadius: 4,
               color: "var(--text)",
+              appearance: "none",
+              WebkitAppearance: "none",
+              cursor: "pointer",
+              backgroundImage:
+                "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%235a6272' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\")",
+              backgroundRepeat: "no-repeat",
+              backgroundPosition: "right 7px center",
             }}
           >
             {allowed.map((minutes) => (

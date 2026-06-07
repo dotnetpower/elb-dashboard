@@ -4,7 +4,7 @@ import { Activity, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { settingsApi } from "@/api/settings";
 import type { ResourceConfig } from "@/components/SetupWizard";
 import { StatusLine } from "@/components/settings/primitives";
-import { INPUT_STYLE } from "@/components/settings/styles";
+import { INPUT_STYLE, SELECT_STYLE } from "@/components/settings/styles";
 import {
   canLookupComponent,
   validateProvisionFields,
@@ -334,7 +334,7 @@ export function ProvisionForm({
             id={`${idPrefix}-retention`}
             value={value.retention_days}
             onChange={update("retention_days")}
-            style={{ ...INPUT_STYLE, fontFamily: "var(--font-mono)" }}
+            style={{ ...SELECT_STYLE, fontFamily: "var(--font-mono)" }}
           >
             {RETENTION_DAYS_OPTIONS.map((days) => (
               <option key={days} value={days}>

@@ -1253,3 +1253,392 @@ def test_auto_warmup_file_backend_save_does_not_create_lock_sentinel(
     files = {p.name for p in tmp_path.iterdir()}
     assert "auto_warmup.json" in files
     assert not any(name.endswith(".lock") for name in files), files
+
+
+def test_to_dict_round_trips_force_rewarm_pending() -> None:
+    """The new ``force_rewarm_pending`` field must survive a to_dict/from_dict
+    round trip so it persists through the Table/file backends and the
+    ``mark_auto_warmup_ready_state`` re-read."""
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        force_rewarm_pending=True,
+    )
+    assert pref.to_dict()["force_rewarm_pending"] is True
+    assert AutoWarmupPreference.from_dict(pref.to_dict()).force_rewarm_pending is True
+    # Default stays False for legacy rows that predate the field.
+    assert AutoWarmupPreference.from_dict({"subscription_id": "s"}).force_rewarm_pending is False
+
+
+def test_force_rewarm_pending_honoured_by_unforced_reconcile(monkeypatch, tmp_path) -> None:
+    """RC1: a persisted ``force_rewarm_pending`` flag must make the *periodic*
+    (un-forced) beat reconcile re-warm a DB that still reports ``Ready``.
+
+    Root cause this guards: ``start_aks`` enqueues a single ``force=True``
+    reconcile immediately after ``begin_start``, but the blastpool nodes are
+    not Ready yet so that one-shot is dropped at the readiness gate. The only
+    reconcile that later sees Ready nodes is the recurring beat tick, which
+    runs with ``force=False``. Without the persisted flag a ``node_disk``
+    cluster's DB stays ``Ready`` but RAM-cold forever. The flag must make the
+    un-forced tick behave as forced until the warmup is actually enqueued.
+    """
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    _patch_ready_db_warm_status(monkeypatch, source_version="2026-05-20-00-00-00")
+
+    calls, fake_send_task = make_send_task_recorder("warmup-task-pending")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    # Persist the pref so the post-enqueue ``clear_force_pending`` write is
+    # observable via a read-back.
+    save_auto_warmup_preference(
+        AutoWarmupPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            storage_account="elbstg01",
+            storage_resource_group="rg-elb",
+            databases=["core_nt"],
+            force_rewarm_pending=True,
+        )
+    )
+
+    # force is NOT passed — this is the periodic beat path (preference=None
+    # lists the persisted prefs).
+    result = reconcile_auto_warmup.run()
+
+    assert result["clusters"][0]["status"] == "triggered"
+    assert result["clusters"][0]["enqueued"] == [
+        {"db": "core_nt", "task_id": "warmup-task-pending"}
+    ]
+    # The pending flag made the un-forced tick behave as forced.
+    assert calls[0]["kwargs"]["force_rewarm"] is True
+    # And it told the task to release the in-flight slot when done.
+    assert calls[0]["kwargs"]["release_inflight_on_done"] is True
+    # The flag is cleared now that a warmup was actually enqueued.
+    persisted = get_auto_warmup_preference("sub-1", "rg-elb", "elb-cluster")
+    assert persisted is not None
+    assert persisted.force_rewarm_pending is False
+
+
+def test_force_rewarm_pending_kept_when_gate_not_ready(monkeypatch, tmp_path) -> None:
+    """RC1: the pending flag must survive a tick where the readiness gate is
+    not satisfied (cluster still starting), so the next tick retries the
+    forced re-warm instead of silently losing it."""
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    # Cluster is still Stopped/starting → gate returns not_ready.
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Stopped",
+                "node_count": 10,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.celery_app.celery_app.send_task",
+        lambda *args, **kwargs: calls.append({"args": args, "kwargs": kwargs}),
+    )
+
+    save_auto_warmup_preference(
+        AutoWarmupPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            storage_account="elbstg01",
+            storage_resource_group="rg-elb",
+            databases=["core_nt"],
+            force_rewarm_pending=True,
+        )
+    )
+
+    result = reconcile_auto_warmup.run()
+
+    assert result["clusters"][0]["status"] == "not_ready"
+    assert calls == []
+    # The flag must NOT be cleared while the gate is unsatisfied.
+    persisted = get_auto_warmup_preference("sub-1", "rg-elb", "elb-cluster")
+    assert persisted is not None
+    assert persisted.force_rewarm_pending is True
+
+
+def test_autowarmup_inflight_release_deletes_key(monkeypatch) -> None:
+    """RC2: the explicit release must delete the Redis in-flight key so a
+    deferred/failed warmup is retried on the next beat tick instead of waiting
+    out the TTL."""
+    from api.services import auto_warmup_reconcile
+
+    deleted: list[str] = []
+
+    class _FakeRedis:
+        def delete(self, key: str) -> int:
+            deleted.append(key)
+            return 1
+
+    monkeypatch.setattr(
+        auto_warmup_reconcile, "autowarmup_inflight_redis", lambda: _FakeRedis()
+    )
+
+    auto_warmup_reconcile.autowarmup_inflight_release("sub-1", "rg-elb", "elb-cluster", "core_nt")
+
+    assert deleted == [
+        auto_warmup_reconcile.autowarmup_inflight_key("sub-1", "rg-elb", "elb-cluster", "core_nt")
+    ]
+
+
+def test_autowarmup_inflight_release_noop_without_redis(monkeypatch) -> None:
+    """The release must be a safe no-op when Redis is unavailable (the TTL is
+    the backstop)."""
+    from api.services import auto_warmup_reconcile
+
+    monkeypatch.setattr(auto_warmup_reconcile, "autowarmup_inflight_redis", lambda: None)
+    # Must not raise.
+    auto_warmup_reconcile.autowarmup_inflight_release("s", "r", "c", "db")
+
+
+# ---------------------------------------------------------------------------
+# Follow-up hardening: bounded gate, partial fallback, circuit breaker, caches.
+# ---------------------------------------------------------------------------
+
+
+def test_expected_warmup_node_count_caps_by_live_pool() -> None:
+    """#4: an oversized configured num_nodes must be capped by the live pool
+    count so the readiness gate stays satisfiable."""
+    from api.services.auto_warmup_reconcile import expected_warmup_node_count
+
+    # Configured 20 but the pool only has 10 → expected is 10.
+    assert expected_warmup_node_count({"node_count": 10}, 20) == 10
+    # Configured below the live count is honoured as-is.
+    assert expected_warmup_node_count({"node_count": 10}, 4) == 4
+    # Unknown live count (0) trusts the configured value.
+    assert expected_warmup_node_count({"node_count": 0}, 8) == 8
+
+
+def test_ready_gate_partial_fallback_after_grace(monkeypatch) -> None:
+    """#3/#5: after the node-wait grace expires, the gate warms the ready
+    subset instead of blocking forever on a missing node."""
+    from api.services import auto_warmup_reconcile as mod
+
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_ready_warmup_node_names",
+        lambda *a, **k: ["node-a", "node-b"],
+    )
+    cluster = {"provisioning_state": "Succeeded", "power_state": "Running", "node_count": 10}
+
+    # Before grace: still waiting (2 of 10 ready).
+    gate = mod.auto_warmup_ready_gate(
+        object(),
+        subscription_id="s",
+        resource_group="r",
+        cluster_name="c",
+        cluster=cluster,
+        configured_num_nodes=10,
+        waited_seconds=10,
+        grace_seconds=900,
+    )
+    assert gate["ready"] is False
+    assert gate["phase"] == "waiting_for_warmup_nodes"
+
+    # After grace: warm the ready subset.
+    gate = mod.auto_warmup_ready_gate(
+        object(),
+        subscription_id="s",
+        resource_group="r",
+        cluster_name="c",
+        cluster=cluster,
+        configured_num_nodes=10,
+        waited_seconds=1000,
+        grace_seconds=900,
+    )
+    assert gate["ready"] is True
+    assert gate["phase"] == "ready_partial"
+    assert gate["partial"] is True
+    assert gate["expected_node_count"] == 2
+    assert gate["requested_node_count"] == 10
+
+
+def test_circuit_breaker_opens_after_threshold() -> None:
+    """#8: repeated Failed observations open the circuit; a reset clears it."""
+    from api.services import auto_warmup_reconcile as mod
+
+    store: dict[str, Any] = {}
+
+    class _FakeRedis:
+        def get(self, k):
+            return store.get(k)
+
+        def set(self, k, v, **kw):
+            store[k] = v if isinstance(v, bytes) else str(v).encode()
+            return True
+
+        def incr(self, k):
+            cur = int(store.get(k, b"0"))
+            cur += 1
+            store[k] = str(cur).encode()
+            return cur
+
+        def expire(self, k, ttl):
+            return True
+
+        def delete(self, *ks):
+            for k in ks:
+                store.pop(k, None)
+            return 1
+
+    import contextlib
+
+    fake = _FakeRedis()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(_patched(mod, "autowarmup_inflight_redis", lambda: fake))
+        # First THRESHOLD-1 observations keep the circuit closed.
+        for i in range(1, mod._CIRCUIT_THRESHOLD):
+            state = mod.autowarmup_circuit_state("s", "r", "c", "db")
+            assert state["open"] is False, i
+        # The threshold-th observation opens it.
+        opened = mod.autowarmup_circuit_state("s", "r", "c", "db")
+        assert opened["open"] is True
+        # While open, subsequent observations stay open (cooldown key present).
+        assert mod.autowarmup_circuit_state("s", "r", "c", "db")["open"] is True
+        # A reset clears both keys → circuit closed again.
+        mod.autowarmup_circuit_reset("s", "r", "c", "db")
+        assert mod.autowarmup_circuit_state("s", "r", "c", "db")["open"] is False
+
+
+def _patched(obj, name, value):
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        old = getattr(obj, name)
+        setattr(obj, name, value)
+        try:
+            yield
+        finally:
+            setattr(obj, name, old)
+
+    return _cm()
+
+
+def test_circuit_breaker_noop_without_redis(monkeypatch) -> None:
+    from api.services import auto_warmup_reconcile as mod
+
+    monkeypatch.setattr(mod, "autowarmup_inflight_redis", lambda: None)
+    assert mod.autowarmup_circuit_state("s", "r", "c", "db") == {
+        "open": False,
+        "failures": 0,
+        "cooldown_seconds": 0,
+    }
+    # reset must not raise either.
+    mod.autowarmup_circuit_reset("s", "r", "c", "db")
+
+
+def test_reconcile_skips_failed_db_when_circuit_open(monkeypatch, tmp_path) -> None:
+    """#8 integration: an open circuit must skip the every-tick force re-warm of
+    a permanently Failed DB instead of re-enqueuing."""
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    _patch_ready_db_warm_status(
+        monkeypatch, source_version="2026-05-20-00-00-00", warm_status="Failed"
+    )
+    # Force the circuit to report open for this DB.
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.autowarmup_circuit_state",
+        lambda *a, **k: {"open": True, "failures": 9, "cooldown_seconds": 1800},
+    )
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.celery_app.celery_app.send_task",
+        lambda *args, **kwargs: calls.append({"args": args, "kwargs": kwargs}),
+    )
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict())
+
+    assert calls == []
+    skipped = result["clusters"][0]["skipped"]
+    assert any(item.get("reason") == "circuit_open" for item in skipped)
+
+
+def test_latest_ncbi_source_version_is_cached(monkeypatch) -> None:
+    """#20: the NCBI latest-dir lookup is TTL-cached so it does not sit on the
+    beat-tick critical path once per preference."""
+    from api.services import auto_warmup_reconcile as mod
+
+    mod._LATEST_VERSION_CACHE.clear()
+    calls = {"n": 0}
+
+    def _fake_resolve():
+        calls["n"] += 1
+        return "2026-06-01-00-00-00"
+
+    monkeypatch.setattr("api.routes.storage.common._resolve_latest_dir", _fake_resolve)
+
+    assert mod._latest_ncbi_source_version() == "2026-06-01-00-00-00"
+    assert mod._latest_ncbi_source_version() == "2026-06-01-00-00-00"
+    # Second call served from cache.
+    assert calls["n"] == 1
+    mod._LATEST_VERSION_CACHE.clear()
+
+
+def test_mark_ready_skips_noop_write(monkeypatch, tmp_path) -> None:
+    """#19: a steady-state reconcile must not rewrite the preference row when
+    nothing the bookkeeping path owns has changed."""
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+
+    saved = save_auto_warmup_preference(
+        AutoWarmupPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            storage_account="elbstg01",
+            storage_resource_group="rg-elb",
+            databases=["core_nt"],
+            last_ready=True,
+        )
+    )
+    before = saved.updated_at
+
+    import time as _t
+
+    _t.sleep(1)
+    from api.services.auto_warmup import mark_auto_warmup_ready_state
+
+    # Same ready state, no trigger, no force clear → must be a no-op (updated_at
+    # unchanged because no write happened).
+    result = mark_auto_warmup_ready_state(saved, ready=True)
+    assert result.updated_at == before

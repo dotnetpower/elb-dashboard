@@ -98,6 +98,14 @@ class AutoWarmupPreference:
     machine_type: str = ""
     num_nodes: int = 0
     last_ready: bool = False
+    # Set True by ``start_aks`` (and any explicit re-warm trigger) so the
+    # recurring beat reconcile keeps forcing a re-warm across ticks until the
+    # cluster's warmup nodes are actually Ready. A one-shot ``force=True``
+    # reconcile enqueued right after ``begin_start`` fires before the blastpool
+    # nodes register Ready, so it is dropped at the readiness gate; persisting
+    # the intent here is what makes the post stop/start re-warm survive that
+    # window (cleared once the warmup is actually enqueued).
+    force_rewarm_pending: bool = False
     last_triggered_at: str = ""
     updated_at: str = ""
     owner_oid: str = ""
@@ -131,6 +139,7 @@ class AutoWarmupPreference:
             "machine_type": self.machine_type,
             "num_nodes": self.num_nodes,
             "last_ready": self.last_ready,
+            "force_rewarm_pending": self.force_rewarm_pending,
             "last_triggered_at": self.last_triggered_at,
             "updated_at": self.updated_at,
             "owner_oid": self.owner_oid,
@@ -162,6 +171,7 @@ class AutoWarmupPreference:
             machine_type=str(value.get("machine_type") or ""),
             num_nodes=num_nodes,
             last_ready=bool(value.get("last_ready", False)),
+            force_rewarm_pending=bool(value.get("force_rewarm_pending", False)),
             last_triggered_at=str(value.get("last_triggered_at") or ""),
             updated_at=str(value.get("updated_at") or ""),
             owner_oid=str(value.get("owner_oid") or ""),
@@ -248,6 +258,7 @@ def mark_auto_warmup_ready_state(
     *,
     ready: bool,
     triggered: bool = False,
+    clear_force_pending: bool = False,
 ) -> AutoWarmupPreference:
     """Update the warm-readiness bookkeeping with optimistic concurrency.
 
@@ -258,8 +269,9 @@ def mark_auto_warmup_ready_state(
     reconciler's decide and write) cannot be silently reverted by the
     in-memory ``pref`` snapshot the reconciler is holding. Only the
     bookkeeping fields (``last_ready`` / ``last_triggered_at`` /
-    ``updated_at``) are written from this path — every user-owned
-    field is taken from the freshly-read row. When the row no longer
+    ``updated_at``, and ``force_rewarm_pending`` when
+    ``clear_force_pending`` is set) are written from this path — every
+    user-owned field is taken from the freshly-read row. When the row no longer
     exists (user deleted the pref), we silently no-op and return the
     in-memory snapshot — there is nothing to update.
 
@@ -278,11 +290,33 @@ def mark_auto_warmup_ready_state(
             pref.subscription_id, pref.resource_group, pref.cluster_name
         )
         base = latest if latest is not None else pref
+        # Skip the write entirely when nothing the bookkeeping path owns would
+        # change. The beat reconcile calls this every tick for every pref; a
+        # steady-state cluster (``last_ready`` already matches, no trigger, no
+        # force-pending clear) would otherwise rewrite the row + bump the ETag
+        # every 120 s, churning Table throughput and audit history for no
+        # observable change.
+        no_change = (
+            latest is not None
+            and base.last_ready == ready
+            and not triggered
+            and not (clear_force_pending and base.force_rewarm_pending)
+        )
+        if no_change:
+            fallback = base
+            return base
         next_pref = AutoWarmupPreference.from_dict(base.to_dict())
         next_pref.etag = base.etag
         next_pref.last_ready = ready
         if triggered:
             next_pref.last_triggered_at = _now_iso()
+        if clear_force_pending:
+            # The reconcile reached the cluster's warmup nodes and processed
+            # every configured DB (enqueued or already-warm), so the forced
+            # re-warm intent has been honoured — drop it so subsequent beat
+            # ticks return to the normal (un-forced) skip behaviour. Left set
+            # when the readiness gate is not satisfied so the next tick retries.
+            next_pref.force_rewarm_pending = False
         next_pref.updated_at = _now_iso()
         fallback = next_pref
         if latest is None:

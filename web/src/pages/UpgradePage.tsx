@@ -368,8 +368,10 @@ export function UpgradePage() {
               </label>
               <select
                 id="upgrade-target"
+                className="glass-input"
                 value={pickedTarget}
                 onChange={(e) => setPickedTarget(e.target.value)}
+                style={{ flex: 1, minWidth: 220 }}
               >
                 <option value="">— pick a version —</option>
                 {commitOption && (
@@ -461,7 +463,6 @@ export function UpgradePage() {
               disabled={
                 submitting ||
                 phase === "active" ||
-                phase === "succeeded" ||
                 !pickedTarget ||
                 !confirmDowntime ||
                 (isMajorBump && !confirmBreaking)
@@ -470,9 +471,16 @@ export function UpgradePage() {
             >
               <ArrowUpCircle size={14} strokeWidth={1.6} /> Start upgrade
             </button>
-            {(phase === "active" || phase === "succeeded") && (
+            {phase === "active" && (
               <p className="muted" style={{ margin: 0 }}>
-                The state must return to <code>idle</code> before another upgrade can start.
+                An upgrade is already in progress; wait for it to finish before
+                starting another.
+              </p>
+            )}
+            {phase === "succeeded" && (
+              <p className="muted" style={{ margin: 0 }}>
+                The last upgrade succeeded. You can start another whenever a newer
+                target is available — no need to wait for the state to reset.
               </p>
             )}
           </>

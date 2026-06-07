@@ -5,7 +5,9 @@ Edit boundaries: Keep reusable domain logic here; routes and tasks should call t
 instead of duplicating SDK code.
 Key entry points: `cluster_is_workload_ready`, `expected_warmup_node_count`,
 `auto_warmup_ready_gate`, `autowarmup_inflight_key`, `autowarmup_inflight_redis`,
-`autowarmup_inflight_acquire`
+`autowarmup_inflight_acquire`, `autowarmup_inflight_release`,
+`autowarmup_wait_elapsed_seconds`, `autowarmup_wait_clear`,
+`autowarmup_circuit_state`, `autowarmup_circuit_reset`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests`.
@@ -14,7 +16,9 @@ Validation: `uv run pytest -q api/tests`.
 from __future__ import annotations
 
 import logging
+import os
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -28,8 +32,34 @@ from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
 
-_AUTOWARMUP_INFLIGHT_TTL_SECONDS = 15 * 60
+_AUTOWARMUP_INFLIGHT_TTL_SECONDS = 8 * 60
 _AUTOWARMUP_INFLIGHT_PREFIX = "autowarmup:inflight:"
+
+# Node-wait bookkeeping: tracks when the gate first started waiting for all
+# warmup nodes on a cluster, so the bounded-wait partial fallback (above) can
+# measure elapsed time across beat ticks. Redis-backed (ephemeral) — losing it
+# on a worker restart only resets the grace timer, which is safe.
+_AUTOWARMUP_WAIT_SINCE_PREFIX = "autowarmup:waitsince:"
+_AUTOWARMUP_WAIT_SINCE_TTL_SECONDS = 6 * 60 * 60
+
+# Per-(cluster, db) circuit breaker for a warmup that keeps landing in the
+# ``Failed`` state. Without this the reconcile force-releases + re-enqueues a
+# permanently failing DB every single beat tick (config/network failure that no
+# retry can fix), generating endless App Insights failures and churn. After
+# ``_CIRCUIT_THRESHOLD`` consecutive Failed observations the circuit opens and
+# the DB is skipped for ``_CIRCUIT_COOLDOWN_SECONDS`` before one probe retry.
+_AUTOWARMUP_FAIL_PREFIX = "autowarmup:fail:"
+_AUTOWARMUP_COOLDOWN_PREFIX = "autowarmup:cooldown:"
+_CIRCUIT_THRESHOLD = max(1, int(os.environ.get("AUTOWARMUP_CIRCUIT_THRESHOLD", "5")))
+_CIRCUIT_FAILURE_WINDOW_SECONDS = int(
+    os.environ.get("AUTOWARMUP_CIRCUIT_FAILURE_WINDOW_SECONDS", "3600")
+)
+_CIRCUIT_COOLDOWN_SECONDS = int(os.environ.get("AUTOWARMUP_CIRCUIT_COOLDOWN_SECONDS", "1800"))
+
+# Process-local TTL cache for the NCBI latest-dir lookup (see
+# ``_latest_ncbi_source_version``).
+_LATEST_VERSION_CACHE: dict[str, Any] = {}
+_LATEST_VERSION_TTL_SECONDS = int(os.environ.get("AUTOWARMUP_LATEST_VERSION_TTL_SECONDS", "300"))
 
 
 def cluster_is_workload_ready(cluster: dict[str, Any]) -> bool:
@@ -41,12 +71,27 @@ def cluster_is_workload_ready(cluster: dict[str, Any]) -> bool:
 
 
 def expected_warmup_node_count(cluster: dict[str, Any], configured_num_nodes: int = 0) -> int:
-    if configured_num_nodes > 0:
-        return configured_num_nodes
+    live = 0
     try:
-        return max(0, int(cluster.get("node_count") or 0))
+        live = max(0, int(cluster.get("node_count") or 0))
     except (TypeError, ValueError):
-        return 0
+        live = 0
+    if configured_num_nodes > 0:
+        # Cap the configured count by the cluster's live pool count. A stale or
+        # oversized ``pref.num_nodes`` (e.g. the pool autoscaled down, or the
+        # user edited the node count after the pref was saved) would otherwise
+        # make ``ready_node_count >= expected_node_count`` impossible to satisfy
+        # and block warmup for that cluster forever. When the live count is
+        # unknown (0) we trust the configured value rather than collapse to 0.
+        return min(configured_num_nodes, live) if live > 0 else configured_num_nodes
+    return live
+
+
+# Past this many seconds of waiting for *all* expected warmup nodes, the gate
+# falls back to warming whatever subset is Ready (>=1 node) so a single node
+# that never becomes Ready (quota, spot eviction, ImagePullBackOff, a stuck
+# node-image upgrade) cannot block warmup for the whole cluster indefinitely.
+_NODE_WAIT_GRACE_SECONDS = int(os.environ.get("AUTOWARMUP_NODE_WAIT_GRACE_SECONDS", "900"))
 
 
 def auto_warmup_ready_gate(
@@ -57,6 +102,8 @@ def auto_warmup_ready_gate(
     cluster_name: str,
     cluster: dict[str, Any],
     configured_num_nodes: int = 0,
+    waited_seconds: float = 0.0,
+    grace_seconds: int = _NODE_WAIT_GRACE_SECONDS,
 ) -> dict[str, Any]:
     expected_node_count = expected_warmup_node_count(cluster, configured_num_nodes)
     if not cluster_is_workload_ready(cluster):
@@ -109,6 +156,30 @@ def auto_warmup_ready_gate(
 
     ready_node_count = len(ready_nodes)
     if ready_node_count < expected_node_count:
+        # Bounded wait: once we have waited past the grace window and at least
+        # one node is Ready, warm the ready subset instead of blocking forever
+        # on a node that may never come up. ``expected_node_count`` is narrowed
+        # to the ready set so the downstream warmup task (which re-checks
+        # ``num_nodes``) does not itself defer the partial warm.
+        if ready_node_count >= 1 and waited_seconds >= grace_seconds:
+            LOGGER.warning(
+                "auto warmup falling back to partial warm cluster=%s ready=%d expected=%d "
+                "after waiting %ds",
+                cluster_name,
+                ready_node_count,
+                expected_node_count,
+                int(waited_seconds),
+            )
+            return {
+                "ready": True,
+                "phase": "ready_partial",
+                "reason": "warming ready subset after node wait grace expired",
+                "partial": True,
+                "expected_node_count": ready_node_count,
+                "requested_node_count": expected_node_count,
+                "ready_node_count": ready_node_count,
+                "ready_nodes": ready_nodes,
+            }
         return {
             "ready": False,
             "phase": "waiting_for_warmup_nodes",
@@ -121,6 +192,7 @@ def auto_warmup_ready_gate(
         "ready": True,
         "phase": "ready",
         "reason": "all warmup nodes are Ready",
+        "partial": False,
         "expected_node_count": expected_node_count,
         "ready_node_count": ready_node_count,
         "ready_nodes": ready_nodes,
@@ -160,6 +232,135 @@ def autowarmup_inflight_acquire(
         return True
 
 
+def autowarmup_inflight_release(
+    subscription_id: str, resource_group: str, cluster_name: str, db_name: str
+) -> None:
+    """Release the enqueue slot claimed by ``autowarmup_inflight_acquire``.
+
+    The acquire is a Redis ``SET NX EX`` whose only other release path is the
+    TTL. A warmup task that completes, fails, or defers far sooner than the TTL
+    must drop the key so the next beat reconcile can re-evaluate the database
+    immediately instead of waiting out the full TTL — otherwise a failed warmup
+    only retries once per TTL window and the dashboard reports the DB ``Stale``
+    far longer than necessary. Best-effort: a missing key or a Redis hiccup is a
+    no-op (the TTL is the backstop). The warmup task calls this from its
+    ``finally`` when ``release_inflight_on_done`` is set (the auto-warmup path).
+    """
+    client = autowarmup_inflight_redis()
+    if client is None:
+        return
+    key = autowarmup_inflight_key(subscription_id, resource_group, cluster_name, db_name)
+    try:
+        client.delete(key)
+    except Exception as exc:
+        LOGGER.debug("auto warm inflight release failed: %s", type(exc).__name__)
+
+
+def autowarmup_wait_elapsed_seconds(
+    subscription_id: str, resource_group: str, cluster_name: str
+) -> float:
+    """Return how long the gate has been waiting for all nodes on a cluster.
+
+    Marks ``now`` on the first call (Redis ``SET NX EX``) and returns the
+    elapsed seconds since that mark on subsequent calls. Returns ``0.0`` when
+    Redis is unavailable (the bounded-wait fallback simply never triggers and we
+    keep the strict all-nodes behaviour, which is the safe default).
+    """
+    client = autowarmup_inflight_redis()
+    if client is None:
+        return 0.0
+    key = f"{_AUTOWARMUP_WAIT_SINCE_PREFIX}{subscription_id}:{resource_group}:{cluster_name}"
+    now = int(time.time())
+    try:
+        client.set(key, str(now), nx=True, ex=_AUTOWARMUP_WAIT_SINCE_TTL_SECONDS)
+        raw = client.get(key)
+    except Exception as exc:
+        LOGGER.debug("auto warm wait-since read failed: %s", type(exc).__name__)
+        return 0.0
+    if raw is None:
+        return 0.0
+    try:
+        started = int(raw.decode() if isinstance(raw, bytes) else raw)
+    except (ValueError, AttributeError):
+        return 0.0
+    return max(0.0, float(now - started))
+
+
+def autowarmup_wait_clear(subscription_id: str, resource_group: str, cluster_name: str) -> None:
+    """Clear the node-wait timestamp once the cluster is ready (or no longer
+    needs warmup), so the next wait window starts fresh."""
+    client = autowarmup_inflight_redis()
+    if client is None:
+        return
+    key = f"{_AUTOWARMUP_WAIT_SINCE_PREFIX}{subscription_id}:{resource_group}:{cluster_name}"
+    try:
+        client.delete(key)
+    except Exception as exc:
+        LOGGER.debug("auto warm wait-since clear failed: %s", type(exc).__name__)
+
+
+def autowarmup_circuit_state(
+    subscription_id: str, resource_group: str, cluster_name: str, db_name: str
+) -> dict[str, Any]:
+    """Observe + advance the per-(cluster, db) warmup failure circuit breaker.
+
+    Call once per reconcile tick for a DB whose warm state is ``Failed``. The
+    helper increments a windowed failure counter and, once it crosses
+    ``_CIRCUIT_THRESHOLD``, opens the circuit for ``_CIRCUIT_COOLDOWN_SECONDS``.
+    Returns ``{"open": bool, "failures": int, "cooldown_seconds": int}``.
+
+    When the circuit is open the reconcile must SKIP the (otherwise every-tick)
+    force-release + re-enqueue for that DB — a permanently failing warmup
+    (missing RBAC, network-blocked Storage, unschedulable pods) cannot be fixed
+    by retrying, and hammering it every 120 s only floods telemetry. After the
+    cooldown the circuit half-opens (one probe retry); a continued failure
+    re-opens it. Degrades to ``open=False`` when Redis is unavailable (current
+    every-tick behaviour, no worse than before).
+    """
+    client = autowarmup_inflight_redis()
+    if client is None:
+        return {"open": False, "failures": 0, "cooldown_seconds": 0}
+    suffix = f"{subscription_id}:{resource_group}:{cluster_name}:{db_name}"
+    fail_key = f"{_AUTOWARMUP_FAIL_PREFIX}{suffix}"
+    cooldown_key = f"{_AUTOWARMUP_COOLDOWN_PREFIX}{suffix}"
+    try:
+        if client.get(cooldown_key) is not None:
+            return {"open": True, "failures": _CIRCUIT_THRESHOLD, "cooldown_seconds": 0}
+        failures = int(client.incr(fail_key))
+        if failures == 1:
+            client.expire(fail_key, _CIRCUIT_FAILURE_WINDOW_SECONDS)
+        if failures >= _CIRCUIT_THRESHOLD:
+            # Open the circuit and reset the counter so the post-cooldown probe
+            # starts from a clean window.
+            client.set(cooldown_key, str(int(time.time())), ex=_CIRCUIT_COOLDOWN_SECONDS)
+            client.delete(fail_key)
+            return {
+                "open": True,
+                "failures": failures,
+                "cooldown_seconds": _CIRCUIT_COOLDOWN_SECONDS,
+            }
+        return {"open": False, "failures": failures, "cooldown_seconds": 0}
+    except Exception as exc:
+        LOGGER.debug("auto warm circuit state failed: %s", type(exc).__name__)
+        return {"open": False, "failures": 0, "cooldown_seconds": 0}
+
+
+def autowarmup_circuit_reset(
+    subscription_id: str, resource_group: str, cluster_name: str, db_name: str
+) -> None:
+    """Clear the failure counter + cooldown for a DB that is no longer Failed
+    (warm succeeded, generation changed, or the DB was removed)."""
+    client = autowarmup_inflight_redis()
+    if client is None:
+        return
+    suffix = f"{subscription_id}:{resource_group}:{cluster_name}:{db_name}"
+    try:
+        client.delete(f"{_AUTOWARMUP_FAIL_PREFIX}{suffix}")
+        client.delete(f"{_AUTOWARMUP_COOLDOWN_PREFIX}{suffix}")
+    except Exception as exc:
+        LOGGER.debug("auto warm circuit reset failed: %s", type(exc).__name__)
+
+
 def warmup_status_by_db(databases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for item in databases:
@@ -170,10 +371,23 @@ def warmup_status_by_db(databases: list[dict[str, Any]]) -> dict[str, dict[str, 
 
 
 def _latest_ncbi_source_version() -> str:
+    # Short process-local TTL cache: the reconcile calls this once per
+    # configured preference, and a slow NCBI ``latest-dir`` lookup would
+    # otherwise sit on the beat-tick critical path N times per run (issue #20).
+    # The latest-dir changes at most daily, so a 5-minute cache is safe and
+    # collapses N per-tick HTTP calls into one.
+    now = time.monotonic()
+    cached = _LATEST_VERSION_CACHE.get("value")
+    cached_at = _LATEST_VERSION_CACHE.get("at", 0.0)
+    if cached is not None and (now - float(cached_at)) < _LATEST_VERSION_TTL_SECONDS:
+        return str(cached)
     try:
         from api.routes.storage.common import _resolve_latest_dir
 
-        return _resolve_latest_dir()
+        value = _resolve_latest_dir()
+        _LATEST_VERSION_CACHE["value"] = value
+        _LATEST_VERSION_CACHE["at"] = now
+        return value
     except Exception as exc:
         LOGGER.warning("auto warm NCBI latest-dir lookup failed: %s", type(exc).__name__)
         return ""
@@ -193,6 +407,7 @@ def _seed_auto_warmup_job_state(
     program: str,
     expected_node_count: int,
     force_rewarm: bool = False,
+    require_all_warmup_nodes: bool = True,
 ) -> bool:
     """Create the `JobState` row for an auto-warmup task before enqueue.
 
@@ -225,7 +440,7 @@ def _seed_auto_warmup_job_state(
         "acr_name": pref.acr_name,
         "program": program,
         "caller_oid": pref.owner_oid,
-        "require_all_warmup_nodes": True,
+        "require_all_warmup_nodes": require_all_warmup_nodes,
         "auto_warmup": True,
         "expected_node_count": expected_node_count,
         "force_rewarm": force_rewarm,
@@ -315,11 +530,27 @@ def reconcile_auto_warmup_preferences(
                 reconciled.append(result)
                 continue
 
+            # A one-shot ``force=True`` reconcile enqueued right after
+            # ``begin_start`` fires before the blastpool nodes register Ready,
+            # so it is dropped at the readiness gate below and the forced
+            # re-warm intent is lost. ``start_aks`` therefore also persists
+            # ``force_rewarm_pending`` on the preference; honour it here so the
+            # recurring beat reconcile keeps forcing the re-warm across ticks
+            # until the cluster is workload-ready, then clears it once the
+            # warmup is actually enqueued (see ``clear_force_pending`` below).
+            effective_force = bool(force) or bool(pref.force_rewarm_pending)
+
             clusters = monitoring.list_aks_clusters(
                 credential, pref.subscription_id, pref.resource_group
             )
             cluster = next(
                 (item for item in clusters if item.get("name") == pref.cluster_name), None
+            )
+            # Bounded node-wait: measure how long the gate has been waiting for
+            # all nodes on this cluster so it can fall back to a partial warm of
+            # the ready subset once the grace window expires (issue #3/#5).
+            waited_seconds = autowarmup_wait_elapsed_seconds(
+                pref.subscription_id, pref.resource_group, pref.cluster_name
             )
             ready_gate = auto_warmup_ready_gate(
                 credential,
@@ -328,8 +559,16 @@ def reconcile_auto_warmup_preferences(
                 cluster_name=pref.cluster_name,
                 cluster=cluster or {},
                 configured_num_nodes=pref.num_nodes,
+                waited_seconds=waited_seconds,
             )
             if not ready_gate["ready"]:
+                # Only the active node-wait should accumulate elapsed time. A
+                # cluster that is Stopped/not-Running resets the timer so the
+                # grace window measures node readiness, not power-off time.
+                if ready_gate.get("phase") != "waiting_for_warmup_nodes":
+                    autowarmup_wait_clear(
+                        pref.subscription_id, pref.resource_group, pref.cluster_name
+                    )
                 mark_auto_warmup_ready_state(pref, ready=False)
                 result.update({k: v for k, v in ready_gate.items() if k != "ready"})
                 if ready_gate.get("phase") == "waiting_for_warmup_nodes":
@@ -351,6 +590,13 @@ def reconcile_auto_warmup_preferences(
                     result["status"] = "not_ready"
                 reconciled.append(result)
                 continue
+
+            # Gate satisfied (full or partial). Clear the node-wait timer so a
+            # later stop/start measures a fresh grace window.
+            autowarmup_wait_clear(pref.subscription_id, pref.resource_group, pref.cluster_name)
+            partial_warm = bool(ready_gate.get("partial"))
+            if partial_warm:
+                result["partial_warm"] = True
 
             warm_status = warmup_status_by_db(
                 monitoring.k8s_warmup_status(
@@ -429,10 +675,58 @@ def reconcile_auto_warmup_preferences(
                 #     reconcile busy-loops). Force-releasing clears them so the
                 #     retry actually re-runs. (Ephemeral self-heals via node
                 #     rotation; node_disk needs this explicit release.)
-                forced_rewarm = bool(warm_meta) and (force or warm_state == "Failed")
-                if warm_state in {"Ready", "Loading"} and not force:
+                forced_rewarm = bool(warm_meta) and (effective_force or warm_state == "Failed")
+                if warm_state in {"Ready", "Loading"} and not effective_force:
+                    # The DB is warm (or warming) with a matching generation —
+                    # a healthy observation clears any previous failure circuit.
+                    autowarmup_circuit_reset(
+                        pref.subscription_id,
+                        pref.resource_group,
+                        pref.cluster_name,
+                        db_name,
+                    )
                     result["skipped"].append({"db": db_name, "reason": warm_state})
                     continue
+                # Circuit breaker (issue #8): a warmup that keeps landing in the
+                # ``Failed`` state cannot be fixed by retrying (missing RBAC,
+                # network-blocked Storage, unschedulable pods). Without this the
+                # reconcile force-releases + re-enqueues it every single beat
+                # tick, flooding telemetry. After N consecutive Failed
+                # observations open the circuit and skip the DB for a cooldown.
+                if warm_state == "Failed":
+                    circuit = autowarmup_circuit_state(
+                        pref.subscription_id,
+                        pref.resource_group,
+                        pref.cluster_name,
+                        db_name,
+                    )
+                    if circuit["open"]:
+                        LOGGER.warning(
+                            "auto warmup circuit OPEN cluster=%s db=%s failures=%s; "
+                            "skipping re-enqueue for cooldown",
+                            pref.cluster_name,
+                            db_name,
+                            circuit.get("failures"),
+                        )
+                        result["skipped"].append(
+                            {
+                                "db": db_name,
+                                "reason": "circuit_open",
+                                "failures": circuit.get("failures", 0),
+                                "cooldown_seconds": circuit.get("cooldown_seconds", 0),
+                            }
+                        )
+                        continue
+                else:
+                    # Any non-Failed warm state for a DB we are about to (re)warm
+                    # means the prior failure streak is broken — reset the
+                    # circuit so a future failure starts a fresh window.
+                    autowarmup_circuit_reset(
+                        pref.subscription_id,
+                        pref.resource_group,
+                        pref.cluster_name,
+                        db_name,
+                    )
                 if not inflight_acquire(
                     pref.subscription_id,
                     pref.resource_group,
@@ -441,7 +735,10 @@ def reconcile_auto_warmup_preferences(
                 ):
                     result["skipped"].append({"db": db_name, "reason": "inflight"})
                     continue
-                job_id = f"auto-warmup-{pref.cluster_name}-{db_name}-{int(time.time())}"
+                job_id = (
+                    f"auto-warmup-{pref.cluster_name}-{db_name}-"
+                    f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+                )
                 machine_type = pref.machine_type or str((cluster or {}).get("node_sku") or "")
                 num_nodes = int(ready_gate.get("expected_node_count") or 0)
                 program = pref.programs.get(db_name, "blastn")
@@ -454,6 +751,7 @@ def reconcile_auto_warmup_preferences(
                     program=program,
                     expected_node_count=num_nodes,
                     force_rewarm=forced_rewarm,
+                    require_all_warmup_nodes=not partial_warm,
                 )
                 task = send_task(
                     "api.tasks.storage.warmup_database",
@@ -478,20 +776,40 @@ def reconcile_auto_warmup_preferences(
                         "acr_name": pref.acr_name,
                         "program": program,
                         "caller_oid": pref.owner_oid,
-                        "require_all_warmup_nodes": True,
+                        # Strict (all-nodes) warmup by default. After the gate's
+                        # bounded-wait fallback fires (``partial_warm``) we warm
+                        # whatever subset is Ready, so the task must NOT defer on
+                        # a missing node — pass False to let it warm the subset.
+                        "require_all_warmup_nodes": not partial_warm,
                         # When a forced (post stop/start) reconcile re-enqueues a
                         # DB that still reports "Ready", the warmup task must drop
                         # the pre-stop Jobs before it recreates them — otherwise
                         # `k8s_ensure_job_manifests` sees the existing names and
                         # no-ops, leaving the RAM cache cold on node_disk.
                         "force_rewarm": forced_rewarm,
+                        # The reconcile claimed the in-flight slot via
+                        # ``inflight_acquire`` (Redis SET NX EX). Tell the task
+                        # to drop that key in its ``finally`` so a deferred or
+                        # failed warmup is retried on the next beat tick instead
+                        # of waiting out the full TTL.
+                        "release_inflight_on_done": True,
                     },
                     queue="storage",
                 )
                 _attach_auto_warmup_task_id(job_id=job_id, task_id=getattr(task, "id", ""))
                 result["enqueued"].append({"db": db_name, "task_id": task.id})
 
-            mark_auto_warmup_ready_state(pref, ready=True, triggered=bool(result["enqueued"]))
+            mark_auto_warmup_ready_state(
+                pref,
+                ready=True,
+                triggered=bool(result["enqueued"]),
+                # Only drop the forced re-warm intent once at least one warmup
+                # was actually enqueued. If every DB was skipped this tick (a
+                # prior warmup still in-flight, or the DB not yet downloaded),
+                # keep the flag so the next tick retries the force instead of
+                # silently losing it during the skip window.
+                clear_force_pending=bool(result["enqueued"]),
+            )
             result["status"] = "triggered" if result["enqueued"] else "ready_noop"
         except Exception as exc:
             LOGGER.warning(
@@ -500,7 +818,12 @@ def reconcile_auto_warmup_preferences(
                 type(exc).__name__,
             )
             result["status"] = "failed"
-            result["error"] = str(exc)[:300]
+            # Sanitise + cap: the reconcile result is surfaced to the SPA and
+            # logs; a raw ARM/Kubernetes exception string can carry subscription
+            # IDs, resource paths, or SAS-like tokens.
+            from api.services.sanitise import sanitise
+
+            result["error"] = sanitise(str(exc))[:300]
         reconciled.append(result)
 
     return {"status": "completed", "clusters": reconciled}

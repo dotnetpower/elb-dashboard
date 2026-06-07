@@ -5,7 +5,7 @@ import { type AksClusterSummary, monitoringApi } from "@/api/monitoring";
 import { settingsApi } from "@/api/settings";
 import type { ResourceConfig } from "@/components/SetupWizard";
 import { Badge, Field, Group, Row, Section, StatusLine } from "@/components/settings/primitives";
-import { INPUT_STYLE } from "@/components/settings/styles";
+import { INPUT_STYLE, SELECT_STYLE } from "@/components/settings/styles";
 import { isRunningTask, usePollTask, TaskStatusLine, type TaskState } from "@/components/settings/taskState";
 import { usePreferences } from "@/hooks/usePreferences";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
@@ -214,7 +214,7 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
             <select
               value={clusterName}
               onChange={(event) => setClusterName(event.target.value)}
-              style={INPUT_STYLE}
+              style={SELECT_STYLE}
             >
               {availableClusters.map((c) => (
                 <option key={`${c.resource_group}/${c.name}`} value={c.name}>

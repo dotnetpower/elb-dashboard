@@ -185,16 +185,30 @@ def start_aks(
                 "subscription_id": subscription_id,
                 "resource_group": resource_group,
                 "cluster_name": cluster_name,
+                # Persist the forced re-warm intent. The one-shot reconcile
+                # enqueued just below fires before the blastpool nodes register
+                # Ready, so it is dropped at the readiness gate; the flag lets
+                # the recurring beat reconcile keep forcing the re-warm across
+                # ticks until the cluster is workload-ready (it clears the flag
+                # once the warmup is actually enqueued).
+                "force_rewarm_pending": True,
             }
             pref = save_auto_warmup_preference(normalise_preference(pref_payload))
             task = celery_app.send_task(
                 "api.tasks.storage.reconcile_auto_warmup",
                 kwargs={"preference": pref.to_dict(), "force": True},
-                queue="storage",
+                # Route to the dedicated `reconcile` queue (same as the beat
+                # reconcile) so this post-start reconcile is not delayed behind
+                # — or competing with — interactive BLAST submits backed up on
+                # the `storage` queue.
+                queue="reconcile",
             )
             auto_warmup_task_id = task.id
         except Exception as exc:
-            LOGGER.warning("auto warm reconcile enqueue failed after AKS start: %s", exc)
+            LOGGER.warning(
+                "auto warm reconcile enqueue failed after AKS start: %s",
+                type(exc).__name__,
+            )
     openapi_task_id = ""
     try:
         from api.tasks.openapi.auto_deploy import (
@@ -209,7 +223,9 @@ def start_aks(
             trigger="aks_start",
         )
     except Exception as exc:
-        LOGGER.warning("openapi deploy enqueue failed after AKS start: %s", exc)
+        LOGGER.warning(
+            "openapi deploy enqueue failed after AKS start: %s", type(exc).__name__
+        )
     return {
         "cluster_name": cluster_name,
         "action": "start",

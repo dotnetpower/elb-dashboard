@@ -20,7 +20,7 @@ import {
 } from "@/api/settings";
 import type { ResourceConfig } from "@/components/SetupWizard";
 import { Badge, Field, Group, Row, Section, StatusLine } from "@/components/settings/primitives";
-import { INPUT_STYLE } from "@/components/settings/styles";
+import { INPUT_STYLE, SELECT_STYLE } from "@/components/settings/styles";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
 
 export function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
@@ -461,7 +461,7 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
             <select
               value={clusterName}
               onChange={(event) => setClusterName(event.target.value)}
-              style={INPUT_STYLE}
+              style={SELECT_STYLE}
             >
               {availableClusters.map((c) => (
                 <option key={`${c.resource_group}/${c.name}`} value={c.name}>
@@ -489,7 +489,7 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
           <select
             value={targetSubscriptionId}
             onChange={(event) => setTargetSubscriptionId(event.target.value)}
-            style={INPUT_STYLE}
+            style={SELECT_STYLE}
           >
             <option value="">Select subscription…</option>
             {subscriptions.map((s) => (
@@ -507,7 +507,7 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
             value={targetResourceGroup}
             onChange={(event) => setTargetResourceGroup(event.target.value)}
             disabled={!targetSubscriptionId || rgLoading}
-            style={INPUT_STYLE}
+            style={SELECT_STYLE}
           >
             <option value="">Select resource group…</option>
             {resourceGroups.map((rg) => (
@@ -531,7 +531,7 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
             value={targetVnetName}
             onChange={(event) => setTargetVnetName(event.target.value)}
             disabled={!targetResourceGroup || vnetsLoading}
-            style={INPUT_STYLE}
+            style={SELECT_STYLE}
           >
             <option value="">Select VNet…</option>
             {vnets.map((v) => (

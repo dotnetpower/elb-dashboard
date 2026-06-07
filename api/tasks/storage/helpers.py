@@ -101,6 +101,12 @@ def wait_for_warmup_jobs(
 ) -> dict[str, Any]:
     from api.services.k8s.monitoring import k8s_warmup_status
 
+    # Guard against a non-positive expected count: `nodes_ready >= 0` would
+    # return "completed" on the very first poll without any Job having warmed,
+    # falsely reporting the DB warm. A warmup with no expected Jobs is a caller
+    # bug; clamp to 1 so the loop still observes real readiness.
+    expected_jobs = max(1, int(expected_jobs or 0))
+
     deadline = time.monotonic() + timeout_seconds
     last_database: dict[str, Any] = {}
     # State-write dedup + adaptive backoff:

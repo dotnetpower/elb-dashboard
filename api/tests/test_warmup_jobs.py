@@ -836,3 +836,51 @@ def test_ensure_job_manifests_is_idempotent_for_existing_jobs() -> None:
     assert result["existing"] == ["warm-core-nt-00"]
     assert result["created"] == ["warm-core-nt-01"]
     assert result["error_count"] == 0
+
+
+def test_candidate_warmup_nodes_excludes_system_only_cluster() -> None:
+    """Node selection must never fall back to system-pool nodes: a Job pinned to
+    a `CriticalAddonsOnly`-tainted system node stays Pending forever. A cluster
+    with only system nodes returns an empty candidate list so the caller defers
+    instead of placing doomed Jobs."""
+    from api.services.k8s.monitoring import _candidate_warmup_node_names
+
+    nodes = [
+        {
+            "metadata": {
+                "name": "aks-system-000000",
+                "labels": {"agentpool": "systempool", "kubernetes.azure.com/mode": "system"},
+            },
+            "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+        },
+        {
+            "metadata": {
+                "name": "aks-system-000001",
+                "labels": {"agentpool": "system", "kubernetes.azure.com/mode": "system"},
+            },
+            "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+        },
+    ]
+
+    assert _candidate_warmup_node_names(nodes) == []
+
+
+def test_broadcast_single_shard_db_uses_per_node_job_count() -> None:
+    """A single-shard DB broadcast across N nodes must produce N Jobs (one per
+    node), so the warmup wait target is N — not 1. Waiting on `selected_shards`
+    (==1) would report the DB warm after only one node finished."""
+    from api.services.warmup.jobs import build_warmup_job_plan
+
+    plan = build_warmup_job_plan(
+        db_name="16S_ribosomal_RNA",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=1,
+        nodes=["node-a", "node-b", "node-c"],
+        image="acr.azurecr.io/ncbi/elb:latest",
+    )
+    # Broadcast → one Job per node, not one Job for the single shard.
+    assert len(plan.jobs) == 3
+    # The warmup task derives expected_jobs from len(plan.jobs); confirm the
+    # broadcast count is what the wait would target.
+    assert max(1, len(plan.jobs)) == 3

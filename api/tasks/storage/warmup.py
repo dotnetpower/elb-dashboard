@@ -91,6 +91,7 @@ def warmup_database(
     caller_oid: str = "",
     require_all_warmup_nodes: bool = False,
     force_rewarm: bool = False,
+    release_inflight_on_done: bool = False,
 ) -> dict[str, Any]:
     """Download a BLAST database from NCBI to the workload storage account.
 
@@ -107,6 +108,11 @@ def warmup_database(
     task drops the database's existing warmup Jobs before ensure so fresh Jobs
     actually run (the on-disk DB survives on node_disk, so only the vmtouch
     re-runs and the download is skipped).
+
+    ``release_inflight_on_done`` is set by the auto-warmup reconcile path: the
+    reconcile claimed a Redis in-flight slot before enqueue, and the task drops
+    it in its ``finally`` so a deferred/failed warmup is retried on the next
+    beat tick instead of waiting out the in-flight TTL.
     """
     _record_task_progress(self, "starting", database=database_name)
     _update_state(job_id, "starting")
@@ -542,6 +548,15 @@ def warmup_database(
                 if apply_summary.get("error_count"):
                     raise RuntimeError(f"warmup Job creation failed: {apply_summary['errors'][:2]}")
 
+                # The number of Jobs actually planned is the wait target. For a
+                # single-shard DB broadcast across every Ready node,
+                # `build_warmup_job_plan` emits one Job *per node* (len(plan.jobs)
+                # == node count), not `selected_shards` (== 1). Waiting on
+                # `selected_shards` would report the DB "warm" as soon as ONE
+                # node finished, leaving the other nodes cold and a search that
+                # lands on them failing with "database not found". Wait on the
+                # real planned Job count so every node is confirmed warm.
+                expected_warm_jobs = max(1, len(plan.jobs))
                 wait_summary = _wait_for_warmup_jobs(
                     self,
                     job_id=job_id,
@@ -550,7 +565,7 @@ def warmup_database(
                     resource_group=resource_group,
                     cluster_name=cluster_name,
                     database_name=database_name,
-                    expected_jobs=selected_shards,
+                    expected_jobs=expected_warm_jobs,
                     timeout_seconds=max(60, min(int(warmup_timeout_seconds), 24 * 60 * 60)),
                 )
                 if wait_summary.get("status") != "completed":
@@ -560,6 +575,7 @@ def warmup_database(
                     "cluster_name": cluster_name,
                     "node_count": actual_node_count,
                     "num_shards": selected_shards,
+                    "jobs_expected": expected_warm_jobs,
                     "jobs_created": apply_summary.get("created_count", 0),
                     "jobs_existing": apply_summary.get("existing_count", 0),
                     "nodes_ready": wait_summary.get("nodes_ready", 0),
@@ -597,6 +613,25 @@ def warmup_database(
         }
 
     except Exception as exc:
-        LOGGER.warning("warmup verification failed: %s", exc)
+        LOGGER.warning("warmup_database failed db=%s: %s", database_name, exc)
         _update_state(job_id, "failed", status="failed", error_code=str(exc)[:500])
         return {"database": database_name, "status": "failed", "error": str(exc)[:500]}
+    finally:
+        # The auto-warmup reconcile claimed a Redis in-flight slot
+        # (`autowarmup_inflight_acquire`) before enqueuing this task. Release it
+        # here so a deferred/failed warmup is retried on the next beat tick
+        # rather than waiting out the TTL. Best-effort: the TTL is the backstop
+        # and the manual `/api/warmup/start` path never sets this flag.
+        if release_inflight_on_done:
+            try:
+                from api.services.auto_warmup_reconcile import (
+                    autowarmup_inflight_release,
+                )
+
+                autowarmup_inflight_release(
+                    subscription_id, resource_group, cluster_name, database_name
+                )
+            except Exception as exc:  # pragma: no cover - best effort cleanup
+                LOGGER.debug(
+                    "auto warm inflight release skipped: %s", type(exc).__name__
+                )

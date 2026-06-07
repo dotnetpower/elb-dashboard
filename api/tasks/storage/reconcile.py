@@ -40,11 +40,38 @@ def reconcile_auto_warmup(
     from api.celery_app import celery_app
     from api.services.auto_warmup_reconcile import reconcile_auto_warmup_preferences
 
-    return reconcile_auto_warmup_preferences(
-        credential=_facade.get_credential(),
-        send_task=celery_app.send_task,
-        preference=preference,
-        force=force,
-        limit=limit,
-        inflight_acquire=_facade._autowarmup_inflight_acquire,
-    )
+    # Overlap guard for the beat (full-list) path: a slow reconcile pass can
+    # outlive the 120 s beat interval, so two ticks could run concurrently and
+    # double-process every preference (extra K8s/Storage reads, racing CAS
+    # writes). A short Redis lock keeps only one full pass in flight; the lock
+    # auto-expires so a crashed worker cannot wedge reconciliation. The
+    # single-preference path (force re-warm from `start_aks`, tests) is never
+    # gated — it is targeted and must always run promptly.
+    lock = None
+    if preference is None:
+        from api.services.auto_warmup_reconcile import autowarmup_inflight_redis
+
+        client = autowarmup_inflight_redis()
+        if client is not None:
+            try:
+                if not client.set("autowarmup:reconcile:lock", "1", nx=True, ex=110):
+                    return {"status": "skipped", "reason": "reconcile_already_running"}
+                lock = client
+            except Exception:  # pragma: no cover - defensive
+                lock = None
+
+    try:
+        return reconcile_auto_warmup_preferences(
+            credential=_facade.get_credential(),
+            send_task=celery_app.send_task,
+            preference=preference,
+            force=force,
+            limit=limit,
+            inflight_acquire=_facade._autowarmup_inflight_acquire,
+        )
+    finally:
+        if lock is not None:
+            try:
+                lock.delete("autowarmup:reconcile:lock")
+            except Exception:  # noqa: S110 - lock auto-expires; release races are not fatal
+                pass
