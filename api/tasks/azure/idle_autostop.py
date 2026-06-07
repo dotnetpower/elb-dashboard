@@ -262,7 +262,17 @@ def auto_stop_aks(
             cluster_name,
             decision.reason,
         )
-        mark_auto_stop_event(pref, stopped=False, reason=f"late_skip:{decision.reason}")
+        # Clear the beat driver's preflight ``last_stop_at`` stamp: it was
+        # written before this task was enqueued (double-enqueue guard), but we
+        # are NOT stopping the cluster, so leaving it would falsely trip the
+        # cooldown gate and hide the SPA countdown for the whole cooldown
+        # window even though the cluster is Running.
+        mark_auto_stop_event(
+            pref,
+            stopped=False,
+            reason=f"late_skip:{decision.reason}",
+            clear_preflight_stop=True,
+        )
         return {
             "cluster_name": cluster_name,
             "action": "skip",

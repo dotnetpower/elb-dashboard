@@ -141,6 +141,60 @@ def test_mark_auto_stop_event_records_stop_and_skip(monkeypatch, tmp_path) -> No
     assert after_skip.last_stop_at == after_stop.last_stop_at
 
 
+def test_mark_auto_stop_event_clears_preflight_stop_on_late_skip(
+    monkeypatch, tmp_path
+) -> None:
+    """A beat preflight stamp (``enqueued:`` reason) followed by an act-task
+    late-skip must blank ``last_stop_at`` so a fake cooldown is not left behind
+    (otherwise the SPA shows ``reason=cooldown`` with no countdown while the
+    cluster is actually Running)."""
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    pref = save_auto_stop_preference(_make())
+
+    # Beat driver preflight-stamps last_stop_at with the enqueued: marker.
+    preflighted = mark_auto_stop_event(
+        pref, stopped=True, reason="enqueued:idle:240m"
+    )
+    assert preflighted.last_stop_at != ""
+
+    # Act task late-skips (e.g. provisioning:Starting) → clear the fake stop.
+    after = mark_auto_stop_event(
+        preflighted,
+        stopped=False,
+        reason="late_skip:provisioning:Starting",
+        clear_preflight_stop=True,
+    )
+    assert after.last_stop_at == ""
+    assert after.last_stop_reason == ""
+    assert after.last_skip_reason == "late_skip:provisioning:Starting"
+
+
+def test_mark_auto_stop_event_clear_preflight_preserves_real_stop(
+    monkeypatch, tmp_path
+) -> None:
+    """``clear_preflight_stop`` must NOT erase a genuine recent stop — only a
+    stamp still carrying the ``enqueued:`` preflight marker is cleared."""
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    pref = save_auto_stop_preference(_make())
+
+    # A real stop landed (reason does NOT start with "enqueued:").
+    stopped = mark_auto_stop_event(pref, stopped=True, reason="idle:240m")
+    real_stop_at = stopped.last_stop_at
+    assert real_stop_at != ""
+
+    after = mark_auto_stop_event(
+        stopped,
+        stopped=False,
+        reason="late_skip:cooldown",
+        clear_preflight_stop=True,
+    )
+    # Real stop is preserved because its reason lacks the enqueued: marker.
+    assert after.last_stop_at == real_stop_at
+    assert after.last_stop_reason == "idle:240m"
+
+
 def test_mark_auto_stop_started_stamps_last_started_at(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))

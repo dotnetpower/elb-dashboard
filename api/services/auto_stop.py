@@ -305,12 +305,28 @@ def mark_auto_stop_event(
     *,
     stopped: bool,
     reason: str,
+    clear_preflight_stop: bool = False,
 ) -> AutoStopPreference:
     """Record the outcome of an evaluator tick.
 
     `stopped=True` records a real stop; `stopped=False` records a skip
     (idle but blocked by guard). The fields feed the SPA's "last
     evaluation" line and the cooldown gate.
+
+    ``clear_preflight_stop`` (only meaningful with ``stopped=False``):
+    the beat driver preflight-stamps ``last_stop_at`` BEFORE enqueueing
+    the act task (its double-enqueue cooldown guard). When the act task
+    then LATE-SKIPS (e.g. the user restarted the cluster, so it is
+    ``provisioning:Starting``), that preflight stamp is a *fake* stop —
+    no cluster was actually stopped — yet it would otherwise leave the
+    cooldown gate tripped, so the SPA shows ``reason=cooldown`` with no
+    countdown for the full cooldown window even though the cluster is
+    happily Running. Passing ``clear_preflight_stop=True`` blanks the
+    ``last_stop_*`` fields so the next evaluator tick computes a real
+    ``next_stop_at`` immediately. Only clears when the persisted
+    ``last_stop_reason`` still carries the ``enqueued:`` preflight marker
+    (i.e. no real stop has landed since), so a genuine recent stop is
+    never erased.
 
     Atomicity: this helper re-fetches the latest persisted row (with
     its ETag) before writing and uses Azure Tables ``If-Match``
@@ -349,6 +365,21 @@ def mark_auto_stop_event(
         else:
             next_pref.last_skip_at = now
             next_pref.last_skip_reason = reason[:200]
+            # Roll back a fake preflight stop stamp when the act task
+            # late-skips. The beat driver stamps ``last_stop_at`` with an
+            # ``enqueued:`` reason BEFORE enqueueing; if the act task then
+            # skips (cluster restarted → provisioning:Starting, user is
+            # active again, …) no cluster was actually stopped, so leaving
+            # the stamp trips the cooldown gate and the SPA shows
+            # ``reason=cooldown`` with no countdown for the whole cooldown
+            # window. Only clear when the persisted reason still carries the
+            # ``enqueued:`` marker — a real stop that landed in between is
+            # never erased.
+            if clear_preflight_stop and (
+                next_pref.last_stop_reason or ""
+            ).startswith("enqueued:"):
+                next_pref.last_stop_at = ""
+                next_pref.last_stop_reason = ""
         next_pref.updated_at = now
         fallback = next_pref
         if latest is None:
