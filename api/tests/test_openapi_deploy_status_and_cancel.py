@@ -439,7 +439,7 @@ def test_openapi_proxy_denied_tokens_keep_symmetric_coverage() -> None:
     """Each privileged family must carry three-way coverage:
     ``/x/`` (segment), ``/x?`` (query-stripped exact), ``/x-`` (dashed
     sibling). Drift would silently shrink the defence-in-depth surface."""
-    from api.routes.aks.openapi import _OPENAPI_PROXY_DENIED_PATH_TOKENS
+    from api.routes.aks.openapi_proxy import _OPENAPI_PROXY_DENIED_PATH_TOKENS
 
     families = ("admin", "internal", "debug", "private", "sudo")
     for family in families:
