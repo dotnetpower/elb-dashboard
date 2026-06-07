@@ -513,6 +513,25 @@ def reconcile_auto_warmup_preferences(
             return {"status": "list_failed", "error": type(exc).__name__, "reconciled": []}
 
     reconciled: list[dict[str, Any]] = []
+    # Per-tick (sub, rg) memoisation of the ARM cluster list. The beat
+    # reconcile can hold several preferences in the same resource group, and
+    # `list_aks_clusters` is one ARM `managedClusters.list` round trip each.
+    # Reusing the list within a single tick removes the duplicate ARM reads
+    # (an App Insights hunt showed ~3.3k managedClusters calls / 4h) without
+    # any staleness risk — every preference in one tick sees the same instant
+    # snapshot, which is exactly what an un-memoised loop would also see modulo
+    # ARM-side caching. Scoped to this call so it never outlives the tick.
+    _cluster_list_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    def _clusters_for(subscription_id: str, resource_group: str) -> list[dict[str, Any]]:
+        cache_key = (subscription_id, resource_group)
+        cached = _cluster_list_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        fetched = monitoring.list_aks_clusters(credential, subscription_id, resource_group)
+        _cluster_list_cache[cache_key] = fetched
+        return fetched
+
     for pref in prefs:
         result: dict[str, Any] = {
             "cluster_name": pref.cluster_name,
@@ -540,9 +559,7 @@ def reconcile_auto_warmup_preferences(
             # warmup is actually enqueued (see ``clear_force_pending`` below).
             effective_force = bool(force) or bool(pref.force_rewarm_pending)
 
-            clusters = monitoring.list_aks_clusters(
-                credential, pref.subscription_id, pref.resource_group
-            )
+            clusters = _clusters_for(pref.subscription_id, pref.resource_group)
             cluster = next(
                 (item for item in clusters if item.get("name") == pref.cluster_name), None
             )

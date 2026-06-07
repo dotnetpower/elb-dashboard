@@ -1642,3 +1642,73 @@ def test_mark_ready_skips_noop_write(monkeypatch, tmp_path) -> None:
     # unchanged because no write happened).
     result = mark_auto_warmup_ready_state(saved, ready=True)
     assert result.updated_at == before
+
+
+def test_reconcile_memoises_cluster_list_per_subscription_rg(monkeypatch, tmp_path) -> None:
+    """ARM `list_aks_clusters` must be called once per (sub, rg) per tick even
+    when several preferences share the same resource group, to avoid redundant
+    ARM round trips (App Insights showed ~3.3k managedClusters calls / 4h)."""
+    from api.services import auto_warmup_reconcile as mod
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+
+    list_calls: list[tuple[str, str]] = []
+
+    def _fake_list(_cred, subscription_id, resource_group):
+        list_calls.append((subscription_id, resource_group))
+        return [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 10,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ]
+
+    monkeypatch.setattr("api.services.monitoring.list_aks_clusters", _fake_list)
+    _patch_ready_warmup_nodes(monkeypatch, 10)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *a, **k: {"databases": []},
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda credential, storage_account: [{"name": "core_nt"}, {"name": "nt"}],
+    )
+
+    _calls, fake_send_task = make_send_task_recorder("warmup-memo")
+
+    # Two preferences in the SAME (sub, rg) — historically two ARM list calls.
+    prefs = [
+        AutoWarmupPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            storage_account="elbstg01",
+            storage_resource_group="rg-elb",
+            databases=["core_nt"],
+        ),
+        AutoWarmupPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            storage_account="elbstg01",
+            storage_resource_group="rg-elb",
+            databases=["nt"],
+        ),
+    ]
+    monkeypatch.setattr(
+        mod, "list_auto_warmup_preferences", lambda limit=100: prefs
+    )
+    monkeypatch.setattr(mod, "autowarmup_inflight_acquire", lambda *a, **k: True)
+
+    mod.reconcile_auto_warmup_preferences(
+        credential=object(),
+        send_task=fake_send_task,
+        force=True,
+    )
+
+    # Both prefs processed but ARM listed once for the shared (sub, rg).
+    assert list_calls == [("sub-1", "rg-elb")]
