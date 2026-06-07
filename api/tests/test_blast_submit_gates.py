@@ -19,6 +19,7 @@ Validation: ``uv run pytest -q api/tests/test_blast_submit_gates.py``.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -140,6 +141,54 @@ def test_aks_cluster_gate_ok_and_cached(monkeypatch: pytest.MonkeyPatch) -> None
     assert first.status == "ok"
     assert second.status == "ok"
     assert len(calls) == 1  # second call served from cache
+
+
+def test_aks_cluster_gate_single_flight_under_parallel_burst(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """50 concurrent submits for the SAME cluster must collapse to ONE ARM
+    probe (single-flight), not 50 — otherwise the burst trips Azure throttling
+    and can fail-close otherwise-valid submits."""
+    import threading
+
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    call_count = {"n": 0}
+    count_lock = threading.Lock()
+    release = threading.Event()
+
+    def _slow_list(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        with count_lock:
+            call_count["n"] += 1
+        # Hold the first probe open so the rest of the burst piles up on the
+        # per-key lock instead of each starting its own probe.
+        release.wait(timeout=5)
+        return [{"name": "elb-cluster", "power_state": "Running"}]
+
+    monkeypatch.setattr("api.services.monitoring.list_aks_clusters", _slow_list)
+
+    results: list[Any] = []
+    results_lock = threading.Lock()
+
+    def _worker() -> None:
+        r = submit_gates._gate_aks_cluster(
+            subscription_id="sub", resource_group="rg", cluster_name="elb-cluster"
+        )
+        with results_lock:
+            results.append(r)
+
+    threads = [threading.Thread(target=_worker) for _ in range(50)]
+    for t in threads:
+        t.start()
+    # Give the herd time to all arrive and block on the per-key lock, then let
+    # the single in-flight probe finish.
+    time.sleep(0.2)
+    release.set()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == 50
+    assert all(r.status == "ok" for r in results)
+    assert call_count["n"] == 1  # single-flight collapsed the stampede
 
 
 def test_aks_cluster_gate_unknown_when_arm_errors(

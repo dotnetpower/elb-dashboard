@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from time import monotonic
 from typing import Any, Literal
@@ -113,9 +114,55 @@ def _cache_set(key: str, value: GateResult) -> None:
     _cache[key] = (monotonic(), value)
 
 
+# Single-flight coordination for the ARM/Storage/ACR-backed gates. Under a
+# burst of N concurrent submits for the SAME (cluster / db / acr) target, the
+# unguarded "miss → probe → set" pattern made all N callers miss the 5 s cache
+# and fire N concurrent ARM/Storage/ACR probes — a classic cache stampede that
+# trips Azure throttling (429) and can fail-closed otherwise-valid submits. The
+# per-key lock below collapses that herd: the first caller computes and fills
+# the cache, the rest block briefly on the key lock and then read the fresh
+# cached value. ``_INFLIGHT_LOCK`` guards only the tiny key→lock registry, so it
+# is never held across a network probe and distinct targets never serialise
+# against each other.
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _key_lock(key: str) -> threading.Lock:
+    with _INFLIGHT_LOCK:
+        lock = _INFLIGHT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _INFLIGHT_LOCKS[key] = lock
+        return lock
+
+
+def _cached_or_compute(key: str, compute: Callable[[], GateResult]) -> GateResult:
+    """Return the cached gate result for ``key`` or compute it exactly once.
+
+    Fast path: a cache hit returns immediately with no locking. On a miss the
+    caller takes the per-key lock and re-checks the cache (double-checked
+    locking) so only the first of a concurrent burst runs ``compute`` (the
+    expensive ARM/Storage/ACR probe); the rest wait and then reuse its result.
+    """
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+    lock = _key_lock(key)
+    with lock:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        result = compute()
+        _cache_set(key, result)
+        return result
+
+
 def reset_submit_gates_cache() -> None:
     """Clear the per-process gate cache. Tests call this between cases."""
     _cache.clear()
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_LOCKS.clear()
 
 
 def _gate_exec_token() -> GateResult:
@@ -216,57 +263,55 @@ def _gate_aks_cluster(
     Unverifiable (ARM throttling / RBAC / private endpoint) is reported as
     ``status=unknown`` so the caller can decide whether to override."""
     cache_key = f"aks:{subscription_id}:{resource_group}:{cluster_name}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-    try:
-        from api.services import get_credential
-        from api.services.monitoring import list_aks_clusters
 
-        clusters = list_aks_clusters(get_credential(), subscription_id, resource_group)
-        match = next((c for c in clusters if c.get("name") == cluster_name), None)
-        if match is None:
-            result = GateResult(
-                id="aks_cluster",
-                status="fail",
-                severity="critical",
-                error_code="cluster_not_found",
-                message=(
-                    f"AKS cluster '{cluster_name}' not found in '{resource_group}'."
-                ),
-                action="Select an existing cluster",
-                action_type="select_cluster",
-            )
-        elif match.get("power_state") != "Running":
-            power = match.get("power_state") or "unknown"
-            result = GateResult(
-                id="aks_cluster",
-                status="fail",
-                severity="critical",
-                error_code="cluster_not_ready",
-                message=f"AKS cluster '{cluster_name}' is {power}. Start it first.",
-                action="Start cluster",
-                action_type="start_cluster",
-            )
-        else:
-            result = GateResult(
+    def _compute() -> GateResult:
+        try:
+            from api.services import get_credential
+            from api.services.monitoring import list_aks_clusters
+
+            clusters = list_aks_clusters(get_credential(), subscription_id, resource_group)
+            match = next((c for c in clusters if c.get("name") == cluster_name), None)
+            if match is None:
+                return GateResult(
+                    id="aks_cluster",
+                    status="fail",
+                    severity="critical",
+                    error_code="cluster_not_found",
+                    message=(
+                        f"AKS cluster '{cluster_name}' not found in '{resource_group}'."
+                    ),
+                    action="Select an existing cluster",
+                    action_type="select_cluster",
+                )
+            if match.get("power_state") != "Running":
+                power = match.get("power_state") or "unknown"
+                return GateResult(
+                    id="aks_cluster",
+                    status="fail",
+                    severity="critical",
+                    error_code="cluster_not_ready",
+                    message=f"AKS cluster '{cluster_name}' is {power}. Start it first.",
+                    action="Start cluster",
+                    action_type="start_cluster",
+                )
+            return GateResult(
                 id="aks_cluster",
                 status="ok",
                 severity="critical",
                 error_code="",
                 message=f"AKS cluster '{cluster_name}' is running.",
             )
-    except Exception as exc:
-        LOGGER.warning("submit gate: AKS probe failed: %s", type(exc).__name__)
-        result = GateResult(
-            id="aks_cluster",
-            status="unknown",
-            severity="critical",
-            error_code="cluster_check_unavailable",
-            message=f"Could not verify AKS cluster ({type(exc).__name__}).",
-        )
-    _cache_set(cache_key, result)
-    return result
+        except Exception as exc:
+            LOGGER.warning("submit gate: AKS probe failed: %s", type(exc).__name__)
+            return GateResult(
+                id="aks_cluster",
+                status="unknown",
+                severity="critical",
+                error_code="cluster_check_unavailable",
+                message=f"Could not verify AKS cluster ({type(exc).__name__}).",
+            )
+
+    return _cached_or_compute(cache_key, _compute)
 
 
 def _gate_openapi_ready() -> GateResult:
@@ -366,51 +411,52 @@ def _gate_blast_database(*, storage_account: str, database: str) -> GateResult:
     ``update_in_progress``). Cached per (storage_account, database) for 5s.
     Storage RBAC / network failures land as ``unknown``."""
     cache_key = f"db:{storage_account}:{database}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-    try:
-        from api.services.blast.task_config import (
-            BlastDatabaseAvailabilityError,
-            validate_blast_database_ready,
-        )
 
-        validate_blast_database_ready(
-            storage_account=storage_account, database=database
-        )
-        result = GateResult(
-            id="blast_database",
-            status="ok",
-            severity="critical",
-            error_code="",
-            message=f"BLAST database '{database}' is available.",
-        )
-    except BlastDatabaseAvailabilityError as exc:
-        code = str(getattr(exc, "code", "") or "database_not_found")
-        # ``database_check_unavailable`` is the wrapper around Storage SDK errors;
-        # treat that as "unknown" so caller-side override can pass through.
-        status: GateStatus = "unknown" if code == "database_check_unavailable" else "fail"
-        action, action_type = _readiness_action_for_code(code)
-        result = GateResult(
-            id="blast_database",
-            status=status,
-            severity="critical",
-            error_code=code,
-            message=str(exc)[:300],
-            action=action,
-            action_type=action_type,
-        )
-    except Exception as exc:
-        LOGGER.warning("submit gate: DB probe failed: %s", type(exc).__name__)
-        result = GateResult(
-            id="blast_database",
-            status="unknown",
-            severity="critical",
-            error_code="database_check_unavailable",
-            message=f"Could not verify BLAST database ({type(exc).__name__}).",
-        )
-    _cache_set(cache_key, result)
-    return result
+    def _compute() -> GateResult:
+        try:
+            from api.services.blast.task_config import (
+                BlastDatabaseAvailabilityError,
+                validate_blast_database_ready,
+            )
+
+            validate_blast_database_ready(
+                storage_account=storage_account, database=database
+            )
+            return GateResult(
+                id="blast_database",
+                status="ok",
+                severity="critical",
+                error_code="",
+                message=f"BLAST database '{database}' is available.",
+            )
+        except BlastDatabaseAvailabilityError as exc:
+            code = str(getattr(exc, "code", "") or "database_not_found")
+            # ``database_check_unavailable`` is the wrapper around Storage SDK
+            # errors; treat that as "unknown" so caller-side override can pass.
+            status: GateStatus = (
+                "unknown" if code == "database_check_unavailable" else "fail"
+            )
+            action, action_type = _readiness_action_for_code(code)
+            return GateResult(
+                id="blast_database",
+                status=status,
+                severity="critical",
+                error_code=code,
+                message=str(exc)[:300],
+                action=action,
+                action_type=action_type,
+            )
+        except Exception as exc:
+            LOGGER.warning("submit gate: DB probe failed: %s", type(exc).__name__)
+            return GateResult(
+                id="blast_database",
+                status="unknown",
+                severity="critical",
+                error_code="database_check_unavailable",
+                message=f"Could not verify BLAST database ({type(exc).__name__}).",
+            )
+
+    return _cached_or_compute(cache_key, _compute)
 
 
 def _gate_node_memory_fit(
@@ -480,54 +526,50 @@ def _gate_node_memory_fit(
             message="Sharded execution profile — full-DB memory check skipped.",
         )
     cache_key = f"memfit:{storage_account}:{database}:{machine_type}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-    try:
-        from api.services.aks_skus import SKU_BY_NAME, normalize_sku_name
-        from api.services.blast.db_metadata import (
-            extract_db_name,
-            resolve_blastdb_json_metadata,
-        )
 
-        db_name = extract_db_name(database)
-        node_ram_gib: float | None = None
-        if machine_type:
-            sku = SKU_BY_NAME.get(normalize_sku_name(machine_type))
-            if sku is not None:
-                node_ram_gib = float(sku.memory_gib)
-
-        if node_ram_gib is None or not db_name:
-            # Unknown node RAM (or no DB name) — we cannot evaluate the fit, so
-            # skip without a Storage round-trip and never block.
-            result = GateResult(
-                id="node_memory_fit",
-                status="ok",
-                severity="critical",
-                error_code="",
-                message=(
-                    "Workload node memory is unknown; full-DB memory check skipped."
-                ),
+    def _compute() -> GateResult:
+        try:
+            from api.services.aks_skus import SKU_BY_NAME, normalize_sku_name
+            from api.services.blast.db_metadata import (
+                extract_db_name,
+                resolve_blastdb_json_metadata,
             )
-            _cache_set(cache_key, result)
-            return result
 
-        meta = resolve_blastdb_json_metadata(storage_account, db_name)
-        bytes_to_cache = int(meta.get("bytes_to_cache") or 0) if meta else 0
+            db_name = extract_db_name(database)
+            node_ram_gib: float | None = None
+            if machine_type:
+                sku = SKU_BY_NAME.get(normalize_sku_name(machine_type))
+                if sku is not None:
+                    node_ram_gib = float(sku.memory_gib)
 
-        if bytes_to_cache <= 0 or node_ram_gib is None:
-            # No authoritative memory requirement, or unknown node RAM — do not
-            # block (the user chose: never false-block on an unknown number).
-            result = GateResult(
-                id="node_memory_fit",
-                status="ok",
-                severity="critical",
-                error_code="",
-                message=(
-                    "Full-DB memory requirement could not be determined; skipped."
-                ),
-            )
-        else:
+            if node_ram_gib is None or not db_name:
+                # Unknown node RAM (or no DB name) — we cannot evaluate the fit,
+                # so skip without a Storage round-trip and never block.
+                return GateResult(
+                    id="node_memory_fit",
+                    status="ok",
+                    severity="critical",
+                    error_code="",
+                    message=(
+                        "Workload node memory is unknown; full-DB memory check skipped."
+                    ),
+                )
+
+            meta = resolve_blastdb_json_metadata(storage_account, db_name)
+            bytes_to_cache = int(meta.get("bytes_to_cache") or 0) if meta else 0
+
+            if bytes_to_cache <= 0 or node_ram_gib is None:
+                # No authoritative memory requirement, or unknown node RAM — do
+                # not block (the user chose: never false-block on an unknown).
+                return GateResult(
+                    id="node_memory_fit",
+                    status="ok",
+                    severity="critical",
+                    error_code="",
+                    message=(
+                        "Full-DB memory requirement could not be determined; skipped."
+                    ),
+                )
             # Mirror ElasticBLAST's submit pre-flight exactly
             # (elastic-blast-azure src/elastic_blast/elb_config.py: it rejects when
             # ``instance_props.memory - SYSTEM_MEMORY_RESERVE < bytes_to_cache_gb``).
@@ -539,7 +581,7 @@ def _gate_node_memory_fit(
             required_gib = bytes_to_cache / float(1024**3)
             usable_gib = node_ram_gib - _SYSTEM_MEMORY_RESERVE_GIB
             if required_gib <= usable_gib:
-                result = GateResult(
+                return GateResult(
                     id="node_memory_fit",
                     status="ok",
                     severity="critical",
@@ -550,37 +592,38 @@ def _gate_node_memory_fit(
                         "workload node."
                     ),
                 )
-            else:
-                result = GateResult(
-                    id="node_memory_fit",
-                    status="fail",
-                    severity="critical",
-                    error_code="node_memory_insufficient",
-                    message=(
-                        f"'{db_name}' needs {required_gib:.1f} GB for a full-database "
-                        "BLAST, which loads the entire database into a single node — "
-                        "adding more nodes does not help. The workload node "
-                        f"({machine_type}) provides only {usable_gib:.0f} GB usable "
-                        f"({node_ram_gib:.0f} GB RAM minus "
-                        f"{_SYSTEM_MEMORY_RESERVE_GIB:.0f} GB system reserve)."
-                    ),
-                    action="Switch to the Sharded throughput profile (or use a larger-SKU cluster)",
-                    action_type="use_sharded_throughput",
-                )
-    except Exception as exc:
-        LOGGER.warning("submit gate: node memory probe failed: %s", type(exc).__name__)
-        # Advisory gate — a probe failure must not block submit (ElasticBLAST's
-        # own pre-flight still catches a genuine over-RAM run). Warning severity
-        # keeps it out of ``blocking``.
-        result = GateResult(
-            id="node_memory_fit",
-            status="unknown",
-            severity="warning",
-            error_code="node_memory_check_unavailable",
-            message=f"Could not verify node memory fit ({type(exc).__name__}).",
-        )
-    _cache_set(cache_key, result)
-    return result
+            return GateResult(
+                id="node_memory_fit",
+                status="fail",
+                severity="critical",
+                error_code="node_memory_insufficient",
+                message=(
+                    f"'{db_name}' needs {required_gib:.1f} GB for a full-database "
+                    "BLAST, which loads the entire database into a single node — "
+                    "adding more nodes does not help. The workload node "
+                    f"({machine_type}) provides only {usable_gib:.0f} GB usable "
+                    f"({node_ram_gib:.0f} GB RAM minus "
+                    f"{_SYSTEM_MEMORY_RESERVE_GIB:.0f} GB system reserve)."
+                ),
+                action="Switch to the Sharded throughput profile (or use a larger-SKU cluster)",
+                action_type="use_sharded_throughput",
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "submit gate: node memory probe failed: %s", type(exc).__name__
+            )
+            # Advisory gate — a probe failure must not block submit (ElasticBLAST's
+            # own pre-flight still catches a genuine over-RAM run). Warning
+            # severity keeps it out of ``blocking``.
+            return GateResult(
+                id="node_memory_fit",
+                status="unknown",
+                severity="warning",
+                error_code="node_memory_check_unavailable",
+                message=f"Could not verify node memory fit ({type(exc).__name__}).",
+            )
+
+    return _cached_or_compute(cache_key, _compute)
 
 
 def _readiness_action_for_code(code: str) -> tuple[str | None, str | None]:
@@ -682,50 +725,48 @@ def _gate_acr_images(*, acr_name: str) -> GateResult:
             message="ACR name not provided; image presence cannot be verified.",
         )
     cache_key = f"acr_images:{acr_name}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-    try:
-        from api.services.image_tags import IMAGE_TAGS
-        from api.services.upgrade.acr_inventory import lookup_images
 
-        endpoint = f"{acr_name.strip().lower()}.azurecr.io"
-        required = {
-            repo: IMAGE_TAGS[repo]
-            for repo in _BLAST_REQUIRED_REPOS
-            if repo in IMAGE_TAGS
-        }
-        refs = [f"{endpoint}/{repo}:{tag}" for repo, tag in required.items()]
-        infos = lookup_images(refs)
-        missing = [info.image_ref for info in infos if not info.exists]
-        unverifiable = any(
-            not info.exists and info.error and "TagNotFound" not in info.error
-            and "ManifestUnknown" not in info.error and "404" not in info.error
-            for info in infos
-        )
-        if not missing:
-            result = GateResult(
-                id="acr_images",
-                status="ok",
-                severity="critical",
-                error_code="",
-                message=f"All {len(refs)} required image(s) are present in '{acr_name}'.",
+    def _compute() -> GateResult:
+        try:
+            from api.services.image_tags import IMAGE_TAGS
+            from api.services.upgrade.acr_inventory import lookup_images
+
+            endpoint = f"{acr_name.strip().lower()}.azurecr.io"
+            required = {
+                repo: IMAGE_TAGS[repo]
+                for repo in _BLAST_REQUIRED_REPOS
+                if repo in IMAGE_TAGS
+            }
+            refs = [f"{endpoint}/{repo}:{tag}" for repo, tag in required.items()]
+            infos = lookup_images(refs)
+            missing = [info.image_ref for info in infos if not info.exists]
+            unverifiable = any(
+                not info.exists and info.error and "TagNotFound" not in info.error
+                and "ManifestUnknown" not in info.error and "404" not in info.error
+                for info in infos
             )
-        elif unverifiable and len(missing) == len(refs):
-            # Every lookup failed for a non-404 reason — likely RBAC or network,
-            # not "actually missing". Downgrade to unknown so the user can
-            # override with X-Submit-Allow-Unverified.
-            result = GateResult(
-                id="acr_images",
-                status="unknown",
-                severity="critical",
-                error_code="acr_check_unavailable",
-                message=f"Could not verify ACR images in '{acr_name}' (RBAC or network).",
-            )
-        else:
+            if not missing:
+                return GateResult(
+                    id="acr_images",
+                    status="ok",
+                    severity="critical",
+                    error_code="",
+                    message=f"All {len(refs)} required image(s) are present in '{acr_name}'.",
+                )
+            if unverifiable and len(missing) == len(refs):
+                # Every lookup failed for a non-404 reason — likely RBAC or
+                # network, not "actually missing". Downgrade to unknown so the
+                # user can override with X-Submit-Allow-Unverified.
+                return GateResult(
+                    id="acr_images",
+                    status="unknown",
+                    severity="critical",
+                    error_code="acr_check_unavailable",
+                    message=f"Could not verify ACR images in '{acr_name}' (RBAC or network).",
+                )
             short = ", ".join(ref.split("/", 1)[-1] for ref in missing[:3])
             extra = f" (+{len(missing) - 3} more)" if len(missing) > 3 else ""
-            result = GateResult(
+            return GateResult(
                 id="acr_images",
                 status="fail",
                 severity="critical",
@@ -737,17 +778,17 @@ def _gate_acr_images(*, acr_name: str) -> GateResult:
                 action="Build ACR images",
                 action_type="build_acr_images",
             )
-    except Exception as exc:
-        LOGGER.warning("submit gate: ACR probe failed: %s", type(exc).__name__)
-        result = GateResult(
-            id="acr_images",
-            status="unknown",
-            severity="critical",
-            error_code="acr_check_unavailable",
-            message=f"Could not verify ACR images ({type(exc).__name__}).",
-        )
-    _cache_set(cache_key, result)
-    return result
+        except Exception as exc:
+            LOGGER.warning("submit gate: ACR probe failed: %s", type(exc).__name__)
+            return GateResult(
+                id="acr_images",
+                status="unknown",
+                severity="critical",
+                error_code="acr_check_unavailable",
+                message=f"Could not verify ACR images ({type(exc).__name__}).",
+            )
+
+    return _cached_or_compute(cache_key, _compute)
 
 
 def evaluate_submit_gates(
