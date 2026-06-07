@@ -195,7 +195,7 @@ def _external_to_blast_job(
     dashboard_job_id = str(job.get("external_correlation_id") or "")
     error_code, error_message = _external_error_message(job.get("error"))
     out: dict[str, Any] = {
-        "job_id": job.get("job_id"),
+        "job_id": openapi_job_id,
         "job_id_kind": "openapi",
         "dashboard_job_id": dashboard_job_id or None,
         "openapi_job_id": openapi_job_id or None,
