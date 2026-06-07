@@ -70,3 +70,38 @@ export function formatCoarseRemaining(seconds: number): string {
   return minutes === 1 ? "about 1 minute" : `about ${minutes} minutes`;
 }
 
+// Default jitter tolerance (seconds) for `stabilizeDeadline`.
+export const DEADLINE_STABILIZE_TOLERANCE_SECONDS = 45;
+
+// Absorb small jitter in the projected auto-stop deadline so the visible
+// "Stops in" countdown does not jump around between polls.
+//
+// The backend re-derives `seconds_until_stop` on every status poll from the
+// most-recent activity anchor (jobstate `updated_at`, `last_started_at`, and a
+// live K8s `app=blast` probe). Those inputs wobble by a few seconds — and the
+// live probe can flip between a value and `null` when K8s is briefly
+// unreachable — so the absolute deadline (`anchorMs + seconds*1000`) shifts by
+// a handful of seconds each poll. Re-anchoring the live countdown on every
+// shift makes the displayed number visibly jump backward/forward.
+//
+// This keeps the previously-shown deadline when the new one is within
+// `toleranceSeconds`, and only adopts the new deadline when it moves by more
+// than the tolerance (a real extend / new activity / genuine drift). Pure: the
+// caller persists `prevDeadlineMs` across renders (a ref) and feeds it back in.
+//
+// Returns the deadline (epoch ms) the countdown should anchor on.
+export function stabilizeDeadline(
+  newDeadlineMs: number,
+  prevDeadlineMs: number | null,
+  toleranceSeconds: number = DEADLINE_STABILIZE_TOLERANCE_SECONDS,
+): number {
+  if (prevDeadlineMs == null || !Number.isFinite(prevDeadlineMs)) {
+    return newDeadlineMs;
+  }
+  if (!Number.isFinite(newDeadlineMs)) {
+    return prevDeadlineMs;
+  }
+  const driftSeconds = Math.abs(newDeadlineMs - prevDeadlineMs) / 1000;
+  return driftSeconds <= toleranceSeconds ? prevDeadlineMs : newDeadlineMs;
+}
+

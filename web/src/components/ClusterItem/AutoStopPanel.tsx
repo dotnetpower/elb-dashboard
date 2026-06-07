@@ -11,7 +11,7 @@ import type {
 import { PermissionGate } from "@/components/PermissionGate";
 import { useToast } from "@/components/Toast";
 import { usePermissions } from "@/hooks/usePermissions";
-import { computeRemainingSeconds, formatCoarseRemaining, formatCountdown } from "./autoStopCountdown";
+import { computeRemainingSeconds, formatCoarseRemaining, formatCountdown, stabilizeDeadline } from "./autoStopCountdown";
 
 // Glassmorphic Idle Auto-Stop control surfaced inside the expanded
 // cluster card. Two visual states:
@@ -324,8 +324,38 @@ export function AutoStopPanel({
   // snapshot plus the client time it arrived (`dataUpdatedAt`) rather than
   // the absolute `next_stop_at`, so the tick is immune to client/server
   // clock skew (critique #1). `dataUpdatedAt` is 0 until the first fetch.
-  const countdownBaseline = status?.seconds_until_stop;
-  const countdownAnchorMs = statusQuery.dataUpdatedAt;
+  const rawBaseline = status?.seconds_until_stop;
+  const rawAnchorMs = statusQuery.dataUpdatedAt;
+  // Stabilise the projected deadline so the visible countdown does not jump
+  // between polls. The backend re-derives `seconds_until_stop` every poll from
+  // a wobbling activity anchor (jobstate updated_at, last_started_at, and a
+  // live K8s probe that can flip to null), so the absolute deadline drifts a
+  // few seconds each poll; without this the displayed "Stops in" value visibly
+  // jumps backward/forward. We keep the prior deadline when the new one is
+  // within tolerance and only adopt a meaningfully different deadline (real
+  // extend / new activity). The ref persists across renders.
+  const deadlineRef = useRef<number | null>(null);
+  const { countdownBaseline, countdownAnchorMs } = useMemo(() => {
+    if (
+      typeof rawBaseline !== "number" ||
+      !Number.isFinite(rawBaseline) ||
+      rawBaseline <= 0 ||
+      rawAnchorMs <= 0
+    ) {
+      deadlineRef.current = null;
+      return { countdownBaseline: rawBaseline, countdownAnchorMs: rawAnchorMs };
+    }
+    const newDeadlineMs = rawAnchorMs + rawBaseline * 1000;
+    const stableDeadlineMs = stabilizeDeadline(newDeadlineMs, deadlineRef.current);
+    deadlineRef.current = stableDeadlineMs;
+    // Re-express the stabilised absolute deadline as a (baseline, anchor) pair
+    // the existing LiveCountdown understands: anchor at the snapshot arrival,
+    // baseline = seconds from anchor to the stabilised deadline.
+    return {
+      countdownBaseline: Math.max(0, Math.round((stableDeadlineMs - rawAnchorMs) / 1000)),
+      countdownAnchorMs: rawAnchorMs,
+    };
+  }, [rawBaseline, rawAnchorMs]);
   const canLiveCountdown =
     armedWithDeadline &&
     typeof countdownBaseline === "number" &&
@@ -494,25 +524,12 @@ export function AutoStopPanel({
 
         <PermissionGate need="can_write" permissions={permissions}>
           <select
+            className="glass-input"
             aria-label="Idle window in minutes"
             value={draftIdleMinutes}
             disabled={!draftEnabled || saveMutation.isPending}
             onChange={(e) => handleIdleChange(Number(e.target.value))}
-            style={{
-              fontSize: 12,
-              padding: "2px 24px 2px 6px",
-              background: "transparent",
-              border: "1px solid var(--border-weak)",
-              borderRadius: 4,
-              color: "var(--text)",
-              appearance: "none",
-              WebkitAppearance: "none",
-              cursor: "pointer",
-              backgroundImage:
-                "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%235a6272' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\")",
-              backgroundRepeat: "no-repeat",
-              backgroundPosition: "right 7px center",
-            }}
+            style={{ width: "auto", fontSize: 12, padding: "4px 26px 4px 8px" }}
           >
             {allowed.map((minutes) => (
               <option key={minutes} value={minutes}>
@@ -529,13 +546,15 @@ export function AutoStopPanel({
             pre-stop warn window (verdict === "keep"). The amber banner
             above already carries the live countdown for warn/stop, so
             this only renders for the calmer keep state to avoid showing
-            the remaining time twice. */}
+            the remaining time twice. The Extend button sits alongside it
+            so the user can push the deadline out at any time, not only
+            once the amber pre-stop banner appears. */}
         {canLiveCountdown && status?.verdict === "keep" && (
           <span
             style={{
               display: "inline-flex",
               alignItems: "center",
-              gap: 4,
+              gap: 6,
               marginLeft: "auto",
               fontSize: 11,
               color: "var(--text-muted)",
@@ -547,13 +566,31 @@ export function AutoStopPanel({
             }
           >
             <Clock size={11} strokeWidth={1.5} style={{ color: "var(--text-faint)" }} />
-            Stops in{" "}
-            <LiveCountdown
-              baselineSeconds={countdownBaseline as number}
-              anchorMs={countdownAnchorMs}
-              style={{ color: "var(--text)" }}
-              onReachZero={handleCountdownZero}
-            />
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              Stops in{" "}
+              <LiveCountdown
+                baselineSeconds={countdownBaseline as number}
+                anchorMs={countdownAnchorMs}
+                style={{ color: "var(--text)" }}
+                onReachZero={handleCountdownZero}
+              />
+            </span>
+            <PermissionGate need="can_write" permissions={permissions}>
+              <button
+                type="button"
+                className="glass-button"
+                disabled={extendMutation.isPending}
+                onClick={() => extendMutation.mutate(30)}
+                title="Push the auto-stop deadline out by 30 minutes"
+                style={{ fontSize: 10, padding: "2px 8px", color: "var(--accent)" }}
+              >
+                {extendMutation.isPending ? (
+                  <Loader2 size={10} className="spin" />
+                ) : (
+                  "Extend 30 min"
+                )}
+              </button>
+            </PermissionGate>
           </span>
         )}
 

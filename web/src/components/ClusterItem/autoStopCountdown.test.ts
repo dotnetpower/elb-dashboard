@@ -4,6 +4,7 @@ import {
   computeRemainingSeconds,
   formatCoarseRemaining,
   formatCountdown,
+  stabilizeDeadline,
 } from "./autoStopCountdown";
 
 describe("computeRemainingSeconds", () => {
@@ -98,3 +99,36 @@ describe("formatCoarseRemaining", () => {
   });
 });
 
+
+describe("stabilizeDeadline", () => {
+  const base = 1_700_000_000_000; // arbitrary epoch ms
+
+  it("adopts the new deadline when there is no prior", () => {
+    expect(stabilizeDeadline(base, null)).toBe(base);
+  });
+
+  it("keeps the prior deadline when the new one is within tolerance", () => {
+    // +20s drift (default tolerance 45s) → keep prior, no visible jump.
+    expect(stabilizeDeadline(base + 20_000, base)).toBe(base);
+    // -30s drift → still within tolerance.
+    expect(stabilizeDeadline(base - 30_000, base)).toBe(base);
+    // exactly at the tolerance boundary → keep prior.
+    expect(stabilizeDeadline(base + 45_000, base)).toBe(base);
+  });
+
+  it("adopts the new deadline when it moves beyond tolerance", () => {
+    // +5min (real extend / new activity) → adopt.
+    expect(stabilizeDeadline(base + 300_000, base)).toBe(base + 300_000);
+    // just past the boundary.
+    expect(stabilizeDeadline(base + 46_000, base)).toBe(base + 46_000);
+  });
+
+  it("respects a custom tolerance", () => {
+    expect(stabilizeDeadline(base + 8_000, base, 5)).toBe(base + 8_000);
+    expect(stabilizeDeadline(base + 4_000, base, 5)).toBe(base);
+  });
+
+  it("falls back to the prior deadline when the new one is non-finite", () => {
+    expect(stabilizeDeadline(Number.NaN, base)).toBe(base);
+  });
+});
