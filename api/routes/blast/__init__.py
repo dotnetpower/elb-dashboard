@@ -25,6 +25,8 @@ from api.routes._blast_shared import (
 )
 from api.routes.blast import capacity as _capacity_routes
 from api.routes.blast import databases as _databases_routes
+from api.routes.blast import databases_oracle as _databases_oracle_routes
+from api.routes.blast import databases_shard as _databases_shard_routes
 from api.routes.blast import jobs as _jobs_routes
 from api.routes.blast import logs as _logs_routes
 from api.routes.blast import preflight as _preflight_routes
@@ -34,13 +36,7 @@ from api.routes.blast import schedules as _schedules_routes
 from api.routes.blast import submit as _submit_routes
 from api.routes.blast import taxonomy as _taxonomy_routes
 from api.routes.blast.databases import (
-    blast_database_order_oracle as blast_database_order_oracle,
-)
-from api.routes.blast.databases import (
     blast_database_preview as blast_database_preview,
-)
-from api.routes.blast.databases import (
-    blast_database_shard as blast_database_shard,
 )
 from api.routes.blast.databases import (
     blast_databases as blast_databases,
@@ -53,6 +49,12 @@ from api.routes.blast.databases import (
 )
 from api.routes.blast.databases import (
     blast_databases_versions as blast_databases_versions,
+)
+from api.routes.blast.databases_oracle import (
+    blast_database_order_oracle as blast_database_order_oracle,
+)
+from api.routes.blast.databases_shard import (
+    blast_database_shard as blast_database_shard,
 )
 from api.routes.blast.jobs import (
     blast_job_cancel as blast_job_cancel,
@@ -152,6 +154,8 @@ blast_router.include_router(_logs_routes.router)
 blast_router.include_router(_preflight_routes.router)
 blast_router.include_router(_submit_routes.router)
 blast_router.include_router(_databases_routes.router)
+blast_router.include_router(_databases_shard_routes.router)
+blast_router.include_router(_databases_oracle_routes.router)
 blast_router.include_router(_taxonomy_routes.router)
 blast_router.include_router(_schedules_routes.router)
 blast_router.include_router(_result_analytics_routes.router)
