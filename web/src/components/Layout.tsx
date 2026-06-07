@@ -399,7 +399,7 @@ export function Layout({ children }: PropsWithChildren) {
         {/* Settings */}
         <button
           className="cfg-gear"
-          onClick={settingsPanel.open}
+          onClick={() => settingsPanel.open(upgrade.attention ? "updates" : undefined)}
           title={upgrade.attention ? "Settings — an update is available" : "Settings"}
           style={{ marginLeft: 0, position: "relative" }}
         >

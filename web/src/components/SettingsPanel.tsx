@@ -48,7 +48,7 @@ import { DiagnosticsSection } from "@/components/settings/sections/DiagnosticsSe
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { usePreferences } from "@/hooks/usePreferences";
 
-type SectionId =
+export type SettingsSectionId =
   | "appearance"
   | "preview"
   | "updates"
@@ -60,6 +60,8 @@ type SectionId =
   | "sizing"
   | "diagnostics"
   | "resources";
+
+type SectionId = SettingsSectionId;
 
 // Mirror of the Layout header's build-version formatter (A.B.<buildNumber>).
 // Kept local so the Settings footer can show the same stamp without importing
@@ -95,11 +97,18 @@ const PREF_BACKED_SECTIONS = new Set<SectionId>(["appearance", "preview", "telem
 interface Props {
   open: boolean;
   onClose: () => void;
+  /**
+   * Section to focus when the panel opens. Lets a deep-link entry point (e.g.
+   * the topbar "update available" indicator) land the user directly on the
+   * relevant section instead of the default Appearance tab — otherwise the
+   * indicator opens Settings on Appearance and the update info looks "missing".
+   */
+  initialSection?: SectionId;
 }
 
-export function SettingsPanel({ open, onClose }: Props) {
+export function SettingsPanel({ open, onClose, initialSection }: Props) {
   const trapRef = useFocusTrap<HTMLDivElement>(open);
-  const [active, setActive] = useState<SectionId>("appearance");
+  const [active, setActive] = useState<SectionId>(initialSection ?? "appearance");
   const { reset } = usePreferences();
   const config = useMemo<ResourceConfig | null>(() => (open ? loadSavedConfig() : null), [open]);
   // The Reset button clears the browser-local preferences in
@@ -118,6 +127,14 @@ export function SettingsPanel({ open, onClose }: Props) {
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [open, onClose]);
+
+  // The panel stays mounted (it only returns null while closed), so `active`
+  // would otherwise persist the last-viewed section across opens. When a caller
+  // requests a specific section, focus it each time the panel opens so a
+  // deep-link (e.g. the update indicator → Updates) always lands correctly.
+  useEffect(() => {
+    if (open && initialSection) setActive(initialSection);
+  }, [open, initialSection]);
 
   if (!open) return null;
 
