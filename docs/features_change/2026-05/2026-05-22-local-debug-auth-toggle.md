@@ -72,8 +72,8 @@ Performed against the live `stelbdashboard01mul5oh5j` deployment in
 $ bash scripts/dev/local-debug-auth.sh status \
     --storage stelbdashboard01mul5oh5j --storage-rg rg-elb-dashboard-01
 ── local-debug-auth status ─────────────────────────────
-  signed-in user:   admin@MngEnvMCAP982529.onmicrosoft.com (25e0aef5-…)
-  subscription:     577d6332-de48-4a30-be66-dded26a712ea
+  signed-in user:   admin@MngEnvMCAPexample.onmicrosoft.com (25e0aef5-…)
+  subscription:     00000000-0000-0000-0000-0000000000a1
   storage:          stelbdashboard01mul5oh5j (rg: rg-elb-dashboard-01)
   AUTH_DEV_BYPASS:  false  (root .env)
   VITE_AUTH_DEV_BYPASS: false  (web/.env.local)

@@ -42,7 +42,7 @@ def test_openapi_deploy_route_forwards_storage_resource_group(
             "resource_group": "rg-elb-cluster",
             "cluster_name": "elb-cluster-01",
             "acr_name": "elbacr",
-            "storage_account": "stelbdashboardmul5oh5j44",
+            "storage_account": "stelbdashboardtest01",
             "storage_resource_group": "rg-elb-dashboard",
         },
         CallerIdentity(
@@ -56,7 +56,7 @@ def test_openapi_deploy_route_forwards_storage_resource_group(
 
     assert response["id"] == "task-openapi-1"
     assert captured["resource_group"] == "rg-elb-cluster"
-    assert captured["storage_account"] == "stelbdashboardmul5oh5j44"
+    assert captured["storage_account"] == "stelbdashboardtest01"
     assert captured["storage_resource_group"] == "rg-elb-dashboard"
 
 
@@ -260,7 +260,7 @@ def test_setup_workload_identity_uses_storage_resource_group_for_storage_role(
         resource_group="rg-elb-cluster",
         cluster_name="elb-cluster-01",
         region="koreacentral",
-        storage_account="stelbdashboardmul5oh5j44",
+        storage_account="stelbdashboardtest01",
         storage_resource_group="rg-elb-dashboard",
     )
 
@@ -276,7 +276,7 @@ def test_setup_workload_identity_uses_storage_resource_group_for_storage_role(
     assert "/resourceGroups/rg-elb-dashboard/" in storage_scope
     assert "/resourceGroups/rg-elb-cluster/providers/Microsoft.Storage/" not in storage_scope
     assert storage_scope.endswith(
-        "/providers/Microsoft.Storage/storageAccounts/stelbdashboardmul5oh5j44"
+        "/providers/Microsoft.Storage/storageAccounts/stelbdashboardtest01"
     )
 
 

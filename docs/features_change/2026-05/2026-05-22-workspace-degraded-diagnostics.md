@@ -9,7 +9,7 @@ swallowed an ARM 401/403/404 and returned an empty `{"degraded": true,
 apparently-healthy dashboard whose underlying calls were actually failing.
 
 The trigger that surfaced the bug: a developer with two Azure CLI profiles
-(`az-jungha` / `az-moonchoi`) had their `az login` session on tenant A but the
+(`az-demo` / `az-moonchoi`) had their `az login` session on tenant A but the
 SPA's saved workspace config pointed at a subscription in tenant B. ARM
 returned `InvalidAuthenticationTokenTenant`; the backend logged the error but
 the SPA never showed anything actionable.

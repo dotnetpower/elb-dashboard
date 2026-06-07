@@ -163,7 +163,7 @@ resolve_azd_defaults() {
 
 # Discover the storage account the SPA actually targets. The wizard may pick
 # a different deployment than azd env defaults to (e.g. stelbdashboard01… vs
-# stelbdashboardmul5oh5j44). If the azd default does not exist but exactly one
+# stelbdashboardtest01). If the azd default does not exist but exactly one
 # stelb* storage account is reachable, fall back to that.
 resolve_storage_or_die() {
   if [[ -n "$STORAGE" ]] && az storage account show --subscription "$SUBSCRIPTION" -n "$STORAGE" -o none 2>/dev/null; then

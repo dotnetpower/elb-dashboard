@@ -103,7 +103,7 @@ to 4. Readiness check failed on every prerequisite:
 
 | Prerequisite                                                                                  | State                                       |
 | --------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| AKS cluster present anywhere in subscription `577d6332-…`                                      | `az aks list` returns `[]`                  |
+| AKS cluster present anywhere in subscription `00000000-…`                                      | `az aks list` returns `[]`                  |
 | Workload Storage `stelbdashboard01mul5oh5j` `blast-db` container has prepared `core_nt/` shards | RBAC blocked listing; account created only 2026-05-23, container only 2026-05-25, no worker logs reference `core_nt` prepare task in last 200 lines |
 | App Insights configured for telemetry pass                                                     | `APPLICATIONINSIGHTS_CONNECTION_STRING=""`, `ENABLE_APPLICATION_INSIGHTS=false`, `/api/health.app_insights_configured=false` |
 | MSAL bearer for deployed `api` (to call `/api/blast/databases`, etc.)                          | AADSTS65001 — interactive admin consent required for `api://ddf48c19-…/.default` |

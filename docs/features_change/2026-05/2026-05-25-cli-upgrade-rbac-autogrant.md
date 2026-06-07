@@ -84,12 +84,12 @@ was run against both:
 ```bash
 bash scripts/dev/grant-runtime-rbac.sh --yes \
   --container-app ca-elb-dashboard-01 --rg rg-elb-dashboard-01 \
-  --subscription 577d6332-de48-4a30-be66-dded26a712ea
+  --subscription 00000000-0000-0000-0000-0000000000a1
 # created=2 skipped=0 failed=0  (Contributor, User Access Administrator)
 
 bash scripts/dev/grant-runtime-rbac.sh --yes \
   --container-app ca-elb-dashboard --rg rg-elb-dashboard \
-  --subscription 577d6332-de48-4a30-be66-dded26a712ea
+  --subscription 00000000-0000-0000-0000-0000000000a1
 # created=2 skipped=0 failed=0
 ```
 
@@ -113,8 +113,8 @@ bash -n scripts/dev/cli-upgrade.sh && echo syntax OK
 
 bash scripts/dev/grant-runtime-rbac.sh --dry-run --yes \
   --container-app ca-elb-dashboard-01 --rg rg-elb-dashboard-01 \
-  --subscription 577d6332-de48-4a30-be66-dded26a712ea
-# Subscription:    577d6332-de48-4a30-be66-dded26a712ea
+  --subscription 00000000-0000-0000-0000-0000000000a1
+# Subscription:    00000000-0000-0000-0000-0000000000a1
 # Container App:   ca-elb-dashboard-01 (rg-elb-dashboard-01)
 # Dashboard MI:    2fef9815-d8ac-4956-bbdb-1bf937392b30
 # AKS cluster RG:  rg-elb-cluster
@@ -131,7 +131,7 @@ Re-running the helper after the manual recovery (round-trip idempotency):
 ```
 $ bash scripts/dev/grant-runtime-rbac.sh --yes \
     --container-app ca-elb-dashboard --rg rg-elb-dashboard \
-    --subscription 577d6332-de48-4a30-be66-dded26a712ea
+    --subscription 00000000-0000-0000-0000-0000000000a1
 [skip] Contributor already assigned at /subscriptions/.../resourceGroups/rg-elb-cluster
 [skip] User Access Administrator already assigned at /subscriptions/.../resourceGroups/rg-elb-cluster
 Summary: created=0 skipped=2 failed=0

@@ -25,7 +25,7 @@ describe("aksApi", () => {
       "rg-elb-cluster",
       "elb-cluster-01",
       "elbacr",
-      "stelbdashboardmul5oh5j44",
+      "stelbdashboardtest01",
       "rg-elb-dashboard",
       "rg-elbacr",
     );
@@ -36,7 +36,7 @@ describe("aksApi", () => {
       cluster_name: "elb-cluster-01",
       acr_name: "elbacr",
       acr_resource_group: "rg-elbacr",
-      storage_account: "stelbdashboardmul5oh5j44",
+      storage_account: "stelbdashboardtest01",
       storage_resource_group: "rg-elb-dashboard",
     });
   });
@@ -76,7 +76,7 @@ describe("aksApi", () => {
       "rg-elb-cluster",
       "elb-cluster-01",
       "elbacr",
-      "stelbdashboardmul5oh5j44",
+      "stelbdashboardtest01",
       "rg-elb-dashboard",
       "rg-elbacr",
       true,
@@ -88,7 +88,7 @@ describe("aksApi", () => {
       cluster_name: "elb-cluster-01",
       acr_name: "elbacr",
       acr_resource_group: "rg-elbacr",
-      storage_account: "stelbdashboardmul5oh5j44",
+      storage_account: "stelbdashboardtest01",
       storage_resource_group: "rg-elb-dashboard",
       confirm_recreate: true,
     });
@@ -104,7 +104,7 @@ describe("aksApi", () => {
       "rg-elb-cluster",
       "elb-cluster-01",
       "elbacr",
-      "stelbdashboardmul5oh5j44",
+      "stelbdashboardtest01",
       "rg-elb-dashboard",
       "rg-elbacr",
       false,
@@ -116,7 +116,7 @@ describe("aksApi", () => {
       cluster_name: "elb-cluster-01",
       acr_name: "elbacr",
       acr_resource_group: "rg-elbacr",
-      storage_account: "stelbdashboardmul5oh5j44",
+      storage_account: "stelbdashboardtest01",
       storage_resource_group: "rg-elb-dashboard",
     });
   });

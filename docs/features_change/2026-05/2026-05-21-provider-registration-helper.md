@@ -25,15 +25,15 @@ After Azure sign-in and azd environment selection, `azd up` can create or reuse 
 ## Validation evidence
 
 - `bash -n scripts/dev/register-providers.sh scripts/dev/preflight-check.sh scripts/dev/quick-deploy.sh scripts/dev/postprovision.sh scripts/dev/setup-app-registration.sh` -> passed.
-- `PROVIDER_REGISTRATION_TIMEOUT_SECONDS=60 bash scripts/dev/register-providers.sh --subscription 577d6332-de48-4a30-be66-dded26a712ea` -> deployment providers reported `ok`, `Microsoft.Compute` and `Microsoft.Quota` reported `ok`, and `Microsoft.ContainerService` registration was started with state `Registering`.
+- `PROVIDER_REGISTRATION_TIMEOUT_SECONDS=60 bash scripts/dev/register-providers.sh --subscription 00000000-0000-0000-0000-0000000000a1` -> deployment providers reported `ok`, `Microsoft.Compute` and `Microsoft.Quota` reported `ok`, and `Microsoft.ContainerService` registration was started with state `Registering`.
 - `bash -n deploy.sh scripts/dev/register-providers.sh scripts/dev/preflight-check.sh scripts/dev/postprovision.sh scripts/dev/quick-deploy.sh && uv run mkdocs build --strict` -> passed; MkDocs still reports the pre-existing informational missing-anchor message for `#phase-2-sign-in-and-create-the-app-registration`.
-- `AZURE_LOCATION=eastus PROVIDER_REGISTRATION_TIMEOUT_SECONDS=60 ./deploy.sh --prepare-only` -> selected `ME-MngEnvMCAP982529-jungha-1`, configured the `elb-dashboard` azd environment, and ran provider registration before exiting prepare-only mode.
+- `AZURE_LOCATION=eastus PROVIDER_REGISTRATION_TIMEOUT_SECONDS=60 ./deploy.sh --prepare-only` -> selected `ME-MngEnvMCAPexample-demo-1`, configured the `elb-dashboard` azd environment, and ran provider registration before exiting prepare-only mode.
 - `bash -n scripts/dev/preflight-check.sh && scripts/dev/preflight-check.sh` -> passed; provider registration ran from preflight and `Microsoft.ContainerService` reached `Registered`.
-- Final provider state check in `577d6332-de48-4a30-be66-dded26a712ea` -> all deployment providers plus `Microsoft.Compute`, `Microsoft.ContainerService`, and `Microsoft.Quota` reported `Registered`.
+- Final provider state check in `00000000-0000-0000-0000-0000000000a1` -> all deployment providers plus `Microsoft.Compute`, `Microsoft.ContainerService`, and `Microsoft.Quota` reported `Registered`.
 - `azd env get-values --environment elb-demo` -> confirmed the affected deployment environment is present.
 - Provider state check in the demo subscription -> all required namespaces reported `Registered`.
 - Redirect URI merge expression used by `scripts/dev/setup-app-registration.sh` -> returned the expected unique URI list in a local `jq` probe.
-- `AZURE_LOCATION=eastus ./deploy.sh` in the `az-jungha` Azure CLI context -> provisioned `rg-elb-dashboard`, reused App Registration `elastic-blast-control-plane`, built and pushed `elb-api`, `elb-frontend`, and `elb-terminal`, swapped the six-sidecar Container App layout, and completed with `/api/health` returning 200.
+- `AZURE_LOCATION=eastus ./deploy.sh` in the `az-demo` Azure CLI context -> provisioned `rg-elb-dashboard`, reused App Registration `elastic-blast-control-plane`, built and pushed `elb-api`, `elb-frontend`, and `elb-terminal`, swapped the six-sidecar Container App layout, and completed with `/api/health` returning 200.
 - `curl -fsS --max-time 30 https://ca-elb-control.jollymushroom-0452ee01.eastus.azurecontainerapps.io/api/health` -> returned `{"status":"ok","version":"0.0.1","revision":"ca-elb-control--0000001"}`.
-- `curl -fsS --max-time 30 https://ca-elb-control.jollymushroom-0452ee01.eastus.azurecontainerapps.io/runtime-config.js` -> returned runtime config with tenant `184be312-98bf-4c54-903a-e77288f0f984` and a non-empty `VITE_AZURE_CLIENT_ID`.
+- `curl -fsS --max-time 30 https://ca-elb-control.jollymushroom-0452ee01.eastus.azurecontainerapps.io/runtime-config.js` -> returned runtime config with tenant `00000000-0000-0000-0000-0000000000c3` and a non-empty `VITE_AZURE_CLIENT_ID`.
 - Integrated browser opened `https://ca-elb-control.jollymushroom-0452ee01.eastus.azurecontainerapps.io/` and rendered the `ElasticBLAST on Azure` sign-in screen.

@@ -23,5 +23,5 @@ Fresh deployments spend time in provider registration, Bicep provisioning, image
 - `./scripts/dev/azd-progress.sh plan`
 - `./scripts/dev/azd-progress.sh step 5 "Image builds" "sample detail"`
 - `./scripts/dev/azd-progress.sh done 5 "Image builds"`
-- `./scripts/dev/register-providers.sh --subscription 577d6332-de48-4a30-be66-dded26a712ea` -> printed deployment provider counters `[1/10]` through `[10/10]` and workflow counters `[1/3]` through `[3/3]`.
+- `./scripts/dev/register-providers.sh --subscription 00000000-0000-0000-0000-0000000000a1` -> printed deployment provider counters `[1/10]` through `[10/10]` and workflow counters `[1/3]` through `[3/3]`.
 - `azd provision --preview --no-prompt` -> generated the infra preview successfully; preview mode does not run/show hooks, so hook output was validated with the helper and shell checks above.

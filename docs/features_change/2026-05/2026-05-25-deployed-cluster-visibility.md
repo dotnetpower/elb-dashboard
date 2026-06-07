@@ -2,7 +2,7 @@
 
 ## Motivation
 
-The deployed dashboard at `https://ca-elb-dashboard.grayflower-8b7c0e22.koreacentral.azurecontainerapps.io/` was rendering the Cluster card as "No AKS clusters found" even though `elb-cluster-01` (in `rg-elb-cluster`, subscription `577d6332-de48-4a30-be66-dded26a712ea`) existed and carried the correct discovery tags (`app=elastic-blast`, `managedBy=elb-dashboard`).
+The deployed dashboard at `https://ca-elb-dashboard.grayflower-8b7c0e22.koreacentral.azurecontainerapps.io/` was rendering the Cluster card as "No AKS clusters found" even though `elb-cluster-01` (in `rg-elb-cluster`, subscription `00000000-0000-0000-0000-0000000000a1`) existed and carried the correct discovery tags (`app=elastic-blast`, `managedBy=elb-dashboard`).
 
 Two independent regressions stacked on top of each other:
 
@@ -41,15 +41,15 @@ $ az containerapp logs show ... --type system | grep redis
 After mirroring + redis image patch (new revision `--0000013`):
 
 ```
-$ az acr import -n acrelbdashboardmul5oh5j44 \
+$ az acr import -n acrelbdashboardtest01 \
     --source docker.io/library/redis:7-alpine \
     --image library/redis:7-alpine
 ... (exit 0)
 
 $ az containerapp update -n ca-elb-dashboard -g rg-elb-dashboard \
     --container-name redis \
-    --image acrelbdashboardmul5oh5j44.azurecr.io/library/redis:7-alpine
-{"latestRev":"ca-elb-dashboard--0000013","redis":"acrelbdashboardmul5oh5j44.azurecr.io/library/redis:7-alpine","runningStatus":"Running"}
+    --image acrelbdashboardtest01.azurecr.io/library/redis:7-alpine
+{"latestRev":"ca-elb-dashboard--0000013","redis":"acrelbdashboardtest01.azurecr.io/library/redis:7-alpine","runningStatus":"Running"}
 
 $ az containerapp revision list ... -o table
 ca-elb-dashboard--0000013  RunningAtMaxScale  Traffic 100  Active True
@@ -58,7 +58,7 @@ $ curl -s https://.../api/health
 {"status":"ok","version":"0.0.0+unknown","revision":"ca-elb-dashboard--0000013","app_insights_configured":false}
 
 $ curl -s -o /dev/null -w '%{http_code}\n' \
-    'https://.../api/monitor/aks?subscription_id=577d6332-de48-4a30-be66-dded26a712ea'
+    'https://.../api/monitor/aks?subscription_id=00000000-0000-0000-0000-0000000000a1'
 401     # "missing bearer token" — auth runs FIRST, so the route accepts the rg-less call
        # (the OLD code would have returned 422 "missing field: resource_group")
 

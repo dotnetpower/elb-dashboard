@@ -13,7 +13,7 @@ classified into `auth_wrong_tenant` / `unauthorized` / `forbidden` /
 machines with multiple Azure profiles:
 
 > The wizard saved `subscriptionId = X`. The user then switched their `az`
-> profile (e.g. `az-jungha`). `X` is no longer visible to the current
+> profile (e.g. `az-demo`). `X` is no longer visible to the current
 > credential, but the SPA's Subscription dropdown silently renders a blank
 > option and the SPA keeps calling `/api/monitor/*` with `X`.
 

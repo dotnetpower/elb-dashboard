@@ -11,7 +11,7 @@ inside `acr-build-access.sh` and `az acr build`) used the globally active subscr
 `~/.azure/` instead of the `AZURE_SUBSCRIPTION_ID` exported from the azd environment.
 
 This caused the following error when deploying to a non-default subscription (e.g. the DEMO
-subscription `577d6332`):
+subscription `00000000`):
 
 ```
 ERROR: The resource with name 'acrelb4fyfo2zjsub4i' and type 'Microsoft.ContainerRegistry/registries'
@@ -29,7 +29,7 @@ and its sourced helpers uses the correct subscription regardless of the global a
 
 ## Validation
 
-Full `postprovision.sh` run against DEMO subscription `577d6332` (env: `elb-demo`):
+Full `postprovision.sh` run against DEMO subscription `00000000` (env: `elb-demo`):
 
 ```
 [14:19:49] ==> Postprovision starting   RG: rg-elb-demo   ACR: acrelb4fyfo2zjsub4i

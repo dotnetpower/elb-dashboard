@@ -23,7 +23,7 @@ single silent failure:
    (`rg-elb-dashboard-01` / `stelbdashboard01mul5oh5j`), and `azd env` /
    `local-run.sh` derived `AZURE_TABLE_ENDPOINT` from that. The SPA's
    workspace config, however, still anchored on the previous account
-   (`rg-elb-dashboard` / `stelbdashboardmul5oh5j44`). The caller had RBAC
+   (`rg-elb-dashboard` / `stelbdashboardtest01`). The caller had RBAC
    only on the older account, so the very first hop of the submit pipeline
    — `JobStateRepository.create()` writing the `jobstate` row — hit a 403
    `AuthorizationFailure` against the new account. That 403 was swallowed
@@ -48,7 +48,7 @@ was ever created, the dashboard had nothing to show.
   the submit task fails fast with phase `terminal_kubeconfig_failed` and a
   human-readable error code rather than silently exiting 0.
 - The local backend env was repinned at the live workspace
-  (`stelbdashboardmul5oh5j44` / `rg-elb-dashboard`) so jobstate Table writes
+  (`stelbdashboardtest01` / `rg-elb-dashboard`) so jobstate Table writes
   succeed. The unused sibling deployment (`-01` suffix) was left in place
   but is no longer the default target.
 - Host `~/.kube/config` was refreshed once via
@@ -85,7 +85,7 @@ Tests:
 
 Local environment:
 
-- `.env` now sets `ELB_LOCAL_STORAGE_ACCOUNT=stelbdashboardmul5oh5j44` and
+- `.env` now sets `ELB_LOCAL_STORAGE_ACCOUNT=stelbdashboardtest01` and
   `ELB_LOCAL_STORAGE_RG=rg-elb-dashboard`, which `scripts/dev/local-run.sh`
   resolves into `AZURE_TABLE_ENDPOINT` / `AZURE_BLOB_ENDPOINT` for api +
   worker + beat. The pre-edit file is preserved at `.env.bak.<epoch>`.
@@ -109,11 +109,11 @@ through `elastic-blast` so submits do not share state.
 - `uv run pytest -q api/tests` → `1460 passed`
 - Live env probe after the env repin:
   - `tr '\0' '\n' < /proc/<api-pid>/environ | grep AZURE_TABLE_ENDPOINT`
-    → `https://stelbdashboardmul5oh5j44.table.core.windows.net`
+    → `https://stelbdashboardtest01.table.core.windows.net`
   - `curl http://127.0.0.1:8085/api/health` → `{"status":"ok",...}`
   - Direct credential probe with `azure-data-tables` + `DefaultAzureCredential`
     successfully created and deleted a probe row in
-    `stelbdashboardmul5oh5j44/jobstate` (the exact write that was 403'ing
+    `stelbdashboardtest01/jobstate` (the exact write that was 403'ing
     before the repin).
 - `az aks get-credentials --resource-group rg-elb-cluster --name elb-cluster-01 --overwrite-existing`
   then `kubectl get nodes` → 9 blastpool nodes Ready.

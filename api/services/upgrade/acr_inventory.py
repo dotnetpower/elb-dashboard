@@ -41,16 +41,42 @@ class ImageInfo:
 
 
 def parse_image_ref(image_ref: str) -> tuple[str, str, str]:
-    """Split `acr.azurecr.io/repo:tag` into ``(acr_endpoint, repo, tag)``.
+    """Split an image reference into ``(acr_endpoint, repo, reference)``.
+
+    Handles both forms the ACA template can carry:
+
+    * **tag** — ``acr.azurecr.io/repo:tag`` → ``reference = "tag"``.
+    * **digest** — ``acr.azurecr.io/repo@sha256:<hex>`` →
+      ``reference = "@sha256:<hex>"`` (kept with the leading ``@`` so
+      `_probe` can tell it apart from a tag and resolve it via the
+      manifest API instead of the tag API).
+
+    A Container App that was deployed by digest pin (the upgrade PATCH may
+    write either form) previously broke the rollback pre-flight: the digest
+    ``repo@sha256:…`` was split on the last ``:`` into
+    ``repo@sha256`` / ``<hex>`` and probed as a *tag*, which always returns
+    ``TagNotFound``. Recognising the digest form here is what fixes the
+    spurious "Rollback unsafe … TagNotFound" gate.
 
     Raises ValueError on garbage input so the rollback path fails fast.
     """
-    if not image_ref or "/" not in image_ref or ":" not in image_ref.rsplit("/", 1)[-1]:
+    if not image_ref or "/" not in image_ref:
         raise ValueError(f"unsupported image reference: {image_ref!r}")
     host, rest = image_ref.split("/", 1)
+    if not host:
+        raise ValueError(f"image reference missing host: {image_ref!r}")
+    # Digest pin: repo@sha256:<hex>. The repo itself may contain '/', but
+    # never '@', so split on the first '@'.
+    if "@" in rest:
+        repo, digest = rest.split("@", 1)
+        if not repo or not digest or ":" not in digest:
+            raise ValueError(f"image reference missing repo/digest: {image_ref!r}")
+        return f"https://{host}", repo, f"@{digest}"
+    if ":" not in rest:
+        raise ValueError(f"image reference missing tag: {image_ref!r}")
     repo, tag = rest.rsplit(":", 1)
-    if not host or not repo or not tag:
-        raise ValueError(f"image reference missing host/repo/tag: {image_ref!r}")
+    if not repo or not tag:
+        raise ValueError(f"image reference missing repo/tag: {image_ref!r}")
     return f"https://{host}", repo, tag
 
 
@@ -124,19 +150,54 @@ def _probe(client: Any, image_ref: str, repo: str, tag: str) -> ImageInfo:
         from azure.core.exceptions import ResourceNotFoundError
     except ImportError:  # pragma: no cover - azure-core ships with the data plane
         ResourceNotFoundError = None  # type: ignore[assignment]
+    # Digest pin (reference starts with '@sha256:…'): resolve via the
+    # manifest API, not the tag API. A digest is content-addressable and is
+    # never registered as a tag, so `get_tag_properties` would always raise
+    # TagNotFound — the root cause of the spurious "Rollback unsafe" gate
+    # when the live Container App was deployed by digest.
+    is_digest = tag.startswith("@")
     try:
-        props = client.get_tag_properties(repo, tag)
+        if is_digest:
+            digest = tag[1:]  # strip the leading '@' → 'sha256:<hex>'
+            props = _get_manifest_properties(client, repo, digest)
+        else:
+            props = client.get_tag_properties(repo, tag)
     except Exception as exc:
         # Distinguish "not found" (= retention purge) from "registry
         # offline" so the upstream rollback gate stays precise.
         if ResourceNotFoundError is not None and isinstance(exc, ResourceNotFoundError):
-            return ImageInfo(image_ref=image_ref, exists=False, error="TagNotFound")
+            return ImageInfo(
+                image_ref=image_ref,
+                exists=False,
+                error="ManifestNotFound" if is_digest else "TagNotFound",
+            )
         msg = str(exc)
-        if "TagNotFound" in msg or "ManifestUnknown" in msg or "404" in msg:
+        if (
+            "TagNotFound" in msg
+            or "ManifestUnknown" in msg
+            or "ManifestNotFound" in msg
+            or "404" in msg
+        ):
             return ImageInfo(image_ref=image_ref, exists=False, error=msg)
         return ImageInfo(image_ref=image_ref, exists=False, error=f"acr lookup error: {msg}")
     created = getattr(props, "created_on", None)
     return ImageInfo(image_ref=image_ref, exists=True, created_on=created)
+
+
+def _get_manifest_properties(client: Any, repo: str, digest: str) -> Any:
+    """Resolve a digest-pinned manifest's properties.
+
+    The `azure-containerregistry` SDK exposes this as
+    `get_manifest_properties(repository, tag_or_digest)`. A fake test client
+    may only implement `get_tag_properties`; fall back to it so the digest
+    string is still probed (the fake keys off the reference string).
+    """
+    getter = getattr(client, "get_manifest_properties", None)
+    if callable(getter):
+        return getter(repo, digest)
+    # Test-double / older SDK fallback: treat the digest as an opaque
+    # reference through the tag API.
+    return client.get_tag_properties(repo, digest)
 
 
 def image_exists(image_ref: str) -> bool:

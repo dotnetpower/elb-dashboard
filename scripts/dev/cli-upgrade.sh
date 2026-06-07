@@ -270,7 +270,7 @@ preflight_storage_parity() {
 
   local acct=""
   if [[ -n "${AZURE_TABLE_ENDPOINT:-}" ]]; then
-    # https://stelbdashboardmul5oh5j44.table.core.windows.net → stelbdashboardmul5oh5j44
+    # https://stelbdashboardtest01.table.core.windows.net → stelbdashboardtest01
     acct="$(printf '%s' "$AZURE_TABLE_ENDPOINT" \
       | sed -E 's|^https?://([^.]+)\..*|\1|')"
   fi

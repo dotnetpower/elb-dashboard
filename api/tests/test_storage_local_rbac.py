@@ -82,10 +82,10 @@ def test_grant_local_debug_storage_roles_creates_expected_assignments(
 
     result = local_rbac.grant_local_debug_storage_roles(
         object(),
-        "577d6332-de48-4a30-be66-dded26a712ea",
+        "00000000-0000-0000-0000-0000000000a1",
         "rg-elb-dashboard",
-        "stelbdashboardmul5oh5j44",
-        "25e0aef5-2ef5-48f7-b57e-5e969b65f916",
+        "stelbdashboardtest01",
+        "00000000-0000-0000-0000-0000000000b2",
     )
 
     assert result["action"] == "assigned"
@@ -101,10 +101,10 @@ def test_grant_local_debug_storage_roles_creates_expected_assignments(
     for call in fake_assignments.calls:
         assert call["scope"].endswith(
             "/resourceGroups/rg-elb-dashboard/providers/Microsoft.Storage/"
-            "storageAccounts/stelbdashboardmul5oh5j44"
+            "storageAccounts/stelbdashboardtest01"
         )
         assert call["parameters"]["principal_id"] == (
-            "25e0aef5-2ef5-48f7-b57e-5e969b65f916"
+            "00000000-0000-0000-0000-0000000000b2"
         )
         assert call["parameters"]["principal_type"] == "User"
 
@@ -127,10 +127,10 @@ def test_grant_local_debug_storage_roles_treats_conflict_as_already_assigned(
 
     result = local_rbac.grant_local_debug_storage_roles(
         object(),
-        "577d6332-de48-4a30-be66-dded26a712ea",
+        "00000000-0000-0000-0000-0000000000a1",
         "rg-elb-dashboard",
-        "stelbdashboardmul5oh5j44",
-        "25e0aef5-2ef5-48f7-b57e-5e969b65f916",
+        "stelbdashboardtest01",
+        "00000000-0000-0000-0000-0000000000b2",
     )
 
     assert result["action"] == "already_assigned"
@@ -141,13 +141,13 @@ def test_local_debug_credential_principal_reads_user_oid() -> None:
     principal_id, principal_type = local_rbac.local_debug_credential_principal(
         FakeCredential(
             {
-                "oid": "25e0aef5-2ef5-48f7-b57e-5e969b65f916",
+                "oid": "00000000-0000-0000-0000-0000000000b2",
                 "preferred_username": "admin@example.test",
             }
         )
     )
 
-    assert principal_id == "25e0aef5-2ef5-48f7-b57e-5e969b65f916"
+    assert principal_id == "00000000-0000-0000-0000-0000000000b2"
     assert principal_type == "User"
 
 
@@ -182,9 +182,9 @@ def _caller(object_id: str) -> CallerIdentity:
 
 def _rbac_body() -> dict[str, str]:
     return {
-        "subscription_id": "577d6332-de48-4a30-be66-dded26a712ea",
+        "subscription_id": "00000000-0000-0000-0000-0000000000a1",
         "resource_group": "rg-elb-dashboard",
-        "account_name": "stelbdashboardmul5oh5j44",
+        "account_name": "stelbdashboardtest01",
     }
 
 
@@ -199,7 +199,7 @@ def test_storage_local_debug_grant_rbac_rejects_dev_bypass(
     monkeypatch.setattr(local_debug, "get_credential", lambda: object())
     monkeypatch.setattr(
         "api.services.storage.local_rbac.local_debug_credential_principal",
-        lambda _credential: ("25e0aef5-2ef5-48f7-b57e-5e969b65f916", "User"),
+        lambda _credential: ("00000000-0000-0000-0000-0000000000b2", "User"),
         raising=True,
     )
 
@@ -224,7 +224,7 @@ def test_storage_local_debug_grant_rbac_rejects_mismatched_local_user(
     monkeypatch.setattr(local_debug, "get_credential", lambda: object())
     monkeypatch.setattr(
         "api.services.storage.local_rbac.local_debug_credential_principal",
-        lambda _credential: ("25e0aef5-2ef5-48f7-b57e-5e969b65f916", "User"),
+        lambda _credential: ("00000000-0000-0000-0000-0000000000b2", "User"),
         raising=True,
     )
 

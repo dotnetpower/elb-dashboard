@@ -1,12 +1,12 @@
 ---
 title: Route expired sign-in sessions to the login page
-description: Add an App-level session-expiry gate so a silently-expired MSAL session sends the user to the in-app sign-in page instead of leaving the dashboard mounted behind a stale banner, and scrub the last live az-jungha dev-profile mentions from the deploy script and auth-flow doc.
+description: Add an App-level session-expiry gate so a silently-expired MSAL session sends the user to the in-app sign-in page instead of leaving the dashboard mounted behind a stale banner, and scrub the last live az-demo dev-profile mentions from the deploy script and auth-flow doc.
 tags:
   - ui
   - auth
 ---
 
-# Sign-in: route expired sessions to the login page; finish az-jungha cleanup
+# Sign-in: route expired sessions to the login page; finish az-demo cleanup
 
 ## Motivation
 MSAL's `<AuthenticatedTemplate>` only checks that an account is still cached, not
@@ -17,7 +17,7 @@ banner and click it. A page reload, by contrast, correctly showed the sign-in
 page. The request: when the sign-in session is broken, take the user to the
 login page automatically.
 
-Separately, the personal `az-jungha` az-profile alias still leaked into two live
+Separately, the personal `az-demo` az-profile alias still leaked into two live
 surfaces (the deploy script's "not signed in" hint and the `auth-flow.md` doc).
 
 ## User-facing change
@@ -28,7 +28,7 @@ surfaces (the deploy script's "not signed in" hint and the `auth-flow.md` doc).
   token is acquired.
 - The expired sign-in page uses `prompt: "login"` to force a fresh credential
   prompt; the first-visit page keeps `prompt: "select_account"`.
-- Deploy-script and documentation no longer name the personal `az-jungha`
+- Deploy-script and documentation no longer name the personal `az-demo`
   profile.
 
 ## Implementation summary
@@ -44,12 +44,12 @@ surfaces (the deploy script's "not signed in" hint and the `auth-flow.md` doc).
   callback now calls `clearAuthSessionIssue()`.
 - `web/src/api/client.ts`: a successful silent token refresh clears the issue.
 - `scripts/dev/quick-deploy.sh`, `docs/copilot/auth-flow.md`: dropped the
-  `az-jungha` mentions.
+  `az-demo` mentions.
 
 ## Validation evidence
 - `cd web && npm test -- --run` → 62 files, 479 tests passed (includes the new
   `src/auth/sessionEvents.test.ts`, 5 tests).
 - `cd web && npm run build` → clean production build.
 - `npx eslint` on all touched `.ts/.tsx` → no findings.
-- `grep -r az-jungha web/ scripts/ docs/copilot/ deploy.sh azure.yaml` → no live
+- `grep -r az-demo web/ scripts/ docs/copilot/ deploy.sh azure.yaml` → no live
   matches (only historical change notes remain, by design).

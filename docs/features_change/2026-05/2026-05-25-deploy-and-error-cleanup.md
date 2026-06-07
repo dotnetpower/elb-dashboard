@@ -52,7 +52,7 @@ corrected via direct `az storage account update`:
 
 ```
 az storage account update \
-  --subscription 577d6332-de48-4a30-be66-dded26a712ea \
+  --subscription 00000000-0000-0000-0000-0000000000a1 \
   -g rg-elb-dashboard-01 \
   -n stelbdashboard01mul5oh5j \
   --public-network-access Enabled \
@@ -96,7 +96,7 @@ window.__ELB_RUNTIME_CONFIG__ = {
   "VITE_API_BASE_URL": "",
   "VITE_AUTH_DEV_BYPASS": "false",
   "VITE_AZURE_REDIRECT_URI": "__RUNTIME__",
-  "VITE_AZURE_TENANT_ID":   "184be312-…",
+  "VITE_AZURE_TENANT_ID":   "00000000-…",
   "VITE_AZURE_CLIENT_ID":   "ddf48c19-…",
   …feature flags…
 };
@@ -304,21 +304,21 @@ sidecar images so it would no longer trail env A on the
 | Env | Container App | RG | ACR | Sidecar | New image tag | Final revision |
 |-----|---------------|----|-----|---------|---------------|----------------|
 | A | `ca-elb-dashboard-01` | `rg-elb-dashboard-01` | `acrelbdashboard01mul5oh5j`  | api / worker / beat (single image) | `elb-api:20260525222137`      | `0000020` |
-| B | `ca-elb-dashboard`    | `rg-elb-dashboard`    | `acrelbdashboardmul5oh5j44` | api / worker / beat (single image) | `elb-api:20260525222807`      | `0000016` |
-| B | `ca-elb-dashboard`    | `rg-elb-dashboard`    | `acrelbdashboardmul5oh5j44` | terminal                           | `elb-terminal:20260525223728` | `0000017` |
-| B | `ca-elb-dashboard`    | `rg-elb-dashboard`    | `acrelbdashboardmul5oh5j44` | frontend                           | `elb-frontend:20260525224526` | `0000018` |
+| B | `ca-elb-dashboard`    | `rg-elb-dashboard`    | `acrelbdashboardtest01` | api / worker / beat (single image) | `elb-api:20260525222807`      | `0000016` |
+| B | `ca-elb-dashboard`    | `rg-elb-dashboard`    | `acrelbdashboardtest01` | terminal                           | `elb-terminal:20260525223728` | `0000017` |
+| B | `ca-elb-dashboard`    | `rg-elb-dashboard`    | `acrelbdashboardtest01` | frontend                           | `elb-frontend:20260525224526` | `0000018` |
 
 Env A was deployed via the default azd env. Env B's azd env
 (`elb-ca`) carries a stale `ACR_NAME=acrelbdashboardogi2vbkece`
 (that ACR does **not** exist in the subscription); the actual
-deployed ACR for `ca-elb-dashboard` is `acrelbdashboardmul5oh5j44`.
+deployed ACR for `ca-elb-dashboard` is `acrelbdashboardtest01`.
 Env B was therefore deployed by exporting the correct values
 manually before `scripts/dev/quick-deploy.sh api`:
 
 ```bash
 export AZURE_RESOURCE_GROUP=rg-elb-dashboard
-export ACR_NAME=acrelbdashboardmul5oh5j44
-export ACR_LOGIN_SERVER=acrelbdashboardmul5oh5j44.azurecr.io
+export ACR_NAME=acrelbdashboardtest01
+export ACR_LOGIN_SERVER=acrelbdashboardtest01.azurecr.io
 export CONTAINER_APP_NAME=ca-elb-dashboard
 bash scripts/dev/quick-deploy.sh api
 ```
@@ -368,7 +368,7 @@ morning's cleanup remain unchanged and out of scope:
 ### Follow-up (already noted, not actioned in this change)
 
 1. The `elb-ca` azd env's `ACR_NAME` is wrong. Either correct it
-   to `acrelbdashboardmul5oh5j44` or delete the env entry so the
+   to `acrelbdashboardtest01` or delete the env entry so the
    next operator does not waste time chasing `ogi2vbkece`.
 2. The Storage-vs-ACR lockdown coupling in `infra/main.bicep`
    (see the earlier "Follow-up" section above) still stands.

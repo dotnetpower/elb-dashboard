@@ -81,6 +81,6 @@ running/completed BLAST workload.
 - Passed: targeted `ruff check` for warmup script and terminal patch taxdb handling.
 - Passed: `/api/blast/jobs?...&limit=10` returned in 0.388 s after OpenAPI list timeout hardening, with `external_degraded_reason=openapi_unreachable` instead of blocking the Jobs surface.
 - Cleanup: `az aks stop -g rg-elb-dashboard -n aks-elb-e2e-core-nt --no-wait` issued after validation; `az aks show` reported `powerState=Stopped`.
-- Cleanup: `scripts/dev/storage-public-access.sh off --account stelbdashboardmul5oh5j44 --rg rg-elb-dashboard --subscription 577d6332-de48-4a30-be66-dded26a712ea` left Storage at `public=Disabled`, `defaultAction=Deny`, `ipRules=[]`.
+- Cleanup: `scripts/dev/storage-public-access.sh off --account stelbdashboardtest01 --rg rg-elb-dashboard --subscription 00000000-0000-0000-0000-0000000000a1` left Storage at `public=Disabled`, `defaultAction=Deny`, `ipRules=[]`.
 - Passed: `scripts/dev/e2e-ui.sh bypass --headless --skip-restart -- npm --prefix web run e2e:all` after adding `azure-core-nt-lifecycle` (3 passed, 2 guarded scenarios skipped).
 - Passed: `npm --prefix web run build`.

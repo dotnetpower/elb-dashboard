@@ -1,12 +1,12 @@
 ---
-title: Workspace banner no longer leaks the az-jungha dev profile hint
-description: Rewrite the subscriptions_unavailable workspace-diagnostics banner so it stops telling deployed users to run `az login` / pick the personal `az-jungha` az profile, and instead describes the managed-identity Reader requirement.
+title: Workspace banner no longer leaks the az-demo dev profile hint
+description: Rewrite the subscriptions_unavailable workspace-diagnostics banner so it stops telling deployed users to run `az login` / pick the personal `az-demo` az profile, and instead describes the managed-identity Reader requirement.
 tags:
   - ui
   - auth
 ---
 
-# Workspace banner: drop `az-jungha` dev hint, describe managed-identity Reader
+# Workspace banner: drop `az-demo` dev hint, describe managed-identity Reader
 
 ## Motivation
 
@@ -15,11 +15,11 @@ When the dashboard could not list any Azure subscriptions it showed a
 
 > The dashboard could not list any Azure subscriptions for your current
 > credential. Run `az login --tenant <your-tenant>` in a terminal (or pick a
-> different az profile such as `az-jungha`), then click Reset workspace…
+> different az profile such as `az-demo`), then click Reset workspace…
 
 Two problems:
 
-1. **`az-jungha` is a personal local az-profile alias** that leaked into the
+1. **`az-demo` is a personal local az-profile alias** that leaked into the
    shipped production UI. It is meaningless to any real user.
 2. The advice is **wrong for the deployed app**. The Container App backend lists
    subscriptions with its **managed identity** (`id-elb-dashboard-*`), not the
@@ -38,7 +38,7 @@ list — exactly the case the corrected wording now explains.
 The `subscriptions_unavailable` banner body and the two inline
 `WorkspaceDiagnosticsBanner` descriptions now:
 
-- never name a personal az profile (`az-jungha` removed);
+- never name a personal az profile (`az-demo` removed);
 - explain the deployed managed-identity Reader requirement and propagation delay
   first, then the local `az login` case;
 - still point at the **Reset workspace** retry action.
@@ -59,4 +59,4 @@ workspace data") is unchanged.
 
 - `npm test -- --run src/utils/monitorDegraded.test.ts` → 19 passed.
 - `npm run build` → built in ~11s, no type errors.
-- `grep -r az-jungha web/src` → 0 matches.
+- `grep -r az-demo web/src` → 0 matches.

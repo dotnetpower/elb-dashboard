@@ -97,7 +97,7 @@ The in-flight `nt` job was recovered without waiting for a redeploy:
 - **Redeploy for persistence** (warranted exception to "do not redeploy" — the
   bug is in the baked pod script): rebuild api/worker image via `az acr build` /
   `quick-deploy.sh`. moonchoi target needs explicit MSAL overrides because `.env`
-  carries jungha values.
+  carries demo values.
 - **Optimization (not done):** the per-file skip check issues one `azcopy list`
   per file (~1.5 s each → ~12 min/shard just to scan 480 files before
   downloads). A single recursive container listing into a lookup set would cut

@@ -18,4 +18,4 @@ A failed numbered deployment can leave the deterministic Key Vault name in Azure
 
 - `az keyvault recover --name kv-elb-dashboard-01-mul5 --resource-group rg-elb-dashboard-01 --location koreacentral` returned the vault to `Succeeded` state.
 - `bash -n scripts/dev/recover-deleted-keyvault.sh scripts/dev/postprovision.sh deploy.sh scripts/dev/resolve-resource-group.sh`
-- `ELB_RESOURCE_NAME_SLOT=slot01 scripts/dev/recover-deleted-keyvault.sh --environment elb-dashboard --subscription 577d6332-de48-4a30-be66-dded26a712ea` returned `No compatible soft-deleted Key Vault found for rg-elb-dashboard-01` after the live recovery, proving the helper is idempotent.
+- `ELB_RESOURCE_NAME_SLOT=slot01 scripts/dev/recover-deleted-keyvault.sh --environment elb-dashboard --subscription 00000000-0000-0000-0000-0000000000a1` returned `No compatible soft-deleted Key Vault found for rg-elb-dashboard-01` after the live recovery, proving the helper is idempotent.
