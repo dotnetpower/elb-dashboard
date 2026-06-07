@@ -187,6 +187,22 @@ EXEC_PID=$!
 # self-sustaining reconnect loop.
 # ---------------------------------------------------------------------------
 TTYD_HOST="${TTYD_HOST:-127.0.0.1}"
+# Charter §9 / AGENTS.md tripwire: ttyd carries the interactive writable shell,
+# so in a deployed Container Apps revision (CONTAINER_APP_NAME is always set by
+# the platform) it MUST stay loopback-only — the api sidecar proxies it over
+# 127.0.0.1. Binding to 0.0.0.0 / a routable interface would expose the shell
+# to the whole Container Apps Environment VNet. Mirror the exec_server guard
+# (terminal/exec_server.py): hard-fail at startup rather than silently rebind,
+# so a misconfigured deploy is visible immediately, not after the first abuse.
+if [[ -n "${CONTAINER_APP_NAME:-}" ]]; then
+  case "$TTYD_HOST" in
+    127.0.0.1 | localhost | ::1) : ;;
+    *)
+      echo "elb-supervisor: refusing to start ttyd with TTYD_HOST=$TTYD_HOST inside a Container Apps revision; pin to 127.0.0.1" >&2
+      exit 1
+      ;;
+  esac
+fi
 /usr/local/bin/ttyd \
   -p 7681 \
   -i "$TTYD_HOST" \

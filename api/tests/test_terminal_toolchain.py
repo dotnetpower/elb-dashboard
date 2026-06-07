@@ -23,6 +23,7 @@ pytestmark = pytest.mark.subprocess
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DOCKERFILE = REPO_ROOT / "terminal" / "Dockerfile"
 TOOL_VERSIONS = REPO_ROOT / "terminal" / "tool-versions.sh"
+ENTRYPOINT = REPO_ROOT / "terminal" / "entrypoint.sh"
 MANUAL_CONTENT = REPO_ROOT / "web" / "src" / "pages" / "terminal" / "terminalManualContent.ts"
 
 
@@ -95,6 +96,46 @@ def test_tool_versions_script_reports_expected_tools() -> None:
         cwd=REPO_ROOT,
         check=True,
     )
+
+
+def test_entrypoint_pins_ttyd_to_loopback_in_a_container_app() -> None:
+    """Charter §9: in a deployed Container Apps revision (CONTAINER_APP_NAME set)
+    ttyd must refuse a non-loopback TTYD_HOST rather than expose the writable
+    shell to the VNet. Mirror the exec_server guard."""
+    body = ENTRYPOINT.read_text()
+    assert "CONTAINER_APP_NAME" in body
+    subprocess.run(  # noqa: S603 - static repository script syntax check.
+        ["/bin/bash", "-n", str(ENTRYPOINT)],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+    guard = (
+        'TTYD_HOST="0.0.0.0"\n'
+        'CONTAINER_APP_NAME="ca-elb-dashboard"\n'
+        'if [[ -n "${CONTAINER_APP_NAME:-}" ]]; then\n'
+        '  case "$TTYD_HOST" in\n'
+        "    127.0.0.1 | localhost | ::1) : ;;\n"
+        '    *) echo "refused" >&2; exit 1 ;;\n'
+        "  esac\n"
+        "fi\n"
+        'echo "started"\n'
+    )
+    blocked = subprocess.run(  # noqa: S603 - static snippet, no external input.
+        ["/bin/bash", "-c", guard],
+        capture_output=True,
+        text=True,
+    )
+    assert blocked.returncode == 1
+    assert "started" not in blocked.stdout
+
+    allowed = subprocess.run(  # noqa: S603 - static snippet, no external input.
+        ["/bin/bash", "-c", guard.replace('TTYD_HOST="0.0.0.0"', 'TTYD_HOST="127.0.0.1"')],
+        capture_output=True,
+        text=True,
+    )
+    assert allowed.returncode == 0
+    assert "started" in allowed.stdout
 
 
 def test_terminal_manual_covers_beginner_and_bioinformatics_workflows() -> None:
