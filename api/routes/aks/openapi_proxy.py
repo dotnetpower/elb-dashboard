@@ -219,8 +219,18 @@ def _enforce_openapi_proxy_target_path(target_path: str) -> None:
                 },
             )
     for prefix in _OPENAPI_PROXY_ALLOWED_PATH_PREFIXES:
-        prefix_root = prefix.rstrip("/")
-        if lowered == prefix or lowered == prefix_root or lowered.startswith(prefix):
+        if prefix.endswith("/"):
+            # Prefix entry (e.g. "/v1/", "/docs/"): the bare root or anything
+            # beneath it is allowed.
+            if lowered == prefix.rstrip("/") or lowered.startswith(prefix):
+                return
+            continue
+        # Exact-path entry (e.g. "/healthz", "/openapi.json"): ONLY the exact
+        # path is allowed. A bare ``startswith`` here would let
+        # ``/healthzXXX`` / ``/openapi.jsonXXX`` ride the admin token into any
+        # upstream route that happens to share that prefix, contradicting the
+        # documented "entry without '/' is an exact path" contract.
+        if lowered == prefix:
             return
     raise HTTPException(
         status_code=400,

@@ -376,6 +376,18 @@ def capture_body(
         text = body.decode("utf-8", errors="replace")
     except Exception:
         text = repr(body)
+    # Defence in depth (charter §12): the inspector renders this body verbatim
+    # in the SPA's request-detail feed, and a captured request/response body can
+    # carry a bearer token, a SAS signature, an account/access key, a client
+    # secret, a connection string, or a password (e.g. the OpenAPI proxy whose
+    # upstream may echo the auto-injected admin token in an error). redact_headers
+    # only scrubs headers, so mask secret-shaped substrings in the BODY too.
+    # mask_subscription_ids=False keeps the debug utility intact — the caller's
+    # own subscription/tenant GUIDs are already surfaced across the dashboard UI
+    # and are not the secret we are protecting here.
+    from api.services.sanitise import sanitise
+
+    text = sanitise(text, mask_subscription_ids=False)
     return (text, truncated)
 
 

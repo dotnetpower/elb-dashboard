@@ -548,6 +548,35 @@ def test_openapi_proxy_rejects_internal_path(client: TestClient) -> None:
     assert response.json()["code"] == "openapi_path_not_allowlisted"
 
 
+@pytest.mark.parametrize(
+    "evil_path",
+    [
+        "/healthzXXX",
+        "/healthz/secret",
+        "/healthz-internal",
+        "/openapi.jsonXXX",
+        "/openapi.json/dump",
+    ],
+)
+def test_openapi_proxy_exact_entries_are_not_prefix_matched(
+    client: TestClient, evil_path: str
+) -> None:
+    """`/healthz` and `/openapi.json` are documented as EXACT-path allowlist
+    entries, so a path that merely starts with one must be rejected — otherwise
+    it would ride the auto-injected admin token into any upstream route sharing
+    that prefix."""
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "path": evil_path,
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "openapi_path_not_allowlisted"
+
+
 def test_openapi_proxy_rejects_path_traversal_inside_allowlisted_prefix(
     client: TestClient,
 ) -> None:

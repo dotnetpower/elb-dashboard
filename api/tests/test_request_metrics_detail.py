@@ -67,6 +67,24 @@ def test_capture_body_empty_input_returns_none():
     assert (text, truncated) == (None, False)
 
 
+def test_capture_body_masks_secrets_but_keeps_subscription_ids():
+    """The inspector renders bodies verbatim, so a captured body must have
+    bearer tokens / SAS signatures / keys masked (charter §12), while the
+    caller's own subscription/tenant GUIDs stay visible for debug utility."""
+    raw = (
+        b'{"authorization":"Bearer abcDEF1234567890ghijklmnopqrstuvwxyz",'
+        b'"sas":"https://x.blob.core.windows.net/c/b?sig=AAAABBBBCCCCDDDD1234",'
+        b'"subscription_id":"b052302c-4c8d-49a4-aa2f-9d60a7301a80"}'
+    )
+    text, _ = rm.capture_body(raw, content_type="application/json")
+    assert text is not None
+    # Real secrets are masked.
+    assert "abcDEF1234567890ghijklmnopqrstuvwxyz" not in text
+    assert "sig=AAAABBBBCCCCDDDD1234" not in text
+    # The caller's own subscription id remains visible for debugging.
+    assert "b052302c-4c8d-49a4-aa2f-9d60a7301a80" in text
+
+
 def test_record_detail_persists_a_single_sample_with_redaction():
     rm.record_detail(
         request_id="req_abc",
