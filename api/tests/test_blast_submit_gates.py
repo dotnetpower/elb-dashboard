@@ -191,6 +191,21 @@ def test_aks_cluster_gate_single_flight_under_parallel_burst(
     assert call_count["n"] == 1  # single-flight collapsed the stampede
 
 
+def test_inflight_lock_registry_is_bounded() -> None:
+    """The per-key lock registry must not grow without bound in a long-lived
+    process — it caps at _MAX_INFLIGHT_LOCKS and drops wholesale past it."""
+    submit_gates.reset_submit_gates_cache()
+    cap = submit_gates._MAX_INFLIGHT_LOCKS
+    for i in range(cap):
+        submit_gates._key_lock(f"k{i}")
+    assert len(submit_gates._INFLIGHT_LOCKS) == cap
+    # One more distinct key trips the wholesale drop, then inserts the new one.
+    submit_gates._key_lock("overflow")
+    assert len(submit_gates._INFLIGHT_LOCKS) == 1
+    assert "overflow" in submit_gates._INFLIGHT_LOCKS
+    submit_gates.reset_submit_gates_cache()
+
+
 def test_aks_cluster_gate_unknown_when_arm_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

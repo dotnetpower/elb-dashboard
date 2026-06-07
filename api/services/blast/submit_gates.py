@@ -126,12 +126,27 @@ def _cache_set(key: str, value: GateResult) -> None:
 # against each other.
 _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT_LOCKS: dict[str, threading.Lock] = {}
+# Upper bound on the key→lock registry. Unlike ``_cache`` (which self-expires on
+# the 5 s TTL), the lock registry is never read-evicted, so without a ceiling a
+# long-lived api/worker process that touches many distinct (cluster / db / SKU)
+# gate keys — ``memfit:{sa}:{db}:{machine_type}`` is the widest — would grow it
+# without bound. When the ceiling is hit we drop the whole registry: any burst
+# already holding a per-key lock keeps its own lock object reference and runs to
+# completion, and the worst case is that a few keys re-create a lock and do one
+# extra probe (the 5 s ``_cache`` still backs correctness). 512 is far above the
+# realistic distinct-key count for one deployment, so the drop is rare.
+_MAX_INFLIGHT_LOCKS = 512
 
 
 def _key_lock(key: str) -> threading.Lock:
     with _INFLIGHT_LOCK:
         lock = _INFLIGHT_LOCKS.get(key)
         if lock is None:
+            if len(_INFLIGHT_LOCKS) >= _MAX_INFLIGHT_LOCKS:
+                # Bounded growth: reset the registry wholesale. Threads already
+                # inside ``with lock:`` hold their own reference, so this never
+                # releases a held lock — it only forgets the mapping.
+                _INFLIGHT_LOCKS.clear()
             lock = threading.Lock()
             _INFLIGHT_LOCKS[key] = lock
         return lock

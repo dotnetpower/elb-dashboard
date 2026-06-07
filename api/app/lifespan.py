@@ -28,12 +28,27 @@ _DEFAULT_THREADPOOL_TOKENS = 40
 
 
 def _configure_threadpool_capacity() -> None:
-    """Set the AnyIO default thread-limiter capacity from the environment.
+    """Size BOTH worker-thread pools the api offloads blocking work to.
 
-    Reads ``API_THREADPOOL_TOKENS`` (a positive int). Unset, non-numeric, or
-    non-positive values leave the limiter at AnyIO's default so the historical
-    behaviour is preserved. Failures are swallowed — a missing/renamed AnyIO
-    internal must never block startup.
+    There are two *separate* pools and historically only one was tunable:
+
+    * **AnyIO default thread-limiter** — backs Starlette sync routes,
+      ``run_in_threadpool``, and FastAPI ``Depends`` that block. Tuned via
+      ``limiter.total_tokens``.
+    * **asyncio loop default executor** — backs every ``asyncio.to_thread(...)``
+      call (JWT validation in ``api.auth``, the SSE log-stream Redis/K8s
+      blocking reads, ``_load_state``, the credential warm-up). This is a
+      ``ThreadPoolExecutor(max_workers=min(32, cpu+4))`` that AnyIO does NOT
+      govern, so on a small-vCPU Container App it can be as low as ~5 threads.
+      A burst of concurrent SSE log streams (each pinning a blocking
+      ``xread`` / pod-log thread) could otherwise starve JWT validation on the
+      same tiny pool and stall every authenticated request.
+
+    Reads ``API_THREADPOOL_TOKENS`` (a positive int) and applies it to BOTH
+    pools so they widen together. Unset / non-numeric / non-positive leaves
+    both at their library defaults (historical behaviour). Must be called from
+    inside the running event loop (the asyncio executor swap needs the loop).
+    Failures are swallowed — startup must never be blocked by a tuning hint.
     """
     import os
 
@@ -65,6 +80,26 @@ def _configure_threadpool_capacity() -> None:
             tokens,
             type(exc).__name__,
         )
+    try:
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        loop = asyncio.get_running_loop()
+        # Replace the loop's default executor so `asyncio.to_thread` gets the
+        # same widened capacity. Safe at startup: no work has been submitted to
+        # the default executor yet, and the executor lazily spawns threads, so
+        # idle capacity costs little. opt-in only — unset env leaves the
+        # asyncio default (min(32, cpu+4)) untouched.
+        loop.set_default_executor(
+            ThreadPoolExecutor(max_workers=tokens, thread_name_prefix="api-to-thread")
+        )
+        LOGGER.info("asyncio default executor capacity set to %d", tokens)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning(
+            "failed to set asyncio default executor capacity to %d: %s",
+            tokens,
+            type(exc).__name__,
+        )
 
 
 @asynccontextmanager
@@ -73,14 +108,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     broadcaster cleanly on shutdown so subscribers see an EOF instead of
     a half-closed socket. See `api.routes.monitor._SidecarBroadcaster`.
     """
-    # Size the AnyIO worker-thread pool that backs every sync route, every
-    # `run_in_threadpool` / `asyncio.to_thread` call, and the Azure SDK
-    # blocking calls those wrap. FastAPI/Starlette leave AnyIO at its default
-    # of 40 tokens; under a burst of monitor/data-plane requests (each of
-    # which offloads several blocking Azure SDK calls) that ceiling can become
-    # the throughput bottleneck before CPU does. Allow operators to raise it
-    # via API_THREADPOOL_TOKENS without touching code; the default preserves
-    # the historical 40-token behaviour exactly.
+    # Size BOTH worker-thread pools the api offloads blocking work to: the
+    # AnyIO limiter (Starlette sync routes / `run_in_threadpool` / `Depends`)
+    # AND the asyncio loop default executor (`asyncio.to_thread` — JWT
+    # validation, SSE log-stream blocking reads, `_load_state`). FastAPI leaves
+    # AnyIO at 40 tokens and asyncio at min(32, cpu+4); under a burst of
+    # monitor/data-plane requests or concurrent SSE log streams either ceiling
+    # can become the bottleneck before CPU does. `API_THREADPOOL_TOKENS` raises
+    # both together without touching code; unset preserves both defaults.
     _configure_threadpool_capacity()
 
     # Warm the managed-identity credential at startup so the first
