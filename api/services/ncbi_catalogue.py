@@ -141,6 +141,11 @@ def _pick_signature_keys(db_name: str, keys: list[str]) -> list[str]:
         n = max(1, min(_SIGNATURE_SAMPLE_COUNT, len(md5s)))
         if len(md5s) <= n:
             return md5s
+        if n == 1:
+            # A single sample (e.g. NCBI_SIGNATURE_SAMPLE_COUNT=1) cannot be
+            # evenly spaced — guard the ``(n - 1)`` divisor below and return the
+            # first key deterministically.
+            return md5s[:1]
         # Evenly-spaced sample including first and last.
         step = (len(md5s) - 1) / (n - 1)
         sampled = [md5s[round(i * step)] for i in range(n)]

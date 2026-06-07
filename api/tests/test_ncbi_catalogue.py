@@ -198,6 +198,32 @@ def test_preview_rejects_invalid_name() -> None:
         ncbi_catalogue.preview_database("../etc/passwd")
 
 
+def test_pick_signature_keys_sample_count_one_does_not_divide_by_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NCBI_SIGNATURE_SAMPLE_COUNT=1 with a multi-shard DB must not crash on the
+    ``(n - 1)`` divisor in the evenly-spaced sampler."""
+    monkeypatch.setattr(ncbi_catalogue, "_SIGNATURE_SAMPLE_COUNT", 1)
+    keys = [
+        "core_nt.00.tar.gz.md5",
+        "core_nt.01.tar.gz.md5",
+        "core_nt.02.tar.gz.md5",
+    ]
+    picked = ncbi_catalogue._pick_signature_keys("core_nt", keys)
+    assert picked == ["core_nt.00.tar.gz.md5"]
+
+
+def test_pick_signature_keys_even_spacing_includes_first_and_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ncbi_catalogue, "_SIGNATURE_SAMPLE_COUNT", 3)
+    keys = [f"core_nt.{i:02d}.tar.gz.md5" for i in range(10)]
+    picked = ncbi_catalogue._pick_signature_keys("core_nt", keys)
+    assert picked[0] == "core_nt.00.tar.gz.md5"
+    assert picked[-1] == "core_nt.09.tar.gz.md5"
+    assert len(picked) == 3
+
+
 def test_database_update_signature_mirrors_preview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

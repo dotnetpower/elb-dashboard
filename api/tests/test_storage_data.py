@@ -314,6 +314,30 @@ def test_read_result_blob_text_inflates_gzip_with_decompressed_cap(
     assert text == "query\tresult"
 
 
+def test_read_result_blob_text_gzip_flush_respects_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A highly-compressible blob whose decompressed size dwarfs ``max_bytes``
+    must NOT exceed the cap via the final ``inflater.flush()`` — the flush
+    length is only a buffer hint, not a limit, so the result is sliced."""
+    # 1 MiB of a single repeated byte compresses to a few hundred bytes, so the
+    # whole compressed stream arrives in one chunk and the decompressor buffers
+    # the bulk for flush() to emit.
+    payload = gzip.compress(b"A" * (1024 * 1024))
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeChunkBlobService(payload),
+    )
+
+    text = storage_data.read_result_blob_text(
+        object(), "elbstg01", "results", "job123/merged_results.out.gz", max_bytes=256
+    )
+
+    assert len(text.encode("utf-8")) <= 256
+    assert text == "A" * 256
+
+
 class FakeDownload:
     def __init__(self, payload: str) -> None:
         self.payload = payload

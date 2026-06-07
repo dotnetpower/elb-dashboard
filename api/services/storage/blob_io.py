@@ -224,9 +224,16 @@ def read_result_blob_text(
             chunks.append(data)
             total += len(data)
     if total < max_bytes:
-        flushed = inflater.flush(max_bytes - total)
+        # NB: ``Decompress.flush(length)`` treats ``length`` as the INITIAL
+        # output-buffer size, not a hard cap — it returns ALL remaining
+        # decompressed output (including anything stashed in
+        # ``unconsumed_tail`` by the bounded ``decompress`` calls above), which
+        # can be far larger than the ``max_bytes`` budget. Slice to the
+        # remaining budget so the documented ``max_bytes`` contract holds and a
+        # highly-compressible blob cannot blow the request thread's memory.
+        flushed = inflater.flush()
         if flushed:
-            chunks.append(flushed)
+            chunks.append(flushed[: max_bytes - total])
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
