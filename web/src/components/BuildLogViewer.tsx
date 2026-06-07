@@ -14,7 +14,6 @@ import { Copy, RefreshCcw } from "lucide-react";
 import { upgradeApi } from "@/api/upgrade";
 
 const ACTIVE_INTERVAL_MS = 3_000;
-const IDLE_INTERVAL_MS = 30_000;
 const MAX_HEIGHT = 320;
 // Cap rendered content to keep the browser snappy on multi-MB logs.
 // The full blob is still downloadable via the raw endpoint.
@@ -56,10 +55,22 @@ export function BuildLogViewer({ jobId, component, active }: Props) {
   useEffect(() => {
     if (!jobId) return undefined;
     void fetchOnce();
-    const interval = active ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS;
+    // Only poll while the upgrade is actively building. Once it is terminal
+    // (succeeded / failed / idle), the build log is frozen — a never-ending
+    // 30 s idle poll just re-reads the same blob forever (observed as ~1200
+    // build-log reads / 4h in App Insights from an open Upgrade tab). Fetch
+    // once on mount + on tab re-focus, but do not arm a recurring interval
+    // unless the build is live.
+    if (!active) {
+      const onVisibleStatic = () => {
+        if (!document.hidden) void fetchOnce();
+      };
+      document.addEventListener("visibilitychange", onVisibleStatic);
+      return () => document.removeEventListener("visibilitychange", onVisibleStatic);
+    }
     const id = window.setInterval(() => {
       if (!document.hidden) void fetchOnce();
-    }, interval);
+    }, ACTIVE_INTERVAL_MS);
     const onVisible = () => {
       if (!document.hidden) void fetchOnce();
     };
@@ -94,7 +105,7 @@ export function BuildLogViewer({ jobId, component, active }: Props) {
       >
         <strong style={{ flex: 1 }}>{component}</strong>
         <span className="muted" style={{ fontSize: 11 }}>
-          {active ? "live (3s)" : "idle (30s)"}
+          {active ? "live (3s)" : "idle"}
           {loading ? " · loading" : ""}
         </span>
         <button
