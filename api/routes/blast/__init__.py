@@ -32,6 +32,7 @@ from api.routes.blast import logs as _logs_routes
 from api.routes.blast import preflight as _preflight_routes
 from api.routes.blast import result_analytics as _result_analytics_routes
 from api.routes.blast import results as _results_routes
+from api.routes.blast import results_export as _results_export_routes
 from api.routes.blast import schedules as _schedules_routes
 from api.routes.blast import submit as _submit_routes
 from api.routes.blast import taxonomy as _taxonomy_routes
@@ -96,7 +97,7 @@ from api.routes.blast.results import (
 from api.routes.blast.results import (
     blast_job_results_download as blast_job_results_download,
 )
-from api.routes.blast.results import (
+from api.routes.blast.results_export import (
     blast_job_results_export as blast_job_results_export,
 )
 from api.routes.blast.schedules import (
@@ -159,5 +160,9 @@ blast_router.include_router(_databases_oracle_routes.router)
 blast_router.include_router(_taxonomy_routes.router)
 blast_router.include_router(_schedules_routes.router)
 blast_router.include_router(_result_analytics_routes.router)
+# results_export MUST be included before results so the specific
+# `/jobs/{job}/results/export` path wins over results' `/results/{file_id}`
+# catch-all route (which would otherwise match file_id="export").
+blast_router.include_router(_results_export_routes.router)
 blast_router.include_router(_results_routes.router)
 blast_router.include_router(_capacity_routes.router)
