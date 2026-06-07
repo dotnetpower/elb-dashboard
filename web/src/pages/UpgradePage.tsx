@@ -20,6 +20,7 @@ import {
   compareSemver,
   githubCompareUrl,
   isCommitUpdateAvailable,
+  isUpgradeAvailable,
   statePhase,
   upgradeApi,
   type UpgradeCandidate,
@@ -171,6 +172,50 @@ export function UpgradePage() {
     () => githubCompareUrl(status, __APP_COMMIT__),
     [status],
   );
+
+  /**
+   * Commit-aware Status identity.
+   *
+   * `running_version` / `latest_version` are release semvers (e.g. `0.2.0`).
+   * Once the GHA build bakes a commit-qualified `APP_VERSION`, `running_version`
+   * itself becomes `0.2.0-commit.<sha>`; we still derive the short sha from the
+   * build-time `__APP_COMMIT__` stamp (always present, matches the header) and
+   * render the bare release + short sha so the field reads `v0.2.0 · 6517596`.
+   * On the commit channel two builds with the same release but different commits
+   * would otherwise both read `v0.2.0`, hiding the real deployed build; we also
+   * flag when an update exists even though the release semver matches.
+   */
+  const baseRelease = (v: string): string => (v || "").split("-", 1)[0] || "";
+  const runningCommitShort = useMemo(() => {
+    const stamp = (__APP_COMMIT__ || "").toLowerCase();
+    if (stamp && stamp !== "dev" && stamp !== "unknown" && stamp.length >= 7) {
+      return stamp.slice(0, 7);
+    }
+    // Fallback: pull the commit out of a commit-qualified running_version.
+    const m = /-commit\.([0-9a-f]{7,40})$/i.exec(status?.running_version || "");
+    return m ? m[1].slice(0, 7) : "";
+  }, [status]);
+  const latestCommitShort = useMemo(() => {
+    const c = (status?.latest_commit_sha || "").toLowerCase();
+    return c ? c.slice(0, 7) : "";
+  }, [status]);
+  const commitUpdate = useMemo(
+    () => isCommitUpdateAvailable(status, __APP_COMMIT__),
+    [status],
+  );
+  const releaseUpdate = useMemo(() => isUpgradeAvailable(status), [status]);
+  const runningLabel = useMemo(() => {
+    const base = `v${baseRelease(status?.running_version || "") || "?"}`;
+    return runningCommitShort ? `${base} · ${runningCommitShort}` : base;
+  }, [status, runningCommitShort]);
+  const latestLabel = useMemo(() => {
+    if (!status?.latest_version) return "—";
+    const base = `v${baseRelease(status.latest_version) || status.latest_version}`;
+    // Only append the commit sha when the commit channel is on and it adds
+    // information (a commit update is available); a release-only match stays
+    // clean as `v0.2.0`.
+    return commitUpdate && latestCommitShort ? `${base} · ${latestCommitShort}` : base;
+  }, [status, commitUpdate, latestCommitShort]);
 
   /**
    * True when `pickedTarget`'s major segment is greater than the running
@@ -327,10 +372,12 @@ export function UpgradePage() {
       <section className="glass-card" style={cardStack}>
         <h3 style={{ margin: 0 }}>Status</h3>
         <dl style={statsGrid}>
-          <Stat label="Running" value={`v${status.running_version || "?"}`} />
+          <Stat label="Running" value={runningLabel} mono={Boolean(runningCommitShort)} />
           <Stat
             label="Latest available"
-            value={status.latest_version ? `v${status.latest_version}` : "—"}
+            value={latestLabel}
+            tone={releaseUpdate || commitUpdate ? "warn" : "ok"}
+            mono={commitUpdate && Boolean(latestCommitShort)}
           />
           <Stat
             label="State"
@@ -344,6 +391,13 @@ export function UpgradePage() {
             value={status.latest_checked_at ? new Date(status.latest_checked_at).toLocaleString() : "—"}
           />
         </dl>
+        {commitUpdate && !releaseUpdate && (
+          <p className="muted" style={{ margin: 0, color: "var(--warning, #d97706)" }}>
+            A newer <code>main</code> commit ({latestCommitShort}) is available on
+            the same release line (v{baseRelease(status.latest_version)}). Pick the
+            preview build below to install it.
+          </p>
+        )}
         <p className="muted" style={{ margin: 0 }}>
           {status.phase_detail || "idle"}
         </p>

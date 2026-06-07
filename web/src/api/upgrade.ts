@@ -231,8 +231,17 @@ export function githubRepoBaseUrl(remote: string | null | undefined): string | n
 }
 
 export function compareSemver(a: string, b: string): number {
-  const aa = a.split(".").map((n) => parseInt(n, 10) || 0);
-  const bb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  // Strip any commit suffix (`<semver>-commit.<sha>` or any `-prerelease`)
+  // before comparing. Once GHA bakes a commit-qualified `running_version`
+  // (e.g. `0.2.0-commit.6517596`), a naive `.split(".")` would parse
+  // `0-commit` → 0 and then compare the raw sha digits as a 4th segment,
+  // making a same-release build look numerically different. Comparing the
+  // bare-semver base keeps the release ordering correct; commit-vs-commit
+  // freshness is handled separately by `isCommitUpdateAvailable`.
+  const baseSemver = (v: string): number[] =>
+    (v.split("-", 1)[0] || "").split(".").map((n) => parseInt(n, 10) || 0);
+  const aa = baseSemver(a);
+  const bb = baseSemver(b);
   const len = Math.max(aa.length, bb.length);
   for (let i = 0; i < len; i += 1) {
     const x = aa[i] ?? 0;

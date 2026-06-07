@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  compareSemver,
   githubCompareUrl,
   githubRepoBaseUrl,
   isCommitUpdateAvailable,
+  isUpgradeAvailable,
   type UpgradeStatus,
 } from "./upgrade";
 
@@ -154,5 +156,40 @@ describe("isCommitUpdateAvailable (range guard parity)", () => {
       latest_commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
     expect(isCommitUpdateAvailable(status, "aaaaaaa")).toBe(false);
+  });
+});
+
+describe("compareSemver (commit-qualified versions)", () => {
+  it("ignores a -commit.<sha> suffix when ordering releases", () => {
+    // Same release, commit-qualified running build → equal (not 'running newer').
+    expect(compareSemver("0.2.0", "0.2.0-commit.6517596")).toBe(0);
+    expect(compareSemver("0.2.0-commit.6517596", "0.2.0")).toBe(0);
+    // A real release bump still orders correctly despite a commit suffix.
+    expect(compareSemver("0.3.0", "0.2.0-commit.6517596")).toBeGreaterThan(0);
+    expect(compareSemver("0.2.0-commit.aaaaaaa", "0.3.0")).toBeLessThan(0);
+  });
+
+  it("keeps plain semver ordering intact", () => {
+    expect(compareSemver("1.5.0", "1.4.0")).toBeGreaterThan(0);
+    expect(compareSemver("1.4.0", "1.4.0")).toBe(0);
+  });
+});
+
+describe("isUpgradeAvailable with commit-qualified running_version", () => {
+  it("does not flag a release update when only the commit differs", () => {
+    // GHA now bakes running_version=0.2.0-commit.<sha>; latest release is 0.2.0.
+    const status = makeStatus({
+      running_version: "0.2.0-commit.6517596",
+      latest_version: "0.2.0",
+    });
+    expect(isUpgradeAvailable(status)).toBe(false);
+  });
+
+  it("still flags a genuine release update", () => {
+    const status = makeStatus({
+      running_version: "0.2.0-commit.6517596",
+      latest_version: "0.3.0",
+    });
+    expect(isUpgradeAvailable(status)).toBe(true);
   });
 });

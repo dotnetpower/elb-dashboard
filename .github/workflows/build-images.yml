@@ -102,6 +102,17 @@ jobs:
           set -euo pipefail
           TAG="gha-${GITHUB_SHA::7}"
           echo "Building tag: $TAG"
+          # Bake the commit-qualified version into APP_VERSION so the backend's
+          # `__version__` (and therefore the upgrade Status card's RUNNING
+          # field) reflects the real deployed build, not just the release
+          # semver. Format MUST match the in-app self-upgrade target shape
+          # `<semver>-commit.<short7sha>` (api/services/upgrade/version_target.py
+          # make_commit_version) so a GHA-deployed build and a self-upgraded
+          # build read identically and the reconciler's version match holds.
+          RELEASE_VER="$(node -p "require('./web/package.json').version" 2>/dev/null || echo 0.0.0)"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          export APP_VERSION="${RELEASE_VER}-commit.${SHORT_SHA}"
+          echo "APP_VERSION=$APP_VERSION"
           bash scripts/dev/quick-deploy.sh all "$TAG" --build-only --yes
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
