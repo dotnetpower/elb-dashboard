@@ -163,3 +163,31 @@ def test_audit_hash_chain_detects_tampering() -> None:
     ok, reason = history.verify_chain()
     assert not ok
     assert "chain broken" in reason
+
+
+def test_backend_is_cached_across_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: the lazily-created Azure backend must be cached so it is not
+    rebuilt on every call. A fresh backend per call re-issued
+    BlobServiceClient.create_container each time (observed as ~1200
+    create_container dependency calls / 4h in App Insights)."""
+    history.set_backend(None)
+    created: list[int] = []
+
+    class _FakeBackend:
+        def __init__(self) -> None:
+            created.append(1)
+
+        def append(self, payload: bytes) -> None:  # pragma: no cover - unused
+            pass
+
+        def read_all(self) -> bytes:  # pragma: no cover - unused
+            return b""
+
+    monkeypatch.setattr(history, "_AzureAppendHistoryBackend", _FakeBackend)
+
+    first = history._backend()
+    second = history._backend()
+
+    assert first is second
+    assert len(created) == 1  # built exactly once, not per call
+    history.set_backend(None)

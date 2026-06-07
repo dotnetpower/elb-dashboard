@@ -229,12 +229,19 @@ def set_backend(backend: _Backend | None) -> None:
 
 
 def _backend() -> _Backend:
+    global _BACKEND
     if _BACKEND is not None:
         return _BACKEND
     with _BACKEND_LOCK:
         if _BACKEND is not None:
             return _BACKEND
-        return _AzureAppendBlobBackend()
+        # Cache the lazily-created backend so its per-instance ``_ensured``
+        # container guard survives across calls; otherwise every append built a
+        # fresh backend and re-issued create_container (same class of bug as
+        # api.services.upgrade.history._backend). Tests reset via
+        # set_backend(None).
+        _BACKEND = _AzureAppendBlobBackend()
+        return _BACKEND
 
 
 class BuildLogWriter:

@@ -258,12 +258,21 @@ def set_backend(backend: _Backend | None) -> None:
 
 
 def _backend() -> _Backend:
+    global _BACKEND
     if _BACKEND is not None:
         return _BACKEND
     with _BACKEND_LOCK:
         if _BACKEND is not None:
             return _BACKEND
-        return _AzureAppendHistoryBackend()
+        # Cache the lazily-created backend. Without this every record_event /
+        # tail_events call built a fresh _AzureAppendHistoryBackend whose
+        # per-instance ``_ensured`` flag was always False, so each call issued
+        # a redundant BlobServiceClient.create_container (observed as ~1200
+        # create_container dependency calls / 4h in App Insights). The cached
+        # instance ensures the container exactly once per process. Tests reset
+        # via set_backend(None).
+        _BACKEND = _AzureAppendHistoryBackend()
+        return _BACKEND
 
 
 def _now_iso() -> str:
