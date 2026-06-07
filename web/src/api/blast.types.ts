@@ -83,6 +83,14 @@ export interface BlastSubmitRequest {
   tie_order_oracle_text?: string;
   tie_order_oracle_strict?: boolean;
   use_db_order_oracle?: boolean;
+  /**
+   * Client-generated stable key so a retried / double-fired submit dedupes to
+   * the same job instead of creating a duplicate BLAST run. The backend turns
+   * `(tenant, caller, idempotency_key)` into a deterministic job_id (uuid5) and
+   * returns the existing job on replay. Generated once per submit attempt in
+   * `useSubmitMutation` so a transport retry keeps the same key.
+   */
+  idempotency_key?: string;
 }
 
 export interface BlastSubmitResponse {

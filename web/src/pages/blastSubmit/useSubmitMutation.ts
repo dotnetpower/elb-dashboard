@@ -84,7 +84,19 @@ export function useSubmitMutation({
   clearDraft,
 }: UseSubmitMutationArgs) {
   return useMutation({
-    mutationFn: (req: BlastSubmitRequest) => blastApi.submit(req),
+    mutationFn: (req: BlastSubmitRequest) => {
+      // Attach a stable idempotency key so a retried or double-fired submit
+      // dedupes to the same job instead of creating a duplicate BLAST run.
+      // TanStack Query may retry mutationFn on transport errors, and the
+      // browser/proxy can replay a request; the backend derives a
+      // deterministic job_id from (tenant, caller, idempotency_key) and
+      // returns the existing job on replay. Generated here per attempt and
+      // reused if the caller already supplied one.
+      const withKey: BlastSubmitRequest = req.idempotency_key
+        ? req
+        : { ...req, idempotency_key: makeIdempotencyKey() };
+      return blastApi.submit(withKey);
+    },
     onSuccess: (resp, req) => {
       clearDraft();
       toast("BLAST search submitted! Tracking your job…", "success");
@@ -95,6 +107,19 @@ export function useSubmitMutation({
       toast(`Submission failed: ${friendly}`, "error");
     },
   });
+}
+
+/** Best-effort UUID for the submit idempotency key (falls back when
+ * `crypto.randomUUID` is unavailable, e.g. older non-secure-context browsers). */
+function makeIdempotencyKey(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // fall through to the timestamp-based fallback
+  }
+  return `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export interface BuildSubmitRequestArgs {
