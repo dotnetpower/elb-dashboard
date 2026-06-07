@@ -15,6 +15,9 @@ Key entry points: `BuildLogWriter`, `open_writer`, `read_blob`,
   `blob_name`, `set_backend`, `InMemoryBuildLogBackend`, `_mask_secrets`.
 Risky contracts: Append-blob block size is bounded; writers chunk lines
   so a runaway producer can't blow past Azure's 4 MiB block ceiling.
+  Writers also flush on a short time interval (`_FLUSH_INTERVAL_SECONDS`)
+  so the live build-log viewer sees incremental output during a build
+  instead of nothing until the component finishes.
   Tests must use `InMemoryBuildLogBackend` (guarded by
   `PYTEST_CURRENT_TEST`).
 Validation: `uv run pytest -q api/tests/test_upgrade_build_logs.py`.
@@ -26,6 +29,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections.abc import Iterable
 from typing import Protocol
 
@@ -38,6 +42,15 @@ LOGGER = logging.getLogger(__name__)
 BUILD_LOG_CONTAINER = "upgrade-logs"
 _BLOB_ENDPOINT_ENV = "AZURE_BLOB_ENDPOINT"
 _MAX_BLOCK_BYTES = 3 * 1024 * 1024  # 3 MiB; Azure caps at 4 MiB per append.
+# Size trigger: flush once the in-process buffer reaches this many bytes so a
+# single append never carries an unbounded payload.
+_FLUSH_SIZE_BYTES = 64 * 1024
+# Time trigger: even below the size threshold, flush at most this many seconds
+# after the previous flush so the live build-log viewer (polls ~3 s while the
+# upgrade is active) shows incremental `az acr build` output instead of staying
+# empty until the component build finishes. A typical sub-64-KiB build would
+# otherwise only flush in the final `flush()` and read back 0 bytes throughout.
+_FLUSH_INTERVAL_SECONDS = 2.0
 # Hard ceiling on the per-writer in-process buffer. When the backend
 # repeatedly fails to flush (Storage 503, throttling, network blip) the
 # `_flush_locked` retry path puts the payload back so a transient outage
@@ -252,6 +265,7 @@ class BuildLogWriter:
         self._backend = backend
         self._buffer = bytearray()
         self._lock = threading.Lock()
+        self._last_flush_monotonic = time.monotonic()
         backend.create(name)
 
     @property
@@ -263,7 +277,15 @@ class BuildLogWriter:
         encoded = (masked.rstrip("\n") + "\n").encode("utf-8", errors="replace")
         with self._lock:
             self._buffer.extend(encoded)
-            if len(self._buffer) >= 64 * 1024:  # flush every ~64 KiB
+            # Flush on size OR on a short time interval. The time trigger keeps
+            # the live viewer fresh for typical sub-64-KiB builds; without it
+            # the buffer only drained in the final `flush()`.
+            if len(self._buffer) >= _FLUSH_SIZE_BYTES:
+                self._flush_locked()
+            elif (
+                time.monotonic() - self._last_flush_monotonic
+                >= _FLUSH_INTERVAL_SECONDS
+            ):
                 self._flush_locked()
 
     def write_lines(self, lines: Iterable[str]) -> None:
@@ -287,6 +309,8 @@ class BuildLogWriter:
                 len(payload),
                 self._name,
             )
+            # Leave _last_flush_monotonic unchanged so the next write_line
+            # retries promptly (the time trigger stays satisfied).
             # Put the bytes back so a future flush can retry, but enforce
             # the buffer ceiling so a backend in sustained failure mode
             # never grows our RSS without bound. Drop oldest — the tail
@@ -302,6 +326,8 @@ class BuildLogWriter:
                     combined = bytearray(_TRUNCATION_MARKER) + combined[-tail_budget:]
             self._buffer = combined
             raise
+        # Append succeeded — reset the time trigger.
+        self._last_flush_monotonic = time.monotonic()
 
 
 def open_writer(job_id: str, component: str) -> BuildLogWriter:

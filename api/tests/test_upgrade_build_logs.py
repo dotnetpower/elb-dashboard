@@ -53,6 +53,27 @@ def test_write_lines_iterable() -> None:
     assert payload == b"a\nb\nc\n"
 
 
+def test_writer_flushes_on_time_interval_below_size_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small (sub-64-KiB) build must flush incrementally on the time trigger
+    so the live viewer is not empty until the build finishes."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(build_logs.time, "monotonic", lambda: clock["t"])
+    writer = build_logs.open_writer("jobTime1", "api")
+
+    # First small line within the interval: buffered, not yet flushed.
+    writer.write_line("step 1/5")
+    assert build_logs.read_blob("jobTime1", "api") == b""
+
+    # Advance past the flush interval; the next line triggers a time-based flush
+    # that drains the whole buffer even though it is far below 64 KiB.
+    clock["t"] += build_logs._FLUSH_INTERVAL_SECONDS + 0.1
+    writer.write_line("step 2/5")
+    assert build_logs.read_blob("jobTime1", "api") == b"step 1/5\nstep 2/5\n"
+
+
+
 def test_writer_recovers_buffer_on_backend_failure() -> None:
     class _BoomBackend:
         def __init__(self) -> None:
