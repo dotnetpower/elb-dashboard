@@ -125,14 +125,14 @@ export function EndpointCard({
       // history.replaceState avoids a navigation, just updates the bar so the
       // user can re-copy or share without scrolling jump.
       window.history.replaceState(null, "", `${window.location.pathname}#${id}`);
-      navigator.clipboard?.writeText(url).then(
-        () => {
-          flashCopiedAnchor(true, 1500);
-        },
-        () => {
-          /* clipboard denied — URL still updated */
-        },
-      );
+      // The address bar now holds the shareable deep-link regardless of whether
+      // the clipboard write is permitted, so flash the confirmation immediately
+      // (the URL bar IS the fallback). Without this, a denied/unavailable
+      // clipboard left the user with NO feedback — the button looked dead.
+      flashCopiedAnchor(true, 1500);
+      void navigator.clipboard?.writeText(url).catch(() => {
+        /* clipboard denied — the URL bar already carries the deep-link */
+      });
     },
     [flashCopiedAnchor, id],
   );

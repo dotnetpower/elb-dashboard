@@ -644,7 +644,7 @@ export function UpgradePage() {
         </section>
       )}
 
-      {escape && (
+      {escape && escape.commands.length > 0 && (
         <section className="glass-card" style={cardStack}>
           <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
             <Terminal size={14} /> Escape-hatch commands
@@ -657,7 +657,11 @@ export function UpgradePage() {
           <button
             type="button"
             className="glass-button"
-            onClick={() => void navigator.clipboard.writeText(escape.commands.join("\n"))}
+            onClick={() => {
+              const text = escape.commands.join("\n");
+              if (!text || !navigator.clipboard) return;
+              void navigator.clipboard.writeText(text);
+            }}
           >
             <Copy size={14} strokeWidth={1.6} /> Copy commands
           </button>

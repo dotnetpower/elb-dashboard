@@ -75,7 +75,7 @@ export function StorageWarnings({ isPublic, isHnsEnabled }: StorageWarningsProps
         <WarningBanner
           icon={<ShieldAlert size={13} strokeWidth={1.5} />}
           title="Public network access is enabled"
-          detail="Expected: Private only · Investigate and remediate"
+          detail="Expected: Private only. Set the Storage account to Private only in the Azure Portal (or, for a local-debug session, run scripts/dev/storage-public-access.sh off)."
         />
       )}
 
