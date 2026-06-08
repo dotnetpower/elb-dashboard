@@ -80,6 +80,109 @@ def test_put_autostop_persists_preference(client: TestClient) -> None:
     assert follow["idle_minutes"] == 30
 
 
+def test_put_autostop_shrinking_window_resets_idle_clock(
+    client: TestClient,
+) -> None:
+    """Lowering ``idle_minutes`` (e.g. 240 → 60) must NOT make the cluster
+    look like it is about to stop immediately. The route stamps
+    ``last_started_at = now`` on a downward change so the new, shorter window
+    is measured from the change moment (live report 2026-06-08)."""
+    from api.services.auto_stop import get_auto_stop_preference
+
+    # Seed a preference with a long window and an OLD last-activity anchor by
+    # writing it directly, then simulate "the cluster has been idle for hours".
+    client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 240,
+        },
+    )
+    before = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
+    assert before is not None
+    # Backdate last_started_at to 3h ago — within the 4h window but beyond 1h.
+    from datetime import UTC, datetime, timedelta
+
+    from api.services.auto_stop import save_auto_stop_preference
+
+    before.last_started_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat(
+        timespec="seconds"
+    )
+    save_auto_stop_preference(before)
+
+    # Now shrink the window to 1h. Without the reset, deadline =
+    # (now-3h)+1h = now-2h → seconds_left < 0 → immediate stop/warn.
+    resp = client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 60,
+        },
+    )
+    assert resp.status_code == 200
+    after = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
+    assert after is not None
+    assert after.idle_minutes == 60
+    # The anchor was reset to ~now, so the fresh 1h window starts now.
+    anchor = datetime.fromisoformat(after.last_started_at)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=UTC)
+    age_seconds = (datetime.now(UTC) - anchor).total_seconds()
+    assert age_seconds < 120, "last_started_at should be reset to ~now on shrink"
+
+
+def test_put_autostop_raising_window_keeps_idle_clock(client: TestClient) -> None:
+    """Raising ``idle_minutes`` (60 → 240) only extends the deadline, so the
+    idle-clock anchor must be preserved (no spurious reset)."""
+    from datetime import UTC, datetime, timedelta
+
+    from api.services.auto_stop import (
+        get_auto_stop_preference,
+        save_auto_stop_preference,
+    )
+
+    client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 60,
+        },
+    )
+    seeded = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
+    assert seeded is not None
+    old_anchor = (datetime.now(UTC) - timedelta(minutes=20)).isoformat(
+        timespec="seconds"
+    )
+    seeded.last_started_at = old_anchor
+    save_auto_stop_preference(seeded)
+
+    resp = client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 240,
+        },
+    )
+    assert resp.status_code == 200
+    after = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
+    assert after is not None
+    assert after.idle_minutes == 240
+    # Anchor preserved (not reset) on an upward change.
+    assert after.last_started_at == old_anchor
+
+
 def test_put_autostop_rejects_invalid_idle_minutes(client: TestClient) -> None:
     """`17` is not an allowed bucket — route returns 400 with a clear contract message
     instead of silently clamping the value (which was the previous, surprising behaviour)."""

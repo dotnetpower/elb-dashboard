@@ -472,6 +472,23 @@ def put_autostop(
         pref.last_skip_at = existing.last_skip_at
         pref.last_skip_reason = existing.last_skip_reason
         pref.extend_until = existing.extend_until
+        # ``created_at`` / ``last_started_at`` are idle-clock anchors the
+        # evaluator reads; the PUT body never carries them, so without this
+        # restore every toggle would reset ``created_at`` to now (and drop a
+        # real ``last_started_at``). Carry them forward by default.
+        pref.created_at = existing.created_at
+        pref.last_started_at = existing.last_started_at
+        # Idle-clock reset on a SHORTER window. Shrinking ``idle_minutes``
+        # (e.g. 4h → 1h) recomputes ``deadline = last_activity + new_window``;
+        # when the last activity predates the new (smaller) window the
+        # evaluator would fire ``stop`` (or a warn banner) on the very next
+        # tick — the cluster looks like it is "about to stop immediately"
+        # right after the user lowered the limit. Treat a downward change as
+        # a fresh intent signal: stamp ``last_started_at = now`` so the new,
+        # shorter window is measured from the change moment. Raising the
+        # window (1h → 4h) only extends the deadline, so it needs no reset.
+        if existing.idle_minutes and pref.idle_minutes < existing.idle_minutes:
+            pref.last_started_at = pref.updated_at
     saved = save_auto_stop_preference(pref)
     _invalidate_status_cache(
         body.subscription_id, body.resource_group, body.cluster_name

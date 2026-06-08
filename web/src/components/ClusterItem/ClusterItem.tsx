@@ -9,13 +9,11 @@ import {
   readAutoWarmupDbs,
 } from "@/components/cards/storage/autoWarmupPrefs";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
-import { getWorkloadNodeCount } from "@/pages/blastSubmit/computeEnvironment";
 
 import { DatabaseChipStrip } from "./DatabaseChipStrip";
 import { StartEstimatePanel } from "./StartEstimatePanel";
 import { startingStatusLine, useStartProgress } from "./startEstimate";
 import { AutoStopPanel } from "./AutoStopPanel";
-import { ScalePanel } from "./ScalePanel";
 import { useClusterDbChips } from "./useClusterDbChips";
 import { useClusterShardMutation } from "./useClusterShardMutation";
 import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
@@ -203,23 +201,6 @@ export function ClusterItem({
             shardError={shardError}
             clusterNumNodes={clusterNumNodes}
             clusterMachineType={clusterMachineType}
-          />
-        )}
-        {showOperationalDetails && (
-          <ScalePanel
-            subscriptionId={subscriptionId}
-            resourceGroup={resourceGroup}
-            clusterName={c.name}
-            currentNodeCount={getWorkloadNodeCount(c) ?? clusterNumNodes}
-            clusterIsRunning={isRunning}
-            machineType={clusterMachineType || undefined}
-            storageAccount={storageAccount}
-            storageResourceGroup={storageResourceGroup}
-            region={region || c.region}
-            acrResourceGroup={acrResourceGroup}
-            acrName={acrName}
-            terminalResourceGroup={terminalResourceGroup}
-            terminalVmName={terminalVmName}
           />
         )}
         {showOperationalDetails && (

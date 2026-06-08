@@ -216,6 +216,14 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'FRONTEND_UPSTREAM', value: 'http://127.0.0.1:8081' }
             { name: 'TERMINAL_UPSTREAM', value: 'http://127.0.0.1:7681' }
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
+            // Platform Storage account name. Surfaced to api/worker so the
+            // auto OpenAPI deploy (api.tasks.openapi.auto_deploy
+            // `build_auto_openapi_payload`) can pass a non-empty
+            // `storage_account` to elb-openapi. Without it the deployed
+            // openapi pod gets `ELB_STORAGE_ACCOUNT=""` and every BLAST
+            // submit fails with an azcopy upload to `https://.blob...`
+            // (empty host) 60s timeout (live E2E 2026-06-08).
+            { name: 'STORAGE_ACCOUNT_NAME', value: platformStorageAccountName }
             // Platform ACR name. Surfaced to the api/worker/beat sidecars so
             // the self-upgrade image builder (api.services.upgrade.image_builder
             // `_acr_name()`) and the beat reconciler revision GC can run
@@ -374,6 +382,13 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // shared secret as the api sidecar.
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
             { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
+            // Platform Storage account name. The worker runs the auto OpenAPI
+            // deploy (api.tasks.openapi.auto_deploy) triggered by aks_start /
+            // provision, which needs a non-empty `storage_account` or the
+            // deployed openapi pod gets `ELB_STORAGE_ACCOUNT=""` and BLAST
+            // submit fails (azcopy to empty `https://.blob...` host; live E2E
+            // 2026-06-08). Keep in sync with the api/terminal sidecars.
+            { name: 'STORAGE_ACCOUNT_NAME', value: platformStorageAccountName }
             // Platform ACR name. The worker runs the self-upgrade pipeline
             // (api.tasks.upgrade.execute_upgrade), whose image builder calls
             // `az acr build` against this registry. Without it the upgrade

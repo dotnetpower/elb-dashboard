@@ -10,6 +10,7 @@ import type {
 } from "@/api/endpoints";
 import { monitoringApi } from "@/api/endpoints";
 import { ClusterModalKubectl } from "@/components/ClusterDiagnostics";
+import { ScalePanel } from "@/components/ClusterItem/ScalePanel";
 import { WarmupSection } from "@/components/WarmupSection";
 
 import { IdentitySection } from "./IdentitySection";
@@ -66,6 +67,16 @@ export function DetailsModal({
   onClose: () => void;
 }) {
   const isRunning = powerState === "Running" && !isTransitioning;
+
+  // Workload (blastpool) pool node count for the scale control. Prefer the
+  // explicit `blastpool` pool, else the first User-mode pool, else the
+  // cluster-level `nodeCount`. Mirrors `selectWorkloadPool` in
+  // `web/src/pages/blastSubmit/computeEnvironment.ts`.
+  const workloadPool =
+    agentPools?.find((p) => p.name.toLowerCase() === "blastpool") ??
+    agentPools?.find((p) => (p.mode ?? "").toLowerCase() === "user");
+  const workloadNodeCount = workloadPool?.count ?? nodeCount ?? 0;
+  const workloadNodeSku = workloadPool?.vm_size ?? nodeSku ?? undefined;
 
   // ESC + body scroll lock
   useEffect(() => {
@@ -131,6 +142,30 @@ export function DetailsModal({
 
           {agentPools && agentPools.length > 0 && (
             <NodePoolsTable agentPools={agentPools} />
+          )}
+
+          {/* Workload-node scaling — slider + input to resize the blastpool.
+           *  Lives in the detail modal (not the cluster row) so the control is
+           *  surfaced where the node pool details are. Re-warm chains
+           *  automatically after a change (see ScalePanel / scale_aks). */}
+          {isRunning && (
+            <div style={{ marginTop: 12 }}>
+              <ScalePanel
+                subscriptionId={subscriptionId}
+                resourceGroup={resourceGroup}
+                clusterName={clusterName}
+                currentNodeCount={workloadNodeCount}
+                clusterIsRunning={isRunning}
+                machineType={workloadNodeSku || undefined}
+                storageAccount={storageAccount}
+                storageResourceGroup={storageResourceGroup}
+                region={region}
+                acrResourceGroup={acrResourceGroup}
+                acrName={acrName}
+                terminalResourceGroup={terminalResourceGroup}
+                terminalVmName={terminalVmName}
+              />
+            </div>
           )}
 
           {/* kubectl sections — only when fully running */}
