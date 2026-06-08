@@ -48,7 +48,7 @@ from api.tasks.azure.idle_autostop import (
     auto_stop_aks,
     evaluate_idle_clusters,
 )
-from api.tasks.azure.lifecycle import delete_aks, start_aks, stop_aks
+from api.tasks.azure.lifecycle import delete_aks, scale_aks, start_aks, stop_aks
 from api.tasks.azure.peering import (
     ensure_vnet_peering_with_cluster as _ensure_vnet_peering_with_cluster,
 )
@@ -102,6 +102,7 @@ __all__ = (
     "provision_app_insights",
     "reconcile_stale_aks_provisions",
     "resource_client",
+    "scale_aks",
     "start_aks",
     "stop_aks",
     "storage_client",

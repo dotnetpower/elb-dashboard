@@ -329,6 +329,118 @@ def _gate_aks_cluster(
     return _cached_or_compute(cache_key, _compute)
 
 
+def _gate_workload_nodes(
+    *, subscription_id: str, resource_group: str, cluster_name: str
+) -> GateResult:
+    """Verify the cluster has at least one Ready, schedulable workload node.
+
+    A running AKS cluster whose workload pool is scaled to 0 (autoscaler floor
+    of 0, or an operator scaled it down) still passes ``_gate_aks_cluster`` —
+    the control plane is ``Running``. But an ``elastic-blast`` submit then
+    applies a Kubernetes Job that sits ``Pending`` forever because no
+    schedulable workload node exists, stranding the queued job row. This gate
+    fails closed so the submit is rejected up front with the same
+    ``no_workload_nodes`` / ``scale_up_workload_pool`` remediation the sibling
+    ``/v1/ready`` probe surfaces — but it works on the dashboard Celery path
+    even when the optional elb-openapi sidecar is not deployed (in which case
+    ``_gate_openapi_ready`` is skipped and never sees the empty pool).
+
+    Ownership boundary: this gate only speaks to the "cluster is Running but the
+    workload pool has no Ready node" case. When the cluster is absent / not
+    Running / unverifiable, it returns ``ok`` (skip) and defers to
+    ``_gate_aks_cluster``, which owns that verdict — this avoids a duplicate
+    blocking entry for the same root cause.
+
+    Ready-node counting reuses ``k8s_ready_warmup_node_names`` (the same helper
+    the warmup reconciler uses): preferred ``blastpool`` nodes, falling back to
+    any non-system user-pool node, excluding cordoned / NotReady nodes. An empty
+    result while the cluster is Running is a definitive ``fail``; a K8s API error
+    at that point is ``unknown`` (so ``allow_unverified`` can downgrade it).
+
+    Cached per (subscription, RG, cluster) for 5s like the other ARM/K8s gates.
+    """
+    cache_key = f"nodes:{subscription_id}:{resource_group}:{cluster_name}"
+
+    def _compute() -> GateResult:
+        try:
+            from api.services import get_credential
+            from api.services.monitoring import list_aks_clusters
+
+            credential = get_credential()
+            clusters = list_aks_clusters(credential, subscription_id, resource_group)
+            match = next((c for c in clusters if c.get("name") == cluster_name), None)
+        except Exception as exc:
+            # Cannot even establish the cluster is Running — ``_gate_aks_cluster``
+            # owns the "cluster unreachable" verdict, so skip rather than emit a
+            # second blocking entry for the same cause.
+            LOGGER.info(
+                "submit gate: workload-node cluster precheck failed cluster=%s: %s",
+                cluster_name,
+                type(exc).__name__,
+            )
+            return GateResult(
+                id="workload_nodes",
+                status="ok",
+                severity="critical",
+                error_code="",
+                message="Cluster state unverifiable; aks_cluster gate owns this.",
+            )
+
+        if match is None or match.get("power_state") != "Running":
+            # Not Running / not found — ``_gate_aks_cluster`` already blocks.
+            return GateResult(
+                id="workload_nodes",
+                status="ok",
+                severity="critical",
+                error_code="",
+                message="Cluster not running; aks_cluster gate owns this.",
+            )
+
+        try:
+            from api.services.k8s.nodes import k8s_ready_warmup_node_names
+
+            ready = k8s_ready_warmup_node_names(
+                credential, subscription_id, resource_group, cluster_name
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "submit gate: workload-node probe failed cluster=%s: %s",
+                cluster_name,
+                type(exc).__name__,
+            )
+            return GateResult(
+                id="workload_nodes",
+                status="unknown",
+                severity="critical",
+                error_code="workload_nodes_check_unavailable",
+                message=f"Could not verify workload nodes ({type(exc).__name__}).",
+            )
+
+        if ready:
+            return GateResult(
+                id="workload_nodes",
+                status="ok",
+                severity="critical",
+                error_code="",
+                message=f"{len(ready)} Ready workload node(s) available.",
+            )
+        return GateResult(
+            id="workload_nodes",
+            status="fail",
+            severity="critical",
+            error_code="no_workload_nodes",
+            message=(
+                f"AKS cluster '{cluster_name}' is running but its workload pool "
+                "has no Ready node. A BLAST Job would stay Pending forever. "
+                "Scale the workload pool up to at least one node before submitting."
+            ),
+            action="Scale up workload pool",
+            action_type="scale_up_workload_pool",
+        )
+
+    return _cached_or_compute(cache_key, _compute)
+
+
 def _gate_openapi_ready() -> GateResult:
     """Pre-flight the sibling elb-openapi ``/v1/ready`` probe.
 
@@ -836,6 +948,11 @@ def evaluate_submit_gates(
         _gate_terminal_sidecar(),
         _gate_broker(),
         _gate_aks_cluster(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
+        _gate_workload_nodes(
             subscription_id=subscription_id,
             resource_group=resource_group,
             cluster_name=cluster_name,

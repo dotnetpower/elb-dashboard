@@ -107,6 +107,57 @@ def test_aks_start_forwards_auto_warmup_payload(
     }
 
 
+def test_aks_scale_forwards_node_count_and_warmup(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, fake_delay = make_delay_recorder("task-scale-aks")
+
+    monkeypatch.setattr("api.tasks.azure.scale_aks.delay", fake_delay)
+
+    response = client.post(
+        "/api/aks/scale",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "node_count": 5,
+            "auto_warmup": {
+                "storage_account": "elbstg01",
+                "databases": ["core_nt"],
+                "enabled": True,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["task_id"] == "task-scale-aks"
+    assert calls[0]["node_count"] == 5
+    assert calls[0]["cluster_name"] == "elb-cluster"
+    assert calls[0]["auto_warmup"]["databases"] == ["core_nt"]
+
+
+@pytest.mark.parametrize("bad_count", [0, -1, 9999, "abc", None])
+def test_aks_scale_rejects_invalid_node_count(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, bad_count: object
+) -> None:
+    calls, fake_delay = make_delay_recorder("should-not-run")
+    monkeypatch.setattr("api.tasks.azure.scale_aks.delay", fake_delay)
+
+    response = client.post(
+        "/api/aks/scale",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "node_count": bad_count,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_node_count"
+    assert calls == [], "task must not be enqueued for an invalid node_count"
+
+
 def test_aks_start_forwards_auto_openapi_payload(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

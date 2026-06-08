@@ -5,8 +5,8 @@ Responsibility: Drive the AKS managed-cluster lifecycle ARM operations and, on s
     SPA asked for when the user pressed Start.
 Edit boundaries: Lifecycle calls and follow-on enqueues only. Provision-time concerns
     (pool layout, runtime RBAC) live in `provision.py` / `rbac.py`.
-Key entry points: `start_aks`, `stop_aks`, `delete_aks` (Celery tasks
-    `api.tasks.azure.{start,stop,delete}_aks`).
+Key entry points: `start_aks`, `scale_aks`, `stop_aks`, `delete_aks` (Celery tasks
+    `api.tasks.azure.{start,scale,stop,delete}_aks`).
 Risky contracts: Task names referenced by routes and tests (`test_warmup_route`
     monkeypatches `api.tasks.azure.start_aks.delay` and
     `api.tasks.azure.assign_aks_roles.delay`). Follow-on enqueues must remain
@@ -100,6 +100,104 @@ def _record_lifecycle_timing(
         LOGGER.warning("cluster timing record failed (%s): %s", phase, exc)
 
 
+def _enqueue_forced_rewarm(
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    auto_warmup: dict[str, Any] | None,
+    num_nodes_override: int | None = None,
+    log_context: str = "AKS lifecycle",
+) -> str:
+    """Persist the Auto warm preference with ``force_rewarm_pending`` and enqueue
+    a forced ``reconcile_auto_warmup``. Returns the reconcile task id, or ``""``
+    when there is nothing to warm / the enqueue failed (never raises).
+
+    Shared by ``start_aks`` (re-warm a freshly-started cluster) and ``scale_aks``
+    (re-warm after a workload-pool node-count change). The one-shot reconcile
+    enqueued here usually fires before the (re-)scaled blastpool nodes register
+    Ready, so it is dropped at the readiness gate; ``force_rewarm_pending`` lets
+    the recurring beat reconcile keep forcing the re-warm across ticks until the
+    cluster is workload-ready (it clears the flag once the warmup is actually
+    enqueued).
+
+    ``num_nodes_override`` lets the scale path pin the expected warmup node count
+    to the new pool size so the readiness gate waits for exactly the post-scale
+    node set instead of a stale ``pref.num_nodes``.
+    """
+    if not auto_warmup:
+        return ""
+    try:
+        from api.celery_app import celery_app
+        from api.services.auto_warmup import (
+            normalise_preference,
+            save_auto_warmup_preference,
+        )
+
+        pref_payload: dict[str, Any] = {
+            **auto_warmup,
+            "subscription_id": subscription_id,
+            "resource_group": resource_group,
+            "cluster_name": cluster_name,
+            "force_rewarm_pending": True,
+        }
+        if num_nodes_override is not None:
+            pref_payload["num_nodes"] = num_nodes_override
+        pref = save_auto_warmup_preference(normalise_preference(pref_payload))
+        task = celery_app.send_task(
+            "api.tasks.storage.reconcile_auto_warmup",
+            kwargs={"preference": pref.to_dict(), "force": True},
+            # Route to the dedicated `reconcile` queue (same as the beat
+            # reconcile) so this post-lifecycle reconcile is not delayed behind
+            # — or competing with — interactive BLAST submits backed up on the
+            # `storage` queue.
+            queue="reconcile",
+        )
+        return task.id
+    except Exception as exc:
+        LOGGER.warning(
+            "forced re-warm reconcile enqueue failed (%s): %s",
+            log_context,
+            type(exc).__name__,
+        )
+        return ""
+
+
+def _resolve_workload_pool_name(
+    aks: Any, resource_group: str, cluster_name: str, pool_name: str = ""
+) -> str:
+    """Return the name of the workload AgentPool to scale.
+
+    When ``pool_name`` is supplied it is used verbatim. Otherwise the workload
+    pool is resolved the same way the SPA does (``selectWorkloadPool`` in
+    ``web/src/pages/blastSubmit/computeEnvironment.ts``): prefer ``blastpool``,
+    else the first User-mode pool. Returns ``""`` when no candidate exists so the
+    caller can fail with a clear error instead of a confusing ARM 404.
+    """
+    if pool_name:
+        return pool_name
+    try:
+        pools = list(aks.agent_pools.list(resource_group, cluster_name))
+    except Exception as exc:
+        LOGGER.warning(
+            "workload pool resolve failed cluster=%s: %s",
+            cluster_name,
+            type(exc).__name__,
+        )
+        return ""
+    blast = next(
+        (p for p in pools if (getattr(p, "name", "") or "").lower() == "blastpool"),
+        None,
+    )
+    if blast is not None:
+        return str(getattr(blast, "name", "") or "")
+    user = next(
+        (p for p in pools if (getattr(p, "mode", "") or "").lower() == "user"),
+        None,
+    )
+    return str(getattr(user, "name", "") or "") if user is not None else ""
+
+
 @shared_task(
     name="api.tasks.azure.start_aks",
     bind=True,
@@ -173,42 +271,13 @@ def start_aks(
         )
     auto_warmup_task_id = ""
     if auto_warmup:
-        try:
-            from api.celery_app import celery_app
-            from api.services.auto_warmup import (
-                normalise_preference,
-                save_auto_warmup_preference,
-            )
-
-            pref_payload = {
-                **auto_warmup,
-                "subscription_id": subscription_id,
-                "resource_group": resource_group,
-                "cluster_name": cluster_name,
-                # Persist the forced re-warm intent. The one-shot reconcile
-                # enqueued just below fires before the blastpool nodes register
-                # Ready, so it is dropped at the readiness gate; the flag lets
-                # the recurring beat reconcile keep forcing the re-warm across
-                # ticks until the cluster is workload-ready (it clears the flag
-                # once the warmup is actually enqueued).
-                "force_rewarm_pending": True,
-            }
-            pref = save_auto_warmup_preference(normalise_preference(pref_payload))
-            task = celery_app.send_task(
-                "api.tasks.storage.reconcile_auto_warmup",
-                kwargs={"preference": pref.to_dict(), "force": True},
-                # Route to the dedicated `reconcile` queue (same as the beat
-                # reconcile) so this post-start reconcile is not delayed behind
-                # — or competing with — interactive BLAST submits backed up on
-                # the `storage` queue.
-                queue="reconcile",
-            )
-            auto_warmup_task_id = task.id
-        except Exception as exc:
-            LOGGER.warning(
-                "auto warm reconcile enqueue failed after AKS start: %s",
-                type(exc).__name__,
-            )
+        auto_warmup_task_id = _enqueue_forced_rewarm(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            auto_warmup=auto_warmup,
+            log_context="aks_start",
+        )
     openapi_task_id = ""
     try:
         from api.tasks.openapi.auto_deploy import (
@@ -233,6 +302,135 @@ def start_aks(
         "noop": not started_now,
         "auto_warmup_task_id": auto_warmup_task_id,
         "openapi_task_id": openapi_task_id,
+    }
+
+
+@shared_task(
+    name="api.tasks.azure.scale_aks",
+    bind=True,
+    max_retries=3,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+)
+def scale_aks(
+    self: Any,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    node_count: int,
+    pool_name: str = "",
+    auto_warmup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Scale the workload (blastpool) node pool to ``node_count`` nodes.
+
+    Side effects: PUTs the resolved workload AgentPool with the new ``count`` via
+    ``agent_pools.begin_create_or_update``. When an Auto warm preference is
+    supplied, queues a forced warmup reconcile (same mechanism as ``start_aks``)
+    so freshly-added nodes get their node-local BLAST DB cache and the warmup
+    status reflects the new pool size. A no-op (target == current count) skips
+    the ARM PUT but still ensures the re-warm runs when ``auto_warmup`` is given
+    (see the retry note below).
+
+    Idempotency / retry safety: the per-pool PUT is itself idempotent (ARM
+    converges the count), so ``autoretry_for=(Exception,)`` is safe — re-issuing
+    the PUT with the same target converges rather than diverges. But that retry
+    creates a subtle gap: if ``poller.result()`` raises a *transient* error
+    AFTER ARM already accepted the change, the autoretry re-runs from the top,
+    now observes ``previous_count == target`` (ARM already converged), and would
+    otherwise take the no-op branch and skip the re-warm entirely — silently
+    leaving the freshly-added nodes cold with no backstop (no ``force_rewarm_
+    pending`` preference was saved on a first-ever scale). To close that gap the
+    no-op branch ALSO enqueues the forced re-warm whenever ``auto_warmup`` is
+    supplied. That is safe: the re-warm is idempotent (the warmup task skips
+    already-cached nodes) and ``reconcile_auto_warmup`` already runs concurrently
+    with the beat reconcile in production. The SPA disables Apply when the count
+    is unchanged, so the only callers that reach the no-op branch are races /
+    retries — both of which want the re-warm.
+    """
+    target = int(node_count)
+    cred = _facade.get_credential()
+    aks = _facade.aks_client(cred, subscription_id)
+    resolved_pool_name = _resolve_workload_pool_name(
+        aks, resource_group, cluster_name, pool_name
+    )
+    if not resolved_pool_name:
+        raise RuntimeError(
+            f"no workload node pool found on cluster '{cluster_name}' to scale"
+        )
+    pool = aks.agent_pools.get(resource_group, cluster_name, resolved_pool_name)
+    previous_count = int(getattr(pool, "count", 0) or 0)
+    if previous_count == target:
+        LOGGER.info(
+            "scale_aks no-op cluster=%s pool=%s count=%d",
+            cluster_name,
+            resolved_pool_name,
+            target,
+        )
+        # Still ensure the re-warm: a no-op here is reachable via an autoretry
+        # that races ARM's own convergence after a successful PUT, where the
+        # user's "re-warm on change" intent must not be silently dropped.
+        auto_warmup_task_id = _enqueue_forced_rewarm(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            auto_warmup=auto_warmup,
+            num_nodes_override=target,
+            log_context="aks_scale_noop",
+        )
+        return {
+            "cluster_name": cluster_name,
+            "action": "scale",
+            "status": "completed",
+            "noop": True,
+            "pool_name": resolved_pool_name,
+            "previous_count": previous_count,
+            "node_count": target,
+            "auto_warmup_task_id": auto_warmup_task_id,
+        }
+    _scaled_at = time.monotonic()
+    pool.count = target
+    poller = aks.agent_pools.begin_create_or_update(
+        resource_group, cluster_name, resolved_pool_name, pool
+    )
+    poller.result()
+    LOGGER.info(
+        "scale_aks cluster=%s pool=%s %d->%d",
+        cluster_name,
+        resolved_pool_name,
+        previous_count,
+        target,
+    )
+    _record_lifecycle_timing(
+        "aks_scale",
+        time.monotonic() - _scaled_at,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    # Re-warm after a node-count change: scale-up adds cold nodes that need the
+    # node-local BLAST DB cache, and the warmup status/readiness gate must track
+    # the new pool size. Idempotent — the warmup task skips already-cached nodes,
+    # so a scale-down (remaining nodes already warm) is a cheap no-op.
+    auto_warmup_task_id = _enqueue_forced_rewarm(
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        auto_warmup=auto_warmup,
+        num_nodes_override=target,
+        log_context="aks_scale",
+    )
+    return {
+        "cluster_name": cluster_name,
+        "action": "scale",
+        "status": "completed",
+        "noop": False,
+        "pool_name": resolved_pool_name,
+        "previous_count": previous_count,
+        "node_count": target,
+        "auto_warmup_task_id": auto_warmup_task_id,
     }
 
 

@@ -47,6 +47,7 @@ import { VnetPeeringSection } from "@/components/settings/sections/VnetPeeringSe
 import { DiagnosticsSection } from "@/components/settings/sections/DiagnosticsSection";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { usePreferences } from "@/hooks/usePreferences";
+import { formatBuildVersion } from "@/utils/buildVersion";
 
 export type SettingsSectionId =
   | "appearance"
@@ -62,17 +63,6 @@ export type SettingsSectionId =
   | "resources";
 
 type SectionId = SettingsSectionId;
-
-// Mirror of the Layout header's build-version formatter (A.B.<buildNumber>).
-// Kept local so the Settings footer can show the same stamp without importing
-// Layout's internal helper.
-function formatBuildVersion(releaseVersion: string, buildNumber: string): string {
-  const parts = releaseVersion.split(".");
-  if (parts.length !== 3 || !/^\d+$/.test(buildNumber)) {
-    return releaseVersion;
-  }
-  return `${parts[0]}.${parts[1]}.${buildNumber}`;
-}
 
 const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> = [
   { id: "appearance", label: "Appearance", icon: <Sun size={14} strokeWidth={1.5} /> },

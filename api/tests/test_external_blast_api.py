@@ -1120,6 +1120,9 @@ def test_canonical_jobs_list_reports_external_detail_code(monkeypatch):
     assert body["jobs"] == []
     assert body["external_degraded"] is True
     assert body["external_degraded_reason"] == "openapi_upstream_error"
+    # The SPA Recent searches page renders this so the external-plane outage is
+    # not swallowed silently. Prefer the upstream client's structured message.
+    assert body["external_degraded_message"] == "bad gateway"
     assert "degraded" not in body
 
 

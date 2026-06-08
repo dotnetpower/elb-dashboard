@@ -222,6 +222,114 @@ def test_aks_cluster_gate_unknown_when_arm_errors(
     assert result.error_code == "cluster_check_unavailable"
 
 
+def _stub_running_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_a, **_k: [{"name": "elb-cluster", "power_state": "Running"}],
+    )
+
+
+def test_workload_nodes_gate_ok_with_ready_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submit_gates.reset_submit_gates_cache()
+    _stub_running_cluster(monkeypatch)
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_k: ["aks-blastpool-0", "aks-blastpool-1"],
+    )
+    result = submit_gates._gate_workload_nodes(
+        subscription_id="sub", resource_group="rg", cluster_name="elb-cluster"
+    )
+    assert result.status == "ok"
+    assert result.error_code == ""
+
+
+def test_workload_nodes_gate_blocks_when_pool_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submit_gates.reset_submit_gates_cache()
+    _stub_running_cluster(monkeypatch)
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_k: [],
+    )
+    result = submit_gates._gate_workload_nodes(
+        subscription_id="sub", resource_group="rg", cluster_name="elb-cluster"
+    )
+    assert result.status == "fail"
+    assert result.severity == "critical"
+    assert result.error_code == "no_workload_nodes"
+    assert result.action_type == "scale_up_workload_pool"
+
+
+def test_workload_nodes_gate_skips_when_cluster_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the cluster is Stopped, aks_cluster gate owns the verdict; this
+    gate must skip (ok) so it does not add a duplicate blocking entry."""
+    submit_gates.reset_submit_gates_cache()
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_a, **_k: [{"name": "elb-cluster", "power_state": "Stopped"}],
+    )
+
+    def _should_not_run(*_a: Any, **_k: Any) -> list[str]:
+        raise AssertionError("node probe must not run when cluster is not Running")
+
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names", _should_not_run
+    )
+    result = submit_gates._gate_workload_nodes(
+        subscription_id="sub", resource_group="rg", cluster_name="elb-cluster"
+    )
+    assert result.status == "ok"
+    assert result.error_code == ""
+
+
+def test_workload_nodes_gate_skips_when_cluster_unverifiable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARM error on the cluster precheck → skip (ok), deferring to aks_cluster
+    so allow_unverified=False does not double-block on the same root cause."""
+    submit_gates.reset_submit_gates_cache()
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    def _boom(*_a: Any, **_k: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("ARM throttled")
+
+    monkeypatch.setattr("api.services.monitoring.list_aks_clusters", _boom)
+    result = submit_gates._gate_workload_nodes(
+        subscription_id="sub", resource_group="rg", cluster_name="elb-cluster"
+    )
+    assert result.status == "ok"
+    assert result.error_code == ""
+
+
+def test_workload_nodes_gate_unknown_when_k8s_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cluster is Running but the K8s node API errors → unknown/critical so
+    allow_unverified can downgrade it to a warning (fail-closed by default)."""
+    submit_gates.reset_submit_gates_cache()
+    _stub_running_cluster(monkeypatch)
+
+    def _boom(*_a: Any, **_k: Any) -> list[str]:
+        raise RuntimeError("k8s API unreachable")
+
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names", _boom
+    )
+    result = submit_gates._gate_workload_nodes(
+        subscription_id="sub", resource_group="rg", cluster_name="elb-cluster"
+    )
+    assert result.status == "unknown"
+    assert result.severity == "critical"
+    assert result.error_code == "workload_nodes_check_unavailable"
+
+
 def test_blast_database_gate_fail_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     from api.services.blast.task_config import BlastDatabaseAvailabilityError
 
@@ -626,6 +734,12 @@ def _stub_all_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         "api.services.monitoring.list_aks_clusters",
         lambda *_a, **_k: [{"name": "elb-cluster", "power_state": "Running"}],
     )
+    # _gate_workload_nodes counts Ready workload nodes via the warmup helper.
+    # Stub a non-empty pool so the gate passes in the all-OK fixture.
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_k: ["aks-blastpool-node-0"],
+    )
     monkeypatch.setattr(
         "api.services.blast.task_config.validate_blast_database_available",
         lambda **_k: {
@@ -662,6 +776,7 @@ def test_evaluate_ok_when_all_gates_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         "terminal_sidecar",
         "broker",
         "aks_cluster",
+        "workload_nodes",
         "openapi_ready",
         "blast_database",
         "node_memory_fit",
@@ -684,6 +799,28 @@ def test_evaluate_blocks_when_cluster_stopped(monkeypatch: pytest.MonkeyPatch) -
     )
     assert report.ok is False
     assert [g.error_code for g in report.blocking] == ["cluster_not_ready"]
+
+
+def test_evaluate_blocks_when_workload_pool_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a Running cluster with an empty workload pool blocks the
+    aggregate report with no_workload_nodes (the dashboard Celery path gap the
+    optional openapi /v1/ready gate does not cover when openapi is absent)."""
+    _stub_all_ok(monkeypatch)
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_k: [],
+    )
+    report = _REAL_EVALUATE(
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        database="core_nt",
+    )
+    assert report.ok is False
+    assert "no_workload_nodes" in [g.error_code for g in report.blocking]
 
 
 def test_evaluate_allow_unverified_downgrades_unknowns(

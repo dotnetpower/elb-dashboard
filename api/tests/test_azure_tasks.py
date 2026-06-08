@@ -1249,3 +1249,232 @@ def test_ensure_dashboard_mi_cluster_rg_roles_falls_back_to_env_var(
     assert captured == ["env-mi-oid", "env-mi-oid"]
     assert result["mi_principal_id"] == "env-mi-oid"
     assert "--principal-id env-mi-oid" in result["recovery_command"]
+
+
+# --------------------------- scale_aks (node count) --------------------------
+
+
+class _FakeAgentPool:
+    def __init__(self, name: str, count: int, mode: str = "User") -> None:
+        self.name = name
+        self.count = count
+        self.mode = mode
+
+
+class _FakeAgentPools:
+    def __init__(self, pools: list[_FakeAgentPool]) -> None:
+        self._pools = {p.name: p for p in pools}
+        self.put_calls: list[tuple[str, int]] = []
+
+    def list(self, _rg: str, _cluster: str) -> list[_FakeAgentPool]:
+        return list(self._pools.values())
+
+    def get(self, _rg: str, _cluster: str, name: str) -> _FakeAgentPool:
+        return self._pools[name]
+
+    def begin_create_or_update(
+        self, _rg: str, _cluster: str, name: str, pool: _FakeAgentPool
+    ) -> Any:
+        self.put_calls.append((name, int(pool.count)))
+        self._pools[name].count = int(pool.count)
+
+        class _Poller:
+            def result(self_inner) -> None:
+                return None
+
+        return _Poller()
+
+
+def _fake_aks_with_pools(pools: list[_FakeAgentPool]) -> Any:
+    agent_pools = _FakeAgentPools(pools)
+
+    class _FakeAks:
+        def __init__(self) -> None:
+            self.agent_pools = agent_pools
+
+    return _FakeAks(), agent_pools
+
+
+def test_scale_aks_resizes_blastpool_and_rewarms(monkeypatch) -> None:
+    """Scaling the workload pool PUTs the new count and chains a forced warmup
+    reconcile pinned to the new node count."""
+    aks, agent_pools = _fake_aks_with_pools(
+        [
+            _FakeAgentPool("systempool", 1, mode="System"),
+            _FakeAgentPool("blastpool", 10, mode="User"),
+        ]
+    )
+    sent: list[dict[str, Any]] = []
+
+    def fake_send_task(
+        task_name: str, *, kwargs: dict[str, Any], queue: str | None = None
+    ) -> AsyncResultStub:
+        sent.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
+        return AsyncResultStub("rewarm-1")
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: aks)
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    # Avoid touching real Storage when persisting the auto-warm preference.
+    saved: dict[str, Any] = {}
+
+    def _save(pref: Any) -> Any:
+        saved["pref"] = pref
+        return pref
+
+    monkeypatch.setattr("api.services.auto_warmup.save_auto_warmup_preference", _save)
+
+    result = azure.scale_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        node_count=5,
+        auto_warmup={
+            "storage_account": "elbstg01",
+            "storage_resource_group": "rg-stg",
+            "databases": ["core_nt"],
+            "enabled": True,
+        },
+    )
+
+    assert result["noop"] is False
+    assert result["previous_count"] == 10
+    assert result["node_count"] == 5
+    assert result["pool_name"] == "blastpool"
+    assert agent_pools.put_calls == [("blastpool", 5)]
+    # Re-warm reconcile enqueued, pinned to the new node count.
+    assert result["auto_warmup_task_id"] == "rewarm-1"
+    assert sent[0]["task_name"] == "api.tasks.storage.reconcile_auto_warmup"
+    assert sent[0]["queue"] == "reconcile"
+    assert sent[0]["kwargs"]["force"] is True
+    assert saved["pref"].num_nodes == 5
+    assert saved["pref"].force_rewarm_pending is True
+
+
+def test_scale_aks_noop_when_count_unchanged(monkeypatch) -> None:
+    """Target == current count must skip the ARM PUT. But the re-warm still
+    fires when ``auto_warmup`` is supplied, because the no-op branch is also
+    reachable via an autoretry that races ARM's convergence after a successful
+    PUT — dropping the re-warm there would silently leave new nodes cold."""
+    aks, agent_pools = _fake_aks_with_pools([_FakeAgentPool("blastpool", 5)])
+    sent: list[dict[str, Any]] = []
+
+    def fake_send_task(
+        task_name: str, *, kwargs: dict[str, Any], queue: str | None = None
+    ) -> AsyncResultStub:
+        sent.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
+        return AsyncResultStub("rewarm-noop")
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: aks)
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    monkeypatch.setattr(
+        "api.services.auto_warmup.save_auto_warmup_preference", lambda pref: pref
+    )
+
+    result = azure.scale_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        node_count=5,
+        auto_warmup={"storage_account": "x", "databases": ["core_nt"], "enabled": True},
+    )
+
+    assert result["noop"] is True
+    assert result["previous_count"] == 5
+    assert agent_pools.put_calls == [], "no-op scale must skip the ARM PUT"
+    # Re-warm still fires (idempotent backstop for the retry-after-PUT race).
+    assert result["auto_warmup_task_id"] == "rewarm-noop"
+    assert sent[0]["task_name"] == "api.tasks.storage.reconcile_auto_warmup"
+
+
+def test_scale_aks_noop_without_warmup_does_nothing(monkeypatch) -> None:
+    """A no-op with no ``auto_warmup`` skips both the PUT and the re-warm."""
+    aks, agent_pools = _fake_aks_with_pools([_FakeAgentPool("blastpool", 5)])
+    sent: list[dict[str, Any]] = []
+
+    def fake_send_task(*_a: Any, **_k: Any) -> AsyncResultStub:
+        sent.append({"a": _a, "k": _k})
+        return AsyncResultStub("unused")
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: aks)
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    result = azure.scale_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        node_count=5,
+    )
+
+    assert result["noop"] is True
+    assert result["auto_warmup_task_id"] == ""
+    assert agent_pools.put_calls == []
+    assert sent == []
+
+
+def test_scale_aks_without_warmup_skips_reconcile(monkeypatch) -> None:
+    """Scaling with no auto_warmup resizes the pool but enqueues no reconcile."""
+    aks, agent_pools = _fake_aks_with_pools([_FakeAgentPool("blastpool", 3)])
+    sent: list[dict[str, Any]] = []
+
+    def fake_send_task(*_a: Any, **_k: Any) -> AsyncResultStub:
+        sent.append({"a": _a, "k": _k})
+        return AsyncResultStub("unused")
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: aks)
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    result = azure.scale_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        node_count=8,
+    )
+
+    assert result["noop"] is False
+    assert result["node_count"] == 8
+    assert agent_pools.put_calls == [("blastpool", 8)]
+    assert result["auto_warmup_task_id"] == ""
+    assert sent == []
+
+
+def test_scale_aks_resolves_user_pool_when_no_blastpool(monkeypatch) -> None:
+    """Falls back to the first User-mode pool when there is no `blastpool`."""
+    aks, agent_pools = _fake_aks_with_pools(
+        [
+            _FakeAgentPool("systempool", 1, mode="System"),
+            _FakeAgentPool("workpool", 4, mode="User"),
+        ]
+    )
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: aks)
+
+    result = azure.scale_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        node_count=6,
+    )
+
+    assert result["pool_name"] == "workpool"
+    assert agent_pools.put_calls == [("workpool", 6)]
+
+
+def test_scale_aks_raises_when_no_workload_pool(monkeypatch) -> None:
+    """A cluster with only a system pool has no workload pool to scale."""
+    aks, _ = _fake_aks_with_pools([_FakeAgentPool("systempool", 1, mode="System")])
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: aks)
+
+    import pytest as _pytest
+
+    with _pytest.raises(RuntimeError, match="no workload node pool"):
+        azure.scale_aks.run(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            node_count=2,
+        )

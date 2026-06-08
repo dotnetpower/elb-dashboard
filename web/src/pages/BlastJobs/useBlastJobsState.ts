@@ -121,6 +121,29 @@ export function useBlastJobsState() {
     };
   }, [jobsQuery.data, allJobs.length]);
 
+  // Distinct from `degradedNotice` (local Table outage): the external OpenAPI
+  // `/v1/jobs` plane can fail independently while the local job store is fine.
+  // The list route degrades to local rows + an `external_degraded` flag rather
+  // than 500ing, so without surfacing it the Recent searches page silently
+  // hides OpenAPI-submitted jobs. Show it even when local jobs exist, because
+  // the list is then known-incomplete.
+  const externalDegradedNotice = useMemo(() => {
+    const data = jobsQuery.data as
+      | {
+          external_degraded?: boolean;
+          external_degraded_reason?: string;
+          external_degraded_message?: string;
+        }
+      | undefined;
+    if (!data?.external_degraded) return null;
+    return {
+      reason: data.external_degraded_reason ?? "unknown",
+      message:
+        data.external_degraded_message ??
+        "Could not load jobs from the OpenAPI execution plane. Locally-recorded jobs are still shown.",
+    };
+  }, [jobsQuery.data]);
+
   const filtered = useMemo(() => {
     let list = [...allJobs];
     if (filter !== "all") {
@@ -189,6 +212,7 @@ export function useBlastJobsState() {
     deleteMutation,
     allJobs,
     degradedNotice,
+    externalDegradedNotice,
     filtered,
     grouped,
     counts,

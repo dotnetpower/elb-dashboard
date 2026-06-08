@@ -117,6 +117,34 @@ def _external_row_with_scope_defaults(
     return scoped
 
 
+def _external_degraded_message(exc: Exception, reason: str) -> str:
+    """Build a short, human-readable note for a failed external `/v1/jobs` poll.
+
+    The list route never raises on an external-plane failure (it degrades to the
+    locally-recorded rows), so the SPA only ever sees `external_degraded=True` +
+    `external_degraded_reason`. Without a message the Recent searches page used
+    to swallow the failure silently — the user saw an incomplete list with no
+    hint that OpenAPI-submitted jobs could not be loaded. Prefer the upstream
+    client's already-sanitised structured detail message, then fall back to a
+    reason-shaped sentence.
+    """
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            message = detail.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()[:300]
+    if reason == "openapi_unreachable":
+        return (
+            "Could not reach the OpenAPI execution plane (the AKS cluster may be "
+            "stopped). Jobs submitted directly through OpenAPI are not shown."
+        )
+    return (
+        "Could not load jobs from the OpenAPI execution plane "
+        f"({reason}). Locally-recorded jobs are still shown."
+    )
+
+
 @router.get("/jobs")
 def blast_jobs_list(
     request: Request,
@@ -337,6 +365,7 @@ def blast_jobs_list(
             external_degraded = {
                 "external_degraded": True,
                 "external_degraded_reason": reason,
+                "external_degraded_message": _external_degraded_message(exc, reason),
             }
 
     jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)

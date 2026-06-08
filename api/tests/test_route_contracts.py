@@ -49,6 +49,7 @@ def test_aks_package_keeps_public_import_surface() -> None:
     assert callable(aks.aks_openapi_token)
     assert callable(aks.aks_openapi_token_generate)
     assert callable(aks.aks_start)
+    assert callable(aks.aks_scale)
     assert callable(aks.aks_assign_roles)
     assert callable(aks._invalidate_aks_monitor_cache)
 

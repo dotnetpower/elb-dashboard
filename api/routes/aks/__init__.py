@@ -30,6 +30,9 @@ from api.routes.aks.lifecycle import (
     aks_delete as aks_delete,
 )
 from api.routes.aks.lifecycle import (
+    aks_scale as aks_scale,
+)
+from api.routes.aks.lifecycle import (
     aks_start as aks_start,
 )
 from api.routes.aks.lifecycle import (

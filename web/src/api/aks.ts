@@ -322,6 +322,27 @@ export const aksApi = {
       cluster_name: clusterName,
     }),
 
+  /**
+   * Scale the workload (blastpool) node pool to `nodeCount` nodes. When an
+   * `autoWarmup` preference is supplied the backend chains a forced warmup
+   * reconcile after the pool resizes so freshly-added nodes get their
+   * node-local BLAST DB cache (and the warmup status tracks the new size).
+   */
+  scale: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    nodeCount: number,
+    autoWarmup?: Partial<AutoWarmupPreference>,
+  ) =>
+    api.post<AksLifecycleResponse>("/aks/scale", {
+      subscription_id: subscriptionId,
+      resource_group: rg,
+      cluster_name: clusterName,
+      node_count: nodeCount,
+      ...(autoWarmup ? { auto_warmup: autoWarmup } : {}),
+    }),
+
   assignRoles: (
     subscriptionId: string,
     rg: string,

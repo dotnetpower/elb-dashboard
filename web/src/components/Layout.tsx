@@ -17,16 +17,9 @@ import { useSettingsPanel } from "@/hooks/useSettingsPanel";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { useUpgradeAvailability } from "@/hooks/useUpgradeAvailability";
 import { prefetchBlastDatabasesQuery } from "@/hooks/usePrefetchBlastDatabases";
+import { formatBuildVersion } from "@/utils/buildVersion";
 
 import "./Layout.css";
-
-function formatBuildVersion(releaseVersion: string, buildNumber: string): string {
-  const parts = releaseVersion.split(".");
-  if (parts.length !== 3 || !/^\d+$/.test(buildNumber)) {
-    return releaseVersion;
-  }
-  return `${parts[0]}.${parts[1]}.${buildNumber}`;
-}
 
 // ---------------------------------------------------------------------------
 // UserMenuDropdown — avatar click → popover with user info + sign out

@@ -2,6 +2,7 @@ import { AlertTriangle } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { DegradedNotice } from "@/components/DegradedNotice";
 
 import { DateGroupSection } from "./DateGroupSection";
 import { JobsFilterBar } from "./JobsFilterBar";
@@ -24,6 +25,7 @@ export function BlastJobs() {
     deleteMutation,
     allJobs,
     degradedNotice,
+    externalDegradedNotice,
     filtered,
     grouped,
     counts,
@@ -65,6 +67,14 @@ export function BlastJobs() {
           <AlertTriangle size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />
           Delete failed: {formatApiError(deleteMutation.error, "blast")}
         </div>
+      )}
+
+      {externalDegradedNotice && (
+        <DegradedNotice
+          reason={externalDegradedNotice.reason}
+          message={externalDegradedNotice.message}
+          scope="OpenAPI jobs"
+        />
       )}
 
       {allJobs.length === 0 && !jobsQuery.isLoading && (
