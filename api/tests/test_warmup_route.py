@@ -354,6 +354,109 @@ def test_warmup_auto_preference_round_trip(
     assert get_response.json()["preference"]["storage_account"] == "elbstg01"
 
 
+def test_auto_preference_put_preserves_pending_force_rewarm(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The SPA auto-sync PUT (DB list / node-count change) must NOT clear a
+    `force_rewarm_pending` that start_aks/scale_aks just set. Otherwise the
+    node-count scale's auto re-warm is silently dropped (2026-06-08 live E2E)."""
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+
+    from api.services.auto_warmup import (
+        get_auto_warmup_preference,
+        normalise_preference,
+        save_auto_warmup_preference,
+    )
+
+    # scale_aks persisted a pending forced re-warm pinned to the new size.
+    save_auto_warmup_preference(
+        normalise_preference(
+            {
+                "subscription_id": "sub-1",
+                "resource_group": "rg-elb",
+                "cluster_name": "elb-cluster",
+                "storage_account": "elbstg01",
+                "storage_resource_group": "rg-elb",
+                "databases": ["16S_ribosomal_RNA"],
+                "enabled": True,
+                "num_nodes": 5,
+                "force_rewarm_pending": True,
+            }
+        )
+    )
+
+    # SPA auto-sync fires after node_count flips 10->5; body omits the flag.
+    response = client.put(
+        "/api/warmup/auto-preference",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "storage_resource_group": "rg-elb",
+            "databases": ["core_nt"],
+            "enabled": True,
+            "num_nodes": 5,
+        },
+    )
+    assert response.status_code == 200
+    # The pending forced re-warm survives the clobbering upsert.
+    assert response.json()["preference"]["force_rewarm_pending"] is True
+    persisted = get_auto_warmup_preference("sub-1", "rg-elb", "elb-cluster")
+    assert persisted is not None
+    assert persisted.force_rewarm_pending is True
+
+
+def test_auto_preference_put_honours_explicit_force_clear(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """An explicit `force_rewarm_pending=false` in the body still wins (the
+    reconcile's own bookkeeping path must be able to clear it)."""
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+
+    from api.services.auto_warmup import (
+        get_auto_warmup_preference,
+        normalise_preference,
+        save_auto_warmup_preference,
+    )
+
+    save_auto_warmup_preference(
+        normalise_preference(
+            {
+                "subscription_id": "sub-1",
+                "resource_group": "rg-elb",
+                "cluster_name": "elb-cluster",
+                "storage_account": "elbstg01",
+                "storage_resource_group": "rg-elb",
+                "databases": ["core_nt"],
+                "enabled": True,
+                "force_rewarm_pending": True,
+            }
+        )
+    )
+
+    response = client.put(
+        "/api/warmup/auto-preference",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "storage_resource_group": "rg-elb",
+            "databases": ["core_nt"],
+            "enabled": True,
+            "force_rewarm_pending": False,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["preference"]["force_rewarm_pending"] is False
+    persisted = get_auto_warmup_preference("sub-1", "rg-elb", "elb-cluster")
+    assert persisted is not None
+    assert persisted.force_rewarm_pending is False
+
+
 def test_warmup_release_calls_k8s_helper(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

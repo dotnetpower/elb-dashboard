@@ -1,7 +1,7 @@
 """Measured AKS lifecycle timings used to turn the SPA start estimate into a stat.
 
 Responsibility: Append observed durations for cluster lifecycle phases
-    (`aks_start`, `aks_stop`, `openapi_deploy`) and compute a robust per-phase
+    (`aks_start`, `aks_stop`, `aks_scale`, `openapi_deploy`) and compute a robust per-phase
     statistic (median of the most recent samples) so the dashboard can render a
     real "Last observed …" estimate instead of a hardcoded constant.
 Edit boundaries: Persistence + aggregation only. No ARM/Kubernetes calls here —
@@ -45,6 +45,7 @@ _TYPE = "cluster_timing"
 DEFAULT_SECONDS: dict[str, float] = {
     "aks_start": 235.0,
     "aks_stop": 180.0,
+    "aks_scale": 90.0,
     "openapi_deploy": 31.0,
 }
 KNOWN_PHASES: tuple[str, ...] = tuple(DEFAULT_SECONDS.keys())

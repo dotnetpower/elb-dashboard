@@ -61,6 +61,16 @@ def test_unknown_phase_rejected(timings: Any) -> None:
     assert timings.record_timing("not_a_phase", 10.0) is False
 
 
+def test_aks_scale_phase_is_known(timings: Any) -> None:
+    """`aks_scale` is a recordable phase so scale_aks's lifecycle timing is
+    persisted instead of being dropped as 'unknown phase' (live E2E 2026-06-08)."""
+    assert "aks_scale" in timings.DEFAULT_SECONDS
+    assert timings.record_timing("aks_scale", 75.0) is True
+    stats = timings.get_timing_stats()
+    assert stats["aks_scale"].source == "measured"
+    assert stats["aks_scale"].seconds == 75.0
+
+
 def test_out_of_range_dropped(timings: Any) -> None:
     """Zero / negative / absurdly large durations are dropped."""
     assert timings.record_timing("aks_start", 0.0) is False

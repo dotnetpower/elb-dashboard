@@ -49,7 +49,11 @@ def warmup_auto_preference_put(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    from api.services.auto_warmup import normalise_preference, save_auto_warmup_preference
+    from api.services.auto_warmup import (
+        get_auto_warmup_preference,
+        normalise_preference,
+        save_auto_warmup_preference,
+    )
 
     try:
         pref = normalise_preference(
@@ -58,6 +62,22 @@ def warmup_auto_preference_put(
     except ValueError as exc:
         # Audit P1 #7: sanitise + cap exception text.
         raise HTTPException(400, sanitise(str(exc))[:200]) from exc
+    # Preserve a pending forced re-warm that `start_aks` / `scale_aks` set on
+    # the row. This PUT is an unconditional "user wins" upsert, and the SPA's
+    # ClusterItem auto-sync fires it whenever the database list OR the live
+    # node count changes — including immediately after a node-count scale, when
+    # `cluster.node_count` flips 10->5. Without carrying the flag forward, that
+    # auto-sync silently clears `force_rewarm_pending=true`, so the next beat
+    # reconcile no longer force-re-warms and the freshly-(re)scaled nodes stay
+    # cold (observed in the 2026-06-08 live E2E). Only carry it forward when the
+    # caller did not explicitly provide the flag, so an intentional clear (e.g.
+    # the reconcile's own bookkeeping path) still wins.
+    if "force_rewarm_pending" not in body:
+        existing = get_auto_warmup_preference(
+            pref.subscription_id, pref.resource_group, pref.cluster_name
+        )
+        if existing is not None and existing.force_rewarm_pending:
+            pref.force_rewarm_pending = True
     saved = save_auto_warmup_preference(pref)
     return {"status": "saved", "preference": saved.to_dict()}
 
