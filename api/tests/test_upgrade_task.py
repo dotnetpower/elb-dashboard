@@ -1305,3 +1305,32 @@ def test_facade_re_exports_every_documented_symbol() -> None:
     }
     for name in expected_internal:
         assert hasattr(facade, name), f"facade missing internal symbol {name!r}"
+
+
+def test_parse_anchor_coerces_naive_to_utc() -> None:
+    """A naive stored timestamp must be coerced to aware UTC so the reconciler's
+    `clock() - anchor` subtraction never raises TypeError (which the call sites
+    only guard for with `except ValueError`)."""
+    from datetime import UTC, datetime
+
+    from api.tasks.upgrade import reconciler
+
+    naive = reconciler._parse_anchor("2026-06-09T00:00:00")
+    assert naive.tzinfo is not None
+    # Subtraction against an aware clock must work (the real bug: TypeError).
+    aware_now = datetime(2026, 6, 9, 0, 5, 0, tzinfo=UTC)
+    assert (aware_now - naive).total_seconds() == 300.0
+
+    already_aware = reconciler._parse_anchor("2026-06-09T00:00:00+00:00")
+    assert already_aware.tzinfo is not None
+    assert (aware_now - already_aware).total_seconds() == 300.0
+
+
+def test_parse_anchor_raises_value_error_on_garbage() -> None:
+    """Malformed input still raises ValueError so the existing
+    `except ValueError` handling at each call site keeps working."""
+    import pytest as _pytest
+    from api.tasks.upgrade import reconciler
+
+    with _pytest.raises(ValueError):
+        reconciler._parse_anchor("not-a-timestamp")

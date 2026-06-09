@@ -147,12 +147,23 @@ export function HttpInspectorPanel() {
   }, []);
 
   useEffect(() => {
-    void fetchOnce();
-    const id = window.setInterval(() => {
-      if (!document.hidden) void fetchOnce();
-    }, REFRESH_INTERVAL_MS);
+    // setInterval does not wait for the async fetch, so a response slower than
+    // REFRESH_INTERVAL_MS would let overlapping requests land out of order and
+    // a stale sample overwrite a newer one. Serialise with a re-entry guard.
+    let pending = false;
+    const tick = async () => {
+      if (pending || document.hidden) return;
+      pending = true;
+      try {
+        await fetchOnce();
+      } finally {
+        pending = false;
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), REFRESH_INTERVAL_MS);
     const onVisible = () => {
-      if (!document.hidden) void fetchOnce();
+      if (!document.hidden) void tick();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {

@@ -73,6 +73,7 @@ def _list_visible_subscriptions() -> tuple[list[dict[str, Any]], str | None]:
         cred = get_credential()
         client = subscription_client(cred)
         subs: list[dict[str, Any]] = []
+        truncated = False
         for s in client.subscriptions.list():
             state = s.state
             subs.append(
@@ -84,14 +85,20 @@ def _list_visible_subscriptions() -> tuple[list[dict[str, Any]], str | None]:
                 }
             )
             if len(subs) >= _SUBSCRIPTION_LIST_LIMIT:
+                # ARM returned more subscriptions than the cap. Stop enumerating
+                # (the iterator can be very large in enterprise tenants) but flag
+                # it so the SPA can warn the user that the picker is incomplete
+                # instead of silently hiding subscriptions past the cap.
+                truncated = True
                 break
         subs.sort(key=lambda x: (x.get("displayName") or "").lower())
+        error = "subscriptions_truncated" if truncated else None
         with _SUBSCRIPTION_CACHE_LOCK:
             _SUBSCRIPTION_CACHE = (
                 time.monotonic() + _SUBSCRIPTION_CACHE_TTL_SECONDS,
-                ([dict(item) for item in subs], None),
+                ([dict(item) for item in subs], error),
             )
-        return subs, None
+        return subs, error
     except Exception as exc:
         LOGGER.warning(
             "me.list_visible_subscriptions failed: %s: %s",

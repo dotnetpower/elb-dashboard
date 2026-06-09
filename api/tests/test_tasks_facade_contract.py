@@ -35,6 +35,7 @@ import pytest
 _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.azure.assign_aks_roles",  # .delay
     "api.tasks.azure.idle_autostop._live_blast_signal",
+    "api.tasks.azure.peering.delete_vnet_peering_on_cluster",
     "api.tasks.azure.peering.ensure_vnet_peering_with_cluster",
     "api.tasks.azure.peering.ensure_vnet_peering_with_target",
     "api.tasks.azure.peering.httpx.get",

@@ -34,7 +34,14 @@ export function usePollTask(
 ) {
   useEffect(() => {
     if (!task || task.status === "SUCCESS" || task.status === "FAILURE") return;
+    // setInterval does not wait for async callbacks, so a slow `/tasks/status`
+    // response (slower than the 4s cadence) would fire overlapping requests and
+    // let a stale response clobber a fresh one. Guard with a re-entry flag so at
+    // most one poll is in flight at a time.
+    let pending = false;
     const id = window.setInterval(async () => {
+      if (pending) return;
+      pending = true;
       try {
         const status = await tasksApi.status(task.taskId);
         const progress = status.progress as
@@ -50,6 +57,8 @@ export function usePollTask(
         onUpdate?.(status);
       } catch (err) {
         setTask({ taskId: task.taskId, status: "FAILURE", message: formatApiError(err) });
+      } finally {
+        pending = false;
       }
     }, 4000);
     return () => window.clearInterval(id);

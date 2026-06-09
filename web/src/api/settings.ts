@@ -272,6 +272,14 @@ export interface VnetPeeringExistingItem {
   /** Succeeded / Updating / Failed / Unknown. */
   provisioning_state: string;
   remote_vnet: VnetPeeringRemoteVnet | null;
+  /**
+   * Tri-state orphan signal. `true` = the remote VNet still exists;
+   * `false` = the remote VNet was deleted, so this peering is a stale ghost
+   * the operator should remove; `null` = not probed / could not be determined
+   * (RBAC, cross-tenant, transport fault). The backend only probes peerings in
+   * the `Disconnected` state.
+   */
+  remote_vnet_exists: boolean | null;
   remote_address_prefixes: string[];
   allow_virtual_network_access: boolean;
   allow_forwarded_traffic: boolean;
@@ -290,6 +298,22 @@ export interface VnetPeeringExistingResponse {
   reason: string | null;
   /** Non-null when the listing call itself failed (e.g. RBAC denial). */
   error: string | null;
+}
+
+export interface VnetPeeringDeleteRequest {
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+  /** The local (AKS-side) peering name to remove. */
+  peering_name: string;
+}
+
+export interface VnetPeeringDeleteResponse {
+  deleted: boolean;
+  skipped: boolean;
+  reason: string | null;
+  error: string | null;
+  peering_name: string;
 }
 
 function querystring(params: Record<string, string>): string {
@@ -387,6 +411,16 @@ export const settingsApi = {
   applyPeeringNsgRule: (body: VnetPeeringNsgRuleRequest) =>
     api.post<VnetPeeringNsgRuleResponse>(
       "/settings/vnet-peering/apply-nsg-rule",
+      body,
+    ),
+
+  /** Remove a single orphaned ("Disconnected") peering from the cluster's
+   *  AKS VNet. Symmetric with `peerVnet` — only the AKS-side peering is
+   *  deleted (the remote side is typically already gone). Idempotent: a
+   *  missing peering returns `deleted=true`. */
+  deletePeering: (body: VnetPeeringDeleteRequest) =>
+    api.post<VnetPeeringDeleteResponse>(
+      "/settings/vnet-peering/delete",
       body,
     ),
 };

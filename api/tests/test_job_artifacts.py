@@ -116,6 +116,77 @@ def test_read_json_artifact_supports_gzip(monkeypatch) -> None:
     assert job_artifacts.read_json_artifact("job-1", "result_aggregate") == {"ok": True}
 
 
+def test_read_json_artifact_marks_failed_when_blob_missing(monkeypatch) -> None:
+    """A "ready" state whose blob is gone must flip to "failed" (so a rebuild is
+    enqueued) and return None instead of raising the 404 to the caller."""
+    from azure.core.exceptions import ResourceNotFoundError
+
+    state = ArtifactState(
+        job_id="job-1",
+        artifact_type="result_aggregate",
+        status="ready",
+        blob_path="job-1/results/aggregate.json",
+    )
+    upserts: list[dict[str, str]] = []
+
+    def _boom(*_args, **_kwargs):
+        raise ResourceNotFoundError("blob not found")
+
+    monkeypatch.setenv("AZURE_BLOB_ENDPOINT", "https://acct.blob.core.windows.net")
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: state)
+    monkeypatch.setattr(job_artifacts, "get_credential", lambda: object())
+    monkeypatch.setattr(job_artifacts.storage_data, "read_blob_text", _boom)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda job_id, artifact_type, **kw: upserts.append(
+            {"job_id": job_id, "type": artifact_type, **kw}
+        ),
+    )
+
+    assert job_artifacts.read_json_artifact("job-1", "result_aggregate") is None
+    assert upserts == [
+        {
+            "job_id": "job-1",
+            "type": "result_aggregate",
+            "status": "failed",
+            "error_code": "blob_missing",
+        }
+    ]
+
+
+def test_read_json_artifact_marks_failed_when_gzip_blob_missing(monkeypatch) -> None:
+    """Same recovery for the gzip path (stream_blob_bytes raises)."""
+    from azure.core.exceptions import ResourceNotFoundError
+
+    state = ArtifactState(
+        job_id="job-1",
+        artifact_type="result_aggregate",
+        status="ready",
+        blob_path="job-1/results/aggregate.json.gz",
+    )
+    upserts: list[dict[str, str]] = []
+
+    def _boom(*_args, **_kwargs):
+        raise ResourceNotFoundError("blob not found")
+
+    monkeypatch.setenv("AZURE_BLOB_ENDPOINT", "https://acct.blob.core.windows.net")
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: state)
+    monkeypatch.setattr(job_artifacts, "get_credential", lambda: object())
+    monkeypatch.setattr(job_artifacts.storage_data, "stream_blob_bytes", _boom)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda job_id, artifact_type, **kw: upserts.append(
+            {"job_id": job_id, "type": artifact_type, **kw}
+        ),
+    )
+
+    assert job_artifacts.read_json_artifact("job-1", "result_aggregate") is None
+    assert upserts and upserts[0]["status"] == "failed"
+    assert upserts[0]["error_code"] == "blob_missing"
+
+
 def test_artifact_build_should_enqueue_stale_pending(monkeypatch) -> None:
     fresh = ArtifactState(
         job_id="job-1",

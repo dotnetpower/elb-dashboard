@@ -215,6 +215,89 @@ def warmup_release(
     return {"db": database_name, **result}
 
 
+@warmup_router.get("/active")
+def warmup_active(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the in-flight warmup(s) for a cluster so the SPA can render live
+    progress even for warmups the browser did not start.
+
+    User-initiated warmups expose their Celery task id to the SPA in the
+    ``/warmup/start`` response, so the WarmupSection can poll ``/{id}/status``.
+    Auto-warmups (beat reconcile + post-AKS-start re-warm) run with no browser
+    round-trip, so their progress was previously invisible. This endpoint scans
+    the ``jobstate`` table for active warmup rows scoped to the cluster and
+    surfaces each one's Celery ``instance_id`` (when attached), ``phase`` and an
+    ``auto`` flag, letting the SPA adopt the active warmup and show its steps.
+
+    Best-effort: never raises — returns ``{"active": false, "warmups": []}`` on
+    any state-store fault so the dashboard degrades quietly.
+    """
+    sub = (subscription_id or "").strip().lower()
+    rg = (resource_group or "").strip().lower()
+    cluster = (cluster_name or "").strip().lower()
+
+    try:
+        from api.services.state_repo import get_state_repo
+
+        rows = get_state_repo().list_active(job_type="warmup", limit=200)
+    except Exception as exc:
+        LOGGER.warning("warmup_active list_active failed: %s", sanitise(str(exc))[:200])
+        return {"active": False, "instance_id": None, "warmup": None, "warmups": []}
+
+    def _row_scope(row: Any) -> tuple[str, str, str]:
+        payload = row.payload if isinstance(getattr(row, "payload", None), dict) else {}
+        row_sub = str(getattr(row, "subscription_id", None) or payload.get("subscription_id") or "")
+        row_rg = str(getattr(row, "resource_group", None) or payload.get("resource_group") or "")
+        row_cluster = str(
+            getattr(row, "cluster_name", None)
+            or payload.get("cluster_name")
+            or payload.get("aks_cluster_name")
+            or ""
+        )
+        return row_sub.lower(), row_rg.lower(), row_cluster.lower()
+
+    matches = []
+    for row in rows:
+        row_sub, row_rg, row_cluster = _row_scope(row)
+        if row_rg == rg and row_cluster == cluster and (not sub or not row_sub or row_sub == sub):
+            matches.append(row)
+
+    matches.sort(
+        key=lambda r: str(getattr(r, "updated_at", "") or getattr(r, "created_at", "") or ""),
+        reverse=True,
+    )
+
+    def _summarise(row: Any) -> dict[str, Any]:
+        payload = row.payload if isinstance(getattr(row, "payload", None), dict) else {}
+        db = (
+            str(getattr(row, "db", None) or "")
+            or str(payload.get("db") or "")
+            or str(payload.get("database_name") or "")
+        )
+        return {
+            "instance_id": str(getattr(row, "task_id", None) or "") or None,
+            "job_id": str(getattr(row, "job_id", None) or ""),
+            "db": db,
+            "phase": str(getattr(row, "phase", None) or "queued"),
+            "status": str(getattr(row, "status", None) or "queued"),
+            "auto": bool(payload.get("auto_warmup")),
+            "started_at": str(getattr(row, "created_at", None) or ""),
+        }
+
+    warmups = [_summarise(row) for row in matches]
+    top = warmups[0] if warmups else None
+    return {
+        "active": bool(top),
+        "instance_id": top["instance_id"] if top else None,
+        "warmup": top,
+        "warmups": warmups,
+    }
+
+
 @warmup_router.get("/{instance_id}/status")
 def warmup_status(
     instance_id: str = Path(...),

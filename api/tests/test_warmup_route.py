@@ -533,3 +533,106 @@ def test_warmup_status_preserves_failed_task_payload(
     assert body["output"]["status"] == "failed"
     assert body["output"]["db"] == "core_nt"
     assert body["output"]["error"] == "node warmup failed"
+
+
+def _warmup_job_state(**overrides: Any) -> Any:
+    from api.services.state.job_state import JobState
+
+    base: dict[str, Any] = {
+        "job_id": "job-1",
+        "type": "warmup",
+        "status": "running",
+        "phase": "warming_nodes",
+        "task_id": "task-auto-1",
+        "created_at": "2026-06-09T00:00:00+00:00",
+        "updated_at": "2026-06-09T00:01:00+00:00",
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+        "db": "core_nt",
+        "payload": {"auto_warmup": True, "db": "core_nt"},
+    }
+    base.update(overrides)
+    return JobState(**base)
+
+
+def test_warmup_active_returns_in_flight_auto_warmup(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [_warmup_job_state()]
+
+    class FakeRepo:
+        def list_active(self, *, job_type: str = "blast", limit: int = 500) -> list[Any]:
+            assert job_type == "warmup"
+            return rows
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: FakeRepo())
+
+    response = client.get(
+        "/api/warmup/active",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active"] is True
+    assert body["instance_id"] == "task-auto-1"
+    assert body["warmup"]["db"] == "core_nt"
+    assert body["warmup"]["phase"] == "warming_nodes"
+    assert body["warmup"]["auto"] is True
+    assert len(body["warmups"]) == 1
+
+
+def test_warmup_active_filters_by_cluster(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [_warmup_job_state(cluster_name="other-cluster", job_id="job-2")]
+
+    class FakeRepo:
+        def list_active(self, *, job_type: str = "blast", limit: int = 500) -> list[Any]:
+            return rows
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: FakeRepo())
+
+    response = client.get(
+        "/api/warmup/active",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active"] is False
+    assert body["instance_id"] is None
+    assert body["warmups"] == []
+
+
+def test_warmup_active_degrades_on_state_store_fault(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeRepo:
+        def list_active(self, *, job_type: str = "blast", limit: int = 500) -> list[Any]:
+            raise RuntimeError("table unavailable")
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: FakeRepo())
+
+    response = client.get(
+        "/api/warmup/active",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active"] is False
+    assert body["warmups"] == []

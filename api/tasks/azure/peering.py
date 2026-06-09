@@ -514,6 +514,11 @@ def _normalise_existing_peering(peering: Any) -> dict[str, Any]:
         "peering_state": str(getattr(peering, "peering_state", None) or "Unknown"),
         "provisioning_state": str(getattr(peering, "provisioning_state", None) or "Unknown"),
         "remote_vnet": remote,
+        # Tri-state orphan signal filled in by `list_vnet_peerings_for_cluster`:
+        # ``True``  -> remote VNet still exists,
+        # ``False`` -> remote VNet was deleted (the peering is a stale ghost),
+        # ``None``  -> not probed / could not determine (RBAC, cross-tenant…).
+        "remote_vnet_exists": None,
         "remote_address_prefixes": remote_prefixes,
         "allow_virtual_network_access": bool(
             getattr(peering, "allow_virtual_network_access", False)
@@ -522,6 +527,35 @@ def _normalise_existing_peering(peering: Any) -> dict[str, Any]:
         "allow_gateway_transit": bool(getattr(peering, "allow_gateway_transit", False)),
         "use_remote_gateways": bool(getattr(peering, "use_remote_gateways", False)),
     }
+
+
+def _remote_vnet_exists(cred: Any, remote_vnet_id: str) -> bool | None:
+    """Best-effort probe: does the peering's remote VNet still exist?
+
+    Returns ``True`` when the VNet resolves, ``False`` when Azure reports it as
+    not found (the peering is an orphaned ghost), and ``None`` when the answer
+    cannot be determined (unparseable id, RBAC denial, cross-tenant, transport
+    fault). Never raises — a ghost-detection probe must not break the read-only
+    listing.
+    """
+    from azure.core.exceptions import ResourceNotFoundError
+
+    try:
+        sub, rg, name = _parse_vnet_id(remote_vnet_id)
+    except ValueError:
+        return None
+    try:
+        nc = network_client(cred, sub)
+        nc.virtual_networks.get(rg, name)
+        return True
+    except ResourceNotFoundError:
+        return False
+    except Exception as exc:  # RBAC / transport / cross-tenant
+        msg = str(exc).lower()
+        # An explicit 404 baked into a generic error still means "gone".
+        if "notfound" in msg or "could not be found" in msg or "status code: 404" in msg:
+            return False
+        return None
 
 
 def list_vnet_peerings_for_cluster(
@@ -596,7 +630,95 @@ def list_vnet_peerings_for_cluster(
         }
 
     base["peerings"] = [_normalise_existing_peering(p) for p in items]
+    # Ghost detection: a peering whose remote VNet was deleted lingers in the
+    # "Disconnected" state. Probe only those (bounded ARM calls) so the SPA can
+    # tell the operator the remote VNet no longer exists and offer to delete the
+    # stale peering. Connected/Initiated peerings are healthy and skipped.
+    for peering in base["peerings"]:
+        state = str(peering.get("peering_state") or "").lower()
+        remote = peering.get("remote_vnet") or {}
+        remote_id = str(remote.get("id") or "") if isinstance(remote, dict) else ""
+        if "disconnect" in state and remote_id:
+            peering["remote_vnet_exists"] = _remote_vnet_exists(cred, remote_id)
     return base
+
+
+def delete_vnet_peering_on_cluster(
+    cred: Any,
+    *,
+    subscription_id: str,
+    cluster_resource_group: str,
+    cluster_name: str,
+    peering_name: str,
+) -> dict[str, Any]:
+    """Delete a single named peering from a cluster's AKS VNet.
+
+    Symmetric with the create path (`ensure_vnet_peering_with_target`): resolves
+    the cluster's AKS VNet, then issues ``virtual_network_peerings.begin_delete``
+    on the local side only. The remote side is intentionally left untouched —
+    the common reason to call this is that the remote VNet was already deleted
+    (an orphaned ghost), so there is no remote peering to clean up.
+
+    Best-effort and side-effect tagged: returns
+    ``{"deleted": bool, "skipped": bool, "reason": str | None, "error": str | None}``.
+    A missing peering is reported as ``deleted=True`` (idempotent) so a
+    double-click from the SPA does not surface a spurious error.
+    """
+    from azure.core.exceptions import ResourceNotFoundError
+
+    from api.services.azure_clients import aks_client
+
+    result: dict[str, Any] = {
+        "deleted": False,
+        "skipped": False,
+        "reason": None,
+        "error": None,
+        "peering_name": peering_name,
+    }
+
+    aks_cl = aks_client(cred, subscription_id)
+    try:
+        cluster = aks_cl.managed_clusters.get(cluster_resource_group, cluster_name)
+    except Exception as exc:
+        return {**result, "error": f"aks_client.managed_clusters.get failed: {type(exc).__name__}"}
+
+    node_rg = (getattr(cluster, "node_resource_group", None) or "").strip()
+    if not node_rg:
+        return {**result, "skipped": True, "reason": "cluster has no node_resource_group"}
+
+    aks_vnet_id = _resolve_aks_vnet_id(
+        cred,
+        subscription_id=subscription_id,
+        node_resource_group=node_rg,
+        cluster=cluster,
+    )
+    if not aks_vnet_id:
+        return {**result, "skipped": True, "reason": "aks_node_rg_has_no_vnet"}
+
+    try:
+        local_sub, local_rg, local_vnet = _parse_vnet_id(aks_vnet_id)
+    except ValueError as exc:
+        return {**result, "error": f"could not parse AKS VNet id: {str(exc)[:200]}"}
+
+    nc = network_client(cred, local_sub)
+    try:
+        poller = nc.virtual_network_peerings.begin_delete(local_rg, local_vnet, peering_name)
+        poller.result()
+        return {**result, "deleted": True}
+    except ResourceNotFoundError:
+        # Already gone — treat as success so the SPA's optimistic refresh is clean.
+        return {**result, "deleted": True, "reason": "peering_already_absent"}
+    except Exception as exc:  # surface a recoverable error to the SPA
+        msg = str(exc).lower()
+        if "notfound" in msg or "could not be found" in msg:
+            return {**result, "deleted": True, "reason": "peering_already_absent"}
+        return {
+            **result,
+            "error": (
+                "virtual_network_peerings.begin_delete failed: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            ),
+        }
 
 
 def ensure_vnet_peering_with_target(

@@ -19,7 +19,10 @@ import {
   PENDING_DUPLICATE_KEY,
   type ExportableFormFields,
 } from "@/pages/blastSubmit/configSerializer";
-import { deriveSubmitValidation } from "@/pages/blastSubmit/submitValidation";
+import {
+  deriveSubmitValidation,
+  type MissingItem,
+} from "@/pages/blastSubmit/submitValidation";
 import { deriveFullDbMemoryFit, fullDbMemoryWarmupRemediation } from "@/pages/blastSubmit/memoryFit";
 import {
   decideProgramSwitch,
@@ -386,6 +389,23 @@ export function BlastSubmit() {
     : undefined;
   const effectiveCanSubmit = validation.canSubmit && !submitPermissionDenied;
 
+  // The Run button is disabled when `effectiveCanSubmit` is false, but a
+  // permission denial only lives in the button's hover `title` — which leaves
+  // the button silently greyed out with no visible reason. Surface it as a
+  // first-class checklist entry so the disabled state always has an on-screen
+  // explanation (the footer / rail render `missing` as the "Required before
+  // submitting" list).
+  const submitMissing: MissingItem[] = submitPermissionDenied
+    ? [
+        ...validation.missing,
+        {
+          text:
+            submitPermissionTooltip ??
+            "You do not have permission to submit BLAST jobs at this cluster scope.",
+        },
+      ]
+    : validation.missing;
+
   const handleSubmit = () => {
     if (!selectedCluster) return;
     if (submitPermissionDenied) {
@@ -625,7 +645,7 @@ export function BlastSubmit() {
               set={set}
               programMeta={programMeta}
               toast={toast}
-              missing={validation.missing}
+              missing={submitMissing}
               searchSummary={validation.searchSummary}
               canSubmit={effectiveCanSubmit}
               submitPending={submitMutation.isPending}
@@ -648,7 +668,7 @@ export function BlastSubmit() {
           toast={toast}
           readySteps={validation.readySteps}
           readyCount={validation.readyCount}
-          missing={validation.missing}
+          missing={submitMissing}
           searchSummary={validation.searchSummary}
           paramsSummary={validation.paramsSummary}
           canSubmit={effectiveCanSubmit}

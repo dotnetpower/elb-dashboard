@@ -798,3 +798,95 @@ def test_existing_route_returns_502_when_helper_raises(monkeypatch) -> None:
 
     assert resp.status_code == 502
     assert resp.json()["detail"]["code"] == "vnet_peering_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# POST /vnet-peering/delete
+# ---------------------------------------------------------------------------
+
+
+def test_delete_route_rejects_bad_parameters(monkeypatch) -> None:
+    app = _build_app(monkeypatch)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/vnet-peering/delete",
+        json={
+            "subscription_id": "not-a-guid",
+            "resource_group": "rg",
+            "cluster_name": "elb-cluster-01",
+            "peering_name": "peer-1",
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_delete_route_forwards_to_helper(monkeypatch) -> None:
+    app = _build_app(monkeypatch)
+    client = TestClient(app)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_delete(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "deleted": True,
+            "skipped": False,
+            "reason": None,
+            "error": None,
+            "peering_name": kwargs["peering_name"],
+        }
+
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.delete_vnet_peering_on_cluster", _fake_delete
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    resp = client.post(
+        "/vnet-peering/delete",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-workload",
+            "cluster_name": "elb-cluster-01",
+            "peering_name": "peer-aks-vnet-to-vnet-target",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["deleted"] is True
+    assert body["peering_name"] == "peer-aks-vnet-to-vnet-target"
+    assert captured["cluster_resource_group"] == "rg-workload"
+    assert captured["peering_name"] == "peer-aks-vnet-to-vnet-target"
+
+
+def test_delete_route_returns_502_on_helper_error(monkeypatch) -> None:
+    app = _build_app(monkeypatch)
+    client = TestClient(app)
+
+    def _fake_delete(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "deleted": False,
+            "skipped": False,
+            "reason": None,
+            "error": "virtual_network_peerings.begin_delete failed: HttpResponseError",
+            "peering_name": kwargs["peering_name"],
+        }
+
+    monkeypatch.setattr(
+        "api.tasks.azure.peering.delete_vnet_peering_on_cluster", _fake_delete
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    resp = client.post(
+        "/vnet-peering/delete",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-workload",
+            "cluster_name": "elb-cluster-01",
+            "peering_name": "peer-1",
+        },
+    )
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"]["code"] == "vnet_peering_delete_failed"

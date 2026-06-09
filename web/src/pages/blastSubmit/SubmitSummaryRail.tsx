@@ -274,6 +274,22 @@ export function SubmitSummaryRail({
             </ul>
           </div>
         )}
+
+        {/* Safety net: the Run button is disabled but nothing above explains
+            why (no checklist entry, no pre-flight panel). Never leave a
+            greyed-out button without an on-screen reason. */}
+        {runDisabled &&
+          !submitPending &&
+          !preFlightBlocked &&
+          missing.length === 0 &&
+          runTitle && (
+            <div className="blast-checklist bsl-rail__checklist">
+              <strong className="bsl-rail__checklist-title">Submission blocked</strong>
+              <ul>
+                <li>{runTitle}</li>
+              </ul>
+            </div>
+          )}
       </div>
 
       {/* ── Run bar ─────────────────────────────────────────────── */}

@@ -284,24 +284,52 @@ def read_json_artifact(
     if state is None or state.status != "ready" or not state.blob_path:
         return None
     account = _platform_storage_account_name()
-    if state.blob_path.endswith(".gz"):
-        compressed = b"".join(
-            storage_data.stream_blob_bytes(
+    try:
+        if state.blob_path.endswith(".gz"):
+            compressed = b"".join(
+                storage_data.stream_blob_bytes(
+                    get_credential(),
+                    account,
+                    ARTIFACTS_CONTAINER,
+                    state.blob_path,
+                )
+            )
+            text = gzip.decompress(compressed).decode("utf-8", errors="replace")[:max_bytes]
+        else:
+            text = storage_data.read_blob_text(
                 get_credential(),
                 account,
                 ARTIFACTS_CONTAINER,
                 state.blob_path,
+                max_bytes=max_bytes,
             )
-        )
-        text = gzip.decompress(compressed).decode("utf-8", errors="replace")[:max_bytes]
-    else:
-        text = storage_data.read_blob_text(
-            get_credential(),
-            account,
-            ARTIFACTS_CONTAINER,
+    except ResourceNotFoundError:
+        # The state row claims "ready" but the blob is gone (manually deleted,
+        # lifecycle-expired, or written to a since-rotated account). Without
+        # this branch every read raises forever and the row never recovers.
+        # Flip it to "failed" so `artifact_build_should_enqueue` re-bakes it on
+        # the next request instead of repeating the 404.
+        LOGGER.warning(
+            "artifact blob missing, marking failed job_id=%s type=%s path=%s",
+            job_id,
+            artifact_type,
             state.blob_path,
-            max_bytes=max_bytes,
         )
+        try:
+            upsert_artifact_state(
+                job_id,
+                artifact_type,
+                status="failed",
+                error_code="blob_missing",
+            )
+        except Exception as exc:  # best-effort — never raise from a read path
+            LOGGER.warning(
+                "failed to mark artifact failed job_id=%s type=%s: %s",
+                job_id,
+                artifact_type,
+                type(exc).__name__,
+            )
+        return None
     try:
         return cast(dict[str, Any], json.loads(text))
     except json.JSONDecodeError:

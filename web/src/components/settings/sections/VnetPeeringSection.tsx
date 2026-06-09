@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, Loader2, Network, RefreshCw, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  EyeOff,
+  Loader2,
+  Network,
+  RefreshCw,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import {
   listResourceGroups,
@@ -22,6 +32,12 @@ import type { ResourceConfig } from "@/components/SetupWizard";
 import { Badge, Field, Group, Row, Section, StatusLine } from "@/components/settings/primitives";
 import { INPUT_STYLE, SELECT_STYLE } from "@/components/settings/styles";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
+
+import {
+  dismissPeering,
+  readDismissedPeerings,
+} from "./dismissedPeerings";
+import { classifyPeering } from "./peeringHealth";
 
 export function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
   const [clusterName, setClusterName] = useState("");
@@ -68,6 +84,12 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
   const [existing, setExisting] = useState<VnetPeeringExistingResponse | null>(null);
   const [existingLoading, setExistingLoading] = useState(false);
   const [existingError, setExistingError] = useState<string | null>(null);
+
+  // Orphaned-peering housekeeping: which ghost peerings the operator has hidden
+  // (cosmetic, localStorage), which one is mid-delete, and the last delete error.
+  const [dismissedPeerings, setDismissedPeerings] = useState<Set<string>>(() => new Set());
+  const [deletingPeering, setDeletingPeering] = useState<string | null>(null);
+  const [peeringActionError, setPeeringActionError] = useState<string | null>(null);
 
   const subscriptionId = config?.subscriptionId ?? "";
   const selectedClusterRg =
@@ -277,6 +299,44 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
     void loadExisting();
   }, [loadExisting]);
 
+  // Re-read the per-cluster hidden-ghost set whenever the selected cluster
+  // changes so a hidden row stays hidden across cluster switches / reloads.
+  useEffect(() => {
+    setDismissedPeerings(readDismissedPeerings(clusterName));
+    setPeeringActionError(null);
+  }, [clusterName]);
+
+  // Hide a ghost peering from the list (cosmetic only — never touches Azure).
+  const hidePeering = useCallback(
+    (peeringName: string) => {
+      setDismissedPeerings(dismissPeering(clusterName, peeringName));
+    },
+    [clusterName],
+  );
+
+  // Delete an orphaned peering from the AKS VNet, then refresh the list.
+  const deletePeering = useCallback(
+    async (peeringName: string) => {
+      if (!subscriptionId || !selectedClusterRg || !clusterName) return;
+      setDeletingPeering(peeringName);
+      setPeeringActionError(null);
+      try {
+        await settingsApi.deletePeering({
+          subscription_id: subscriptionId,
+          resource_group: selectedClusterRg,
+          cluster_name: clusterName,
+          peering_name: peeringName,
+        });
+        await loadExisting();
+      } catch (err) {
+        setPeeringActionError(formatApiError(err, "settings"));
+      } finally {
+        setDeletingPeering(null);
+      }
+    },
+    [subscriptionId, selectedClusterRg, clusterName, loadExisting],
+  );
+
   const canSubmit = Boolean(
     subscriptionId &&
       selectedClusterRg &&
@@ -445,7 +505,12 @@ export function VnetPeeringSection({ config }: { config: ResourceConfig | null }
           error={existingError}
           data={existing}
           clusterName={clusterName}
+          dismissed={dismissedPeerings}
+          deletingPeering={deletingPeering}
+          actionError={peeringActionError}
           onRefresh={() => void loadExisting()}
+          onHide={hidePeering}
+          onDelete={(name) => void deletePeering(name)}
         />
         <Field
           label="AKS cluster"
@@ -721,12 +786,24 @@ function PeeringFlag({ on, label }: { on: boolean; label: string }) {
   );
 }
 
-function ExistingPeeringRow({ item }: { item: VnetPeeringExistingItem }) {
+function ExistingPeeringRow({
+  item,
+  deleting,
+  onHide,
+  onDelete,
+}: {
+  item: VnetPeeringExistingItem;
+  deleting: boolean;
+  onHide: () => void;
+  onDelete: () => void;
+}) {
   const remote = item.remote_vnet;
   const remoteLabel = remote?.name || item.name || "(unknown VNet)";
   const subShort = remote?.subscription_id ? `${remote.subscription_id.slice(0, 8)}…` : "";
   const locationBits = [remote?.resource_group, subShort].filter(Boolean).join(" · ");
   const prefixes = item.remote_address_prefixes.join(", ");
+  const health = classifyPeering(item);
+  const stale = health !== "healthy";
 
   return (
     <div
@@ -737,7 +814,9 @@ function ExistingPeeringRow({ item }: { item: VnetPeeringExistingItem }) {
         padding: "10px 12px",
         borderRadius: 8,
         background: "var(--bg-tertiary)",
-        border: "1px solid var(--border-weak)",
+        border: stale
+          ? "1px solid var(--warning-border, var(--border-weak))"
+          : "1px solid var(--border-weak)",
       }}
     >
       <div
@@ -785,6 +864,82 @@ function ExistingPeeringRow({ item }: { item: VnetPeeringExistingItem }) {
         <PeeringFlag on={item.allow_gateway_transit} label="gw transit" />
         <PeeringFlag on={item.use_remote_gateways} label="remote gw" />
       </div>
+      {stale && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            marginTop: 4,
+            padding: "8px 10px",
+            borderRadius: 6,
+            background: "var(--warning-surface, rgba(180, 140, 60, 0.08))",
+            border: "1px solid var(--warning-border, var(--border-weak))",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 6,
+              fontSize: 11.5,
+              color: "var(--text-muted)",
+              lineHeight: 1.4,
+            }}
+          >
+            <AlertTriangle
+              size={13}
+              strokeWidth={1.5}
+              style={{ flexShrink: 0, marginTop: 1, color: "var(--warning, #c79a3a)" }}
+            />
+            <span>
+              {health === "ghost"
+                ? "The remote VNet for this peering no longer exists. This is a stale peering — delete it to clean up, or hide it from this view."
+                : "This peering is disconnected (its remote VNet may have been deleted). If it is no longer needed, delete it to clean up, or hide it from this view."}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button
+              type="button"
+              className="glass-button"
+              onClick={onDelete}
+              disabled={deleting}
+              title="Delete this stale peering from the AKS VNet"
+              style={{
+                fontSize: 11,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "4px 10px",
+              }}
+            >
+              {deleting ? (
+                <Loader2 size={11} className="spin" />
+              ) : (
+                <Trash2 size={11} strokeWidth={1.5} />
+              )}
+              {deleting ? "Deleting…" : "Delete peering"}
+            </button>
+            <button
+              type="button"
+              className="glass-button"
+              onClick={onHide}
+              disabled={deleting}
+              title="Hide this peering from the dashboard (does not touch Azure)"
+              style={{
+                fontSize: 11,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "4px 10px",
+              }}
+            >
+              <EyeOff size={11} strokeWidth={1.5} />
+              Hide
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -794,15 +949,27 @@ function ExistingPeerings({
   error,
   data,
   clusterName,
+  dismissed,
+  deletingPeering,
+  actionError,
   onRefresh,
+  onHide,
+  onDelete,
 }: {
   loading: boolean;
   error: string | null;
   data: VnetPeeringExistingResponse | null;
   clusterName: string;
+  dismissed: Set<string>;
+  deletingPeering: string | null;
+  actionError: string | null;
   onRefresh: () => void;
+  onHide: (peeringName: string) => void;
+  onDelete: (peeringName: string) => void;
 }) {
-  const peerings = data?.peerings ?? [];
+  const allPeerings = data?.peerings ?? [];
+  const peerings = allPeerings.filter((p) => !dismissed.has(p.name));
+  const hiddenCount = allPeerings.length - peerings.length;
   const showRefresh = Boolean(clusterName);
 
   return (
@@ -891,15 +1058,28 @@ function ExistingPeerings({
         </StatusLine>
       ) : peerings.length === 0 ? (
         <StatusLine kind="info">
-          No peerings on this cluster&apos;s AKS VNet yet. Use the form below to
-          create one.
+          {hiddenCount > 0
+            ? `All ${hiddenCount} peering(s) on this cluster's AKS VNet are hidden. Use the form below to create one.`
+            : "No peerings on this cluster's AKS VNet yet. Use the form below to create one."}
         </StatusLine>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {peerings.map((item) => (
-            <ExistingPeeringRow key={item.name} item={item} />
+            <ExistingPeeringRow
+              key={item.name}
+              item={item}
+              deleting={deletingPeering === item.name}
+              onHide={() => onHide(item.name)}
+              onDelete={() => onDelete(item.name)}
+            />
           ))}
         </div>
+      )}
+      {actionError && <StatusLine kind="error">{actionError}</StatusLine>}
+      {hiddenCount > 0 && peerings.length > 0 && (
+        <StatusLine kind="info">
+          {hiddenCount} stale peering(s) hidden from this view.
+        </StatusLine>
       )}
     </div>
   );

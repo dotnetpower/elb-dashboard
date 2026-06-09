@@ -15,6 +15,11 @@ import { isDevBypassEnabled } from "@/config/runtime";
 import { listWithMiFallback } from "@/lib/armWithMiFallback";
 
 import { configFromTags } from "./configFromTags";
+import {
+  type DiscoveryRg,
+  hasElbWorkspace,
+  mergeRgsByName,
+} from "./discoveryRgs";
 
 const DEV_BYPASS = isDevBypassEnabled();
 
@@ -99,16 +104,37 @@ export function useWorkspaceDiscovery() {
         }[];
       }[] = [];
       for (const sub of subs) {
-        // Same MI-fallback rationale as the subs query above: a user with
-        // only RG-scope Reader (or no RBAC at all) gets an empty list
-        // from direct ARM and needs the backend MI proxy to surface the
-        // elb-tagged workspace RG so auto-discovery can find it.
-        const rgList = DEV_BYPASS
-          ? await armProxyApi.listResourceGroups(sub.subscriptionId)
-          : await listWithMiFallback(
-              () => armListRGs(sub.subscriptionId),
-              () => armProxyApi.listResourceGroups(sub.subscriptionId),
-            );
+        // Same MI-fallback rationale as the subs query above, with one extra
+        // failure mode handled: a user with only RG-scope Reader on an
+        // *unrelated* RG gets a NON-empty direct list that nevertheless omits
+        // the elb-tagged workload RG. `listWithMiFallback` only falls back on
+        // an empty/thrown direct result, so that partial list would mask the
+        // workspace and wrongly drop the caller into the SetupWizard. We
+        // therefore consult the backend MI proxy (subscription-wide Reader via
+        // the shared identity) whenever the direct scan finds no elb workspace,
+        // and merge so the workload RG surfaces regardless of per-user RBAC.
+        let rgList: DiscoveryRg[];
+        if (DEV_BYPASS) {
+          rgList = await armProxyApi.listResourceGroups(sub.subscriptionId);
+        } else {
+          let direct: DiscoveryRg[] = [];
+          try {
+            direct = await armListRGs(sub.subscriptionId);
+          } catch {
+            direct = [];
+          }
+          if (hasElbWorkspace(sub.subscriptionId, direct)) {
+            rgList = direct;
+          } else {
+            let mi: DiscoveryRg[] = [];
+            try {
+              mi = await armProxyApi.listResourceGroups(sub.subscriptionId);
+            } catch {
+              mi = [];
+            }
+            rgList = mergeRgsByName(direct, mi);
+          }
+        }
         const rgs = rgList.map((r) => ({
           name: r.name,
           location: r.location,

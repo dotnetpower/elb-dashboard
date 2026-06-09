@@ -106,6 +106,27 @@ export interface WarmupStatus {
   error?: string;
 }
 
+/** One in-flight warmup row as surfaced by `GET /api/warmup/active`. */
+export interface WarmupActiveItem {
+  /** Celery task id to poll `/warmup/{id}/status`, or null if not yet attached. */
+  instance_id: string | null;
+  job_id: string;
+  db: string;
+  /** Current pipeline phase (queued → checking_storage → sharding → … → completed). */
+  phase: string;
+  status: string;
+  /** True when triggered by the auto-warmup reconciler (not the user). */
+  auto: boolean;
+  started_at: string;
+}
+
+export interface WarmupActiveResponse {
+  active: boolean;
+  instance_id: string | null;
+  warmup: WarmupActiveItem | null;
+  warmups: WarmupActiveItem[];
+}
+
 export interface AutoWarmupPreference {
   subscription_id: string;
   resource_group: string;
@@ -703,6 +724,15 @@ export const monitoringApi = {
       } | null;
       output: { status: string; db: string; error?: string } | null;
     }>(`/warmup/${encodeURIComponent(instanceId)}/status`),
+
+  /** Discover in-flight warmups for a cluster — including auto-warmups the
+   *  browser did not start (beat reconcile / post-AKS-start re-warm). Lets the
+   *  WarmupSection adopt the active warmup and render its live phase so the
+   *  user always sees what the platform is doing. Best-effort (never 500). */
+  warmupActive: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<WarmupActiveResponse>(
+      `/warmup/active?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
 
   saveAutoWarmupPreference: (body: AutoWarmupPreference) =>
     api.put<{ status: string; preference: AutoWarmupPreference }>(

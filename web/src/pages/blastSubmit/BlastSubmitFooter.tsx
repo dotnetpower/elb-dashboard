@@ -152,6 +152,18 @@ export function BlastSubmitFooter({
         </div>
       )}
 
+      {/* Safety net: the Run button is disabled but nothing above explains why
+          (no checklist entry, no pre-flight panel). Never leave a greyed-out
+          button without an on-screen reason. */}
+      {runDisabled && !submitPending && !preFlightBlocked && missing.length === 0 && runTitle && (
+        <div className="blast-checklist">
+          <strong className="blast-checklist__title">Submission blocked:</strong>
+          <ul>
+            <li>{runTitle}</li>
+          </ul>
+        </div>
+      )}
+
       {preFlightResult && (
         <PreFlightResultPanel
           result={preFlightResult}

@@ -104,6 +104,46 @@ def test_list_visible_subscriptions_uses_short_cache(monkeypatch: pytest.MonkeyP
     assert calls == 1
 
 
+def test_list_visible_subscriptions_flags_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When ARM returns more subscriptions than the cap, the helper must stop at
+    the limit AND flag `subscriptions_truncated` so the SPA can warn instead of
+    silently hiding subscriptions past the cap."""
+    import api.routes.me as me_module
+
+    class _FakeState:
+        value = "Enabled"
+
+    def _make_sub(i: int) -> object:
+        return type(
+            "_Sub",
+            (),
+            {
+                "subscription_id": f"sub-{i}",
+                "display_name": f"Demo {i}",
+                "tenant_id": "tenant-1",
+                "state": _FakeState(),
+            },
+        )()
+
+    class _FakeSubscriptions:
+        def list(self):
+            return [_make_sub(i) for i in range(10)]
+
+    class _FakeClient:
+        def __init__(self, _credential: object) -> None:
+            self.subscriptions = _FakeSubscriptions()
+
+    me_module.reset_subscription_cache_for_tests()
+    monkeypatch.setattr(me_module, "_SUBSCRIPTION_LIST_LIMIT", 3, raising=False)
+    monkeypatch.setattr(me_module, "get_credential", lambda: object())
+    monkeypatch.setattr("azure.mgmt.resource.SubscriptionClient", _FakeClient, raising=True)
+
+    subs, error = me_module._list_visible_subscriptions()
+
+    assert len(subs) == 3
+    assert error == "subscriptions_truncated"
+
+
 def test_me_requires_caller(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without AUTH_DEV_BYPASS, anonymous requests must be rejected.
 

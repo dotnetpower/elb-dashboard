@@ -133,6 +133,24 @@ def confirm_window_seconds() -> int:
     return _env_int("UPGRADE_CONFIRM_WINDOW_SECONDS", CONFIRM_WINDOW_SECONDS, minimum=0)
 
 
+def _parse_anchor(text: str) -> datetime:
+    """Parse a stored ISO timestamp into a timezone-aware UTC datetime.
+
+    The reconciler subtracts these anchors from ``clock()`` (always aware UTC).
+    If a row carries a *naive* timestamp — an older row, a manual edit, or a
+    future writer that forgets the tz — ``aware - naive`` raises ``TypeError``,
+    which the call sites only guard for with ``except ValueError``. That
+    uncaught ``TypeError`` would crash the whole reconcile tick and strand every
+    in-flight upgrade. Coercing a naive value to UTC here keeps the subtraction
+    valid and the elapsed math correct. Raises ``ValueError`` on a malformed
+    string so the existing ``except ValueError`` handling still applies.
+    """
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
 def reconcile_rolling_out_inline(
     *,
     aca: object | None = None,
@@ -246,7 +264,7 @@ def reconcile_rolling_out_inline(
         if not anchor:
             return None
         try:
-            started = datetime.fromisoformat(anchor)
+            started = _parse_anchor(anchor)
         except ValueError:
             return None
         elapsed = (clock() - started).total_seconds()
@@ -373,7 +391,7 @@ def reconcile_rolling_out_inline(
     # Fast-fail when the ARM PATCH evidently never landed.
     if row.target_version and row.started_at:
         try:
-            started = datetime.fromisoformat(row.started_at)
+            started = _parse_anchor(row.started_at)
             elapsed = (clock() - started).total_seconds()
         except ValueError:
             elapsed = 0
@@ -409,7 +427,7 @@ def reconcile_rolling_out_inline(
         # before becoming ready. Escalate after grace.
         if status.replicas == 0 and not status.active and row.started_at:
             try:
-                started = datetime.fromisoformat(row.started_at)
+                started = _parse_anchor(row.started_at)
                 elapsed = (clock() - started).total_seconds()
             except ValueError:
                 elapsed = 0
@@ -515,7 +533,7 @@ def _reconcile_validating(
     anchor = row.validating_started_at or row.started_at
     if anchor:
         try:
-            elapsed = (clock() - datetime.fromisoformat(anchor)).total_seconds()
+            elapsed = (clock() - _parse_anchor(anchor)).total_seconds()
         except ValueError:
             elapsed = 0.0
         if elapsed > validating_timeout_seconds():
@@ -652,7 +670,7 @@ def _reconcile_confirming(
     # Still healthy: wait for the confirm deadline before finalising.
     if row.confirm_deadline:
         try:
-            deadline = datetime.fromisoformat(row.confirm_deadline)
+            deadline = _parse_anchor(row.confirm_deadline)
         except ValueError:
             deadline = clock()
         if clock() < deadline:
@@ -674,7 +692,7 @@ def _reconcile_confirming(
         # version) instead of looping invisibly.
         if row.confirm_deadline:
             try:
-                cap = datetime.fromisoformat(
+                cap = _parse_anchor(
                     row.confirm_deadline
                 ) + timedelta(seconds=CONFIRM_CUTOVER_CONVERGE_GRACE_SECONDS)
             except ValueError:
@@ -740,7 +758,7 @@ def _check_pre_patch_stuck(
     if not row.started_at:
         return None
     try:
-        started = datetime.fromisoformat(row.started_at)
+        started = _parse_anchor(row.started_at)
     except ValueError:
         return None
     elapsed = (clock() - started).total_seconds()

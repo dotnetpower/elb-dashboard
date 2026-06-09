@@ -38,6 +38,35 @@ import {
   summariseWarmupCapacity,
 } from "@/components/warmupSection/helpers";
 
+/** Short label for an orchestrator warmup phase (the `/warmup/{id}/status`
+ *  custom_status.phase / `/warmup/active` phase vocabulary), used by the
+ *  background-warmup banner. Distinct from `shortWarmupPhase`, which maps the
+ *  k8s per-DB `active_phase` vocabulary. */
+function orchestratorPhaseLabel(phase: string): string {
+  switch (phase) {
+    case "queued":
+      return "Queued";
+    case "starting":
+      return "Starting";
+    case "checking_storage":
+      return "Checking storage";
+    case "sharding":
+      return "Building shards";
+    case "planning_node_warmup":
+      return "Planning node warmup";
+    case "applying_warmup_jobs":
+      return "Applying warmup jobs";
+    case "warming_nodes":
+      return "Loading DB to nodes";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    default:
+      return "Warming";
+  }
+}
+
 interface Props {
   subscriptionId: string;
   resourceGroup: string;
@@ -91,6 +120,10 @@ export function WarmupSection({
     message: string;
   } | null>(null);
   const [starting, setStarting] = useState(false);
+  // True when the warmup currently being shown was started by the platform
+  // (auto-warmup reconcile / post-AKS-start re-warm), not by the user clicking
+  // "Warm". Drives the "Auto" badge so the progress is transparent.
+  const [adoptedAuto, setAdoptedAuto] = useState(false);
 
   // Query downloaded databases from storage (to know which are available for warmup).
   // Passing cluster topology asks the backend to attach a `warmup_plan` to each
@@ -216,6 +249,40 @@ export function WarmupSection({
     retry: 1, // fail fast on stale instance_id
   });
 
+  // Discover in-flight warmups the browser did not start (auto-warmup via beat
+  // reconcile, or the forced re-warm after an AKS start). Without this the user
+  // had no idea the platform was warming databases in the background. We only
+  // poll while the cluster is running and no user-initiated warmup is already
+  // being tracked, then adopt the active warmup so the existing progress panel
+  // renders its live phase.
+  const activeQuery = useQuery({
+    queryKey: ["warmup-active", subscriptionId, resourceGroup, clusterName],
+    queryFn: () =>
+      monitoringApi.warmupActive(subscriptionId, resourceGroup, clusterName),
+    enabled:
+      Boolean(subscriptionId && resourceGroup && clusterName) && !warmupInstanceId,
+    refetchInterval: (query) =>
+      query.state.data?.active ? 10_000 : 30_000,
+    retry: 1,
+  });
+
+  // Adopt an active warmup's Celery instance id (when attached) so the
+  // orchestrator status panel below shows its live phase progression. Remember
+  // whether it was an auto run so the panel can badge it.
+  useEffect(() => {
+    if (warmupInstanceId) return;
+    const active = activeQuery.data?.warmup;
+    if (active && active.instance_id) {
+      setAdoptedAuto(Boolean(active.auto));
+      setWarmupInstanceId(active.instance_id);
+      try {
+        localStorage.setItem(`elb-warmup-${clusterName}`, active.instance_id);
+      } catch {
+        /* */
+      }
+    }
+  }, [activeQuery.data, warmupInstanceId, clusterName]);
+
   // Clear stale instance_id only when the backend explicitly says the
   // orchestrator no longer exists. Transient network or 5xx failures should not
   // erase the handle for an active warmup run.
@@ -223,6 +290,7 @@ export function WarmupSection({
     const status = (orchQuery.error as Partial<ApiError> | null)?.status;
     if (warmupInstanceId && orchQuery.isError && status === 404) {
       setWarmupInstanceId(null);
+      setAdoptedAuto(false);
       try {
         localStorage.removeItem(`elb-warmup-${clusterName}`);
       } catch {
@@ -239,6 +307,7 @@ export function WarmupSection({
       // Keep showing for a bit, then clear
       const t = setTimeout(() => {
         setWarmupInstanceId(null);
+        setAdoptedAuto(false);
         try {
           localStorage.removeItem(`elb-warmup-${clusterName}`);
         } catch {
@@ -266,6 +335,7 @@ export function WarmupSection({
     setStartError(null);
     setSelectedDb(dbName);
     setStarting(true);
+    setAdoptedAuto(false);
     try {
       const candidate = WARMUP_CANDIDATES.find((c) => c.value === dbName);
       const resp = await monitoringApi.startWarmup({
@@ -383,6 +453,53 @@ export function WarmupSection({
         />
       )}
 
+      {/* Auto-warmup discovered but its Celery task id is not attached yet, so
+          the orchestrator panel below cannot poll. Surface a lightweight banner
+          so a background warmup is never invisible to the user. */}
+      {!warmupInstanceId && activeQuery.data?.active && activeQuery.data.warmup && (
+        <div
+          style={{
+            padding: "8px 12px",
+            borderRadius: 8,
+            marginBottom: "var(--space-2)",
+            fontSize: 11,
+            background: "rgba(122,167,255,0.08)",
+            border: "1px solid rgba(122,167,255,0.2)",
+            color: "var(--accent)",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <Loader2 size={12} className="spin" />
+          <div>
+            <strong>
+              Warmup{" "}
+              {activeQuery.data.warmup.db ? `(${activeQuery.data.warmup.db})` : ""}
+            </strong>
+            {activeQuery.data.warmup.auto && (
+              <span
+                title="Started automatically by the platform (auto-warmup)"
+                style={{
+                  marginLeft: 6,
+                  padding: "1px 6px",
+                  borderRadius: 999,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  background: "rgba(122,167,255,0.16)",
+                  color: "var(--accent)",
+                }}
+              >
+                Auto
+              </span>
+            )}
+            : {orchestratorPhaseLabel(activeQuery.data.warmup.phase)}
+          </div>
+        </div>
+      )}
+
       {/* Active warmup orchestrator status */}
       {warmupInstanceId && orchQuery.data && (
         <div
@@ -417,7 +534,26 @@ export function WarmupSection({
           {orchFinished && orchSuccess && <CheckCircle2 size={12} strokeWidth={1.5} />}
           {orchFinished && !orchSuccess && <AlertTriangle size={12} strokeWidth={1.5} />}
           <div>
-            <strong>Warmup {orchDb ? `(${orchDb})` : ""}</strong>:{" "}
+            <strong>Warmup {orchDb ? `(${orchDb})` : ""}</strong>
+            {adoptedAuto && (
+              <span
+                title="Started automatically by the platform (auto-warmup)"
+                style={{
+                  marginLeft: 6,
+                  padding: "1px 6px",
+                  borderRadius: 999,
+                  fontSize: 9,
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  background: "rgba(122,167,255,0.16)",
+                  color: "var(--accent)",
+                }}
+              >
+                Auto
+              </span>
+            )}
+            :{" "}
             {orchPhase === "starting"
               ? "Starting task..."
               : orchPhase === "checking_storage"

@@ -107,6 +107,64 @@ def list_existing_peerings(
         ) from exc
 
 
+@router.post("/vnet-peering/delete")
+def delete_existing_peering(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Delete a single named peering from the cluster's AKS VNet.
+
+    Used by the Settings panel to remove an orphaned ("Disconnected") peering
+    whose remote VNet was deleted. Symmetric with the create path: only the
+    AKS-side peering is removed (the remote side is typically already gone).
+    Best-effort — a missing peering is reported as ``deleted=True`` so the SPA's
+    optimistic refresh stays clean.
+    """
+    sub = _require(body.get("subscription_id"), _RE_SUB, "subscription_id")
+    rg = _require(body.get("resource_group"), _RE_RG, "resource_group")
+    cluster = _require(body.get("cluster_name"), _RE_NAME, "cluster_name")
+    peering_name = _require(body.get("peering_name"), _RE_NAME, "peering_name")
+
+    LOGGER.info(
+        "settings/vnet-peering/delete requested cluster=%s rg=%s peering=%s caller_oid=%s",
+        cluster,
+        rg,
+        peering_name,
+        redact_oid(caller.object_id),
+    )
+
+    from api.services import get_credential
+    from api.tasks.azure.peering import delete_vnet_peering_on_cluster
+
+    try:
+        result = delete_vnet_peering_on_cluster(
+            get_credential(),
+            subscription_id=sub,
+            cluster_resource_group=rg,
+            cluster_name=cluster,
+            peering_name=peering_name,
+        )
+    except Exception as exc:
+        LOGGER.exception("settings/vnet-peering/delete helper failed")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "vnet_peering_delete_failed",
+                "message": (
+                    "The peering could not be deleted: "
+                    f"{type(exc).__name__}: {str(exc)[:200]}"
+                ),
+            },
+        ) from exc
+
+    if result.get("error"):
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "vnet_peering_delete_failed", "message": result["error"]},
+        )
+    return result
+
+
 @router.post("/vnet-peering")
 def peer_vnet(
     body: dict[str, Any] = Body(...),

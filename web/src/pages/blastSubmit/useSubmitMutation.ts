@@ -192,6 +192,18 @@ export function buildSubmitRequest({
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
   };
 
+  // word_size / gap_open / gap_extend are free-text numeric fields. The old
+  // `form.x ? parseInt(form.x, 10) : undefined` pattern sent `NaN` (which
+  // JSON-serialises to `null`) when the field held only whitespace, because a
+  // whitespace string is truthy. Trim first and drop non-finite results so the
+  // API only ever receives a real integer or `undefined`.
+  const parseOptionalInt = (value: string): number | undefined => {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const parsed = Number.parseInt(trimmed, 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+
   // When the query came from an accession the subrange travels in
   // `query_accession_seq_start/stop`, so suppress the form-driven `-query_loc`
   // that `buildEffectiveAdditionalOptions` would otherwise append.
@@ -212,9 +224,9 @@ export function buildSubmitRequest({
     evalue: form.evalue,
     max_target_seqs: form.max_target_seqs,
     outfmt: form.outfmt,
-    word_size: form.word_size ? parseInt(form.word_size, 10) : undefined,
-    gap_open: form.gap_open ? parseInt(form.gap_open, 10) : undefined,
-    gap_extend: form.gap_extend ? parseInt(form.gap_extend, 10) : undefined,
+    word_size: parseOptionalInt(form.word_size),
+    gap_open: parseOptionalInt(form.gap_open),
+    gap_extend: parseOptionalInt(form.gap_extend),
     low_complexity_filter: form.low_complexity_filter,
     taxid: taxid ?? undefined,
     is_inclusive: taxid ? form.is_inclusive : undefined,

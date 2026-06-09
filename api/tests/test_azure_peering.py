@@ -1035,3 +1035,215 @@ def test_list_peerings_never_raises_when_cluster_get_fails(monkeypatch) -> None:
 
     assert result["peerings"] == []
     assert "managed_clusters.get failed" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Orphan detection + delete_vnet_peering_on_cluster
+# ---------------------------------------------------------------------------
+
+
+def _install_vnet_clients(
+    monkeypatch,
+    *,
+    peerings=None,
+    vnet_get_raises=None,
+    delete_raises=None,
+    delete_recorder=None,
+    cluster_obj=None,
+):
+    from api.services import azure_clients
+    from api.tasks.azure import peering as peering_mod
+
+    class _FakeVnets:
+        def get(self, rg: str, name: str):
+            if vnet_get_raises is not None:
+                raise vnet_get_raises
+            return SimpleNamespace(id=f"/{rg}/{name}")
+
+    class _FakePeeringsList:
+        def list(self, rg: str, vnet: str):
+            return list(peerings or [])
+
+        def begin_delete(self, rg: str, vnet: str, name: str):
+            if delete_recorder is not None:
+                delete_recorder.append({"rg": rg, "vnet": vnet, "name": name})
+            if delete_raises is not None:
+                raise delete_raises
+
+            class _Poller:
+                def result(self_inner):
+                    return None
+
+            return _Poller()
+
+    class _FakeNetworkClient:
+        virtual_network_peerings = _FakePeeringsList()
+        virtual_networks = _FakeVnets()
+
+    class _FakeAksClient:
+        managed_clusters = SimpleNamespace(
+            get=lambda _rg, _name: cluster_obj or _make_cluster()
+        )
+
+    monkeypatch.setattr(peering_mod, "network_client", lambda _c, _s: _FakeNetworkClient())
+    monkeypatch.setattr(azure_clients, "aks_client", lambda _c, _s: _FakeAksClient())
+
+
+def test_list_peerings_flags_orphaned_disconnected(monkeypatch) -> None:
+    from api.tasks.azure import peering as peering_mod
+    from azure.core.exceptions import ResourceNotFoundError
+
+    aks_vnet_id = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet"
+    )
+    monkeypatch.setattr(peering_mod, "_resolve_aks_vnet_id", lambda *a, **k: aks_vnet_id)
+
+    ghost = SimpleNamespace(
+        name="peer-aks-vnet-to-deleted",
+        peering_state="Disconnected",
+        provisioning_state="Succeeded",
+        remote_virtual_network=SimpleNamespace(
+            id=(
+                "/subscriptions/sub-2/resourceGroups/rg-gone/"
+                "providers/Microsoft.Network/virtualNetworks/vnet-gone"
+            )
+        ),
+        remote_address_space=SimpleNamespace(address_prefixes=[]),
+        allow_virtual_network_access=True,
+        allow_forwarded_traffic=False,
+        allow_gateway_transit=False,
+        use_remote_gateways=False,
+    )
+    _install_vnet_clients(
+        monkeypatch,
+        peerings=[ghost],
+        vnet_get_raises=ResourceNotFoundError("not found"),
+    )
+
+    result = peering_mod.list_vnet_peerings_for_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+    )
+
+    assert result["peerings"][0]["remote_vnet_exists"] is False
+
+
+def test_list_peerings_does_not_probe_connected(monkeypatch) -> None:
+    from api.tasks.azure import peering as peering_mod
+
+    aks_vnet_id = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet"
+    )
+    monkeypatch.setattr(peering_mod, "_resolve_aks_vnet_id", lambda *a, **k: aks_vnet_id)
+
+    healthy = SimpleNamespace(
+        name="peer-aks-vnet-to-vnet-target",
+        peering_state="Connected",
+        provisioning_state="Succeeded",
+        remote_virtual_network=SimpleNamespace(
+            id=(
+                "/subscriptions/sub-2/resourceGroups/rg-target/"
+                "providers/Microsoft.Network/virtualNetworks/vnet-target"
+            )
+        ),
+        remote_address_space=SimpleNamespace(address_prefixes=["10.10.0.0/16"]),
+        allow_virtual_network_access=True,
+        allow_forwarded_traffic=False,
+        allow_gateway_transit=False,
+        use_remote_gateways=False,
+    )
+
+    def _explode(*_a, **_k):
+        raise AssertionError("connected peerings must not be probed")
+
+    _install_vnet_clients(monkeypatch, peerings=[healthy])
+    # Replace the orphan probe so a regression that probes Connected rows fails.
+    monkeypatch.setattr(peering_mod, "_remote_vnet_exists", _explode)
+
+    result = peering_mod.list_vnet_peerings_for_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+    )
+
+    assert result["peerings"][0]["remote_vnet_exists"] is None
+
+
+def test_delete_peering_happy_path(monkeypatch) -> None:
+    from api.tasks.azure import peering as peering_mod
+
+    aks_vnet_id = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet"
+    )
+    monkeypatch.setattr(peering_mod, "_resolve_aks_vnet_id", lambda *a, **k: aks_vnet_id)
+    recorder: list[dict[str, Any]] = []
+    _install_vnet_clients(monkeypatch, delete_recorder=recorder)
+
+    result = peering_mod.delete_vnet_peering_on_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+        peering_name="peer-aks-vnet-to-deleted",
+    )
+
+    assert result["deleted"] is True
+    assert result["error"] is None
+    assert recorder == [
+        {"rg": "MC_rg", "vnet": "aks-vnet", "name": "peer-aks-vnet-to-deleted"}
+    ]
+
+
+def test_delete_peering_idempotent_when_absent(monkeypatch) -> None:
+    from api.tasks.azure import peering as peering_mod
+    from azure.core.exceptions import ResourceNotFoundError
+
+    aks_vnet_id = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet"
+    )
+    monkeypatch.setattr(peering_mod, "_resolve_aks_vnet_id", lambda *a, **k: aks_vnet_id)
+    _install_vnet_clients(
+        monkeypatch, delete_raises=ResourceNotFoundError("not found")
+    )
+
+    result = peering_mod.delete_vnet_peering_on_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+        peering_name="peer-already-gone",
+    )
+
+    assert result["deleted"] is True
+    assert result["reason"] == "peering_already_absent"
+
+
+def test_delete_peering_reports_error(monkeypatch) -> None:
+    from api.tasks.azure import peering as peering_mod
+
+    aks_vnet_id = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet"
+    )
+    monkeypatch.setattr(peering_mod, "_resolve_aks_vnet_id", lambda *a, **k: aks_vnet_id)
+    _install_vnet_clients(
+        monkeypatch, delete_raises=RuntimeError("AuthorizationFailed")
+    )
+
+    result = peering_mod.delete_vnet_peering_on_cluster(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-workload",
+        cluster_name="elb-cluster-01",
+        peering_name="peer-locked",
+    )
+
+    assert result["deleted"] is False
+    assert "begin_delete failed" in result["error"]

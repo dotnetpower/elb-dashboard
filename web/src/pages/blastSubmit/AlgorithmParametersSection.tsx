@@ -2,6 +2,7 @@ import { ChevronDown, ChevronUp, Gauge, Zap } from "lucide-react";
 
 import { PRESETS } from "@/pages/blastSubmitModel";
 import type { FormState } from "@/pages/blastSubmitModel";
+import { parseNumericInput } from "@/pages/blastSubmit/numericInput";
 import type { ProgramMeta, SetBlastField } from "@/pages/blastSubmit/types";
 import { Tip } from "@/pages/blastSubmit/ui";
 
@@ -113,7 +114,9 @@ export function AlgorithmParametersSection({
                     className="glass-input"
                     type="number"
                     value={form.max_target_seqs}
-                    onChange={(event) => set("max_target_seqs", parseInt(event.target.value, 10) || 100)}
+                    onChange={(event) =>
+                      set("max_target_seqs", parseNumericInput(event.target.value, 100))
+                    }
                   />
                 </label>
                 <label>
@@ -125,7 +128,9 @@ export function AlgorithmParametersSection({
                     type="number"
                     step="any"
                     value={form.evalue}
-                    onChange={(event) => set("evalue", parseFloat(event.target.value) || 0.05)}
+                    onChange={(event) =>
+                      set("evalue", parseNumericInput(event.target.value, 0.05))
+                    }
                   />
                 </label>
                 <label>
