@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E501
 """Patch the vendored elastic-blast-azure clone for dashboard sharded runs.
 
 Responsibility: Patch the vendored elastic-blast-azure clone for dashboard sharded runs
@@ -710,6 +711,108 @@ def patch_blast_run_aks_script(root: Path) -> None:
             _BLAST_RUN_AKS_VMTOUCH_BLOCK + _BLAST_RUN_AKS_VMTOUCH_ANCHOR,
             "ELB vmtouch warm step",
         )
+        patch_blast_run_aks_outfmt_argv(path)
+
+
+# ---------------------------------------------------------------------------
+# blast-run-aks.sh: pass BLAST options as a quote-safe argv array so a
+# multi-token `-outfmt` specifier (e.g. `-outfmt 7 std staxids sstrand qseq
+# sseq`, needed to surface subject taxids/names) reaches `blastn` as a SINGLE
+# argument instead of being word-split into stray positional args.
+#
+# The canonical wire format is UNQUOTED — quotes break the raw YAML
+# substitution elastic-blast uses to inject ELB_BLAST_OPTIONS into the pod env,
+# so we cannot rely on shell quotes to group the specifier. Instead we rebuild
+# an argv array from ELB_BLAST_OPTIONS, rejoining every token after `-outfmt`
+# up to the next `-flag` (BLAST format field codes never start with `-`, and
+# every other BLAST option takes a single-token value — only `-outfmt` is
+# multi-token). For a single-token `-outfmt 5` (every job today) the array is
+# byte-identical to the previous unquoted `$ELB_BLAST_OPTIONS` word-splitting,
+# so existing runs are unchanged; only a multi-token specifier behaves
+# differently (correctly grouped). No `eval`, no quotes — deterministic and
+# unit-testable in isolation.
+# ---------------------------------------------------------------------------
+
+_BLAST_RUN_AKS_ARGV_ANCHOR = (
+    '# shellcheck disable=SC2086\n'
+    'TIME="$DATE_NOW run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB %e %U %S %P" \\\n'
+)
+_BLAST_RUN_AKS_ARGV_BLOCK = r"""# ELB outfmt argv rebuild (added by patch_elastic_blast.py).
+# Rejoin a multi-token -outfmt specifier into a single argv element so it
+# survives to blastn intact. Byte-identical to plain word-splitting for the
+# single-token -outfmt every current job uses.
+#
+# Hardening: split ELB_BLAST_OPTIONS with glob DISABLED (set -f) and a known
+# IFS so a stray glob metacharacter in the options can never expand a BLAST
+# flag into matching filenames (the previous unquoted `$ELB_BLAST_OPTIONS`
+# expansion did glob — this is strictly safer for the no-glob inputs BLAST
+# options actually carry). The original noglob state is restored afterwards.
+ELB_BLAST_ARGV=()
+_elb_had_noglob=0
+case "$-" in *f*) _elb_had_noglob=1 ;; esac
+_elb_saved_ifs="$IFS"
+set -f
+IFS=$' \t\n'
+# shellcheck disable=SC2206
+_elb_opt_tokens=( $ELB_BLAST_OPTIONS )
+IFS="$_elb_saved_ifs"
+[ "$_elb_had_noglob" -eq 1 ] || set +f
+_elb_i=0
+while [ "$_elb_i" -lt "${#_elb_opt_tokens[@]}" ]; do
+    _elb_tok="${_elb_opt_tokens[$_elb_i]}"
+    if [ "$_elb_tok" = "-outfmt" ]; then
+        ELB_BLAST_ARGV+=( "-outfmt" )
+        _elb_i=$((_elb_i + 1))
+        _elb_spec=""
+        _elb_have_spec=0
+        while [ "$_elb_i" -lt "${#_elb_opt_tokens[@]}" ] && [ "${_elb_opt_tokens[$_elb_i]:0:1}" != "-" ]; do
+            if [ "$_elb_have_spec" -eq 0 ]; then
+                _elb_spec="${_elb_opt_tokens[$_elb_i]}"
+                _elb_have_spec=1
+            else
+                _elb_spec="$_elb_spec ${_elb_opt_tokens[$_elb_i]}"
+            fi
+            _elb_i=$((_elb_i + 1))
+        done
+        if [ "$_elb_have_spec" -eq 1 ]; then
+            ELB_BLAST_ARGV+=( "$_elb_spec" )
+        fi
+    else
+        ELB_BLAST_ARGV+=( "$_elb_tok" )
+        _elb_i=$((_elb_i + 1))
+    fi
+done
+
+"""
+
+
+def patch_blast_run_aks_outfmt_argv(path: Path) -> None:
+    """Rebuild BLAST options into a quote-safe argv array (multi-token outfmt).
+
+    Skips gracefully when the TIME= invocation anchor is absent (e.g. a partial
+    test stub or a layout this patch does not recognise), and raises only when
+    the anchor is present but the invocation line has drifted — so a real
+    upstream change cannot silently leave the rebuilt array unused.
+    """
+    text = path.read_text()
+    if "ELB outfmt argv rebuild" in text:
+        return
+    if _BLAST_RUN_AKS_ARGV_ANCHOR not in text:
+        return
+    invocation_old = '-num_threads "$ELB_NUM_CPUS" \\\n$ELB_BLAST_OPTIONS \\\n2>"$ERROR_FILE"'
+    invocation_new = '-num_threads "$ELB_NUM_CPUS" \\\n"${ELB_BLAST_ARGV[@]}" \\\n2>"$ERROR_FILE"'
+    if invocation_old not in text:
+        raise RuntimeError(
+            "blast-run-aks.sh has the argv anchor but the blastn invocation line "
+            "drifted; update patch_blast_run_aks_outfmt_argv before building"
+        )
+    text = text.replace(
+        _BLAST_RUN_AKS_ARGV_ANCHOR,
+        _BLAST_RUN_AKS_ARGV_BLOCK + _BLAST_RUN_AKS_ARGV_ANCHOR,
+        1,
+    )
+    text = text.replace(invocation_old, invocation_new, 1)
+    path.write_text(text)
 
 
 def patch_aks_workload_tolerations(root: Path) -> None:

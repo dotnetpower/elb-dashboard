@@ -17,6 +17,7 @@ Validation: `uv run pytest -q api/tests/test_terminal_patch_elastic_blast.py`.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 
@@ -104,6 +105,104 @@ def test_patch_partitioned_outfmt_gate_is_idempotent(tmp_path: Path) -> None:
     assert target.read_text() == once
     # The widened gate is present exactly once (no double application).
     assert once.count("outfmt_code not in {'5', '6', '7'}") == 1
+
+
+_BLAST_RUN_AKS_STUB = """#!/bin/bash
+set -uo pipefail
+# shellcheck disable=SC2086
+TIME="$DATE_NOW run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB %e %U %S %P" \\
+\\time -o "$BLAST_RUNTIME" \\
+$ELB_BLAST_PROGRAM \\
+-db "$ELB_DB" \\
+-query "$QUERY_DIR/batch_${JOB_NUM}.fa" \\
+-out "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out" \\
+-num_threads "$ELB_NUM_CPUS" \\
+$ELB_BLAST_OPTIONS \\
+2>"$ERROR_FILE"
+BLAST_EXIT_CODE=$?
+"""
+
+# A probe inserted right before the patched TIME= invocation (after the argv
+# rebuild) that prints each argv element on its own line for exact assertions.
+_ARGV_PROBE = 'for _a in "${ELB_BLAST_ARGV[@]}"; do printf "ARG[%s]\\n" "$_a"; done\nexit 0\n'
+
+
+def _run_argv_rebuild(tmp_path: Path, blast_options: str) -> list[str]:
+    patch_module = _load_patch_module()
+    script = tmp_path / "blast-run-aks.sh"
+    script.write_text(_BLAST_RUN_AKS_STUB)
+    patch_module.patch_blast_run_aks_outfmt_argv(script)
+    text = script.read_text()
+    anchor = '# shellcheck disable=SC2086\nTIME="$DATE_NOW run start'
+    assert anchor in text
+    script.write_text(text.replace(anchor, _ARGV_PROBE + anchor, 1))
+
+    proc = subprocess.run(  # noqa: S603 -- runs the patched stub in bash
+        ["/bin/bash", str(script)],
+        capture_output=True,
+        text=True,
+        env={"ELB_BLAST_OPTIONS": blast_options, "PATH": "/usr/bin:/bin"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    return [
+        line[len("ARG[") : -1]
+        for line in proc.stdout.splitlines()
+        if line.startswith("ARG[") and line.endswith("]")
+    ]
+
+
+def test_blast_run_argv_single_token_outfmt_is_byte_identical(tmp_path: Path) -> None:
+    """For the single-token -outfmt every job uses today, the rebuilt argv is
+    identical to plain word-splitting (no behavioural change)."""
+    argv = _run_argv_rebuild(tmp_path, "-evalue 0.05 -outfmt 5 -word_size 28 -dust yes")
+    assert argv == ["-evalue", "0.05", "-outfmt", "5", "-word_size", "28", "-dust", "yes"]
+
+
+def test_blast_run_argv_multitoken_outfmt_is_grouped(tmp_path: Path) -> None:
+    """A multi-token -outfmt is rejoined into ONE argv element so it reaches
+    blastn intact (the whole point of the patch)."""
+    argv = _run_argv_rebuild(
+        tmp_path,
+        "-evalue 0.05 -outfmt 7 sseqid staxids sstrand pident evalue bitscore -word_size 28",
+    )
+    assert argv == [
+        "-evalue",
+        "0.05",
+        "-outfmt",
+        "7 sseqid staxids sstrand pident evalue bitscore",
+        "-word_size",
+        "28",
+    ]
+
+
+def test_blast_run_argv_outfmt_at_end(tmp_path: Path) -> None:
+    """A multi-token -outfmt as the final option is grouped to the end."""
+    argv = _run_argv_rebuild(tmp_path, "-evalue 0.05 -outfmt 7 std staxids")
+    assert argv == ["-evalue", "0.05", "-outfmt", "7 std staxids"]
+
+
+def test_blast_run_argv_glob_metachar_not_expanded(tmp_path: Path, monkeypatch) -> None:
+    """A glob metacharacter in the options must NOT expand to filenames.
+
+    The rebuild splits with glob disabled, so a stray ``*`` stays literal even
+    when matching files exist in the working directory.
+    """
+    # Create a file that `*` would match if globbing were active.
+    (tmp_path / "WOULD_MATCH.txt").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    argv = _run_argv_rebuild(tmp_path, "-evalue 0.05 -outfmt 7 -word_size *")
+    assert argv == ["-evalue", "0.05", "-outfmt", "7", "-word_size", "*"]
+
+
+def test_patch_blast_run_outfmt_argv_is_idempotent(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    script = tmp_path / "blast-run-aks.sh"
+    script.write_text(_BLAST_RUN_AKS_STUB)
+    patch_module.patch_blast_run_aks_outfmt_argv(script)
+    once = script.read_text()
+    patch_module.patch_blast_run_aks_outfmt_argv(script)
+    assert script.read_text() == once
+    assert once.count("ELB outfmt argv rebuild") == 1
 
 
 def test_patch_init_shard_script_is_idempotent(tmp_path: Path) -> None:

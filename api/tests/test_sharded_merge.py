@@ -451,6 +451,136 @@ def test_merge_sharded_results_outfmt7_extended_fields_header(tmp_path: Path) ->
     assert report["fields"] == extended_fields
 
 
+def test_merge_sharded_results_outfmt7_reordered_fields_taxids(tmp_path: Path) -> None:
+    """The guide's exact taxid layout merges correctly even though it reorders
+    columns and omits qseqid.
+
+    `-outfmt "7 sseqid staxids sstrand pident evalue bitscore qstart qend sstart
+    send qseq sseq"` puts sseqid at col0, staxids at col1, evalue at col4 and
+    bitscore at col5 — none of the historical fixed positions hold. The merge
+    must resolve evalue/bitscore BY NAME to re-rank, treat the whole file as one
+    query group (no qseqid), and preserve every column including staxids.
+    """
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    guide_outfmt = (
+        "7 sseqid staxids sstrand pident evalue bitscore qstart qend sstart send qseq sseq"
+    )
+    # Columns: sseqid, staxids, sstrand, pident, evalue, bitscore, qstart, qend,
+    # sstart, send, qseq, sseq  (evalue=col4, bitscore=col5, NO qseqid).
+    row_best = "s1\t9606\tplus\t100\t1e-30\t90\t1\t20\t1\t20\tACGT\tACGT"
+    row_mid = "s2\t10090\tplus\t100\t1e-20\t80\t1\t20\t1\t20\tACGT\tACGT"
+    row_low = "s3\t562\tminus\t98\t1e-5\t60\t1\t20\t1\t20\tACGT\tACGT"
+    input_tsv.write_text("\n".join([row_mid, row_best, row_low]) + "\n")
+
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "2",
+            "blastn",
+            f'-outfmt "{guide_outfmt}" -max_target_seqs 2',
+        ],
+        check=True,
+    )
+
+    with gzip.open(output_gz, "rt") as handle:
+        lines = [line.rstrip("\n") for line in handle if line.strip()]
+    data_rows = [line for line in lines if not line.startswith("#")]
+    # Ranked best-first by the RESOLVED evalue/bitscore columns; max_target_seqs
+    # cuts the third hit. staxids (col1) preserved verbatim.
+    assert data_rows == [row_best, row_mid]
+    assert data_rows[0].split("\t")[1] == "9606"
+    assert all(len(row.split("\t")) == 12 for row in data_rows)
+
+    report = json.loads(report_json.read_text())
+    assert report["outfmt"] == 7
+    # Resolved by name: sseqid=0 (subject), staxids has no role, evalue=4,
+    # bitscore=5, and no query column.
+    assert report["resolved_columns"] == {
+        "qseqid": None,
+        "evalue": 4,
+        "bitscore": 5,
+        "subject": 0,
+    }
+    # No-query-column fallback is surfaced as a warning.
+    assert any("single query group" in w for w in report["warnings"])
+
+
+def test_merge_sharded_results_outfmt7_unquoted_multitoken(tmp_path: Path) -> None:
+    """The canonical wire format is UNQUOTED (quotes break elastic-blast's raw
+    YAML substitution), so the merge must resolve the full specifier even when
+    `-outfmt` arrives as separate tokens (`-outfmt 7 std staxids`, no quotes)."""
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    # std 12 + staxids = 13 columns; evalue=col10, bitscore=col11 (std positions).
+    row_best = "q1\ts1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\t9606"
+    row_mid = "q1\ts2\t100\t20\t0\t0\t1\t20\t1\t20\t1e-20\t80\t10090"
+    input_tsv.write_text("\n".join([row_mid, row_best]) + "\n")
+
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "2",
+            "blastn",
+            # UNQUOTED multi-token outfmt (the YAML-safe wire format).
+            "-outfmt 7 std staxids -max_target_seqs 2",
+        ],
+        check=True,
+    )
+
+    with gzip.open(output_gz, "rt") as handle:
+        data_rows = [
+            line.rstrip("\n") for line in handle if line.strip() and not line.startswith("#")
+        ]
+    assert data_rows == [row_best, row_mid]
+    assert data_rows[0].split("\t")[12] == "9606"
+
+    report = json.loads(report_json.read_text())
+    # The full specifier was recovered (std → positions 0/10/11, staxids extra).
+    assert report["resolved_columns"] == {
+        "qseqid": 0,
+        "evalue": 10,
+        "bitscore": 11,
+        "subject": 1,
+    }
+
+
+def test_merge_sharded_results_rejects_outfmt_without_rank_columns(tmp_path: Path) -> None:
+    """A tabular outfmt missing evalue/bitscore cannot be re-ranked, so the
+    merge fails closed rather than emitting an unranked (wrong) result."""
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    input_tsv.write_text("s1\t9606\tplus\t100\n")
+
+    proc = subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "2",
+            "blastn",
+            '-outfmt "7 sseqid staxids sstrand pident" -max_target_seqs 2',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "evalue and bitscore" in proc.stderr
+
+
 def _run_tabular_merge(
     tmp_path: Path,
     rows: list[str],
