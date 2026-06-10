@@ -35,12 +35,13 @@ describe("API Reference spec parser", () => {
     const keys = Object.keys(examples);
 
     // small_16s_rrna is first (the dashboard default), mode_b_core_nt and the
-    // outfmt 7 variant remain available, and the upstream `mode_a` example is
+    // outfmt 7 variants remain available, and the upstream `mode_a` example is
     // preserved at the end.
     expect(keys).toEqual([
       "small_16s_rrna",
       "mode_b_core_nt",
       "mode_b_core_nt_outfmt7",
+      "mode_b_core_nt_outfmt7_taxids",
       "mode_a",
     ]);
 
@@ -90,6 +91,18 @@ describe("API Reference spec parser", () => {
     };
     expect(coreNtOutfmt7.db).toBe("core_nt");
     expect(coreNtOutfmt7.blast_options.outfmt).toBe("7");
+
+    // The taxid variant keeps the standard 12 columns first (std) so the shard
+    // merge can re-rank, then appends the taxonomy/strand/sequence columns.
+    const coreNtOutfmt7Taxids = examples.mode_b_core_nt_outfmt7_taxids.value as {
+      db: string;
+      blast_options: { outfmt: string };
+    };
+    expect(coreNtOutfmt7Taxids.db).toBe("core_nt");
+    expect(coreNtOutfmt7Taxids.blast_options.outfmt).toBe(
+      "7 std staxids sstrand qseq sseq",
+    );
+    expect(coreNtOutfmt7Taxids.blast_options.outfmt.startsWith("7 std")).toBe(true);
   });
 
   it("selects the small 16S rRNA example as the default request body for POST /v1/jobs", () => {

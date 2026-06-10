@@ -85,6 +85,24 @@ const CORE_NT_OUTFMT7_JOB_EXAMPLE = {
   },
 };
 
+const CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE = {
+  summary: "Mode B - core_nt tabular + taxids (outfmt 7 std staxids)",
+  description:
+    "Adds taxonomy + strand + sequence columns to the tabular output via an extended outfmt specifier. The standard 12 columns MUST stay first (the `std` token), because the shard merge re-ranks by the fixed std positions (evalue=col11, bitscore=col12) and only then preserves the trailing columns; a non-std-leading order is rejected. The full specifier is passed as the `outfmt` value (the sibling keeps it verbatim) so the standard columns are not duplicated — do NOT also place -outfmt in `extra`. For Web BLAST-equivalent e-values and ranking, submit this from New Search with sharding_mode=precise (search-space correction + tie-order oracle). CAVEAT: the env-var -> shell quoting of a multi-token outfmt through to each shard pod is not yet end-to-end verified on a live sharded run; validate on a non-production cluster before relying on it. If a shard fails to start, fall back to plain outfmt 7 (no extra columns) or outfmt 5 (XML).",
+  value: {
+    program: "blastn",
+    db: "core_nt",
+    query_fasta: CORE_NT_NC_003310_FASTA,
+    blast_options: {
+      evalue: 0.05,
+      max_target_seqs: 100,
+      outfmt: '7 std staxids sstrand qseq sseq',
+      extra: CORE_NT_BLAST_OPTIONS,
+    },
+    resource_profile: "core_nt_safe",
+  },
+};
+
 const OPENAPI_JOB_ID_DESCRIPTION =
   "Short OpenAPI job id returned by POST /v1/jobs, for example 17dfd2825089. Do not paste a Dashboard job UUID from /blast/jobs/<uuid>.";
 const OPENAPI_JOB_ID_USAGE_HINT =
@@ -477,6 +495,7 @@ function withCuratedRequestExamples(
           small_16s_rrna: SMALL_16S_RRNA_JOB_EXAMPLE,
           mode_b_core_nt: CORE_NT_JOB_EXAMPLE,
           mode_b_core_nt_outfmt7: CORE_NT_OUTFMT7_JOB_EXAMPLE,
+          mode_b_core_nt_outfmt7_taxids: CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE,
           ...(jsonBody.examples || {}),
         },
       },

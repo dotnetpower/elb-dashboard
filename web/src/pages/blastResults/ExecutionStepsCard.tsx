@@ -32,7 +32,15 @@ export function ExecutionStepsCard({ state }: ExecutionStepsCardProps) {
     (stepsForVersion["submitting"]?.log_line_count as number | undefined) ?? 0;
   const updatedAt = (jobRecord?.updated_at as string | undefined) ?? "";
   const stickVersion = `${effectivePhase}|${updatedAt}|${submittingLines}`;
-  useStickToBottom({ version: stickVersion, enabled: Boolean(job) });
+  useStickToBottom({
+    version: stickVersion,
+    enabled: Boolean(job),
+    // Follow the active/failed step row (rendered by StepRow with this
+    // attribute) rather than the document bottom — the timeline always keeps
+    // the still-pending steps below the active one, so the page bottom is a
+    // stack of empty pending rows, not the live log.
+    anchorSelector: '[data-blast-follow-anchor="true"]',
+  });
 
   if (!job) return null;
   return (

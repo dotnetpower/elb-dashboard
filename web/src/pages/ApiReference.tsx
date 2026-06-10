@@ -276,34 +276,58 @@ export function ApiReference() {
               deployedTag &&
               normaliseImageTag(pinnedTag) !== normaliseImageTag(deployedTag),
           );
-          const manifestOutdated = Boolean(deploymentQuery.data?.manifest_outdated);
-          if (!imageOutdated && !manifestOutdated) {
-            return null;
+          const dep = deploymentQuery.data;
+          const manifestOutdated = Boolean(dep?.manifest_outdated);
+          // A live deployment whose api image predates manifest-drift detection
+          // returns NO `manifest_outdated` field at all (vs. an explicit
+          // `false` from a current api). Distinguish the two so the operator
+          // isn't left wondering why no redeploy prompt appears: an absent
+          // signal means the CONTROL PLANE (api image) needs a redeploy before
+          // elb-openapi drift can even be evaluated.
+          const manifestSignalMissing =
+            dep != null && dep.manifest_outdated === undefined;
+          // The deployment read itself failed (workload-cluster unreachable /
+          // kubectl RBAC). Surface it instead of silently dropping the banner —
+          // a "redeploy needed" prompt that fails closed is worse than a noisy
+          // one, because the operator assumes everything is current.
+          const deploymentReadFailed = deploymentQuery.isError;
+
+          if (imageOutdated || manifestOutdated) {
+            return (
+              <OpenApiDeployPanel
+                variant="update"
+                reason={imageOutdated ? "image" : "manifest"}
+                subscriptionId={sub}
+                resourceGroup={clusterRg}
+                clusterName={clusterName}
+                acrName={acrName}
+                acrResourceGroup={acrRg}
+                storageAccount={savedConfig?.storageAccountName ?? ""}
+                storageResourceGroup={anchorRg}
+                imageBuilt={hasOpenApiImage}
+                onRetry={() => {
+                  svcQuery.refetch();
+                  specQuery.refetch();
+                  deploymentQuery.refetch();
+                }}
+                retrying={
+                  svcQuery.isFetching || specQuery.isFetching || deploymentQuery.isFetching
+                }
+                pinnedTag={pinnedTag}
+                currentTag={deployedTag}
+              />
+            );
           }
-          return (
-            <OpenApiDeployPanel
-              variant="update"
-              reason={imageOutdated ? "image" : "manifest"}
-              subscriptionId={sub}
-              resourceGroup={clusterRg}
-              clusterName={clusterName}
-              acrName={acrName}
-              acrResourceGroup={acrRg}
-              storageAccount={savedConfig?.storageAccountName ?? ""}
-              storageResourceGroup={anchorRg}
-              imageBuilt={hasOpenApiImage}
-              onRetry={() => {
-                svcQuery.refetch();
-                specQuery.refetch();
-                deploymentQuery.refetch();
-              }}
-              retrying={
-                svcQuery.isFetching || specQuery.isFetching || deploymentQuery.isFetching
-              }
-              pinnedTag={pinnedTag}
-              currentTag={deployedTag}
-            />
-          );
+          if (deploymentReadFailed || manifestSignalMissing) {
+            return (
+              <OpenApiManifestDiagnostic
+                reason={deploymentReadFailed ? "read_failed" : "signal_missing"}
+                retrying={deploymentQuery.isFetching}
+                onRetry={() => deploymentQuery.refetch()}
+              />
+            );
+          }
+          return null;
         })()}
 
       {baseUrl && specQuery.isLoading && !clusterStopped && <SpecLoadingState />}
@@ -631,6 +655,61 @@ function MissingOpenApiImageState() {
 
 function SpecLoadingState() {
   return <ApiReferenceSkeleton compact label="Loading API specification" />;
+}
+
+function OpenApiManifestDiagnostic({
+  reason,
+  retrying,
+  onRetry,
+}: {
+  reason: "read_failed" | "signal_missing";
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  const readFailed = reason === "read_failed";
+  return (
+    <PanelState border="1px solid rgba(242,153,74,0.2)">
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <StateIcon background="rgba(242,153,74,0.1)">
+          <AlertTriangle size={16} style={{ color: "var(--warning)" }} />
+        </StateIcon>
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>
+            {readFailed
+              ? "elb-openapi deployment status unavailable"
+              : "Redeploy detection not available yet"}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            {readFailed ? (
+              <>
+                The dashboard could not read the live{" "}
+                <InlineCode>elb-openapi</InlineCode> deployment (workload-cluster
+                unreachable or missing kubectl RBAC), so it cannot tell whether a
+                redeploy is needed. Resolve cluster access, then refresh.
+              </>
+            ) : (
+              <>
+                This control plane (<InlineCode>api</InlineCode> image) predates
+                manifest-drift detection, so it never reports whether the live{" "}
+                <InlineCode>elb-openapi</InlineCode> manifest is outdated. Redeploy
+                the control plane (rebuild + roll the <InlineCode>api</InlineCode>{" "}
+                image) to enable the redeploy prompt.
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+      <button
+        type="button"
+        className="glass-button"
+        style={{ fontSize: 12 }}
+        onClick={onRetry}
+        disabled={retrying}
+      >
+        <RefreshCw size={12} /> {retrying ? "Refreshing…" : "Refresh"}
+      </button>
+    </PanelState>
+  );
 }
 
 function ApiReferenceSkeleton({

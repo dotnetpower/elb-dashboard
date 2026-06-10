@@ -61,9 +61,15 @@ export function StepRow({
             ? "skipped"
             : "pending";
   const logId = `step-log-${step.key}`;
+  // The active step (or a failed step, whose error block is what the user
+  // needs to read) is the tail anchor that useStickToBottom follows — the
+  // timeline always renders the still-pending steps BELOW this row, so the
+  // document bottom is a stack of empty pending rows, not the live log.
+  const isFollowAnchor = state === "active" || state === "error";
 
   return (
     <div
+      data-blast-follow-anchor={isFollowAnchor ? "true" : undefined}
       style={{
         borderRadius: 6,
         overflow: "hidden",
