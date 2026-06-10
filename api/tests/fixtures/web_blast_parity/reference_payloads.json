@@ -95,7 +95,7 @@
       ]
     },
     "rdrp_orf1ab": {
-      "description": "SARS-CoV-2 ORF1ab polyprotein (266..21555 of NC_045512.2; includes nsp12 / RdRp), 21290 bp. NCBI Web BLAST RID 1G7Z8G7W016 submitted 2026-05-28 with the parity tool/email tuple (the issue's elb-dashboard-parity / parity@example.com is the documented original requestor; either combination produces the same scientific result for these parameters).",
+      "description": "SARS-CoV-2 ORF1ab polyprotein (266..21555 of NC_045512.2; includes nsp12 / RdRp), 21290 bp. NCBI Web BLAST RID 1G7Z8G7W016 submitted 2026-05-28 with the parity tool/email tuple (the documented original requestor; either combination produces the same scientific result for these parameters).",
       "fasta_path": "orf1ab_query.fasta",
       "fasta_source": "NCBI Entrez efetch nuccore NC_045512.2:266-21555",
       "reference_xml_path": "reference_xml/rdrp_orf1ab_1G7Z8G7W016.xml.gz",
