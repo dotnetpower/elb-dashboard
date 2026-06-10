@@ -15,6 +15,7 @@ Validation: `uv run pytest -q api/tests/test_auto_warmup.py api/tests/test_warmu
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC
 from typing import Any
 
@@ -71,6 +72,35 @@ def _program_to_mol_type(*args: Any, **kwargs: Any) -> str:
 
 def _build_elb_image(*args: Any, **kwargs: Any) -> str:
     return str(_facade._build_elb_image(*args, **kwargs))
+
+
+def _env_int_override(name: str, *, lo: int, hi: int) -> int | None:
+    """Read a positive, in-range integer ops override from the environment.
+
+    Lets operators tune the warmup azcopy concurrency / buffer on the worker
+    sidecar without a code change. Returns ``None`` (meaning "use the default
+    behaviour" — i.e. let azcopy auto-tune) when the variable is unset, empty,
+    unparseable, non-positive, OR outside ``[lo, hi]``. A bad value therefore
+    degrades gracefully to the default instead of failing the warmup in the
+    downstream ``build_warmup_job_plan`` range check.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value < lo or value > hi:
+        LOGGER.warning(
+            "ignoring out-of-range %s=%s (allowed [%s, %s]); using azcopy auto-tune",
+            name,
+            value,
+            lo,
+            hi,
+        )
+        return None
+    return value
 
 
 @shared_task(
@@ -418,6 +448,15 @@ def warmup_database(
                     node_count=actual_node_count,
                     machine_type=machine_type or "Standard_E16s_v5",
                 )
+                # Leave azcopy concurrency / buffer UNSET by default so the
+                # warmup pod uses azcopy's own CPU-based auto-tuning (16 * vCPU,
+                # capped at 300) — a live benchmark measured that ~1.78x faster
+                # than the old hard-coded concurrency=16. Operators can still
+                # pin them on the worker via WARMUP_AZCOPY_CONCURRENCY /
+                # WARMUP_AZCOPY_BUFFER_GB; when set, those values are injected as
+                # Job env vars (None means "let azcopy auto-tune").
+                azcopy_concurrency = _env_int_override("WARMUP_AZCOPY_CONCURRENCY", lo=1, hi=512)
+                azcopy_buffer_gb = _env_int_override("WARMUP_AZCOPY_BUFFER_GB", lo=1, hi=64)
                 plan = build_warmup_job_plan(
                     db_name=database_name,
                     mol_type=_program_to_mol_type(program, database_name),
@@ -425,6 +464,8 @@ def warmup_database(
                     num_shards=selected_shards,
                     nodes=nodes,
                     image=_build_elb_image(acr_name),
+                    azcopy_concurrency=azcopy_concurrency,
+                    azcopy_buffer_gb=azcopy_buffer_gb,
                     source_version=str(match.get("source_version") or ""),
                 )
 
@@ -642,6 +683,4 @@ def warmup_database(
                     subscription_id, resource_group, cluster_name, database_name
                 )
             except Exception as exc:  # pragma: no cover - best effort cleanup
-                LOGGER.debug(
-                    "auto warm inflight release skipped: %s", type(exc).__name__
-                )
+                LOGGER.debug("auto warm inflight release skipped: %s", type(exc).__name__)

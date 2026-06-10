@@ -38,14 +38,14 @@ export function AccessDenied({ message }: AccessDeniedProps) {
         <h1 style={{ marginTop: 0, fontSize: 22 }}>Access denied</h1>
         <p className="muted" style={{ lineHeight: 1.6, fontSize: 14 }}>
           {message ||
-            "You are signed in but do not have an Azure role on this dashboard's resource group."}
+            "You are signed in but do not have an Azure role on this dashboard's resource group. Ask a subscription owner or administrator to grant you at least the Reader role, then retry."}
         </p>
         <p
           className="muted"
           style={{ fontSize: 12, lineHeight: 1.6, marginTop: "var(--space-2)" }}
         >
-          Ask a subscription owner to grant you at least the <strong>Reader</strong>{" "}
-          role on the dashboard resource group (or the subscription), then retry.
+          Access is granted through Azure RBAC. Once the role is assigned it can
+          take a minute to propagate — use <strong>Retry</strong> below afterwards.
         </p>
 
         <div

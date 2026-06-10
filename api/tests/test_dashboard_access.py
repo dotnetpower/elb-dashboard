@@ -165,6 +165,13 @@ def test_dependency_denies_no_role_when_enforced(monkeypatch: pytest.MonkeyPatch
     assert excinfo.value.status_code == 403
     assert excinfo.value.detail["code"] == DASHBOARD_ACCESS_DENIED_CODE
     assert excinfo.value.detail["resource_group"] == "rg-elb-dashboard"
+    assert excinfo.value.detail["subscription_id"] == "sub-1"
+    # The message names the concrete scope + role so a blocked caller can
+    # forward an actionable access request to an administrator.
+    message = excinfo.value.detail["message"]
+    assert "rg-elb-dashboard" in message
+    assert "sub-1" in message
+    assert "Reader" in message
 
 
 # ---------------------------------------------------------------------------

@@ -59,8 +59,10 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         }
         assert pod_spec["nodeName"] == _nodes(10)[idx]
         assert env["ELB_DB"] == f"core_nt_shard_{shard}"
-        assert env["AZCOPY_CONCURRENCY_VALUE"] == "16"
-        assert env["AZCOPY_BUFFER_GB"] == "2"
+        # By default the plan injects NO azcopy env vars, so the warmup pod
+        # falls through to azcopy's own CPU-based auto-tuning.
+        assert "AZCOPY_CONCURRENCY_VALUE" not in env
+        assert "AZCOPY_BUFFER_GB" not in env
         assert env["ELB_PARTITION_PREFIX"] == (
             "https://elbstg01.blob.core.windows.net/blast-db/10shards/core_nt_shard_"
         )
@@ -82,6 +84,77 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         # equivalence-experiment shell scripts that exec it directly.
         assert "blast-vmtouch-aks.sh" not in container["args"][0]
         assert "STAGING_COMPLETE shard=" in container["args"][0]
+
+
+def test_plan_omits_azcopy_env_by_default_for_auto_tuning() -> None:
+    # No override -> no AZCOPY_* env, so the warmup pod uses azcopy's CPU-based
+    # auto-tuning (measured ~1.78x faster than the old hard-coded 16).
+    plan = build_warmup_job_plan(
+        db_name="core_nt",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=5,
+        nodes=_nodes(5),
+        image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+    )
+    for job in plan.jobs:
+        names = {item["name"] for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert "AZCOPY_CONCURRENCY_VALUE" not in names
+        assert "AZCOPY_BUFFER_GB" not in names
+
+
+def test_plan_injects_azcopy_env_only_when_overridden() -> None:
+    # An operator override (worker env -> plan args) is injected so azcopy
+    # honours it; a None for one of them keeps that var unset.
+    plan = build_warmup_job_plan(
+        db_name="core_nt",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=5,
+        nodes=_nodes(5),
+        image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+        azcopy_concurrency=256,
+        azcopy_buffer_gb=None,
+    )
+    for job in plan.jobs:
+        env = {
+            item["name"]: item["value"]
+            for item in job["spec"]["template"]["spec"]["containers"][0]["env"]
+        }
+        assert env["AZCOPY_CONCURRENCY_VALUE"] == "256"
+        assert "AZCOPY_BUFFER_GB" not in env
+
+
+def test_plan_rejects_out_of_range_azcopy_override() -> None:
+    with pytest.raises(ValueError, match="azcopy_concurrency"):
+        build_warmup_job_plan(
+            db_name="core_nt",
+            mol_type="nucl",
+            storage_account="elbstg01",
+            num_shards=1,
+            nodes=_nodes(1),
+            image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+            azcopy_concurrency=99999,
+        )
+
+
+def test_env_int_override_falls_back_to_default(monkeypatch) -> None:
+    # The warmup task's ops-override reader must degrade to None (= "let azcopy
+    # auto-tune") for every bad input so a typo never fails the warmup, rather
+    # than passing an out-of-range value to the plan's range check.
+    from api.tasks.storage.warmup import _env_int_override
+
+    name = "WARMUP_AZCOPY_CONCURRENCY"
+    # unset
+    monkeypatch.delenv(name, raising=False)
+    assert _env_int_override(name, lo=1, hi=512) is None
+    # empty / non-numeric / non-positive / out-of-range all fall back to None
+    for bad in ("", "   ", "abc", "0", "-5", "99999"):
+        monkeypatch.setenv(name, bad)
+        assert _env_int_override(name, lo=1, hi=512) is None, bad
+    # a valid in-range value is honoured
+    monkeypatch.setenv(name, "256")
+    assert _env_int_override(name, lo=1, hi=512) == 256
 
 
 def test_single_shard_db_is_broadcast_to_every_node() -> None:
@@ -167,9 +240,13 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
     assert "init-db-shard-aks.sh" in manifest["data"]
     assert "blast-vmtouch-aks.sh" in manifest["data"]
     assert "azcopy login --identity" in manifest["data"]["init-db-shard-aks.sh"]
-    assert (
-        "AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}"
-        in manifest["data"]["init-db-shard-aks.sh"]
+    # The script must NOT pin a concurrency default any more — leaving
+    # AZCOPY_CONCURRENCY_VALUE unset lets azcopy auto-tune (16 * vCPU).
+    assert "AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}" not in (
+        manifest["data"]["init-db-shard-aks.sh"]
+    )
+    assert "AZCOPY_BUFFER_GB=${AZCOPY_BUFFER_GB:-2}" not in (
+        manifest["data"]["init-db-shard-aks.sh"]
     )
     assert "taxdb.btd;taxdb.bti" in manifest["data"]["init-db-shard-aks.sh"]
     assert 'cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"' in manifest["data"]["init-db-shard-aks.sh"]
@@ -460,7 +537,6 @@ def test_infer_warmup_pod_phase_detects_copying_from_logs() -> None:
 
         assert status["phase"] == "copying_files"
         assert status["message"] == "Downloading shard files with azcopy"
-
 
     def test_infer_warmup_pod_phase_treats_azcopy_percent_as_copying() -> None:
         pod = {

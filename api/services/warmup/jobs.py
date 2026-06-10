@@ -34,8 +34,19 @@ DEFAULT_NAMESPACE = "default"
 DEFAULT_SCRIPTS_CONFIGMAP = "elb-warmup-scripts"
 DEFAULT_NODE_DB_PATH = "/workspace/blast"
 DEFAULT_CONTAINER_DB_PATH = "/blast/blastdb"
-DEFAULT_AZCOPY_CONCURRENCY = 16
-DEFAULT_AZCOPY_BUFFER_GB = 2
+
+# azcopy tuning for the node-local warmup download (blob -> node disk over the
+# private endpoint). The download script intentionally does NOT pin
+# ``AZCOPY_CONCURRENCY_VALUE``: azcopy's own default is ``16 * vCPU`` (capped at
+# 300) and it dynamically tunes against CPU usage, which a fixed value defeats.
+# A live throwaway-pod benchmark on cluster-02 (Standard_E16s_v5, core_nt,
+# 256 MiB blocks) measured the old hard-coded ``concurrency=16`` at 158 MB/s vs
+# azcopy's CPU-based auto (256 connections) at 281 MB/s — a 1.78x speedup just
+# from letting azcopy choose. We therefore inject the azcopy env vars ONLY when
+# an operator override is supplied (``None`` means "let azcopy auto-tune"); the
+# buffer constraint that actually matters is just ``max block size <= 0.75 *
+# AZCOPY_BUFFER_GB`` (256 MiB needs ~0.34 GiB), so the script's small default
+# buffer was never the bottleneck.
 
 WARMUP_PHASE_LABELS: dict[str, str] = {
     "waiting": "Waiting for container",
@@ -121,8 +132,8 @@ def build_warmup_job_plan(
     scripts_configmap: str = DEFAULT_SCRIPTS_CONFIGMAP,
     node_db_path: str = DEFAULT_NODE_DB_PATH,
     app_label: str = DEFAULT_WARMUP_APP_LABEL,
-    azcopy_concurrency: int = DEFAULT_AZCOPY_CONCURRENCY,
-    azcopy_buffer_gb: int = DEFAULT_AZCOPY_BUFFER_GB,
+    azcopy_concurrency: int | None = None,
+    azcopy_buffer_gb: int | None = None,
     source_version: str = "",
 ) -> WarmupJobPlan:
     """Build one Kubernetes Job per shard, pinned one-to-one onto nodes.
@@ -638,8 +649,8 @@ def _build_job(
     node_db_path: str,
     app_label: str,
     partition_prefix: str,
-    azcopy_concurrency: int,
-    azcopy_buffer_gb: int,
+    azcopy_concurrency: int | None,
+    azcopy_buffer_gb: int | None,
     source_version: str,
     db_content_shard_idx: int | None = None,
 ) -> dict[str, Any]:
@@ -658,6 +669,21 @@ def _build_job(
     host_path = node_db_path.rstrip("/")
     command = _warmup_shell_command()
     annotations = {SOURCE_VERSION_ANNOTATION: source_version} if source_version else {}
+    # azcopy concurrency / buffer are injected ONLY when an operator override is
+    # supplied. When omitted (the default) the env vars stay unset so azcopy
+    # uses its own CPU-based auto-tuning (16 * vCPU, capped at 300), which a
+    # benchmark showed is ~1.78x faster than the old hard-coded 16.
+    env = [
+        {"name": "ELB_SHARD_IDX", "value": content_shard},
+        {"name": "ELB_PARTITION_PREFIX", "value": partition_prefix},
+        {"name": "ELB_DB", "value": shard_db},
+        {"name": "ELB_DB_SOURCE_VERSION", "value": source_version},
+        {"name": "ELB_DB_MOL_TYPE", "value": mol_type},
+    ]
+    if azcopy_concurrency is not None:
+        env.append({"name": "AZCOPY_CONCURRENCY_VALUE", "value": str(azcopy_concurrency)})
+    if azcopy_buffer_gb is not None:
+        env.append({"name": "AZCOPY_BUFFER_GB", "value": str(azcopy_buffer_gb)})
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -699,18 +725,7 @@ def _build_job(
                             "image": image,
                             "command": ["bash", "-lc"],
                             "args": [command],
-                            "env": [
-                                {"name": "ELB_SHARD_IDX", "value": content_shard},
-                                {"name": "ELB_PARTITION_PREFIX", "value": partition_prefix},
-                                {"name": "ELB_DB", "value": shard_db},
-                                {"name": "ELB_DB_SOURCE_VERSION", "value": source_version},
-                                {"name": "ELB_DB_MOL_TYPE", "value": mol_type},
-                                {
-                                    "name": "AZCOPY_CONCURRENCY_VALUE",
-                                    "value": str(azcopy_concurrency),
-                                },
-                                {"name": "AZCOPY_BUFFER_GB", "value": str(azcopy_buffer_gb)},
-                            ],
+                            "env": env,
                             "volumeMounts": [
                                 {"name": "db", "mountPath": DEFAULT_CONTAINER_DB_PATH},
                                 {"name": "scripts", "mountPath": "/scripts"},
@@ -739,7 +754,6 @@ def _build_job(
     }
 
 
-
 def _validate_common(
     *,
     db_name: str,
@@ -752,8 +766,8 @@ def _validate_common(
     scripts_configmap: str,
     node_db_path: str,
     app_label: str,
-    azcopy_concurrency: int,
-    azcopy_buffer_gb: int,
+    azcopy_concurrency: int | None,
+    azcopy_buffer_gb: int | None,
 ) -> None:
     if not _SAFE_DB_RE.match(db_name):
         raise ValueError(f"invalid db_name: {db_name!r}")
@@ -780,9 +794,9 @@ def _validate_common(
             raise ValueError(f"invalid {label_name}: {label!r}")
     if not node_db_path.startswith("/") or ".." in node_db_path.split("/"):
         raise ValueError("node_db_path must be an absolute path without '..'")
-    if azcopy_concurrency < 1 or azcopy_concurrency > 512:
+    if azcopy_concurrency is not None and (azcopy_concurrency < 1 or azcopy_concurrency > 512):
         raise ValueError("azcopy_concurrency must be in [1, 512]")
-    if azcopy_buffer_gb < 1 or azcopy_buffer_gb > 64:
+    if azcopy_buffer_gb is not None and (azcopy_buffer_gb < 1 or azcopy_buffer_gb > 64):
         raise ValueError("azcopy_buffer_gb must be in [1, 64]")
 
 

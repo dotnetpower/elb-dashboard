@@ -137,6 +137,7 @@ def require_dashboard_access(
     from api.services.sanitise import redact_oid
 
     resource_group = os.environ.get("AZURE_RESOURCE_GROUP", "").strip()
+    subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID", "").strip()
     LOGGER.info(
         "dashboard_access denied for oid=%s rg=%s",
         redact_oid(caller.object_id),
@@ -145,15 +146,18 @@ def require_dashboard_access(
     scope_label = (
         f"resource group '{resource_group}'" if resource_group else "the subscription"
     )
+    sub_suffix = f" (subscription {subscription_id})" if subscription_id else ""
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail={
             "code": DASHBOARD_ACCESS_DENIED_CODE,
             "message": (
                 "You are signed in but have no Azure role on the dashboard's "
-                f"{scope_label}. Ask an owner to grant you at least the Reader "
-                "role there (or on the subscription) to access the dashboard."
+                f"{scope_label}{sub_suffix}. Ask a subscription owner or "
+                "administrator to grant you at least the Reader role there (or "
+                "on the subscription), then retry."
             ),
             "resource_group": resource_group,
+            "subscription_id": subscription_id,
         },
     )
