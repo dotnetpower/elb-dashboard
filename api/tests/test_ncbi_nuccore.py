@@ -14,7 +14,7 @@ Validation: `uv run pytest -q api/tests/test_ncbi_nuccore.py`.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -737,6 +737,89 @@ def test_fasta_overflow_raises_response_too_large(
 
     with pytest.raises(NcbiResponseTooLarge):
         nuccore.fetch_nuccore_fasta("NM_000546.6")
+
+
+# ---------------------------------------------------------------------------
+# efetch (byte-streaming) timeout — large genome records load past 8 s
+# ---------------------------------------------------------------------------
+
+
+def test_efetch_timeout_default_exceeds_summary_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The byte-streaming efetch path must use a budget larger than the
+    8 s esummary timeout so a slow-but-healthy genome record (10-20 s
+    server-side generation) loads on the first attempt instead of timing
+    out and failing with a misleading 503."""
+    from api.services.ncbi import _eutils
+
+    monkeypatch.delenv("NCBI_EFETCH_HTTP_TIMEOUT", raising=False)
+    timeout = _eutils._efetch_timeout_seconds()
+    assert timeout > _eutils.DEFAULT_TIMEOUT_SECONDS
+    assert timeout == 30.0
+
+
+def test_efetch_timeout_env_override_and_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`NCBI_EFETCH_HTTP_TIMEOUT` overrides the default, but a value below
+    the esummary timeout (or a non-numeric value) is ignored — the efetch
+    path must never be made faster-failing than the cheap header call."""
+    from api.services.ncbi import _eutils
+
+    monkeypatch.setenv("NCBI_EFETCH_HTTP_TIMEOUT", "45")
+    assert _eutils._efetch_timeout_seconds() == 45.0
+
+    monkeypatch.setenv("NCBI_EFETCH_HTTP_TIMEOUT", "2")
+    assert _eutils._efetch_timeout_seconds() == _eutils._DEFAULT_EFETCH_TIMEOUT_SECONDS
+
+    monkeypatch.setenv("NCBI_EFETCH_HTTP_TIMEOUT", "not-a-number")
+    assert _eutils._efetch_timeout_seconds() == _eutils._DEFAULT_EFETCH_TIMEOUT_SECONDS
+
+
+def test_request_bytes_passes_efetch_timeout_to_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`request_bytes` must hand the longer efetch timeout to
+    `client.stream(...)` per request — not silently inherit the pooled
+    client's default 8 s timeout."""
+    from api.services.ncbi import _eutils
+
+    captured: dict[str, Any] = {}
+
+    class _FakeResponse:
+        headers: ClassVar[dict[str, str]] = {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self) -> list[bytes]:
+            return [b">seq\nACGT\n"]
+
+        def close(self) -> None:
+            return None
+
+    class _FakeStreamCtx:
+        def __enter__(self) -> _FakeResponse:
+            return _FakeResponse()
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+    class _FakeClient:
+        def stream(self, _method: str, _endpoint: str, **kwargs: Any) -> _FakeStreamCtx:
+            captured["timeout"] = kwargs.get("timeout")
+            return _FakeStreamCtx()
+
+    monkeypatch.setattr(_eutils, "_consume_token", lambda *a, **k: None)
+    monkeypatch.setattr(_eutils, "_pooled_client", lambda _slot: _FakeClient())
+    monkeypatch.delenv("NCBI_EFETCH_HTTP_TIMEOUT", raising=False)
+
+    body = _eutils.request_bytes(
+        "efetch.fcgi", {"db": "nuccore"}, max_bytes=1024, accept="application/xml"
+    )
+    assert body == b">seq\nACGT\n"
+    assert captured["timeout"] == _eutils._efetch_timeout_seconds()
 
 
 # ---------------------------------------------------------------------------

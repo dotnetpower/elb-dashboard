@@ -31,6 +31,35 @@ LOGGER = logging.getLogger(__name__)
 
 EUTILS_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 DEFAULT_TIMEOUT_SECONDS = 8.0
+# efetch (GenBank XML / FASTA) is generated server-side and, for large viral /
+# organelle / draft-genome records, legitimately takes 10-20 s — well above the
+# 8 s budget that is fine for the tiny esummary JSON header. With the short
+# timeout a slow-but-healthy record turns into a retry storm that ALWAYS fails:
+# every attempt times out at 8 s, the record is never faster, and the user
+# waits ~26 s (8 + 0.5 + 8 + 1.5 + 8) only to get a 503. Give the
+# byte-streaming path its own larger budget so these records load on the first
+# attempt. Override with ``NCBI_EFETCH_HTTP_TIMEOUT`` (floored at the JSON
+# timeout so it can never be made shorter than the esummary call).
+_DEFAULT_EFETCH_TIMEOUT_SECONDS = 30.0
+
+
+def _efetch_timeout_seconds() -> float:
+    """Return the byte-streaming (efetch) request timeout in seconds.
+
+    Read at call time (like ``_rate_capacity`` / ``ncbi_identity_params``) so
+    tests and dev can override via env after import. Values below
+    ``DEFAULT_TIMEOUT_SECONDS`` are ignored — the efetch path must never be
+    faster-failing than the cheap esummary call.
+    """
+    raw = os.environ.get("NCBI_EFETCH_HTTP_TIMEOUT", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return _DEFAULT_EFETCH_TIMEOUT_SECONDS
+        if value >= DEFAULT_TIMEOUT_SECONDS:
+            return value
+    return _DEFAULT_EFETCH_TIMEOUT_SECONDS
 
 
 class NcbiServiceUnavailable(RuntimeError):
@@ -535,11 +564,17 @@ def request_bytes(
     Retries once on transient 5xx / network errors (0.5 s then 1.5 s
     backoff). ``NcbiResponseTooLarge`` is **not** retryable — the same
     accession will always blow the cap; the caller must supply a sub-range.
+
+    Uses the longer ``_efetch_timeout_seconds()`` budget (not the 8 s
+    esummary timeout): large viral / genome records are generated slowly
+    server-side (10-20 s observed) and would otherwise time out on every
+    attempt and fail with a misleading "service unavailable".
     """
     _consume_token()
     client = _pooled_client("ncbi-eutils-bytes")
     full_params = {**params, **ncbi_identity_params()}
     last_exc: httpx.HTTPError | None = None
+    timeout = _efetch_timeout_seconds()
     for attempt in range(len(_RETRY_DELAYS) + 1):
         try:
             with client.stream(
@@ -547,6 +582,7 @@ def request_bytes(
                 endpoint,
                 params=full_params,
                 headers={"Accept": accept},
+                timeout=timeout,
             ) as response:
                 response.raise_for_status()
                 declared = response.headers.get("Content-Length")
