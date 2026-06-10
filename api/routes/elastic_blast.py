@@ -227,7 +227,15 @@ def submit_external_blast_job(
     # client so the submit still goes through.
     external_blast.ready()
     upstream = external_blast.submit_job(payload)
-    return _normalise_external_job_payload(upstream, request_payload=payload)
+    normalised = _normalise_external_job_payload(upstream, request_payload=payload)
+    # The sibling OpenAPI plane stores no query identity for inline FASTA, so
+    # remember a defline-derived label keyed by the upstream job id. The jobs
+    # list enriches external rows with it instead of showing ``query.fa``.
+    # Fully best-effort: must never 5xx an already-accepted submit.
+    from api.services.blast.external_query_labels import remember_inline_query_label
+
+    remember_inline_query_label(str(normalised.get("job_id") or ""), request.query_fasta)
+    return normalised
 
 
 @router.get("/jobs")

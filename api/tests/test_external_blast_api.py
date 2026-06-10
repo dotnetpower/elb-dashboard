@@ -855,6 +855,95 @@ def test_canonical_jobs_list_enriches_external_rows_with_detail(monkeypatch):
     assert row["output"]["execution"]["shards_succeeded"] == 1
 
 
+def test_canonical_jobs_list_shows_remembered_inline_query_label(monkeypatch):
+    """An inline-FASTA API submit remembers the first defline so Recent
+    searches shows the real query instead of the generic ``query.fa``.
+
+    The sibling OpenAPI plane returns no query identity on the job record, so
+    without the submit-time bridge the projection falls back to ``query.fa``.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.routes import blast as stubs
+    from api.services import external_blast, state_repo
+    from api.services.blast import external_query_labels as eql
+
+    class EmptyRepo:
+        def list_for_owner(self, *_args, **_kwargs):
+            return []
+
+        def list_for_scope(self, *_args, **_kwargs):
+            return []
+
+    # In-memory OPS Redis so remember/recall round-trips without a server.
+    fake_store: dict[str, str] = {}
+
+    class _FakeRedis:
+        def set(self, key, value, ex=None):
+            fake_store[key] = value
+
+        def get(self, key):
+            value = fake_store.get(key)
+            return value.encode("utf-8") if value is not None else None
+
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client", lambda **_kw: _FakeRedis()
+    )
+    monkeypatch.setattr(state_repo, "JobStateRepository", EmptyRepo)
+    monkeypatch.setattr(
+        stubs,
+        "_openapi_client_kwargs_from_cluster",
+        lambda subscription_id, resource_group, cluster_name: {
+            "base_url": f"http://{cluster_name}.{resource_group}.{subscription_id}",
+            "api_token": "cluster-token",
+        },
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload: {"job_id": "dddddddddddd", "status": "queued"},
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "list_jobs",
+        lambda **_kwargs: {
+            "jobs": [
+                {
+                    "job_id": "dddddddddddd",
+                    "status": "running",
+                    "created_at": "2026-06-10T00:00:00Z",
+                    "program": "blastn",
+                    "db": "core_nt",
+                    "cluster_name": "elb-cluster",
+                }
+            ],
+            "count": 1,
+        },
+    )
+    # Detail enrichment is not exercised here (the list row carries enough).
+    monkeypatch.setattr(
+        external_blast, "get_job", lambda job_id, **_kw: {"job_id": job_id, "status": "running"}
+    )
+
+    client = TestClient(app)
+
+    submit = client.post(
+        "/api/blast/jobs",
+        json={"query_fasta": ">NC_003310.1 cowpox\nATGGAGAAGCGAGAAGTTAA", "db": "core_nt"},
+    )
+    assert submit.status_code == 202
+    # The bridge remembered the defline for the upstream job id.
+    assert eql.recall_query_label("dddddddddddd") == "NC_003310.1"
+
+    listing = client.get(
+        "/api/blast/jobs?subscription_id=sub-1&resource_group=rg-elb-01&cluster_name=elb-cluster"
+    )
+    assert listing.status_code == 200
+    rows = [row for row in listing.json()["jobs"] if row["job_id"] == "dddddddddddd"]
+    assert rows, "external job missing from listing"
+    assert rows[0]["query_label"] == "NC_003310.1"
+
+
 @pytest.mark.parametrize("external_status", ["success", "completed"])
 def test_external_completed_status_maps_to_dashboard_completed(external_status):
     from api.routes import _blast_shared as stubs
@@ -924,6 +1013,70 @@ def test_sync_external_jobs_creates_missing_rows(monkeypatch):
     assert created[0].kwargs["job_id"] == "abc123"
     assert created[0].kwargs["status"] == "running"
     assert updated == []
+
+
+def test_sync_external_jobs_persists_remembered_query_label(monkeypatch):
+    """The sync MUST durably persist the submit-time defline label into the
+    Table row even when the caller did not pre-apply it to the row.
+
+    This makes the label survive a revision restart that drops OPS Redis:
+    once the first list call materialises the row, the label lives in the
+    durable Table independent of Redis. The sync is responsible for the
+    injection itself (does not rely on the route having applied it first).
+    """
+    from api.routes import _blast_shared as shared
+
+    created: list[object] = []
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {}
+
+        def create(self, state):
+            created.append(state)
+            return state
+
+        def update(self, *_a, **_kw):
+            pass
+
+    class FakeRepoFactory:
+        def __call__(self):
+            return FakeRepo()
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.job_id = kwargs.get("job_id")
+            self.status = kwargs.get("status")
+            self.phase = kwargs.get("phase")
+
+    from api.services import state_repo
+    from api.services.blast import external_query_labels as eql
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", FakeRepoFactory())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    # Remembered label keyed by the upstream job id; the input row carries NO
+    # query identity (mirrors a raw sibling list row).
+    monkeypatch.setattr(eql, "recall_query_label", lambda job_id: "NC_003310.1")
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "abc123",
+                "status": "running",
+                "created_at": "2026-06-10T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                "cluster_name": "elb-cluster",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    assert result == (1, 0, set())
+    assert len(created) == 1
+    assert created[0].kwargs["query_label"] == "NC_003310.1"
 
 
 def test_sync_external_jobs_updates_drifted_status(monkeypatch):

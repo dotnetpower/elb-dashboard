@@ -44,6 +44,7 @@ from api.services.blast.external_job_projection import (
 from api.services.blast.external_job_projection import (
     _short_external_db_name as _short_external_db_name,
 )
+from api.services.blast.external_query_labels import apply_remembered_query_label
 
 LOGGER = logging.getLogger(__name__)
 
@@ -255,6 +256,12 @@ def _sync_external_jobs_to_table(
         if not job_id:
             continue
         try:
+            # Inline-FASTA API submits carry no query identity from the sibling.
+            # Inject the defline label remembered at submit time BEFORE projecting
+            # so it is persisted into the Table row (durable), independent of
+            # whether the caller already applied it for display. Idempotent: a
+            # row that already has a query identity is returned unchanged.
+            ext = apply_remembered_query_label(ext)
             converted = _external_to_blast_job(ext)
             ext_status = str(converted.get("status") or "unknown")
             ext_phase = str(converted.get("phase") or ext_status)

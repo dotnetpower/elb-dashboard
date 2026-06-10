@@ -39,6 +39,7 @@ from api.routes._blast_shared import (
     _sync_external_jobs_to_table,
     blast_shared_visibility_enabled,
 )
+from api.services.blast.external_query_labels import apply_remembered_query_label
 from api.services.blast.job_state import _K8S_REFRESH_PHASES
 from api.services.blast.jobs_list_cache import (
     jobs_list_cache_get,
@@ -329,6 +330,10 @@ def blast_jobs_list(
                 ):
                     ext_row = _external_job_detail_or_row(external_blast, ext_row, external_kwargs)
                     detail_budget -= 1
+                # Inline-FASTA API submits carry no query identity from the
+                # sibling; inject the defline label remembered at submit time
+                # so the row shows the real query instead of "query.fa".
+                ext_row = apply_remembered_query_label(ext_row)
                 candidate_rows.append(ext_row)
 
         # Sync newly-discovered external jobs into Table Storage so they

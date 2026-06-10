@@ -534,6 +534,14 @@ def blast_job_submit(
     )
     openapi_job_id = str(upstream.get("job_id") or "")
     dashboard_job_id = str(payload["external_correlation_id"])
+    # The sibling OpenAPI plane discards the inline FASTA's identity (it uploads
+    # to ``queries/<job_id>.fa`` and stores no query field), so the jobs list
+    # would otherwise render every API submit as the generic ``query.fa``.
+    # Remember a defline-derived label so Recent searches can show it. Fully
+    # best-effort: never let this display side effect 5xx an accepted submit.
+    from api.services.blast.external_query_labels import remember_inline_query_label
+
+    remember_inline_query_label(openapi_job_id, submit_request.query_fasta)
     response.headers["Location"] = f"/api/blast/jobs/{dashboard_job_id}"
     response.headers["Retry-After"] = str(_SUBMIT_RETRY_AFTER_SECONDS)
     return {
