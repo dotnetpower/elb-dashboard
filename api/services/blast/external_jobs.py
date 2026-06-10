@@ -6,7 +6,8 @@ dashboard projection helpers live in the sibling `external_job_projection.py`).
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `_external_list_jobs_cached`, `_sync_external_jobs_to_table`,
-`_external_job_detail_or_row`, `_openapi_client_kwargs_from_cluster`, `_reset_external_jobs_cache`
+`_external_job_detail_or_row`, `_openapi_client_kwargs_from_cluster`,
+`_discover_subscription_clusters`, `_reset_external_jobs_cache`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries. The projection helpers are re-exported under their original private names so
 existing consumers (`job_state`, tests) keep their import surface.
@@ -112,6 +113,83 @@ _EXTERNAL_SYNC_CACHE_TTL_SECONDS = 70.0
 _EXTERNAL_SYNC_CACHE: dict[str, tuple[float, tuple[int, int, set[str]]]] = {}
 _OPENAPI_CLIENT_KWARGS_CACHE_TTL_SECONDS = 70.0
 _OPENAPI_CLIENT_KWARGS_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+# Subscription-wide ElasticBLAST cluster discovery cache. The Recent searches
+# history view lists jobs subscription-scoped (no cluster pinned), so to find
+# jobs submitted directly through ``POST /v1/jobs`` we must enumerate the
+# subscription's clusters and resolve each one's OpenAPI endpoint. That is one
+# ARM ``managedClusters.list`` round trip — cache it so the ~10 s jobs-list
+# poll cannot fan out into a managedClusters.list per request (App Insights
+# previously caught managedClusters call storms from uncached fan-out).
+_SUBSCRIPTION_CLUSTERS_CACHE_TTL_SECONDS = 60.0
+_SUBSCRIPTION_CLUSTERS_CACHE: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+
+
+def _discover_subscription_clusters(subscription_id: str) -> list[tuple[str, str]]:
+    """Return cached ``(resource_group, cluster_name)`` pairs for ELB clusters.
+
+    Used by the subscription-scoped jobs listing to resolve every cluster's
+    OpenAPI endpoint so directly-submitted ``/v1/jobs`` jobs are discovered.
+    One ARM ``managedClusters.list`` round trip, cached for
+    ``_SUBSCRIPTION_CLUSTERS_CACHE_TTL_SECONDS``. Never raises — discovery
+    failures (no credential, ARM throttle, RBAC gap) return an empty list so
+    the caller degrades to the env / runtime-cache fallback target.
+
+    Stopped clusters are excluded on purpose. The caller resolves each
+    returned cluster's OpenAPI endpoint via ``_openapi_client_kwargs_from_cluster``,
+    which calls ``k8s_get_service_ip`` against the cluster's K8s API server
+    (a 10 s-timeout HTTP GET). A Stopped cluster's API server is down, so that
+    call always burns the full timeout and then returns ``{}`` (which the
+    resolver does NOT cache), forcing the ~14 s-polled Recent searches endpoint
+    to re-pay one 10 s timeout per Stopped cluster on every poll. A Stopped
+    cluster also cannot serve ``/v1/jobs`` (no running pods), so it can never
+    yield a live job anyway — anything it ran while Running was already synced
+    into our Table and still shows as a local row. Gating on power state keeps
+    the latency cost proportional to the number of *running* clusters.
+    """
+    if not subscription_id:
+        return []
+    import time as _time
+
+    now = _time.monotonic()
+    with _EXTERNAL_JOBS_CACHE_LOCK:
+        cached = _SUBSCRIPTION_CLUSTERS_CACHE.get(subscription_id)
+        if cached and cached[0] > now:
+            return list(cached[1])
+    try:
+        from api.services import get_credential
+        from api.services.monitoring import list_aks_clusters_in_subscription
+
+        credential = get_credential()
+        clusters = list_aks_clusters_in_subscription(credential, subscription_id)
+        pairs = [
+            (str(c.get("resource_group") or ""), str(c.get("name") or ""))
+            for c in clusters
+            if c.get("name") and _cluster_power_state_allows_openapi(c.get("power_state"))
+        ]
+    except Exception as exc:
+        LOGGER.info(
+            "subscription cluster discovery for external jobs failed: %s",
+            type(exc).__name__,
+        )
+        pairs = []
+    with _EXTERNAL_JOBS_CACHE_LOCK:
+        _SUBSCRIPTION_CLUSTERS_CACHE[subscription_id] = (
+            _time.monotonic() + _SUBSCRIPTION_CLUSTERS_CACHE_TTL_SECONDS,
+            list(pairs),
+        )
+    return pairs
+
+
+def _cluster_power_state_allows_openapi(power_state: object) -> bool:
+    """True when a cluster may have a reachable OpenAPI plane.
+
+    A missing/unknown power state is treated as allowed (do not hide a
+    genuinely-running cluster just because the field was absent); only an
+    explicitly non-``Running`` state (``Stopped`` / ``Stopping``) is excluded.
+    """
+    if power_state in (None, ""):
+        return True
+    return str(power_state).strip().casefold() == "running"
 
 
 def _external_list_jobs_cached(external_kwargs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -196,6 +274,7 @@ def _reset_external_jobs_cache() -> None:
         _EXTERNAL_JOB_DETAIL_CACHE.clear()
         _EXTERNAL_SYNC_CACHE.clear()
         _OPENAPI_CLIENT_KWARGS_CACHE.clear()
+        _SUBSCRIPTION_CLUSTERS_CACHE.clear()
 
 
 def _sync_external_jobs_to_table(

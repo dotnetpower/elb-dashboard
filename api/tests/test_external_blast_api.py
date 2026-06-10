@@ -707,6 +707,216 @@ def test_canonical_jobs_list_uses_cluster_openapi_context(monkeypatch):
     assert body["jobs"][0]["status"] == "completed"
 
 
+def test_discover_subscription_clusters_skips_stopped(monkeypatch):
+    """Stopped clusters are excluded so the polled Recent searches endpoint
+    never pays a 10 s ``k8s_get_service_ip`` timeout per Stopped cluster.
+
+    A Stopped cluster's OpenAPI plane is down (no running pods), so it can
+    never serve a live ``/v1/jobs`` row anyway; anything it ran while Running
+    was already synced into the Table.
+    """
+    import api.services as services_pkg
+    import api.services.monitoring as monitoring_pkg
+    from api.services.blast import external_jobs
+
+    external_jobs._reset_external_jobs_cache()
+    monkeypatch.setattr(
+        monitoring_pkg,
+        "list_aks_clusters_in_subscription",
+        lambda _cred, _sub: [
+            {"name": "running-a", "resource_group": "rg-1", "power_state": "Running"},
+            {"name": "stopped-b", "resource_group": "rg-2", "power_state": "Stopped"},
+            {"name": "unknown-c", "resource_group": "rg-3", "power_state": None},
+        ],
+    )
+    monkeypatch.setattr(services_pkg, "get_credential", lambda: object())
+
+    pairs = external_jobs._discover_subscription_clusters("sub-1")
+
+    # Running + unknown power state are kept; explicitly Stopped is dropped.
+    assert ("rg-1", "running-a") in pairs
+    assert ("rg-3", "unknown-c") in pairs
+    assert ("rg-2", "stopped-b") not in pairs
+
+
+def test_canonical_jobs_list_subscription_scope_discovers_clusters(monkeypatch):
+    """Subscription-only listing (Recent searches) discovers every cluster's
+    OpenAPI endpoint so jobs submitted directly through ``POST /v1/jobs`` show
+    up even though no ``cluster_name`` is pinned.
+
+    Reproduces the production bug: the Recent searches history view omits
+    ``cluster_name`` to list across all clusters, but
+    ``_openapi_client_kwargs_from_cluster`` needs the full triple, so the
+    external listing resolved to the env/runtime fallback and directly-submitted
+    jobs were invisible. The route now enumerates the subscription's clusters.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    from api.main import app
+    from api.routes import blast as stubs
+    from api.routes.blast import jobs as jobs_route
+    from api.services import external_blast
+
+    monkeypatch.setattr(
+        jobs_route,
+        "_discover_subscription_clusters",
+        lambda subscription_id: [
+            ("rg-elb-01", "elb-cluster-a"),
+            ("rg-elb-02", "elb-cluster-b"),
+        ],
+    )
+    monkeypatch.setattr(
+        stubs,
+        "_openapi_client_kwargs_from_cluster",
+        lambda subscription_id, resource_group, cluster_name: (
+            {"base_url": f"http://{cluster_name}", "api_token": "tok"}
+            if cluster_name
+            else {}
+        ),
+    )
+
+    jobs_by_base = {
+        "http://elb-cluster-a": {
+            "jobs": [
+                {
+                    "job_id": "aaaaaaaaaaaa",
+                    "status": "success",
+                    "created_at": "2026-05-12T10:00:00Z",
+                    "program": "blastn",
+                    "db": "core_nt",
+                }
+            ],
+            "count": 1,
+        },
+        "http://elb-cluster-b": {
+            "jobs": [
+                {
+                    "job_id": "bbbbbbbbbbbb",
+                    "status": "running",
+                    "created_at": "2026-05-12T11:00:00Z",
+                    "program": "blastn",
+                    "db": "core_nt",
+                }
+            ],
+            "count": 1,
+        },
+    }
+
+    def list_jobs(**kwargs):
+        return jobs_by_base.get(kwargs.get("base_url", ""), {"jobs": [], "count": 0})
+
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
+    client = TestClient(app)
+
+    response = client.get("/api/blast/jobs?subscription_id=sub-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    job_ids = {job["job_id"] for job in body["jobs"]}
+    assert job_ids == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert "external_degraded" not in body
+
+
+def test_canonical_jobs_list_subscription_scope_partial_cluster_failure(monkeypatch):
+    """A single Stopped/unreachable cluster must not hide jobs on the other
+    reachable clusters, and must not flag the whole list as degraded."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    from api.main import app
+    from api.routes import blast as stubs
+    from api.routes.blast import jobs as jobs_route
+    from api.services import external_blast
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        jobs_route,
+        "_discover_subscription_clusters",
+        lambda subscription_id: [
+            ("rg-elb-01", "up-cluster"),
+            ("rg-elb-02", "down-cluster"),
+        ],
+    )
+    monkeypatch.setattr(
+        stubs,
+        "_openapi_client_kwargs_from_cluster",
+        lambda subscription_id, resource_group, cluster_name: {
+            "base_url": f"http://{cluster_name}",
+            "api_token": "tok",
+        },
+    )
+
+    def list_jobs(**kwargs):
+        if kwargs.get("base_url") == "http://down-cluster":
+            raise HTTPException(
+                503, detail={"code": "openapi_unreachable", "message": "down"}
+            )
+        return {
+            "jobs": [
+                {
+                    "job_id": "cccccccccccc",
+                    "status": "success",
+                    "created_at": "2026-05-12T10:00:00Z",
+                    "program": "blastn",
+                    "db": "core_nt",
+                }
+            ],
+            "count": 1,
+        }
+
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
+    client = TestClient(app)
+
+    response = client.get("/api/blast/jobs?subscription_id=sub-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [job["job_id"] for job in body["jobs"]] == ["cccccccccccc"]
+    # Partial success (one cluster answered) is not flagged as degraded.
+    assert "external_degraded" not in body
+
+
+def test_canonical_jobs_list_subscription_scope_all_clusters_down(monkeypatch):
+    """When every discovered cluster is unreachable the list degrades with an
+    ``external_degraded`` flag so the SPA can warn that OpenAPI-submitted jobs
+    may be missing."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    from api.main import app
+    from api.routes import blast as stubs
+    from api.routes.blast import jobs as jobs_route
+    from api.services import external_blast
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        jobs_route,
+        "_discover_subscription_clusters",
+        lambda subscription_id: [("rg-elb-01", "down-cluster")],
+    )
+    monkeypatch.setattr(
+        stubs,
+        "_openapi_client_kwargs_from_cluster",
+        lambda subscription_id, resource_group, cluster_name: {
+            "base_url": f"http://{cluster_name}",
+            "api_token": "tok",
+        },
+    )
+
+    def list_jobs(**_kwargs):
+        raise HTTPException(
+            503, detail={"code": "openapi_unreachable", "message": "down"}
+        )
+
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
+    client = TestClient(app)
+
+    response = client.get("/api/blast/jobs?subscription_id=sub-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("external_degraded") is True
+    assert body["external_degraded_reason"] == "openapi_unreachable"
+
+
 @pytest.mark.slow
 def test_canonical_jobs_list_filters_local_rows_by_scope(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")

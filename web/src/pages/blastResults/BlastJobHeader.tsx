@@ -158,7 +158,13 @@ export function BlastJobHeader({
       typeof fieldsToStash.query_data === "string" &&
       fieldsToStash.query_data.trim().length > 0;
     const hasOriginalBlob =
-      Boolean(jobPayload?.query_file) || Boolean(jobPayload?.query_blob_url);
+      Boolean(jobPayload?.query_file) ||
+      Boolean(jobPayload?.query_blob_url) ||
+      // External (OpenAPI) jobs project their record under `payload.external`
+      // and carry no top-level query_file, but the sibling plane still stored
+      // the inline FASTA at `queries/<job_id>.fa`. The backend reconstructs
+      // that path, so attempt the fetch for these jobs too.
+      Boolean(jobPayload?.external);
     if (!hasInlineQuery && hasOriginalBlob) {
       setLoadingQuery(true);
       try {

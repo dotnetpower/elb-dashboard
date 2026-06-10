@@ -212,6 +212,91 @@ def test_blast_job_query_rejects_path_traversal(monkeypatch) -> None:
     assert response.json()["code"] == "invalid_query_path"
 
 
+def test_blast_job_query_reconstructs_external_blob(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    # External (OpenAPI) jobs project their record under ``payload.external``
+    # with no top-level query_file and an empty storage_account on the row.
+    # The route must reconstruct ``queries/<openapi_job_id>.fa`` and recover
+    # the storage account from the trusted db URL so Edit search can rehydrate
+    # the original query the same way dashboard jobs do.
+    fasta = ">extseq\nTTTTGGGGCCCCAAAA\n"
+    captured: dict[str, str] = {}
+
+    class _CapturingBlobService:
+        def get_blob_client(self, container: str, blob_path: str):
+            captured["container"] = container
+            captured["blob_path"] = blob_path
+            return _FakeBlobClient(fasta.encode("utf-8"))
+
+    monkeypatch.setattr(
+        "api.services.state_repo.JobStateRepository",
+        _query_route_repo(
+            {
+                "external": {
+                    "job_id": "job-q",
+                    "db": "https://elbstg01.blob.core.windows.net/blast-db/core_nt",
+                }
+            },
+            storage_account="",
+        ),
+    )
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.extract_trusted_storage_account",
+        lambda database: "elbstg01" if "elbstg01" in database else "",
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda credential, account_name: _CapturingBlobService(),
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get("/api/blast/jobs/job-q/query")
+
+    assert response.status_code == 200
+    assert response.json()["query_text"] == fasta
+    assert captured == {"container": "queries", "blob_path": "job-q.fa"}
+
+
+def test_blast_job_query_external_404_when_storage_account_untrusted(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    # An external job whose db URL points at a foreign (untrusted) account must
+    # not leak the MI Storage token: the trusted-account gate returns "" and
+    # the route degrades to 404 instead of reaching the Storage SDK.
+    monkeypatch.setattr(
+        "api.services.state_repo.JobStateRepository",
+        _query_route_repo(
+            {
+                "external": {
+                    "job_id": "job-q",
+                    "db": "https://attacker.blob.core.windows.net/blast-db/core_nt",
+                }
+            },
+            storage_account="",
+        ),
+    )
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.extract_trusted_storage_account",
+        lambda database: "elbstg01" if "elbstg01" in database else "",
+    )
+
+    def _should_not_call(*_args, **_kwargs):
+        raise AssertionError("Storage SDK must not be invoked without a trusted account")
+
+    monkeypatch.setattr("api.services.storage.data._blob_service", _should_not_call)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get("/api/blast/jobs/job-q/query")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "query_not_persisted"
+
+
 _DEV_BYPASS_OID = "00000000-0000-0000-0000-000000000000"
 
 
