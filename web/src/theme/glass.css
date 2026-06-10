@@ -5045,6 +5045,14 @@ button.blast-db-table__row:focus-visible {
   width: 100%;
   padding: 0;
 }
+.blast-params-summary__fmt {
+  color: var(--accent);
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+}
 .blast-presets {
   display: flex;
   gap: 6px;

@@ -37,6 +37,24 @@ const MATCH_MISMATCH_OPTIONS = [
   { value: "4,-5", label: "4,-5" },
 ];
 
+// Render the collapsed-section summary, highlighting the output-format ("Fmt: N")
+// segment so it stands out from the other muted parameters.
+function renderParamsSummary(summary: string) {
+  return summary.split(" · ").map((segment, index) => {
+    const node = segment.startsWith("Fmt:") ? (
+      <span className="blast-params-summary__fmt">{segment}</span>
+    ) : (
+      segment
+    );
+    return (
+      <span key={index}>
+        {index > 0 && " · "}
+        {node}
+      </span>
+    );
+  });
+}
+
 export function AlgorithmParametersSection({
   form,
   set,
@@ -71,7 +89,7 @@ export function AlgorithmParametersSection({
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span className="muted" style={{ fontSize: 11 }}>
-            {!showParams && paramsSummary}
+            {!showParams && renderParamsSummary(paramsSummary)}
           </span>
           {showParams ? <ChevronUp size={16} strokeWidth={1.5} /> : <ChevronDown size={16} strokeWidth={1.5} />}
         </div>
