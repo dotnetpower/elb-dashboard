@@ -21,6 +21,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from api.services.feature_events import TERMINAL_STATUSES, record_feature_event
 from api.tasks import blast as _blast
 from api.tasks.blast.progress import _merge_progress_payload, _phase_is_terminal_for_artifacts
 
@@ -107,6 +108,14 @@ def _update_state(
             },
         )
         _blast._enqueue_artifact_finalizer(job_id, phase, status)
+        if status in TERMINAL_STATUSES:
+            record_feature_event(
+                "blast",
+                status=status,
+                job_id=job_id,
+                phase=phase,
+                error_code=stored_error_code or None,
+            )
     except Exception as exc:
         LOGGER.warning("blast state update failed job_id=%s phase=%s: %s", job_id, phase, exc)
 

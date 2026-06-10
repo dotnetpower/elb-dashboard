@@ -35,6 +35,7 @@ from typing import Any
 from celery import shared_task
 
 import api.tasks.storage as _facade
+from api.services.feature_events import TERMINAL_STATUSES, record_feature_event
 from api.services.k8s.prepare_db_jobs import (
     DEFAULT_ACTIVE_DEADLINE_SECONDS,
     DEFAULT_AZCOPY_CONCURRENCY,
@@ -58,6 +59,15 @@ LOGGER = logging.getLogger(__name__)
 
 def _update_state(job_id: str, phase: str, status: str = "running", **extra: Any) -> None:
     _facade._update_state(job_id, phase, status, **extra)
+    if status in TERMINAL_STATUSES:
+        record_feature_event(
+            "prepare_db",
+            status=status,
+            job_id=job_id,
+            phase=phase,
+            outcome=extra.get("outcome"),
+            error_code=extra.get("error_code"),
+        )
 
 
 def _record_task_progress(task: Any, phase: str, **meta: Any) -> None:

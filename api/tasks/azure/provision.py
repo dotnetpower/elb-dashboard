@@ -25,6 +25,7 @@ from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from celery import shared_task
 
 import api.tasks.azure as _facade
+from api.services.feature_events import TERMINAL_STATUSES, record_feature_event
 from api.tasks.azure.cluster_params import build_cluster_params
 from api.tasks.azure.helpers import publish_progress
 
@@ -128,6 +129,14 @@ def _publish(
         message=message if message is not None else label,
         **extra,
     )
+    if status in TERMINAL_STATUSES:
+        record_feature_event(
+            "cluster_provision",
+            status=status,
+            job_id=job_id,
+            phase=phase,
+            error_code=extra.get("error_code"),
+        )
 
 
 def _collect_pool_states(aks: Any, resource_group: str, cluster_name: str) -> list[dict[str, Any]]:

@@ -114,6 +114,44 @@ union requests, exceptions, dependencies, traces
 
 That returns a single timeline that crosses sidecars (api → worker, api → Azure SDK, etc.) and includes the matching exception stack if any.
 
+### Feature Lifecycle Events
+
+Beyond raw requests and traces, the worker and beat sidecars emit a **feature event** at the terminal transition of every long-running operation — warmup, cluster provisioning, BLAST database preparation, and BLAST job submission. Each event is a single record on the `api.events` logger that carries the [customEvent name attribute](https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-add-modify), so it lands in **both** the `traces` table (as a structured log line) and the `customEvents` table (as a named event). When telemetry is disabled the same call is a local log line only — there is **zero Azure ingestion cost**, and no code path forces it on.
+
+Query the catalogue from App Insights → **Logs**:
+
+```kusto
+customEvents
+| where name in ("warmup", "cluster_provision", "prepare_db", "blast")
+| project timestamp, name, tostring(customDimensions.event_status),
+          tostring(customDimensions.phase), tostring(customDimensions.job_id),
+          tostring(customDimensions.error_code)
+| order by timestamp desc
+```
+
+Only **terminal** transitions emit an event (`event_status` ∈ `completed` / `failed` / `cancelled`), so a per-tick progress update never floods the table. The `phase` dimension carries the fine-grained machine string the dashboard switches on, and `error_code` is populated on failures.
+
+| `customEvents.name` | Emitted by | `event_status` values | Key `phase` values (machine strings) |
+| --- | --- | --- | --- |
+| `warmup` | `api.tasks.storage.warmup_database` | `completed`, `failed` | `completed`, `failed` (preceded by non-terminal `starting` → `downloading` → `sharding` → `planning_node_warmup`) |
+| `cluster_provision` | `api.tasks.azure.provision` | `completed`, `failed` | `completed`, `failed` (5-step pipeline: `creating_cluster` → `ensuring_resource_group` → `arm_create_or_update` → `ensuring_rbac` → `completed`) |
+| `prepare_db` | `api.tasks.storage.prepare_db_via_aks` | `completed`, `failed` | `completed` (promoted) / `partial` (some shards failed); `error_code` + `outcome` dimensions explain partials |
+| `blast` | `api.tasks.blast.*` (submit / cancel / poll) | `completed`, `failed`, `cancelled` | `completed`, `submit_failed`, `cancelled`, `submit_retryable_failure`, `config_invalid`, `terminal_unavailable`, `status_unavailable` |
+
+To see only failures across every feature in one query:
+
+```kusto
+customEvents
+| where tostring(customDimensions.event_status) == "failed"
+| project timestamp, name, tostring(customDimensions.phase),
+          tostring(customDimensions.error_code), tostring(customDimensions.job_id)
+| order by timestamp desc
+```
+
+!!! note "Non-terminal phases live in `jobstate`, not customEvents"
+
+    The intermediate phases (`downloading`, `arm_create_or_update`, `submitting`, …) are written to the Azure Table `jobstate` row and the per-job history that the dashboard renders live. They also reach App Insights as `traces` whenever the surrounding code logs them, but only the terminal transition is promoted to a named `customEvent`. Use the `jobstate`-backed dashboard job timeline for live progress and `customEvents` for "did this operation ultimately succeed or fail, and why?".
+
 ### Application Map
 
 **Application Insights → Investigate → Application map** is the topology view. It draws every cloud role the dashboard emits telemetry from (the SPA, plus every Python sidecar) and every outbound dependency they call, with the average latency and call count on each edge. It is the right place to start when an alert fires and you do not yet know *which* component is unhealthy.
