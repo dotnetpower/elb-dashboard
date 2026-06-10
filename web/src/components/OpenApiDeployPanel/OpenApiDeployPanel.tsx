@@ -25,6 +25,14 @@ export interface OpenApiDeployPanelProps {
    * pinned image tag changes upstream.
    */
   variant?: "deploy" | "update";
+  /**
+   * For the `update` variant, why the redeploy is being offered:
+   * `image` (default) — the pinned image tag changed upstream.
+   * `manifest` — the live Deployment's manifest predates this dashboard's
+   * generation (e.g. the single-replica queue owner) and a redeploy is
+   * needed to apply it. The redeploy action is identical either way.
+   */
+  reason?: "image" | "manifest";
   /** Tag pinned in this dashboard (`api/services/image_tags.py`). */
   pinnedTag?: string;
   /** Tag currently present in ACR. */
@@ -43,6 +51,7 @@ export function OpenApiDeployPanel({
   onRetry,
   retrying,
   variant = "deploy",
+  reason = "image",
   pinnedTag,
   currentTag,
 }: OpenApiDeployPanelProps) {
@@ -85,6 +94,7 @@ export function OpenApiDeployPanel({
     >
       <DeployHeader
         isUpdate={isUpdate}
+        reason={reason}
         clusterName={clusterName}
         pinnedTag={pinnedTag}
         currentTag={currentTag}

@@ -90,6 +90,54 @@ for _name in (
     logging.getLogger(_name).setLevel(_azure_log_level)
 
 
+def _error_detail_text(detail: Any) -> str | None:
+    """Render an exception detail into a short, sanitised span attribute.
+
+    ``detail`` may be a string or the structured ``dict`` our routes raise
+    (``{"code": ..., "message": ...}``). We prefer the ``message`` (falling
+    back to ``code`` then the whole dict) and run it through ``sanitise`` so
+    no token / SAS / subscription id is ever written to telemetry. Returns
+    ``None`` for an empty detail so the caller skips the attribute.
+    """
+    from api.services.sanitise import sanitise
+
+    if detail is None:
+        return None
+    if isinstance(detail, dict):
+        text = str(detail.get("message") or detail.get("code") or detail)
+    else:
+        text = str(detail)
+    cleaned = sanitise(text).strip()
+    return cleaned[:512] or None
+
+
+def _annotate_error_span_safe(
+    *,
+    status_code: int,
+    error_type: str,
+    detail: str | None,
+    request_id: str | None,
+) -> None:
+    """Best-effort wrapper around ``telemetry.annotate_error_span``.
+
+    Importing telemetry lazily keeps the OpenTelemetry dependency off the
+    import path for unit tests / telemetry-disabled local runs, and the
+    broad ``except`` guarantees a telemetry hiccup can never turn a clean
+    4xx/5xx response into a 500.
+    """
+    try:
+        from api.app.telemetry import annotate_error_span
+
+        annotate_error_span(
+            status_code=status_code,
+            error_type=error_type,
+            detail=detail,
+            request_id=request_id,
+        )
+    except Exception:
+        return
+
+
 def _document_common_error_responses(schema: dict[str, Any]) -> None:
     """Augment every operation with the common error responses it can return.
 
@@ -379,6 +427,15 @@ def create_app() -> FastAPI:
         rid = getattr(_request.state, "request_id", None)
         if rid and isinstance(payload, dict):
             payload.setdefault("request_id", rid)
+        # Attach the failure reason to the request span so App Insights shows
+        # *why* a 4xx/5xx happened (the FastAPI instrumentor leaves 4xx spans
+        # bare). Sanitise first — a detail can carry an upstream URL/SAS.
+        _annotate_error_span_safe(
+            status_code=exc.status_code,
+            error_type=f"http_{exc.status_code}",
+            detail=_error_detail_text(detail),
+            request_id=rid,
+        )
         # Preserve route-supplied headers (e.g. Retry-After on 429) — Starlette
         # carries them on the exception but the default JSONResponse otherwise
         # drops them.
@@ -398,6 +455,18 @@ def create_app() -> FastAPI:
         body: dict[str, object] = {"detail": errors}
         if rid:
             body["request_id"] = rid
+        # Surface the offending field locations (NOT the submitted values,
+        # which could be sensitive) on the span so a 422 is diagnosable in
+        # App Insights.
+        locations = ".".join(
+            str(part) for err in errors for part in (err.get("loc") or ()) if part != "body"
+        )
+        _annotate_error_span_safe(
+            status_code=422,
+            error_type="validation_error",
+            detail=locations[:512] or None,
+            request_id=rid,
+        )
         return JSONResponse(body, status_code=422)
 
     @app.exception_handler(Exception)
@@ -409,6 +478,12 @@ def create_app() -> FastAPI:
             request.method,
             request.url.path,
             type(exc).__name__,
+        )
+        _annotate_error_span_safe(
+            status_code=500,
+            error_type=type(exc).__name__,
+            detail=_error_detail_text(str(exc)),
+            request_id=None if rid == "-" else rid,
         )
         return JSONResponse(
             {"detail": "internal server error", "request_id": rid},

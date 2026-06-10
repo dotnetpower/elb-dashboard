@@ -59,6 +59,53 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     assert "taxonomy4blast.sqlite3" not in skip_prefix
 
 
+_ELB_CONFIG_OUTFMT_GATE = (
+    "            if (\n"
+    "                outfmt_code not in {'5', '6'}\n"
+    "                or (outfmt_code == '5' and outfmt_extended)\n"
+    "                or (outfmt_code == '6' and outfmt_extended and not "
+    "outfmt_extended.startswith('std'))\n"
+    "            ):\n"
+    "                errors.append(\n"
+    "                    'Partitioned BLAST requires outfmt 5 without extended fields, '\n"
+    "                    'outfmt 6, or \"6 std...\"; '\n"
+    "                    f'{outfmt} is not supported for merge')\n"
+)
+
+
+def _write_elb_config(tmp_path: Path) -> Path:
+    config_dir = tmp_path / "src" / "elastic_blast"
+    config_dir.mkdir(parents=True)
+    target = config_dir / "elb_config.py"
+    target.write_text("# elb_config stub\n" + _ELB_CONFIG_OUTFMT_GATE)
+    return target
+
+
+def test_patch_partitioned_outfmt_gate_allows_outfmt7(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    target = _write_elb_config(tmp_path)
+
+    patch_module.patch_partitioned_outfmt_gate(tmp_path)
+
+    text = target.read_text()
+    assert "outfmt_code not in {'5', '6', '7'}" in text
+    assert "outfmt_code == '7' and outfmt_extended" in text
+    assert "outfmt 6, outfmt 7," in text
+
+
+def test_patch_partitioned_outfmt_gate_is_idempotent(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    target = _write_elb_config(tmp_path)
+
+    patch_module.patch_partitioned_outfmt_gate(tmp_path)
+    once = target.read_text()
+    patch_module.patch_partitioned_outfmt_gate(tmp_path)
+
+    assert target.read_text() == once
+    # The widened gate is present exactly once (no double application).
+    assert once.count("outfmt_code not in {'5', '6', '7'}") == 1
+
+
 def test_patch_init_shard_script_is_idempotent(tmp_path: Path) -> None:
     patch_module = _load_patch_module()
     script_path = tmp_path / "src" / "elastic_blast" / "templates" / "scripts"

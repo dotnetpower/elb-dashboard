@@ -158,3 +158,112 @@ def test_init_never_raises_when_distro_breaks(monkeypatch: pytest.MonkeyPatch) -
     telemetry = _fresh_telemetry_module(monkeypatch)
     assert telemetry.init_telemetry("worker") is False
     assert telemetry.is_initialized() is False
+
+
+class _FakeSpan:
+    def __init__(self, recording: bool = True) -> None:
+        self._recording = recording
+        self.attributes: dict[str, Any] = {}
+        self.status: tuple[Any, str] | None = None
+
+    def is_recording(self) -> bool:
+        return self._recording
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        self.attributes[key] = value
+
+    def set_status(self, status: Any) -> None:
+        self.status = status
+
+
+def _patch_current_span(monkeypatch: pytest.MonkeyPatch, span: Any) -> None:
+    import opentelemetry.trace as trace_mod
+
+    monkeypatch.setattr(trace_mod, "get_current_span", lambda: span)
+
+
+def test_annotate_error_span_4xx_attaches_detail_without_error_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry = _fresh_telemetry_module(monkeypatch)
+    span = _FakeSpan()
+    _patch_current_span(monkeypatch, span)
+
+    telemetry.annotate_error_span(
+        status_code=404,
+        error_type="http_404",
+        detail="database not found",
+        request_id="rid-123",
+    )
+
+    assert span.attributes["elb.error.status_code"] == 404
+    assert span.attributes["elb.error.type"] == "http_404"
+    assert span.attributes["elb.error.detail"] == "database not found"
+    assert span.attributes["elb.request.id"] == "rid-123"
+    # We must NOT write the standard error.type key — the ASGI instrumentor
+    # owns it and would overwrite our richer value with the bare status code.
+    assert "error.type" not in span.attributes
+    assert "http.response.status_code" not in span.attributes
+    # 4xx is a client problem — the span status is NOT flipped to ERROR.
+    assert span.status is None
+
+
+def test_annotate_error_span_5xx_sets_error_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opentelemetry.trace import StatusCode
+
+    telemetry = _fresh_telemetry_module(monkeypatch)
+    span = _FakeSpan()
+    _patch_current_span(monkeypatch, span)
+
+    telemetry.annotate_error_span(
+        status_code=500,
+        error_type="RuntimeError",
+        detail="boom",
+        request_id=None,
+    )
+
+    assert span.attributes["elb.error.status_code"] == 500
+    assert span.status is not None
+    assert span.status.status_code == StatusCode.ERROR
+    assert "elb.request.id" not in span.attributes
+
+
+def test_annotate_error_span_noop_when_not_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry = _fresh_telemetry_module(monkeypatch)
+    span = _FakeSpan(recording=False)
+    _patch_current_span(monkeypatch, span)
+
+    telemetry.annotate_error_span(
+        status_code=400,
+        error_type="http_400",
+        detail="bad",
+        request_id="rid",
+    )
+
+    assert span.attributes == {}
+    assert span.status is None
+
+
+def test_annotate_error_span_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    telemetry = _fresh_telemetry_module(monkeypatch)
+
+    import opentelemetry.trace as trace_mod
+
+    def _boom() -> Any:
+        raise RuntimeError("span lookup failed")
+
+    monkeypatch.setattr(trace_mod, "get_current_span", _boom)
+    # Must swallow the error and return None without raising.
+    assert (
+        telemetry.annotate_error_span(
+            status_code=500,
+            error_type="X",
+            detail=None,
+            request_id=None,
+        )
+        is None
+    )

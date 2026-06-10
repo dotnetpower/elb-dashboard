@@ -10,10 +10,20 @@ Key entry points: `build_manifests`.
 Risky contracts: The blast-pool toleration and `nodeSelector workload=blast` are load-
     bearing — without them the deployment lands on tainted system nodes and serves no
     traffic. `AZURE_CLIENT_ID` is deliberately NOT set in the pod env (workload-identity
-    webhook injects it from the annotated ServiceAccount). The Deployment carries
-    `replicas: 2` + readiness/liveness probes on `/healthz` + a PodDisruptionBudget
-    (`minAvailable: 1`) so node drains, rollouts, and crashing pods cannot all take
-    the BLAST submit path down at once. Single-node blast pools still work because
+    webhook injects it from the annotated ServiceAccount). The Deployment runs
+    `replicas: 1` ON PURPOSE: the sibling OpenAPI service holds its job queue in a
+    process-local in-memory dict and enforces `ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS`
+    against that local view only (it never re-reads peers' ConfigMaps), so a second
+    replica would (a) multiply the effective run-concurrency ceiling by the replica
+    count and (b) strand queued jobs on whichever replica the LoadBalancer happened to
+    route them to. One replica = one authoritative queue owner. To preserve that
+    invariant even mid-rollout the strategy is `maxUnavailable: 1` + `maxSurge: 0`
+    (the old pod terminates before the new one starts, so two queue owners never
+    coexist); the brief submit-path gap is covered by the sibling reloading job state
+    from its ConfigMaps on startup. The PodDisruptionBudget is `maxUnavailable: 1`
+    (NOT `minAvailable: 1`, which on a single replica would block every voluntary node
+    drain / AKS upgrade forever). Readiness/liveness probes on `/healthz` restart a
+    wedged pod. Single-node blast pools still work because
     `topologySpreadConstraints.whenUnsatisfiable` is `ScheduleAnyway`. The pod's
     own kubectl (used by the service's `/v1/ready` -> `kubectl get --raw /readyz`
     probe) does NOT auto-load in-cluster config, so an `elb-openapi-kubeconfig`
@@ -28,7 +38,13 @@ from __future__ import annotations
 
 import json
 
-from api.tasks.openapi.constants import K8S_NAMESPACE, K8S_SA_NAME, PlsConfig
+from api.tasks.openapi.constants import (
+    K8S_NAMESPACE,
+    K8S_SA_NAME,
+    OPENAPI_MANIFEST_REVISION,
+    OPENAPI_MANIFEST_REVISION_ANNOTATION,
+    PlsConfig,
+)
 
 
 def build_manifests(
@@ -177,20 +193,37 @@ def build_manifests(
     deploy_manifest = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
-        "metadata": {"name": "elb-openapi", "namespace": K8S_NAMESPACE},
+        "metadata": {
+            "name": "elb-openapi",
+            "namespace": K8S_NAMESPACE,
+            # Manifest generation stamp. The dashboard reads this back from the
+            # live Deployment to detect a manifest that predates a
+            # redeploy-only change (see constants.OPENAPI_MANIFEST_REVISION)
+            # and prompt a redeploy. Stringified because K8s annotation values
+            # must be strings.
+            "annotations": {
+                OPENAPI_MANIFEST_REVISION_ANNOTATION: str(OPENAPI_MANIFEST_REVISION),
+            },
+        },
         "spec": {
-            # Two replicas + PDB(minAvailable=1, below) so a single node
-            # restart / cordon / pod eviction does not take the BLAST submit
-            # path down. The blast pool has 10 nodes; the topology spread
-            # constraint below prefers different nodes for the two replicas.
-            "replicas": 2,
+            # SINGLE replica on purpose — the sibling OpenAPI service keeps its
+            # job queue in a process-local in-memory dict and counts active
+            # submissions against that local view only (no cross-replica
+            # ConfigMap re-read). A 2nd replica would multiply the effective
+            # MAX_ACTIVE_SUBMISSIONS ceiling and strand queued jobs on whichever
+            # replica the LoadBalancer routed them to, which is exactly the
+            # "/v1/jobs queueing doesn't work" symptom. One replica = one
+            # authoritative queue owner.
+            "replicas": 1,
             "selector": {"matchLabels": {"app": "elb-openapi"}},
-            # Surge one extra pod and never go below the running count so
-            # an image bump rolls smoothly even though the new pod must
-            # pass the readiness probe first.
+            # maxUnavailable:1 + maxSurge:0 => the old pod terminates BEFORE the
+            # new one starts, so two queue owners never coexist even mid-rollout
+            # (the opposite of the usual surge-first rollout). The brief
+            # submit-path gap is covered by the sibling reloading job state from
+            # its ConfigMaps on startup.
             "strategy": {
                 "type": "RollingUpdate",
-                "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1},
+                "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 0},
             },
             "template": {
                 "metadata": {
@@ -286,11 +319,11 @@ def build_manifests(
                         },
                     ],
                     "nodeSelector": {"workload": "blast"},
-                    # Prefer different nodes for the two replicas so a
-                    # single node drain / restart cannot take both down.
-                    # ScheduleAnyway (not DoNotSchedule) keeps single-node
-                    # blast pools functional while still spreading on
-                    # multi-node pools.
+                    # Harmless on a single replica today, but retained so that
+                    # if the sibling ever moves its queue to a shared store and
+                    # this deployment scales back to >1 replica, the pods spread
+                    # across nodes. ScheduleAnyway (not DoNotSchedule) keeps
+                    # single-node blast pools functional.
                     "topologySpreadConstraints": [
                         {
                             "maxSkew": 1,
@@ -319,15 +352,18 @@ def build_manifests(
         },
     }
 
-    # PodDisruptionBudget so AKS upgrades / node drains / `kubectl drain`
-    # cannot evict the last running elb-openapi pod, which would otherwise
-    # take the BLAST submit path down even with two replicas.
+    # PodDisruptionBudget uses maxUnavailable:1 (NOT minAvailable:1). On a
+    # single-replica deployment minAvailable:1 would forbid EVERY voluntary
+    # eviction, so `kubectl drain` / AKS node-image upgrades would hang forever
+    # on this pod. maxUnavailable:1 permits the drain (the queue owner is
+    # intentionally not HA — it recovers its job state from ConfigMaps on the
+    # rescheduled pod's startup).
     pdb_manifest = {
         "apiVersion": "policy/v1",
         "kind": "PodDisruptionBudget",
         "metadata": {"name": "elb-openapi", "namespace": K8S_NAMESPACE},
         "spec": {
-            "minAvailable": 1,
+            "maxUnavailable": 1,
             "selector": {"matchLabels": {"app": "elb-openapi"}},
         },
     }

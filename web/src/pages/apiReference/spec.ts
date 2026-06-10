@@ -67,6 +67,24 @@ const SMALL_16S_RRNA_JOB_EXAMPLE = {
   },
 };
 
+const CORE_NT_OUTFMT7_JOB_EXAMPLE = {
+  summary: "Mode B - core_nt tabular (outfmt 7)",
+  description:
+    "Same Web BLAST-equivalent core_nt search as Mode B, but requests tabular output with comment lines (outfmt 7) instead of XML. outfmt 7 shares outfmt 6's 12-column data rows, so it runs sharded: the shard merge skips the per-shard comment headers and re-emits a single merged comment header. Use outfmt 7 when a downstream consumer wants tabular rows with the BLASTN / Query / Fields / hit-count comments.",
+  value: {
+    program: "blastn",
+    db: "core_nt",
+    query_fasta: CORE_NT_NC_003310_FASTA,
+    blast_options: {
+      evalue: 0.05,
+      max_target_seqs: 100,
+      outfmt: "7",
+      extra: CORE_NT_BLAST_OPTIONS,
+    },
+    resource_profile: "core_nt_safe",
+  },
+};
+
 const OPENAPI_JOB_ID_DESCRIPTION =
   "Short OpenAPI job id returned by POST /v1/jobs, for example 17dfd2825089. Do not paste a Dashboard job UUID from /blast/jobs/<uuid>.";
 const OPENAPI_JOB_ID_USAGE_HINT =
@@ -458,6 +476,7 @@ function withCuratedRequestExamples(
         examples: {
           small_16s_rrna: SMALL_16S_RRNA_JOB_EXAMPLE,
           mode_b_core_nt: CORE_NT_JOB_EXAMPLE,
+          mode_b_core_nt_outfmt7: CORE_NT_OUTFMT7_JOB_EXAMPLE,
           ...(jsonBody.examples || {}),
         },
       },

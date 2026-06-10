@@ -33,24 +33,27 @@ class FakeSession:
         self.closed = True
 
 
+def _deployment(*, image: str, revision: str | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if revision is not None:
+        metadata["annotations"] = {"elb-dashboard/manifest-revision": revision}
+    return {
+        "metadata": metadata,
+        "spec": {
+            "template": {"spec": {"containers": [{"name": "openapi", "image": image}]}}
+        },
+    }
+
+
 def test_openapi_deployment_status_extracts_image_tag(monkeypatch) -> None:
     from api.services.openapi import deployment as openapi_deployment
+    from api.tasks.openapi.constants import OPENAPI_MANIFEST_REVISION
 
     session = FakeSession(
-        {
-            "spec": {
-                "template": {
-                    "spec": {
-                        "containers": [
-                            {
-                                "name": "openapi",
-                                "image": "elbacr.azurecr.io/elb-openapi:4.9",
-                            }
-                        ]
-                    }
-                }
-            }
-        }
+        _deployment(
+            image="elbacr.azurecr.io/elb-openapi:4.9",
+            revision=str(OPENAPI_MANIFEST_REVISION),
+        )
     )
     monkeypatch.setattr(
         openapi_deployment,
@@ -73,5 +76,60 @@ def test_openapi_deployment_status_extracts_image_tag(monkeypatch) -> None:
         "image": "elbacr.azurecr.io/elb-openapi:4.9",
         "image_repository": "elbacr.azurecr.io/elb-openapi",
         "image_tag": "4.9",
+        "manifest_revision": OPENAPI_MANIFEST_REVISION,
+        "expected_manifest_revision": OPENAPI_MANIFEST_REVISION,
+        "manifest_outdated": False,
     }
     assert session.closed is True
+
+
+def test_openapi_deployment_status_flags_missing_revision_annotation(monkeypatch) -> None:
+    """A pre-annotation (legacy two-replica) Deployment must report outdated."""
+    from api.services.openapi import deployment as openapi_deployment
+
+    session = FakeSession(
+        _deployment(image="elbacr.azurecr.io/elb-openapi:4.9", revision=None)
+    )
+    monkeypatch.setattr(
+        openapi_deployment,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+
+    result = openapi_deployment.get_openapi_deployment_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result["manifest_revision"] is None
+    assert result["manifest_outdated"] is True
+
+
+def test_openapi_deployment_status_flags_lower_revision(monkeypatch) -> None:
+    """A Deployment stamped with an older revision must report outdated."""
+    from api.services.openapi import deployment as openapi_deployment
+    from api.tasks.openapi.constants import OPENAPI_MANIFEST_REVISION
+
+    session = FakeSession(
+        _deployment(
+            image="elbacr.azurecr.io/elb-openapi:4.9",
+            revision=str(OPENAPI_MANIFEST_REVISION - 1),
+        )
+    )
+    monkeypatch.setattr(
+        openapi_deployment,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+
+    result = openapi_deployment.get_openapi_deployment_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result["manifest_revision"] == OPENAPI_MANIFEST_REVISION - 1
+    assert result["manifest_outdated"] is True

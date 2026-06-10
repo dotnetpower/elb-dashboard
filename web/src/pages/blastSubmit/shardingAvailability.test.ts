@@ -216,7 +216,7 @@ describe("deriveShardingAvailability", () => {
     expect(availability.options.approximate.reason).toContain("needs at least");
   });
 
-  it("requires a merge-compatible output format", () => {
+  it("allows tabular outfmt 7 (same merge family as 6)", () => {
     const availability = deriveShardingAvailability({
       cluster,
       database,
@@ -224,8 +224,20 @@ describe("deriveShardingAvailability", () => {
       outfmt: 7,
     });
 
+    expect(availability.options.approximate.enabled).toBe(true);
+    expect(availability.options.approximate.reason).toBeNull();
+  });
+
+  it("rejects a non-merge-compatible output format", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: true,
+      outfmt: 11,
+    });
+
     expect(availability.options.precise.enabled).toBe(false);
-    expect(availability.options.precise.reason).toContain("output format 5 or 6");
+    expect(availability.options.precise.reason).toContain("output format 5, 6, or 7");
   });
 });
 

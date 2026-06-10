@@ -109,6 +109,14 @@ export interface OpenApiDeploymentStatus {
   image: string;
   image_repository: string;
   image_tag: string;
+  /** Manifest generation stamped on the live Deployment, or null when the
+   * Deployment predates the annotation (legacy two-replica rollout). */
+  manifest_revision?: number | null;
+  /** Manifest generation this dashboard ships (`OPENAPI_MANIFEST_REVISION`). */
+  expected_manifest_revision?: number;
+  /** True when the live Deployment's manifest predates the dashboard's and a
+   * redeploy is needed to apply a redeploy-only change (e.g. single replica). */
+  manifest_outdated?: boolean;
 }
 
 export interface OpenApiPublicHttpsStatus {

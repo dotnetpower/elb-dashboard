@@ -114,6 +114,7 @@ export function BlastResults() {
         cancelDisabled={actions.cancelMutation.isPending}
         onRequestCancel={() => setShowCancelConfirm(true)}
         jobPayload={job?.payload}
+        queryLabel={job?.query_label ?? null}
         program={job?.program ?? null}
         database={job?.db ?? null}
         customStatus={job?.custom_status}

@@ -2,6 +2,7 @@ import { AlertTriangle, RotateCw } from "lucide-react";
 
 export interface DeployHeaderProps {
   isUpdate: boolean;
+  reason?: "image" | "manifest";
   clusterName: string;
   pinnedTag?: string;
   currentTag?: string;
@@ -9,10 +10,12 @@ export interface DeployHeaderProps {
 
 export function DeployHeader({
   isUpdate,
+  reason = "image",
   clusterName,
   pinnedTag,
   currentTag,
 }: DeployHeaderProps) {
+  const isManifest = isUpdate && reason === "manifest";
   return (
     <>
       <div
@@ -29,7 +32,11 @@ export function DeployHeader({
           <AlertTriangle size={16} style={{ color: "var(--warning)" }} />
         )}
         <span style={{ fontWeight: 600, fontSize: isUpdate ? 13 : 14 }}>
-          {isUpdate ? "Update OpenAPI service" : "OpenAPI service not found"}
+          {isManifest
+            ? "Redeploy OpenAPI service"
+            : isUpdate
+              ? "Update OpenAPI service"
+              : "OpenAPI service not found"}
         </span>
         {isUpdate && pinnedTag && (
           <span
@@ -84,23 +91,37 @@ export function DeployHeader({
             margin: "0 0 10px",
           }}
         >
-          Re-roll the{" "}
-          <code style={{ fontFamily: "var(--font-mono)" }}>elb-openapi</code>{" "}
-          deployment with the tag pinned in this dashboard. Use this after the
-          sibling
-          <code
-            style={{
-              fontFamily: "var(--font-mono)",
-              marginLeft: 4,
-            }}
-          >
-            elastic-blast-azure
-          </code>{" "}
-          repo bumps the image. The pod is recreated with{" "}
-          <code style={{ fontFamily: "var(--font-mono)" }}>
-            imagePullPolicy: Always
-          </code>
-          .
+          {isManifest ? (
+            <>
+              The running{" "}
+              <code style={{ fontFamily: "var(--font-mono)" }}>elb-openapi</code>{" "}
+              deployment uses an older manifest. Redeploy to apply the latest
+              configuration — a single queue owner so the{" "}
+              <code style={{ fontFamily: "var(--font-mono)" }}>/v1/jobs</code>{" "}
+              concurrency limit is enforced correctly. The image tag is
+              unchanged; this only re-applies the manifest.
+            </>
+          ) : (
+            <>
+              Re-roll the{" "}
+              <code style={{ fontFamily: "var(--font-mono)" }}>elb-openapi</code>{" "}
+              deployment with the tag pinned in this dashboard. Use this after
+              the sibling
+              <code
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  marginLeft: 4,
+                }}
+              >
+                elastic-blast-azure
+              </code>{" "}
+              repo bumps the image. The pod is recreated with{" "}
+              <code style={{ fontFamily: "var(--font-mono)" }}>
+                imagePullPolicy: Always
+              </code>
+              .
+            </>
+          )}
         </p>
       )}
     </>

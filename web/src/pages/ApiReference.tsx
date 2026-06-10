@@ -261,22 +261,29 @@ export function ApiReference() {
         hasOpenApiImage &&
         !clusterStopped &&
         (() => {
-          // Only render the update panel when the actual deployed container
-          // image tag differs from the dashboard-pinned tag. The OpenAPI
-          // document's `info.version` is the API app version, not the image
-          // tag, so it is not a reliable update signal.
+          // Prompt a redeploy when EITHER the pinned image tag changed
+          // upstream OR the live Deployment's manifest predates this
+          // dashboard's generation (a redeploy-only change such as the
+          // single-replica queue owner). The image-tag redeploy also
+          // re-applies the manifest, so when both are true we show only the
+          // image panel to avoid stacking two identical actions. The
+          // OpenAPI document's `info.version` is the API app version, not the
+          // image tag, so it is not a reliable update signal.
           const pinnedTag = acrQuery.data?.expected_image_tags?.["elb-openapi"];
           const deployedTag = deploymentQuery.data?.image_tag;
-          if (
-            !pinnedTag ||
-            !deployedTag ||
-            normaliseImageTag(pinnedTag) === normaliseImageTag(deployedTag)
-          ) {
+          const imageOutdated = Boolean(
+            pinnedTag &&
+              deployedTag &&
+              normaliseImageTag(pinnedTag) !== normaliseImageTag(deployedTag),
+          );
+          const manifestOutdated = Boolean(deploymentQuery.data?.manifest_outdated);
+          if (!imageOutdated && !manifestOutdated) {
             return null;
           }
           return (
             <OpenApiDeployPanel
               variant="update"
+              reason={imageOutdated ? "image" : "manifest"}
               subscriptionId={sub}
               resourceGroup={clusterRg}
               clusterName={clusterName}

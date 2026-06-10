@@ -79,12 +79,17 @@ def test_warmup_status_issues_all_expected_calls() -> None:
     # Result merges the parallel reads identically to the sequential version.
     assert result["workspace_ready"] == 1
     assert result["workspace_desired"] == 2
-    assert result["vmtouch_ready"] == 1
+    # The legacy vmtouch-db-cache DaemonSet is no longer probed (it was removed
+    # when warmup moved to a Job-based model), so vmtouch_ready stays 0 and the
+    # URL is never requested. `warm` still resolves from the create-workspace
+    # DaemonSet's ready count.
+    assert result["vmtouch_ready"] == 0
     assert result["warm"] is True
     assert result["namespaces"] == ["elastic-blast-1"]
-    # All six top-level URLs were issued exactly once.
+    # The five remaining top-level URLs were issued exactly once each; the
+    # dead vmtouch-db-cache probe is gone.
     assert sum("/daemonsets/create-workspace" in u for u in seen_urls) == 1
-    assert sum("/daemonsets/vmtouch-db-cache" in u for u in seen_urls) == 1
+    assert sum("/daemonsets/vmtouch-db-cache" in u for u in seen_urls) == 0
     assert sum("/batch/v1/namespaces/default/jobs" in u for u in seen_urls) == 2  # setup + warmup
     assert sum(u.endswith("/apps/v1/namespaces/default/daemonsets") for u in seen_urls) == 1
     assert sum(u.endswith("/api/v1/namespaces") for u in seen_urls) == 1

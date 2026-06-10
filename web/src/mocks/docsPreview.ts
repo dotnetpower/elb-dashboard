@@ -903,6 +903,9 @@ function matchApi(path: string, method: string): Response | null {
       image: `${workspaceConfig.acrName}.azurecr.io/elb-openapi:4.14`,
       image_repository: "elb-openapi",
       image_tag: "4.14",
+      manifest_revision: 2,
+      expected_manifest_revision: 2,
+      manifest_outdated: false,
     });
   }
   if (path === "/api/aks/openapi/token") {

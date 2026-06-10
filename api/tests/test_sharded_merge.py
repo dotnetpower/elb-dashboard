@@ -330,6 +330,127 @@ def test_merge_sharded_results_writes_valid_xml(tmp_path: Path) -> None:
     assert report["format"] == "blast_xml"
 
 
+def test_merge_sharded_results_supports_outfmt7_tabular(tmp_path: Path) -> None:
+    """outfmt 7 merges through the tabular path: per-shard comment lines are
+    skipped and a single merged comment header is re-emitted, with the report
+    recording outfmt 7."""
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    # Interleave outfmt-7-style comment lines with the 12-column data rows to
+    # prove the merge skips them and still merges the data correctly.
+    input_tsv.write_text(
+        "\n".join(
+            [
+                "# BLASTN 2.17.0+",
+                "# Query: q1",
+                "# Database: child-db",
+                "# Fields: query acc.ver, subject acc.ver, % identity, alignment length, "
+                "mismatches, gap opens, q. start, q. end, s. start, s. end, evalue, bit score",
+                "# 2 hits found",
+                "q1\ts2\t100\t20\t0\t0\t1\t20\t1\t20\t1e-20\t80",
+                "q1\ts1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90",
+                "q2\ts4\t100\t20\t0\t0\t1\t20\t1\t20\t1e-5\t60",
+            ]
+        )
+        + "\n"
+    )
+
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "2",
+            "blastn",
+            "-outfmt 7 -max_target_seqs 2",
+        ],
+        check=True,
+    )
+
+    with gzip.open(output_gz, "rt") as handle:
+        lines = [line.rstrip("\n") for line in handle if line.strip()]
+    data_rows = [line for line in lines if not line.startswith("#")]
+    comment_rows = [line for line in lines if line.startswith("#")]
+    # Data is merged + re-ranked by evalue/bitscore (best first per query).
+    assert data_rows == [
+        "q1\ts1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90",
+        "q1\ts2\t100\t20\t0\t0\t1\t20\t1\t20\t1e-20\t80",
+        "q2\ts4\t100\t20\t0\t0\t1\t20\t1\t20\t1e-5\t60",
+    ]
+    # outfmt 7 comment headers are re-emitted (per query block).
+    assert any(line.startswith("# Query:") for line in comment_rows)
+    assert any(line.startswith("# Fields:") for line in comment_rows)
+
+    report = json.loads(report_json.read_text())
+    assert report["outfmt"] == 7
+    assert report["format"] == "blast_tabular"
+    assert report["total_output_hits"] == 3
+
+
+def test_merge_sharded_results_outfmt7_extended_fields_header(tmp_path: Path) -> None:
+    """A `7 std staxids ...` run preserves the extended columns AND re-emits the
+    authoritative `# Fields:` header BLAST wrote, so the merged output stays
+    self-describing instead of mislabelling the trailing columns as bare std."""
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    extended_fields = (
+        "query acc.ver, subject acc.ver, % identity, alignment length, mismatches, "
+        "gap opens, q. start, q. end, s. start, s. end, evalue, bit score, "
+        "subject taxids, subject strand, query seq, subject seq"
+    )
+    # std 12 columns + staxids + sstrand + qseq + sseq = 16 columns per row.
+    row_best = "q1\ts1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\t9606\tplus\tACGT\tACGT"
+    row_mid = "q1\ts2\t100\t20\t0\t0\t1\t20\t1\t20\t1e-20\t80\t10090\tplus\tACGT\tACGT"
+    input_tsv.write_text(
+        "\n".join(
+            [
+                "# BLASTN 2.17.0+",
+                "# Query: q1",
+                f"# Fields: {extended_fields}",
+                "# 2 hits found",
+                row_mid,
+                row_best,
+            ]
+        )
+        + "\n"
+    )
+
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "2",
+            "blastn",
+            '-outfmt "7 std staxids sstrand qseq sseq" -max_target_seqs 2',
+        ],
+        check=True,
+    )
+
+    with gzip.open(output_gz, "rt") as handle:
+        lines = [line.rstrip("\n") for line in handle if line.strip()]
+    data_rows = [line for line in lines if not line.startswith("#")]
+    # Extended columns are preserved verbatim, re-ranked best-first by evalue.
+    assert data_rows == [row_best, row_mid]
+    assert all(len(row.split("\t")) == 16 for row in data_rows)
+    # The merged header reuses the authoritative extended Fields line, so the
+    # trailing taxid / strand / seq columns are correctly described.
+    field_lines = [line for line in lines if line.startswith("# Fields:")]
+    assert field_lines, "merged output must carry a # Fields: header"
+    assert all(line == f"# Fields: {extended_fields}" for line in field_lines)
+    assert "subject taxids" in field_lines[0]
+
+    report = json.loads(report_json.read_text())
+    assert report["outfmt"] == 7
+    assert report["fields"] == extended_fields
+
+
 def _run_tabular_merge(
     tmp_path: Path,
     rows: list[str],

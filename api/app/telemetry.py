@@ -153,3 +153,63 @@ def init_telemetry(role: str, app: FastAPI | None = None) -> bool:
 def is_initialized() -> bool:
     """Return ``True`` when `init_telemetry` has configured the distro."""
     return _INITIALIZED_FOR is not None
+
+
+def annotate_error_span(
+    *,
+    status_code: int,
+    error_type: str,
+    detail: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Attach diagnostic attributes to the in-flight request span.
+
+    Why this exists: the FastAPI OpenTelemetry instrumentor records a span per
+    request but it does NOT mark 4xx responses as errors and never attaches the
+    failure reason, so an operator looking at App Insights saw a bare
+    ``resultCode=400`` request with no "why". This helper, called from the
+    app's exception handlers, stamps the current span with ``elb.error.type`` /
+    ``elb.error.detail`` / ``elb.request.id`` (which surface as
+    ``customDimensions`` on the ``requests`` row) and, for 5xx, flips the span
+    status to ERROR so the Failures blade and ``requests | where success ==
+    false`` both light up.
+
+    Attribute namespace: we deliberately use the ``elb.*`` prefix rather than
+    the OpenTelemetry-standard ``error.type`` / ``http.response.status_code``.
+    The ASGI instrumentor's ``_set_status`` sets the standard ``error.type`` to
+    the bare status-code string ("404") under the new HTTP semantic-convention
+    opt-in mode, and it runs AFTER this handler (on ``http.response.start``),
+    so writing our richer value to ``error.type`` would be silently overwritten
+    on some distro versions. ``elb.*`` keys are never touched by the
+    instrumentor, so the detail always survives. The status code itself is
+    already on the ``requests`` row (``resultCode``), so we do not duplicate it.
+
+    Contract:
+    * Never raises — telemetry annotation must not break request handling.
+    * No-op when telemetry is not initialized (the current span is a
+      non-recording span, so ``set_attribute`` is a cheap no-op anyway).
+    * ``detail`` MUST already be sanitised by the caller (no tokens / SAS /
+      subscription ids); this helper only length-caps it as a backstop.
+    """
+    try:
+        from opentelemetry import trace
+        from opentelemetry.trace import Status, StatusCode
+
+        span = trace.get_current_span()
+        if span is None or not span.is_recording():
+            return
+        span.set_attribute("elb.error.type", error_type[:120])
+        span.set_attribute("elb.error.status_code", int(status_code))
+        if request_id:
+            span.set_attribute("elb.request.id", request_id[:64])
+        if detail:
+            span.set_attribute("elb.error.detail", detail[:512])
+        # 4xx stays a non-error span by HTTP semantics (it is a client
+        # problem, not a server fault) but we still attach the reason above so
+        # it is queryable. Only 5xx flips the span to ERROR so the Failures
+        # blade reflects genuine server faults.
+        if status_code >= 500:
+            span.set_status(Status(StatusCode.ERROR, error_type[:120]))
+    except Exception:
+        # Telemetry must never break the request path.
+        return

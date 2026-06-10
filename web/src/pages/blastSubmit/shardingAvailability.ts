@@ -58,7 +58,9 @@ export interface ReconcileShardingSelectionArgs {
 }
 
 function isMergeCompatibleOutfmt(outfmt: number): boolean {
-  return outfmt === 5 || outfmt === 6;
+  // outfmt 7 is the same tabular layout as 6 with comment lines; the shard
+  // merge handles all three (5 = XML, 6/7 = tabular).
+  return outfmt === 5 || outfmt === 6 || outfmt === 7;
 }
 
 export function hasPreparedShardLayout(database?: BlastDatabase): boolean {
@@ -100,7 +102,7 @@ function unavailableReason({
     return "Database size metadata is missing, so shard capacity cannot be checked.";
   }
   if (!isMergeCompatibleOutfmt(outfmt)) {
-    return "Sharded result merging supports output format 5 or 6 only.";
+    return "Sharded result merging supports output format 5, 6, or 7 only.";
   }
   if (!capacityPlan?.feasible)
     return (

@@ -100,6 +100,49 @@ def patch_azure_py(root: Path) -> None:
     )
 
 
+def patch_partitioned_outfmt_gate(root: Path) -> None:
+    """Allow ``-outfmt 7`` for partitioned (sharded) BLAST runs.
+
+    Upstream ``elb_config.py`` rejects every partitioned outfmt other than 5,
+    6, or ``6 std...``. outfmt 7 is the same 12-column tabular layout as 6 with
+    added comment lines, which the dashboard's shard merge already skips and
+    re-emits, so 7 merges correctly through the tabular path. Widen the gate so
+    the dashboard's New Search ``outfmt 7`` selection (and the OpenAPI plane,
+    which copies this patch into its build context) can run sharded.
+    """
+    path = root / "src/elastic_blast/elb_config.py"
+    _replace_once_unless_present(
+        path,
+        (
+            "            if (\n"
+            "                outfmt_code not in {'5', '6'}\n"
+            "                or (outfmt_code == '5' and outfmt_extended)\n"
+            "                or (outfmt_code == '6' and outfmt_extended and not "
+            "outfmt_extended.startswith('std'))\n"
+            "            ):\n"
+            "                errors.append(\n"
+            "                    'Partitioned BLAST requires outfmt 5 without extended fields, '\n"
+            "                    'outfmt 6, or \"6 std...\"; '\n"
+            "                    f'{outfmt} is not supported for merge')\n"
+        ),
+        (
+            "            if (\n"
+            "                outfmt_code not in {'5', '6', '7'}\n"
+            "                or (outfmt_code == '5' and outfmt_extended)\n"
+            "                or (outfmt_code == '6' and outfmt_extended and not "
+            "outfmt_extended.startswith('std'))\n"
+            "                or (outfmt_code == '7' and outfmt_extended and not "
+            "outfmt_extended.startswith('std'))\n"
+            "            ):\n"
+            "                errors.append(\n"
+            "                    'Partitioned BLAST requires outfmt 5 without extended fields, '\n"
+            "                    'outfmt 6, outfmt 7, or \"6 std...\"/\"7 std...\"; '\n"
+            "                    f'{outfmt} is not supported for merge')\n"
+        ),
+        "outfmt_code not in {'5', '6', '7'}",
+    )
+
+
 def patch_azure_cli_glue(root: Path) -> None:
     path = root / "src/elastic_blast/azure_cli_glue.py"
     _replace_once_unless_present(
@@ -820,6 +863,7 @@ def main() -> int:
         return 2
 
     patch_azure_py(root)
+    patch_partitioned_outfmt_gate(root)
     patch_azure_cli_glue(root)
     patch_azure_traits(root)
     patch_finalizer_template(root)

@@ -292,7 +292,7 @@ def generate_config(params: dict[str, Any]) -> str:
         if not outfmt_is_merge_compatible(merge_outfmt):
             raise ValueError(
                 "sharded BLAST result merge currently supports only outfmt 5, "
-                "outfmt 6, or outfmt '6 std...'"
+                "outfmt 6, outfmt 7, or outfmt '6 std...'/'7 std...'"
             )
 
         report = build_precision_report(

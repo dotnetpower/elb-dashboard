@@ -102,6 +102,19 @@ def test_approximate_sharding_opt_in_injects_partitions_and_prefix() -> None:
     assert cfg.get("cluster", "exp-use-local-ssd") == "true"
 
 
+def test_approximate_sharding_accepts_outfmt7() -> None:
+    """outfmt 7 is a merge-compatible tabular layout, so a sharded config with
+    outfmt 7 builds successfully (the elastic-blast runtime gate is widened by
+    terminal/patch_elastic_blast.py to match)."""
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["outfmt"] = 7
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-partitions") == "5"
+    assert "-outfmt 7" in cfg.get("blast", "options")
+
+
+
 def test_approximate_sharding_uses_full_dbsize_when_available() -> None:
     params = _base_params()
     params["allow_approximate_sharding"] = True
@@ -194,7 +207,7 @@ def test_sharded_merge_allows_additional_outfmt_equals_xml() -> None:
 def test_sharded_merge_rejects_unsupported_outfmt() -> None:
     params = _base_params()
     params["allow_approximate_sharding"] = True
-    params["outfmt"] = 7
+    params["outfmt"] = 11
     with pytest.raises(ValueError, match="outfmt 5"):
         generate_config(params)
 
@@ -202,7 +215,7 @@ def test_sharded_merge_rejects_unsupported_outfmt() -> None:
 def test_sharded_merge_rejects_additional_outfmt_equals_unsupported() -> None:
     params = _base_params()
     params["allow_approximate_sharding"] = True
-    params["additional_options"] = "-outfmt=7"
+    params["additional_options"] = "-outfmt=11"
     with pytest.raises(ValueError, match="outfmt 5"):
         generate_config(params)
 

@@ -44,6 +44,14 @@ interface BlastJobHeaderProps {
   onRequestCancel: () => void;
   /** Original submit payload, used by Edit search / Duplicate / Export config. */
   jobPayload?: Record<string, unknown> | undefined;
+  /**
+   * Backend-resolved top-level query label. External / OpenAPI-submitted jobs
+   * nest the upstream job under `payload.external` and never set the dashboard
+   * payload query fields, so the header would otherwise show "—" for them.
+   * The backend projection always sets this (the remembered defline for
+   * API-bridge submits, or the generic "query.fa" placeholder).
+   */
+  queryLabel?: string | null;
   /** NCBI-style metadata surfaced in the new 7-line header. */
   program?: string | null;
   database?: string | null;
@@ -81,6 +89,7 @@ export function BlastJobHeader({
   cancelDisabled,
   onRequestCancel,
   jobPayload,
+  queryLabel,
   program,
   database,
   customStatus,
@@ -102,10 +111,7 @@ export function BlastJobHeader({
   const hydratableFields = jobPayload ? partialFormFromJobPayload(jobPayload) : null;
   const canReuseConfig = Boolean(hydratableFields);
 
-  const queryId =
-    pickString(jobPayload, ["query_id", "query_name", "query_label"]) ??
-    firstQueryRecordId(jobPayload) ??
-    queryFileBasename(jobPayload);
+  const queryId = resolveQueryHeaderId(jobPayload, queryLabel);
   const queryDescription =
     pickString(jobPayload, ["query_description", "description"]) ?? jobTitle ?? null;
   const molecule = pickString(jobPayload, ["molecule_type"]) ?? deriveMolecule(program);
@@ -953,6 +959,46 @@ function queryFileBasename(
   const cleaned = raw.replace(/\\/g, "/");
   const tail = cleaned.includes("/") ? cleaned.split("/").pop() : cleaned;
   return tail && tail.length > 0 ? tail : null;
+}
+
+/**
+ * Resolve the header's "Query" identifier across dashboard- and
+ * external/OpenAPI-submitted jobs.
+ *
+ * Dashboard submits carry the query identity directly on the payload
+ * (`query_id` / `query_name` / `query_metadata.records` / `query_file`).
+ * Jobs submitted directly through the sibling `/v1/jobs` API nest the upstream
+ * job under `payload.external` and never set those dashboard fields, so the
+ * header used to show "—" for them. We mirror the jobs-list cards by digging
+ * the external `query_file` / `query` / `query_blob_url` and finally falling
+ * back to the backend-resolved top-level `query_label` (the remembered defline
+ * for API-bridge submits, or the generic "query.fa" placeholder when the
+ * upstream stored no query identity).
+ */
+export function resolveQueryHeaderId(
+  jobPayload: Record<string, unknown> | undefined,
+  queryLabel?: string | null,
+): string | null {
+  const fromPayload =
+    pickString(jobPayload, ["query_id", "query_name", "query_label"]) ??
+    firstQueryRecordId(jobPayload) ??
+    queryFileBasename(jobPayload);
+  if (fromPayload) return fromPayload;
+
+  const external = jobPayload?.external;
+  if (external && typeof external === "object") {
+    const externalRecord = external as Record<string, unknown>;
+    const fromExternal =
+      queryFileBasename(externalRecord) ?? pickString(externalRecord, ["query"]);
+    if (fromExternal) {
+      const cleaned = fromExternal.replace(/\\/g, "/");
+      const tail = cleaned.includes("/") ? cleaned.split("/").pop() : cleaned;
+      if (tail && tail.length > 0) return tail;
+    }
+  }
+
+  const trimmedLabel = typeof queryLabel === "string" ? queryLabel.trim() : "";
+  return trimmedLabel.length > 0 ? trimmedLabel : null;
 }
 
 export interface TimingMetric {

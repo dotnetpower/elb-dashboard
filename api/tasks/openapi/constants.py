@@ -41,6 +41,25 @@ K8S_SA_NAME = "elb-openapi-sa"
 K8S_NAMESPACE = "default"
 FED_CRED_NAME = "fc-elb-openapi"
 
+# Manifest generation stamp. ``build_manifests`` writes this as the Deployment
+# annotation ``elb-dashboard/manifest-revision`` so the dashboard can detect a
+# live elb-openapi Deployment whose manifest predates a change that only takes
+# effect on redeploy (Bicep/azd never touch this in-cluster Deployment — it is
+# applied by the "Deploy elb-openapi" task). ``get_openapi_deployment_status``
+# compares the live annotation against this constant and surfaces
+# ``manifest_outdated`` so the API Reference page can prompt a redeploy.
+#
+# Bump this by 1 whenever a manifest change in ``manifests.py`` must be
+# redeployed to take effect (replica count, env, probes, PDB, tolerations, …).
+# A live Deployment with a missing or lower revision is reported as outdated.
+#
+# History:
+#   1 — implicit baseline (two replicas; pre-annotation deployments report None).
+#   2 — single queue owner (replicas 1 + maxUnavailable rollout + PDB
+#       maxUnavailable:1) so ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS is authoritative.
+OPENAPI_MANIFEST_REVISION = 2
+OPENAPI_MANIFEST_REVISION_ANNOTATION = "elb-dashboard/manifest-revision"
+
 
 def mi_name_for_cluster(subscription_id: str, cluster_name: str) -> str:
     """Return the per-cluster user-assigned managed identity name.

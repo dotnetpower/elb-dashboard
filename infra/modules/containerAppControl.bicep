@@ -295,11 +295,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             //   BLAST_GATE_SIGNAL_CACHE_S        (default 30)
             { name: 'BLAST_GATE_ENABLED', value: controlPlaneEnv.api.BLAST_GATE_ENABLED }
             // Dev-stage job visibility (issue: recent searches only showed
-            // API-submitted jobs). Default OFF preserves per-owner BLAST job
-            // isolation (Charter §12a Rule 4). Flip to 'true' to let every
-            // authenticated tenant member see and open all jobs regardless of
-            // `owner_oid` — intended for the single-tenant development phase
-            // only. Flip back to 'false' before multi-user production.
+            // API-submitted jobs). Default ON for the single-tenant
+            // development phase: every authenticated tenant member can see and
+            // open all jobs regardless of `owner_oid`. Flip to 'false' to
+            // restore per-owner BLAST job isolation (a foreign job returns
+            // `403 not owner`) before multi-user production.
             { name: 'BLAST_JOBS_SHARED_VISIBILITY', value: controlPlaneEnv.api.BLAST_JOBS_SHARED_VISIBILITY }
             // Native ACA blue/green self-upgrade (issue: guaranteed rollback +
             // no leftover revisions). Default OFF preserves the legacy

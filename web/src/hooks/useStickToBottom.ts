@@ -2,26 +2,42 @@
  * useStickToBottom — window-level "follow the tail" scroll behaviour.
  *
  * Responsibility: When BLAST progresses (new log lines, step transitions),
- * keep the window scrolled to the bottom so the user always sees the most
- * recent output — unless the user has manually scrolled up to inspect
- * earlier content, in which case auto-scroll pauses until they return to
- * the bottom.
+ * keep the window scrolled so the user always sees the most recent output —
+ * unless the user has manually scrolled up to inspect earlier content, in
+ * which case auto-scroll pauses until they return to the tail. The "tail"
+ * is the bottom of the currently-active step row when an `anchorSelector`
+ * is supplied (GitHub-Actions-style: follow the running step, not the page
+ * bottom — the BLAST timeline always renders the still-pending steps BELOW
+ * the active one, so the document bottom is a stack of empty pending rows,
+ * not the live log). With no anchor present it falls back to the document
+ * bottom.
  * Edit boundaries: Keep this pure window-scroll behaviour; do not depend
  * on a specific DOM container. Components opt in by calling the hook with
- * an opaque `version` value that increments whenever new content arrives.
- * Key entry points: `useStickToBottom({ version, enabled })`,
- * `shouldFollow`.
+ * an opaque `version` value that increments whenever new content arrives,
+ * and optionally an `anchorSelector` that resolves to the row to tail.
+ * Key entry points: `useStickToBottom({ version, enabled, anchorSelector })`,
+ * `shouldFollow`, `shouldFollowAnchor`, `anchorFollowTarget`.
  * Risky contracts: Only safe in the browser (uses `window`). The threshold
  * for "at bottom" must be generous enough to survive layout reflows and
  * sub-pixel rounding; 96 px matches typical sticky-footer heights. The
  * smooth follow relies on a ResizeObserver firing on every body-height
  * growth (each appended live-log line); dropping it reverts to the old
  * coarse, multi-second "lurch" follow driven by the debounced `version`.
+ * When an anchor is present the follow/pause decision MUST be measured
+ * against the anchor bottom (not the document bottom) or a small user
+ * scroll after an anchor-aligned auto-scroll would be misread as
+ * "scrolled away" and pause following.
  * Validation: `cd web && npm test -- useStickToBottom`.
  */
 import { useEffect, useRef } from "react";
 
 const BOTTOM_THRESHOLD_PX = 96;
+/**
+ * Breathing room left below the anchor's bottom edge so the latest line is
+ * not flush against the viewport bottom and a sliver of the next pending
+ * step stays visible as a "more is coming" cue.
+ */
+const ANCHOR_BOTTOM_MARGIN_PX = 24;
 
 /**
  * Pure decision: given the current scroll geometry, is the viewport close
@@ -38,29 +54,97 @@ export function shouldFollow(
   return scrollTop + viewportHeight >= documentHeight - threshold;
 }
 
-function isAtBottom(): boolean {
-  if (typeof window === "undefined") return false;
-  return shouldFollow(
-    window.scrollY,
-    window.innerHeight,
-    document.documentElement.scrollHeight,
-  );
+/**
+ * Pure decision for the anchor (active-step) follow mode: is the viewport
+ * bottom at or past the anchor's bottom edge, within the threshold? When the
+ * user scrolls up further than the threshold above the anchor bottom this
+ * returns false and following pauses.
+ */
+export function shouldFollowAnchor(
+  scrollTop: number,
+  viewportHeight: number,
+  anchorBottom: number,
+  threshold: number = BOTTOM_THRESHOLD_PX,
+): boolean {
+  return scrollTop + viewportHeight >= anchorBottom - threshold;
 }
 
-function scrollToBottom(): void {
-  if (typeof window === "undefined") return;
-  window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
+/**
+ * Pure target computation: the scrollTop that aligns the anchor's bottom
+ * edge to `margin` px above the viewport bottom, clamped to the scrollable
+ * range so we never overscroll a short document.
+ */
+export function anchorFollowTarget(
+  anchorBottom: number,
+  viewportHeight: number,
+  documentHeight: number,
+  margin: number = ANCHOR_BOTTOM_MARGIN_PX,
+): number {
+  const maxScroll = Math.max(0, documentHeight - viewportHeight);
+  const target = anchorBottom - viewportHeight + margin;
+  return Math.min(Math.max(0, target), maxScroll);
 }
 
 export function useStickToBottom({
   version,
   enabled = true,
+  anchorSelector,
 }: {
   /** Monotonically-increasing token whose change signals new tail content. */
   version: number | string;
   /** Disable when the host page is not visible (e.g. wrong tab). */
   enabled?: boolean;
+  /**
+   * Optional CSS selector for the element whose bottom edge is the tail to
+   * follow (the active step row). When multiple match, the LAST one wins so
+   * the lowest meaningful row is tailed. When omitted or unmatched, the hook
+   * follows the document bottom.
+   */
+  anchorSelector?: string;
 }): void {
+  // Latest selector lives in a ref so the rAF / scroll closures below read
+  // the current value without re-subscribing every render.
+  const anchorSelectorRef = useRef<string | undefined>(anchorSelector);
+  anchorSelectorRef.current = anchorSelector;
+
+  // Absolute document-Y of the follow anchor's bottom edge, or null when no
+  // anchor element is present (→ fall back to document-bottom follow).
+  const getAnchorBottom = (): number | null => {
+    if (typeof window === "undefined") return null;
+    const selector = anchorSelectorRef.current;
+    if (!selector) return null;
+    const matches = document.querySelectorAll(selector);
+    const el = matches.length > 0 ? matches[matches.length - 1] : null;
+    if (!el) return null;
+    return el.getBoundingClientRect().bottom + window.scrollY;
+  };
+
+  const isFollowing = (): boolean => {
+    if (typeof window === "undefined") return false;
+    const anchorBottom = getAnchorBottom();
+    if (anchorBottom !== null) {
+      return shouldFollowAnchor(window.scrollY, window.innerHeight, anchorBottom);
+    }
+    return shouldFollow(
+      window.scrollY,
+      window.innerHeight,
+      document.documentElement.scrollHeight,
+    );
+  };
+
+  const scrollToTail = (): void => {
+    if (typeof window === "undefined") return;
+    const anchorBottom = getAnchorBottom();
+    const top =
+      anchorBottom !== null
+        ? anchorFollowTarget(
+            anchorBottom,
+            window.innerHeight,
+            document.documentElement.scrollHeight,
+          )
+        : document.documentElement.scrollHeight;
+    window.scrollTo({ top, behavior: "auto" });
+  };
   // True until the user manually scrolls away from the bottom. Re-arms when
   // they scroll back to the bottom.
   const followingRef = useRef(true);
@@ -86,7 +170,7 @@ export function useStickToBottom({
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null;
       selfScrollingRef.current = true;
-      scrollToBottom();
+      scrollToTail();
       followingRef.current = true;
       // Release the self-scroll guard after the scroll event has had a
       // chance to fire (next frame).
@@ -97,12 +181,12 @@ export function useStickToBottom({
   };
 
   // Track manual scroll to toggle following on/off. Ignore the single
-  // self-induced scroll event produced by our own scrollToBottom().
+  // self-induced scroll event produced by our own scrollToTail().
   useEffect(() => {
     if (!enabled || typeof window === "undefined") return;
     const onScroll = () => {
       if (selfScrollingRef.current) return;
-      followingRef.current = isAtBottom();
+      followingRef.current = isFollowing();
     };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
@@ -133,11 +217,12 @@ export function useStickToBottom({
     return () => observer.disconnect();
   }, [enabled]);
 
-  // On mount + every version change, force a scroll to the bottom IF either
+  // On mount + every version change, force a scroll to the tail IF either
   // (a) this is the initial render (land at the tail of an already-rendered
   // completed job, where no further growth fires the ResizeObserver), or
-  // (b) the user is still anchored near the bottom (covers phase-transition
-  // cues and any growth the observer missed).
+  // (b) the user is still anchored near the tail (covers phase-transition
+  // cues — where the active anchor row changes — and any growth the observer
+  // missed).
   useEffect(() => {
     if (!enabled || typeof window === "undefined") return;
     if (lastVersionRef.current === version && !armedForInitialRef.current) return;

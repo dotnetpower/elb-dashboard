@@ -96,7 +96,12 @@ def outfmt_is_merge_compatible(value: object | None) -> bool:
 
 
 def merge_format_for_outfmt(value: object | None) -> Literal["tabular", "xml"] | None:
-    """Return the supported shard merge family for a BLAST outfmt value."""
+    """Return the supported shard merge family for a BLAST outfmt value.
+
+    outfmt 7 is the same 12-column tabular layout as outfmt 6 with added
+    comment lines; the shard merge skips the comment lines and re-emits its
+    own, so 7 merges via the same tabular path as 6 (plain or ``std``).
+    """
     if value in (None, ""):
         return "tabular"
     parts = str(value).strip().strip("'\"").split()
@@ -104,7 +109,7 @@ def merge_format_for_outfmt(value: object | None) -> Literal["tabular", "xml"] |
         return "tabular"
     if parts[0] == "5" and len(parts) == 1:
         return "xml"
-    if parts[0] == "6" and (len(parts) == 1 or parts[1] == "std"):
+    if parts[0] in ("6", "7") and (len(parts) == 1 or parts[1] == "std"):
         return "tabular"
     return None
 
@@ -197,7 +202,8 @@ def build_precision_report(
     merge_format = merge_format_for_outfmt(outfmt)
     if merge_format is None:
         blockers.append(
-            "sharded result merge currently supports only outfmt 5, outfmt 6, or outfmt '6 std...'"
+            "sharded result merge currently supports only outfmt 5, outfmt 6, "
+            "outfmt 7, or outfmt '6 std...'/'7 std...'"
         )
 
     if not db_stats_available and not positive_int(opts.get("db_total_letters")):

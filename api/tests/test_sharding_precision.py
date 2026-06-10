@@ -72,8 +72,15 @@ def test_additional_outfmt_equals_xml_is_eligible() -> None:
     assert report.merge_strategy == "xml_top_n"
 
 
-def test_sharded_unsupported_outfmt_is_blocked() -> None:
+def test_sharded_outfmt7_is_supported() -> None:
+    """outfmt 7 shares outfmt 6's tabular layout, so it is merge-eligible."""
     report = build_precision_report({"sharding_mode": "approximate", "outfmt": 7})
+    assert report.eligible is True
+    assert report.precision_level != "blocked"
+
+
+def test_sharded_unsupported_outfmt_is_blocked() -> None:
+    report = build_precision_report({"sharding_mode": "approximate", "outfmt": 11})
     assert report.eligible is False
     assert report.precision_level == "blocked"
     assert "outfmt 5" in report.blocking_errors[0]
@@ -81,7 +88,7 @@ def test_sharded_unsupported_outfmt_is_blocked() -> None:
 
 def test_additional_outfmt_equals_unsupported_is_blocked() -> None:
     report = build_precision_report(
-        {"sharding_mode": "approximate", "additional_options": "-outfmt=7"}
+        {"sharding_mode": "approximate", "additional_options": "-outfmt=11"}
     )
     assert report.eligible is False
     assert report.precision_level == "blocked"

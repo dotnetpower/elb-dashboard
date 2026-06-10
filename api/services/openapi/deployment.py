@@ -16,6 +16,10 @@ from typing import Any
 from azure.core.credentials import TokenCredential
 
 from api.services.k8s.monitoring import _get_k8s_session
+from api.tasks.openapi.constants import (
+    OPENAPI_MANIFEST_REVISION,
+    OPENAPI_MANIFEST_REVISION_ANNOTATION,
+)
 
 OPENAPI_DEPLOYMENT_NAME = "elb-openapi"
 OPENAPI_CONTAINER_NAME = "openapi"
@@ -91,6 +95,23 @@ def _image_repository(image: str) -> str:
     return image
 
 
+def _manifest_revision(deployment: dict[str, Any]) -> int | None:
+    """Return the live Deployment's stamped manifest revision, or None.
+
+    Deployments applied before the annotation existed (or by an external tool)
+    carry no revision; those are treated as outdated by the caller so the SPA
+    prompts a redeploy onto the current manifest.
+    """
+    annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
+    raw = annotations.get(OPENAPI_MANIFEST_REVISION_ANNOTATION)
+    if raw in (None, ""):
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def get_openapi_deployment_status(
     credential: TokenCredential,
     *,
@@ -111,8 +132,16 @@ def get_openapi_deployment_status(
     try:
         deployment = _read_deployment(session, server, namespace, OPENAPI_DEPLOYMENT_NAME)
         image = _container_image(deployment, OPENAPI_CONTAINER_NAME)
+        manifest_revision = _manifest_revision(deployment)
     finally:
         session.close()
+
+    # A live Deployment whose manifest predates the dashboard's current
+    # generation (missing annotation, or a lower revision) needs a redeploy to
+    # pick up a redeploy-only manifest change (e.g. the single-replica queue
+    # owner). Bicep/azd never touch this in-cluster Deployment, so the SPA is
+    # the only place that can surface the drift.
+    manifest_outdated = manifest_revision is None or manifest_revision < OPENAPI_MANIFEST_REVISION
 
     return {
         "configured": bool(image),
@@ -122,4 +151,9 @@ def get_openapi_deployment_status(
         "image": image,
         "image_repository": _image_repository(image),
         "image_tag": _image_tag(image),
+        "manifest_revision": manifest_revision,
+        "expected_manifest_revision": OPENAPI_MANIFEST_REVISION,
+        # Only meaningful when the Deployment actually exists; an absent
+        # Deployment raises 404 upstream before reaching here.
+        "manifest_outdated": bool(image) and manifest_outdated,
     }

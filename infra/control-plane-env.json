@@ -5,7 +5,7 @@
     "ENFORCE_OPENAPI_EXEC_RBAC": "false",
     "ENFORCE_DASHBOARD_RBAC": "true",
     "BLAST_GATE_ENABLED": "false",
-    "BLAST_JOBS_SHARED_VISIBILITY": "false",
+    "BLAST_JOBS_SHARED_VISIBILITY": "true",
     "STRICT_BLUEGREEN": "false"
   },
   "worker": {

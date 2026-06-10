@@ -34,9 +34,15 @@ describe("API Reference spec parser", () => {
     const examples = endpoint.requestBody?.content?.["application/json"]?.examples || {};
     const keys = Object.keys(examples);
 
-    // small_16s_rrna is first (the dashboard default), mode_b_core_nt remains
-    // available, and the upstream `mode_a` example is preserved at the end.
-    expect(keys).toEqual(["small_16s_rrna", "mode_b_core_nt", "mode_a"]);
+    // small_16s_rrna is first (the dashboard default), mode_b_core_nt and the
+    // outfmt 7 variant remain available, and the upstream `mode_a` example is
+    // preserved at the end.
+    expect(keys).toEqual([
+      "small_16s_rrna",
+      "mode_b_core_nt",
+      "mode_b_core_nt_outfmt7",
+      "mode_a",
+    ]);
 
     const small16s = examples.small_16s_rrna.value as {
       program: string;
@@ -77,6 +83,13 @@ describe("API Reference spec parser", () => {
       extra: "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668",
     });
     expect(coreNt.resource_profile).toBe("core_nt_safe");
+
+    const coreNtOutfmt7 = examples.mode_b_core_nt_outfmt7.value as {
+      db: string;
+      blast_options: { outfmt: string };
+    };
+    expect(coreNtOutfmt7.db).toBe("core_nt");
+    expect(coreNtOutfmt7.blast_options.outfmt).toBe("7");
   });
 
   it("selects the small 16S rRNA example as the default request body for POST /v1/jobs", () => {

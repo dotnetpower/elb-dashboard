@@ -150,9 +150,16 @@ def test_build_manifests_preserves_openapi_api_token() -> None:
     assert env["ELB_OPENAPI_API_TOKEN"] == "generated-token"
 
 
-def test_build_manifests_hardens_for_ha() -> None:
-    """elb-openapi must roll out with replicas:2 + probes + PDB so a single
-    node restart cannot take the BLAST submit path down."""
+def test_build_manifests_single_queue_owner() -> None:
+    """elb-openapi must roll out with a SINGLE replica.
+
+    The sibling OpenAPI service keeps its job queue in a process-local
+    in-memory dict and enforces ``ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS`` against
+    that local view only. A second replica would multiply the effective
+    run-concurrency ceiling and strand queued jobs on whichever replica the
+    LoadBalancer routed them to (the "/v1/jobs queueing doesn't work"
+    symptom), so exactly one authoritative queue owner must ship.
+    """
     manifest = openapi._build_manifests(
         image="elbacr.azurecr.io/elb-openapi:4.9",
         mi_client_id="mi-client-id",
@@ -172,24 +179,40 @@ def test_build_manifests_hardens_for_ha() -> None:
 
     deployment = next(doc for doc in docs if doc["kind"] == "Deployment")
     spec = deployment["spec"]
-    assert spec["replicas"] == 2
+    assert spec["replicas"] == 1
 
+    # The manifest carries a revision annotation so the dashboard can detect a
+    # live Deployment that predates a redeploy-only manifest change.
+    from api.tasks.openapi.constants import (
+        OPENAPI_MANIFEST_REVISION,
+        OPENAPI_MANIFEST_REVISION_ANNOTATION,
+    )
+
+    annotations = deployment["metadata"].get("annotations", {})
+    assert annotations.get(OPENAPI_MANIFEST_REVISION_ANNOTATION) == str(
+        OPENAPI_MANIFEST_REVISION
+    )
     container = spec["template"]["spec"]["containers"][0]
     assert container["readinessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["port"] == 8000
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
 
-    # Rolling update must not drop below the running count.
-    assert spec["strategy"]["rollingUpdate"]["maxUnavailable"] == 0
+    # Rollout must never run two queue owners at once: the old pod terminates
+    # before the new one starts (maxUnavailable:1, maxSurge:0).
+    assert spec["strategy"]["rollingUpdate"]["maxUnavailable"] == 1
+    assert spec["strategy"]["rollingUpdate"]["maxSurge"] == 0
 
-    # topologySpread keeps the two replicas on different nodes when possible
-    # but does not block scheduling on a single-node blast pool.
+    # topologySpread is retained (harmless on a single replica) and must keep
+    # ScheduleAnyway so a single-node blast pool still schedules the pod.
     spread = spec["template"]["spec"]["topologySpreadConstraints"][0]
     assert spread["topologyKey"] == "kubernetes.io/hostname"
     assert spread["whenUnsatisfiable"] == "ScheduleAnyway"
 
+    # PDB uses maxUnavailable:1 so a single-replica deployment does not block
+    # voluntary node drains / AKS upgrades (minAvailable:1 would hang them).
     pdb = next(doc for doc in docs if doc["kind"] == "PodDisruptionBudget")
-    assert pdb["spec"]["minAvailable"] == 1
+    assert pdb["spec"]["maxUnavailable"] == 1
+    assert "minAvailable" not in pdb["spec"]
     assert pdb["spec"]["selector"]["matchLabels"] == {"app": "elb-openapi"}
 
     service = next(doc for doc in docs if doc["kind"] == "Service")

@@ -302,10 +302,18 @@ def k8s_warmup_status(
             _get,
             f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
         )
-        f_vmtouch = pool.submit(
-            _get,
-            f"{server}/apis/apps/v1/namespaces/default/daemonsets/vmtouch-db-cache",
-        )
+        # NOTE: the legacy ``vmtouch-db-cache`` DaemonSet is intentionally NOT
+        # probed. Warmup moved to a Job-based model and the in-pod vmtouch step
+        # now runs inside the search pod (see
+        # docs/features_change/2026-06/2026-06-06-warmup-drop-fake-vmtouch.md),
+        # so that DaemonSet no longer exists on any cluster. Probing it emitted
+        # a guaranteed ``GET …/daemonsets/vmtouch-db-cache → 404`` on every
+        # warmup-status poll, which App Insights recorded as a failed
+        # dependency (~34 in 14d) and wasted one parallel K8s round trip per
+        # tick. ``vmtouch_ready`` stays 0 in the response for backward
+        # compatibility (frontend type + mocks still carry the field). The real
+        # node-side warmup DaemonSets are discovered via ``f_warmup_ds`` below
+        # (labelSelector ``app=db-warmup``).
         f_setup_jobs = pool.submit(
             _get,
             f"{server}/apis/batch/v1/namespaces/default/jobs",
@@ -329,11 +337,6 @@ def k8s_warmup_status(
             result["workspace_ready"] = status.get("numberReady", 0)
             result["workspace_desired"] = status.get("desiredNumberScheduled", 0)
             result["warm"] = result["workspace_ready"] > 0
-
-        response = f_vmtouch.result()
-        if response.status_code == 200:
-            result["vmtouch_ready"] = response.json().get("status", {}).get("numberReady", 0)
-            result["warm"] = result["warm"] or result["vmtouch_ready"] > 0
 
         response = f_setup_jobs.result()
         if response.status_code == 200:

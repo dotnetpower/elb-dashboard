@@ -248,7 +248,7 @@ def parse_outfmt(options_text):
     return outfmt.strip().split(maxsplit=1)[0] or "6"
 
 
-def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings):
+def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings, outfmt="6"):
     oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
     strict_oracle = bool(tie_order) and strict_oracle_enabled()
     if strict_oracle:
@@ -257,13 +257,30 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     unsupported_rows = 0
     total_input_rows = 0
     ordinal = 0
+    # Capture the authoritative `# Fields:` header BLAST itself wrote into the
+    # shard outputs (outfmt 7 only). Reusing it verbatim makes the merged
+    # output self-describing for EXTENDED layouts like
+    # `-outfmt "7 std staxids sstrand qseq sseq"` — the merge re-ranks by the
+    # fixed std positions (cols[0]/[10]/[11], guaranteed by the gate that forces
+    # `std` to be the first field) and re-emits the full row, so trailing
+    # columns (staxids, qseq, sseq, …) are preserved; this keeps the header in
+    # sync with them instead of mislabelling them as the bare std 12. Plain
+    # outfmt 6 input carries no comment lines, so `captured_fields` stays None
+    # and the standard 12-field fallback below applies (unchanged behaviour).
+    captured_fields = None
 
     input_path = Path(input_tsv)
     if input_path.exists():
         with input_path.open() as handle:
             for raw_line in handle:
                 line = raw_line.rstrip("\n")
-                if not line or line.startswith("#"):
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    if captured_fields is None and line.startswith("# Fields:"):
+                        candidate = line[len("# Fields:") :].strip()
+                        if candidate:
+                            captured_fields = candidate
                     continue
                 total_input_rows += 1
                 cols = line.split("\t")
@@ -282,7 +299,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     if unsupported_rows:
         warnings.append("Some rows were skipped because they were not outfmt 6 compatible")
 
-    fields = (
+    fields = captured_fields or (
         "query acc.ver, subject acc.ver, % identity, alignment length, mismatches, "
         "gap opens, q. start, q. end, s. start, s. end, evalue, bit score"
     )
@@ -390,8 +407,9 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         )
 
     report = {
-        "outfmt": 6,
+        "outfmt": int(str(outfmt).strip().split(maxsplit=1)[0]) if str(outfmt).strip() else 6,
         "format": "blast_tabular",
+        "fields": fields,
         "max_target_seqs": max_hits,
         "queries": len(query_hits),
         "total_input_hits": total_input_rows,
@@ -724,8 +742,13 @@ max_hits, warnings = parse_max_target_seqs(blast_options)
 outfmt = parse_outfmt(blast_options)
 if outfmt == "5":
     total_hits, query_count = merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
-elif outfmt == "6":
-    total_hits, query_count = merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings)
+elif outfmt in ("6", "7"):
+    # outfmt 7 shares outfmt 6's 12-column data rows (it only adds comment
+    # lines, which the tabular merge already skips and re-emits), so both merge
+    # through the same tabular path. The report records the real outfmt.
+    total_hits, query_count = merge_tabular(
+        input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings, outfmt=outfmt
+    )
 else:
     raise ValueError(f"Unsupported sharded merge outfmt: {outfmt}")
 print(
