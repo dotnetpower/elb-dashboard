@@ -313,13 +313,17 @@ def test_reconcile_auto_warmup_enqueues_when_all_ready_workload_nodes(
     assert calls[0]["kwargs"]["require_all_warmup_nodes"] is True
 
 
-def test_reconcile_auto_warmup_skips_stale_downloaded_generation(
+def test_reconcile_auto_warmup_warms_current_generation_when_update_available(
     monkeypatch,
     tmp_path,
 ) -> None:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
     monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
     monkeypatch.setattr(
         "api.services.monitoring.list_aks_clusters",
         lambda credential, subscription_id, resource_group: [
@@ -348,11 +352,8 @@ def test_reconcile_auto_warmup_skips_stale_downloaded_generation(
         lambda: "2026-05-20-00-00-00",
     )
 
-    calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        "api.celery_app.celery_app.send_task",
-        lambda *args, **kwargs: calls.append({"args": args, "kwargs": kwargs}),
-    )
+    calls, fake_send_task = make_send_task_recorder("warmup-task-current-generation")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
 
     pref = AutoWarmupPreference(
         subscription_id="sub-1",
@@ -365,16 +366,25 @@ def test_reconcile_auto_warmup_skips_stale_downloaded_generation(
 
     result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
 
-    assert result["clusters"][0]["status"] == "ready_noop"
-    assert result["clusters"][0]["skipped"] == [
+    cluster_result = result["clusters"][0]
+    # A newer NCBI generation exists, but auto-warmup must NOT block on it: it
+    # warms the CURRENTLY downloaded generation so node invalidation recovers,
+    # and records the available update as an informational signal instead of a
+    # skip. Auto-downloading a new generation stays an explicit user action.
+    assert cluster_result["status"] == "triggered"
+    assert cluster_result["enqueued"] == [
+        {"db": "core_nt", "task_id": "warmup-task-current-generation"}
+    ]
+    assert calls[0]["kwargs"]["database_name"] == "core_nt"
+    assert cluster_result["update_available"] == [
         {
             "db": "core_nt",
-            "reason": "update_required",
             "source_version": "2026-05-19-00-00-00",
             "latest_version": "2026-05-20-00-00-00",
         }
     ]
-    assert calls == []
+    # The drift is no longer reported as a skip.
+    assert all(item.get("reason") != "update_required" for item in cluster_result["skipped"])
 
 
 def test_reconcile_auto_warmup_reenqueues_stale_warm_generation(

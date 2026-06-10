@@ -649,15 +649,26 @@ def reconcile_auto_warmup_preferences(
                     and db_source_version
                     and db_source_version != latest_source_version
                 ):
-                    result["skipped"].append(
+                    # An NCBI snapshot newer than the downloaded generation
+                    # exists. Auto-warmup intentionally does NOT auto-download a
+                    # new generation — that is an explicit, user-initiated
+                    # prepare-db update (it can move hundreds of GB). Record the
+                    # drift as an informational signal, then FALL THROUGH so the
+                    # warm-state logic below still (re)warms the CURRENTLY
+                    # downloaded generation. Skipping outright used to strand the
+                    # DB cold/Stale forever every time NCBI rolled a daily
+                    # snapshot: node invalidation (stop/start, node rotation)
+                    # flips the warm Jobs Stale, but the early skip meant the
+                    # reconcile never re-warmed them. Warming the current
+                    # generation keeps searches working; the operator updates to
+                    # the new generation on their own schedule.
+                    result.setdefault("update_available", []).append(
                         {
                             "db": db_name,
-                            "reason": "update_required",
                             "source_version": db_source_version,
                             "latest_version": latest_source_version,
                         }
                     )
-                    continue
                 warm_meta = warm_status.get(db_name) or {}
                 warm_generation = str(warm_meta.get("source_version") or "")
                 warm_generations = {
