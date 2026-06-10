@@ -115,4 +115,18 @@ describe("blast job error display", () => {
       ),
     ).toBe(true);
   });
+
+  it("suppresses a stale error on a successfully-completed job", () => {
+    expect(
+      shouldShowNonTerminalJobError(
+        job({
+          status: "completed",
+          phase: "completed",
+          error_code: "worker_lost",
+          error: "worker_lost",
+        }),
+        "completed",
+      ),
+    ).toBe(false);
+  });
 });

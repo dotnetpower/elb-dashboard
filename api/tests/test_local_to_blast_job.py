@@ -180,6 +180,20 @@ def test_local_to_blast_job_does_not_expose_submit_slot_wait_as_error():
     assert out["error"] == ""
 
 
+def test_local_to_blast_job_suppresses_stale_error_on_completed_job():
+    # A job transiently demoted to `worker_lost` and then reconciled to
+    # `completed` once its results were detected keeps the stale top-level
+    # error_code (the reconcile/finalize paths flip status+phase but do not
+    # clear it). The user-facing `error` must be empty so the Run details
+    # page does not paint a red `worker_lost` on a successful job; the raw
+    # `error_code` is still surfaced for diagnostics.
+    out = _local_to_blast_job(
+        _state(status="completed", phase="completed", error_code="worker_lost")
+    )
+    assert out["error_code"] == "worker_lost"
+    assert out["error"] == ""
+
+
 def test_local_to_blast_job_exposes_progress_steps():
     out = _local_to_blast_job(
         _state(

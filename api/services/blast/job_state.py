@@ -323,6 +323,16 @@ def _job_error_for_response(state: Any) -> str:
     if not error_code:
         return ""
     status = str(getattr(state, "status", "") or "").strip().casefold()
+    # A successfully-completed job has no user-facing error. A stale
+    # error_code can linger on the row when a job was transiently demoted
+    # (e.g. `worker_lost` while the submit worker died mid-flight) and then
+    # later reconciled to `completed` once its results were detected: the
+    # reconcile / artifact-finalize paths flip status+phase but do NOT clear
+    # the top-level error_code column, so the Run details page painted a red
+    # `worker_lost` on a job that actually succeeded. Suppress it here — the
+    # success banner already represents the terminal outcome.
+    if status == "completed":
+        return ""
     if status == "running" and error_code in _NON_ERROR_RUNNING_ERROR_CODES:
         return ""
     return error_code

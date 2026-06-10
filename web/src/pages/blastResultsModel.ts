@@ -180,6 +180,15 @@ export function shouldShowNonTerminalJobError(
   phase: string,
 ): boolean {
   if (!job?.error || phase === "failed" || phase === "error") return false;
+  // A successfully-completed job is terminal: its outcome is the success
+  // banner, not this transient-error fallback. A stale error_code (e.g.
+  // `worker_lost` left over from a transient demotion that was later
+  // reconciled to completed) must not paint a red error on a job that
+  // actually succeeded. The backend already suppresses `error` for completed
+  // jobs; this guard keeps the rule even if a caller hands us a completed job
+  // that still carries an error string.
+  const status = (job.status || "").toLowerCase();
+  if (status === "completed" || phase === "completed") return false;
   const code = job.error_code || job.error;
   if (job.status === "running" && NON_ERROR_RUNNING_JOB_CODES.has(code)) {
     return false;
