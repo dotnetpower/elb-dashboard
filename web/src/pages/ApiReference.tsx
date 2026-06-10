@@ -11,6 +11,7 @@ import { ApiHero } from "@/pages/apiReference/ApiHero";
 import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
 import { ApiResponseContractPanel } from "@/pages/apiReference/ApiResponseContractPanel";
 import { ApiTokenPanel } from "@/pages/apiReference/ApiTokenPanel";
+import { CoreApiSection } from "@/pages/apiReference/CoreApiSection";
 import { PlsTransitionBanner } from "@/pages/apiReference/PlsTransitionBanner";
 import {
   RepairPeeringButton,
@@ -210,6 +211,7 @@ export function ApiReference() {
         spec={spec}
         baseUrl={internalBaseUrl ?? baseUrl}
         publicHttpsUrl={publicHttpsBaseUrl}
+        imageTag={deploymentQuery.data?.image_tag}
         onRefresh={() => specQuery.refetch()}
         refreshing={specQuery.isFetching}
       />
@@ -219,6 +221,22 @@ export function ApiReference() {
           clusters={candidates}
           selectedName={clusterName}
           onSelect={onSelectCluster}
+        />
+      )}
+
+      {/* Always-on control-plane section. Rendered whenever a cluster context
+          is known — including while the cluster is stopped — because its
+          ensure-running endpoint is exactly how the cluster is woken. It lives
+          on a different host (the dashboard api sidecar) than the spec-derived
+          elb-openapi groups below, hence the distinct accent + host banner. */}
+      {enabled && clusterName && (
+        <CoreApiSection
+          context={{
+            subscriptionId: sub,
+            resourceGroup: clusterRg,
+            clusterName,
+          }}
+          originLabel={typeof window !== "undefined" ? window.location.origin : ""}
         />
       )}
 

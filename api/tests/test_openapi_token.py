@@ -577,3 +577,86 @@ def test_resync_from_cluster_returns_empty_when_pod_has_no_token_env(monkeypatch
     assert result == ""
     assert synced == []
     assert session.closed is True
+
+
+def test_read_cluster_openapi_token_returns_live_token(monkeypatch) -> None:
+    """The deploy path reads the live deployment env so an AKS stop/start
+    redeploy preserves the existing token instead of minting a new one."""
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment("pod-live-token"))
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+
+    result = openapi_token.read_cluster_openapi_token(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result == "pod-live-token"
+    assert session.patches == [], "read must never patch the deployment"
+    assert session.closed is True
+
+
+def test_read_cluster_openapi_token_empty_without_context(monkeypatch) -> None:
+    """Missing cluster context short-circuits before any K8s call."""
+    from api.services.openapi import token as openapi_token
+
+    def _must_not_call(*_args, **_kwargs):
+        raise AssertionError("k8s session must not be created without context")
+
+    monkeypatch.setattr(openapi_token, "_get_k8s_session", _must_not_call)
+
+    result = openapi_token.read_cluster_openapi_token(
+        object(),
+        subscription_id="",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+    assert result == ""
+
+
+def test_read_cluster_openapi_token_empty_when_no_token_env(monkeypatch) -> None:
+    """Deployment exists but has no token env entry → "" (first deploy)."""
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment())  # no ELB_OPENAPI_API_TOKEN entry
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+
+    result = openapi_token.read_cluster_openapi_token(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result == ""
+    assert session.closed is True
+
+
+def test_read_cluster_openapi_token_swallows_k8s_session_error(monkeypatch) -> None:
+    """A K8s session error returns "" without raising (best-effort)."""
+    from api.services.openapi import token as openapi_token
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("api server unreachable")
+
+    monkeypatch.setattr(openapi_token, "_get_k8s_session", _boom)
+
+    result = openapi_token.read_cluster_openapi_token(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result == ""

@@ -122,6 +122,31 @@ def list_aks_clusters(
     return clusters
 
 
+def get_aks_cluster_snapshot(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any] | None:
+    """Return the serialised snapshot for a single cluster, or ``None`` (404).
+
+    A focused ``ManagedClusters.get`` + the same ``_serialise_cluster`` shape the
+    list endpoints use, so callers that need ``node_count`` / ``provisioning_state``
+    / ``power_state`` for one cluster (e.g. the warmup readiness gate consumed by
+    the ensure-running orchestration) do not have to list a whole resource group.
+    Returns ``None`` when the cluster does not exist so the caller can map that to
+    a ``not_found`` state instead of raising.
+    """
+    from azure.core.exceptions import ResourceNotFoundError
+
+    client = aks_client(credential, subscription_id)
+    try:
+        cluster = client.managed_clusters.get(resource_group, cluster_name)
+    except ResourceNotFoundError:
+        return None
+    return _serialise_cluster(cluster, resource_group=resource_group)
+
+
 def list_aks_clusters_in_subscription(
     credential: TokenCredential,
     subscription_id: str,

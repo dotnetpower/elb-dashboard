@@ -4,7 +4,7 @@ Responsibility: Generate, read, and apply the sibling OpenAPI API token
 Edit boundaries: Keep Kubernetes token storage and runtime cache synchronization here; routes
 should only validate HTTP input and shape responses.
 Key entry points: `get_openapi_api_token_status`, `ensure_openapi_api_token`,
-`resync_openapi_api_token_from_cluster`
+`read_cluster_openapi_token`, `resync_openapi_api_token_from_cluster`
 Risky contracts: Never log token values; keep tokens in server-side env/runtime cache and only
 return them to authenticated dashboard callers.
 Validation: `uv run pytest -q api/tests/test_openapi_token.py`.
@@ -352,6 +352,63 @@ def _sync_runtime_token(token: str, metadata: dict[str, Any]) -> None:
         LOGGER.debug("openapi token cache reset skipped: %s", exc)
 
 
+def read_cluster_openapi_token(
+    credential: TokenCredential,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str = K8S_NAMESPACE,
+) -> str:
+    """Best-effort read of the live ``ELB_OPENAPI_API_TOKEN`` from the
+    existing elb-openapi deployment, given explicit cluster context.
+
+    Returns the token, or ``""`` when the deployment is absent, has no
+    token env entry, or any Kubernetes error occurs. This function NEVER
+    mints a token and NEVER raises — the deploy path uses it to preserve a
+    token that already lives on the cluster across an AKS stop/start so the
+    token is only rotated by an explicit Generate (POST
+    ``/api/aks/openapi/token``). The durable source of truth for the token
+    is the deployment env in etcd (which survives ``az aks stop/start``);
+    the api-sidecar ``os.environ`` and the in-revision Redis cache are both
+    ephemeral, so without this read a redeploy after a control-plane
+    revision restart would silently rotate the token.
+    """
+    if not (subscription_id and resource_group and cluster_name):
+        return ""
+    try:
+        session, server = _get_k8s_session(
+            credential,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            admin=True,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "openapi token cluster read skipped: k8s session error %s",
+            type(exc).__name__,
+        )
+        return ""
+    try:
+        deployment = _read_deployment(
+            session, server, namespace, OPENAPI_DEPLOYMENT_NAME
+        )
+        return _container_env_value(
+            deployment, OPENAPI_CONTAINER_NAME, OPENAPI_TOKEN_ENV
+        )
+    except OpenApiTokenError as exc:
+        LOGGER.warning("openapi token cluster read failed: %s", exc.code)
+        return ""
+    except Exception as exc:
+        LOGGER.warning(
+            "openapi token cluster read failed: unexpected %s", type(exc).__name__
+        )
+        return ""
+    finally:
+        session.close()
+
+
 def resync_openapi_api_token_from_cluster(*, namespace: str = K8S_NAMESPACE) -> str:
     """Re-read the live ``ELB_OPENAPI_API_TOKEN`` from the elb-openapi
     deployment and sync it into the runtime token cache. Returns the synced
@@ -399,37 +456,13 @@ def resync_openapi_api_token_from_cluster(*, namespace: str = K8S_NAMESPACE) -> 
         )
         return ""
 
-    try:
-        session, server = _get_k8s_session(
-            credential,
-            subscription_id,
-            resource_group,
-            cluster_name,
-            admin=True,
-        )
-    except Exception as exc:
-        LOGGER.warning(
-            "openapi token resync skipped: k8s session error %s", type(exc).__name__
-        )
-        return ""
-
-    try:
-        deployment = _read_deployment(
-            session, server, namespace, OPENAPI_DEPLOYMENT_NAME
-        )
-        token = _container_env_value(
-            deployment, OPENAPI_CONTAINER_NAME, OPENAPI_TOKEN_ENV
-        )
-    except OpenApiTokenError as exc:
-        LOGGER.warning("openapi token resync failed: %s", exc.code)
-        return ""
-    except Exception as exc:
-        LOGGER.warning(
-            "openapi token resync failed: unexpected %s", type(exc).__name__
-        )
-        return ""
-    finally:
-        session.close()
+    token = read_cluster_openapi_token(
+        credential,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        namespace=namespace,
+    )
 
     if not token:
         LOGGER.info(

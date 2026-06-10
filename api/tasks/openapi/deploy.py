@@ -337,18 +337,59 @@ def deploy_openapi_service(
     # token here when nothing is cached so the deploy is self-contained;
     # subsequent rotations still go through the API menu's POST
     # /api/aks/openapi/token path.
-    api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
-    token_source = "env" if api_token else ""
-    if not api_token:
-        from api.services.openapi.runtime import get_openapi_api_token
+    #
+    # Resolution order is cross-cluster-safe: every source is keyed to THIS
+    # cluster. The process-global ``os.environ["ELB_OPENAPI_API_TOKEN"]``
+    # and the legacy global Redis key are deliberately NOT consulted here —
+    # a single Container App revision can manage several clusters, and those
+    # globals hold the most-recently-touched cluster's token, so reading
+    # them would let cluster A's deploy stamp cluster B with A's token. We
+    # use (1) the per-cluster Redis cache, then (2) the live deployment env
+    # on the cluster (source of truth, survives ``az aks stop/start`` and a
+    # revision restart), then (3) mint. The token only rotates on an
+    # explicit Generate (POST /api/aks/openapi/token).
+    from api.services.openapi.runtime import get_openapi_api_token, save_openapi_api_token
 
-        api_token = get_openapi_api_token()
+    api_token = get_openapi_api_token(
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    token_source = "runtime_cache" if api_token else ""
+    if not api_token:
+        # Read the live deployment env so a redeploy after the per-cluster
+        # Redis cache was wiped (revision restart) preserves the token.
+        # Best-effort: a missing deployment / K8s error returns "" and we
+        # fall through to mint.
+        from api.services.openapi.token import read_cluster_openapi_token
+
+        api_token = read_cluster_openapi_token(
+            cred,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
         if api_token:
-            token_source = "runtime_cache"  # noqa: S105 - source label, not a credential.
+            token_source = "cluster_existing"  # noqa: S105 - source label, not a credential.
+            os.environ["ELB_OPENAPI_API_TOKEN"] = api_token
+            try:
+                save_openapi_api_token(
+                    api_token,
+                    metadata={
+                        "subscription_id": subscription_id,
+                        "resource_group": resource_group,
+                        "cluster_name": cluster_name,
+                        "deployment_name": "elb-openapi",
+                        "source": "deploy_preserve_cluster_token",
+                    },
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "openapi deploy: runtime token cache reseed skipped: %s",
+                    type(exc).__name__,
+                )
     if not api_token:
         import secrets
-
-        from api.services.openapi.runtime import save_openapi_api_token
 
         api_token = secrets.token_urlsafe(32)
         token_source = "auto_generated"  # noqa: S105 - source label, not a credential.

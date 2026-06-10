@@ -28,11 +28,13 @@ export function EndpointCard({
   ep,
   baseUrl,
   proxyInfo,
+  dashboardApi = false,
   id,
 }: {
   ep: SpecEndpoint;
   baseUrl: string;
   proxyInfo?: OpenApiProxyInfo;
+  dashboardApi?: boolean;
   id: string;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -46,6 +48,7 @@ export function EndpointCard({
       endpoint: ep,
       baseUrl,
       proxyInfo,
+      dashboardApi,
       paramValues,
       bodyText,
     });

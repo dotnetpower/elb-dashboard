@@ -70,6 +70,18 @@ def list_aks_clusters(
     return _aks_module.list_aks_clusters(credential, subscription_id, resource_group)
 
 
+def get_aks_cluster_snapshot(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any] | None:
+    _aks_module.aks_client = aks_client
+    return _aks_module.get_aks_cluster_snapshot(
+        credential, subscription_id, resource_group, cluster_name
+    )
+
+
 def list_aks_clusters_in_subscription(
     credential: TokenCredential,
     subscription_id: str,

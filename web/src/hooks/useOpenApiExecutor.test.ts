@@ -224,4 +224,32 @@ describe("OpenAPI executor curl builder", () => {
     expect(curl).toContain("http://localhost:8085/api/aks/openapi/proxy?");
     expect(curl).not.toContain("http://localhost:8090/api/aks/openapi/proxy?");
   });
+
+  it("builds a same-origin curl with a bearer header in dashboardApi mode", () => {
+    const curl = buildCurl({
+      endpoint: {
+        method: "post",
+        path: "/api/aks/openapi/ensure-running",
+        parameters: [],
+        requestBody: { content: { "application/json": {} } },
+      },
+      baseUrl: "",
+      dashboardApi: true,
+      paramValues: {},
+      bodyText: '{"resource_group":"rg","cluster_name":"c"}',
+      apiBase: "",
+      origin: "https://dash.example",
+      bearerToken: "live-token",
+    });
+    // Same-origin dashboard host (NOT the elb-openapi proxy path).
+    expect(curl).toContain(
+      "curl -X POST 'https://dash.example/api/aks/openapi/ensure-running'",
+    );
+    expect(curl).not.toContain("/api/aks/openapi/proxy");
+    expect(curl).toContain("'Authorization: Bearer live-token'");
+    expect(curl).toContain(
+      `--data-raw '{"resource_group":"rg","cluster_name":"c"}'`,
+    );
+  });
 });
+

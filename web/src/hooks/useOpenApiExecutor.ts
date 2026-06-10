@@ -39,12 +39,19 @@ export function useOpenApiExecutor({
   proxyInfo,
   paramValues,
   bodyText,
+  dashboardApi = false,
 }: {
   endpoint: OpenApiEndpoint;
   baseUrl: string;
   proxyInfo?: OpenApiProxyInfo;
   paramValues: Record<string, string>;
   bodyText: string;
+  /** When true the request targets the dashboard's OWN api sidecar
+   *  (same-origin `/api/...`, MSAL bearer) instead of the AKS-hosted
+   *  elb-openapi service. Used by the always-on "Core" control-plane
+   *  section so endpoints like ensure-running stay callable even while the
+   *  cluster (and thus elb-openapi) is stopped. */
+  dashboardApi?: boolean;
 }) {
   const [response, setResponse] = useState<OpenApiExecutionResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -82,15 +89,17 @@ export function useOpenApiExecutor({
     const start = Date.now();
     const isCurrent = () => mountedRef.current && requestSeqRef.current === requestSeq;
     try {
-      const resp = proxyInfo
-        ? await executeViaProxy(
-            endpoint,
-            proxyInfo,
-            targetPath,
-            bodyText,
-            controller.signal,
-          )
-        : await executeDirect(endpoint, baseUrl, targetPath, bodyText, controller.signal);
+      const resp = dashboardApi
+        ? await executeDashboard(endpoint, targetPath, bodyText, controller.signal)
+        : proxyInfo
+          ? await executeViaProxy(
+              endpoint,
+              proxyInfo,
+              targetPath,
+              bodyText,
+              controller.signal,
+            )
+          : await executeDirect(endpoint, baseUrl, targetPath, bodyText, controller.signal);
       const rendered = await readResponseForViewer(resp, targetPath);
       lastPayloadRef.current = rendered.blob ?? rendered.rawText ?? null;
       if (isCurrent()) {
@@ -113,7 +122,7 @@ export function useOpenApiExecutor({
         abortRef.current = null;
       }
     }
-  }, [baseUrl, bodyText, endpoint, paramValues, proxyInfo]);
+  }, [baseUrl, bodyText, endpoint, paramValues, proxyInfo, dashboardApi]);
 
   const copyResponse = useCallback(() => {
     if (response) copyText(response.body, "openapi-response");
@@ -139,7 +148,7 @@ export function useOpenApiExecutor({
   const copyCurl = useCallback(async () => {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
     let bearerToken: string | null = null;
-    if (proxyInfo) {
+    if (proxyInfo || dashboardApi) {
       try {
         bearerToken = await getApiAccessToken();
       } catch {
@@ -152,6 +161,7 @@ export function useOpenApiExecutor({
       endpoint,
       baseUrl,
       proxyInfo,
+      dashboardApi,
       paramValues,
       bodyText,
       apiBase: apiBaseUrl(),
@@ -159,7 +169,7 @@ export function useOpenApiExecutor({
       bearerToken,
     });
     copyText(curl, "openapi-curl");
-  }, [baseUrl, bodyText, copyText, endpoint, paramValues, proxyInfo]);
+  }, [baseUrl, bodyText, copyText, endpoint, paramValues, proxyInfo, dashboardApi]);
 
   return { execute, response, loading, copyResponse, downloadResponse, copyCurl };
 }
@@ -180,6 +190,7 @@ export function buildCurl({
   endpoint,
   baseUrl,
   proxyInfo,
+  dashboardApi,
   paramValues,
   bodyText,
   apiBase,
@@ -189,6 +200,7 @@ export function buildCurl({
   endpoint: OpenApiEndpoint;
   baseUrl: string;
   proxyInfo?: OpenApiProxyInfo;
+  dashboardApi?: boolean;
   paramValues: Record<string, string>;
   bodyText: string;
   apiBase: string;
@@ -202,7 +214,14 @@ export function buildCurl({
   let url: string;
   const headers: Array<[string, string]> = [];
 
-  if (proxyInfo) {
+  if (dashboardApi) {
+    // Same-origin call to the dashboard's own api sidecar. `targetPath`
+    // already carries the public `/api/...` prefix for display, so the curl
+    // target is just origin + path with an MSAL bearer.
+    const base = origin || apiBase;
+    url = `${base}${targetPath}`;
+    headers.push(["Authorization", `Bearer ${bearerToken || "$AAD_TOKEN"}`]);
+  } else if (proxyInfo) {
     const params = new URLSearchParams({
       subscription_id: proxyInfo.sub,
       resource_group: proxyInfo.rg,
@@ -288,6 +307,23 @@ async function executeDirect(
   };
   if (endpoint.requestBody && bodyText) opts.body = bodyText;
   return fetch(baseUrl + targetPath, opts);
+}
+
+async function executeDashboard(
+  endpoint: OpenApiEndpoint,
+  targetPath: string,
+  bodyText: string,
+  signal: AbortSignal,
+): Promise<Response> {
+  const opts: RequestInit = { method: endpoint.method.toUpperCase(), signal };
+  if (endpoint.requestBody && bodyText) {
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = bodyText;
+  }
+  // `endpoint.path` carries the public `/api/...` path for display + curl; the
+  // dashboard client (`fetchApiRawNoRedirect`) re-adds the `/api` base, so strip
+  // the leading `/api` before handing it the relative path.
+  return fetchApiRawNoRedirect(targetPath.replace(/^\/api/, ""), opts);
 }
 
 export function formatResponseBody(text: string): string {

@@ -16,6 +16,7 @@ from fastapi import APIRouter
 
 from api.routes.aks import autostop as _autostop_routes
 from api.routes.aks import cancel as _cancel_routes
+from api.routes.aks import ensure_running as _ensure_running_routes
 from api.routes.aks import lifecycle as _lifecycle_routes
 from api.routes.aks import openapi as _openapi_routes
 from api.routes.aks import openapi_proxy as _openapi_proxy_routes
@@ -26,6 +27,9 @@ from api.routes.aks import recent_failures as _recent_failures_routes
 from api.routes.aks import roles as _roles_routes
 from api.routes.aks import skus as _skus_routes
 from api.routes.aks.common import _invalidate_aks_monitor_cache as _invalidate_aks_monitor_cache
+from api.routes.aks.ensure_running import (
+    aks_openapi_ensure_running as aks_openapi_ensure_running,
+)
 from api.routes.aks.lifecycle import (
     aks_delete as aks_delete,
 )
@@ -75,6 +79,7 @@ aks_router.include_router(_cancel_routes.router)
 aks_router.include_router(_recent_failures_routes.router)
 aks_router.include_router(_openapi_routes.router)
 aks_router.include_router(_openapi_proxy_routes.router)
+aks_router.include_router(_ensure_running_routes.router)
 aks_router.include_router(_peering_routes.router)
 aks_router.include_router(_lifecycle_routes.router)
 aks_router.include_router(_roles_routes.router)

@@ -20,6 +20,13 @@ cluster cannot silently overwrite the first cluster's entry. The legacy
 ``openapi:runtime:public-base-url`` key is still maintained as the
 "most recently set cluster" display fallback for SPA polling routes
 that do not yet pass cluster context.
+The API token cache is keyed the same way: ``save_openapi_api_token``
+writes both the legacy global ``openapi:runtime:api-token`` key and, when
+its ``metadata`` carries ``subscription_id`` / ``resource_group`` /
+``cluster_name``, a per-cluster key ``openapi:runtime:api-token:cluster:
+<sha256[:16]>``. ``get_openapi_api_token`` reads the per-cluster key first
+when given cluster context (deploy path) and falls back to the global key
+for context-less readers that pair with the global base-url.
 ``save_openapi_public_base_url`` returns False when the durable Storage
 Table write fails so the caller can mark the task partially-degraded
 even if the hot Redis write succeeded.
@@ -41,6 +48,7 @@ LOGGER = logging.getLogger(__name__)
 
 _RUNTIME_KEY = "openapi:runtime:base-url"
 _TOKEN_KEY = "openapi:runtime:api-token"  # noqa: S105 - Redis key name, not a secret value.
+_TOKEN_CLUSTER_PREFIX = f"{_TOKEN_KEY}:cluster:"
 _PUBLIC_BASE_URL_KEY = "openapi:runtime:public-base-url"
 _PUBLIC_BASE_URL_CLUSTER_PREFIX = f"{_PUBLIC_BASE_URL_KEY}:cluster:"
 
@@ -92,6 +100,22 @@ def _cluster_arm_id_from_metadata(metadata: dict[str, Any]) -> str:
         f"/subscriptions/{sub}/resourceGroups/{rg}"
         f"/providers/Microsoft.ContainerService/managedClusters/{name}"
     ).lower()
+
+
+def _token_cluster_key(metadata: dict[str, Any] | None) -> str:
+    """Return the deterministic per-cluster Redis key for the API token.
+
+    Derived from the same lower-cased ARM id as the public base-url
+    per-cluster key so the two stay in lock-step. Returns an empty string
+    when ``metadata`` is missing any of ``subscription_id`` /
+    ``resource_group`` / ``cluster_name`` — the caller then falls back to
+    the legacy global key.
+    """
+    arm_id = _cluster_arm_id_from_metadata(metadata or {})
+    if not arm_id:
+        return ""
+    digest = hashlib.sha256(arm_id.encode("utf-8")).hexdigest()[:16]
+    return f"{_TOKEN_CLUSTER_PREFIX}{digest}"
 
 
 def save_openapi_base_url(
@@ -176,7 +200,18 @@ def save_openapi_api_token(
     metadata: dict[str, Any] | None = None,
     client: Any | None = None,
 ) -> bool:
-    """Persist the current OpenAPI API token in ops Redis."""
+    """Persist the current OpenAPI API token in ops Redis.
+
+    Writes both the legacy global key (``openapi:runtime:api-token``,
+    consumed by context-less readers that pair with the global base-url)
+    AND — when ``metadata`` carries ``subscription_id`` / ``resource_group``
+    / ``cluster_name`` — a per-cluster key so a second cluster's token
+    cannot silently overwrite the first cluster's cached token. This
+    mirrors the per-cluster keying already used for the public base-url
+    (``_per_cluster_key``). The deploy path reads the per-cluster key with
+    explicit cluster context, so the global key staying "most recently
+    written cluster" is intentional and only used by the global readers.
+    """
     value = token.strip()
     if not value:
         return False
@@ -185,20 +220,63 @@ def save_openapi_api_token(
         "metadata": metadata or {},
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    serialised = json.dumps(payload, separators=(",", ":"))
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
+    ok = True
     try:
-        redis_client.set(_TOKEN_KEY, json.dumps(payload, separators=(",", ":")))
-        return True
+        redis_client.set(_TOKEN_KEY, serialised)
     except Exception as exc:
         LOGGER.warning("openapi runtime token cache write failed: %s", type(exc).__name__)
-        return False
+        ok = False
+    cluster_key = _token_cluster_key(metadata)
+    if cluster_key:
+        try:
+            redis_client.set(cluster_key, serialised)
+        except Exception as exc:
+            LOGGER.warning(
+                "openapi runtime per-cluster token cache write failed: %s",
+                type(exc).__name__,
+            )
+            ok = False
+    return ok
 
 
-def get_openapi_api_token(*, client: Any | None = None) -> str:
-    """Return the cached OpenAPI API token, or an empty string if unavailable."""
+def get_openapi_api_token(
+    *,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+    client: Any | None = None,
+) -> str:
+    """Return the cached OpenAPI API token, or an empty string if unavailable.
+
+    When the caller passes ``subscription_id`` / ``resource_group`` /
+    ``cluster_name`` the per-cluster key is tried first so a multi-cluster
+    dashboard reads the token for the *requested* cluster rather than the
+    globally most-recently-written one. Falls back to the legacy global
+    key when no per-cluster entry exists yet (e.g. a token minted before
+    this keying landed). Context-less callers keep reading the global key
+    unchanged.
+    """
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
+    cluster_key = _token_cluster_key(
+        {
+            "subscription_id": subscription_id,
+            "resource_group": resource_group,
+            "cluster_name": cluster_name,
+        }
+    )
+    if cluster_key:
+        token = _read_token_key(redis_client, cluster_key)
+        if token:
+            return token
+    return _read_token_key(redis_client, _TOKEN_KEY)
+
+
+def _read_token_key(redis_client: Any, key: str) -> str:
+    """Read + decode a token payload from a single Redis key."""
     try:
-        raw = redis_client.get(_TOKEN_KEY)
+        raw = redis_client.get(key)
     except Exception as exc:
         LOGGER.debug("openapi runtime token cache read failed: %s", type(exc).__name__)
         return ""

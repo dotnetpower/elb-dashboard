@@ -93,7 +93,13 @@ function formatAlignedText(seq: string, posWidth: number): string {
   return out.join("\n");
 }
 
-const monoFamily = "var(--font-mono, monospace)";
+// The global ``--font-mono`` token is intentionally aliased to Inter (a
+// proportional font) for the rest of the UI, which breaks the per-character
+// column alignment the ORIGIN block depends on. Pin a real fixed-width stack
+// here so every base occupies the same advance width and the 10-base groups
+// line up across rows.
+const monoFamily =
+  'ui-monospace, "Cascadia Code", "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace';
 
 export function SequenceBlocks({
   fasta,
@@ -189,6 +195,20 @@ export function SequenceBlocks({
               </span>
               N / ambiguous
             </span>
+            {highlight && hlStop >= hlStart && hlStart > 0 && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <span
+                  style={{
+                    width: 9,
+                    height: 9,
+                    borderRadius: 2,
+                    background: "rgba(245, 201, 123, 0.28)",
+                    display: "inline-block",
+                  }}
+                />
+                BLAST hit ({hlStart.toLocaleString()}–{hlStop.toLocaleString()})
+              </span>
+            )}
           </span>
         )}
         {colorEligible && !colorize && seq.length <= COLOR_HARD_LIMIT && (

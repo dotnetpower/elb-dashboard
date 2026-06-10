@@ -54,12 +54,18 @@ export function ApiHero({
   spec,
   baseUrl,
   publicHttpsUrl,
+  imageTag,
   onRefresh,
   refreshing,
 }: {
   spec: ParsedSpec | null;
   baseUrl: string | null;
   publicHttpsUrl?: string | null;
+  /** Deployed `elb-openapi` ACR image tag (dashboard 4.x scheme). Shown
+   *  next to the spec's `info.version` (the upstream FastAPI app VERSION,
+   *  e.g. 3.7.5) so the operator can see the two numbers map to one build
+   *  rather than reading them as a version mismatch. */
+  imageTag?: string | null;
   onRefresh: () => void;
   refreshing: boolean;
 }) {
@@ -91,6 +97,11 @@ export function ApiHero({
             </h1>
             {spec && (
               <span
+                title={
+                  imageTag
+                    ? `OpenAPI app version v${spec.version} (upstream FastAPI VERSION) is served by elb-openapi image tag ${imageTag} (dashboard 4.x scheme). Different numbering schemes, same build.`
+                    : `OpenAPI app version (upstream FastAPI VERSION)`
+                }
                 style={{
                   fontSize: 10,
                   padding: "2px 8px",
@@ -102,6 +113,7 @@ export function ApiHero({
                 }}
               >
                 v{spec.version}
+                {imageTag ? ` · image ${imageTag}` : ""}
               </span>
             )}
           </div>
