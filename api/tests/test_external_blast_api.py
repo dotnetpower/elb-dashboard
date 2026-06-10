@@ -2479,3 +2479,153 @@ def test_external_error_message_rejects_long_body_as_code():
     # (4) Empty / falsy error → both None.
     assert _external_error_message(None) == (None, None)
     assert _external_error_message("") == (None, None)
+
+
+def _capture_submit_transport(monkeypatch, responder):
+    """Install a MockTransport for httpx.Client and capture posted JSON bodies.
+
+    ``responder`` receives the 0-based attempt index and the parsed JSON body
+    and must return an ``httpx.Response`` (or raise an ``httpx`` transport
+    error to simulate a connection failure). Returns the list that collects
+    each attempt's posted body.
+    """
+    import json as _json
+
+    from api.services import external_blast
+
+    bodies: list[dict] = []
+    state = {"attempt": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content.decode("utf-8"))
+        bodies.append(body)
+        idx = state["attempt"]
+        state["attempt"] += 1
+        return responder(idx, body)
+
+    transport = httpx.MockTransport(handler)
+    original_client_cls = httpx.Client
+
+    class _StubClient(original_client_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(external_blast.httpx, "Client", _StubClient)
+    return bodies
+
+
+def test_submit_job_derives_idempotency_key_from_correlation_id(monkeypatch) -> None:
+    """No caller idempotency_key → derive one from external_correlation_id.
+
+    Without this the sibling (which dedupes ONLY on idempotency_key) cannot
+    collapse a retried submit, so a lost-response retry would duplicate the
+    cluster job.
+    """
+    from api.services import external_blast
+
+    bodies = _capture_submit_transport(
+        monkeypatch,
+        lambda idx, body: httpx.Response(202, json={"job_id": "j1", "status": "queued"}),
+    )
+
+    result = external_blast.submit_job(
+        {"external_correlation_id": "corr-123", "program": "blastn", "db": "core_nt"},
+        base_url="http://openapi",
+    )
+
+    assert result["job_id"] == "j1"
+    assert len(bodies) == 1
+    assert bodies[0]["idempotency_key"] == "corr-123"
+    # The correlation id is preserved alongside the derived key.
+    assert bodies[0]["external_correlation_id"] == "corr-123"
+
+
+def test_submit_job_does_not_mutate_caller_payload(monkeypatch) -> None:
+    from api.services import external_blast
+
+    _capture_submit_transport(
+        monkeypatch,
+        lambda idx, body: httpx.Response(202, json={"job_id": "j1", "status": "queued"}),
+    )
+
+    payload = {"external_correlation_id": "corr-xyz", "program": "blastn", "db": "core_nt"}
+    external_blast.submit_job(payload, base_url="http://openapi")
+
+    # The caller's dict must not gain an idempotency_key (we copy internally).
+    assert "idempotency_key" not in payload
+
+
+def test_submit_job_preserves_caller_idempotency_key(monkeypatch) -> None:
+    from api.services import external_blast
+
+    bodies = _capture_submit_transport(
+        monkeypatch,
+        lambda idx, body: httpx.Response(202, json={"job_id": "j1", "status": "queued"}),
+    )
+
+    external_blast.submit_job(
+        {
+            "external_correlation_id": "corr-123",
+            "idempotency_key": "caller-key",
+            "program": "blastn",
+            "db": "core_nt",
+        },
+        base_url="http://openapi",
+    )
+
+    # Caller-supplied idempotency_key always wins over the derived correlation id.
+    assert bodies[0]["idempotency_key"] == "caller-key"
+
+
+def test_submit_job_retry_resends_same_idempotency_key(monkeypatch) -> None:
+    """A retried submit must re-send the SAME idempotency_key so the sibling
+    dedupes it to one cluster job instead of creating a duplicate."""
+    from api.services import external_blast
+
+    # No backoff sleeps in the test.
+    monkeypatch.setattr(external_blast, "_SUBMIT_MAX_TRANSPORT_RETRIES", 2)
+    monkeypatch.setattr(external_blast, "_SUBMIT_RETRY_BACKOFF_SECONDS", (0.0, 0.0))
+
+    def responder(idx: int, body: dict) -> httpx.Response:
+        if idx == 0:
+            raise httpx.ConnectError("sibling unreachable")
+        return httpx.Response(202, json={"job_id": "j1", "status": "queued"})
+
+    bodies = _capture_submit_transport(monkeypatch, responder)
+
+    result = external_blast.submit_job(
+        {"external_correlation_id": "corr-retry", "program": "blastn", "db": "core_nt"},
+        base_url="http://openapi",
+    )
+
+    assert result["job_id"] == "j1"
+    assert len(bodies) == 2  # first failed, second succeeded
+    assert bodies[0]["idempotency_key"] == bodies[1]["idempotency_key"] == "corr-retry"
+
+
+def test_submit_job_without_any_key_does_not_retry(monkeypatch) -> None:
+    """No idempotency_key AND no external_correlation_id → the sibling cannot
+    dedupe, so a transport failure must surface immediately (no retry) to avoid
+    duplicate jobs."""
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "_SUBMIT_MAX_TRANSPORT_RETRIES", 2)
+    monkeypatch.setattr(external_blast, "_SUBMIT_RETRY_BACKOFF_SECONDS", (0.0, 0.0))
+
+    attempts = {"n": 0}
+
+    def responder(idx: int, body: dict) -> httpx.Response:
+        attempts["n"] += 1
+        raise httpx.ConnectError("sibling unreachable")
+
+    _capture_submit_transport(monkeypatch, responder)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.submit_job(
+            {"program": "blastn", "db": "core_nt"},
+            base_url="http://openapi",
+        )
+
+    assert raised.value.status_code == 503
+    assert attempts["n"] == 1  # surfaced on the first failure, no retry

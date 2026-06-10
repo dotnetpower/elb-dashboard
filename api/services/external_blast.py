@@ -224,22 +224,30 @@ def submit_job(
 ) -> dict[str, Any]:
     """POST the canonical submit body to the sibling OpenAPI service.
 
-    When ``payload`` carries an ``idempotency_key`` (server-derived from
-    ``external_correlation_id`` for dashboard submissions, or supplied by
-    the external caller for direct API hits) the sibling can safely dedupe
-    a re-send, so this client retries up to ``_SUBMIT_MAX_TRANSPORT_RETRIES``
-    times on transient transport failures (httpx.ConnectError /
-    httpx.ReadTimeout / etc.). Without an idempotency_key the call is
+    When the forwarded payload carries an ``idempotency_key`` the sibling can
+    safely dedupe a re-send, so this client retries up to
+    ``_SUBMIT_MAX_TRANSPORT_RETRIES`` times on transient transport failures
+    (httpx.ConnectError / httpx.ReadTimeout / etc.). Without one the call is
     surfaced to the caller on the first failure to avoid creating duplicate
     jobs on the cluster.
+
+    The sibling dedupes ONLY on ``idempotency_key`` — ``external_correlation_id``
+    is correlation/tracing metadata it deliberately does NOT treat as a dedupe
+    key (its ``test_external_correlation_id_is_not_idempotency_key``). So when
+    the caller did not supply an explicit ``idempotency_key`` we derive one
+    here from the unique-per-submit ``external_correlation_id``. Without this a
+    retried submit whose first attempt actually created the job (response lost
+    to a ReadTimeout under burst, when the single-worker sibling serialises
+    submits) would create a DUPLICATE cluster job on every retry. A
+    caller-supplied ``idempotency_key`` always wins.
     """
-    has_idempotency_key = bool(
-        isinstance(payload, dict)
-        and (
-            payload.get("idempotency_key")
-            or payload.get("external_correlation_id")
-        )
-    )
+    if isinstance(payload, dict) and not payload.get("idempotency_key"):
+        derived_key = str(payload.get("external_correlation_id") or "").strip()
+        if derived_key:
+            # Copy so we never mutate the caller's payload dict.
+            payload = {**payload, "idempotency_key": derived_key}
+
+    has_idempotency_key = bool(isinstance(payload, dict) and payload.get("idempotency_key"))
     import time as _time
 
     attempts = 1 + (_SUBMIT_MAX_TRANSPORT_RETRIES if has_idempotency_key else 0)
