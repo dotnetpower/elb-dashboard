@@ -104,6 +104,16 @@ var platformResourceGroupName = resourceGroup().name
 // researcher does not have to remember the registry name by hand.
 var platformAcrName = empty(acrLoginServer) ? '' : split(acrLoginServer, '.')[0]
 
+// Control-plane GUARD/POLICY env toggles, loaded from the single source of
+// truth shared with scripts/dev/quick-deploy.sh. quick-deploy patches IMAGES
+// only, so without a shared source a fast / GitHub-Actions deploy would never
+// apply an env-default change made here (e.g. ENFORCE_DASHBOARD_RBAC) — the
+// guard would silently stay at whatever the last full `azd provision` set.
+// The script reads the same JSON and emits these as --set-env-vars on every
+// api/worker/beat PATCH so both deploy paths converge. The literal entries
+// below keep their inline documentation; only the VALUES come from the JSON.
+var controlPlaneEnv = loadJsonContent('../control-plane-env.json')
+
 resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
   location: location
@@ -248,7 +258,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // `openapi_unsafe_transport`. Opt-in unblocks the dashboard;
             // flip back to `false` (or remove this entry) once the Service
             // is moved behind an internal LB or TLS-terminated ingress.
-            { name: 'OPENAPI_ALLOW_PUBLIC_LB', value: 'true' }
+            { name: 'OPENAPI_ALLOW_PUBLIC_LB', value: controlPlaneEnv.api.OPENAPI_ALLOW_PUBLIC_LB }
             // OpenAPI proxy execution RBAC gate (security audit, 2026-05-31).
             // Default OFF preserves the legacy behaviour where any
             // authenticated tenant member can drive state-changing OpenAPI
@@ -259,7 +269,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // the api managed identity needs
             // Microsoft.Authorization/roleAssignments/read at the
             // subscription scope (the Reader built-in grants this).
-            { name: 'ENFORCE_OPENAPI_EXEC_RBAC', value: 'false' }
+            { name: 'ENFORCE_OPENAPI_EXEC_RBAC', value: controlPlaneEnv.api.ENFORCE_OPENAPI_EXEC_RBAC }
             // Dashboard entry RBAC gate (OWASP A01 follow-up). Enabled by
             // default: a signed-in tenant member must hold at least a read
             // role (Reader / Contributor / Owner / AKS read / Storage Blob
@@ -274,7 +284,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // OPEN (any tenant member loads the dashboard) to avoid a
             // tenant-wide lockout. Flip to 'false' to restore the legacy
             // "any authenticated tenant member loads the dashboard" behaviour.
-            { name: 'ENFORCE_DASHBOARD_RBAC', value: 'true' }
+            { name: 'ENFORCE_DASHBOARD_RBAC', value: controlPlaneEnv.api.ENFORCE_DASHBOARD_RBAC }
             // BLAST capacity gate (issue #23). Default OFF preserves the
             // existing per-cluster Redis submit lock + max_slots=1 behaviour
             // (Charter §12a Rule 4). Flip to 'true' to enable cluster-aware
@@ -283,14 +293,14 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             //   BLAST_GATE_CPU_WATERMARK_PCT     (default 75)
             //   BLAST_GATE_MEM_WATERMARK_PCT     (default 75)
             //   BLAST_GATE_SIGNAL_CACHE_S        (default 30)
-            { name: 'BLAST_GATE_ENABLED', value: 'false' }
+            { name: 'BLAST_GATE_ENABLED', value: controlPlaneEnv.api.BLAST_GATE_ENABLED }
             // Dev-stage job visibility (issue: recent searches only showed
             // API-submitted jobs). Default OFF preserves per-owner BLAST job
             // isolation (Charter §12a Rule 4). Flip to 'true' to let every
             // authenticated tenant member see and open all jobs regardless of
             // `owner_oid` — intended for the single-tenant development phase
             // only. Flip back to 'false' before multi-user production.
-            { name: 'BLAST_JOBS_SHARED_VISIBILITY', value: 'false' }
+            { name: 'BLAST_JOBS_SHARED_VISIBILITY', value: controlPlaneEnv.api.BLAST_JOBS_SHARED_VISIBILITY }
             // Native ACA blue/green self-upgrade (issue: guaranteed rollback +
             // no leftover revisions). Default OFF preserves the legacy
             // Single-mode in-place revision recreate (Charter §12a Rule 4):
@@ -305,7 +315,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             //   UPGRADE_VALIDATING_TIMEOUT_SECONDS (default 900)
             //   UPGRADE_CONFIRM_WINDOW_SECONDS (default 300)
             //   UPGRADE_REVISION_KEEP_N (default 2)
-            { name: 'STRICT_BLUEGREEN', value: 'false' }
+            { name: 'STRICT_BLUEGREEN', value: controlPlaneEnv.api.STRICT_BLUEGREEN }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
           probes: [
@@ -411,11 +421,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'PLATFORM_ACR_NAME', value: platformAcrName }
             // BLAST capacity gate (issue #23) — must match the api sidecar.
             // Default OFF preserves the existing submit-lock path.
-            { name: 'BLAST_GATE_ENABLED', value: 'false' }
+            { name: 'BLAST_GATE_ENABLED', value: controlPlaneEnv.worker.BLAST_GATE_ENABLED }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // worker-run pipeline/rollback tasks branch identically. Default
             // OFF (Charter §12a Rule 4).
-            { name: 'STRICT_BLUEGREEN', value: 'false' }
+            { name: 'STRICT_BLUEGREEN', value: controlPlaneEnv.worker.STRICT_BLUEGREEN }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
@@ -454,11 +464,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'PLATFORM_ACR_NAME', value: platformAcrName }
             // BLAST capacity gate (issue #23) — must match the api sidecar.
             // Default OFF preserves the existing submit-lock path.
-            { name: 'BLAST_GATE_ENABLED', value: 'false' }
+            { name: 'BLAST_GATE_ENABLED', value: controlPlaneEnv.beat.BLAST_GATE_ENABLED }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // beat-driven reconciler drives validating→confirming→succeeded
             // identically. Default OFF (Charter §12a Rule 4).
-            { name: 'STRICT_BLUEGREEN', value: 'false' }
+            { name: 'STRICT_BLUEGREEN', value: controlPlaneEnv.beat.STRICT_BLUEGREEN }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }

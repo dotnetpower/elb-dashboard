@@ -32,6 +32,7 @@ import {
 } from "@/api/upgrade";
 import { BuildLogViewer } from "@/components/BuildLogViewer";
 import { useToast } from "@/components/Toast";
+import { formatBuildVersion } from "@/utils/buildVersion";
 
 const STATUS_POLL_MS = 5_000;
 const BROADCAST_CHANNEL_NAME = "elb-upgrade-status";
@@ -205,17 +206,28 @@ export function UpgradePage() {
   );
   const releaseUpdate = useMemo(() => isUpgradeAvailable(status), [status]);
   const runningLabel = useMemo(() => {
-    const base = `v${baseRelease(status?.running_version || "") || "?"}`;
+    // Match the topbar / SettingsPanel stamp exactly: the running build IS this
+    // browser bundle, so render its build-number stamp (`v0.2.287`) rather than
+    // the bare backend release (`v0.2.0`). The backend `__version__` carries no
+    // build number — that counter (commits since the latest `vA.B.0` tag) is
+    // computed only at frontend build time and baked in as `__APP_BUILD_NUMBER__`.
+    const base = `v${formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__)}`;
     return runningCommitShort ? `${base} · ${runningCommitShort}` : base;
-  }, [status, runningCommitShort]);
+  }, [runningCommitShort]);
   const latestLabel = useMemo(() => {
     if (!status?.latest_version) return "—";
+    // No update of either kind → "latest" IS the running build. Show the same
+    // build-number stamp so the two rows match, instead of rendering `v0.2.0`
+    // next to the running `v0.2.287` (which would look like latest is behind).
+    if (!releaseUpdate && !commitUpdate) {
+      return runningLabel;
+    }
     const base = `v${baseRelease(status.latest_version) || status.latest_version}`;
-    // Only append the commit sha when the commit channel is on and it adds
-    // information (a commit update is available); a release-only match stays
-    // clean as `v0.2.0`.
+    // A newer release tag renders clean as `v0.3.0` (a fresh tag has build
+    // number 0). A commit update on the same release line appends the short
+    // sha — the real differentiator when the release semver is unchanged.
     return commitUpdate && latestCommitShort ? `${base} · ${latestCommitShort}` : base;
-  }, [status, commitUpdate, latestCommitShort]);
+  }, [status, releaseUpdate, commitUpdate, latestCommitShort, runningLabel]);
 
   /**
    * True when `pickedTarget`'s major segment is greater than the running

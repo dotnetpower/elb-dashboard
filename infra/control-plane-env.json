@@ -1,0 +1,19 @@
+{
+  "_comment": "Single source of truth for control-plane GUARD/POLICY env toggles. Read by BOTH infra/modules/containerAppControl.bicep (loadJsonContent, applied on full azd/postprovision deploys) AND scripts/dev/quick-deploy.sh (applied as --set-env-vars on every api/worker/beat PATCH, including the GitHub Actions deploy.yml path). Without this shared source, a fast/GHA deploy patches images only and never applies a Bicep env-default change (e.g. ENFORCE_DASHBOARD_RBAC), so a no-RBAC user could still load the dashboard after an apparent redeploy. Keep values as strings. Per-sidecar maps mirror the env arrays in containerAppControl.bicep; only the policy/guard toggles live here (operational vars like LOG_LEVEL and param-derived vars stay inline in Bicep).",
+  "api": {
+    "OPENAPI_ALLOW_PUBLIC_LB": "true",
+    "ENFORCE_OPENAPI_EXEC_RBAC": "false",
+    "ENFORCE_DASHBOARD_RBAC": "true",
+    "BLAST_GATE_ENABLED": "false",
+    "BLAST_JOBS_SHARED_VISIBILITY": "false",
+    "STRICT_BLUEGREEN": "false"
+  },
+  "worker": {
+    "BLAST_GATE_ENABLED": "false",
+    "STRICT_BLUEGREEN": "false"
+  },
+  "beat": {
+    "BLAST_GATE_ENABLED": "false",
+    "STRICT_BLUEGREEN": "false"
+  }
+}

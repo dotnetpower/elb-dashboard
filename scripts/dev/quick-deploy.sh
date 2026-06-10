@@ -19,6 +19,13 @@
 # config is generated from server environment variables at startup, so
 # this script keeps those values in sync during fast frontend deploys.
 #
+# Control-plane GUARD env exception: api/worker/beat PATCHes also upsert the
+# policy toggles from infra/control-plane-env.json (ENFORCE_DASHBOARD_RBAC,
+# ENFORCE_OPENAPI_EXEC_RBAC, BLAST_GATE_ENABLED, BLAST_JOBS_SHARED_VISIBILITY,
+# STRICT_BLUEGREEN, OPENAPI_ALLOW_PUBLIC_LB). That same JSON is the source
+# Bicep loads, so a guard-default change lands on BOTH a full `azd provision`
+# AND a fast / GitHub-Actions deploy. All other runtime env stays untouched.
+#
 # Usage:
 #   scripts/dev/quick-deploy.sh <sidecar> [tag]
 #
@@ -53,6 +60,49 @@ cd "$REPO_ROOT"
 
 ts() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Control-plane GUARD/POLICY env toggles (single source of truth shared with
+# infra/modules/containerAppControl.bicep via infra/control-plane-env.json).
+#
+# Why: this script patches IMAGES only. Container App env vars otherwise land
+# exclusively through a full `azd provision` / postprovision Bicep deploy. So
+# a guard default changed in Bicep (e.g. ENFORCE_DASHBOARD_RBAC=true) would
+# never reach a fast deploy OR the GitHub Actions deploy.yml path (which also
+# calls this script) — a no-RBAC user could still load the dashboard after an
+# apparent redeploy. We read the SAME JSON Bicep reads and apply the per-
+# sidecar guard toggles as `--set-env-vars` on every api/worker/beat PATCH so
+# both deploy paths converge to the repo's source of truth. `--set-env-vars`
+# is an upsert: it only touches the listed keys, leaving image/secret/other
+# env entries intact.
+# ---------------------------------------------------------------------------
+CONTROL_PLANE_ENV_FILE="$REPO_ROOT/infra/control-plane-env.json"
+
+# Fail fast on a malformed source file (runs in the parent shell so `die`
+# actually aborts). A missing file is tolerated (older checkouts) — the
+# per-sidecar helper then yields no pairs and the PATCH stays image-only.
+if [[ -f "$CONTROL_PLANE_ENV_FILE" ]]; then
+  python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$CONTROL_PLANE_ENV_FILE" \
+    || die "control-plane-env: $CONTROL_PLANE_ENV_FILE is not valid JSON"
+fi
+
+# Echo `KEY=VALUE` lines for the given sidecar (api|worker|beat|...), or
+# nothing when the file is absent or the sidecar has no guard toggles.
+control_plane_env_pairs() {
+  local sidecar="$1"
+  [[ -f "$CONTROL_PLANE_ENV_FILE" ]] || return 0
+  python3 - "$CONTROL_PLANE_ENV_FILE" "$sidecar" <<'PY'
+import json, sys
+path, sidecar = sys.argv[1], sys.argv[2]
+data = json.load(open(path))
+section = data.get(sidecar) or {}
+for k, v in section.items():
+    if k.startswith("_"):
+        continue
+    print(f"{k}={v}")
+PY
+}
+
 
 release_build_number() {
   local latest_tag=""
@@ -689,15 +739,39 @@ fi
         -o none
     else
       # --no-build path (or non-frontend sidecar): swap image only and leave
-      # the container's existing runtime env vars untouched. The frontend's
-      # baked VITE_* values from the build stage are authoritative; runtime
-      # env from the last full deploy / Bicep stays as-is.
-      az containerapp update \
-        --name "$CONTAINER_APP_NAME" \
-        --resource-group "$AZURE_RESOURCE_GROUP" \
-        --container-name "$tgt" \
-        --image "$img" \
-        -o none
+      # the container's existing runtime env vars untouched — EXCEPT the
+      # control-plane guard toggles, which we upsert from the shared JSON so a
+      # Bicep guard-default change (e.g. ENFORCE_DASHBOARD_RBAC) actually lands
+      # on a fast / GitHub-Actions deploy instead of waiting for a full
+      # `azd provision`. The frontend's baked VITE_* values stay authoritative;
+      # all other runtime env from the last full deploy / Bicep is preserved.
+      mapfile -t _cp_pairs < <(control_plane_env_pairs "$tgt")
+      if [[ ${#_cp_pairs[@]} -gt 0 ]]; then
+        ts "    + applying ${#_cp_pairs[@]} control-plane guard env var(s) for '$tgt'"
+        az containerapp update \
+          --name "$CONTAINER_APP_NAME" \
+          --resource-group "$AZURE_RESOURCE_GROUP" \
+          --container-name "$tgt" \
+          --image "$img" \
+          --set-env-vars "${_cp_pairs[@]}" \
+          -o none
+      else
+        # No guard toggles for this sidecar (terminal/redis), OR the shared
+        # JSON is missing/moved. Log it so a vanished source file cannot
+        # silently degrade an api/worker/beat PATCH to image-only and leave
+        # a security guard (ENFORCE_DASHBOARD_RBAC) stale without warning.
+        if [[ ! -f "$CONTROL_PLANE_ENV_FILE" ]]; then
+          ts "    ! control-plane env file missing ($CONTROL_PLANE_ENV_FILE) — '$tgt' PATCHed image-only, guard env NOT applied"
+        else
+          ts "    (no control-plane guard env for '$tgt')"
+        fi
+        az containerapp update \
+          --name "$CONTAINER_APP_NAME" \
+          --resource-group "$AZURE_RESOURCE_GROUP" \
+          --container-name "$tgt" \
+          --image "$img" \
+          -o none
+      fi
     fi
   done
 
@@ -886,12 +960,36 @@ for tgt in "${TARGETS[@]}"; do
         "AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
       -o none
   else
-    az containerapp update \
-      --name "$CONTAINER_APP_NAME" \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
-      --container-name "$tgt" \
-      --image "$NEW_IMAGE" \
-      -o none
+    # Non-frontend sidecar: swap image and upsert the control-plane guard
+    # toggles from the shared JSON (see the helper near the top of this file).
+    # This keeps a fast single-sidecar deploy in sync with a Bicep guard
+    # default instead of silently leaving the live env stale.
+    mapfile -t _cp_pairs < <(control_plane_env_pairs "$tgt")
+    if [[ ${#_cp_pairs[@]} -gt 0 ]]; then
+      ts "    + applying ${#_cp_pairs[@]} control-plane guard env var(s) for '$tgt'"
+      az containerapp update \
+        --name "$CONTAINER_APP_NAME" \
+        --resource-group "$AZURE_RESOURCE_GROUP" \
+        --container-name "$tgt" \
+        --image "$NEW_IMAGE" \
+        --set-env-vars "${_cp_pairs[@]}" \
+        -o none
+    else
+      # No guard toggles for this sidecar, OR the shared JSON is missing.
+      # Log it so a vanished source cannot silently leave a security guard
+      # stale on an api/worker/beat PATCH (see the `all` path for rationale).
+      if [[ ! -f "$CONTROL_PLANE_ENV_FILE" ]]; then
+        ts "    ! control-plane env file missing ($CONTROL_PLANE_ENV_FILE) — '$tgt' PATCHed image-only, guard env NOT applied"
+      else
+        ts "    (no control-plane guard env for '$tgt')"
+      fi
+      az containerapp update \
+        --name "$CONTAINER_APP_NAME" \
+        --resource-group "$AZURE_RESOURCE_GROUP" \
+        --container-name "$tgt" \
+        --image "$NEW_IMAGE" \
+        -o none
+    fi
   fi
 done
 
