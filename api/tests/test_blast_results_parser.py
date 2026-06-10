@@ -356,3 +356,33 @@ def test_parse_outfmt7_with_frame_header_extracts_qframe_and_sframe() -> None:
     hit = hits[0]
     assert hit["qframe"] == 2
     assert hit["sframe"] == -1
+
+
+def test_parse_outfmt7_with_spaced_taxid_header_maps_staxids_and_sscinames() -> None:
+    """blastn (BLAST+ 2.17.0) writes the taxonomy columns as ``subject tax
+    ids`` / ``subject sci names`` (with spaces). The parser must map both to
+    the canonical ``staxids`` / ``sscinames`` names so the dashboard's
+    Scientific Name and Taxonomy views populate, instead of falling back to
+    ``subject_tax_ids`` and dropping the value.
+    """
+    content = "\n".join(
+        [
+            "# BLASTN 2.17.0+",
+            "# Query: q1",
+            "# Database: core_nt",
+            (
+                "# Fields: query acc.ver, subject acc.ver, % identity, "
+                "alignment length, mismatches, gap opens, q. start, q. end, "
+                "s. start, s. end, evalue, bit score, subject tax ids, "
+                "subject sci names"
+            ),
+            "# 1 hits found",
+            "q1\tPQ221797.1\t100.000\t462\t0\t0\t1\t462\t1\t462\t0.0\t828\t10244\tMonkeypox virus",
+        ]
+    )
+    hits = parse_blast_tabular(content)
+    assert len(hits) == 1
+    hit = hits[0]
+    assert hit["staxids"] == "10244"
+    assert hit["sscinames"] == "Monkeypox virus"
+    assert "subject_tax_ids" not in hit

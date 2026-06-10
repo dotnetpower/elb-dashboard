@@ -549,3 +549,96 @@ def test_patch_blast_run_aks_script_missing_anchor_raises(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="expected one match"):
         patch_module.patch_blast_run_aks_script(tmp_path)
+
+
+def test_finalizer_awk_filter_preserves_fields_header() -> None:
+    """The patched finalizer concatenation keeps the `# Fields:` comment so the
+    merge can re-emit a self-describing header.
+
+    Upstream uses ``awk '!/^#/'`` which drops every comment, including the
+    authoritative ``# Fields:`` line that names the extended outfmt 7 columns
+    (staxids / sscinames). The patch widens it to ``awk '/^# Fields:/ || !/^#/'``
+    so the Fields line survives while other comment noise is still stripped.
+    """
+    shard_output = "\n".join(
+        [
+            "# BLASTN 2.17.0+",
+            "# Query: q1",
+            "# Database: core_nt_shard_00",
+            (
+                "# Fields: query acc.ver, subject acc.ver, % identity, "
+                "alignment length, mismatches, gap opens, q. start, q. end, "
+                "s. start, s. end, evalue, bit score, subject tax ids, "
+                "subject sci names"
+            ),
+            "# 1 hits found",
+            "q1\tPQ221797.1\t100.000\t462\t0\t0\t1\t462\t1\t462\t0.0\t828\t10244\tMonkeypox virus",
+            "# BLAST processed 1 queries",
+        ]
+    )
+
+    patched = subprocess.run(
+        ["/bin/bash", "-c", "awk '/^# Fields:/ || !/^#/'"],
+        input=shard_output,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+    # The authoritative Fields header and the data row survive; other comment
+    # lines (# BLASTN, # Query, # Database, # N hits found, # BLAST processed)
+    # are stripped.
+    assert any(line.startswith("# Fields:") for line in patched)
+    assert "subject tax ids" in patched[0]
+    assert any("Monkeypox virus" in line for line in patched)
+    assert not any(line.startswith("# BLASTN") for line in patched)
+    assert not any(line.startswith("# Query") for line in patched)
+    assert not any(line.startswith("# 1 hits found") for line in patched)
+
+
+def test_patch_finalizer_script_widens_awk_comment_filter(tmp_path: Path) -> None:
+    """`patch_finalizer_script` rewrites the comment-stripping awk so the
+    `# Fields:` header is preserved, and is idempotent."""
+    patch_module = _load_patch_module()
+    script_dir = tmp_path / "src" / "elastic_blast" / "templates" / "scripts"
+    script_dir.mkdir(parents=True)
+    finalizer = script_dir / "elb-finalizer-aks.sh"
+    # Minimal fixture carrying only the awk anchor this assertion targets, at
+    # the exact upstream indentation (20 spaces) so the replacement matches.
+    finalizer.write_text(
+        "#!/bin/bash\n"
+        'for f in "$LOCAL_DIR"/*.out.gz; do\n'
+        "                    if ! zcat \"$f\" | awk '!/^#/' >> \"$MERGE_INPUT\"; then\n"
+        '                        echo "ERROR"\n'
+        "                    fi\n"
+        "done\n"
+    )
+
+    anchor = "                    if ! zcat \"$f\" | awk '!/^#/' >> \"$MERGE_INPUT\"; then\n"
+    replacement = (
+        "                    if ! zcat \"$f\" | awk '/^# Fields:/ || !/^#/' "
+        '>> "$MERGE_INPUT"; then\n'
+    )
+    patch_module._replace_once_unless_present(
+        finalizer, anchor, replacement, "awk '/^# Fields:/ || !/^#/'"
+    )
+    once = finalizer.read_text()
+    # Idempotent: the marker short-circuits a second application.
+    patch_module._replace_once_unless_present(
+        finalizer, anchor, replacement, "awk '/^# Fields:/ || !/^#/'"
+    )
+    assert finalizer.read_text() == once
+    assert "awk '/^# Fields:/ || !/^#/'" in once
+    assert "awk '!/^#/'" not in once
+
+
+def test_patch_source_wires_finalizer_awk_fields_preservation() -> None:
+    """Guard the patch wiring: the finalizer patch must replace the upstream
+    comment-stripping awk with the Fields-preserving form."""
+    patch_path = (
+        Path(__file__).resolve().parents[2] / "terminal" / "patch_elastic_blast.py"
+    )
+    source = patch_path.read_text()
+    assert "awk '/^# Fields:/ || !/^#/'" in source
+
+

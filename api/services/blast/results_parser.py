@@ -66,6 +66,14 @@ _FIELD_LABEL_TO_COLUMN: dict[str, str] = {
     "subject sci name": "sscinames",
     "subject sci names": "sscinames",
     "subject taxids": "staxids",
+    # blastn (BLAST+ 2.17.0) writes the staxids column header with spaces
+    # ("subject tax ids" / singular "subject tax id"), not the run-together
+    # "subject taxids" form. Without these aliases the parser falls back to
+    # naming the column "subject_tax_ids", so the UI's `hit.staxids` lookup
+    # misses and the Scientific Name / Taxonomy views show no taxid even
+    # though the merged tabular output carries it.
+    "subject tax ids": "staxids",
+    "subject tax id": "staxids",
     # Reading-frame labels used by translated BLAST programs (blastx /
     # tblastn / tblastx). Web BLAST surfaces these as the "Frame" column;
     # without this mapping the tabular parser would silently drop them.

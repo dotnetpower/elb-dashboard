@@ -335,6 +335,30 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
         ),
         '--include-pattern "*.out.gz"',
     )
+    # Preserve the per-shard ``# Fields:`` comment line when concatenating
+    # shard outputs into MERGE_INPUT. Upstream strips every comment with
+    # ``awk '!/^#/'``, which means the authoritative outfmt 7 field list
+    # (``... bit score, subject tax ids, subject sci names``) never reaches
+    # merge-sharded-results.sh. The merge then falls back to the standard
+    # 12-field header even though the data rows carry the extended staxids /
+    # sscinames columns, so the results parser — which derives columns from
+    # the ``# Fields:`` line — silently drops them and the dashboard shows an
+    # empty Scientific Name. Keeping every ``# Fields:`` line (the merge
+    # captures the first and ignores the rest) makes the merged header match
+    # the extended data rows. Plain outfmt 6 input carries no comment lines,
+    # so this is a no-op for the standard layout.
+    _replace_once_unless_present(
+        path,
+        (
+            "                    if ! zcat \"$f\" | awk '!/^#/' "
+            '>> "$MERGE_INPUT"; then\n'
+        ),
+        (
+            "                    if ! zcat \"$f\" | awk '/^# Fields:/ || !/^#/' "
+            '>> "$MERGE_INPUT"; then\n'
+        ),
+        "awk '/^# Fields:/ || !/^#/'",
+    )
     _replace_once_unless_present(
         path,
         (
