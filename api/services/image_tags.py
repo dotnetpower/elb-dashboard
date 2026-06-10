@@ -30,7 +30,15 @@ from __future__ import annotations
 # result listing the download path uses is populated, with a bounded
 # RESULTS_VISIBILITY_GRACE_SECONDS fallback; fixes the completed -> /results
 # 404 race from Azure Blob list-after-write visibility lag — see
-# docs/features_change/2026-06/2026-06-04-openapi-results-visibility-race.md).
+# docs/features_change/2026-06/2026-06-04-openapi-results-visibility-race.md;
+# 4.21 == 4.20 app code (upstream 3.7.5, unchanged) REBUILT FROM THE PATCHED
+# LOCAL CONTEXT to pick up the sharded outfmt 7 support that 4.20 predates:
+# the partitioned-outfmt gate widening (allow ``7``/``7 std``), the quote-safe
+# multi-token ``-outfmt`` argv rebuild in blast-run-aks.sh, and the field-aware
+# shard merge. 4.20 was pinned 2026-06-04, before those patches landed
+# (2026-06-10), so an OpenAPI ``-outfmt 7 std staxids`` submit failed with
+# "7 is not supported for merge" until this rebuild — see
+# docs/features_change/2026-06/2026-06-10-openapi-outfmt7-gate-rebuild.md).
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
@@ -50,7 +58,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.20",
+    "elb-openapi": "4.21",
 }
 
 # GitHub source repo for ACR Build Tasks.
