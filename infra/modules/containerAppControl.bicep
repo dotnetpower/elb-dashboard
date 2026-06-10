@@ -260,6 +260,21 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Microsoft.Authorization/roleAssignments/read at the
             // subscription scope (the Reader built-in grants this).
             { name: 'ENFORCE_OPENAPI_EXEC_RBAC', value: 'false' }
+            // Dashboard entry RBAC gate (OWASP A01 follow-up). Default OFF
+            // preserves the legacy behaviour where any authenticated tenant
+            // member can load the dashboard, even with zero Azure RBAC on the
+            // deployment (Charter §12a Rule 4). Flip to 'true' to require the
+            // signed-in caller to hold at least a read role (Reader /
+            // Contributor / Owner / AKS read / Storage Blob Data reader) on
+            // the platform scope (subscription + resource group) before the
+            // SPA's `/api/me` bootstrap succeeds; denied callers get a 403
+            // `dashboard_access_denied` and the access-denied screen. When
+            // enabled the api managed identity needs
+            // Microsoft.Authorization/roleAssignments/read at the
+            // subscription scope (the Reader built-in grants this) — otherwise
+            // enumeration fails and the gate degrades OPEN to avoid a
+            // tenant-wide lockout.
+            { name: 'ENFORCE_DASHBOARD_RBAC', value: 'false' }
             // BLAST capacity gate (issue #23). Default OFF preserves the
             // existing per-cluster Redis submit lock + max_slots=1 behaviour
             // (Charter §12a Rule 4). Flip to 'true' to enable cluster-aware

@@ -30,6 +30,7 @@ from api.services.access_review import (
     dashboard_identity_principal_id,
     review_resource_group_access,
 )
+from api.services.dashboard_access import require_dashboard_access
 from api.services.me_permissions import compute_caller_permissions
 from api.services.sanitise import sanitise
 
@@ -110,8 +111,17 @@ def _list_visible_subscriptions() -> tuple[list[dict[str, Any]], str | None]:
 
 
 @router.get("/me")
-def me(caller: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
+def me(caller: CallerIdentity = Depends(require_dashboard_access)) -> dict[str, Any]:
     """Return the validated caller's identity claims + visible subscriptions.
+
+    This is the SPA's identity bootstrap, so it carries the optional entry
+    gate (`require_dashboard_access`). When `ENFORCE_DASHBOARD_RBAC=true`, a
+    tenant member with no read RBAC on the dashboard scope gets a 403
+    (`dashboard_access_denied`) here and the SPA renders an access-denied
+    screen instead of a half-broken dashboard. Default OFF preserves the
+    legacy behaviour. The `/me/permissions` and `/me/access-review` routes
+    below intentionally keep the plain `require_caller` gate so a *blocked*
+    caller can still inspect why they were denied.
 
     Mirrors the Function App's `GET /api/me` for the identity fields and
     augments the response with the list of subscriptions the api sidecar's

@@ -5,7 +5,9 @@ import { AuthenticatedTemplate, UnauthenticatedTemplate } from "@azure/msal-reac
 import { Layout } from "@/components/Layout";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SignIn } from "@/pages/SignIn";
+import { AccessDenied } from "@/pages/AccessDenied";
 import { useAuthSessionIssue } from "@/auth/sessionEvents";
+import { useDashboardAccessGate } from "@/hooks/useDashboardAccessGate";
 import { Dashboard } from "@/pages/Dashboard";
 import { BlastSubmit } from "@/pages/BlastSubmit";
 import { BlastJobs } from "@/pages/BlastJobs";
@@ -245,10 +247,48 @@ export function App() {
 // keep the dashboard mounted behind a stale banner. When a session issue is
 // raised (no active account, interaction required, refresh failed, or a 401
 // from the API/ARM) we route the user to the in-app sign-in page instead.
+//
+// On top of that, the optional backend entry gate (`ENFORCE_DASHBOARD_RBAC`)
+// can deny a signed-in tenant member who holds no Azure read role on the
+// dashboard scope. `useDashboardAccessGate` resolves the `/api/me` bootstrap
+// once and, only on an explicit `dashboard_access_denied` 403, swaps the app
+// for the access-denied screen. When the gate is OFF (default) `/api/me`
+// returns 200 and this is a sub-100ms pass-through.
 function AuthenticatedApp() {
   const sessionIssue = useAuthSessionIssue();
+  const access = useDashboardAccessGate();
   if (sessionIssue) {
     return <SignIn expired expiredMessage={sessionIssue.message} />;
   }
+  if (access.status === "loading") {
+    return <AccessCheckLoading />;
+  }
+  if (access.status === "denied") {
+    return <AccessDenied message={access.message} />;
+  }
   return <AppRoutes />;
+}
+
+function AccessCheckLoading() {
+  return (
+    <div
+      style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}
+      aria-busy="true"
+      aria-label="Checking access"
+    >
+      <div
+        className="glass-card"
+        style={{ width: "min(360px, 100%)", display: "grid", gap: 12 }}
+      >
+        <span
+          className="skeleton"
+          style={{ width: "42%", height: 14, borderRadius: 999 }}
+        />
+        <span
+          className="skeleton"
+          style={{ width: "78%", height: 12, borderRadius: 999 }}
+        />
+      </div>
+    </div>
+  );
 }
