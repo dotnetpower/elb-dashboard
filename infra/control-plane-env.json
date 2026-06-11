@@ -6,14 +6,17 @@
     "ENFORCE_DASHBOARD_RBAC": "true",
     "BLAST_GATE_ENABLED": "false",
     "BLAST_JOBS_SHARED_VISIBILITY": "true",
-    "STRICT_BLUEGREEN": "false"
+    "STRICT_BLUEGREEN": "false",
+    "SERVICEBUS_ENABLED": "false"
   },
   "worker": {
     "BLAST_GATE_ENABLED": "false",
-    "STRICT_BLUEGREEN": "false"
+    "STRICT_BLUEGREEN": "false",
+    "SERVICEBUS_ENABLED": "false"
   },
   "beat": {
     "BLAST_GATE_ENABLED": "false",
-    "STRICT_BLUEGREEN": "false"
+    "STRICT_BLUEGREEN": "false",
+    "SERVICEBUS_ENABLED": "false"
   }
 }

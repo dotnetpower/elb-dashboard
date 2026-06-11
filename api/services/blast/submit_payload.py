@@ -85,7 +85,7 @@ _BLAST_SUBMIT_OPTION_KEYS = frozenset(
 )
 
 _SEARCHSP_OPTION_RE = re.compile(r"(?<!\S)-searchsp(?:\s|=|$)")
-_SUBMISSION_SOURCES = frozenset({"dashboard", "external_api"})
+_SUBMISSION_SOURCES = frozenset({"dashboard", "external_api", "servicebus"})
 
 
 def canonical_submit_metadata(

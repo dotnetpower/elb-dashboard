@@ -294,6 +294,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             //   BLAST_GATE_MEM_WATERMARK_PCT     (default 75)
             //   BLAST_GATE_SIGNAL_CACHE_S        (default 30)
             { name: 'BLAST_GATE_ENABLED', value: controlPlaneEnv.api.BLAST_GATE_ENABLED }
+            // Optional Service Bus BLAST integration master switch. Default OFF
+            // (Charter §12a Rule 4): the api submit routes do not enqueue to
+            // Service Bus and the beat tasks no-op until both this AND the saved
+            // config row opt in. NOT the Celery broker — that stays Redis.
+            { name: 'SERVICEBUS_ENABLED', value: controlPlaneEnv.api.SERVICEBUS_ENABLED }
             // Dev-stage job visibility (issue: recent searches only showed
             // API-submitted jobs). Default ON for the single-tenant
             // development phase: every authenticated tenant member can see and
@@ -422,6 +427,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // BLAST capacity gate (issue #23) — must match the api sidecar.
             // Default OFF preserves the existing submit-lock path.
             { name: 'BLAST_GATE_ENABLED', value: controlPlaneEnv.worker.BLAST_GATE_ENABLED }
+            // Service Bus integration master switch — must match the api/beat
+            // sidecars so the worker-run drain/publish/cleanup tasks gate
+            // identically. Default OFF (Charter §12a Rule 4).
+            { name: 'SERVICEBUS_ENABLED', value: controlPlaneEnv.worker.SERVICEBUS_ENABLED }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // worker-run pipeline/rollback tasks branch identically. Default
             // OFF (Charter §12a Rule 4).
@@ -465,6 +474,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // BLAST capacity gate (issue #23) — must match the api sidecar.
             // Default OFF preserves the existing submit-lock path.
             { name: 'BLAST_GATE_ENABLED', value: controlPlaneEnv.beat.BLAST_GATE_ENABLED }
+            // Service Bus integration master switch — must match the api/worker
+            // sidecars so the beat scheduler only emits drain/publish/cleanup
+            // ticks when the integration is on. Default OFF (Charter §12a Rule 4).
+            { name: 'SERVICEBUS_ENABLED', value: controlPlaneEnv.beat.SERVICEBUS_ENABLED }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // beat-driven reconciler drives validating→confirming→succeeded
             // identically. Default OFF (Charter §12a Rule 4).

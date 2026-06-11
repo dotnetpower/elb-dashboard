@@ -395,6 +395,20 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-servicebus"
+version = "7.12.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/71/8a/4eea5dbc1626b4e2cc2fe9abd7b6afeb51eb50f50c0fd9467c3b38560aff/azure_servicebus-7.12.3.tar.gz", hash = "sha256:3f0759731ad2211c68eb4b21e5bca29827f7d6ff0272bdc7eef103c1c13f8322", size = 515299, upload-time = "2024-09-19T22:42:21.096Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/72/eb4f41220244c1d07a7392fae091a94b4a2f0a0f075b521f6f3b2d93b6b6/azure_servicebus-7.12.3-py3-none-any.whl", hash = "sha256:f09b3323277a049e8cdca0ee3b090876835834e941cebb3fab07ef3cf1707984", size = 410018, upload-time = "2024-09-19T22:42:24.677Z" },
+]
+
+[[package]]
 name = "azure-storage-blob"
 version = "12.23.1"
 source = { registry = "https://pypi.org/simple" }
@@ -731,6 +745,7 @@ dependencies = [
     { name = "azure-mgmt-storage" },
     { name = "azure-monitor-opentelemetry" },
     { name = "azure-monitor-query" },
+    { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
     { name = "celery" },
     { name = "defusedxml" },
@@ -784,6 +799,7 @@ requires-dist = [
     { name = "azure-mgmt-storage", specifier = "==21.2.1" },
     { name = "azure-monitor-opentelemetry", specifier = "==1.6.4" },
     { name = "azure-monitor-query", specifier = "==1.4.1" },
+    { name = "azure-servicebus", specifier = "==7.12.3" },
     { name = "azure-storage-blob", specifier = "==12.23.1" },
     { name = "celery", specifier = "==5.4.0" },
     { name = "defusedxml", specifier = "==0.7.1" },

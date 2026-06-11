@@ -64,6 +64,7 @@ celery_app = Celery(
         "api.tasks.blast_artifacts",
         "api.tasks.storage",
         "api.tasks.openapi",
+        "api.tasks.servicebus",
         "api.tasks.upgrade",
     ],
 )
@@ -113,6 +114,7 @@ celery_app.conf.update(
         "api.tasks.blast.*": {"queue": "blast"},
         "api.tasks.storage.*": {"queue": "storage"},
         "api.tasks.openapi.*": {"queue": "azure"},
+        "api.tasks.servicebus.*": {"queue": "reconcile"},
     },
     # The interactive task_routes above are deliberately left pointing at the
     # latency-critical queues (azure / blast / storage / default) so an
@@ -179,6 +181,24 @@ celery_app.conf.update(
         "openapi-public-https-reconcile": {
             "task": "api.tasks.openapi.reconcile_public_https",
             "schedule": float(os.environ.get("CELERY_BEAT_OPENAPI_PUBLIC_HTTPS_SECONDS", "120")),
+            "options": {"queue": "reconcile"},
+        },
+        # Optional Service Bus BLAST integration. All three no-op unless
+        # SERVICEBUS_ENABLED=true AND the saved config opts in, so leaving them
+        # scheduled on every deployment is free (one cheap guard check per tick).
+        "servicebus-drain-and-resubmit": {
+            "task": "api.tasks.servicebus.drain_and_resubmit",
+            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS", "30")),
+            "options": {"queue": "reconcile"},
+        },
+        "servicebus-publish-transitions": {
+            "task": "api.tasks.servicebus.publish_transitions",
+            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_SECONDS", "30")),
+            "options": {"queue": "reconcile"},
+        },
+        "servicebus-dlq-cleanup": {
+            "task": "api.tasks.servicebus.dlq_cleanup",
+            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS", "3600")),
             "options": {"queue": "reconcile"},
         },
     },

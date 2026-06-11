@@ -316,6 +316,76 @@ export interface VnetPeeringDeleteResponse {
   peering_name: string;
 }
 
+export type ServiceBusAuthMode = "entra" | "sas";
+
+/** Service Bus integration config (no secret material — `sas_secret_name` is a
+ *  Key Vault secret NAME, never the connection string). */
+export interface ServiceBusConfig {
+  enabled: boolean;
+  auth_mode: ServiceBusAuthMode;
+  namespace_fqdn: string;
+  request_queue: string;
+  completion_topic: string;
+  sas_secret_name: string;
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+  storage_account: string;
+  dlq_cleanup_enabled: boolean;
+  dlq_max_age_days: number;
+  dlq_max_count: number;
+  dlq_cleanup_batch: number;
+  updated_at: string;
+  owner_oid: string;
+  tenant_id: string;
+}
+
+export interface ServiceBusCounts {
+  available: boolean;
+  reason?: string;
+  queue?: {
+    active_message_count: number;
+    dead_letter_message_count: number;
+    scheduled_message_count: number;
+    total_message_count: number;
+  } | null;
+  dead_letter?: number | null;
+  subscriptions?: Array<{
+    name: string;
+    active_message_count: number;
+    dead_letter_message_count: number;
+  }>;
+}
+
+export interface ServiceBusStatusResponse {
+  config: ServiceBusConfig;
+  env_enabled: boolean;
+  effective_enabled: boolean;
+  counts: ServiceBusCounts;
+}
+
+export interface ServiceBusTestResponse {
+  reachable: boolean;
+  peeked?: number;
+  reason?: string;
+  detail?: string;
+  auth_mode?: ServiceBusAuthMode;
+}
+
+export interface ServiceBusDiscoverResponse {
+  namespaces?: Array<{ name: string; id: string; location: string; fqdn: string }>;
+  namespace_fqdn?: string;
+  queues?: string[];
+  topics?: string[];
+  reason?: string;
+}
+
+export interface ServiceBusPurgeResponse {
+  status: string;
+  dead_letter: boolean;
+  removed: number;
+}
+
 function querystring(params: Record<string, string>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) usp.set(k, v);
@@ -423,4 +493,25 @@ export const settingsApi = {
       "/settings/vnet-peering/delete",
       body,
     ),
+
+  /** Read the Service Bus integration config + best-effort runtime counts.
+   *  Never 404s; returns a disabled default when no row exists. */
+  getServiceBus: () => api.get<ServiceBusStatusResponse>("/settings/service-bus"),
+
+  /** Persist the Service Bus integration config (validated server-side). */
+  putServiceBus: (body: Partial<ServiceBusConfig>) =>
+    api.put<{ status: string; config: ServiceBusConfig }>("/settings/service-bus", body),
+
+  /** Non-destructive reachability probe (peeks the request queue). */
+  testServiceBus: (body: Partial<ServiceBusConfig>) =>
+    api.post<ServiceBusTestResponse>("/settings/service-bus/test", body),
+
+  /** Discover namespaces (pass subscription_id) or queues/topics (pass
+   *  namespace_fqdn) for the Settings dropdowns. */
+  discoverServiceBus: (body: { subscription_id?: string; namespace_fqdn?: string; auth_mode?: ServiceBusAuthMode; sas_secret_name?: string }) =>
+    api.post<ServiceBusDiscoverResponse>("/settings/service-bus/discover", body),
+
+  /** Manual purge of the main queue or its DLQ (operator action). */
+  purgeServiceBus: (body: { dead_letter: boolean; max_messages?: number }) =>
+    api.post<ServiceBusPurgeResponse>("/settings/service-bus/purge", body),
 };

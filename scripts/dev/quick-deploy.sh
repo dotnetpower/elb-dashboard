@@ -1010,5 +1010,52 @@ if $TAIL_LOGS; then
     --tail 20
 fi
 
+# --------------------------------------------------------------------------
+# Optional Service Bus integration RBAC. The namespace is normally chosen at
+# runtime from Settings (so quick-deploy cannot know it), but when the operator
+# exports SERVICEBUS_NAMESPACE (+ optional SERVICEBUS_NAMESPACE_RG) we grant the
+# shared managed identity the two data-plane roles it needs to drain requests
+# and publish completions over Entra. Idempotent: an existing assignment is a
+# no-op. SAS-mode / cross-tenant namespaces are skipped (Entra cannot reach
+# them) — those use a connection-string secret instead. Never narrows a role
+# (charter §12a Rule 1: additive only).
+# --------------------------------------------------------------------------
+ensure_service_bus_rbac() {
+  local ns="${SERVICEBUS_NAMESPACE:-}"
+  [[ -n "$ns" ]] || { ts "    (SERVICEBUS_NAMESPACE unset — skipping Service Bus RBAC grant)"; return 0; }
+  local ns_rg="${SERVICEBUS_NAMESPACE_RG:-$AZURE_RESOURCE_GROUP}"
+  local mi_principal
+  mi_principal="$(az identity list \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "[?starts_with(name,'id-elb-dashboard')].principalId | [0]" \
+    -o tsv 2>/dev/null || true)"
+  if [[ -z "$mi_principal" || "$mi_principal" == "None" ]]; then
+    ts "    ! could not resolve shared MI principal in '$AZURE_RESOURCE_GROUP' — skipping Service Bus RBAC"
+    return 0
+  fi
+  local ns_id
+  ns_id="$(az servicebus namespace show \
+    --name "$ns" --resource-group "$ns_rg" --query id -o tsv 2>/dev/null || true)"
+  if [[ -z "$ns_id" ]]; then
+    ts "    ! Service Bus namespace '$ns' not found in '$ns_rg' — skipping RBAC grant"
+    return 0
+  fi
+  local role
+  for role in "Azure Service Bus Data Sender" "Azure Service Bus Data Receiver"; do
+    if az role assignment create \
+      --assignee-object-id "$mi_principal" --assignee-principal-type ServicePrincipal \
+      --role "$role" --scope "$ns_id" --only-show-errors >/dev/null 2>&1; then
+      ts "    + granted '$role' to shared MI on $ns"
+    else
+      ts "    (role '$role' already present or grant skipped for $ns)"
+    fi
+  done
+}
+
+# Only relevant for the api/worker/beat image (which runs the integration).
+case "$SIDECAR" in
+  api|worker|beat) ensure_service_bus_rbac ;;
+esac
+
 ts "==> Done. Tag was: $TAG"
 ts "    To roll back: scripts/dev/quick-deploy.sh $SIDECAR <previous-tag>"

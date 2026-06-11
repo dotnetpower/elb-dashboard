@@ -13,6 +13,7 @@ import {
   FlaskConical,
   RefreshCw,
   RotateCcw,
+  Radio,
   Settings as SettingsIcon,
   Stethoscope,
   Sun,
@@ -43,6 +44,7 @@ import { PerformanceSection } from "@/components/settings/sections/PerformanceSe
 import { TelemetrySection } from "@/components/settings/sections/TelemetrySection";
 import { AksSection } from "@/components/settings/sections/AksSection";
 import { PublicHttpsSection } from "@/components/settings/sections/PublicHttpsSection";
+import { ServiceBusSection } from "@/components/settings/sections/ServiceBusSection";
 import { VnetPeeringSection } from "@/components/settings/sections/VnetPeeringSection";
 import { DiagnosticsSection } from "@/components/settings/sections/DiagnosticsSection";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
@@ -58,6 +60,7 @@ export type SettingsSectionId =
   | "performance"
   | "public-https"
   | "vnet-peering"
+  | "service-bus"
   | "sizing"
   | "diagnostics"
   | "resources";
@@ -73,6 +76,7 @@ const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> =
   { id: "performance", label: "Performance", icon: <HardDrive size={14} strokeWidth={1.5} /> },
   { id: "public-https", label: "Public HTTPS", icon: <Globe size={14} strokeWidth={1.5} /> },
   { id: "vnet-peering", label: "VNet peering", icon: <Network size={14} strokeWidth={1.5} /> },
+  { id: "service-bus", label: "Service Bus", icon: <Radio size={14} strokeWidth={1.5} /> },
   { id: "sizing", label: "Sizing", icon: <Gauge size={14} strokeWidth={1.5} /> },
   { id: "diagnostics", label: "Diagnose & solve problems", icon: <Stethoscope size={14} strokeWidth={1.5} /> },
   { id: "resources", label: "Resources", icon: <SettingsIcon size={14} strokeWidth={1.5} /> },
@@ -214,6 +218,7 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
             {active === "performance" && <PerformanceSection config={config} />}
             {active === "public-https" && <PublicHttpsSection config={config} />}
             {active === "vnet-peering" && <VnetPeeringSection config={config} />}
+            {active === "service-bus" && <ServiceBusSection config={config} />}
             {active === "sizing" && <SizingSection />}
             {active === "diagnostics" && <DiagnosticsSection config={config} onClose={onClose} />}
             {active === "resources" && <ResourcesSection config={config} />}

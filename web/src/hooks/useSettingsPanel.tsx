@@ -40,6 +40,7 @@ const VALID_SECTIONS: ReadonlySet<string> = new Set<SettingsSectionId>([
   "performance",
   "public-https",
   "vnet-peering",
+  "service-bus",
   "sizing",
   "diagnostics",
   "resources",
