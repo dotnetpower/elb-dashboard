@@ -103,6 +103,7 @@ def _publish(
     *,
     status: str = "running",
     message: str | None = None,
+    step_override: int | None = None,
     **extra: Any,
 ) -> None:
     """Wrapper around `publish_progress` that auto-fills step/total_steps from
@@ -113,12 +114,21 @@ def _publish(
     RBAC sub-phases (`ensuring_rbac_acr` / `ensuring_rbac_storage`) inherit
     the parent `ensuring_rbac` step number so they render under "Step 4/5"
     instead of an unknown step.
+
+    `step_override` pins the step counter to an explicit value regardless of
+    the phase's natural step. This is needed for the pre-create RBAC
+    self-grant: it reuses the `_RBAC_SUB_PHASES` strings (which map to the
+    post-create step 4) but runs BEFORE the ARM create (step 3), so without
+    the override the banner would jump 2 → 4 → 3 → 4 → 5. Pinning the
+    pre-create ticks to the RG step (2) keeps the counter monotonic.
     """
     step = _STEP_INDEX.get(phase)
     label = _STEP_LABEL.get(phase)
     if step is None and phase in _RBAC_SUB_PHASES:
         step = _STEP_INDEX["ensuring_rbac"]
         label = _RBAC_SUB_PHASES[phase]
+    if step_override is not None:
+        step = step_override
     publish_progress(
         task,
         job_id,
@@ -409,7 +419,18 @@ def provision_aks(
     # AKS create succeeds. Idempotent — uses stable assignment UUIDs, so
     # the post-create call below becomes a no-op on success.
     def _pre_create_rbac_progress(sub_phase: str, msg: str) -> None:
-        _publish(self, job_id, sub_phase, message=msg)
+        # This self-grant runs BEFORE the ARM create (step 3), inside the
+        # RG-preparation window. The sub-phase strings map to the
+        # post-create RBAC step (4) via `_RBAC_SUB_PHASES`, so pin these
+        # ticks to the RG step (2) to keep the banner step counter
+        # monotonic (1 → 2 → 3 → 4 → 5) instead of jumping 2 → 4 → 3.
+        _publish(
+            self,
+            job_id,
+            sub_phase,
+            message=msg,
+            step_override=_STEP_INDEX["ensuring_resource_group"],
+        )
 
     pre_create_mi_summary = _facade._ensure_dashboard_mi_cluster_rg_roles(
         cred,

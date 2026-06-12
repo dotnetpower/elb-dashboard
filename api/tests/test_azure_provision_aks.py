@@ -736,6 +736,136 @@ def test_provision_aks_publishes_step_progress_with_pool_states(
     _ = ResourceNotFoundError  # silence import-unused
 
 
+def test_provision_aks_step_counter_is_monotonic_with_pre_create_rbac(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The banner step counter must never go backwards.
+
+    The pre-create dashboard-MI self-grant runs BEFORE the ARM create
+    (step 3) but reuses the `_RBAC_SUB_PHASES` strings, which map to the
+    post-create RBAC step (4). Before the fix, those pre-create ticks
+    published step 4, so the banner showed 2 -> 4 -> 3 (ARM) -> 4 -> 5.
+    This test fires the pre-create progress callback and asserts every
+    published `step` is monotonically non-decreasing.
+    """
+    import api.tasks.azure as azure
+    from api.tasks.azure import provision as provision_mod
+    from api.tasks.azure import provision_aks
+
+    class FakeResourceGroups:
+        def create_or_update(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
+
+        def get(self, _rg: str) -> object:
+            return object()
+
+    class FakeRc:
+        resource_groups = FakeResourceGroups()
+
+    class FakePoller:
+        def done(self) -> bool:
+            return True
+
+        def result(self) -> object:
+            class _Cluster:
+                identity = type("I", (), {"principal_id": "mi-principal"})()
+                provisioning_state = "Succeeded"
+                node_resource_group = "MC_rg_x_koreacentral"
+
+            return _Cluster()
+
+    class FakeManagedClusters:
+        def begin_create_or_update(self, _rg: str, _name: str, _params: object) -> FakePoller:
+            return FakePoller()
+
+        def get(self, _rg: str, _name: str) -> object:
+            class _C:
+                provisioning_state = "Creating"
+
+            return _C()
+
+    class FakeAgentPools:
+        def list(self, _rg: str, _cluster: str) -> list[object]:
+            return []
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+        agent_pools = FakeAgentPools()
+
+    publishes: list[dict[str, Any]] = []
+
+    def _capture(state: str, meta: dict[str, Any] | None = None, **_kw: Any) -> None:
+        publishes.append({"state": state, "meta": dict(meta or {})})
+
+    monkeypatch.setattr(provision_aks, "update_state", _capture)
+    monkeypatch.setattr(provision_mod.time, "sleep", lambda _secs: None)
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setattr(azure, "resource_client", lambda _cred, _sub: FakeRc())
+
+    # Fire the pre-create RBAC progress callback with a sub-phase that maps
+    # to the post-create step (4) via `_RBAC_SUB_PHASES`. The fix must pin
+    # these ticks to the RG step (2) instead.
+    def _fake_pre_create(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        cb = kwargs.get("progress_callback")
+        if cb is not None:
+            cb("ensuring_dashboard_mi_rbac", "Self-granting dashboard MI on cluster RG")
+        return {"roles_assigned": ["Contributor"], "roles_failed": []}
+
+    monkeypatch.setattr(azure, "_ensure_dashboard_mi_cluster_rg_roles", _fake_pre_create)
+    monkeypatch.setattr(
+        azure,
+        "_ensure_aks_runtime_rbac",
+        lambda *_args, **_kwargs: {
+            "acr_attached": True,
+            "storage_role_granted": True,
+            "roles_assigned": ["AcrPull", "Storage Blob Data Contributor"],
+            "roles_failed": [],
+        },
+    )
+
+    provision_aks.run(
+        job_id="job-monotonic",
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+        region="koreacentral",
+        cluster_name="elb-cluster-01",
+        node_sku="Standard_D8s_v3",
+        node_count=2,
+        system_vm_size="Standard_D2s_v3",
+        system_node_count=1,
+        acr_resource_group="",
+        acr_name="",
+        storage_resource_group="",
+        storage_account="",
+        caller_oid="caller-1",
+    )
+
+    # The pre-create RBAC tick (published BEFORE the ARM create) must land
+    # on the RG step (2), not the post-create RBAC step (4). The same
+    # sub-phase string is also published post-create at step 4 — that one
+    # is legitimate because it runs after ARM (step 3).
+    phases_in_order = [p["meta"].get("phase") for p in publishes if p["state"] == "PROGRESS"]
+    arm_idx = phases_in_order.index("arm_create_or_update")
+    pre_create_ticks = [
+        p["meta"]
+        for i, p in enumerate(
+            [pp for pp in publishes if pp["state"] == "PROGRESS"]
+        )
+        if p["meta"].get("phase") == "ensuring_dashboard_mi_rbac" and i < arm_idx
+    ]
+    assert pre_create_ticks, publishes
+    assert all(t["step"] == 2 for t in pre_create_ticks), pre_create_ticks
+
+    # No PROGRESS publish may report a step lower than a previous one.
+    steps = [
+        p["meta"]["step"]
+        for p in publishes
+        if p["state"] == "PROGRESS" and isinstance(p["meta"].get("step"), int)
+    ]
+    assert steps == sorted(steps), steps
+
+
 def test_provision_aks_retries_in_progress_cluster_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
