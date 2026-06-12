@@ -139,6 +139,20 @@ def _clear_caches() -> None:
     clear_nuccore_caches()
 
 
+@pytest.fixture(autouse=True)
+def _disable_durable_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the durable ops-Redis cache for every test by default.
+
+    The durable cache is best-effort and environment-dependent (it talks to
+    ``OPS_REDIS_URL``, which defaults to a local Redis that may or may not be
+    running). Disabling it keeps the in-process ``cached`` assertions below
+    deterministic regardless of whether a local Redis is reachable. The
+    dedicated durable-cache tests re-enable it with a fake client.
+    """
+    monkeypatch.setenv("NCBI_DURABLE_CACHE_DISABLED", "true")
+    _clear_caches()
+
+
 # ---------------------------------------------------------------------------
 # normalise_accession
 # ---------------------------------------------------------------------------
@@ -240,6 +254,112 @@ def test_fetch_nuccore_summary_caches_second_call(
     second["title"] = "tampered"
     third = nuccore.fetch_nuccore_summary("NM_000546.6")
     assert third["title"].startswith("Homo sapiens tumor protein p53")
+
+
+class _FakeRedis:
+    """Minimal dict-backed Redis stand-in for the durable cache tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+        self.get_calls = 0
+        self.setex_calls = 0
+
+    def get(self, key: str) -> str | None:
+        self.get_calls += 1
+        return self.store.get(key)
+
+    def setex(self, key: str, _ttl: int, value: str) -> None:
+        self.setex_calls += 1
+        self.store[key] = value
+
+
+def test_durable_cache_survives_in_process_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The durable ops-Redis cache must serve a second viewer even after the
+    in-process cache is cleared (cold replica / api restart) without a second
+    NCBI fetch — this is the core of issue #27."""
+    _clear_caches()
+    monkeypatch.setenv("NCBI_DURABLE_CACHE_DISABLED", "false")
+    from api.services import redis_clients
+    from api.services.ncbi import nuccore
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(redis_clients, "get_ops_redis_client", lambda **_kw: fake)
+
+    invocations: list[int] = []
+
+    def fake_request_json(_endpoint: str, _params: dict[str, str]) -> dict[str, Any]:
+        invocations.append(1)
+        return _ESUMMARY_JSON
+
+    monkeypatch.setattr(nuccore, "request_json", fake_request_json)
+
+    first = nuccore.fetch_nuccore_summary("NM_000546.6")
+    assert first["cached"] is False
+    assert len(invocations) == 1
+    assert fake.setex_calls == 1
+
+    # Simulate a cold replica: wipe the in-process cache. The durable cache
+    # must now satisfy the read with no extra NCBI call.
+    _clear_caches()
+    second = nuccore.fetch_nuccore_summary("NM_000546.6")
+    assert second["cached"] is True
+    assert len(invocations) == 1, "durable cache must avoid a second NCBI fetch"
+    assert second["accession_version"] == "NM_000546.6"
+
+
+def test_durable_cache_degrades_on_redis_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any Redis failure must degrade silently to a live NCBI fetch — the
+    durable layer can never change correctness, only latency."""
+    _clear_caches()
+    monkeypatch.setenv("NCBI_DURABLE_CACHE_DISABLED", "false")
+    from api.services import redis_clients
+    from api.services.ncbi import nuccore
+
+    class _ExplodingRedis:
+        def get(self, _key: str) -> str | None:
+            raise RuntimeError("redis is down")
+
+        def setex(self, _key: str, _ttl: int, _value: str) -> None:
+            raise RuntimeError("redis is down")
+
+    monkeypatch.setattr(
+        redis_clients, "get_ops_redis_client", lambda **_kw: _ExplodingRedis()
+    )
+
+    invocations: list[int] = []
+
+    def fake_request_json(_endpoint: str, _params: dict[str, str]) -> dict[str, Any]:
+        invocations.append(1)
+        return _ESUMMARY_JSON
+
+    monkeypatch.setattr(nuccore, "request_json", fake_request_json)
+
+    result = nuccore.fetch_nuccore_summary("NM_000546.6")
+    assert result["cached"] is False
+    assert result["accession_version"] == "NM_000546.6"
+    assert len(invocations) == 1
+
+
+def test_durable_cache_disabled_env_skips_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the kill-switch set, the durable cache must never touch Redis."""
+    _clear_caches()
+    monkeypatch.setenv("NCBI_DURABLE_CACHE_DISABLED", "true")
+    from api.services import redis_clients
+    from api.services.ncbi import nuccore
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(redis_clients, "get_ops_redis_client", lambda **_kw: fake)
+    monkeypatch.setattr(nuccore, "request_json", lambda *_a, **_kw: _ESUMMARY_JSON)
+
+    nuccore.fetch_nuccore_summary("NM_000546.6")
+    assert fake.get_calls == 0
+    assert fake.setex_calls == 0
 
 
 def test_fetch_nuccore_summary_handles_error_payload(

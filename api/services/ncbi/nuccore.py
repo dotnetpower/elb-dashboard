@@ -5,6 +5,10 @@ Responsibility: For a single NCBI nucleotide accession, return three views —
 flat record + features list), and ``fasta`` (efetch FASTA text, optionally
 subranged). Includes process-wide TTL caches keyed by ``accession.version`` (+
 subrange for FASTA) so repeated dashboard polls stay within NCBI policy.
+A second, durable cross-sidecar cache (ops Redis, JSON, 7-day TTL) backs the
+``summary`` and ``genbank`` views so the first viewer on a cold api replica /
+worker — and the first viewer after an api sidecar restart — reuses a payload
+another sidecar already fetched instead of paying the 10-16 s efetch again.
 Edit boundaries: Strictly nucleotide records (``db=nuccore``). Protein /
 taxonomy / gene / pubmed live in their own modules. Shared HTTP +
 identity + rate-limit primitives stay in ``_eutils.py``.
@@ -14,14 +18,18 @@ Risky contracts: ``normalise_accession`` rejects anything that does not match
 the conservative NCBI accession pattern. All XML parsing goes through
 ``defusedxml`` to neutralise XXE / billion-laughs. FASTA bodies bigger than
 ``MAX_FASTA_BYTES`` are rejected — the caller must pass an explicit subrange to
-exercise large records.
+exercise large records. The durable cache is best-effort: any Redis error (or
+``NCBI_DURABLE_CACHE_DISABLED=true``) degrades silently to the in-process cache
++ live NCBI fetch, so it can never change correctness, only latency.
 Validation: `uv run pytest -q api/tests/test_ncbi_nuccore.py`.
 """
 
 from __future__ import annotations
 
 import copy
+import json
 import logging
+import os
 import re
 import threading
 import time
@@ -58,6 +66,21 @@ _MAX_ACCESSION_LENGTH = 32
 
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _MAX_CACHE_ENTRIES = 512
+
+# Durable cross-sidecar cache (ops Redis). The in-process caches above are
+# per-replica and reset on every api/worker restart, so the first viewer on a
+# cold replica still pays the 10-16 s efetch for a large record (issue #27).
+# A shared Redis layer lets any sidecar reuse a payload another already
+# fetched. Best-effort only: any Redis error (or the kill-switch env var)
+# degrades silently to the in-process cache + live NCBI fetch, so it can only
+# change latency, never correctness. Keyed by view + accession.version; values
+# are JSON (the parsed payload dict). 7-day TTL because GenBank records for a
+# fixed accession.version are immutable once published.
+_DURABLE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+_DURABLE_CACHE_KEY_PREFIX = "ncbi:nuccore:"
+# Skip persisting payloads larger than this to keep ops Redis lean; the
+# in-process cache still serves them within a replica.
+_DURABLE_CACHE_MAX_VALUE_BYTES = 1 * 1024 * 1024
 
 
 def normalise_accession(accession: str) -> str:
@@ -159,6 +182,84 @@ def clear_nuccore_caches() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Durable cross-sidecar cache (ops Redis)
+#
+# Best-effort JSON cache shared by every api/worker sidecar. All helpers
+# swallow every error: a miss, a Redis outage, or the kill-switch env var all
+# return ``None`` (read) or no-op (write) so the caller falls through to the
+# in-process cache + live NCBI fetch. This layer can only improve latency,
+# never correctness.
+# ---------------------------------------------------------------------------
+def _durable_cache_enabled() -> bool:
+    return os.environ.get("NCBI_DURABLE_CACHE_DISABLED", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _durable_cache_client() -> Any | None:
+    if not _durable_cache_enabled():
+        return None
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        return get_ops_redis_client(socket_timeout=0.5)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.debug("nuccore durable cache redis unavailable: %s", type(exc).__name__)
+        return None
+
+
+def _durable_cache_key(view: str, normalised: str) -> str:
+    return f"{_DURABLE_CACHE_KEY_PREFIX}{view}:{normalised}"
+
+
+def _durable_cache_get(view: str, normalised: str) -> dict[str, Any] | None:
+    client = _durable_cache_client()
+    if client is None:
+        return None
+    try:
+        raw = client.get(_durable_cache_key(view, normalised))
+    except Exception as exc:
+        LOGGER.debug("nuccore durable cache get failed: %s", type(exc).__name__)
+        return None
+    if not raw:
+        return None
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        body = json.loads(raw)
+        if isinstance(body, dict):
+            return body
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def _durable_cache_set(view: str, normalised: str, payload: dict[str, Any]) -> None:
+    client = _durable_cache_client()
+    if client is None:
+        return
+    try:
+        serialised = json.dumps(payload)
+    except (TypeError, ValueError) as exc:
+        LOGGER.debug("nuccore durable cache serialise failed: %s", type(exc).__name__)
+        return
+    if len(serialised.encode("utf-8")) > _DURABLE_CACHE_MAX_VALUE_BYTES:
+        # Oversized record: skip the shared cache; the in-process LRU still
+        # serves it within this replica.
+        return
+    try:
+        client.setex(
+            _durable_cache_key(view, normalised),
+            _DURABLE_CACHE_TTL_SECONDS,
+            serialised,
+        )
+    except Exception as exc:
+        LOGGER.debug("nuccore durable cache setex failed: %s", type(exc).__name__)
+
+
+# ---------------------------------------------------------------------------
 # esummary
 # ---------------------------------------------------------------------------
 def fetch_nuccore_summary(accession: str) -> dict[str, Any]:
@@ -167,12 +268,19 @@ def fetch_nuccore_summary(accession: str) -> dict[str, Any]:
     cached = _cache_get(_SUMMARY_CACHE, normalised)
     if cached is not None:
         return {**cached, "cached": True}
+    durable = _durable_cache_get("summary", normalised)
+    if durable is not None:
+        # Re-seed the in-process cache so subsequent reads on this replica
+        # skip Redis entirely.
+        _cache_put(_SUMMARY_CACHE, normalised, durable)
+        return {**durable, "cached": True}
     data = request_json(
         "esummary.fcgi",
         {"db": "nuccore", "id": normalised, "retmode": "json"},
     )
     payload = _parse_esummary(data, normalised)
     _cache_put(_SUMMARY_CACHE, normalised, payload)
+    _durable_cache_set("summary", normalised, payload)
     return {**payload, "cached": False}
 
 
@@ -245,6 +353,10 @@ def fetch_nuccore_genbank(accession: str) -> dict[str, Any]:
     cached = _cache_get(_GENBANK_CACHE, normalised)
     if cached is not None:
         return {**cached, "cached": True}
+    durable = _durable_cache_get("genbank", normalised)
+    if durable is not None:
+        _cache_put(_GENBANK_CACHE, normalised, durable)
+        return {**durable, "cached": True}
     body = request_bytes(
         "efetch.fcgi",
         {
@@ -258,6 +370,7 @@ def fetch_nuccore_genbank(accession: str) -> dict[str, Any]:
     )
     payload = _parse_genbank_xml(body, normalised)
     _cache_put(_GENBANK_CACHE, normalised, payload)
+    _durable_cache_set("genbank", normalised, payload)
     return {**payload, "cached": False}
 
 
