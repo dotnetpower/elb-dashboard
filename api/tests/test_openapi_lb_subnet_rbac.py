@@ -16,7 +16,7 @@ Validation: ``uv run pytest -q api/tests/test_openapi_lb_subnet_rbac.py``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from fastapi import FastAPI
@@ -174,6 +174,38 @@ def test_helper_is_idempotent_on_repeat(monkeypatch: pytest.MonkeyPatch) -> None
     assert {g["subnet_id"] for g in grants} == {_SUBNET}
 
 
+def test_helper_reuses_passed_cluster_without_arm_get(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the caller (deploy_openapi_service) passes a pre-fetched cluster,
+    the helper must NOT call aks_client — avoiding a duplicate ARM read."""
+    from api.services.aks.openapi_lb_rbac import ensure_openapi_lb_subnet_rbac
+
+    grants: list[dict[str, Any]] = []
+
+    def _fake_grant(
+        _cred: Any, _sub: str, *, principal_id: str, subnet_id: str, label: str
+    ) -> None:
+        grants.append({"principal_id": principal_id, "subnet_id": subnet_id})
+
+    monkeypatch.setattr(
+        "api.tasks.azure._grant_network_contributor_on_subnet", _fake_grant
+    )
+
+    def _boom_aks(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("aks_client must not be called when cluster is passed")
+
+    monkeypatch.setattr("api.services.azure_clients.aks_client", _boom_aks)
+
+    cluster = _Cluster(_Identity(principal_id="prin-passed"), [_Pool(_SUBNET)])
+    out = ensure_openapi_lb_subnet_rbac(
+        object(), "sub-1", "rg", "c1", cluster=cluster
+    )
+
+    assert out["status"] == "granted"
+    assert out["principal_id"] == "prin-passed"
+    assert grants == [{"principal_id": "prin-passed", "subnet_id": _SUBNET}]
+
+
+
 # --------------------------------------------------------------------------- #
 # Route — POST /api/aks/openapi/lb-subnet-rbac
 # --------------------------------------------------------------------------- #
@@ -262,3 +294,116 @@ def test_route_returns_502_when_helper_raises(monkeypatch: pytest.MonkeyPatch) -
 
     assert resp.status_code == 502
     assert resp.json()["detail"]["code"] == "lb_subnet_rbac_grant_failed"
+
+
+# --------------------------------------------------------------------------- #
+# deploy_openapi_service integration — grant runs BEFORE the Service is applied
+# --------------------------------------------------------------------------- #
+
+
+def _stub_deploy_prelude(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Stub the deploy task up to the grant, then hard-stop at pls_config_from_env.
+
+    Returns the list of recorded grant calls. The task short-circuits with a
+    PLS misconfig error immediately AFTER the grant step, so the test isolates
+    the grant integration without standing up kubectl / k8s probes.
+    """
+    from api.tasks.openapi import deploy as deploy_mod
+
+    class _Region:
+        location = "koreacentral"
+        agent_pool_profiles: ClassVar[list[Any]] = []
+
+    class _ManagedClusters:
+        @staticmethod
+        def get(_rg: str, _name: str) -> _Region:
+            return _Region()
+
+    class _Aks:
+        managed_clusters = _ManagedClusters()
+
+    monkeypatch.setattr(deploy_mod, "get_credential", lambda: object())
+    monkeypatch.setattr(deploy_mod, "aks_client", lambda _c, _s: _Aks())
+    monkeypatch.setattr(
+        deploy_mod,
+        "setup_workload_identity",
+        lambda *a, **k: {"mi_client_id": "mi-x"},
+    )
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_api_token",
+        lambda **k: "tok",
+    )
+    # Stop the task right after the grant step so we never reach kubectl apply.
+    def _pls_boom() -> Any:
+        raise ValueError("stop-after-grant")
+
+    monkeypatch.setattr(deploy_mod, "pls_config_from_env", _pls_boom)
+
+    grants: list[dict[str, Any]] = []
+
+    def _record(
+        _cred: Any,
+        subscription_id: str,
+        resource_group: str,
+        cluster_name: str,
+        *,
+        cluster: Any = None,
+    ) -> dict[str, Any]:
+        grants.append(
+            {"cluster_name": cluster_name, "cluster_passed": cluster is not None}
+        )
+        return {"status": "granted"}
+
+    monkeypatch.setattr(
+        "api.services.aks.openapi_lb_rbac.ensure_openapi_lb_subnet_rbac", _record
+    )
+    return grants
+
+
+def test_deploy_grants_lb_subnet_rbac_before_apply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """deploy_openapi_service must grant the node-subnet RBAC (reusing the
+    already-fetched cluster) before it applies the Service manifest."""
+    from api.tasks.openapi import deploy as deploy_mod
+
+    grants = _stub_deploy_prelude(monkeypatch)
+
+    out = deploy_mod.deploy_openapi_service.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-01",
+        acr_name="",  # avoid the acr_resource_group requirement
+    )
+
+    # The grant ran, was passed the pre-fetched cluster, and the task then
+    # short-circuited at the PLS step (proving the grant precedes apply).
+    assert grants == [{"cluster_name": "elb-cluster-01", "cluster_passed": True}]
+    assert out["status"] == "failed"
+    assert out["openapi_deploy"]["code"] == "openapi_pls_misconfigured"
+
+
+def test_deploy_tolerates_lb_subnet_rbac_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A grant failure is best-effort — it must not abort the deploy. The task
+    proceeds to the next step (here the PLS short-circuit) regardless."""
+    from api.tasks.openapi import deploy as deploy_mod
+
+    _stub_deploy_prelude(monkeypatch)
+
+    def _boom(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise RuntimeError("subnet grant ARM 403")
+
+    monkeypatch.setattr(
+        "api.services.aks.openapi_lb_rbac.ensure_openapi_lb_subnet_rbac", _boom
+    )
+
+    out = deploy_mod.deploy_openapi_service.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-01",
+        acr_name="",
+    )
+
+    # Grant raised, but the task continued (reached the PLS step) instead of
+    # surfacing the grant error.
+    assert out["status"] == "failed"
+    assert out["openapi_deploy"]["code"] == "openapi_pls_misconfigured"
+

@@ -417,6 +417,45 @@ def deploy_openapi_service(
 
     # ----- 2. kubectl apply --------------------------------------------------
     record_progress(self, "applying_manifests", image=image, mi_client_id=mi_client_id[:8])
+
+    # BYO-subnet clusters: ensure the cluster control-plane identity can create
+    # the elb-openapi internal LoadBalancer frontend IP in the node subnet
+    # BEFORE the Service is applied. `provision_aks` performs this grant at
+    # create time, but a cluster created out-of-band (manual `az aks create`,
+    # or delete + recreate) skips it, leaving the LB stuck `<pending>` with a
+    # `subnets/... 403 AuthorizationFailed` event (GitHub #33). Granting here —
+    # before kubectl apply creates the Service — means the cloud-provider sees
+    # the role on its first LB reconcile, sidestepping the token-cache lag that
+    # makes a post-hoc grant take effect only after a stop/start. Best-effort
+    # and idempotent: a failure only degrades the LB (warmup/BLAST unaffected),
+    # and managed-VNet clusters skip. Reuses the already-fetched `cluster` to
+    # avoid a duplicate ARM read.
+    lb_subnet_rbac: dict[str, Any] = {"status": "skipped", "reason": "not_attempted"}
+    try:
+        from api.services.aks.openapi_lb_rbac import ensure_openapi_lb_subnet_rbac
+
+        lb_subnet_rbac = ensure_openapi_lb_subnet_rbac(
+            cred,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            cluster=cluster,
+        )
+        LOGGER.info(
+            "openapi deploy: LB subnet RBAC status=%s cluster=%s",
+            lb_subnet_rbac.get("status"),
+            cluster_name,
+        )
+    except Exception as exc:
+        # Mirror provision_aks: a grant failure must not fail the deploy. The
+        # LB may stay <pending> until an admin re-grants, but the pod + warmup
+        # are unaffected.
+        LOGGER.warning(
+            "openapi deploy: LB subnet RBAC grant failed (LB may stay <pending>): %s",
+            exc,
+        )
+        lb_subnet_rbac = {"status": "error", "error": str(exc)[:200]}
+
     try:
         pls = pls_config_from_env()
     except ValueError as exc:
@@ -609,6 +648,7 @@ def deploy_openapi_service(
                 "error": diagnostics["message"],
                 "diagnostics": diagnostics,
                 "apply_output": apply_output[:1000],
+                "lb_subnet_rbac": lb_subnet_rbac.get("status"),
             },
             "elapsed_seconds": elapsed,
         }
@@ -658,6 +698,7 @@ def deploy_openapi_service(
             "desired_replicas": desired_replicas,
             "api_token_source": token_source,
             "apply_output": apply_output[:1000],
+            "lb_subnet_rbac": lb_subnet_rbac.get("status"),
         },
         "elapsed_seconds": elapsed,
     }

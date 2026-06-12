@@ -78,6 +78,8 @@ def ensure_openapi_lb_subnet_rbac(
     subscription_id: str,
     resource_group: str,
     cluster_name: str,
+    *,
+    cluster: Any = None,
 ) -> dict[str, Any]:
     """Grant Network Contributor on the cluster's BYO node subnet (idempotent).
 
@@ -91,13 +93,19 @@ def ensure_openapi_lb_subnet_rbac(
     * ``{"status": "granted", "principal_id", "subnet_id", "role", "note"}`` —
       the grant now exists (or already existed). ``note`` carries the
       token-cache caveat the operator must see.
+
+    ``cluster`` lets a caller that already fetched the ``ManagedCluster`` (e.g.
+    ``deploy_openapi_service``) pass it in to avoid a duplicate ARM
+    ``managed_clusters.get``; when ``None`` the cluster is fetched here.
     """
-    from api.services.azure_clients import aks_client
     from api.tasks.azure import _grant_network_contributor_on_subnet
 
-    cluster = aks_client(cred, subscription_id).managed_clusters.get(
-        resource_group, cluster_name
-    )
+    if cluster is None:
+        from api.services.azure_clients import aks_client
+
+        cluster = aks_client(cred, subscription_id).managed_clusters.get(
+            resource_group, cluster_name
+        )
 
     principal = _resolve_cluster_identity_principal(cluster)
     if not principal:

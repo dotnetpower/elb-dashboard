@@ -351,11 +351,13 @@ azd env refresh -e elb-dashboard
 
 This is a [bring-your-own (BYO) subnet](https://learn.microsoft.com/azure/aks/configure-azure-cni) AKS cluster: the nodes live in the dashboard's `vnet-elb-dashboard/snet-aks`. The **runtime** LoadBalancer reconcile runs as the *cluster control-plane identity* (not the dashboard managed identity that created the nodes), so that identity needs **Network Contributor** on the `snet-aks` subnet to allocate the internal LB frontend IP.
 
-The dashboard's `provision_aks` task grants this automatically at create time. A cluster created **out-of-band** (manual `az aks create`, or delete + recreate outside the dashboard) skips that grant, so the internal LoadBalancer can never come up.
+The dashboard's `provision_aks` task grants this automatically at create time, and the **Deploy elb-openapi** task (`deploy_openapi_service`) also grants it just before it applies the Service. A cluster whose `elb-openapi` was applied **before** that grant integration shipped (or applied entirely out-of-band) can still be missing it.
 
 **Fix**
 
-Re-run the grant idempotently via the recovery route (mirrors what provisioning does):
+The simplest fix is to **re-run Deploy elb-openapi** from the API page (or `POST /api/aks/openapi/deploy`) — the deploy task now performs the grant before re-applying the Service, so the LoadBalancer comes up on the next reconcile.
+
+If you cannot redeploy, re-run just the grant idempotently via the recovery route:
 
 ```bash
 APP=https://<your-container-app-fqdn>
@@ -368,15 +370,15 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
 
 A `granted` response means the role is now (or already) assigned. A `skipped` response with `managed_vnet_mode` means the cluster is not BYO-subnet (AKS manages the LB itself — nothing to fix here).
 
-!!! warning "The grant does not take effect instantly"
+!!! warning "A grant on an already-running cluster does not take effect instantly"
     The AKS cloud-controller caches its ARM token, so a role granted on an
     **already-running** cluster is not seen until that token refreshes — the
     LoadBalancer can stay `<pending>` for several minutes. If it does not
     recover on its own, **stop and start the cluster** to force the
-    cloud-controller to pick up the new role. Provision-time grants avoid this
-    because they run while the cluster is being created (the token is fresh).
+    cloud-controller to pick up the new role. Both the provision-time grant and
+    the Deploy-elb-openapi grant avoid this because they run before the Service
+    is (re)created, so the cloud-provider sees the role on its first reconcile.
 
-To avoid the gap entirely, prefer creating clusters through the dashboard's provision flow, which performs this grant as part of `provision_aks`.
 
 ## Where to go next
 
