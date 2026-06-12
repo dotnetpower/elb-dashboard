@@ -272,7 +272,7 @@ redeploy. The env flags only gate whether the subsystem runs at all.
 
 ```bash
 uv run pytest -q api/tests/test_service_bus_pref.py \
-  api/tests/test_service_bus_service.py \
+  api/tests/test_service_bus_drain_loop.py \
   api/tests/test_settings_service_bus.py \
   api/tests/test_servicebus_tasks.py
 ```

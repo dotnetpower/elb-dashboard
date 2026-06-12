@@ -22,7 +22,7 @@ Risky contracts: Receivers settle EVERY message they receive (complete /
     logged or returned to a caller. All errors are normalised to
     ``ServiceBusUnavailable`` / ``ServiceBusAuthError`` so callers degrade
     instead of leaking SDK internals.
-Validation: ``uv run pytest -q api/tests/test_service_bus_service.py``.
+Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py``.
 """
 
 from __future__ import annotations
