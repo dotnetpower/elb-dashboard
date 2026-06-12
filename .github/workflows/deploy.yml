@@ -4,18 +4,29 @@ name: Deploy to Container App
 # `build-images.yml` on every push to main; this workflow only patches the
 # running `ca-elb-dashboard` to a chosen tag (no rebuild).
 #
-# Two ways to start a deploy, both gated by the same `production` approval:
-#   1. Automatic — after "Build Images" succeeds on main, this workflow is
+# Two ways to start a deploy:
+#   1. Automatic CD — after "Build Images" succeeds on main, this workflow is
 #      triggered via `workflow_run`. It deploys ALL sidecars at the immutable
-#      `gha-<sha>` tag the build just produced.
+#      `gha-<sha>` tag the build just produced, **without an approval gate**,
+#      but ONLY when the triggering commit message contains the literal marker
+#      `[cd]`. A push whose commit message has no `[cd]` builds images but does
+#      NOT deploy (the deploy job is skipped). This is an intentional
+#      production auto-deploy: the `[cd]` marker is the human's explicit opt-in.
 #   2. Manual — `workflow_dispatch` from the Actions UI, choosing the sidecar
-#      and tag yourself (the original behaviour).
+#      and tag yourself. Manual deploys STILL go through the `production`
+#      environment approval gate (a human clicks Approve), because a hand-run
+#      deploy is a deliberate, reviewable action.
 #
-# In BOTH cases the job targets the `production` environment, whose required
-# reviewer rule makes GitHub e-mail the reviewer (you) for approval before
-# `az containerapp update` runs. Nothing reaches Azure until you click Approve
-# in the run's "Review deployments" prompt (or the e-mail link). Reject to
-# discard an auto-deploy you don't want.
+# Approval matrix:
+#   - workflow_dispatch  -> environment: production  -> approval REQUIRED
+#   - workflow_run + [cd] -> environment: (none)      -> NO approval, auto-deploy
+#   - workflow_run, no [cd] -> job skipped (build only)
+#
+# Safety rails kept even on the no-approval CD path: main branch only
+# (workflow_run.branches), build-success only, the chosen image tag must exist
+# in ACR, and the post-deploy /api/health smoke must pass or the run goes red.
+# There is no automatic rollback — a red CD run is the signal to roll back with
+# the manual workflow.
 #
 # Configure the environment once at:
 #   https://github.com/dotnetpower/elb-dashboard/settings/environments
@@ -51,9 +62,10 @@ on:
         required: false
         default: false
         type: boolean
-  # Auto-deploy path: fire after a successful Build Images run on main. The
-  # job still stops at the production approval gate (e-mail), so this only
-  # *offers* a deploy of the freshly built images — it never deploys on its own.
+  # Auto-deploy path: fire after a successful Build Images run on main. Unlike
+  # the manual path this runs WITHOUT the production approval gate, so it is
+  # additionally guarded by the `[cd]` commit-message marker in the job `if`
+  # below — a push without `[cd]` builds images but skips this deploy.
   workflow_run:
     workflows: ["Build Images"]
     types: [completed]
@@ -73,11 +85,20 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Manual dispatch always runs; the auto path only runs when the triggering
-    # Build Images run succeeded (a failed/cancelled build never offers a deploy).
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # Manual dispatch always runs. The auto (workflow_run) path runs only when
+    # the triggering build succeeded AND its commit message carries the literal
+    # `[cd]` marker — the human's explicit opt-in for a no-approval production
+    # deploy. A successful build without `[cd]` skips this job (build only).
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           contains(github.event.workflow_run.head_commit.message, '[cd]')) }}
+    # Approval gate is applied ONLY to manual dispatch: `production` requires a
+    # reviewer. The automatic `[cd]` path resolves to an empty environment name,
+    # which GitHub treats as "no environment" → no approval gate. This is the
+    # deliberate auto-CD behaviour the `[cd]` marker opts into.
     environment:
-      name: production
+      name: ${{ github.event_name == 'workflow_dispatch' && 'production' || '' }}
       # CONTAINER_APP_FQDN should be a repo variable; the env link lets the
       # GitHub UI show a click-through URL alongside the approval gate.
       url: https://${{ vars.CONTAINER_APP_FQDN }}/
