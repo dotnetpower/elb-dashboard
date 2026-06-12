@@ -9,6 +9,7 @@ import { JobsFilterBar } from "./JobsFilterBar";
 import { JobsHeader } from "./JobsHeader";
 import { JobsLoadingSkeleton } from "./JobsLoadingSkeleton";
 import { NoFilteredEmpty, NoJobsEmpty } from "./JobsEmptyState";
+import { ServiceBusInboundStrip } from "./ServiceBusInboundStrip";
 import { useBlastJobsState } from "./useBlastJobsState";
 
 export function BlastJobs() {
@@ -20,6 +21,8 @@ export function BlastJobs() {
     setFilter,
     search,
     setSearch,
+    source,
+    setSource,
     cluster,
     jobsQuery,
     deleteMutation,
@@ -29,6 +32,7 @@ export function BlastJobs() {
     filtered,
     grouped,
     counts,
+    sourceCounts,
     handleDelete,
   } = state;
 
@@ -41,6 +45,8 @@ export function BlastJobs() {
         jobsQuery={jobsQuery}
       />
 
+      <ServiceBusInboundStrip />
+
       {jobsQuery.isLoading && <JobsLoadingSkeleton />}
 
       {allJobs.length > 0 && (
@@ -50,6 +56,9 @@ export function BlastJobs() {
           search={search}
           setSearch={setSearch}
           counts={counts}
+          source={source}
+          setSource={setSource}
+          sourceCounts={sourceCounts}
         />
       )}
 

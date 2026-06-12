@@ -14,8 +14,12 @@ import { useClusterReadiness } from "@/hooks/usePrerequisites";
 import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
 
 import { GROUP_ORDER, getDateGroup, type DateGroup } from "./dateGroup";
+import { jobSubmissionSource, type JobSource } from "./jobSource";
 
 export type FilterKind = "all" | "queued" | "running" | "completed" | "failed";
+
+/** Submission-source filter for Recent searches. ``all`` keeps every job. */
+export type SourceKind = "all" | JobSource;
 
 const FILTER_KINDS: ReadonlySet<FilterKind> = new Set([
   "all",
@@ -25,8 +29,19 @@ const FILTER_KINDS: ReadonlySet<FilterKind> = new Set([
   "failed",
 ]);
 
+const SOURCE_KINDS: ReadonlySet<SourceKind> = new Set([
+  "all",
+  "ui",
+  "api",
+  "servicebus",
+]);
+
 function parseFilter(raw: string | null): FilterKind {
   return raw && FILTER_KINDS.has(raw as FilterKind) ? (raw as FilterKind) : "all";
+}
+
+function parseSource(raw: string | null): SourceKind {
+  return raw && SOURCE_KINDS.has(raw as SourceKind) ? (raw as SourceKind) : "all";
 }
 
 export function useBlastJobsState() {
@@ -40,6 +55,24 @@ export function useBlastJobsState() {
   );
   const search = searchParams.get("q") ?? "";
   const clusterFilter = searchParams.get("cluster") ?? "";
+  const source = useMemo<SourceKind>(
+    () => parseSource(searchParams.get("source")),
+    [searchParams],
+  );
+  const setSource = useCallback(
+    (next: SourceKind) => {
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          if (next === "all") params.delete("source");
+          else params.set("source", next);
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
   const setFilter = useCallback(
     (next: FilterKind) => {
       setSearchParams(
@@ -154,6 +187,9 @@ export function useBlastJobsState() {
         return isDashboardJobCompleted(j);
       });
     }
+    if (source !== "all") {
+      list = list.filter((j) => jobSubmissionSource(j) === source);
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter((j) => {
@@ -171,7 +207,7 @@ export function useBlastJobsState() {
       });
     }
     return list;
-  }, [allJobs, filter, search]);
+  }, [allJobs, filter, source, search]);
 
   const grouped = useMemo(() => {
     const map = new Map<DateGroup, BlastJobSummary[]>();
@@ -197,6 +233,16 @@ export function useBlastJobsState() {
     return c;
   }, [allJobs]);
 
+  // Counts per submission source for the source filter chips. Computed over
+  // ALL jobs (not the status-filtered subset) so each chip shows its total.
+  const sourceCounts = useMemo(() => {
+    const c = { ui: 0, api: 0, servicebus: 0 };
+    allJobs.forEach((j) => {
+      c[jobSubmissionSource(j)]++;
+    });
+    return c;
+  }, [allJobs]);
+
   const handleDelete = useCallback((id: string) => setDeleteTarget(id), []);
 
   return {
@@ -206,6 +252,8 @@ export function useBlastJobsState() {
     setFilter,
     search,
     setSearch,
+    source,
+    setSource,
     cluster,
     clusterName,
     jobsQuery,
@@ -216,6 +264,7 @@ export function useBlastJobsState() {
     filtered,
     grouped,
     counts,
+    sourceCounts,
     handleDelete,
   } as const;
 }

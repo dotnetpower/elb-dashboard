@@ -1,6 +1,6 @@
 import { Search } from "lucide-react";
 
-import type { BlastJobsState, FilterKind } from "./useBlastJobsState";
+import type { BlastJobsState, FilterKind, SourceKind } from "./useBlastJobsState";
 
 export interface JobsFilterBarProps {
   filter: FilterKind;
@@ -8,9 +8,20 @@ export interface JobsFilterBarProps {
   search: string;
   setSearch: BlastJobsState["setSearch"];
   counts: BlastJobsState["counts"];
+  source: SourceKind;
+  setSource: BlastJobsState["setSource"];
+  sourceCounts: BlastJobsState["sourceCounts"];
 }
 
 const FILTERS: FilterKind[] = ["all", "queued", "running", "completed", "failed"];
+
+// Source chips. Labels are friendlier than the raw enum (servicebus -> Queue).
+const SOURCES: Array<{ kind: SourceKind; label: string }> = [
+  { kind: "all", label: "All sources" },
+  { kind: "ui", label: "UI" },
+  { kind: "api", label: "API" },
+  { kind: "servicebus", label: "Queue" },
+];
 
 export function JobsFilterBar({
   filter,
@@ -18,6 +29,9 @@ export function JobsFilterBar({
   search,
   setSearch,
   counts,
+  source,
+  setSource,
+  sourceCounts,
 }: JobsFilterBarProps) {
   return (
     <div
@@ -41,6 +55,23 @@ export function JobsFilterBar({
             {f !== "all" && ` (${counts[f as Exclude<FilterKind, "all">]})`}
           </button>
         ))}
+      </div>
+      <div style={{ display: "flex", gap: "var(--space-2)" }}>
+        {SOURCES.map((s) => {
+          const count =
+            s.kind === "all" ? null : sourceCounts[s.kind as Exclude<SourceKind, "all">];
+          return (
+            <button
+              key={s.kind}
+              className={`glass-button ${source === s.kind ? "glass-button--primary" : ""}`}
+              onClick={() => setSource(s.kind)}
+              style={{ fontSize: 11 }}
+            >
+              {s.label}
+              {count !== null && ` (${count})`}
+            </button>
+          );
+        })}
       </div>
       <div style={{ position: "relative", flex: "1 1 180px", maxWidth: 280 }}>
         <Search
