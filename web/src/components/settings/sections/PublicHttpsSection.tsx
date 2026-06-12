@@ -238,14 +238,20 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
     setError(null);
     setStatusLoading(true);
     try {
-      const data = await aksApi.openApiPublicHttpsStatus();
+      // Scope the status read to the selected cluster so a different
+      // cluster's public-HTTPS state never leaks into this panel.
+      const data = await aksApi.openApiPublicHttpsStatus(
+        subscriptionId,
+        selectedClusterRg,
+        clusterName,
+      );
       setStatus(data);
     } catch (err) {
       setError(formatApiError(err, "aks"));
     } finally {
       setStatusLoading(false);
     }
-  }, []);
+  }, [subscriptionId, selectedClusterRg, clusterName]);
 
   useEffect(() => {
     void refresh();

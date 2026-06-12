@@ -589,6 +589,9 @@ def _validate_operator_email(value: str) -> str:
 
 @router.get("/openapi/public-https")
 def aks_openapi_public_https_status(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Return the cached public HTTPS endpoint state for the SPA panel.
@@ -596,12 +599,22 @@ def aks_openapi_public_https_status(
     Reads from ops Redis only — no kubectl round trip — so polling is
     cheap. ``{enabled: false}`` means the operator has never run the
     setup task (or ran the disable task afterwards).
+
+    The cluster context (``subscription_id`` / ``resource_group`` /
+    ``cluster_name``) scopes the lookup to that cluster's per-cluster key
+    so a previously-enabled cluster's public FQDN never leaks onto a
+    different cluster's API page. The params are optional for backward
+    compatibility; when any is missing the legacy global key is read.
     """
 
     from api.tasks.openapi import get_openapi_public_https_status
 
     del caller
-    return get_openapi_public_https_status()
+    return get_openapi_public_https_status(
+        subscription_id=subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
 
 
 @router.get("/openapi/public-https/operator-email-rules")
@@ -783,7 +796,11 @@ def aks_openapi_spec(
 
     sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
     cred = get_credential()
-    public_base = get_public_tls_base_url()
+    public_base = get_public_tls_base_url(
+        subscription_id=sub,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
 
     base_url: str = ""
     if public_base:

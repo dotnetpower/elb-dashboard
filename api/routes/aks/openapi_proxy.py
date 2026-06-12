@@ -318,7 +318,11 @@ async def aks_openapi_proxy(
     # configured, is always safe for admin-token injection because the
     # transit is encrypted end-to-end. When the env is unset we fall back
     # to the historical IP path with all its safety gates intact.
-    public_base = get_public_tls_base_url()
+    public_base = get_public_tls_base_url(
+        subscription_id=sub,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
     use_public_tls = bool(public_base and public_base.lower().startswith("https://"))
 
     if use_public_tls:

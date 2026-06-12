@@ -5,6 +5,7 @@ import { AlertTriangle, Loader2, Package, Power, RefreshCw, Server } from "lucid
 import { Link } from "react-router-dom";
 
 import { aksApi, monitoringApi } from "@/api/endpoints";
+import type { ApiError } from "@/api/client";
 import { OpenApiDeployPanel } from "@/components/OpenApiDeployPanel";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { ApiHero } from "@/pages/apiReference/ApiHero";
@@ -127,9 +128,9 @@ export function ApiReference() {
   // Swagger UI link, and the "Copy curl" button all point at the
   // externally-reachable URL.
   const publicHttpsQuery = useQuery({
-    queryKey: ["openapi-public-https"],
-    queryFn: () => aksApi.openApiPublicHttpsStatus(),
-    enabled,
+    queryKey: ["openapi-public-https", sub, clusterRg, clusterName],
+    queryFn: () => aksApi.openApiPublicHttpsStatus(sub, clusterRg, clusterName),
+    enabled: enabled && Boolean(clusterName),
     staleTime: 60_000,
     retry: 1,
   });
@@ -307,8 +308,15 @@ export function ApiReference() {
           // The deployment read itself failed (workload-cluster unreachable /
           // kubectl RBAC). Surface it instead of silently dropping the banner —
           // a "redeploy needed" prompt that fails closed is worse than a noisy
-          // one, because the operator assumes everything is current.
-          const deploymentReadFailed = deploymentQuery.isError;
+          // one, because the operator assumes everything is current. A 404
+          // (`openapi_deployment_not_found`) is NOT a read failure though — it
+          // means elb-openapi simply isn't deployed yet, which the
+          // service-IP-driven Deploy panel above already handles. Treating it
+          // as "unreachable / missing RBAC" mislabels a fresh cluster, so
+          // exclude it here.
+          const deploymentReadFailed =
+            deploymentQuery.isError &&
+            (deploymentQuery.error as Partial<ApiError> | null)?.status !== 404;
 
           if (imageOutdated || manifestOutdated) {
             return (

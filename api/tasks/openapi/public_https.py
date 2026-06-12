@@ -1114,7 +1114,12 @@ def disable_openapi_public_https(
     }
 
 
-def get_openapi_public_https_status() -> dict[str, Any]:
+def get_openapi_public_https_status(
+    *,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+) -> dict[str, Any]:
     """Return the current public HTTPS state for the SPA's panel.
 
     Reads from the runtime cache only — no kubectl round trip — so the
@@ -1122,8 +1127,22 @@ def get_openapi_public_https_status() -> dict[str, Any]:
     `setup_openapi_public_https` on success and cleared by
     `disable_openapi_public_https`, so its presence is the source of
     truth for "enabled" vs "not enabled".
+
+    When the caller passes the full cluster context the lookup is scoped
+    to that cluster's per-cluster key. This prevents a previously-enabled
+    cluster's public FQDN from leaking onto a different (e.g. just-created)
+    cluster's API page, where it would point the SPA at a dead endpoint and
+    surface a spurious "did not respond / repair peering" recovery card.
+    Without the context the legacy global key is read (backward compatible
+    with callers that predate the multi-cluster cache).
     """
-    cached = get_openapi_public_base_url()
+    cluster_arm_id = ""
+    if subscription_id and resource_group and cluster_name:
+        cluster_arm_id = (
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.ContainerService/managedClusters/{cluster_name}"
+        )
+    cached = get_openapi_public_base_url(cluster_arm_id=cluster_arm_id)
     if not cached:
         return {"enabled": False}
     metadata = cached.get("metadata") or {}

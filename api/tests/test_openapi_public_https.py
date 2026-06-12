@@ -713,6 +713,108 @@ def test_disable_public_https_clears_cache(monkeypatch) -> None:
     assert task_module.get_openapi_public_https_status() == {"enabled": False}
 
 
+def test_public_https_status_scoped_to_cluster(monkeypatch) -> None:
+    """A previously-enabled cluster's public FQDN must not leak onto a
+    different (e.g. just-created) cluster's API page.
+
+    Regression guard for the stale-cache bug: ``get_openapi_public_https_status``
+    used to read the legacy global key unconditionally, so a fresh cluster
+    inherited an old cluster's dead endpoint and the SPA surfaced a spurious
+    "did not respond / repair peering" recovery card.
+    """
+    from api.services.openapi import runtime
+    from api.tasks.openapi import public_https as task_module
+
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(runtime, "get_ops_redis_client", lambda **_kw: fake_redis)
+
+    runtime.save_openapi_public_base_url(
+        "https://elb-openapi-aaa.koreacentral.cloudapp.azure.com",
+        cluster_arm_id=(
+            "/subscriptions/sub-1/resourceGroups/rg-elb"
+            "/providers/Microsoft.ContainerService/managedClusters/cluster-a"
+        ),
+        metadata={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "cluster-a",
+        },
+        client=fake_redis,
+    )
+
+    # Cluster A sees its own endpoint.
+    status_a = task_module.get_openapi_public_https_status(
+        subscription_id="sub-1", resource_group="rg-elb", cluster_name="cluster-a"
+    )
+    assert status_a["enabled"] is True
+    assert status_a["public_base_url"].endswith("cloudapp.azure.com")
+
+    # A freshly-created cluster B (no entry of its own) must NOT inherit A's URL.
+    status_b = task_module.get_openapi_public_https_status(
+        subscription_id="sub-1", resource_group="rg-elb", cluster_name="cluster-b"
+    )
+    assert status_b == {"enabled": False}
+
+    # No context at all → legacy global key (backward compatible).
+    status_legacy = task_module.get_openapi_public_https_status()
+    assert status_legacy["enabled"] is True
+
+
+def test_public_tls_base_url_scoped_to_cluster(monkeypatch) -> None:
+    """`get_public_tls_base_url` must not leak one cluster's public FQDN onto
+    another cluster's data-plane calls (BLAST submit / spec / proxy).
+
+    Regression guard for the cross-cluster misrouting bug: the helper used to
+    read the legacy global key unconditionally, so submitting to cluster B
+    while cluster A had public HTTPS enabled would route B's traffic to A's
+    endpoint.
+    """
+    from api.services.openapi import runtime
+
+    fake_redis = _FakeRedis()
+    monkeypatch.delenv("OPENAPI_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setattr(runtime, "get_ops_redis_client", lambda **_kw: fake_redis)
+
+    runtime.save_openapi_public_base_url(
+        "https://elb-openapi-aaa.koreacentral.cloudapp.azure.com",
+        cluster_arm_id=(
+            "/subscriptions/sub-1/resourceGroups/rg-elb"
+            "/providers/Microsoft.ContainerService/managedClusters/cluster-a"
+        ),
+        metadata={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "cluster-a",
+        },
+        client=fake_redis,
+    )
+
+    # Cluster A resolves its own HTTPS endpoint.
+    assert (
+        runtime.get_public_tls_base_url(
+            subscription_id="sub-1", resource_group="rg-elb", cluster_name="cluster-a"
+        )
+        == "https://elb-openapi-aaa.koreacentral.cloudapp.azure.com"
+    )
+
+    # Cluster B (no entry) falls back to the legacy IP path, NOT A's URL.
+    assert (
+        runtime.get_public_tls_base_url(
+            subscription_id="sub-1", resource_group="rg-elb", cluster_name="cluster-b"
+        )
+        == ""
+    )
+
+    # Env hard-pin still wins regardless of cluster context.
+    monkeypatch.setenv("OPENAPI_PUBLIC_BASE_URL", "https://override.example.com")
+    assert (
+        runtime.get_public_tls_base_url(
+            subscription_id="sub-1", resource_group="rg-elb", cluster_name="cluster-b"
+        )
+        == "https://override.example.com"
+    )
+
+
 def test_setup_public_https_propagates_kubectl_failure(monkeypatch) -> None:
     from api.tasks.openapi import public_https as task_module
 

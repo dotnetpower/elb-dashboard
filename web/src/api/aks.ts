@@ -457,8 +457,12 @@ export const aksApi = {
       regenerate,
     }),
 
-  openApiPublicHttpsStatus: () =>
-    api.get<OpenApiPublicHttpsStatus>("/aks/openapi/public-https"),
+  openApiPublicHttpsStatus: (subscriptionId?: string, rg?: string, clusterName?: string) =>
+    api.get<OpenApiPublicHttpsStatus>(
+      subscriptionId && rg && clusterName
+        ? `/aks/openapi/public-https?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`
+        : "/aks/openapi/public-https",
+    ),
 
   /**
    * Fetch the operator-email validator rules (private-use TLDs the

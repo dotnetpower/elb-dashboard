@@ -490,7 +490,11 @@ def _openapi_client_kwargs_from_cluster(
     # scheme/host. Env unset = 100% legacy behaviour.
     from api.services.openapi.runtime import get_public_tls_base_url
 
-    public_base_url = get_public_tls_base_url()
+    public_base_url = get_public_tls_base_url(
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
     try:
         from api.services import get_credential
         from api.services.k8s.monitoring import (

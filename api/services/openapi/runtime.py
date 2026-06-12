@@ -657,7 +657,12 @@ def _clear_legacy(
         return False
 
 
-def get_public_tls_base_url() -> str:
+def get_public_tls_base_url(
+    *,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+) -> str:
     """Return the operator-configured public TLS endpoint, or empty string.
 
     Empty string means "no domain configured yet — use the legacy IP
@@ -668,9 +673,23 @@ def get_public_tls_base_url() -> str:
     2. Ops Redis cache populated by `setup_openapi_public_https` — lets
        the dashboard flip to HTTPS as soon as the Celery task finishes,
        no Container App revision required.
+
+    When the full cluster context is supplied the cache lookup is scoped
+    to that cluster's per-cluster key. This is critical for the data
+    plane: without it a cluster that enabled public HTTPS would leak its
+    FQDN onto a *different* cluster's submit / spec / proxy calls (the
+    legacy global key returns the most-recently-set cluster), silently
+    misrouting BLAST submissions across clusters. Without context the
+    legacy global key is read (backward compatible).
     """
     env_url = _normalise_base_url(os.environ.get(_PUBLIC_BASE_URL_ENV, ""))
     if env_url:
         return env_url
-    cached = get_openapi_public_base_url()
+    cluster_arm_id = ""
+    if subscription_id and resource_group and cluster_name:
+        cluster_arm_id = (
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.ContainerService/managedClusters/{cluster_name}"
+        )
+    cached = get_openapi_public_base_url(cluster_arm_id=cluster_arm_id)
     return str(cached.get("base_url") or "")
