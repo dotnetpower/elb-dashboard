@@ -414,6 +414,38 @@ def _local_to_blast_job(
             payload_error = payload.get("error")
             if payload_error:
                 out["output"]["error"] = payload_error
+    elif isinstance(payload, dict) and isinstance(payload.get("external"), dict):
+        # External-origin rows (a `/v1/jobs` submit synced into our Table) never
+        # carry a dashboard `_progress` — the embedded sibling snapshot lives at
+        # payload['external']. Synthesize the SAME honest step timeline the
+        # fresh-fetch projection produces so the Execution Steps section is not
+        # blank (and dashboard-only warmup/staging steps are shown skipped, not
+        # faked as completed). Drive it off the row's LIVE status (the embedded
+        # snapshot status can be stale; repo.update only refreshes status/phase).
+        from api.services.blast.external_job_projection import _external_step_projection
+
+        external_snapshot = payload["external"]
+        live_status = str(getattr(state, "status", "") or "")
+        ext_projection = _external_step_projection(
+            external_snapshot, dashboard_status=live_status
+        )
+        ext_steps = ext_projection["steps"]
+        out["custom_status"] = {
+            "phase": state.phase or live_status,
+            "blast_status": str(external_snapshot.get("status") or live_status),
+            "steps": ext_steps,
+        }
+        out["output"] = {
+            "status": live_status,
+            "phase": state.phase or live_status,
+            "steps": ext_steps,
+        }
+        if ext_projection["error"]:
+            out["output"]["error"] = ext_projection["error"]
+            if not out.get("error"):
+                out["error"] = ext_projection["error"]
+        if ext_projection["failed_step"]:
+            out["output"]["failed_step"] = ext_projection["failed_step"]
     if include_database_metadata:
         from api.services.blast.db_metadata import extract_trusted_storage_account
 

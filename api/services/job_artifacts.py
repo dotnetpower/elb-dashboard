@@ -432,10 +432,35 @@ def build_execution_steps_snapshot(state: Any) -> dict[str, Any]:
     progress: dict[str, Any] = raw_progress if isinstance(raw_progress, dict) else {}
     raw_steps = progress.get("steps")
     steps: dict[str, Any] = raw_steps if isinstance(raw_steps, dict) else {}
+    status = str(getattr(state, "status", "") or progress.get("status") or "")
+    # External-origin rows (a `/v1/jobs` job synced into our Table) never carry
+    # a dashboard `_progress`; the sibling snapshot lives at payload['external'].
+    # Synthesize the SAME honest step timeline the projection produces so the
+    # terminal execution-steps snapshot the SPA overlays on a finished external
+    # job is not blank (dashboard-only warmup/staging steps shown skipped, not
+    # faked). Driven off the live row status (the embedded snapshot can be stale).
+    external_error: str | None = None
+    external_failed_step: str | None = None
+    if not steps and isinstance(payload.get("external"), dict):
+        from api.services.blast.external_job_projection import _external_step_projection
+
+        ext_proj = _external_step_projection(payload["external"], dashboard_status=status)
+        steps = ext_proj["steps"]
+        external_error = ext_proj["error"]
+        external_failed_step = ext_proj["failed_step"]
+    output: dict[str, Any] = {
+        "status": getattr(state, "status", None),
+        "phase": getattr(state, "phase", None),
+        "steps": steps,
+    }
+    if external_error:
+        output["error"] = external_error
+    if external_failed_step:
+        output["failed_step"] = external_failed_step
     return {
         "schema_version": 1,
         "job_id": str(getattr(state, "job_id", "")),
-        "status": str(getattr(state, "status", "") or progress.get("status") or ""),
+        "status": status,
         "phase": str(getattr(state, "phase", "") or progress.get("phase") or ""),
         "created_at": getattr(state, "created_at", None),
         "updated_at": getattr(state, "updated_at", None),
@@ -444,11 +469,7 @@ def build_execution_steps_snapshot(state: Any) -> dict[str, Any]:
             "status": progress.get("status") or getattr(state, "status", None),
             "steps": steps,
         },
-        "output": {
-            "status": getattr(state, "status", None),
-            "phase": getattr(state, "phase", None),
-            "steps": steps,
-        },
+        "output": output,
         "artifact_state": "inline_fallback",
         "log_artifacts": {
             "container": ARTIFACTS_CONTAINER,

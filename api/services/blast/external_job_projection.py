@@ -44,13 +44,37 @@ __all__ = [
     "_clamp_error_message",
     "_database_metadata_for_response",
     "_external_error_message",
+    "_external_execution_detail_text",
+    "_external_execution_steps",
     "_external_execution_summary",
     "_external_result_files",
     "_external_status_to_dashboard",
+    "_external_step_projection",
     "_external_to_blast_job",
     "_normalise_error_code",
     "_short_external_db_name",
 ]
+
+# The dashboard's 8-step timeline (Prepare Run / Warmup Check / Configure /
+# Stage DB / Submit Job / BLAST Run / Export / Complete) is a *dashboard-native*
+# concept driven by the Celery submit task. A job that ran on the sibling
+# OpenAPI plane (a ``/v1/jobs`` submit, whether direct or Service-Bus bridged)
+# never executed the dashboard's node-local warmup / SSD-staging steps and the
+# sibling does not report per-step progress. These two steps are therefore
+# marked ``skipped`` (with an explicit reason) rather than fabricated as
+# ``completed`` — surfacing them green would be a "looks-alive ≠ is-alive"
+# lie. The remaining steps (prepare / configure / submit / run) are universally
+# true for any ``elastic-blast`` run, so their state is derived honestly from
+# the coarse external lifecycle (queued → running → success/failed/cancelled).
+_EXTERNAL_DASHBOARD_ONLY_STEPS = ("warming_up", "staging_db")
+_EXTERNAL_SKIP_REASON = "not_reported_by_external_api"
+_STEP_DONE = {"status": "completed", "success": True, "source": "external_api"}
+_STEP_SKIPPED = {
+    "status": "skipped",
+    "skipped": True,
+    "skip_reason": _EXTERNAL_SKIP_REASON,
+    "source": "external_api",
+}
 
 
 def _external_status_to_dashboard(status: str) -> str:
@@ -117,8 +141,18 @@ def _normalise_error_code(raw: str) -> str | None:
 
 
 def _clamp_error_message(raw: str) -> str | None:
-    """Collapse whitespace and cap the length of a free-form error message."""
-    collapsed = " ".join(str(raw).split())
+    """Collapse whitespace, redact secrets, and cap a free-form error message.
+
+    The message ends up in the dashboard banner and (via the synthesized step
+    projection) in ``output.steps[failed].error`` / ``.output``, so it MUST be
+    sanitised (Charter §12: UI-shown output is sanitised). A sibling
+    elastic-blast failure body can embed a SAS query string, a Bearer token, or
+    a subscription GUID; ``sanitise`` masks all three. ANSI control sequences
+    are stripped by ``sanitise`` too, before the whitespace collapse.
+    """
+    from api.services.sanitise import sanitise
+
+    collapsed = " ".join(sanitise(str(raw)).split())
     if not collapsed:
         return None
     if len(collapsed) > _MAX_ERROR_MESSAGE_LEN:
@@ -157,6 +191,182 @@ def _external_execution_summary(job: dict[str, Any]) -> dict[str, int]:
     return out
 
 
+def _external_execution_detail_text(
+    job: dict[str, Any],
+    execution_summary: dict[str, int],
+) -> str:
+    """Render the *real* sibling-reported execution detail as a log block.
+
+    Only genuinely-reported fields are included (BLAST+ version, DB version,
+    shard counts, hit count). Returns ``""`` when the sibling reported nothing,
+    so callers never attach an empty/fabricated console block to a step.
+    """
+    execution = job.get("execution")
+    if not isinstance(execution, dict):
+        result_exec = job.get("result")
+        if isinstance(result_exec, dict) and isinstance(result_exec.get("execution"), dict):
+            execution = result_exec["execution"]
+    execution = execution if isinstance(execution, dict) else {}
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+
+    def _first(*values: Any) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    lines: list[str] = []
+    blast_version = _first(job.get("blast_version"), execution.get("blast_version"))
+    if blast_version:
+        lines.append(f"BLAST+ version : {blast_version}")
+    db_version = _first(
+        job.get("db_version"), execution.get("db_version"), execution.get("db_last_updated")
+    )
+    if db_version:
+        lines.append(f"DB version     : {db_version}")
+    total = execution_summary.get("splits_total")
+    done = execution_summary.get("splits_done")
+    failed = execution_summary.get("splits_failed")
+    if total:
+        lines.append(
+            f"Shards         : {done or 0}/{total} done"
+            + (f", {failed} failed" if failed else "")
+        )
+    hit_count = result.get("hit_count")
+    if isinstance(hit_count, int):
+        lines.append(f"Hits           : {hit_count}")
+    return "\n".join(lines)
+
+
+def _external_execution_steps(
+    *,
+    dashboard_status: str,
+    error_message: str | None,
+    execution_summary: dict[str, int],
+    detail_text: str = "",
+) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """Synthesize an honest step-state map for an external OpenAPI job.
+
+    The sibling only reports a coarse ``queued → running → success/failed/
+    cancelled`` lifecycle, so we derive the dashboard timeline states from it
+    WITHOUT fabricating per-step console output. Dashboard-only node-local
+    steps (warmup / SSD staging) are marked ``skipped`` because the external
+    API neither runs nor reports them. On failure the real error is attached to
+    the inferred failed step (``running`` when shard activity is visible, else
+    ``submitting``).
+
+    Returns ``(steps, failed_step_key)`` — ``failed_step_key`` is ``None`` for
+    non-failure lifecycles.
+    """
+    steps: dict[str, dict[str, Any]] = {
+        step: dict(_STEP_SKIPPED) for step in _EXTERNAL_DASHBOARD_ONLY_STEPS
+    }
+
+    if dashboard_status == "queued":
+        steps["preparing"] = {"status": "running", "source": "external_api"}
+        return steps, None
+
+    if dashboard_status == "running":
+        steps["preparing"] = dict(_STEP_DONE)
+        steps["configuring"] = dict(_STEP_DONE)
+        steps["submitting"] = dict(_STEP_DONE)
+        running = {"status": "running", "source": "external_api"}
+        if detail_text:
+            running["last_output"] = detail_text
+        steps["running"] = running
+        return steps, None
+
+    if dashboard_status == "completed":
+        for key in ("preparing", "configuring", "submitting", "exporting_results", "completed"):
+            steps[key] = dict(_STEP_DONE)
+        running = dict(_STEP_DONE)
+        if detail_text:
+            running["last_output"] = detail_text
+        steps["running"] = running
+        return steps, None
+
+    if dashboard_status in {"failed", "cancelled"}:
+        # Infer where it broke: any visible shard activity means it reached the
+        # BLAST run; otherwise the failure is at submit time.
+        had_run_activity = any(
+            execution_summary.get(key, 0)
+            for key in ("splits_total", "splits_done", "splits_failed", "splits_active")
+        )
+        failed_step = "running" if had_run_activity else "submitting"
+        steps["preparing"] = dict(_STEP_DONE)
+        steps["configuring"] = dict(_STEP_DONE)
+        if failed_step == "running":
+            steps["submitting"] = dict(_STEP_DONE)
+        if dashboard_status == "failed":
+            failure_step: dict[str, Any] = {
+                "status": "failed",
+                "success": False,
+                "source": "external_api",
+            }
+            if error_message:
+                failure_step["error"] = error_message
+                failure_step["output"] = error_message
+            steps[failed_step] = failure_step
+            return steps, failed_step
+        # Cancelled is terminal but NOT a failure phase: leave the stopped step
+        # skipped (with a cancellation reason) and do not flag a failed step.
+        steps[failed_step] = {
+            "status": "skipped",
+            "skipped": True,
+            "skip_reason": "cancelled",
+            "source": "external_api",
+        }
+        return steps, None
+
+    # Unknown / unmapped status — surface nothing fabricated.
+    return steps, None
+
+
+_EXTERNAL_FAILED_NO_DETAIL = (
+    "External BLAST job failed, but the OpenAPI service reported no error "
+    "detail. Check the sibling job logs for the underlying cause."
+)
+
+
+def _external_step_projection(
+    job: dict[str, Any],
+    *,
+    dashboard_status: str,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    """Shared honest step + error projection for an external OpenAPI job.
+
+    Used by BOTH ``_external_to_blast_job`` (fresh sibling fetch) and the
+    external-origin branch of ``_local_to_blast_job`` (a synced Table row whose
+    payload embeds the sibling job under ``payload['external']``) so the two
+    code paths surface an identical timeline.
+
+    ``dashboard_status`` is the CURRENT normalised status — for a synced row the
+    embedded snapshot's raw ``status`` can be stale, so the live row status is
+    passed in explicitly. Returns ``steps`` / ``error`` / ``failed_step`` /
+    ``execution_summary`` (the shard tallies the caller also merges top-level).
+    """
+    if error_message is None:
+        _code, error_message = _external_error_message(job.get("error"))
+    if dashboard_status == "failed" and not error_message:
+        error_message = _EXTERNAL_FAILED_NO_DETAIL
+    execution_summary = _external_execution_summary(job)
+    detail_text = _external_execution_detail_text(job, execution_summary)
+    steps, failed_step = _external_execution_steps(
+        dashboard_status=dashboard_status,
+        error_message=error_message,
+        execution_summary=execution_summary,
+        detail_text=detail_text,
+    )
+    return {
+        "steps": steps,
+        "error": error_message,
+        "failed_step": failed_step,
+        "execution_summary": execution_summary,
+    }
+
+
 def _external_to_blast_job(
     job: dict[str, Any],
     *,
@@ -193,7 +403,31 @@ def _external_to_blast_job(
     source = str(job.get("submission_source") or "external_api")
     openapi_job_id = str(job.get("job_id") or "")
     dashboard_job_id = str(job.get("external_correlation_id") or "")
-    error_code, error_message = _external_error_message(job.get("error"))
+    error_code, _raw_error_message = _external_error_message(job.get("error"))
+    # A failed external job must never surface as "No detailed error was
+    # recorded": the shared projection synthesizes an honest, non-empty message
+    # when the sibling reports a failure with no usable error body (mirror of
+    # the local submit-failed fix in api/tasks/blast/cli_parsing.py). It also
+    # builds the honest step timeline (dashboard-only warmup/staging steps are
+    # skipped, never faked as completed).
+    projection = _external_step_projection(
+        job, dashboard_status=status, error_message=_raw_error_message
+    )
+    steps = projection["steps"]
+    failed_step = projection["failed_step"]
+    error_message = projection["error"]
+    execution_summary = projection["execution_summary"]
+    output: dict[str, Any] = {
+        "status": status,
+        "external_status": external_status,
+        "result": job.get("result"),
+        "execution": job.get("execution"),
+        "steps": steps,
+    }
+    if error_message:
+        output["error"] = error_message
+    if failed_step:
+        output["failed_step"] = failed_step
     out: dict[str, Any] = {
         "job_id": openapi_job_id,
         "job_id_kind": "openapi",
@@ -216,13 +450,9 @@ def _external_to_blast_job(
             "blast_status": external_status,
             "progress_pct": job.get("progress_pct"),
             "queue_position": job.get("queue_position"),
+            "steps": steps,
         },
-        "output": {
-            "status": status,
-            "external_status": external_status,
-            "result": job.get("result"),
-            "execution": job.get("execution"),
-        },
+        "output": output,
         "payload": {"external": job},
     }
     out["target"] = build_target(
@@ -238,7 +468,7 @@ def _external_to_blast_job(
             "openapi_status": f"/v1/jobs/{openapi_job_id}/status" if openapi_job_id else "",
         },
     )
-    out.update(_external_execution_summary(job))
+    out.update(execution_summary)
     infrastructure = {
         "subscription_id": metadata["subscription_id"],
         "resource_group": metadata["resource_group"],

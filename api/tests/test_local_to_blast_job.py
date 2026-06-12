@@ -168,6 +168,42 @@ def test_local_to_blast_job_exposes_error_for_frontend():
     assert out["error"] == "boom"
 
 
+def test_local_to_blast_job_external_origin_row_synthesizes_steps():
+    # A synced `/v1/jobs` row embeds the sibling snapshot under
+    # payload['external'] and carries no dashboard `_progress`. The projection
+    # must still surface the honest step timeline (so the Execution Steps
+    # section is not blank) driven off the row's LIVE status.
+    out = _local_to_blast_job(
+        _state(
+            status="completed",
+            phase="completed",
+            payload={"external": {"job_id": "ext-1", "status": "running"}},
+        )
+    )
+    steps = out["output"]["steps"]
+    assert out["custom_status"]["steps"] == steps
+    # Live row status (completed) wins over the stale embedded snapshot.
+    assert steps["running"]["status"] == "completed"
+    # Dashboard-only steps stay skipped, never faked.
+    assert steps["warming_up"]["status"] == "skipped"
+    assert steps["staging_db"]["status"] == "skipped"
+
+
+def test_local_to_blast_job_external_failed_row_surfaces_error():
+    out = _local_to_blast_job(
+        _state(
+            status="failed",
+            phase="failed",
+            payload={"external": {"job_id": "ext-2", "status": "failed"}},
+        )
+    )
+    # Honest fallback error so the banner never shows "No detailed error".
+    assert out["error"]
+    assert "no error detail" in out["error"].lower()
+    assert out["output"]["failed_step"] == "submitting"
+    assert out["output"]["steps"]["submitting"]["status"] == "failed"
+
+
 def test_local_to_blast_job_does_not_expose_submit_slot_wait_as_error():
     out = _local_to_blast_job(
         _state(

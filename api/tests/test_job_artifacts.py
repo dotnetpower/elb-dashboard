@@ -61,6 +61,37 @@ def test_build_execution_steps_snapshot_preserves_steps() -> None:
     assert snapshot["output"]["steps"]["submitting"]["status"] == "completed"
 
 
+def test_build_execution_steps_snapshot_synthesizes_external_row_steps() -> None:
+    # A synced `/v1/jobs` row has no dashboard `_progress`; the terminal
+    # execution-steps snapshot the SPA overlays must still carry an honest
+    # step timeline (not blank), with dashboard-only steps skipped.
+    state = _state(
+        status="completed",
+        phase="completed",
+        payload={"external": {"job_id": "ext-9", "status": "success"}},
+    )
+    snapshot = build_execution_steps_snapshot(state)
+    steps = snapshot["output"]["steps"]
+    assert snapshot["custom_status"]["steps"] == steps
+    assert steps["running"]["status"] == "completed"
+    assert steps["warming_up"]["status"] == "skipped"
+    assert steps["staging_db"]["status"] == "skipped"
+
+
+def test_build_execution_steps_snapshot_external_failure_surfaces_error() -> None:
+    state = _state(
+        status="failed",
+        phase="failed",
+        payload={"external": {"job_id": "ext-10", "status": "failed"}},
+    )
+    snapshot = build_execution_steps_snapshot(state)
+    assert snapshot["output"]["error"]
+    assert "no error detail" in snapshot["output"]["error"].lower()
+    assert snapshot["output"]["failed_step"] == "submitting"
+    assert snapshot["output"]["steps"]["submitting"]["status"] == "failed"
+
+
+
 def test_artifact_finalizer_only_runs_for_terminal_phases(monkeypatch) -> None:
     calls: list[dict[str, str]] = []
 
