@@ -168,6 +168,15 @@ def blast_databases_check_updates(
     base: dict[str, Any] = {
         "latest_version": "",
         "updates_available": [],
+        # True only once the per-DB NCBI signature comparison has actually
+        # run (storage scope supplied AND the downloaded-DB list resolved).
+        # The SPA uses this to decide whether an EMPTY ``updates_available``
+        # means "evaluated, nothing stale" (authoritative — do not second
+        # guess) versus "not evaluated" (fall back to the coarse
+        # ``source_version != latest-dir`` heuristic). Without it the SPA
+        # cannot tell the two apart and falsely re-flags every DB whose
+        # ``latest-dir`` merely rotated once all real updates are applied.
+        "updates_available_evaluated": False,
     }
 
     try:
@@ -277,6 +286,7 @@ def blast_databases_check_updates(
             )
 
     base["updates_available"] = updates
+    base["updates_available_evaluated"] = True
     return base
 
 

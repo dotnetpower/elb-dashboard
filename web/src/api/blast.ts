@@ -401,9 +401,20 @@ export const blastApi = {
         db: string;
         snapshot?: string;
         signature_etag?: string;
+        composite_signature?: string | null;
         stored_etag?: string | null;
+        stored_composite_signature?: string | null;
         stored_source_version?: string | null;
       }>;
+      /**
+       * True only when the backend actually ran the per-DB NCBI signature
+       * comparison (storage scope supplied AND the downloaded-DB list
+       * resolved). When true, an empty `updates_available` is authoritative —
+       * the SPA must NOT fall back to the coarse `source_version !==
+       * latest_version` heuristic, which re-flags every DB whose `latest-dir`
+       * merely rotated. When false/undefined the SPA may use that fallback.
+       */
+      updates_available_evaluated?: boolean;
       degraded?: boolean;
       degraded_reason?: string;
       message?: string;

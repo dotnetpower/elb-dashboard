@@ -26,6 +26,7 @@ import {
   BlastDbRowSkeleton,
 } from "@/components/cards/storage/BlastDbRow";
 import { BlastDbUpdateConfirm } from "@/components/cards/storage/BlastDbUpdateConfirm";
+import { dbHasUpdate } from "@/components/cards/storage/blastDbUpdates";
 import {
   readAutoWarmupDbs,
   setAutoWarmupDb,
@@ -170,6 +171,7 @@ export function BlastDbModal({
     isDbReady,
     updatesAvailable,
     updatesAvailableByDb,
+    updatesEvaluated,
     downloading,
     oracleBuilding,
     inProgress,
@@ -607,16 +609,15 @@ export function BlastDbModal({
                     const preview = previewByName.get(db.value);
                     // Per-DB update detection prefers the server-side ETag
                     // map; fall back to the legacy snapshot comparison only
-                    // when the server omitted the per-DB list.
-                    const etagUpdate = updatesAvailableByDb.has(db.value);
-                    const legacyUpdate =
-                      !!meta?.source_version &&
-                      !!latestVersion &&
-                      meta.source_version !== latestVersion;
-                    const hasUpdate =
-                      isDownloaded &&
-                      (etagUpdate || (updatesAvailableByDb.size === 0 && legacyUpdate)) &&
-                      !meta?.update_in_progress;
+                    // when the server did NOT evaluate per-DB (no storage
+                    // scope / list failed). See dbHasUpdate for the rule.
+                    const hasUpdate = dbHasUpdate({
+                      meta,
+                      isDownloaded,
+                      inUpdateMap: updatesAvailableByDb.has(db.value),
+                      updatesEvaluated,
+                      latestVersion,
+                    });
                     return (
                       <BlastDbRow
                         key={db.value}

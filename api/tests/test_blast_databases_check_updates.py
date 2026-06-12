@@ -11,7 +11,11 @@ Key entry points: `test_no_storage_scope_returns_legacy_shape`,
     `test_per_db_etag_diff_lists_update`,
     `test_ncbi_unavailable_degrades`.
 Risky contracts: Response keys ``latest_version`` and ``updates_available``
-    are part of the SPA contract (web/src/api/blast.ts ``checkUpdates``).
+    are part of the SPA contract (web/src/api/blast.ts ``checkUpdates``). The
+    ``updates_available_evaluated`` boolean tells the SPA whether the per-DB
+    comparison actually ran; an empty list with the flag True is authoritative
+    "nothing stale" (the SPA must not re-apply its legacy source_version
+    heuristic), while the flag False permits that fallback.
 Validation: `uv run pytest -q api/tests/test_blast_databases_check_updates.py`.
 """
 
@@ -81,6 +85,9 @@ def test_no_storage_scope_returns_legacy_shape(
     body = resp.json()
     assert body["latest_version"] == "2026-05-21-01-05-02"
     assert body["updates_available"] == []
+    # No storage scope -> the per-DB signature comparison did NOT run, so the
+    # SPA is allowed to fall back to its legacy source_version heuristic.
+    assert body["updates_available_evaluated"] is False
 
 
 def test_per_db_etag_match_returns_no_updates(
@@ -122,6 +129,9 @@ def test_per_db_etag_match_returns_no_updates(
     assert body["latest_version"] == "2026-05-21-01-05-02"
     # ETag unchanged -> no update fires even though latest-dir rotated.
     assert body["updates_available"] == []
+    # Per-DB comparison ran and found nothing: this empty list is
+    # authoritative, so the SPA must NOT fall back to the legacy heuristic.
+    assert body["updates_available_evaluated"] is True
 
 
 def test_per_db_etag_diff_lists_update(
@@ -163,6 +173,7 @@ def test_per_db_etag_diff_lists_update(
     assert item["db"] == "core_nt"
     assert item["signature_etag"] == "new-etag"
     assert item["stored_etag"] == "old-etag"
+    assert body["updates_available_evaluated"] is True
 
 
 def test_ncbi_unavailable_degrades(

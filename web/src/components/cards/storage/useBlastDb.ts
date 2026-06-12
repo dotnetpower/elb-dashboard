@@ -178,6 +178,12 @@ export function useBlastDb({
     staleTime: 300_000,
   });
   const latestVersion = latestQuery.data?.latest_version ?? null;
+  // True when the backend actually ran the per-DB NCBI signature comparison.
+  // When true, an empty `updates_available` is authoritative: the SPA must
+  // NOT fall back to the coarse `source_version !== latest_version` heuristic
+  // (that fallback re-flags every DB whose `latest-dir` merely rotated once
+  // all genuine updates are applied — the "looks not updated" false positive).
+  const updatesEvaluated = latestQuery.data?.updates_available_evaluated === true;
   const updatesAvailableByDb = useMemo(() => {
     const map = new Map<string, { snapshot?: string; etag?: string }>();
     for (const item of latestQuery.data?.updates_available ?? []) {
@@ -255,8 +261,8 @@ export function useBlastDb({
     // Prefer the server-side per-DB list (compares NCBI ETag against the
     // ETag stored when prepare-db landed) — it does not fire whenever
     // ``latest-dir`` rotates. Fall back to the legacy heuristic only when
-    // the server omitted the per-DB list (no storage scope passed).
-    if (updatesAvailableByDb.size > 0) {
+    // the server did NOT evaluate per-DB (no storage scope / list failed).
+    if (updatesEvaluated) {
       let n = 0;
       for (const [name] of updatesAvailableByDb) {
         const meta = downloadedDbs.get(name);
@@ -269,7 +275,7 @@ export function useBlastDb({
       (d) =>
         d.source_version && d.source_version !== latestVersion && !d.update_in_progress,
     ).length;
-  }, [downloadedDbs, latestVersion, updatesAvailableByDb]);
+  }, [downloadedDbs, latestVersion, updatesAvailableByDb, updatesEvaluated]);
 
   // Tick elapsed seconds while ANY copy is in-flight — either the API ack
   // is pending (``downloading``) or the server-side copy daemon is polling
@@ -325,6 +331,23 @@ export function useBlastDb({
     }, 10_000);
     return () => clearInterval(t);
   }, [inProgress.size, serverCopyActive, refetchDbList]);
+
+  // Clear the stale "Update available" badge/button the instant a copy or
+  // update finishes. The check-updates query (`blast-db-latest-version`) has a
+  // long staleTime and no refetchInterval — without this it keeps serving the
+  // pre-update list (including the DB the user JUST updated) for minutes, so
+  // the row still shows "Update" and the dashboard still looks un-updated.
+  // Re-running it on the serverCopyActive falling edge re-reads the per-DB
+  // NCBI signatures so the freshly-promoted DB drops out of the list.
+  const refetchLatest = latestQuery.refetch;
+  const prevServerCopyActiveRef = useRef(serverCopyActive);
+  useEffect(() => {
+    const wasActive = prevServerCopyActiveRef.current;
+    prevServerCopyActiveRef.current = serverCopyActive;
+    if (wasActive && !serverCopyActive) {
+      void refetchLatest();
+    }
+  }, [serverCopyActive, refetchLatest]);
 
   // Detect copy completion honestly — the hardened prepare-db pipeline writes
   // ``copy_status.phase`` into ``{db}-metadata.json``. Only ``completed`` is
@@ -692,6 +715,7 @@ export function useBlastDb({
     isDbReady,
     updatesAvailable,
     updatesAvailableByDb,
+    updatesEvaluated,
     // Local-debug state (only meaningful when the api process is local)
     canEnableLocalAccess,
     canGrantLocalRbac,
