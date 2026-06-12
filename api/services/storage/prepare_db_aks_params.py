@@ -11,7 +11,8 @@ Responsibility: Parse the `PREPARE_DB_AKS_*` environment knobs into a validated
     optional azcopy-concurrency / backoff / TTL overrides).
 Edit boundaries: Pure function — no Azure SDK, no IO, no HTTP. The route still
     owns dispatch, locking, metadata, and error mapping.
-Key entry points: `AksJobLimits`, `resolve_aks_job_limits`.
+Key entry points: `AksJobLimits`, `resolve_aks_job_limits`,
+    `prefer_server_side_for_small_db`.
 Risky contracts: An unset / unparsable optional override stays `None` so the
     downstream `prepare_db_jobs` defaults apply — omitting an env var MUST keep
     the existing behaviour.
@@ -25,6 +26,48 @@ from dataclasses import dataclass
 
 _DEFAULT_IMAGE = "mcr.microsoft.com/azure-cli:2.81.0"
 _DEFAULT_DEADLINE_SECONDS = 4 * 60 * 60
+
+# Size below which an ``mode=auto`` prepare-db is cheaper on the server-side
+# (`start_copy_from_url`) path than the AKS-fanout path. The AKS path pays a
+# fixed bootstrap cost per Job (pod scheduling + image pull + `azcopy login`
+# + the Celery poll granularity) that dwarfs the transfer for a small DB like
+# `16S_ribosomal_RNA` (~18 MB / 15 files). Server-to-server async copy is
+# near-instant at that scale and needs no cluster. Only consulted for
+# ``mode=auto``; explicit ``mode=aks`` always honours the caller.
+_DEFAULT_MIN_AKS_TOTAL_BYTES = 1024 * 1024 * 1024  # 1 GiB
+# When NCBI does not report per-file sizes (every size is 0), fall back to a
+# file-count gate so a large DB with unknown sizes is NOT misrouted to the
+# slower server-side path. Few files + unknown size = treat as small.
+_DEFAULT_MIN_AKS_FILE_COUNT = 30
+
+
+def prefer_server_side_for_small_db(total_bytes: int, file_count: int) -> bool:
+    """Return True when an ``mode=auto`` prepare-db should use the server-side
+    path instead of AKS-fanout because the database is small enough that the
+    AKS Job bootstrap overhead dominates the transfer.
+
+    Decision (env-overridable):
+      * sizes known (``total_bytes > 0``): server-side iff
+        ``total_bytes < PREPARE_DB_AKS_MIN_TOTAL_BYTES``.
+      * sizes unknown (``total_bytes == 0``): server-side iff
+        ``file_count <= PREPARE_DB_AKS_MIN_FILE_COUNT`` — never strand a
+        large, unknown-size DB on the slow path on a count it cannot beat.
+
+    Pure / side-effect-free so the route stays thin and this is unit-testable.
+    """
+    min_bytes = _int_or(
+        _DEFAULT_MIN_AKS_TOTAL_BYTES,
+        os.environ.get("PREPARE_DB_AKS_MIN_TOTAL_BYTES", str(_DEFAULT_MIN_AKS_TOTAL_BYTES)),
+        minimum=0,
+    )
+    min_count = _int_or(
+        _DEFAULT_MIN_AKS_FILE_COUNT,
+        os.environ.get("PREPARE_DB_AKS_MIN_FILE_COUNT", str(_DEFAULT_MIN_AKS_FILE_COUNT)),
+        minimum=0,
+    )
+    if total_bytes > 0:
+        return total_bytes < min_bytes
+    return file_count <= min_count
 
 
 @dataclass(frozen=True)
@@ -90,7 +133,7 @@ def resolve_aks_job_limits() -> AksJobLimits:
         files_per_pod=_int_or(
             50, os.environ.get("PREPARE_DB_AKS_FILES_PER_POD", "50"), minimum=1
         ),
-        image=os.environ.get("PREPARE_DB_AKS_AZCOPY_IMAGE", _DEFAULT_IMAGE),
+        image=os.environ.get("PREPARE_DB_AKS_AZCOPY_IMAGE", "").strip() or _DEFAULT_IMAGE,
         active_deadline_seconds=_int_or(
             _DEFAULT_DEADLINE_SECONDS,
             os.environ.get("PREPARE_DB_AKS_JOB_TIMEOUT_SECONDS", str(_DEFAULT_DEADLINE_SECONDS)),

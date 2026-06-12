@@ -331,6 +331,29 @@ def _try_dispatch_aks_mode(
     file_keys = [k for k, _ in sized_keys]
     file_sizes = {k: s for k, s in sized_keys if s > 0}
 
+    # Size-based routing (mode=auto only). A tiny DB (e.g. 16S ~18 MB / 15
+    # files) finishes a server-to-server async copy near-instantly, while the
+    # AKS-fanout path pays a fixed per-Job bootstrap cost (pod scheduling +
+    # image pull + `azcopy login` + the 30 s Celery poll granularity) that
+    # dwarfs the transfer. Fall through to the server-side path BEFORE taking
+    # the lock / writing start metadata, so no state is left behind. Explicit
+    # ``mode=aks`` always honours the caller and skips this gate.
+    if mode == "auto":
+        from api.services.storage.prepare_db_aks_params import (
+            prefer_server_side_for_small_db,
+        )
+
+        total_bytes = sum(file_sizes.values())
+        if prefer_server_side_for_small_db(total_bytes, len(file_keys)):
+            LOGGER.info(
+                "prepare_db mode=auto db=%s small (%d bytes, %d files); "
+                "using server-side path instead of AKS-fanout",
+                db_name,
+                total_bytes,
+                len(file_keys),
+            )
+            return None
+
     # Acquire route-side lock + write start metadata. The Celery worker
     # process owns the rest of the lifecycle; cross-process serialisation
     # is the metadata's ``update_in_progress=true`` flag.

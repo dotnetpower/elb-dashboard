@@ -13,7 +13,10 @@ Validation: `uv run pytest -q api/tests/test_prepare_db_aks_params.py`.
 from __future__ import annotations
 
 import pytest
-from api.services.storage.prepare_db_aks_params import resolve_aks_job_limits
+from api.services.storage.prepare_db_aks_params import (
+    prefer_server_side_for_small_db,
+    resolve_aks_job_limits,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +29,8 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "PREPARE_DB_AKS_AZCOPY_CONCURRENCY",
         "PREPARE_DB_AKS_BACKOFF_LIMIT",
         "PREPARE_DB_AKS_TTL_SECONDS",
+        "PREPARE_DB_AKS_MIN_TOTAL_BYTES",
+        "PREPARE_DB_AKS_MIN_FILE_COUNT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -83,3 +88,29 @@ def test_zero_backoff_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     limits = resolve_aks_job_limits()
     assert limits.backoff_limit == 0
     assert limits.task_overrides()["backoff_limit"] == 0
+
+
+def test_small_known_size_prefers_server_side() -> None:
+    # 16S_ribosomal_RNA shape: ~18 MB across 15 files → server-side.
+    assert prefer_server_side_for_small_db(18 * 1024 * 1024, 15) is True
+
+
+def test_large_known_size_stays_aks() -> None:
+    # core_nt shape: hundreds of GB → AKS.
+    assert prefer_server_side_for_small_db(300 * 1024 * 1024 * 1024, 4800) is False
+
+
+def test_unknown_size_uses_file_count_gate() -> None:
+    # Sizes unknown (all 0): few files → server-side, many files → AKS so a
+    # large unknown-size DB is never stranded on the slow path.
+    assert prefer_server_side_for_small_db(0, 12) is True
+    assert prefer_server_side_for_small_db(0, 5000) is False
+
+
+def test_size_thresholds_are_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Lower the byte threshold below 18 MB → the small DB now stays on AKS.
+    monkeypatch.setenv("PREPARE_DB_AKS_MIN_TOTAL_BYTES", str(1024 * 1024))  # 1 MiB
+    assert prefer_server_side_for_small_db(18 * 1024 * 1024, 15) is False
+    # Raise the file-count gate so an unknown-size 5000-file DB routes server-side.
+    monkeypatch.setenv("PREPARE_DB_AKS_MIN_FILE_COUNT", "9999")
+    assert prefer_server_side_for_small_db(0, 5000) is True

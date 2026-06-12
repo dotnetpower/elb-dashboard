@@ -441,6 +441,12 @@ ts "==> Building images via az acr build (api/frontend parallel; terminal chains
 acr_ensure_build_access "$ACR_NAME"
 build_image PID_API      "elb-api"      "$REPO_ROOT/api/Dockerfile"      "$REPO_ROOT"
 build_image PID_FRONTEND "elb-frontend" "$REPO_ROOT/web/Dockerfile"      "$REPO_ROOT"
+# Pre-baked AKS-fanout prepare-db image (Azure CLI + pinned azcopy 10.28.0).
+# Pulled by the AKS kubelet (which already holds AcrPull on this registry) so
+# prepare-db pods skip the per-pod GitHub azcopy download. The api sidecar's
+# PREPARE_DB_AKS_AZCOPY_IMAGE env (containerAppControl.bicep) points the Job at
+# this tag; if it is ever absent the resolver falls back to the public image.
+build_image PID_PREPAREDB "elb-prepare-db" "$REPO_ROOT/aks/prepare-db/Dockerfile" "$REPO_ROOT/aks/prepare-db"
 build_terminal_image PID_TERMINAL
 
 ts "    elb-api:      pid=$PID_API"
@@ -452,6 +458,7 @@ declare -A RUNNING
 RUNNING["elb-api"]=$PID_API
 RUNNING["elb-frontend"]=$PID_FRONTEND
 RUNNING["elb-terminal"]=$PID_TERMINAL
+RUNNING["elb-prepare-db"]=$PID_PREPAREDB
 
 while [ ${#RUNNING[@]} -gt 0 ]; do
   sleep 15
@@ -482,7 +489,7 @@ done
 
 # Final pass: any non-zero exit means abort.
 fail=0
-for name in elb-api elb-frontend elb-terminal; do
+for name in elb-api elb-frontend elb-terminal elb-prepare-db; do
   if ! grep -q "rc=0$" "$LOG_DIR/build-$name.log" 2>/dev/null; then
     fail=1
     ts "✗ build $name did not produce rc=0"
@@ -492,7 +499,7 @@ if [ "$fail" = "1" ]; then
   ts "Aborting: at least one image build failed."
   exit 1
 fi
-ts "==> All 3 images built and pushed"
+ts "==> All 4 images built and pushed"
 progress "done" 6 "Image builds"
 
 # ---------------------------------------------------------------------------

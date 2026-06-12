@@ -86,7 +86,24 @@ def get_credential() -> Any:
 # terminal Complete/Failed/DeadlineExceeded condition instead of declaring
 # its own ``timed_out`` first and leaving the Job orphaned. Override via env
 # to scale with even larger DBs.
-_JOB_POLL_INTERVAL_SECONDS = 30.0
+#
+# Adaptive cadence: the loop starts fast (``_JOB_POLL_INITIAL_SECONDS``) and
+# doubles each poll up to ``_JOB_POLL_INTERVAL_SECONDS``. A medium DB that
+# finishes in a couple of minutes is detected within ~5-35 s instead of
+# waiting a fixed 30 s tick, while a multi-hour `nt`/`core_nt` download settles
+# at the 30 s ceiling so the K8s API is not hammered. Small DBs no longer reach
+# this path at all (mode=auto routes them server-side), so this only tightens
+# completion detection for the medium AKS jobs that remain.
+_JOB_POLL_INTERVAL_SECONDS = float(
+    os.environ.get("PREPARE_DB_AKS_JOB_POLL_INTERVAL_SECONDS", "30")
+)
+_JOB_POLL_INITIAL_SECONDS = max(
+    1.0,
+    min(
+        _JOB_POLL_INTERVAL_SECONDS,
+        float(os.environ.get("PREPARE_DB_AKS_JOB_POLL_INITIAL_SECONDS", "5")),
+    ),
+)
 _JOB_POLL_MAX_SECONDS = int(
     os.environ.get("PREPARE_DB_AKS_JOB_POLL_MAX_SECONDS", str(4 * 60 * 60 + 15 * 60))
 )
@@ -598,6 +615,15 @@ def _poll_job_until_done(
     """Poll the Job's `.status.active/.succeeded/.failed` until completion or timeout."""
     deadline = time.monotonic() + _JOB_POLL_MAX_SECONDS
     last_snapshot: dict[str, Any] = {}
+    # Adaptive cadence: start fast, double up to the ceiling (see the constant
+    # block). A local helper keeps both sleep sites in lock-step.
+    poll_interval = _JOB_POLL_INITIAL_SECONDS
+
+    def _sleep_and_backoff() -> None:
+        nonlocal poll_interval
+        time.sleep(poll_interval)
+        poll_interval = min(poll_interval * 2, _JOB_POLL_INTERVAL_SECONDS)
+
     while time.monotonic() < deadline:
         try:
             status = get_prepare_db_job(
@@ -614,7 +640,7 @@ def _poll_job_until_done(
                 job_name,
                 type(exc).__name__,
             )
-            time.sleep(_JOB_POLL_INTERVAL_SECONDS)
+            _sleep_and_backoff()
             continue
         if status.get("missing"):
             # Job has been GC'd (TTL controller, peer delete). Treat as
@@ -650,7 +676,7 @@ def _poll_job_until_done(
         terminal = _job_is_terminal(status, succeeded, completions)
         if terminal:
             return last_snapshot
-        time.sleep(_JOB_POLL_INTERVAL_SECONDS)
+        _sleep_and_backoff()
     last_snapshot["timed_out"] = True
     return last_snapshot
 

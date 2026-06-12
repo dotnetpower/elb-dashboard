@@ -93,6 +93,12 @@ var bootstrapImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:lates
 var apiImage      = useBootstrapImage ? bootstrapImage : '${acrLoginServer}/elb-api:${apiImageTag}'
 var frontendImage = useBootstrapImage ? bootstrapImage : '${acrLoginServer}/elb-frontend:${frontendImageTag}'
 var terminalImage = useBootstrapImage ? bootstrapImage : '${acrLoginServer}/elb-terminal:${terminalImageTag}'
+// Pre-baked AKS-fanout prepare-db image (Azure CLI + azcopy 10.28.0) built into
+// the workload ACR by scripts/dev/postprovision.sh. Surfaced to the api sidecar
+// (which resolves the Job image in resolve_aks_job_limits before dispatch).
+// Empty when there is no ACR yet -> the resolver falls back to the public
+// mcr.microsoft.com/azure-cli image + the entrypoint's GitHub azcopy download.
+var prepareDbImage = empty(acrLoginServer) ? '' : '${acrLoginServer}/elb-prepare-db:${apiImageTag}'
 
 var storageDnsSuffix = environment().suffixes.storage
 var tableEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.table.${storageDnsSuffix}'
@@ -240,6 +246,13 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // `az acr build` / resolve image tags. Without it the self-upgrade
             // fails pre-flight with "PLATFORM_ACR_NAME is not set".
             { name: 'PLATFORM_ACR_NAME', value: platformAcrName }
+            // Pre-baked prepare-db AKS-fanout Job image (Azure CLI + azcopy
+            // 10.28.0). Resolved here in the api sidecar by
+            // resolve_aks_job_limits and passed as the Job image so pods skip
+            // the per-pod GitHub azcopy download. Empty -> the resolver uses
+            // the public azure-cli image + entrypoint download (unchanged
+            // legacy behaviour).
+            { name: 'PREPARE_DB_AKS_AZCOPY_IMAGE', value: prepareDbImage }
             // Live Wall log-tail fallback target. When non-empty,
             // `api.services.sidecar_logs` switches from local file tailing
             // to KQL against the LA workspace. Empty disables the fallback

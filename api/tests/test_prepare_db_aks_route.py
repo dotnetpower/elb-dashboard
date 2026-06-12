@@ -410,6 +410,10 @@ def test_mode_auto_uses_aks_when_available(
 ) -> None:
     snapshot = "2026-05-21-01-05-02"
     container = _FakeContainer()
+    # This test exercises the AKS-AVAILABILITY routing, not the size gate, so
+    # disable the small-DB size shortcut (covered in test_prepare_db_aks_params)
+    # to keep the tiny fixture sizes dispatching to AKS.
+    monkeypatch.setenv("PREPARE_DB_AKS_MIN_TOTAL_BYTES", "0")
     _baseline_patches(
         monkeypatch,
         snapshot=snapshot,
@@ -439,6 +443,52 @@ def test_mode_auto_uses_aks_when_available(
     assert payload["mode"] == "aks"
     aks_calls = [c for c in calls if c["task_name"] == "api.tasks.storage.prepare_db_via_aks"]
     assert len(aks_calls) == 1
+
+
+def test_mode_auto_small_db_uses_server_side_even_when_aks_available(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`mode=auto` + small DB → server-side path, even with AKS healthy.
+
+    The AKS Job bootstrap overhead dwarfs the transfer for a tiny DB, so the
+    size gate must short-circuit to the server-side copy and NOT dispatch the
+    AKS Celery task.
+    """
+    snapshot = "2026-05-21-01-05-02"
+    container = _FakeContainer()
+    _baseline_patches(
+        monkeypatch,
+        snapshot=snapshot,
+        # ~18 MB total — well under the 1 GiB default threshold.
+        keys_with_sizes=[(f"{snapshot}/16S_ribosomal_RNA.nsq", 18 * 1024 * 1024)],
+        container=container,
+    )
+    # AKS is fully healthy and would be used were it not for the size gate.
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_kw: ["aks-node-1", "aks-node-2", "aks-node-3"],
+        raising=True,
+    )
+    calls, fake_send = make_send_task_recorder("task-should-not-fire")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
+
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+        "db_name": "16S_ribosomal_RNA",
+        "mode": "auto",
+        "aks_resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+    }
+    resp = client.post("/api/storage/prepare-db", json=body)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    # Server-side response shape — no AKS mode marker, no task dispatch.
+    assert payload.get("mode") != "aks"
+    assert payload.get("async") is True
+    aks_calls = [c for c in calls if c["task_name"] == "api.tasks.storage.prepare_db_via_aks"]
+    assert len(aks_calls) == 0
 
 
 def test_invalid_mode_returns_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
