@@ -84,6 +84,22 @@ export function BlastHitsTable({
 
   const selectedRows = hits.filter((hit) => selectedHits.has(hitKey(hit)));
 
+  // Detect columns that are blank for the WHOLE result set because the run's
+  // outfmt omitted the source field (issue #32). `7 std staxids sscinames`
+  // carries no `stitle` (Description) and no `qlen` (so `qcovs` / HSP Cover
+  // cannot be derived), so those columns render as silent blanks. Surface a
+  // one-line reason banner instead of leaving the user guessing. outfmt 5
+  // (XML) always carries both, so the banner never shows for XML runs.
+  const descriptionColumnEmpty =
+    hits.length > 0 && hits.every((hit) => !hit.stitle);
+  const coverColumnEmpty =
+    hits.length > 0 && hits.every((hit) => numberValue(hit.qcovs) === null);
+  const showOutfmtGapHint = descriptionColumnEmpty || coverColumnEmpty;
+  const missingColumnLabels = [
+    descriptionColumnEmpty ? "Description" : null,
+    coverColumnEmpty ? "HSP Cover" : null,
+  ].filter((label): label is string => label !== null);
+
   // Per-subject rollup so the table can show NCBI's "Max Score / Total Score"
   // pair plus the HSP count. Prefer the backend aggregate (spans the
   // whole filtered result set, not just the visible page); fall back to
@@ -135,6 +151,32 @@ export function BlastHitsTable({
         />
       )}
       <div style={{ padding: 16, overflowX: "auto" }}>
+        {showOutfmtGapHint && (
+          <div
+            role="note"
+            style={{
+              marginBottom: 12,
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid var(--border)",
+              background: "color-mix(in srgb, var(--accent) 6%, transparent)",
+              color: "var(--text-muted)",
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            <strong style={{ color: "var(--text)" }}>
+              {missingColumnLabels.join(" and ")}{" "}
+              {missingColumnLabels.length > 1 ? "are" : "is"} blank for this run.
+            </strong>{" "}
+            This search used a tabular output format (e.g.{" "}
+            <code>7 std staxids sscinames</code>) that does not include{" "}
+            <code>stitle</code> (Description) or <code>qlen</code> (needed for HSP
+            Cover). Re-run with <code>stitle qlen</code> appended to the outfmt
+            specifier, or use <code>outfmt 5</code> (XML), to populate these
+            columns.
+          </div>
+        )}
         <table className="table" style={{ width: "100%", minWidth: 1320, fontSize: 13 }}>
           <thead>
             <tr>
