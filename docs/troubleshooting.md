@@ -330,6 +330,54 @@ azd env refresh -e elb-dashboard
 
 `azd env new` creates the local stub; `azd env refresh` then fills it from the deployment outputs.
 
+## OpenAPI "Try it" / Service Bus drain unreachable after a manual cluster recreate
+
+**Symptom**
+
+- The API page shows the OpenAPI spec as degraded (`openapi_endpoint_unreachable` / `openapi_service_not_reachable`), and the Service Bus drain path cannot reach the execution plane.
+- `kubectl describe svc elb-openapi -n default` shows the Service stuck on `EXTERNAL-IP <pending>` with an event like:
+
+    ```text
+    Warning  SyncLoadBalancerFailed  service-controller
+      Error syncing load balancer: failed to ensure load balancer:
+      GET .../virtualNetworks/<platform-vnet>/subnets/snet-aks
+      RESPONSE 403: AuthorizationFailed ... does not have authorization to
+      perform action 'Microsoft.Network/virtualNetworks/subnets/read'
+    ```
+
+- The `elb-openapi` pod itself is healthy (`READY 1/1 Running`); only the internal LoadBalancer frontend IP never gets allocated.
+
+**Cause**
+
+This is a [bring-your-own (BYO) subnet](https://learn.microsoft.com/azure/aks/configure-azure-cni) AKS cluster: the nodes live in the dashboard's `vnet-elb-dashboard/snet-aks`. The **runtime** LoadBalancer reconcile runs as the *cluster control-plane identity* (not the dashboard managed identity that created the nodes), so that identity needs **Network Contributor** on the `snet-aks` subnet to allocate the internal LB frontend IP.
+
+The dashboard's `provision_aks` task grants this automatically at create time. A cluster created **out-of-band** (manual `az aks create`, or delete + recreate outside the dashboard) skips that grant, so the internal LoadBalancer can never come up.
+
+**Fix**
+
+Re-run the grant idempotently via the recovery route (mirrors what provisioning does):
+
+```bash
+APP=https://<your-container-app-fqdn>
+CID=<API_CLIENT_ID>
+TOKEN=$(az account get-access-token --resource "$CID" --query accessToken -o tsv)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"subscription_id":"<sub>","resource_group":"<cluster-rg>","cluster_name":"<cluster>"}' \
+  "$APP/api/aks/openapi/lb-subnet-rbac"
+```
+
+A `granted` response means the role is now (or already) assigned. A `skipped` response with `managed_vnet_mode` means the cluster is not BYO-subnet (AKS manages the LB itself — nothing to fix here).
+
+!!! warning "The grant does not take effect instantly"
+    The AKS cloud-controller caches its ARM token, so a role granted on an
+    **already-running** cluster is not seen until that token refreshes — the
+    LoadBalancer can stay `<pending>` for several minutes. If it does not
+    recover on its own, **stop and start the cluster** to force the
+    cloud-controller to pick up the new role. Provision-time grants avoid this
+    because they run while the cluster is being created (the token is fresh).
+
+To avoid the gap entirely, prefer creating clusters through the dashboard's provision flow, which performs this grant as part of `provision_aks`.
+
 ## Where to go next
 
 - [Joining An Existing Deployment](joining-existing-deployment.md) — happy path for the same workflow.

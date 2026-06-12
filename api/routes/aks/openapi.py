@@ -396,6 +396,83 @@ def aks_openapi_deploy_cancel(
     }
 
 
+@router.post("/openapi/lb-subnet-rbac")
+def aks_openapi_lb_subnet_rbac(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Grant the cluster identity Network Contributor on its BYO node subnet.
+
+    Recovery for clusters created out-of-band (manual ``az aks create`` /
+    delete+recreate) whose ``elb-openapi`` internal LoadBalancer stays
+    ``<pending>`` with a ``subnets/<snet> ... 403 AuthorizationFailed`` event.
+    Idempotent — mirrors the grant ``provision_aks`` performs at create time
+    (see GitHub issue #33). Synchronous like ``/api/aks/peer-with-platform``.
+
+    Note: granting on an already-running cluster does not take effect
+    immediately (the cloud-controller caches its ARM token); the response
+    ``note`` explains the token-cache caveat and the stop/start workaround.
+    """
+
+    cluster_name = (body.get("cluster_name") or "").strip()
+    resource_group = (body.get("resource_group") or "").strip()
+    if not (cluster_name and resource_group):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "missing_parameters",
+                "message": "resource_group and cluster_name are required.",
+            },
+        )
+    subscription_id = (
+        body.get("subscription_id") or os.getenv("AZURE_SUBSCRIPTION_ID", "") or ""
+    ).strip()
+    if not subscription_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "missing_parameters",
+                "message": (
+                    "subscription_id is required (env AZURE_SUBSCRIPTION_ID "
+                    "is not set in this sidecar)."
+                ),
+            },
+        )
+
+    LOGGER.info(
+        "aks/openapi/lb-subnet-rbac requested cluster=%s rg=%s caller_oid=%s",
+        cluster_name,
+        resource_group,
+        redact_oid(caller.object_id),
+    )
+
+    from api.services import get_credential
+    from api.services.aks.openapi_lb_rbac import ensure_openapi_lb_subnet_rbac
+
+    try:
+        return ensure_openapi_lb_subnet_rbac(
+            get_credential(),
+            subscription_id,
+            resource_group,
+            cluster_name,
+        )
+    except Exception as exc:
+        # The grant helper raises only on a non-recoverable ARM error (e.g. the
+        # dashboard MI lacks roleAssignments/write at the subnet scope). Surface
+        # 502 with a recovery hint rather than a raw 500.
+        LOGGER.exception("aks/openapi/lb-subnet-rbac: grant failed")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "lb_subnet_rbac_grant_failed",
+                "message": (
+                    "Could not grant Network Contributor on the node subnet: "
+                    f"{type(exc).__name__}: {str(exc)[:200]}"
+                ),
+            },
+        ) from exc
+
+
 @router.get("/openapi/deployment")
 def aks_openapi_deployment(
     subscription_id: str = Query(default=""),
