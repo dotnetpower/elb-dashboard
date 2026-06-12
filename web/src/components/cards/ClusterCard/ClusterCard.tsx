@@ -618,6 +618,7 @@ export function ClusterCard({
             key={`${c.resource_group}/${c.name}`}
             cluster={c}
             transitioning={actions.transitioning}
+            transitionStartedAt={actions.transitionStartedAt}
             actionLoading={actions.actionLoading}
             onStartStop={actions.handleStartStop}
             onDelete={actions.setDeleteTarget}

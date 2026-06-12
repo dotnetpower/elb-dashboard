@@ -14,6 +14,13 @@ export type ClusterTransitionKind = "starting" | "stopping" | "deleting";
 type PersistedTransition = {
   action: ClusterTransitionKind;
   deadline: number;
+  /**
+   * Wall-clock ms when the transition was first issued. Persisted so the
+   * "Starting… · 1m 20s elapsed" clock keeps counting from the real start
+   * across page reloads instead of resetting to 0 on every refresh.
+   * Optional for back-compat with records written before this field existed.
+   */
+  startedAt?: number;
   taskId?: string;
 };
 
@@ -121,12 +128,38 @@ function readPersistedTransitionDeadlines(
   }
 }
 
+function readPersistedTransitionStartedAt(
+  subscriptionId: string,
+  resourceGroup: string,
+): Map<string, number> {
+  if (typeof window === "undefined") return new Map();
+  if (!subscriptionId || !resourceGroup) return new Map();
+  try {
+    const raw = window.localStorage.getItem(persistedKey(subscriptionId, resourceGroup));
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as Record<string, PersistedTransition>;
+    const now = Date.now();
+    const out = new Map<string, number>();
+    for (const [name, entry] of Object.entries(parsed)) {
+      if (entry?.deadline > now) {
+        // Back-compat: records written before `startedAt` existed derive it
+        // from the deadline (deadline = startedAt + TTL when first written).
+        out.set(name, entry.startedAt ?? entry.deadline - TRANSITION_TTL_MS);
+      }
+    }
+    return out;
+  } catch {
+    return new Map();
+  }
+}
+
 function writePersistedTransitions(
   subscriptionId: string,
   resourceGroup: string,
   map: Map<string, ClusterTransitionKind>,
   taskIds: Map<string, string>,
   deadlines: Map<string, number>,
+  startedAts: Map<string, number>,
 ): void {
   if (typeof window === "undefined") return;
   if (!subscriptionId || !resourceGroup) return;
@@ -138,9 +171,11 @@ function writePersistedTransitions(
     }
     const payload: Record<string, PersistedTransition> = {};
     for (const [name, action] of map) {
+      const deadline = deadlines.get(name) ?? Date.now() + TRANSITION_TTL_MS;
       payload[name] = {
         action,
-        deadline: deadlines.get(name) ?? Date.now() + TRANSITION_TTL_MS,
+        deadline,
+        startedAt: startedAts.get(name) ?? deadline - TRANSITION_TTL_MS,
         taskId: taskIds.get(name),
       };
     }
@@ -221,6 +256,9 @@ export function useClusterActions(args: {
   const [transitionDeadlines, setTransitionDeadlines] = useState<Map<string, number>>(
     () => readPersistedTransitionDeadlines(subscriptionId, resourceGroup),
   );
+  const [transitionStartedAt, setTransitionStartedAt] = useState<Map<string, number>>(
+    () => readPersistedTransitionStartedAt(subscriptionId, resourceGroup),
+  );
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   // Persist whenever the in-memory map changes so a reload survives.
@@ -231,6 +269,7 @@ export function useClusterActions(args: {
       transitioning,
       transitionTaskIds,
       transitionDeadlines,
+      transitionStartedAt,
     );
   }, [
     subscriptionId,
@@ -238,6 +277,7 @@ export function useClusterActions(args: {
     transitioning,
     transitionTaskIds,
     transitionDeadlines,
+    transitionStartedAt,
   ]);
 
   // If the parent re-targets a different subscription/RG, reload the persisted
@@ -247,6 +287,9 @@ export function useClusterActions(args: {
     setTransitionTaskIds(readPersistedTransitionTaskIds(subscriptionId, resourceGroup));
     setTransitionDeadlines(
       readPersistedTransitionDeadlines(subscriptionId, resourceGroup),
+    );
+    setTransitionStartedAt(
+      readPersistedTransitionStartedAt(subscriptionId, resourceGroup),
     );
   }, [subscriptionId, resourceGroup]);
 
@@ -258,6 +301,12 @@ export function useClusterActions(args: {
     setTransitioning((prev) => new Map(prev).set(name, action));
     setTransitionDeadlines((prev) =>
       new Map(prev).set(name, Date.now() + TRANSITION_TTL_MS),
+    );
+    // Preserve the original start time if this cluster is already in a
+    // transition (e.g. a re-issued action) so the elapsed clock never jumps
+    // backwards; only stamp `Date.now()` for a fresh transition.
+    setTransitionStartedAt((prev) =>
+      prev.has(name) ? prev : new Map(prev).set(name, Date.now()),
     );
     setTransitionTaskIds((prev) => {
       const next = new Map(prev);
@@ -281,6 +330,12 @@ export function useClusterActions(args: {
       return next;
     });
     setTransitionDeadlines((prev) => {
+      if (!prev.has(name)) return prev;
+      const next = new Map(prev);
+      next.delete(name);
+      return next;
+    });
+    setTransitionStartedAt((prev) => {
       if (!prev.has(name)) return prev;
       const next = new Map(prev);
       next.delete(name);
@@ -375,6 +430,12 @@ export function useClusterActions(args: {
           deadlines.delete(name);
           return deadlines;
         });
+        setTransitionStartedAt((prev) => {
+          if (!prev.has(name)) return prev;
+          const starts = new Map(prev);
+          starts.delete(name);
+          return starts;
+        });
         continue;
       }
       const reached = transitionTargetReached(expected, cluster);
@@ -392,6 +453,12 @@ export function useClusterActions(args: {
           const deadlines = new Map(prev);
           deadlines.delete(name);
           return deadlines;
+        });
+        setTransitionStartedAt((prev) => {
+          if (!prev.has(name)) return prev;
+          const starts = new Map(prev);
+          starts.delete(name);
+          return starts;
         });
       }
     }
@@ -516,6 +583,7 @@ export function useClusterActions(args: {
     actionInfo,
     setActionInfo,
     transitioning,
+    transitionStartedAt,
     handleStartStop,
     handleDelete,
     deleteTarget,

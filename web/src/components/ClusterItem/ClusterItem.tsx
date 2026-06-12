@@ -32,6 +32,7 @@ import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useCl
 export function ClusterItem({
   cluster: c,
   transitioning,
+  transitionStartedAt,
   actionLoading,
   onStartStop,
   onDelete,
@@ -47,6 +48,7 @@ export function ClusterItem({
 }: {
   cluster: AksClusterSummary;
   transitioning: Map<string, ClusterTransitionKind>;
+  transitionStartedAt: Map<string, number>;
   actionLoading: string | null;
   onStartStop: (name: string, action: "start" | "stop") => void;
   onDelete: (name: string) => void;
@@ -64,7 +66,10 @@ export function ClusterItem({
   const trans = transitioning.get(c.name);
   const isTransitioning = transitioning.has(c.name);
   const showOperationalDetails = isRunning && !isTransitioning;
-  const [transitionStartedAt, setTransitionStartedAt] = useState<number | null>(null);
+  // The start timestamp lives in the persisted transition record (owned by
+  // useClusterActions), so the elapsed clock keeps counting from the real
+  // start across page reloads instead of resetting to 0 on every refresh.
+  const startedAt = trans === "starting" ? (transitionStartedAt.get(c.name) ?? null) : null;
   const [detailOpen, setDetailOpen] = useState(false);
 
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
@@ -72,18 +77,10 @@ export function ClusterItem({
   );
   const autoWarmupSyncKeyRef = useRef("");
 
-  useEffect(() => {
-    if (trans === "starting") {
-      setTransitionStartedAt((prev) => prev ?? Date.now());
-      return;
-    }
-    setTransitionStartedAt(null);
-  }, [trans]);
-
   // Live timing model for the "Starting…" state — shared by the always-visible
   // status line and the expanded StartEstimatePanel so they never disagree.
   const startProgress = useStartProgress({
-    startedAt: trans === "starting" ? transitionStartedAt : null,
+    startedAt,
     autoWarmupDbCount: autoWarmupDbs.size,
   });
   const startingLine =
@@ -187,7 +184,7 @@ export function ClusterItem({
           <StartEstimatePanel
             clusterName={c.name}
             autoWarmupDbCount={autoWarmupDbs.size}
-            startedAt={transitionStartedAt}
+            startedAt={startedAt}
             progress={startProgress}
           />
         )}
