@@ -16,7 +16,10 @@ import threading
 import api.services.blast.jobs_list_cache as cache_mod
 from api.services.blast.jobs_list_cache import (
     JOBS_LIST_CACHE_MAX_ENTRIES,
+    begin_jobs_list_revalidate,
+    end_jobs_list_revalidate,
     jobs_list_cache_get,
+    jobs_list_cache_get_swr,
     jobs_list_cache_key,
     jobs_list_cache_set,
     reset_jobs_list_cache,
@@ -70,6 +73,66 @@ def test_lru_eviction_bound() -> None:
     for i in range(JOBS_LIST_CACHE_MAX_ENTRIES + 25):
         jobs_list_cache_set(_key(f"k{i}"), {"i": i})
     assert len(cache_mod._JOBS_LIST_CACHE) <= JOBS_LIST_CACHE_MAX_ENTRIES
+
+
+def test_swr_fresh_then_stale_then_cold(monkeypatch) -> None:
+    """jobs_list_cache_get_swr must report fresh, then stale, then cold."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock["now"])
+    key = _key("swr")
+    jobs_list_cache_set(key, {"v": 1})
+
+    payload, is_stale = jobs_list_cache_get_swr(key)
+    assert payload == {"v": 1} and is_stale is False
+
+    # Past the fresh window but inside the stale ceiling → stale (still served).
+    clock["now"] += cache_mod.JOBS_LIST_CACHE_TTL_SECONDS + 0.01
+    payload, is_stale = jobs_list_cache_get_swr(key)
+    assert payload == {"v": 1} and is_stale is True
+
+    # Past the stale ceiling → cold (dropped).
+    clock["now"] += cache_mod.JOBS_LIST_CACHE_STALE_TTL_SECONDS
+    payload, is_stale = jobs_list_cache_get_swr(key)
+    assert payload is None and is_stale is False
+
+
+def test_legacy_get_is_fresh_only(monkeypatch) -> None:
+    """The legacy strict-freshness reader must return None once stale."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock["now"])
+    key = _key("legacy")
+    jobs_list_cache_set(key, {"v": 1})
+    assert jobs_list_cache_get(key) == {"v": 1}
+    clock["now"] += cache_mod.JOBS_LIST_CACHE_TTL_SECONDS + 0.01
+    # Stale to SWR, but the legacy reader treats stale as a miss.
+    assert jobs_list_cache_get(key) is None
+    payload, is_stale = jobs_list_cache_get_swr(key)
+    assert payload == {"v": 1} and is_stale is True
+
+
+def test_revalidate_single_flight() -> None:
+    """Only one revalidation slot per key until it is released."""
+    key = _key("rv")
+    assert begin_jobs_list_revalidate(key) is True
+    # A second begin while the first is in flight is denied.
+    assert begin_jobs_list_revalidate(key) is False
+    end_jobs_list_revalidate(key)
+    # Slot is free again.
+    assert begin_jobs_list_revalidate(key) is True
+    end_jobs_list_revalidate(key)
+
+
+def test_revalidate_slot_reelects_after_ttl(monkeypatch) -> None:
+    """A leader that never released (crash) must not wedge revalidation: a
+    later begin past the inflight TTL re-elects."""
+    clock = {"now": 5000.0}
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock["now"])
+    key = _key("rv-ttl")
+    assert begin_jobs_list_revalidate(key) is True
+    assert begin_jobs_list_revalidate(key) is False
+    clock["now"] += cache_mod._JOBS_LIST_REVALIDATE_TTL_SECONDS + 0.01
+    assert begin_jobs_list_revalidate(key) is True
+    end_jobs_list_revalidate(key)
 
 
 def test_concurrent_set_get_no_crash() -> None:

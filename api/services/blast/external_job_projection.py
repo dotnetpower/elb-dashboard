@@ -43,6 +43,7 @@ __all__ = [
     "_MAX_ERROR_MESSAGE_LEN",
     "_clamp_error_message",
     "_database_metadata_for_response",
+    "_enrich_external_failure_detail",
     "_external_error_message",
     "_external_execution_detail_text",
     "_external_execution_steps",
@@ -328,6 +329,66 @@ _EXTERNAL_FAILED_NO_DETAIL = (
     "detail. Check the sibling job logs for the underlying cause."
 )
 
+# Coarse, non-actionable failure strings the sibling OpenAPI service stamps when
+# it only knows the Kubernetes Job failed (it does not read the runner's
+# blastn stderr / exit code). When the current error is one of these (or empty /
+# the no-detail placeholder) the dashboard prefers the authoritative cluster-side
+# ``FAILURE.txt`` / ``BLAST_RUNTIME`` detail if it can read it from Storage.
+_EXTERNAL_GENERIC_FAILURE_MESSAGES = frozenset(
+    {
+        "BLAST job failed",
+        "one or more BLAST jobs failed",
+        "submit job failed before creating BLAST jobs",
+    }
+)
+
+
+def _enrich_external_failure_detail(
+    *,
+    status: str,
+    current_error: str | None,
+    storage_account: str,
+    results_job_id: str,
+    steps: dict[str, Any] | None = None,
+    failed_step: str | None = None,
+) -> str | None:
+    """Recover the cluster-side blastn failure detail for a failed external job.
+
+    The sibling OpenAPI service only reports a coarse ``failed`` lifecycle with a
+    generic (or empty) ``error``. The authoritative blastn diagnostics live in
+    the workload results container (``metadata/FAILURE.txt`` +
+    ``logs/BLAST_RUNTIME-NNN.out``), which ``read_blast_runtime_failure`` reads
+    best-effort. This is gated by the caller to detail-view renders only (it
+    performs a Storage list + small blob reads), and only fires when the current
+    error is missing / a known-generic sibling string — a genuinely specific
+    sibling error is left untouched.
+
+    Returns the sanitised + clamped replacement detail (also mutating the failed
+    step's ``error`` / ``output`` in place when ``steps``/``failed_step`` are
+    given), or ``None`` when nothing better is available.
+    """
+    if status != "failed":
+        return None
+    has_specific = bool(
+        current_error
+        and current_error != _EXTERNAL_FAILED_NO_DETAIL
+        and current_error not in _EXTERNAL_GENERIC_FAILURE_MESSAGES
+    )
+    if has_specific:
+        return None
+    if not storage_account or not results_job_id:
+        return None
+    from api.services.blast.runtime_failure import read_blast_runtime_failure
+
+    raw_detail = read_blast_runtime_failure(storage_account, results_job_id)
+    detail = _clamp_error_message(raw_detail) if raw_detail else None
+    if not detail:
+        return None
+    if steps is not None and failed_step and isinstance(steps.get(failed_step), dict):
+        steps[failed_step]["error"] = detail
+        steps[failed_step]["output"] = detail
+    return detail
+
 
 def _external_step_projection(
     job: dict[str, Any],
@@ -495,6 +556,21 @@ def _external_to_blast_job(
         )
         if database_metadata is not None:
             out["database_metadata"] = database_metadata
+        # When the sibling reported a failure with no usable detail, recover the
+        # authoritative cluster-side blastn error from the results container
+        # (gated to this detail-view path so list rendering never pays for it).
+        # External jobs store results under ``results/<openapi_job_id>/...``.
+        enriched_error = _enrich_external_failure_detail(
+            status=status,
+            current_error=error_message,
+            storage_account=storage_account,
+            results_job_id=openapi_job_id,
+            steps=steps,
+            failed_step=failed_step,
+        )
+        if enriched_error:
+            error_message = enriched_error
+            output["error"] = enriched_error
     if error_message:
         out["error"] = error_message
     if error_code:

@@ -277,9 +277,14 @@ export interface K8sNodeMetrics {
   /** Node capacity in KiB. */
   mem_capacity_ki?: number;
   /**
-   * Reclaimable file (page) cache in KiB, sampled from the kubelet
-   * `/stats/summary` proxy. This is where a warmed BLAST DB actually lives;
-   * the metrics.k8s.io working set (`mem_ki`) deliberately excludes it.
+   * Reclaimable file (page) cache in KiB, derived node-wide as
+   * `usageBytes - workingSetBytes` from the kubelet `/stats/summary` proxy.
+   * A warmed BLAST DB normally dominates this, but it is NOT a DB-scoped
+   * figure — it also includes image layers, logs, and other file I/O, and
+   * reflects the uncompressed resident size, so it can exceed the DB's
+   * catalogue (download) size. The metrics.k8s.io working set (`mem_ki`)
+   * deliberately excludes reclaimable cache; during an active search the DB
+   * pages are promoted to working set and leave this number.
    * Absent when the kubelet proxy is unavailable — render working-set-only then.
    */
   cache_ki?: number;

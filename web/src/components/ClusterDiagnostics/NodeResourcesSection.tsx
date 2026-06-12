@@ -224,7 +224,7 @@ export function NodeResourcesSection({ query }: { query: NodeResourcesQuery }) {
                         opacity: 0.7,
                       }}
                     />
-                    File cache (warm BLAST DB · reclaimable)
+                    Reclaimable file cache (mostly warm DB)
                   </span>
                 </div>
               )}
@@ -402,7 +402,7 @@ function NodeRow({ metric }: { metric: K8sNodeMetrics }) {
         labelMinWidth={100}
         labelTitle={
           hasCache
-            ? `working set ${metric.memory} (${metric.mem_ki ?? 0}Ki) · file cache ${cacheGiB} GiB (${metric.cache_ki ?? 0}Ki, ${cachePct}%) of ${metric.mem_capacity_ki ?? 0}Ki — cache holds the warm BLAST DB and is reclaimable`
+            ? `working set ${metric.memory} (${metric.mem_ki ?? 0}Ki) · reclaimable file cache ${cacheGiB} GiB (${metric.cache_ki ?? 0}Ki, ${cachePct}%) of ${metric.mem_capacity_ki ?? 0}Ki — node-wide page cache dominated by the warmed BLAST DB volumes (also images/logs/other file I/O), so it can exceed the DB's catalogue size. During an active search the DB pages count as working set instead.`
             : `${metric.memory} (raw ${metric.mem_ki ?? 0}Ki of ${metric.mem_capacity_ki ?? 0}Ki)`
         }
       />

@@ -1397,6 +1397,139 @@ def test_sync_external_jobs_skips_unchanged_status(monkeypatch):
     assert result == (0, 0, set())
 
 
+def test_sync_external_jobs_backfills_empty_cluster_scope(monkeypatch):
+    """A /v1/jobs row first stored with no cluster_name MUST be backfilled
+    once a later poll resolves the cluster, so the AKS cluster card (which
+    filters by cluster_name) shows it under the same rule as Recent searches.
+
+    The status is unchanged here, proving the backfill happens on its own —
+    not only as a side effect of a status drift update."""
+    from api.routes import _blast_shared as shared
+
+    updated_calls: list[dict[str, object]] = []
+    created: list[object] = []
+
+    class ExistingRow:
+        status = "running"
+        phase = "running"
+        subscription_id = ""
+        resource_group = ""
+        cluster_name = ""
+        storage_account = ""
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"bf-job-1": ExistingRow()}
+
+        def update(self, job_id, **kwargs):
+            updated_calls.append({"job_id": job_id, **kwargs})
+
+        def create(self, state):
+            created.append(state)
+            return state
+
+    fake_repo = FakeRepo()
+
+    class FakeRepoFactory:
+        def __call__(self):
+            return fake_repo
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", FakeRepoFactory())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "bf-job-1",
+                "status": "running",
+                "created_at": "2026-05-20T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                # Scope injected by a cluster-scoped poll's scope defaults.
+                "subscription_id": "sub-1",
+                "resource_group": "rg-elb-cluster",
+                "cluster_name": "elb-cluster-01",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    assert result == (0, 1, set())
+    assert created == []
+    # Status did not drift, so only the empty scope columns are written.
+    assert updated_calls == [
+        {
+            "job_id": "bf-job-1",
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+        }
+    ]
+
+
+def test_sync_external_jobs_does_not_overwrite_existing_cluster_scope(monkeypatch):
+    """The backfill MUST only fill empty columns — a row that already carries a
+    cluster_name must never be clobbered by a poll resolving a different scope,
+    and an unchanged status with a fully-populated row triggers no update."""
+    from api.routes import _blast_shared as shared
+
+    updated_calls: list[dict[str, object]] = []
+
+    class ExistingRow:
+        status = "running"
+        phase = "running"
+        subscription_id = "sub-1"
+        resource_group = "rg-elb-cluster"
+        cluster_name = "elb-cluster-01"
+        storage_account = "stexisting"
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"bf-job-2": ExistingRow()}
+
+        def update(self, job_id, **kwargs):
+            updated_calls.append({"job_id": job_id, **kwargs})
+
+        def create(self, state):  # pragma: no cover - not expected
+            raise AssertionError("create must not be called for an existing row")
+
+    fake_repo = FakeRepo()
+
+    class FakeRepoFactory:
+        def __call__(self):
+            return fake_repo
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", FakeRepoFactory())
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "bf-job-2",
+                "status": "running",
+                "created_at": "2026-05-20T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                "subscription_id": "sub-1",
+                "resource_group": "rg-elb-cluster",
+                "cluster_name": "elb-cluster-99",
+                "storage_account": "stother",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    assert result == (0, 0, set())
+    assert updated_calls == []
+
+
 def test_external_jobs_cache_serves_repeat_requests(monkeypatch):
     """Two back-to-back calls within the TTL MUST hit the upstream only once."""
     from api.routes import _blast_shared as shared

@@ -331,7 +331,22 @@ class JobStateRepository:
         error_code: str | None = None,
         payload: dict[str, Any] | None = None,
         updated_at: str | None = None,
+        subscription_id: str | None = None,
+        resource_group: str | None = None,
+        cluster_name: str | None = None,
+        storage_account: str | None = None,
     ) -> JobState:
+        """Patch the named properties of an existing job row (MERGE).
+
+        The ``subscription_id`` / ``resource_group`` / ``cluster_name`` /
+        ``storage_account`` parameters exist so a later poll can *backfill* the
+        scope columns on a row that was first persisted without them (e.g. a
+        ``/v1/jobs`` row synced before its cluster endpoint was resolvable). They
+        are written verbatim when not None; the caller is responsible for only
+        passing a value when it should overwrite an empty column. They are NOT
+        re-derived from ``payload`` (the external payload nests its fields under
+        an ``external`` key that ``canonical_job_metadata`` does not inspect).
+        """
         with self._state_client() as t:
             try:
                 e = dict(t.get_entity(partition_key=job_id, row_key="current"))
@@ -378,6 +393,24 @@ class JobStateRepository:
                 patch["schema_version"] = _JOB_SCHEMA_VERSION
                 e.update(canonical)
                 patch.update(canonical)
+            # Explicit scope args are written AFTER the payload-canonical block
+            # so a caller that passes both (payload + an explicit scope kwarg)
+            # gets the explicit value, not the payload-derived one. Today the
+            # only caller (`_sync_external_jobs_to_table` backfill) passes
+            # scope-only, but ordering them last removes the silent-override
+            # footgun for any future combined call.
+            if subscription_id is not None:
+                e["subscription_id"] = subscription_id
+                patch["subscription_id"] = subscription_id
+            if resource_group is not None:
+                e["resource_group"] = resource_group
+                patch["resource_group"] = resource_group
+            if cluster_name is not None:
+                e["cluster_name"] = cluster_name
+                patch["cluster_name"] = cluster_name
+            if storage_account is not None:
+                e["storage_account"] = storage_account
+                patch["storage_account"] = storage_account
             ts = updated_at or _now_iso()
             e["updated_at"] = ts
             patch["updated_at"] = ts

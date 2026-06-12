@@ -65,6 +65,9 @@ from api.services.blast.external_jobs import (  # noqa: E402
 from api.services.blast.external_jobs import (  # noqa: E402
     _sync_external_jobs_to_table as _sync_external_jobs_to_table,
 )
+from api.services.blast.runtime_failure import (  # noqa: E402
+    read_blast_runtime_failure as _read_blast_runtime_failure,
+)
 
 
 def _payload_value(payload: dict[str, Any] | None, *keys: str) -> Any:
@@ -455,18 +458,42 @@ def _local_to_blast_job(
         # the Storage-backed resolver fills the sequence/letter counts and
         # snapshot date, matching dashboard jobs. The trust gate stops an
         # attacker-influenced db URL from leaking the MI Storage token.
+        external = payload.get("external") if isinstance(payload.get("external"), dict) else None
         storage_account = str(infrastructure.get("storage_account") or "")
         if not storage_account:
-            external = payload.get("external") if isinstance(payload.get("external"), dict) else {}
             storage_account = extract_trusted_storage_account(
                 db
-            ) or extract_trusted_storage_account(str(external.get("db") or ""))
+            ) or extract_trusted_storage_account(str((external or {}).get("db") or ""))
         database_metadata = _database_metadata_for_response(
             db,
             storage_account,
         )
         if database_metadata is not None:
             out["database_metadata"] = database_metadata
+        # External-origin failed rows: the sibling only reports a coarse/empty
+        # error, so recover the authoritative cluster-side blastn detail from
+        # the results container (gated to this detail-view path). External jobs
+        # store results under ``results/<openapi_job_id>/...``.
+        if external is not None and isinstance(out.get("output"), dict):
+            from api.services.blast.external_job_projection import (
+                _enrich_external_failure_detail,
+            )
+
+            ext_output = out["output"]
+            ext_steps = (
+                ext_output.get("steps") if isinstance(ext_output.get("steps"), dict) else None
+            )
+            enriched_error = _enrich_external_failure_detail(
+                status=str(out.get("status") or ""),
+                current_error=ext_output.get("error") or out.get("error"),
+                storage_account=storage_account,
+                results_job_id=str(external.get("job_id") or ""),
+                steps=ext_steps,
+                failed_step=ext_output.get("failed_step"),
+            )
+            if enriched_error:
+                ext_output["error"] = enriched_error
+                out["error"] = enriched_error
     # Optional dashboard-friendly query name (used by the cluster bento
     # Active jobs cell to show "BRCA1 - chr17.fa" rather than the raw uuid).
     query_label = getattr(state, "query_label", None) or _payload_value(
@@ -875,81 +902,6 @@ def _payload_with_refresh_progress(
         if error_detail:
             out["error"] = error_detail
     return out
-
-
-def _read_blast_runtime_failure(storage_account: str, job_id: str) -> str:
-    """Best-effort cluster-side blastn failure detail for a failed job.
-
-    On a K8s search failure the dashboard otherwise only sees the generic
-    ``status=failed`` pod/Job summary. The elastic-blast runner writes the real
-    diagnostics into the results container:
-
-    * ``.../logs/BLAST_RUNTIME-NNN.out`` ends with ``run exitCode NNN <code>``.
-    * ``.../metadata/FAILURE.txt`` carries the captured blastn stderr (best-
-      effort upload by the runner; frequently absent).
-
-    Returns a concise one-line message, or ``""`` when nothing is readable so
-    the caller can fall back to a generic message.
-    """
-    if not storage_account or not job_id:
-        return ""
-    try:
-        from api.services import get_credential
-        from api.services.storage.blob_io import list_result_blobs, read_blob_text
-
-        credential = get_credential()
-        blobs = list_result_blobs(
-            credential, storage_account, "results", f"{job_id}/", max_results=2000
-        )
-    except Exception as exc:
-        LOGGER.debug(
-            "blast failure-detail listing skipped job_id=%s: %s", job_id, type(exc).__name__
-        )
-        return ""
-
-    failure_path = ""
-    runtime_path = ""
-    for blob in blobs:
-        name = str(blob.get("name") or "")
-        if name.endswith("/metadata/FAILURE.txt"):
-            failure_path = name
-        elif "/logs/BLAST_RUNTIME-" in name and name.endswith(".out") and not runtime_path:
-            runtime_path = name
-
-    exit_code = ""
-    if runtime_path:
-        try:
-            text = read_blob_text(
-                credential, storage_account, "results", runtime_path, max_bytes=4096
-            )
-            for line in text.splitlines():
-                if "run exitCode" in line:
-                    exit_code = line.split()[-1]
-        except Exception as exc:
-            LOGGER.debug("blast runtime read skipped job_id=%s: %s", job_id, type(exc).__name__)
-
-    stderr_text = ""
-    if failure_path:
-        try:
-            stderr_text = read_blob_text(
-                credential, storage_account, "results", failure_path, max_bytes=4096
-            ).strip()
-        except Exception as exc:
-            LOGGER.debug("blast FAILURE.txt read skipped job_id=%s: %s", job_id, type(exc).__name__)
-
-    if stderr_text:
-        head = stderr_text.replace("\n", " ").strip()[:500]
-        if exit_code and exit_code not in {"0", ""}:
-            return f"BLAST search exited with code {exit_code}: {head}"
-        return f"BLAST search failed on the cluster: {head}"
-    if exit_code and exit_code not in {"0", ""}:
-        return (
-            f"BLAST search exited with code {exit_code} on the cluster "
-            "(no stderr was captured by the runner). A common cause is the "
-            "database not being staged on the assigned node — re-run the DB "
-            "warmup for this database and resubmit."
-        )
-    return ""
 
 
 def _state_has_parseable_result_artifact(state: Any, payload: dict[str, Any]) -> bool:

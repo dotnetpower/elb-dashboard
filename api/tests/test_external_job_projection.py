@@ -165,3 +165,74 @@ def test_external_error_message_is_sanitised() -> None:
     assert out["output"]["steps"]["submitting"]["error"] == message
 
 
+def test_external_failed_job_enriched_with_cluster_detail(monkeypatch) -> None:
+    # A sibling failure with a generic/empty error: on the detail view the
+    # dashboard recovers the authoritative blastn detail from the results
+    # container and replaces the placeholder banner + failed-step error.
+    import api.services.blast.runtime_failure as runtime_failure
+
+    monkeypatch.setattr(
+        runtime_failure,
+        "read_blast_runtime_failure",
+        lambda account, job_id: "BLAST search exited with code 2: bad alphabet",
+    )
+    out = _external_to_blast_job(
+        {
+            "job_id": "ext-1",
+            "status": "failed",
+            "error": "one or more BLAST jobs failed",
+            "db": "https://stgworkload.blob.core.windows.net/blast-db/core_nt",
+            "storage_account": "stgworkload",
+        },
+        include_database_metadata=True,
+    )
+    assert "exited with code 2" in out["error"]
+    assert "exited with code 2" in out["output"]["error"]
+    # The failed step (submit, no shard activity here) carries the same detail.
+    assert "exited with code 2" in out["output"]["steps"]["submitting"]["error"]
+
+
+def test_external_failed_enrichment_skipped_on_list_view(monkeypatch) -> None:
+    # List rendering (include_database_metadata=False) must NOT pay for the
+    # Storage read — the generic sibling message is left as-is.
+    import api.services.blast.runtime_failure as runtime_failure
+
+    def _boom(*_a, **_k):
+        raise AssertionError("Storage read must not run on the list view")
+
+    monkeypatch.setattr(runtime_failure, "read_blast_runtime_failure", _boom)
+    out = _external_to_blast_job(
+        {
+            "job_id": "ext-2",
+            "status": "failed",
+            "error": "one or more BLAST jobs failed",
+            "db": "https://stgworkload.blob.core.windows.net/blast-db/core_nt",
+        },
+    )
+    assert out["error"] == "one or more BLAST jobs failed"
+
+
+def test_external_failed_enrichment_preserves_specific_error(monkeypatch) -> None:
+    # A genuinely specific sibling error is authoritative; do not overwrite it
+    # even if a cluster-side detail happens to be readable.
+    import api.services.blast.runtime_failure as runtime_failure
+
+    monkeypatch.setattr(
+        runtime_failure,
+        "read_blast_runtime_failure",
+        lambda account, job_id: "generic cluster blob detail",
+    )
+    out = _external_to_blast_job(
+        {
+            "job_id": "ext-3",
+            "status": "failed",
+            "error": {"code": "database_not_found", "message": "core_nt missing on node"},
+            "db": "https://stgworkload.blob.core.windows.net/blast-db/core_nt",
+        },
+        include_database_metadata=True,
+    )
+    assert "core_nt missing on node" in out["error"]
+    assert "generic cluster blob detail" not in out["error"]
+
+
+

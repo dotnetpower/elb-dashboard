@@ -204,6 +204,78 @@ def test_local_to_blast_job_external_failed_row_surfaces_error():
     assert out["output"]["steps"]["submitting"]["status"] == "failed"
 
 
+def test_local_to_blast_job_external_failed_row_enriched_with_cluster_detail(monkeypatch):
+    # On the detail view, a synced external failed row with only a generic/empty
+    # sibling error recovers the authoritative cluster-side blastn detail from
+    # the results container (keyed by the sibling openapi job id).
+    monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbdashboard3abp67bppe")
+    monkeypatch.setattr(
+        blast_job_state, "_database_metadata_for_response", lambda *_a, **_k: None
+    )
+    import api.services.blast.runtime_failure as runtime_failure
+
+    seen: dict[str, str] = {}
+
+    def fake_reader(account: str, job_id: str) -> str:
+        seen["account"] = account
+        seen["job_id"] = job_id
+        return "BLAST search exited with code 2: bad alphabet"
+
+    monkeypatch.setattr(runtime_failure, "read_blast_runtime_failure", fake_reader)
+
+    out = _local_to_blast_job(
+        _state(
+            status="failed",
+            phase="failed",
+            payload={
+                "external": {
+                    "job_id": "ext-3",
+                    "status": "failed",
+                    "error": "one or more BLAST jobs failed",
+                    "db": (
+                        "https://stelbdashboard3abp67bppe.blob.core.windows.net/"
+                        "blast-db/core_nt/core_nt"
+                    ),
+                }
+            },
+        ),
+        include_database_metadata=True,
+    )
+    # Results are keyed by the sibling openapi job id, on the trusted account.
+    assert seen["account"] == "stelbdashboard3abp67bppe"
+    assert seen["job_id"] == "ext-3"
+    assert "exited with code 2" in out["error"]
+    assert "exited with code 2" in out["output"]["error"]
+    assert "exited with code 2" in out["output"]["steps"]["submitting"]["error"]
+
+
+def test_local_to_blast_job_external_enrichment_skipped_on_list_view(monkeypatch):
+    # List rendering (include_database_metadata=False) must not pay for the
+    # Storage read; the generic sibling error is left untouched.
+    import api.services.blast.runtime_failure as runtime_failure
+
+    def _boom(*_a, **_k):
+        raise AssertionError("Storage read must not run on the list view")
+
+    monkeypatch.setattr(runtime_failure, "read_blast_runtime_failure", _boom)
+    out = _local_to_blast_job(
+        _state(
+            status="failed",
+            phase="failed",
+            payload={
+                "external": {
+                    "job_id": "ext-4",
+                    "status": "failed",
+                    "error": "one or more BLAST jobs failed",
+                }
+            },
+        )
+    )
+    assert "one or more BLAST jobs failed" in out["output"]["error"]
+
+
 def test_local_to_blast_job_does_not_expose_submit_slot_wait_as_error():
     out = _local_to_blast_job(
         _state(
@@ -346,6 +418,39 @@ def test_read_blast_runtime_failure_prefers_stderr(monkeypatch):
     detail = blast_job_state._read_blast_runtime_failure("stelb", "job-1")
 
     assert detail == "BLAST search exited with code 2: BLAST engine error: bad option"
+
+
+def test_read_blast_runtime_failure_redacts_secrets_in_stderr(monkeypatch):
+    # FAILURE.txt is runner-captured stderr that can embed a SAS token / Bearer
+    # / subscription GUID (e.g. from an azcopy diagnostic). The reader MUST
+    # redact at the source so BOTH the K8s-refresh step error and the external
+    # projection surface secret-free text (Charter §12).
+    blobs = [
+        {"name": "job-1/job-elastic/logs/BLAST_RUNTIME-000.out"},
+        {"name": "job-1/job-elastic/metadata/FAILURE.txt"},
+    ]
+    texts = {
+        "job-1/job-elastic/logs/BLAST_RUNTIME-000.out": "1780 run exitCode 000 2\n",
+        "job-1/job-elastic/metadata/FAILURE.txt": (
+            "azcopy failed: https://acct.blob.core.windows.net/c/b"
+            "?sv=2021&sig=AAAABBBBCCCCsecretsig%3D"
+        ),
+    }
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage.blob_io.list_result_blobs",
+        lambda *_a, **_k: blobs,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.blob_io.read_blob_text",
+        lambda _c, _a, _ct, path, **_k: texts[path],
+    )
+
+    detail = blast_job_state._read_blast_runtime_failure("stelb", "job-1")
+
+    assert "sig=AAAABBBBCCCC" not in detail
+    assert "secretsig" not in detail
+    assert "exited with code 2" in detail
 
 
 def test_read_blast_runtime_failure_generic_when_no_stderr(monkeypatch):

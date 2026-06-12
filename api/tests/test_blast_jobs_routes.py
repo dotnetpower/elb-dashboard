@@ -60,6 +60,57 @@ def test_job_detail_skips_split_child_lookup_for_non_split_job(monkeypatch) -> N
     assert "database_metadata" not in body
 
 
+def test_jobs_list_swr_serves_stale_and_revalidates(monkeypatch) -> None:
+    """The jobs list is served stale-while-revalidate: fresh → cache hit,
+    stale → immediate stale payload + one background rebuild, then the rebuilt
+    payload once it lands."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    import api.services.blast.jobs_list_cache as cache_mod
+    from api.routes.blast import jobs as jobs_mod
+
+    cache_mod.reset_jobs_list_cache()
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock["now"])
+
+    calls = {"n": 0}
+
+    def fake_compute(**_kwargs):
+        calls["n"] += 1
+        return {"jobs": [{"job_id": f"build-{calls['n']}"}], "meta": {}}
+
+    monkeypatch.setattr(jobs_mod, "_compute_blast_jobs_response", fake_compute)
+
+    from api.main import app
+
+    client = TestClient(app)
+
+    # Cold → synchronous build #1, cached.
+    r1 = client.get("/api/blast/jobs")
+    assert r1.status_code == 200
+    assert r1.json()["jobs"][0]["job_id"] == "build-1"
+    assert calls["n"] == 1
+
+    # Within the fresh window → cache hit, no rebuild.
+    r2 = client.get("/api/blast/jobs")
+    assert r2.json()["jobs"][0]["job_id"] == "build-1"
+    assert calls["n"] == 1
+
+    # Into the stale window → stale payload served immediately AND a background
+    # rebuild (#2) runs (TestClient executes background tasks after the response).
+    clock["now"] += cache_mod.JOBS_LIST_CACHE_TTL_SECONDS + 0.01
+    r3 = client.get("/api/blast/jobs")
+    assert r3.json()["jobs"][0]["job_id"] == "build-1"  # stale served, not blocked
+    assert calls["n"] == 2  # background revalidate ran
+
+    # The rebuilt payload is now fresh and served on the next poll.
+    r4 = client.get("/api/blast/jobs")
+    assert r4.json()["jobs"][0]["job_id"] == "build-2"
+    assert calls["n"] == 2
+
+
+
 def _query_route_repo(payload: dict, *, storage_account: str = "elbstg01"):
     """Build a fake repo whose ``get`` returns a single owned state row."""
     owner_oid = "00000000-0000-0000-0000-000000000000"

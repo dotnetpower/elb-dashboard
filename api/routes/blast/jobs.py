@@ -16,7 +16,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+)
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import (
@@ -43,7 +52,10 @@ from api.services.blast.external_jobs import _discover_subscription_clusters
 from api.services.blast.external_query_labels import apply_remembered_query_label
 from api.services.blast.job_state import _K8S_REFRESH_PHASES
 from api.services.blast.jobs_list_cache import (
+    begin_jobs_list_revalidate,
+    end_jobs_list_revalidate,
     jobs_list_cache_get,
+    jobs_list_cache_get_swr,
     jobs_list_cache_key,
     jobs_list_cache_set,
     reset_jobs_list_cache,
@@ -227,6 +239,7 @@ def _external_degraded_message(exc: Exception, reason: str) -> str:
 @router.get("/jobs")
 def blast_jobs_list(
     request: Request,
+    background_tasks: BackgroundTasks,
     limit: int = Query(default=50, ge=1, le=500),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
@@ -238,19 +251,116 @@ def blast_jobs_list(
     Local Table-backed rows win when both sources know the same job. Direct
     OpenAPI submissions live in the sibling service's ConfigMaps, so merging
     them here keeps the SPA on one canonical jobs endpoint.
+
+    Served stale-while-revalidate: a fresh cache entry is returned directly, a
+    stale one is returned immediately while a single background task rebuilds
+    it, and only a cold (or past-stale-ceiling) key pays the synchronous build.
+    This hides the cold-build latency (external OpenAPI cluster discovery plus
+    per-cluster ``/v1/jobs`` fetches) from the ~14 s polling caller.
     """
+    shared_visibility = blast_shared_visibility_enabled()
     cache_key = _blast_jobs_list_cache_key(
         caller_oid=caller.object_id,
         limit=limit,
         subscription_id=subscription_id,
         resource_group=resource_group,
         cluster_name=cluster_name,
-        shared_visibility=blast_shared_visibility_enabled(),
+        shared_visibility=shared_visibility,
     )
-    cached = _blast_jobs_list_cache_get(cache_key)
-    if cached is not None:
+    request_id = request_id_from_scope(request)
+    cached, is_stale = jobs_list_cache_get_swr(cache_key)
+    if cached is not None and not is_stale:
+        return cached
+    if cached is not None and is_stale:
+        # Serve the stale payload now and rebuild off the request path so the
+        # cold-build latency never blocks a poll. Single-flight: a burst of
+        # polls that all see the same stale entry enqueues exactly one rebuild.
+        if begin_jobs_list_revalidate(cache_key):
+            background_tasks.add_task(
+                _revalidate_blast_jobs_list,
+                cache_key=cache_key,
+                caller_oid=caller.object_id,
+                tenant_id=getattr(caller, "tenant_id", ""),
+                limit=limit,
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+                shared_visibility=shared_visibility,
+                request_id=request_id,
+            )
         return cached
 
+    response = _compute_blast_jobs_response(
+        caller_oid=caller.object_id,
+        tenant_id=getattr(caller, "tenant_id", ""),
+        limit=limit,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        shared_visibility=shared_visibility,
+        request_id=request_id,
+    )
+    jobs_list_cache_set(cache_key, response)
+    return response
+
+
+def _revalidate_blast_jobs_list(
+    *,
+    cache_key: str,
+    caller_oid: str,
+    tenant_id: str,
+    limit: int,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    shared_visibility: bool,
+    request_id: str,
+) -> None:
+    """Background stale-while-revalidate rebuild of one jobs-list cache entry.
+
+    Single-flight is enforced by the caller via ``begin_jobs_list_revalidate``;
+    this only releases the slot in its ``finally`` so a crash mid-build cannot
+    wedge future revalidations. Failures are swallowed (logged) — the stale
+    entry already went to the user and the next poll retries.
+    """
+    try:
+        response = _compute_blast_jobs_response(
+            caller_oid=caller_oid,
+            tenant_id=tenant_id,
+            limit=limit,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            shared_visibility=shared_visibility,
+            request_id=request_id,
+        )
+        jobs_list_cache_set(cache_key, response)
+    except Exception as exc:
+        LOGGER.warning(
+            "blast_jobs_list background revalidate failed: %s", type(exc).__name__
+        )
+    finally:
+        end_jobs_list_revalidate(cache_key)
+
+
+def _compute_blast_jobs_response(
+    *,
+    caller_oid: str,
+    tenant_id: str,
+    limit: int,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    shared_visibility: bool,
+    request_id: str,
+) -> dict[str, Any]:
+    """Build the BLAST jobs-list response payload (no caching side effects).
+
+    Extracted from the route so stale-while-revalidate can rebuild it from a
+    background task without a live ``Request``. The caller identity is reduced
+    to ``caller_oid`` / ``tenant_id`` and the request id is passed in for the
+    response ``meta``.
+    """
     jobs: list[dict[str, Any]] = []
     degraded: dict[str, Any] = {}
     try:
@@ -258,7 +368,6 @@ def blast_jobs_list(
 
         repo = get_state_repo()
         scoped_listing = bool(subscription_id or resource_group or cluster_name)
-        shared_visibility = blast_shared_visibility_enabled()
         if scoped_listing and hasattr(repo, "list_for_scope"):
             source_rows = repo.list_for_scope(
                 subscription_id=subscription_id,
@@ -273,7 +382,7 @@ def blast_jobs_list(
             source_rows = repo.list_all(limit=limit, include_payload=False)
         else:
             source_rows = repo.list_for_owner(
-                caller.object_id, limit=limit, include_payload=False
+                caller_oid, limit=limit, include_payload=False
             )
         rows = [
             row
@@ -332,7 +441,7 @@ def blast_jobs_list(
         else:
             split_summaries = _split_child_summaries_from_repo(
                 repo,
-                caller.object_id,
+                caller_oid,
                 parent_ids,
             )
         for row in rows:
@@ -444,7 +553,7 @@ def blast_jobs_list(
             _created, _updated, tombstoned_ids = _sync_external_jobs_to_table(
                 candidate_rows,
                 caller_oid="",
-                tenant_id=getattr(caller, "tenant_id", ""),
+                tenant_id=tenant_id,
             )
 
         for ext_row in candidate_rows:
@@ -478,13 +587,12 @@ def blast_jobs_list(
     jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
     response: dict[str, Any] = {
         "jobs": jobs[:limit],
-        "meta": build_meta(request_id=request_id_from_scope(request)),
+        "meta": build_meta(request_id=request_id),
     }
     if degraded and not jobs:
         response.update(degraded)
     if external_degraded:
         response.update(external_degraded)
-    _blast_jobs_list_cache_set(cache_key, response)
     return response
 
 

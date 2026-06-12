@@ -633,6 +633,111 @@ def test_update_submits_only_the_changed_fields(monkeypatch) -> None:
     assert "payload_json" not in patch
 
 
+def test_update_backfills_scope_columns_without_status(monkeypatch) -> None:
+    """A scope-only ``update`` MUST patch just the scope columns + updated_at.
+
+    This is the /v1/jobs cluster_name backfill path: the row already has the
+    right status, we only fill the empty subscription/RG/cluster/storage
+    columns so the AKS cluster card (which filters by cluster_name) shows the
+    job under the same rule as Recent searches.
+    """
+    submitted: list[dict[str, object]] = []
+    existing_entity = JobState(
+        job_id="job-scope",
+        type="blast",
+        status="running",
+        phase="running",
+        owner_oid="owner-1",
+    ).to_entity()
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, *, partition_key: str, row_key: str) -> dict[str, object]:
+            return dict(existing_entity)
+
+        def update_entity(self, entity: dict[str, object], **_kwargs: object) -> None:
+            submitted.append(entity)
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    repo.update(
+        "job-scope",
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-01",
+    )
+
+    assert len(submitted) == 1
+    patch = submitted[0]
+    assert patch["subscription_id"] == "sub-1"
+    assert patch["resource_group"] == "rg-elb-cluster"
+    assert patch["cluster_name"] == "elb-cluster-01"
+    assert "updated_at" in patch
+    # Status/phase untouched — a backfill must not rewrite the lifecycle.
+    assert "status" not in patch
+    assert "phase" not in patch
+
+
+def test_update_explicit_scope_arg_wins_over_payload(monkeypatch) -> None:
+    """When a caller passes BOTH ``payload`` and an explicit scope kwarg, the
+    explicit value MUST win over the payload-derived canonical value.
+
+    Guards the ordering: the payload-canonical block must run before the
+    explicit scope writes so a future combined call cannot silently lose the
+    explicit cluster_name.
+    """
+    submitted: list[dict[str, object]] = []
+    existing_entity = JobState(
+        job_id="job-both",
+        type="blast",
+        status="running",
+        phase="running",
+        owner_oid="owner-1",
+    ).to_entity()
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, *, partition_key: str, row_key: str) -> dict[str, object]:
+            return dict(existing_entity)
+
+        def update_entity(self, entity: dict[str, object], **_kwargs: object) -> None:
+            submitted.append(entity)
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    repo.update(
+        "job-both",
+        payload={"cluster_name": "payload-cluster", "job_title": "x"},
+        cluster_name="explicit-cluster",
+    )
+
+    assert len(submitted) == 1
+    patch = submitted[0]
+    assert patch["cluster_name"] == "explicit-cluster"
+
+
 def test_list_active_filters_to_in_flight_states(monkeypatch) -> None:
     """list_active MUST scope to in-flight statuses and the requested type."""
     captured: list[str] = []

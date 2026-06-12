@@ -351,9 +351,37 @@ def _sync_external_jobs_to_table(
                 if cur_status == "deleted":
                     tombstoned.add(job_id)
                     continue
-                if ext_status and (ext_status != cur_status or ext_phase != cur_phase):
+                # Backfill scope columns that were stored empty. A row first
+                # synced by a sub-scoped poll whose cluster endpoint was
+                # transiently unresolvable falls back to the env target and
+                # lands with no cluster_name. The AKS cluster card filters jobs
+                # by cluster_name, so such a /v1/jobs row stayed visible on
+                # Recent searches but hidden on the card forever. Once a later
+                # poll resolves the real cluster identity, copy it onto the row
+                # so both views converge on the same scope rule. Only ever fill
+                # an empty column — never overwrite a value already on the row.
+                infra = converted.get("infrastructure") or {}
+                scope_backfill: dict[str, str] = {}
+                for col in (
+                    "subscription_id",
+                    "resource_group",
+                    "cluster_name",
+                    "storage_account",
+                ):
+                    new_val = str(infra.get(col) or "")
+                    cur_val = str(getattr(existing, col, "") or "")
+                    if new_val and not cur_val:
+                        scope_backfill[col] = new_val
+                status_changed = bool(
+                    ext_status and (ext_status != cur_status or ext_phase != cur_phase)
+                )
+                if status_changed or scope_backfill:
+                    update_kwargs: dict[str, Any] = dict(scope_backfill)
+                    if status_changed:
+                        update_kwargs["status"] = ext_status
+                        update_kwargs["phase"] = ext_phase
                     try:
-                        repo.update(job_id, status=ext_status, phase=ext_phase)
+                        repo.update(job_id, **update_kwargs)
                         updated += 1
                     except KeyError:
                         existing = None
