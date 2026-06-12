@@ -91,16 +91,42 @@ def _last_json(stdout: str) -> dict[str, Any] | None:
 
 
 def _result_error(result: Mapping[str, Any], payload: Mapping[str, Any] | None) -> str:
+    # A structured error payload is the most precise source, but the sibling
+    # sometimes emits ``{"kind": "error"}`` with an empty / missing ``message``
+    # (e.g. a non-zero exit with the detail only in the raw stream). Falling
+    # straight back to ``_snippet`` then yielded an empty string, which the
+    # dashboard rendered as the opaque "No detailed error was recorded by the
+    # orchestrator." Only trust the structured message when it is non-empty;
+    # otherwise keep digging into the raw stderr / stdout below.
     if payload and payload.get("kind") == "error":
-        return _blast._snippet(payload.get("message"))
-    text = str(
-        result.get("stderr") or result.get("stdout") or "elastic-blast failed"
-    )
+        message = _blast._snippet(payload.get("message")).strip()
+        if message:
+            return message
     # ElasticBLAST now routes its full INFO log to stderr (see
     # ``_elastic_blast_argv``), so the actionable error / traceback is at the END
     # of the stream. Take the tail rather than the head so the INFO preamble does
     # not crowd out the real failure message.
-    return _tail_snippet(text, 500)
+    text = str(result.get("stderr") or result.get("stdout") or "").strip()
+    if text:
+        return _tail_snippet(text, 500)
+    # Last resort: no structured message and no captured output. Surface the
+    # exit code (and timeout flag) so the failure is never reported as
+    # "no detailed error" — an exit code is still actionable diagnostic signal.
+    exit_code = result.get("exit_code")
+    if result.get("timed_out"):
+        return (
+            "elastic-blast submit timed out before producing any output "
+            f"(exit code {exit_code})."
+            if exit_code not in (None, "")
+            else "elastic-blast submit timed out before producing any output."
+        )
+    if exit_code not in (None, "", 0):
+        return (
+            f"elastic-blast submit failed with exit code {exit_code} "
+            "but produced no output. Check the worker / terminal sidecar logs "
+            "for the underlying error."
+        )
+    return "elastic-blast submit failed (no output captured)."
 
 
 # ElasticBLAST's submit pre-flight rejects a full-database run whose memory

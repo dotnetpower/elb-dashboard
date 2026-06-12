@@ -198,6 +198,55 @@ def test_submit_gate_disabled_uses_submit_lock(monkeypatch: pytest.MonkeyPatch) 
     assert capacity_touched == []  # gate path must not be entered when disabled
 
 
+def test_submit_failed_persists_full_console_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-retryable submit failure must persist the full stdout/stderr console
+    # output on the ``submit_failed`` step (not just the short error_code tail)
+    # so the Run details page shows the detailed error the operator needs.
+    monkeypatch.delenv("BLAST_GATE_ENABLED", raising=False)
+    tracker = _install_pipeline_stubs(monkeypatch)
+
+    monkeypatch.setattr(submit_task, "acquire_submit_lock", lambda *_a, **_k: (object(), "tok"))
+    monkeypatch.setattr(submit_task, "release_submit_lock", lambda *_a, **_k: None)
+
+    failure_stderr = "INFO: starting submit\nERROR: AKS cluster elb-cluster-02 not found\n"
+
+    def _failing_stream(**_kwargs: Any) -> dict[str, Any]:
+        tracker.stream_calls += 1
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": failure_stderr,
+            "duration_ms": 42,
+            "timed_out": False,
+            "log_line_count": 2,
+            "_log_events": [],
+        }
+
+    monkeypatch.setattr(_blast, "_stream_submit_command", _failing_stream)
+    # A non-error JSON payload so _result_error digs into the raw stderr.
+    monkeypatch.setattr(_blast, "_last_json", lambda *_a, **_k: {"decision": "accepted"})
+    monkeypatch.setattr(_blast, "_is_retryable_result", lambda *_a, **_k: False)
+
+    result = _blast.submit.run(**_SUBMIT_KWARGS)
+
+    assert result["status"] == "failed"
+    assert result["phase"] == "submit_failed"
+    assert "cluster elb-cluster-02 not found" in result["error"]
+
+    failed_rows = [u for u in tracker.updates if u[1] == "submit_failed"]
+    assert failed_rows, "expected a submit_failed state update"
+    details = failed_rows[-1][2]
+    assert details["status"] == "failed"
+    # Full console output is persisted on the step, not just error_code.
+    assert "cluster elb-cluster-02 not found" in details["output"]
+    assert "cluster elb-cluster-02 not found" in details["last_output"]
+    assert details["exit_code"] == 1
+    assert details["log_line_count"] == 2
+    assert details["error_code"]  # non-empty diagnostic always recorded
+
+
 # ---------------------------------------------------------------------------
 # Gate-enabled path — admit, retryable deny, hard reject, reserve race.
 # ---------------------------------------------------------------------------

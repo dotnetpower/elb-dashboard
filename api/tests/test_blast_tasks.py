@@ -315,6 +315,49 @@ def test_submit_failure_guidance_is_none_for_unrelated_errors() -> None:
     assert blast._submit_failure_guidance("ERROR: query file not found") is None
 
 
+def test_result_error_prefers_structured_message() -> None:
+    error = blast._result_error(
+        {"exit_code": 1, "stdout": "", "stderr": "noise"},
+        {"kind": "error", "message": "ELB ran out of disk"},
+    )
+    assert error == "ELB ran out of disk"
+
+
+def test_result_error_falls_back_to_raw_output_when_message_empty() -> None:
+    # Regression: a ``{"kind": "error"}`` payload with an empty / missing
+    # message previously yielded "" → the dashboard showed "No detailed error
+    # was recorded by the orchestrator." Now we dig into the raw stream.
+    error = blast._result_error(
+        {"exit_code": 1, "stdout": "INFO start\nERROR: cluster not found", "stderr": ""},
+        {"kind": "error", "message": ""},
+    )
+    assert "cluster not found" in error
+
+
+def test_result_error_falls_back_to_exit_code_when_no_output() -> None:
+    error = blast._result_error(
+        {"exit_code": 137, "stdout": "", "stderr": ""},
+        {"kind": "error"},
+    )
+    assert "exit code 137" in error
+    assert "No detailed error" not in error
+
+
+def test_result_error_reports_timeout_when_no_output() -> None:
+    error = blast._result_error(
+        {"exit_code": 124, "stdout": "", "stderr": "", "timed_out": True},
+        None,
+    )
+    assert "timed out" in error.lower()
+
+
+def test_result_error_is_never_empty_with_clean_result() -> None:
+    # exit_code 0 with no output should still produce a non-empty diagnostic
+    # rather than an empty string (which renders as "No detailed error").
+    error = blast._result_error({"exit_code": 0, "stdout": "", "stderr": ""}, None)
+    assert error.strip()
+
+
 def test_update_state_uses_repository_contract(monkeypatch) -> None:
     class FakeRepo:
         def __init__(self) -> None:

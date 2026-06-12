@@ -1131,7 +1131,25 @@ def submit(
     guidance = _blast._submit_failure_guidance(error)
     if guidance:
         error = f"{error}\n\n{guidance}"
-    _blast._update_state(job_id, "submit_failed", status="failed", error_code=error)
+    # Persist the full submit console output (not just the 500-char error_code
+    # tail) on the failed ``submitting`` step so the Run details page can render
+    # the complete stdout/stderr the operator needs to diagnose the failure. The
+    # frontend's submit-step builder reads ``output`` / ``last_output`` first and
+    # only falls back to the short error text when they are empty, so without
+    # this a non-retryable submit failure showed the truncated tail (or, when the
+    # parsed error was empty, "No detailed error was recorded").
+    _blast._update_state(
+        job_id,
+        "submit_failed",
+        status="failed",
+        error_code=error,
+        output=_blast._snippet(submit_output, _blast.LIVE_OUTPUT_SNIPPET_CHARS),
+        last_output=_blast._snippet(submit_output, _blast.LIVE_OUTPUT_SNIPPET_CHARS),
+        exit_code=exit_code,
+        log_line_count=result.get("log_line_count"),
+        terminal_duration_ms=result.get("duration_ms"),
+        timed_out=result.get("timed_out"),
+    )
     return {"job_id": job_id, "status": "failed", "phase": "submit_failed", "error": error}
 
 
