@@ -290,6 +290,13 @@ def drain_requests(
     cfg = _require_enabled_config(cfg)
     stats = DrainStats()
     budget = max(1, max_messages)
+    # An abandoned message becomes immediately receivable again, so without a
+    # guard the same message can be re-received within THIS drain tick and burn
+    # its whole delivery count (→ premature dead-letter) on a transient handler
+    # failure. Track the message ids already settled this tick and stop the loop
+    # once we see one again — the message is then retried on the NEXT tick, not
+    # spun in a hot loop. Keyed by message_id (falls back to sequence_number).
+    seen: set[str] = set()
     with _client(cfg) as client, client.get_queue_receiver(
         cfg.request_queue,
         max_wait_time=max_wait_seconds,
@@ -301,10 +308,21 @@ def drain_requests(
             )
             if not batch:
                 break
+            wrapped = False
             for message in batch:
+                parsed = _parse(message)
+                ident = str(parsed.message_id or parsed.sequence_number or "")
+                if ident and ident in seen:
+                    # Re-delivery of a message we already abandoned this tick.
+                    # Abandon it again WITHOUT counting another attempt-burn and
+                    # stop draining — it will be retried next tick.
+                    _safe_abandon(receiver, message)
+                    wrapped = True
+                    break
+                if ident:
+                    seen.add(ident)
                 stats.received += 1
                 budget -= 1
-                parsed = _parse(message)
                 try:
                     action = handler(parsed)
                 except Exception:
@@ -314,6 +332,8 @@ def drain_requests(
                     )
                     action = MessageAction.ABANDON
                 _settle(receiver, message, action, stats)
+            if wrapped:
+                break
     return stats
 
 

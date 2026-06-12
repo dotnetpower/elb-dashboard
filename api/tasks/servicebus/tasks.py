@@ -116,6 +116,31 @@ def _result_ref(openapi_job_id: str) -> dict[str, str]:
     }
 
 
+def _openapi_kwargs(cfg: ServiceBusConfig) -> dict[str, str]:
+    """Resolve OpenAPI base_url + token from the configured cluster.
+
+    The drain/publish path runs in the worker/beat sidecars, where the
+    OpenAPI runtime base-url cache (ephemeral per-revision Redis) may be empty
+    after a redeploy. ``external_blast.submit_job`` / ``get_job`` would then
+    fail with ``openapi_not_configured``. Resolving the kwargs from the saved
+    cluster context (the same helper the dashboard's /api/blast/jobs listing
+    uses) makes the integration self-healing: it re-discovers the elb-openapi
+    Service IP and re-populates the cache. Returns ``{}`` when the cluster
+    context is incomplete; the SDK then falls back to env / cache as before.
+    """
+    if not (cfg.subscription_id and cfg.resource_group and cfg.cluster_name):
+        return {}
+    try:
+        from api.services.blast.external_jobs import _openapi_client_kwargs_from_cluster
+
+        return _openapi_client_kwargs_from_cluster(
+            cfg.subscription_id, cfg.resource_group, cfg.cluster_name
+        )
+    except Exception:
+        LOGGER.debug("openapi kwargs resolution failed", exc_info=True)
+        return {}
+
+
 def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[str, Any] | None:
     """Map a queue message body to a validated OpenAPI submit payload.
 
@@ -205,7 +230,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         return MessageAction.COMPLETE
 
     try:
-        upstream = external_blast.submit_job(payload)
+        upstream = external_blast.submit_job(payload, **_openapi_kwargs(cfg))
     except Exception:
         LOGGER.exception("service bus → OpenAPI submit failed corr=%s", correlation_id)
         return MessageAction.ABANDON
@@ -267,6 +292,7 @@ def publish_transitions() -> dict[str, Any]:
     published = 0
     finished = 0
     scanned = 0
+    openapi_kwargs = _openapi_kwargs(cfg)
     for rec in list_active_bridges(limit=_PUBLISH_MAX_ROWS):
         scanned += 1
         if not rec.openapi_job_id:
@@ -277,7 +303,7 @@ def publish_transitions() -> dict[str, Any]:
                 finished += 1
             continue
         try:
-            job = external_blast.get_job(rec.openapi_job_id)
+            job = external_blast.get_job(rec.openapi_job_id, **openapi_kwargs)
         except Exception:  # transient; retry next tick
             LOGGER.debug("status poll failed corr=%s", rec.correlation_id, exc_info=True)
             continue
