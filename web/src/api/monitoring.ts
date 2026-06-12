@@ -410,7 +410,13 @@ export const monitoringApi = {
     podName: string,
     tail?: number,
   ) =>
-    api.get<{ logs: string; pod_name: string; namespace: string }>(
+    api.get<{
+      logs: string;
+      pod_name: string;
+      namespace: string;
+      degraded?: boolean;
+      degraded_reason?: string;
+    }>(
       `/monitor/aks/pod-logs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&pod_name=${encodeURIComponent(podName)}&tail=${tail ?? 200}`,
     ),
 
@@ -456,7 +462,7 @@ export const monitoringApi = {
     deploymentName: string,
     tail?: number,
   ) =>
-    api.get<{ logs: string }>(
+    api.get<{ logs: string; degraded?: boolean; degraded_reason?: string }>(
       `/monitor/aks/deployment-logs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&deployment_name=${encodeURIComponent(deploymentName)}&tail=${tail ?? 200}`,
     ),
 
@@ -502,7 +508,7 @@ export const monitoringApi = {
     jobName: string,
     tail?: number,
   ) =>
-    api.get<{ logs: string }>(
+    api.get<{ logs: string; degraded?: boolean; degraded_reason?: string }>(
       `/monitor/aks/job-logs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&job_name=${encodeURIComponent(jobName)}&tail=${tail ?? 200}`,
     ),
 

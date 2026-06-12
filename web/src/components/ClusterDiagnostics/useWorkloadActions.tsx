@@ -52,10 +52,38 @@ interface DeleteResult {
 
 export interface WorkloadActionApi {
   /** Fetch the last `tail` lines of logs (a representative pod for
-   * Deployments / Jobs). */
-  logs: (namespace: string, name: string) => Promise<{ logs: string }>;
+   * Deployments / Jobs). The backend `_graceful` path returns
+   * `logs: ""` plus `degraded` / `degraded_reason` when the pod log GET
+   * fails (commonly: the Job's Spot node was reclaimed, so the pod object
+   * lingers but its log is no longer readable). */
+  logs: (
+    namespace: string,
+    name: string,
+  ) => Promise<{ logs: string; degraded?: boolean; degraded_reason?: string }>;
   describe: (namespace: string, name: string) => Promise<{ describe: string }>;
   del: (namespace: string, name: string) => Promise<DeleteResult>;
+}
+
+/** Human explanation for an empty/degraded log fetch so the dialog never
+ *  shows a silent `(empty)`. `kind` lets the Job case name the most common
+ *  real cause (Spot node reclaimed after the Job finished). The
+ *  `degraded_reason` codes come from `_classify_exception` in
+ *  `api/routes/monitor/common.py`. */
+function degradedLogMessage(kind: string, reason: string | undefined): string {
+  const lower = kind.toLowerCase();
+  const suffix = reason ? ` (reason: ${reason})` : "";
+  if (lower === "job") {
+    return (
+      `Logs are no longer available${suffix}. The Job has finished and its ` +
+      `node was likely reclaimed (BLAST search Jobs run on Azure Spot nodes), ` +
+      `so the on-cluster pod log is gone. The BLAST results were already ` +
+      `shipped to Storage — view them from the job's results instead.`
+    );
+  }
+  return (
+    `Logs could not be fetched${suffix}. The pod may have been removed or its ` +
+    `node reclaimed, so the on-cluster log is no longer readable.`
+  );
 }
 
 interface Target {
@@ -97,14 +125,23 @@ export function useWorkloadActions(
       setLogLoading(true);
       try {
         const r = await api.logs(namespace, name);
-        setLogOutput(r.logs || "(empty)");
+        if (r.logs) {
+          setLogOutput(r.logs);
+        } else if (r.degraded) {
+          // Backend hit an exception fetching the pod log and degraded to
+          // an empty string. Surface the reason instead of a blank
+          // `(empty)` (issue #28).
+          setLogOutput(degradedLogMessage(kind, r.degraded_reason));
+        } else {
+          setLogOutput("(empty)");
+        }
       } catch (e) {
         setLogOutput(`Error: ${(e as Error).message}`);
       } finally {
         setLogLoading(false);
       }
     },
-    [api],
+    [api, kind],
   );
   const closeLogs = () => {
     setLogTarget(null);
