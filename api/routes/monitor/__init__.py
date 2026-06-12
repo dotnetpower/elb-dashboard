@@ -19,6 +19,7 @@ from api.routes.monitor import aks as _aks_routes
 from api.routes.monitor import cluster as _cluster_routes
 from api.routes.monitor import jobs as _jobs_routes
 from api.routes.monitor import logs as _logs_routes
+from api.routes.monitor import message_flow as _message_flow_routes
 from api.routes.monitor import metrics as _metrics_routes
 from api.routes.monitor import sidecars as _sidecars_routes
 from api.routes.monitor import storage as _storage_routes
@@ -49,4 +50,5 @@ router.include_router(_terminal_routes.router)
 router.include_router(_cluster_routes.router)
 router.include_router(_jobs_routes.router)
 router.include_router(_logs_routes.router)
+router.include_router(_message_flow_routes.router)
 router.include_router(_sidecars_routes.router)

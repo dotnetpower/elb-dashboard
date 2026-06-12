@@ -1,5 +1,6 @@
 import { AcrCard } from "@/components/cards/AcrCard";
 import { ClusterCard } from "@/components/cards/ClusterCard";
+import { MessageFlowCard } from "@/components/cards/MessageFlow";
 import { SidecarsCard } from "@/components/cards/SidecarsCard";
 import { StorageCard } from "@/components/cards/StorageCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
@@ -49,6 +50,11 @@ export function DashboardGrid({ config }: DashboardGridProps) {
           terminalVmName={config.terminalVmName}
         />
       </section>
+
+      {/* Optional Service Bus message-flow strip. Renders nothing unless the
+          integration is effective-enabled, so the default dashboard layout is
+          unchanged. */}
+      <MessageFlowCard />
 
       <section className="dashboard-workspace__section" aria-label="Resource plane">
         <div className="dashboard-section-label">

@@ -1,0 +1,299 @@
+"""Tests for the message-flow snapshot service and route.
+
+Responsibility: Verify ``build_message_flow`` returns a disabled shape when the
+    integration is off, groups active jobs into producers by submitter alias,
+    sizes broker boxes by query length, groups consumers by cluster, derives
+    aliases for external/servicebus sources, and degrades Service Bus counts
+    gracefully. Also covers the route's disabled default + auth gate.
+Edit boundaries: Aggregation/route shaping only; persistence + SDK behaviour
+    covered elsewhere.
+Key entry points: the ``test_*`` functions.
+Risky contracts: broker boxes reflect ACTIVE jobstate rows, never raw queue
+    messages; aliases never expose a raw ``owner_oid``.
+Validation: ``uv run pytest -q api/tests/test_message_flow.py``.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from api.services import message_flow
+from fastapi.testclient import TestClient
+
+
+def _job(
+    *,
+    job_id: str,
+    status: str,
+    owner_upn: str | None = None,
+    owner_oid: str | None = None,
+    program: str = "blastn",
+    db: str = "core_nt",
+    cluster_name: str = "elb-cluster-01",
+    resource_group: str = "rg-elb-cluster",
+    subscription_id: str = "sub-1",
+    payload: dict[str, Any] | None = None,
+    phase: str | None = None,
+    query_label: str | None = None,
+    created_at: str = "2026-06-13T00:00:00+00:00",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        job_id=job_id,
+        status=status,
+        owner_upn=owner_upn,
+        owner_oid=owner_oid,
+        program=program,
+        db=db,
+        cluster_name=cluster_name,
+        resource_group=resource_group,
+        subscription_id=subscription_id,
+        phase=phase,
+        query_label=query_label,
+        created_at=created_at,
+        payload=payload or {},
+    )
+
+
+class _FakeRepo:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def list_all(self, *, limit: int = 200, include_payload: bool = True) -> list[Any]:
+        return self._rows[:limit]
+
+    def list_for_owner(
+        self, owner_oid: str, *, limit: int = 200, include_payload: bool = True
+    ) -> list[Any]:
+        return [r for r in self._rows if getattr(r, "owner_oid", None) == owner_oid][:limit]
+
+
+@pytest.fixture()
+def _enable(monkeypatch: pytest.MonkeyPatch):
+    """Turn the integration on with a namespaced config and shared visibility."""
+
+    def _apply(rows: list[Any], *, counts: Any = None, shared: bool = True) -> None:
+        monkeypatch.setattr(
+            "api.services.service_bus_pref.service_bus_enabled", lambda: True
+        )
+        cfg = SimpleNamespace(
+            namespace_fqdn="sb-elb-dashboard-krc.servicebus.windows.net",
+            request_queue="elastic-blast-requests",
+            completion_topic="elastic-blast-completions",
+        )
+        monkeypatch.setattr(
+            "api.services.service_bus_pref.get_service_bus_config", lambda: cfg
+        )
+        monkeypatch.setattr(
+            "api.services.blast.job_state.blast_shared_visibility_enabled", lambda: shared
+        )
+        monkeypatch.setattr(
+            "api.services.state_repo.get_state_repo", lambda: _FakeRepo(rows)
+        )
+
+        from api.services import service_bus
+
+        def _counts(_cfg: Any) -> dict[str, Any]:
+            if counts is None:
+                return {"queue": {"active_message_count": 0}, "subscriptions": []}
+            if isinstance(counts, Exception):
+                raise counts
+            return counts
+
+        monkeypatch.setattr(service_bus, "entity_counts", _counts)
+
+    return _apply
+
+
+def test_disabled_when_integration_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.service_bus_enabled", lambda: False
+    )
+    assert message_flow.build_message_flow("oid-1") == {"enabled": False}
+
+
+def test_active_jobs_grouped_into_producers_and_clusters(_enable) -> None:
+    rows = [
+        _job(
+            job_id="j1",
+            status="running",
+            owner_upn="jihoon@example.com",
+            payload={"submission_source": "dashboard", "query": {"total_letters": 12000}},
+        ),
+        _job(
+            job_id="j2",
+            status="queued",
+            owner_upn="jihoon@example.com",
+            payload={"submission_source": "dashboard", "query": {"total_letters": 400}},
+        ),
+        _job(
+            job_id="j3",
+            status="running",
+            owner_upn="sora@example.com",
+            payload={"submission_source": "dashboard", "query": {"query_count": 3}},
+        ),
+        # Completed job must be excluded from every lane.
+        _job(job_id="j4", status="completed", owner_upn="jihoon@example.com"),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+
+    assert snap["enabled"] is True
+    assert snap["active_total"] == 3
+    # Producers grouped by alias, busiest first.
+    producers = snap["producers"]
+    assert producers[0]["alias"] == "jihoon@example.com"
+    assert producers[0]["job_count"] == 2
+    assert {p["alias"] for p in producers} == {"jihoon@example.com", "sora@example.com"}
+    # Broker boxes are the active rows only.
+    assert {b["job_id"] for b in snap["broker"]} == {"j1", "j2", "j3"}
+    sizes = {b["job_id"]: b["query_size"] for b in snap["broker"]}
+    assert sizes["j1"] == 12000
+    assert sizes["j2"] == 400
+    assert sizes["j3"] == 3  # query_count fallback
+    # Consumers grouped by cluster with running/queued split.
+    clusters = snap["consumers"]["clusters"]
+    assert len(clusters) == 1
+    assert clusters[0]["cluster_name"] == "elb-cluster-01"
+    assert clusters[0]["running"] == 2
+    assert clusters[0]["queued"] == 1
+    assert clusters[0]["total"] == 3
+
+
+def test_external_and_servicebus_aliases(_enable) -> None:
+    rows = [
+        _job(
+            job_id="sb1",
+            status="running",
+            owner_upn=None,
+            payload={"submission_source": "servicebus"},
+        ),
+        _job(
+            job_id="ext1",
+            status="running",
+            owner_upn=None,
+            payload={"metadata": {"submission_source": "external_api"}},
+        ),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+    aliases = {p["alias"] for p in snap["producers"]}
+    assert aliases == {"servicebus", "external"}
+
+
+def test_alias_never_exposes_raw_oid(_enable) -> None:
+    rows = [
+        _job(
+            job_id="j1",
+            status="running",
+            owner_upn=None,
+            owner_oid="11111111-2222-3333-4444-555555555555",
+            payload={"submission_source": "dashboard"},
+        ),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+    alias = snap["producers"][0]["alias"]
+    assert alias.startswith("user-")
+    assert "11111111" not in alias
+
+
+def test_query_size_none_when_absent(_enable) -> None:
+    rows = [_job(job_id="j1", status="running", owner_upn="a@b.com", payload={})]
+    _enable(rows)
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["broker"][0]["query_size"] is None
+
+
+def test_counts_degrade_on_auth_error(_enable) -> None:
+    from api.services import service_bus
+
+    rows = [
+        _job(
+            job_id="j1",
+            status="running",
+            owner_upn="a@b.com",
+            payload={"submission_source": "dashboard"},
+        )
+    ]
+    _enable(rows, counts=service_bus.ServiceBusAuthError("no manage"))
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["sb_counts"]["available"] is False
+    assert snap["sb_counts"]["reason"] == "no_manage_claim"
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("AZURE_TENANT_ID", "common")
+    monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.delenv("SERVICEBUS_ENABLED", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    from api.main import app
+
+    return TestClient(app)
+
+
+def test_route_disabled_default(client: TestClient) -> None:
+    r = client.get("/api/monitor/message-flow")
+    assert r.status_code == 200
+    assert r.json() == {"enabled": False}
+
+
+def test_route_enabled_path(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The enabled route returns a full snapshot and never echoes a raw oid."""
+    from api.services import service_bus
+    from api.services.monitor_cache import reset_monitor_snapshot_cache
+
+    reset_monitor_snapshot_cache()
+
+    rows = [
+        _job(
+            job_id="j1",
+            status="running",
+            owner_upn="jihoon@example.com",
+            owner_oid="11111111-2222-3333-4444-555555555555",
+            payload={"submission_source": "dashboard", "query": {"total_letters": 9000}},
+        ),
+    ]
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.service_bus_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.get_service_bus_config",
+        lambda: SimpleNamespace(
+            namespace_fqdn="sb-elb-dashboard-krc.servicebus.windows.net",
+            request_queue="elastic-blast-requests",
+            completion_topic="elastic-blast-completions",
+        ),
+    )
+    monkeypatch.setattr(
+        "api.services.blast.job_state.blast_shared_visibility_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo", lambda: _FakeRepo(rows)
+    )
+    monkeypatch.setattr(
+        service_bus, "entity_counts", lambda _cfg: {"queue": {"active_message_count": 0}}
+    )
+
+    r = client.get("/api/monitor/message-flow")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["enabled"] is True
+    assert body["scope"] == "shared"
+    assert body["active_total"] == 1
+    assert body["broker_truncated"] is False
+    assert len(body["broker"]) == 1
+    # Snapshot must not leak the raw owner GUID anywhere.
+    assert "11111111-2222-3333-4444-555555555555" not in r.text
+
+    reset_monitor_snapshot_cache()
+
