@@ -156,6 +156,32 @@ fi
 ensure_spa_redirect_uri "$API_CLIENT_ID_VAL" "https://$CONTAINER_APP_FQDN"
 progress "done" 4 "App registration"
 APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="${APPLICATIONINSIGHTS_CONNECTION_STRING:-}"
+# Telemetry wiring (App Insights). The Container App template bakes this value
+# into the api/worker/beat sidecars as a plain env var. A bare
+# `${APPLICATIONINSIGHTS_CONNECTION_STRING:-}` left it empty whenever the
+# shell env was unset (the common case when postprovision runs standalone, not
+# inside `azd up`), which silently disabled ALL backend telemetry —
+# customEvents, traces, exceptions, requests — even though an
+# `appi-elb-dashboard` resource existed and was healthy (container-log audit
+# 2026-06-13 found 30 days of zero telemetry for exactly this reason). Resolve
+# the value from progressively broader sources so a redeploy lights telemetry
+# back up automatically; an empty result is still acceptable (telemetry off,
+# zero Azure cost) when no App Insights component exists.
+if [ -z "$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" ] && command -v azd >/dev/null 2>&1; then
+  APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="$(azd env get-values 2>/dev/null \
+    | awk -F= '/^APPLICATIONINSIGHTS_CONNECTION_STRING=/{gsub(/"/, "", $2); print $2; exit}')"
+fi
+if [ -z "$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" ]; then
+  # Fall back to the live App Insights component in the platform RG. Omitting
+  # `--app` lists every component in the group; take the first. Non-fatal:
+  # any failure (extension missing, no component, RBAC) leaves the value empty.
+  APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="$(az monitor app-insights component show \
+    -g "$AZURE_RESOURCE_GROUP" --query "[0].connectionString" -o tsv \
+    --only-show-errors 2>/dev/null || true)"
+  if [ -n "$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" ]; then
+    progress note "Resolved APPLICATIONINSIGHTS_CONNECTION_STRING from the App Insights component in $AZURE_RESOURCE_GROUP."
+  fi
+fi
 # Live Wall log-tail fallback target. Empty is acceptable (the api sidecar
 # then renders the historical "blank tile" state); when present, the api
 # uses LogsQueryClient to KQL `ContainerAppConsoleLogs_CL`.

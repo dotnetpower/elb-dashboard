@@ -155,13 +155,27 @@ def aks_openapi_deploy(
             },
         )
 
+    # Resolve the ACR resource group with the same precedence the auto-deploy
+    # path uses (api/tasks/openapi/auto_deploy.py): explicit body value wins,
+    # then the platform env. The deploy task hard-fails when ``acr_name`` is
+    # set but ``acr_resource_group`` is empty, so a SPA build that saved a
+    # config without the ACR RG would otherwise queue a task that is
+    # guaranteed to raise. Falling back to the platform env keeps the
+    # single-cluster default (ACR in the platform RG) working without forcing
+    # the operator to re-enter it.
+    acr_resource_group = (
+        (body.get("acr_resource_group", "") or "").strip()
+        or os.environ.get("PLATFORM_ACR_RESOURCE_GROUP", "").strip()
+        or os.environ.get("AZURE_RESOURCE_GROUP", "").strip()
+    )
+
     result = _safe_delay(
         deploy_openapi_service,
         subscription_id=body.get("subscription_id", "") or "",
         resource_group=rg,
         cluster_name=cluster_name,
         acr_name=acr_name,
-        acr_resource_group=body.get("acr_resource_group", "") or "",
+        acr_resource_group=acr_resource_group,
         storage_account=body.get("storage_account", "") or "",
         storage_resource_group=body.get("storage_resource_group", "") or "",
         tenant_id=caller.tenant_id or "",

@@ -10,9 +10,22 @@ Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from azure.core.credentials import TokenCredential
+
+LOGGER = logging.getLogger(__name__)
+
+# Status codes the metrics.k8s.io aggregated API returns when metrics-server
+# is not ready or not installed: 503 ServiceUnavailable (the APIService points
+# at a metrics-server that is still starting / unhealthy) and 404 (the
+# aggregated API is not registered at all). Both are transient or
+# configuration states, not request errors, so the top-nodes / top-pods
+# helpers degrade to an empty result instead of raising an HTTPError whose
+# traceback floods the api sidecar logs (App Insights / container-log audit
+# 2026-06-13 found 58 such 503 tracebacks).
+_METRICS_UNAVAILABLE_STATUS = frozenset({404, 503})
 
 
 def k8s_top_nodes(
@@ -29,6 +42,12 @@ def k8s_top_nodes(
     try:
         capacity = _node_capacity_with_meta(session, server)
         response = session.get(f"{server}/apis/metrics.k8s.io/v1beta1/nodes", timeout=10)
+        if getattr(response, "status_code", None) in _METRICS_UNAVAILABLE_STATUS:
+            LOGGER.debug(
+                "metrics.k8s.io nodes unavailable (status=%s); returning empty",
+                response.status_code,
+            )
+            return []
         response.raise_for_status()
         nodes: list[dict[str, Any]] = []
         for item in response.json().get("items", []):
@@ -220,6 +239,12 @@ def k8s_top_pods(
         if label_selector:
             params["labelSelector"] = label_selector
         response = session.get(url, params=params or None, timeout=10)
+        if getattr(response, "status_code", None) in _METRICS_UNAVAILABLE_STATUS:
+            LOGGER.debug(
+                "metrics.k8s.io pods unavailable (status=%s); returning empty",
+                response.status_code,
+            )
+            return []
         response.raise_for_status()
         pods: list[dict[str, Any]] = []
         for item in response.json().get("items", []):

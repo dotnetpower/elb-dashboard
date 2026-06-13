@@ -94,6 +94,75 @@ def test_openapi_deploy_route_forwards_acr_resource_group(
     assert captured["acr_resource_group"] == "rg-shared-acr"
 
 
+def test_openapi_deploy_route_falls_back_to_platform_acr_rg_env(monkeypatch) -> None:
+    """When the SPA omits ``acr_resource_group`` (older saved config), the
+    route must resolve it from the platform env instead of forwarding an empty
+    string — the deploy task hard-fails when ``acr_name`` is set but the ACR RG
+    is empty, so an omitted value would otherwise queue a guaranteed-to-raise
+    task (App Insights audit 2026-06-13: 10x ``deploy_openapi_service`` raised
+    RuntimeError 'acr_resource_group is required')."""
+    captured: dict[str, Any] = {}
+
+    def fake_safe_delay(_task: object, **kwargs: Any) -> AsyncResultStub:
+        captured.update(kwargs)
+        return AsyncResultStub("task-openapi-env-acr")
+
+    monkeypatch.setattr(openapi_route, "_safe_delay", fake_safe_delay)
+    monkeypatch.setenv("PLATFORM_ACR_RESOURCE_GROUP", "rg-platform-acr")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-elb-dashboard")
+
+    openapi_route.aks_openapi_deploy(
+        {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+            "acr_name": "elbacr",
+        },
+        CallerIdentity(
+            object_id="caller-oid",
+            tenant_id="tenant-id",
+            upn="researcher@example.test",
+            raw_token="token",
+            claims={},
+        ),
+    )
+
+    assert captured["acr_resource_group"] == "rg-platform-acr"
+
+
+def test_openapi_deploy_route_falls_back_to_azure_resource_group_env(monkeypatch) -> None:
+    """With no body value and no ``PLATFORM_ACR_RESOURCE_GROUP``, the route
+    uses ``AZURE_RESOURCE_GROUP`` (the single-cluster default where the ACR
+    lives in the platform RG)."""
+    captured: dict[str, Any] = {}
+
+    def fake_safe_delay(_task: object, **kwargs: Any) -> AsyncResultStub:
+        captured.update(kwargs)
+        return AsyncResultStub("task-openapi-default-acr")
+
+    monkeypatch.setattr(openapi_route, "_safe_delay", fake_safe_delay)
+    monkeypatch.delenv("PLATFORM_ACR_RESOURCE_GROUP", raising=False)
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-elb-dashboard")
+
+    openapi_route.aks_openapi_deploy(
+        {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+            "acr_name": "elbacr",
+        },
+        CallerIdentity(
+            object_id="caller-oid",
+            tenant_id="tenant-id",
+            upn="researcher@example.test",
+            raw_token="token",
+            claims={},
+        ),
+    )
+
+    assert captured["acr_resource_group"] == "rg-elb-dashboard"
+
+
 def test_openapi_deploy_route_forwards_confirm_recreate(monkeypatch) -> None:
     """Issue #22: the PLS transition banner posts ``confirm_recreate: true`` so
     the deploy task can recreate the ``elb-openapi`` Service (the only way to

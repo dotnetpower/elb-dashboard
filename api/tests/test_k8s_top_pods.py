@@ -107,3 +107,26 @@ def test_k8s_top_pods_skips_pods_without_containers() -> None:
     assert out[0]["containers"] == []
     assert out[1]["cpu_m"] == 10
     assert out[1]["mem_ki"] == 20 * 1024
+
+
+def test_k8s_top_pods_returns_empty_when_metrics_server_unavailable() -> None:
+    """metrics-server returns 503 (APIService unhealthy) / 404 (not installed)
+    on a freshly started or scaling AKS cluster. ``k8s_top_pods`` must degrade
+    to an empty list instead of raising an HTTPError whose traceback floods the
+    api sidecar logs (App Insights audit 2026-06-13)."""
+    for status in (503, 404):
+        response = MagicMock()
+        response.status_code = status
+        # raise_for_status must NOT be consulted on the unavailable path.
+        response.raise_for_status.side_effect = AssertionError("must not raise")
+        session = MagicMock()
+        session.get.return_value = response
+        session.close = MagicMock()
+        with patch(
+            "api.services.k8s.monitoring._get_k8s_session",
+            return_value=(session, "https://aks"),
+        ):
+            out = m.k8s_top_pods(MagicMock(), "sub", "rg", "aks")
+        assert out == []
+        session.close.assert_called_once()
+

@@ -115,3 +115,49 @@ def test_top_nodes_proxy_denied_degrades() -> None:
     assert "cache_ki" not in node
     assert "cache_pct" not in node
     assert node["name"] == "node-a"
+
+
+class _MetricsUnavailableSession:
+    """Returns a valid node-capacity payload but a 503/404 from metrics.k8s.io,
+    mimicking metrics-server being unhealthy on a freshly started cluster."""
+
+    def __init__(self, metrics_status: int) -> None:
+        self._metrics_status = metrics_status
+        self.close = MagicMock()
+
+    def get(self, url: str, timeout: float = 0, **_kw: Any) -> Any:
+        if url.endswith("/api/v1/nodes"):
+            return _Resp(
+                {
+                    "items": [
+                        {
+                            "metadata": {"name": "node-a", "labels": {}},
+                            "status": {
+                                "capacity": {"cpu": "8", "memory": "65536000Ki"},
+                                "conditions": [{"type": "Ready", "status": "True"}],
+                            },
+                        }
+                    ]
+                }
+            )
+        if url.endswith("/apis/metrics.k8s.io/v1beta1/nodes"):
+            resp = MagicMock()
+            resp.status_code = self._metrics_status
+            resp.raise_for_status.side_effect = AssertionError("must not raise")
+            return resp
+        raise AssertionError(f"unexpected URL {url}")
+
+
+def test_top_nodes_returns_empty_when_metrics_server_unavailable() -> None:
+    """metrics-server 503/404 must degrade ``k8s_top_nodes`` to an empty list
+    rather than raising a traceback (App Insights audit 2026-06-13)."""
+    for status in (503, 404):
+        session = _MetricsUnavailableSession(status)
+        with patch(
+            "api.services.k8s.monitoring._get_k8s_session",
+            return_value=(session, "https://aks"),
+        ):
+            out = m.k8s_top_nodes(MagicMock(), "sub", "rg", "aks")
+        assert out == []
+        session.close.assert_called_once()
+
