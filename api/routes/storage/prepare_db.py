@@ -1245,6 +1245,9 @@ def prepare_db_cancel(
             account_name=account_name,
             db_name=db_name,
             extra={"aborted": aborted, "skipped": skipped, "errors": errors},
+            # Cancel runs entirely within this request; the audit row has no
+            # later writer, so record it terminal instead of leaking in queued.
+            status="completed",
         )
     except Exception as exc:
         LOGGER.debug("cancel audit record skipped: %s", type(exc).__name__)
@@ -1490,6 +1493,9 @@ def prepare_db_delete(
                 "errors": errors,
                 "metadata_deleted": metadata_deleted,
             },
+            # Delete runs entirely within this request; the audit row has no
+            # later writer, so record it terminal instead of leaking in queued.
+            status="completed",
         )
     except Exception as exc:
         LOGGER.debug("delete audit record skipped: %s", type(exc).__name__)

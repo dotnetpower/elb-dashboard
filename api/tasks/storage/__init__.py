@@ -51,6 +51,7 @@ from api.tasks.storage.helpers import (
 from api.tasks.storage.prepare_db_via_aks import prepare_db_via_aks
 from api.tasks.storage.reconcile import reconcile_auto_warmup
 from api.tasks.storage.reconcile_orphan_prepare_db import reconcile_orphaned_prepare_db
+from api.tasks.storage.reconcile_stale_dbops import reconcile_stale_dbops_jobs
 from api.tasks.storage.update_check import check_database_updates
 from api.tasks.storage.warmup import warmup_database
 
@@ -70,5 +71,6 @@ __all__ = (
     "prepare_db_via_aks",
     "reconcile_auto_warmup",
     "reconcile_orphaned_prepare_db",
+    "reconcile_stale_dbops_jobs",
     "warmup_database",
 )

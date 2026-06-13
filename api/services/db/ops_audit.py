@@ -44,15 +44,29 @@ def record_db_op(
     account_name: str,
     db_name: str,
     extra: dict[str, Any] | None = None,
+    status: str = "queued",
+    phase: str | None = None,
 ) -> str:
     """Create a JobState row for a DB-admin action and return its job_id.
 
     Best-effort — failures are logged and we still return a synthetic id so
     callers can use it to correlate downstream history events. The route
     should NEVER fail because audit recording failed.
+
+    ``status`` defaults to ``"queued"`` so an asynchronous dispatch (a Celery
+    task or a background K8s Job whose lifecycle is tracked elsewhere — e.g.
+    ``prepare_db_aks`` / ``prepare_db`` / ``shard`` / ``oracle``) shows up as
+    in-flight until something terminalises it. A **synchronous** op that has
+    already finished by the time this is called (``prepare_db_cancel`` /
+    ``prepare_db_delete``) MUST pass ``status="completed"`` so its audit row is
+    born terminal instead of leaking forever in ``queued`` — there is no later
+    writer for those rows. ``phase`` defaults to ``status`` so the SPA timeline
+    matches the row status. The ``history`` event name mirrors the status
+    (``"completed"`` for a terminal row, ``"started"`` otherwise).
     """
     job_id = _job_id(op, account_name, db_name)
     now = datetime.now(UTC).isoformat(timespec="seconds")
+    row_phase = phase if phase is not None else status
     payload: dict[str, Any] = {
         "op": op,
         "account_name": account_name,
@@ -60,14 +74,16 @@ def record_db_op(
     }
     if extra:
         payload.update({k: v for k, v in extra.items() if v is not None})
+    _TERMINAL = {"completed", "failed", "cancelled", "deleted"}
+    event = status if status in _TERMINAL else "started"
     try:
         repo = get_state_repo()
         repo.create(
             JobState(
                 job_id=job_id,
                 type=op,
-                status="queued",
-                phase="queued",
+                status=status,
+                phase=row_phase,
                 owner_oid=caller.object_id,
                 tenant_id=caller.tenant_id,
                 created_at=now,
@@ -75,7 +91,7 @@ def record_db_op(
                 payload=payload,
             )
         )
-        repo.append_history(job_id, "started", payload)
+        repo.append_history(job_id, event, payload)
     except Exception as exc:
         LOGGER.warning("db-ops audit create failed op=%s db=%s: %s", op, db_name, exc)
     return job_id

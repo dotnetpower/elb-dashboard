@@ -45,7 +45,30 @@ ACTIVE_JOB_TYPES = ("blast", "warmup", "prepare_db", "shard", "oracle")
 A submitted-but-not-yet-K8s-visible BLAST run is the most common false
 negative; covering ``warmup`` / ``prepare_db`` / ``shard`` / ``oracle``
 also stops a database admin action from being killed mid-flight.
+
+Matching is **prefix-aware for the ``prepare_db`` family** (see
+:func:`_row_type_blocks_autostop`): the live row types are ``prepare_db_aks`` /
+``prepare_db_cancel`` / ``prepare_db_delete`` (the bare ``prepare_db`` only
+appears for the legacy server-side sync mode), and an in-flight
+``prepare_db_aks`` download genuinely uses the AKS cluster, so it must keep an
+otherwise-idle cluster alive. The synchronous ``prepare_db_cancel`` /
+``prepare_db_delete`` rows are now born terminal at the source, so prefix
+matching does not falsely pin a cluster on those. The ``_ACTIVE_ROW_STALE_SECONDS``
+zombie cap still backstops a crashed ``prepare_db_aks`` row.
 """
+
+
+def _row_type_blocks_autostop(row_type: str) -> bool:
+    """True when a row of ``row_type`` should count as "cluster in use".
+
+    Exact membership in :data:`ACTIVE_JOB_TYPES`, plus a prefix match for the
+    ``prepare_db`` family (``prepare_db_aks`` / ``prepare_db_cancel`` /
+    ``prepare_db_delete``) so a sub-typed download is not silently ignored.
+    """
+    if row_type in ACTIVE_JOB_TYPES:
+        return True
+    return row_type.startswith("prepare_db")
+
 
 _ACTIVE_ROW_STALE_SECONDS = int(
     os.environ.get("AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", "7200")
@@ -187,7 +210,6 @@ def _scan_cluster_jobs(
     except Exception:
         return 0, None, False, False
 
-    allowed_types = frozenset(ACTIVE_JOB_TYPES)
     active = 0
     latest: datetime | None = None
     for row in rows:
@@ -205,7 +227,7 @@ def _scan_cluster_jobs(
                 row_latest = ts
             if latest is None or ts > latest:
                 latest = ts
-        if row_type in allowed_types and row_status in ACTIVE_JOB_STATUSES:
+        if _row_type_blocks_autostop(row_type) and row_status in ACTIVE_JOB_STATUSES:
             # A row with no parseable timestamp fails safe (counted). A
             # fresh active row counts. A row untouched for longer than the
             # cap is a zombie (crashed worker) and is dropped so it cannot
@@ -479,5 +501,6 @@ __all__ = [
     "IdleDecision",
     "StateRepoProtocol",
     "Verdict",
+    "_row_type_blocks_autostop",
     "evaluate_cluster",
 ]

@@ -134,26 +134,7 @@ export function PulseRowSummary({
             >
               {tier}
             </span>
-          ) : (
-            <span
-              title="elb-tier ARM tag not set on this cluster"
-              style={{
-                flexShrink: 0,
-                fontSize: 9,
-                fontWeight: 500,
-                lineHeight: 1,
-                padding: "2px 6px",
-                borderRadius: 999,
-                background: "transparent",
-                color: "var(--text-faint)",
-                border: "1px dashed var(--border-weak)",
-                textTransform: "lowercase",
-                letterSpacing: 0.2,
-              }}
-            >
-              untagged
-            </span>
-          )}
+          ) : null}
           {resourceGroup ? (
             <span
               title={`Resource group: ${resourceGroup}`}

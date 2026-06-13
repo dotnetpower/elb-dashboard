@@ -138,6 +138,17 @@ celery_app.conf.update(
             ),
             "options": {"queue": "reconcile"},
         },
+        # Terminalise warmup / prepare_db_* / shard / oracle jobstate rows stuck
+        # active after a worker crash (or a legacy synchronous audit row). The
+        # orphan reconciler above only fixes {db}-metadata.json; this one fixes
+        # the Table rows so the job list / auto-stop no longer see phantom work.
+        "stale-dbops-reconcile": {
+            "task": "api.tasks.storage.reconcile_stale_dbops_jobs",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_STALE_DBOPS_SECONDS", "300")
+            ),
+            "options": {"queue": "reconcile"},
+        },
         "blast-reconcile-stale-jobs": {
             "task": "api.tasks.blast.reconcile_stale_jobs",
             "schedule": float(os.environ.get("CELERY_BEAT_BLAST_RECONCILE_SECONDS", "90")),

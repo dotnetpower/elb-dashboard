@@ -48,6 +48,21 @@ def _env_baseline(
     # set; drop any ambient value so tests stay network-free and deterministic
     # unless they opt in explicitly.
     monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    # Isolate the ops Redis the suite reads from the developer's live local
+    # ops Redis (default db 2). That db carries real deployment runtime state
+    # — e.g. a cached `openapi:runtime:base-url` pointing at an internal AKS
+    # IP. When that key leaks into a test, a 404 job lookup
+    # (`GET /api/blast/jobs/<unknown>`) falls through to the external OpenAPI
+    # branch and makes a real, unreachable httpx call that blocks for the full
+    # 90 s `get_job` timeout, hanging the whole suite. Point tests at a
+    # dedicated, normally-empty test db so runtime reads are clean and
+    # deterministic — matching CI, where no Redis is reachable and the read
+    # already degrades to "". A test that genuinely needs ops Redis still
+    # overrides this with its own `monkeypatch.setenv` (last write wins).
+    monkeypatch.setenv("OPS_REDIS_URL", "redis://127.0.0.1:6379/15")
+    # Belt-and-braces: never let a leaked base-URL env reach the external
+    # OpenAPI client during tests. Individual tests opt in explicitly.
+    monkeypatch.delenv("ELB_OPENAPI_BASE_URL", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path_factory.mktemp("elb_state")))
 
 
@@ -83,6 +98,34 @@ def _stub_blast_submit_gates(monkeypatch: pytest.MonkeyPatch) -> None:
         submit_gates, "_gate_terminal_sidecar", lambda: _ok("terminal_sidecar")
     )
     submit_gates.reset_submit_gates_cache()
+
+
+def _flush_ops_runtime_cache() -> None:
+    """Delete every ``openapi:runtime:*`` key from the (test-only) ops Redis.
+
+    A handful of routes persist the resolved OpenAPI endpoint via
+    ``save_openapi_base_url`` using the *real* ops Redis client. Under
+    ``_env_baseline`` that client points at the dedicated test db (15), but
+    without an explicit flush a base URL written by one test
+    (e.g. ``http://10.20.30.40``) survives into the next test in the same
+    xdist worker. A later ``GET /api/blast/jobs/<unknown>`` then resolves that
+    leaked endpoint and makes a real, unreachable httpx call that blocks for
+    the full 90 s ``get_job`` timeout — hanging the suite. Clearing the keys
+    between tests keeps the runtime cache scoped to the test that wrote it.
+    Best-effort: a missing / unreachable Redis (CI has none) is a silent no-op.
+    """
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        client = get_ops_redis_client(socket_timeout=1.0)
+        keys = list(client.keys("openapi:runtime:*"))
+        if keys:
+            client.delete(*keys)
+    except Exception:  # noqa: S110 - best-effort test cleanup; no Redis → no-op
+        # No Redis / transient error → nothing to clean; the read path
+        # already degrades to "" in that case.
+        pass
+
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +178,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_k8s_credential_cache()
     reset_k8s_session_pool()
     reset_redis_clients()
+    _flush_ops_runtime_cache()
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()
     _reset_autostop_table_pool()
@@ -154,6 +198,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_k8s_session_pool()
     reset_k8s_credential_cache()
     reset_redis_clients()
+    _flush_ops_runtime_cache()
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()
     _reset_autostop_table_pool()
