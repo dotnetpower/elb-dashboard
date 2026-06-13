@@ -31,7 +31,7 @@ jobs:
   backend:
     name: ruff + pytest (api/)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -56,8 +56,14 @@ jobs:
 
       - name: pytest (fast loop — parallel, slow/subprocess excluded)
         # The default pytest.ini addopts already wire `-n auto`, the marker
-        # filter, and the `--timeout=60` safety net. Set CI=true so any
+        # filter, `--timeout=60` (per-test) and `--session-timeout=300`
+        # (whole-run) safety nets, plus `faulthandler_timeout=90` for stack
+        # dumps of a stuck test. This step-level `timeout-minutes` is the final
+        # hard backstop: even if the xdist controller fully deadlocks (so the
+        # in-process session timeout cannot fire), Actions OS-kills the step at
+        # 6 minutes instead of letting it run to the job cap. Set CI=true so any
         # CI-aware code paths (logging, color, etc.) behave correctly.
+        timeout-minutes: 6
         env:
           CI: "true"
         run: uv run pytest -q api/tests
