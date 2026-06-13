@@ -176,12 +176,260 @@ def test_running_with_warmup_ready_is_ready(patch_health, monkeypatch) -> None:
             "ready_node_count": 2,
         },
     )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *a, **k: {
+            "databases": [{"name": "16S_ribosomal_RNA", "status": "Ready"}],
+        },
+    )
     out = svc.evaluate_ensure_running(
         object(), subscription_id="s", resource_group="rg", cluster_name="c"
     )
     assert out["status"] == "ready"
     assert out["warmup"]["ready"] is True
+    assert out["warmup"]["databases_total"] == 1
+    assert out["warmup"]["databases_ready"] == 1
+    assert out["warmup"]["pending_databases"] == []
+    assert out["warmup"]["failed_databases"] == []
     assert out["retry_after_seconds"] is None
+
+
+class _MultiDbPref:
+    enabled = True
+    databases: ClassVar[list[str]] = ["core_nt", "16S_ribosomal_RNA"]
+    num_nodes = 2
+
+
+def test_running_nodes_ready_but_database_still_loading_is_warming(
+    patch_health, monkeypatch
+) -> None:
+    # Regression: warmup nodes are all K8s-Ready but ``core_nt`` is still
+    # ``Loading`` (only ``16S_ribosomal_RNA`` warmed). The cluster must report
+    # ``warming``, NOT ``ready`` — submitting now would fall back to the slow
+    # on-node DB init.
+    patch_health(_health(power_state="Running", provisioning_state="Succeeded"))
+    monkeypatch.setattr(
+        "api.services.auto_warmup.get_auto_warmup_preference",
+        lambda *a, **k: _MultiDbPref(),
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.get_aks_cluster_snapshot",
+        lambda *a, **k: {
+            "provisioning_state": "Succeeded",
+            "power_state": "Running",
+            "node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.auto_warmup_ready_gate",
+        lambda *a, **k: {
+            "ready": True,
+            "phase": "ready",
+            "expected_node_count": 2,
+            "ready_node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *a, **k: {
+            "databases": [
+                {"name": "16S_ribosomal_RNA", "status": "Ready"},
+                {"name": "core_nt", "status": "Loading"},
+            ],
+        },
+    )
+    out = svc.evaluate_ensure_running(
+        object(), subscription_id="s", resource_group="rg", cluster_name="c"
+    )
+    assert out["status"] == "warming"
+    assert out["warmup"]["ready"] is False
+    assert out["warmup"]["phase"] == "warming_databases"
+    assert out["warmup"]["databases_total"] == 2
+    assert out["warmup"]["databases_ready"] == 1
+    assert out["warmup"]["pending_databases"] == [{"db": "core_nt", "status": "Loading"}]
+    assert "core_nt" in out["reason"]
+    assert out["retry_after_seconds"] == svc._RETRY_WARMING
+
+
+def test_running_nodes_ready_but_database_missing_is_warming(
+    patch_health, monkeypatch
+) -> None:
+    # The warmup Job for a configured database has not appeared yet (empty
+    # warmup status). Node readiness alone must not report ``ready``.
+    patch_health(_health(power_state="Running", provisioning_state="Succeeded"))
+    monkeypatch.setattr(
+        "api.services.auto_warmup.get_auto_warmup_preference",
+        lambda *a, **k: _Pref(),
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.get_aks_cluster_snapshot",
+        lambda *a, **k: {
+            "provisioning_state": "Succeeded",
+            "power_state": "Running",
+            "node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.auto_warmup_ready_gate",
+        lambda *a, **k: {
+            "ready": True,
+            "phase": "ready",
+            "expected_node_count": 2,
+            "ready_node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *a, **k: {"databases": []},
+    )
+    out = svc.evaluate_ensure_running(
+        object(), subscription_id="s", resource_group="rg", cluster_name="c"
+    )
+    assert out["status"] == "warming"
+    assert out["warmup"]["databases_ready"] == 0
+    assert out["warmup"]["pending_databases"] == [
+        {"db": "16S_ribosomal_RNA", "status": "pending"}
+    ]
+    assert out["retry_after_seconds"] == svc._RETRY_WARMING
+
+
+def test_running_database_terminally_failed_is_ready_degraded(
+    patch_health, monkeypatch
+) -> None:
+    # A configured database whose warmup is terminally ``Failed`` (no active
+    # node) must NOT block ``ready`` forever — warmup is best-effort, so the
+    # cluster reports ``ready`` (degraded) with the failed set surfaced. The
+    # search falls back to the slow on-node init for that DB only.
+    patch_health(_health(power_state="Running", provisioning_state="Succeeded"))
+    monkeypatch.setattr(
+        "api.services.auto_warmup.get_auto_warmup_preference",
+        lambda *a, **k: _MultiDbPref(),
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.get_aks_cluster_snapshot",
+        lambda *a, **k: {
+            "provisioning_state": "Succeeded",
+            "power_state": "Running",
+            "node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.auto_warmup_ready_gate",
+        lambda *a, **k: {
+            "ready": True,
+            "phase": "ready",
+            "expected_node_count": 2,
+            "ready_node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *a, **k: {
+            "databases": [
+                {"name": "16S_ribosomal_RNA", "status": "Ready"},
+                {"name": "core_nt", "status": "Failed", "nodes_active": 0},
+            ],
+        },
+    )
+    out = svc.evaluate_ensure_running(
+        object(), subscription_id="s", resource_group="rg", cluster_name="c"
+    )
+    assert out["status"] == "ready"
+    assert out["warmup"]["phase"] == "ready_degraded"
+    assert out["warmup"]["databases_ready"] == 1
+    assert out["warmup"]["pending_databases"] == []
+    assert out["warmup"]["failed_databases"] == [{"db": "core_nt", "status": "Failed"}]
+    assert "core_nt" in out["reason"]
+    assert out["retry_after_seconds"] is None
+
+
+def test_running_failed_database_with_active_node_keeps_warming(
+    patch_health, monkeypatch
+) -> None:
+    # A ``Failed`` status that still has an active node is a retry in progress,
+    # not a terminal failure — keep ``warming`` rather than degrading to ready.
+    patch_health(_health(power_state="Running", provisioning_state="Succeeded"))
+    monkeypatch.setattr(
+        "api.services.auto_warmup.get_auto_warmup_preference",
+        lambda *a, **k: _MultiDbPref(),
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.get_aks_cluster_snapshot",
+        lambda *a, **k: {
+            "provisioning_state": "Succeeded",
+            "power_state": "Running",
+            "node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.auto_warmup_ready_gate",
+        lambda *a, **k: {
+            "ready": True,
+            "phase": "ready",
+            "expected_node_count": 2,
+            "ready_node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *a, **k: {
+            "databases": [
+                {"name": "16S_ribosomal_RNA", "status": "Ready"},
+                {"name": "core_nt", "status": "Failed", "nodes_active": 1},
+            ],
+        },
+    )
+    out = svc.evaluate_ensure_running(
+        object(), subscription_id="s", resource_group="rg", cluster_name="c"
+    )
+    assert out["status"] == "warming"
+    assert out["warmup"]["phase"] == "warming_databases"
+    assert out["warmup"]["pending_databases"] == [{"db": "core_nt", "status": "Failed"}]
+    assert out["warmup"]["failed_databases"] == []
+    assert out["retry_after_seconds"] == svc._RETRY_WARMING
+
+
+def test_running_stale_database_keeps_warming(patch_health, monkeypatch) -> None:
+    # ``Stale`` (mixed DB generations) is recoverable — the reconcile re-warms
+    # it — so it keeps ``warming``, not the terminal degraded path.
+    patch_health(_health(power_state="Running", provisioning_state="Succeeded"))
+    monkeypatch.setattr(
+        "api.services.auto_warmup.get_auto_warmup_preference",
+        lambda *a, **k: _Pref(),
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.get_aks_cluster_snapshot",
+        lambda *a, **k: {
+            "provisioning_state": "Succeeded",
+            "power_state": "Running",
+            "node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.auto_warmup_ready_gate",
+        lambda *a, **k: {
+            "ready": True,
+            "phase": "ready",
+            "expected_node_count": 2,
+            "ready_node_count": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *a, **k: {
+            "databases": [{"name": "16S_ribosomal_RNA", "status": "Stale"}],
+        },
+    )
+    out = svc.evaluate_ensure_running(
+        object(), subscription_id="s", resource_group="rg", cluster_name="c"
+    )
+    assert out["status"] == "warming"
+    assert out["warmup"]["pending_databases"] == [
+        {"db": "16S_ribosomal_RNA", "status": "Stale"}
+    ]
+    assert out["warmup"]["failed_databases"] == []
+    assert out["retry_after_seconds"] == svc._RETRY_WARMING
+
 
 
 def test_running_warmup_snapshot_missing_degrades_to_warming(

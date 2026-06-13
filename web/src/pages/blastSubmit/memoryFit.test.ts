@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import type { AksClusterSummary, BlastDatabase } from "@/api/endpoints";
 
-import { deriveFullDbMemoryFit, fullDbMemoryWarmupRemediation } from "./memoryFit";
+import {
+  deriveFullDbMemoryFit,
+  fullDbMemoryWarmingInProgress,
+  fullDbMemoryWarmupRemediation,
+} from "./memoryFit";
 
 // core_nt's BLASTDB bytes-to-cache — the exact 251.7 GB figure ElasticBLAST
 // reports. Used to verify we block on E16s_v5 (128 GB) but NOT on E32s_v5
@@ -136,6 +140,65 @@ describe("fullDbMemoryWarmupRemediation", () => {
       shardingMode: "precise", // sharded → fit is null
     });
     expect(fullDbMemoryWarmupRemediation(fit, "core_nt")).toBeNull();
+  });
+});
+
+describe("fullDbMemoryWarmingInProgress", () => {
+  const blockedFit = () =>
+    deriveFullDbMemoryFit({
+      database: db(),
+      cluster: cluster("Standard_E16s_v5"), // 128 GB → 126 GB usable
+      shardingMode: "off",
+    });
+
+  it("tells the user to wait for the running warmup, not to warm again", () => {
+    const message = fullDbMemoryWarmingInProgress(blockedFit(), "core_nt");
+    expect(message).not.toBeNull();
+    expect(message).toContain("is warming on the selected cluster now");
+    expect(message).toContain("wait for the warmup to complete");
+    expect(message).toContain("core_nt");
+    // Must NOT repeat the "Warm this database" / "Switch to the Sharded"
+    // instructions — the user is already warming and the control is greyed out.
+    expect(message).not.toContain("Warm this database");
+    expect(message).not.toContain("Switch to the Sharded");
+  });
+
+  it("folds a partial progress percentage into the message", () => {
+    const message = fullDbMemoryWarmingInProgress(blockedFit(), "core_nt", 42.6);
+    expect(message).toContain("(43% complete)");
+  });
+
+  it("omits the progress hint at the 0% / 100% boundaries and when unknown", () => {
+    expect(fullDbMemoryWarmingInProgress(blockedFit(), "core_nt", 0)).not.toContain(
+      "complete)",
+    );
+    expect(fullDbMemoryWarmingInProgress(blockedFit(), "core_nt", 100)).not.toContain(
+      "complete)",
+    );
+    expect(fullDbMemoryWarmingInProgress(blockedFit(), "core_nt", null)).not.toContain(
+      "complete)",
+    );
+    expect(
+      fullDbMemoryWarmingInProgress(blockedFit(), "core_nt", undefined),
+    ).not.toContain("complete)");
+  });
+
+  it("returns null when the run fits (no block to remediate)", () => {
+    const fit = deriveFullDbMemoryFit({
+      database: db(),
+      cluster: cluster("Standard_E32s_v5"), // 256 GB > 251.7 GB
+      shardingMode: "off",
+    });
+    expect(fullDbMemoryWarmingInProgress(fit, "core_nt")).toBeNull();
+  });
+
+  it("returns null when the fit verdict is unknown", () => {
+    const fit = deriveFullDbMemoryFit({
+      database: db(),
+      cluster: cluster("Standard_E16s_v5"),
+      shardingMode: "precise", // sharded → fit is null
+    });
+    expect(fullDbMemoryWarmingInProgress(fit, "core_nt")).toBeNull();
   });
 });
 

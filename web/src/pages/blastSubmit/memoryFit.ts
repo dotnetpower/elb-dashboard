@@ -11,7 +11,8 @@
 //   accept (e.g. core_nt 251.7 GB on Standard_E32s_v5 / 256 GB) nor passes one
 //   it would reject. Keep the threshold a direct `required <= nodeRam` compare
 //   in lockstep with `api/services/blast/submit_gates.py::_gate_node_memory_fit`.
-// Key entry points: `deriveFullDbMemoryFit`.
+// Key entry points: `deriveFullDbMemoryFit`, `fullDbMemoryWarmupRemediation`,
+//   `fullDbMemoryWarmingInProgress`.
 // Risky contracts: `fits === null` means "unknown" (no authoritative number) and
 //   MUST NOT block — the backend gate and ElasticBLAST's own pre-flight remain
 //   the net. `blockedReason` is user-visible; tests assert its shape.
@@ -121,5 +122,44 @@ export function fullDbMemoryWarmupRemediation(
     `node's ${usableGib.toFixed(0)} GB usable for a full-database BLAST. Warm this ` +
     `database on the selected cluster to enable the Sharded throughput profile, ` +
     `which spreads it across your nodes — or use a cluster with a larger machine type.`
+  );
+}
+
+/**
+ * Remediation for the full-DB memory block when an explicit warmup is ALREADY
+ * running on the selected cluster for this database. Both the default
+ * `blockedReason` and `fullDbMemoryWarmupRemediation` tell the user to "warm
+ * this database" — but when a warmup Job is mid-flight that reads as "do the
+ * thing you are already doing". This message instead reassures the user that
+ * the warmup in progress will unlock the Sharded throughput profile (which
+ * spreads the database across nodes) and that they should submit once it
+ * completes. Waiting — not Baseline — is the path, because a full-database
+ * (Baseline) run loads the entire DB into one node and can never fit here.
+ *
+ * `progressPct` (0–100) is folded into the message only when it is a partial
+ * value, so a missing or boundary number degrades to no progress hint instead
+ * of a misleading "0% / 100%".
+ *
+ * Returns `null` unless `fit.fits === false` with known numbers, so callers can
+ * fall through to the other remediations.
+ */
+export function fullDbMemoryWarmingInProgress(
+  fit: FullDbMemoryFit,
+  dbName: string,
+  progressPct?: number | null,
+): string | null {
+  if (fit.fits !== false || fit.requiredGib == null || fit.nodeRamGib == null) {
+    return null;
+  }
+  const progress =
+    typeof progressPct === "number" && progressPct > 0 && progressPct < 100
+      ? ` (${progressPct.toFixed(0)}% complete)`
+      : "";
+  return (
+    `'${dbName}' is warming on the selected cluster now${progress}. When it ` +
+    `finishes, the Sharded throughput profile unlocks and spreads its ` +
+    `${fit.requiredGib.toFixed(1)} GB across your nodes — wait for the warmup to ` +
+    `complete, then submit. A full-database (Baseline) run loads the entire ` +
+    `database into a single node, so it cannot run '${dbName}' here.`
   );
 }

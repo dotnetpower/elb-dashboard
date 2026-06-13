@@ -73,6 +73,25 @@ export function useWarmupStatus({
   const isDbAlreadyWarm = warmDbs.has(selectedDbShortName);
   const warmDbInfo = warmDbs.get(selectedDbShortName);
 
+  // The selected DB's current warmup-status entry (regardless of Ready), used
+  // to tell "warming right now" apart from "confirmed cold / never warmed".
+  // An explicit dashboard warmup Job reports `status="Loading"` (nodes_active
+  // > 0) with `sources` including `"warmup"` while it copies the DB onto node
+  // SSDs; `progress_pct` advances 0 → 100 across the node fan-out.
+  const selectedDbWarmupInfo = useMemo(() => {
+    const dbs = warmupQuery.data?.databases ?? [];
+    return dbs.find((d) => d.name === selectedDbShortName);
+  }, [warmupQuery.data, selectedDbShortName]);
+
+  const isDbWarming = Boolean(
+    selectedDbWarmupInfo?.status === "Loading" &&
+      (selectedDbWarmupInfo?.sources ?? []).includes("warmup"),
+  );
+  const warmupProgressPct =
+    typeof selectedDbWarmupInfo?.progress_pct === "number"
+      ? selectedDbWarmupInfo.progress_pct
+      : null;
+
   // Whether we have a trustworthy warm/not-warm answer for the selected
   // cluster yet. The query returns `undefined` while it is disabled (cluster
   // not workload-ready) or loading its first response; in those windows the
@@ -88,5 +107,7 @@ export function useWarmupStatus({
     isDbAlreadyWarm,
     isWarmupStatusResolved,
     warmDbInfo,
+    isDbWarming,
+    warmupProgressPct,
   } as const;
 }

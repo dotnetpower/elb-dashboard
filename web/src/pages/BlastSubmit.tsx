@@ -23,7 +23,11 @@ import {
   deriveSubmitValidation,
   type MissingItem,
 } from "@/pages/blastSubmit/submitValidation";
-import { deriveFullDbMemoryFit, fullDbMemoryWarmupRemediation } from "@/pages/blastSubmit/memoryFit";
+import {
+  deriveFullDbMemoryFit,
+  fullDbMemoryWarmingInProgress,
+  fullDbMemoryWarmupRemediation,
+} from "@/pages/blastSubmit/memoryFit";
 import {
   decideProgramSwitch,
   deriveDbAvailabilityByType,
@@ -187,6 +191,8 @@ export function BlastSubmit() {
     isDbAlreadyWarm,
     isWarmupStatusResolved,
     warmDbInfo,
+    isDbWarming,
+    warmupProgressPct,
   } =
     useWarmupStatus({
       subId,
@@ -286,18 +292,29 @@ export function BlastSubmit() {
   });
 
   // Resolve the user-facing blocker for a full-DB run that does not fit node
-  // RAM. When the Sharded throughput profile is disabled *only* because the DB
-  // is not warm yet (and warming would unlock it, and warming is feasible),
-  // steer the user to warm the database instead of to the greyed-out Sharded
-  // control — otherwise the default message is a catch-22. Falls back to the
-  // default reason whenever sharding cannot be unlocked by warming alone.
+  // RAM, in priority order:
+  //   1. A warmup is ALREADY running for this DB on the selected cluster — tell
+  //      the user to wait for it to finish (it unlocks the Sharded profile),
+  //      not to "warm the database" they are already warming. Includes the live
+  //      progress percentage when known.
+  //   2. The DB is confirmed cold and warming WOULD unlock sharding (and is
+  //      feasible) — steer to warming instead of the greyed-out Sharded control
+  //      (the original catch-22 fix).
+  //   3. Otherwise — the default message steering to the Sharded profile or a
+  //      larger machine type.
   const fullDbMemoryBlockedReason =
-    fullDbMemoryFit.fits === false &&
-    shardingAvailability.canUnlockShardingByWarming &&
-    !warmupBlocked
-      ? (fullDbMemoryWarmupRemediation(fullDbMemoryFit, selectedDbInfo?.name ?? "") ??
-        fullDbMemoryFit.blockedReason)
-      : fullDbMemoryFit.blockedReason;
+    fullDbMemoryFit.fits === false && isDbWarming
+      ? (fullDbMemoryWarmingInProgress(
+          fullDbMemoryFit,
+          selectedDbInfo?.name ?? "",
+          warmupProgressPct,
+        ) ?? fullDbMemoryFit.blockedReason)
+      : fullDbMemoryFit.fits === false &&
+          shardingAvailability.canUnlockShardingByWarming &&
+          !warmupBlocked
+        ? (fullDbMemoryWarmupRemediation(fullDbMemoryFit, selectedDbInfo?.name ?? "") ??
+          fullDbMemoryFit.blockedReason)
+        : fullDbMemoryFit.blockedReason;
 
   useEffect(() => {
     if (runtimeDataLoading) return;

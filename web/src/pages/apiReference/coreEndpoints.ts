@@ -41,7 +41,8 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
         "status transitions:\n" +
         "  • stopped  — cluster is stopped; a start is enqueued (start_triggered=true)\n" +
         "  • starting — start operation in progress\n" +
-        "  • warming  — Running, but the warmup nodes are not Ready yet\n" +
+        "  • warming  — Running, but the warmup nodes are not all Ready yet, or a " +
+        "configured database is still loading onto the node-local SSD\n" +
         "  • ready    — Running and warmed; safe to submit\n" +
         "  • not_found / unknown — cluster missing / ARM unreachable (no start)\n\n" +
         "Pass start=false to observe the phase without triggering a start.\n\n" +
@@ -51,10 +52,18 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
         "node-local BLAST DB warmup, so a /v1/jobs submitted right after /v1/ready " +
         "still works but falls back to the slow on-node SSD DB init. This " +
         "endpoint's status='ready' additionally waits for the configured warmup " +
-        "nodes to be Ready, so 'ready' here means the cluster is warmed and " +
+        "nodes to be Ready AND for every configured database to finish its " +
+        "node-local warmup, so 'ready' here means the cluster is warmed and " +
         "/v1/jobs runs at full speed. (When no warmup preference is configured " +
         "there is nothing to warm, so a Running cluster reports 'ready' " +
-        "immediately — same as /v1/ready.)",
+        "immediately — same as /v1/ready.)\n\n" +
+        "Warmup is best-effort: a database whose warmup is terminally Failed (a " +
+        "cause retrying cannot fix) does NOT block 'ready' forever — the cluster " +
+        "reports 'ready' with warmup.phase='ready_degraded' and the failed set in " +
+        "warmup.failed_databases, and /v1/jobs for that database falls back to the " +
+        "slow on-node init. NOTE: 'ready' confirms each database is warm, not that " +
+        "it is the latest NCBI generation — the per-submit gate owns the " +
+        "generation check, so a brand-new snapshot may still be re-warming.",
       tags: ["Core"],
       parameters: [],
       requestBody: {
@@ -91,10 +100,13 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
         "200": {
           description:
             "Current serving phase. Poll until status='ready'. ⚠️ status='ready' " +
-            "means Running AND warmed (BLAST DB warmup nodes Ready) — stricter " +
-            "than the upstream /v1/ready. status='warming' = started but the " +
-            "warmup is still running; 'warmup' carries ready_node_count / " +
-            "expected_node_count so you can show progress.",
+            "means Running AND warmed (warmup nodes Ready AND every configured " +
+            "database warmed onto the node-local SSD, or terminally Failed) — " +
+            "stricter than the upstream /v1/ready. status='warming' = started but " +
+            "the warmup is still running; 'warmup' carries ready_node_count / " +
+            "expected_node_count for node progress and, once the nodes are Ready, " +
+            "databases_ready / databases_total / pending_databases / " +
+            "failed_databases for per-database progress.",
           fields: [
             "status",
             "start_triggered",
@@ -117,12 +129,16 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
             start_task_id: null,
             warmup: {
               ready: false,
-              phase: "waiting_for_warmup_nodes",
+              phase: "warming_databases",
               expected_node_count: 2,
-              ready_node_count: 1,
+              ready_node_count: 2,
+              databases_total: 2,
+              databases_ready: 1,
+              pending_databases: [{ db: "core_nt", status: "Loading" }],
+              failed_databases: [],
             },
             retry_after_seconds: 15,
-            message: "waiting for all warmup nodes",
+            message: "warmup databases still loading: core_nt",
           },
         },
         "400": {
