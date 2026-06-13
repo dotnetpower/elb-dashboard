@@ -1,10 +1,12 @@
 """FastAPI app lifespan — credential warm-up, subscriber start, clean shutdown.
 
 Responsibility: Pre-warm the managed-identity credential, start the BLAST DB
-metadata Redis subscriber, and on shutdown close the sidecar SSE broadcaster,
+metadata Redis subscriber, start the process-local BLAST DB catalogue cache
+warmer, and on shutdown stop the warmer, close the sidecar SSE broadcaster,
 the frontend reverse-proxy client, and the shared httpx pool.
 Edit boundaries: Keep this module focused on app-level start/stop work. Per-
-sidecar background loops (cgroup reporter etc.) belong in `create_app()`.
+sidecar background loops (cgroup reporter etc.) belong in `create_app()`. The
+catalogue warmer's loop logic lives in `api.services.storage.catalog_warmer`.
 Key entry points: `_lifespan`, `_configure_threadpool_capacity`.
 Risky contracts: Every shutdown step is wrapped in try/except so a single
 failure cannot block the rest. Subscriber stop is conditional on the start
@@ -161,9 +163,28 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             type(exc).__name__,
         )
         stop_invalidate_subscriber = None  # type: ignore[assignment]
+    # Keep the BLAST DB catalogue cache hot in THIS (api) process so the first
+    # `GET /api/blast/databases` after the cache TTL expires does not make the
+    # user wait on the ~4 s cold enumeration. The cache is process-local, so a
+    # worker/beat fill would not help the api read path — the warmer must run
+    # here. Failure to start is non-fatal: the read path still works, just cold.
+    try:
+        from api.services.storage.catalog_warmer import start_catalog_warmer
+
+        start_catalog_warmer(app)
+    except Exception as exc:
+        LOGGER.debug("catalog warmer scheduling skipped: %s", type(exc).__name__)
     try:
         yield
     finally:
+        try:
+            from api.services.storage.catalog_warmer import stop_catalog_warmer
+
+            await stop_catalog_warmer(app)
+        except Exception as exc:
+            LOGGER.debug(
+                "catalog warmer shutdown skipped: %s", type(exc).__name__, exc_info=True
+            )
         try:
             from api.routes.monitor import _SIDECAR_BROADCASTER
 
