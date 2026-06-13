@@ -15,6 +15,18 @@ terminal_base_log() {
   fi
 }
 
+# Default sibling ref the terminal toolchain is built from. This MUST point at
+# a commit that still ships the `bin/` launcher scripts: setup.cfg installs the
+# `elastic-blast` CLI via `scripts = bin/*`, and upstream commit 72a69822
+# ("Remove deprecated scripts") deleted `bin/`. Building from `master` (or any
+# ref at/after that commit) yields a venv with the elastic_blast PACKAGE but no
+# `elastic-blast` EXECUTABLE, so every dashboard BLAST submit fails inside the
+# terminal sidecar with `[Errno 2] No such file or directory: 'elastic-blast'`.
+# Keep this in lock-step with the `ARG ELASTIC_BLAST_REF` default in
+# terminal/Dockerfile.base; the hash, log, and build below all resolve through
+# it so the content tag can never drift from the ref actually built.
+_ELASTIC_BLAST_REF_DEFAULT='f4b8b734a82285a18a2ca9aadcbe02759d13f903'
+
 terminal_base_hash() {
   local dockerfile="$REPO_ROOT/terminal/Dockerfile.base"
   {
@@ -25,7 +37,7 @@ terminal_base_hash() {
     sha256sum "$REPO_ROOT/terminal/merge-sharded-results.sh"
     printf '\n-- KUBECTL_VERSION=%s\n' "${KUBECTL_VERSION:-v1.34.2}"
     printf '\n-- TTYD_VERSION=%s\n' "${TTYD_VERSION:-1.7.7}"
-    printf '\n-- ELASTIC_BLAST_REF=%s\n' "${ELASTIC_BLAST_REF:-f4b8b734a82285a18a2ca9aadcbe02759d13f903}"
+    printf '\n-- ELASTIC_BLAST_REF=%s\n' "${ELASTIC_BLAST_REF:-$_ELASTIC_BLAST_REF_DEFAULT}"
   } | sha256sum | awk '{print substr($1, 1, 16)}'
 }
 
@@ -60,13 +72,13 @@ ensure_terminal_base_image() {
 
   terminal_base_log "==> Building terminal toolchain base: $image"
   terminal_base_log "    log: $log"
-  terminal_base_log "    ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF:-master}"
+  terminal_base_log "    ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF:-$_ELASTIC_BLAST_REF_DEFAULT}"
   az acr build \
     --registry "$ACR_NAME" \
     --image "elb-terminal-base:$tag" \
     --image "elb-terminal-base:latest" \
     --file "$REPO_ROOT/terminal/Dockerfile.base" \
-    --build-arg "ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF:-master}" \
+    --build-arg "ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF:-$_ELASTIC_BLAST_REF_DEFAULT}" \
     "$REPO_ROOT/terminal" \
     --output none \
     > "$log" 2>&1

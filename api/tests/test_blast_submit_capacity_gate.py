@@ -247,6 +247,62 @@ def test_submit_failed_persists_full_console_output(
     assert details["error_code"]  # non-empty diagnostic always recorded
 
 
+def test_submit_failed_logs_diagnostic_for_missing_elastic_blast(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Regression: when the terminal sidecar cannot spawn `elastic-blast` the
+    # exec server now streams a stderr diagnostic + exit code 127 instead of an
+    # empty body. The submit task must (a) surface that diagnostic as the job
+    # error and (b) emit an explicit ``blast_submit_failed`` worker-log record
+    # so the failure is greppable by job_id (previously the branch was silent,
+    # producing the opaque "no output captured" with nothing in Log Analytics).
+    monkeypatch.delenv("BLAST_GATE_ENABLED", raising=False)
+    tracker = _install_pipeline_stubs(monkeypatch)
+
+    monkeypatch.setattr(submit_task, "acquire_submit_lock", lambda *_a, **_k: (object(), "tok"))
+    monkeypatch.setattr(submit_task, "release_submit_lock", lambda *_a, **_k: None)
+
+    exec_diag = (
+        "exec: cannot start 'elastic-blast': "
+        "[Errno 2] No such file or directory: 'elastic-blast'"
+    )
+
+    def _failing_stream(**_kwargs: Any) -> dict[str, Any]:
+        tracker.stream_calls += 1
+        return {
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": exec_diag,
+            "duration_ms": 31,
+            "timed_out": False,
+            "log_line_count": 1,
+            "_log_events": [],
+            "error": exec_diag,
+        }
+
+    monkeypatch.setattr(_blast, "_stream_submit_command", _failing_stream)
+    monkeypatch.setattr(_blast, "_last_json", lambda *_a, **_k: None)
+    monkeypatch.setattr(_blast, "_is_retryable_result", lambda *_a, **_k: False)
+
+    with caplog.at_level("ERROR", logger="api.tasks.blast.submit_task"):
+        result = _blast.submit.run(**_SUBMIT_KWARGS)
+
+    assert result["status"] == "failed"
+    assert result["phase"] == "submit_failed"
+    assert "cannot start 'elastic-blast'" in result["error"]
+
+    # An explicit worker-log record names the job + the actionable signals.
+    failure_logs = [
+        rec for rec in caplog.records if rec.message.startswith("blast_submit_failed")
+    ]
+    assert failure_logs, "expected a blast_submit_failed ERROR log record"
+    log_text = failure_logs[-1].getMessage()
+    assert "job-cap-1" in log_text
+    assert "exit_code=127" in log_text
+    assert "cannot start 'elastic-blast'" in log_text
+
+
 # ---------------------------------------------------------------------------
 # Gate-enabled path — admit, retryable deny, hard reject, reserve race.
 # ---------------------------------------------------------------------------

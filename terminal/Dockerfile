@@ -102,13 +102,31 @@ RUN python3.12 -m venv /opt/elb/venv \
 # PEP 517 build isolation, so install with --no-build-isolation --no-deps
 # (matches the legacy cloud-init behavior).
 ARG ELASTIC_BLAST_REPO=https://github.com/dotnetpower/elastic-blast-azure.git
-ARG ELASTIC_BLAST_REF=master
+# Pin a sibling commit that still ships the `bin/` launcher scripts. setup.cfg
+# installs the `elastic-blast` CLI via `scripts = bin/*`; upstream commit
+# 72a69822 ("Remove deprecated scripts") deleted `bin/`, so building from
+# `master` installs the elastic_blast PACKAGE but no `elastic-blast` EXECUTABLE
+# and every BLAST submit fails with `No such file or directory: 'elastic-blast'`.
+# Keep in lock-step with terminal/Dockerfile.base and scripts/dev/terminal-base-image.sh.
+# Fetch the exact ref (not `--branch`, which only accepts branch/tag names) so a
+# commit SHA works the same way the base image resolves it.
+ARG ELASTIC_BLAST_REF=f4b8b734a82285a18a2ca9aadcbe02759d13f903
 COPY patch_elastic_blast.py /tmp/patch_elastic_blast.py
 COPY merge-sharded-results.sh /tmp/merge-sharded-results.sh
-RUN git clone --depth 1 --branch "${ELASTIC_BLAST_REF}" "${ELASTIC_BLAST_REPO}" /opt/elb/elastic-blast-azure \
+RUN git init /opt/elb/elastic-blast-azure \
+    && cd /opt/elb/elastic-blast-azure \
+    && git remote add origin "${ELASTIC_BLAST_REPO}" \
+    && git fetch --depth 1 origin "${ELASTIC_BLAST_REF}" \
+    && git checkout --detach FETCH_HEAD \
     && python3.12 /tmp/patch_elastic_blast.py /opt/elb/elastic-blast-azure /tmp/merge-sharded-results.sh \
     && /opt/elb/venv/bin/pip install --no-cache-dir -r /opt/elb/elastic-blast-azure/requirements/base.txt packit glob2 \
     && /opt/elb/venv/bin/pip install --no-build-isolation --no-deps /opt/elb/elastic-blast-azure
+
+# Fail the build loudly if the install did not produce the `elastic-blast`
+# launcher (setup.cfg ships it via `scripts = bin/*`; a ref without `bin/`
+# installs the package but no executable, which only surfaces at submit time).
+RUN command -v elastic-blast >/dev/null 2>&1 \
+    || { echo "FATAL: elastic-blast executable missing after install (ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF}); the ref must ship bin/* per setup.cfg"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Operator user + home directory. The Container Apps deployment intentionally

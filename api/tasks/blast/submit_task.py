@@ -1131,6 +1131,22 @@ def submit(
     guidance = _blast._submit_failure_guidance(error)
     if guidance:
         error = f"{error}\n\n{guidance}"
+    # Emit an explicit worker-log record for the non-retryable submit failure.
+    # Without this the task only writes the failure into job state and returns,
+    # so the worker container log carried NO line explaining why a submit
+    # failed — a "no output captured" job looked silent in Log Analytics. Log
+    # the authoritative signals (exit code, timeout, captured-output size) plus
+    # an error snippet so the failure is greppable by job_id.
+    LOGGER.error(
+        "blast_submit_failed job_id=%s cluster=%s exit_code=%s timed_out=%s "
+        "log_lines=%s error=%s",
+        job_id,
+        cluster_name,
+        exit_code,
+        result.get("timed_out"),
+        result.get("log_line_count"),
+        _blast._snippet(error, _blast.ERROR_SNIPPET_CHARS),
+    )
     # Persist the full submit console output (not just the 500-char error_code
     # tail) on the failed ``submitting`` step so the Run details page can render
     # the complete stdout/stderr the operator needs to diagnose the failure. The

@@ -495,8 +495,31 @@ def _stream(req: dict, write_line, client_alive=None) -> dict:
             pass
 
     try:
-        _write_stdin_file(req, cwd)
-        proc = _spawn(req["argv"], cwd, req["stdin"])
+        try:
+            _write_stdin_file(req, cwd)
+            proc = _spawn(req["argv"], cwd, req["stdin"])
+        except OSError as exc:
+            # The binary is missing / not executable, or the workdir could not
+            # be set up. The streaming HTTP handler has ALREADY sent the 200 +
+            # headers by the time it calls us, so it cannot turn this into a
+            # non-2xx status. If we let the exception escape, the client reads
+            # an empty body (no NDJSON lines, no summary) and the api caller
+            # reports the opaque "no output captured" with nothing in the
+            # worker log to explain it. Instead, surface the failure as a real
+            # stderr line plus a non-zero summary (127 = "command not found",
+            # the shell convention) so the caller captures an actionable error.
+            detail = f"exec: cannot start {req['argv'][0]!r}: {exc}"
+            try:
+                write_line({"stream": "stderr", "line": detail})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return {
+                "exit_code": 127,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "timed_out": False,
+                "client_aborted": False,
+                "error": detail,
+            }
         if req["stdin"] is not None and proc.stdin is not None:
             try:
                 proc.stdin.write(req["stdin"].encode("utf-8"))
@@ -723,7 +746,15 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             _audit("exec_error", request_id=request_id, error=str(exc))
             try:
-                self._send_json(500, {"error": "exec failed"})
+                # Include the failure detail (not just a generic "exec failed")
+                # so the buffered ``run()`` caller raises a TerminalExecError
+                # that names the underlying cause. This is loopback-only and
+                # the api caller sanitises the body before surfacing it. The
+                # streaming path already reported its own spawn failures as a
+                # stderr line + non-zero summary, so reaching here means a
+                # buffered call or a late streaming error after headers were
+                # sent — in the latter case _send_json is a no-op (caught).
+                self._send_json(500, {"error": "exec failed", "detail": str(exc)[:500]})
             except Exception:  # noqa: S110 - response failure on a closing socket; audited above
                 pass
         finally:

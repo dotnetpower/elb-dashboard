@@ -79,7 +79,14 @@ RUN git init /opt/elb/elastic-blast-azure \
     && /opt/elb/venv/bin/pip install --no-cache-dir -r /opt/elb/elastic-blast-azure/requirements/base.txt packit glob2 \
     && /opt/elb/venv/bin/pip install --no-build-isolation --no-deps /opt/elb/elastic-blast-azure
 
-RUN id azureuser 2>/dev/null || useradd -m -s /bin/bash azureuser \
+# Fail the build loudly if the install did not produce the `elastic-blast`
+# launcher. setup.cfg ships the CLI via `scripts = bin/*`; a ref without `bin/`
+# (e.g. upstream master after commit 72a69822 "Remove deprecated scripts")
+# installs the elastic_blast PACKAGE but no EXECUTABLE, which otherwise only
+# surfaces at submit time inside the deployed sidecar as
+# `[Errno 2] No such file or directory: 'elastic-blast'`.
+RUN command -v elastic-blast >/dev/null 2>&1 \
+    || { echo "FATAL: elastic-blast executable missing after install (ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF}); the ref must ship bin/* per setup.cfg"; exit 1; }
     && mkdir -p /home/azureuser \
     && chown -R azureuser:azureuser /home/azureuser
 
