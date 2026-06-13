@@ -36,7 +36,7 @@ from fastapi.responses import StreamingResponse
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _OPENAPI_PROXY_ALLOWED_HEADERS
-from api.routes.aks.openapi import _peering_recovery_hint
+from api.routes.aks.openapi import _lb_pending_recovery_hint_async, _peering_recovery_hint
 
 LOGGER = logging.getLogger(__name__)
 
@@ -339,6 +339,16 @@ async def aks_openapi_proxy(
             # OpenApiPanel can back off instead of retrying every render
             # cycle while the Service IP is still being provisioned
             # (typical “cluster just started” window).
+            #
+            # The LB IP is missing — the same signature as GitHub #33 (the
+            # cluster identity lacks Network Contributor on its BYO node
+            # subnet). Classify it so the SPA can offer the specific
+            # "Grant LB subnet RBAC" one-click fix; the async-safe helper
+            # offloads the events read to a thread and degrades to the
+            # generic peering hint when the RBAC signature is absent.
+            lb_hint = await _lb_pending_recovery_hint_async(
+                cred, sub, resource_group, cluster_name
+            )
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -346,7 +356,7 @@ async def aks_openapi_proxy(
                     "message": "The elb-openapi service is not reachable yet.",
                     "retryable": True,
                     "retry_after_seconds": 15,
-                    **_peering_recovery_hint(),
+                    **lb_hint,
                 },
                 headers={"Retry-After": "15"},
             )

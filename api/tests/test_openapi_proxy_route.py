@@ -335,6 +335,11 @@ def test_openapi_proxy_returns_503_when_service_ip_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_service_ip(monkeypatch, None)
+    # No subnet-RBAC signature present → falls back to the generic peering hint.
+    monkeypatch.setattr(
+        "api.services.aks.openapi_lb_rbac.detect_lb_subnet_rbac_missing",
+        lambda *a, **k: False,
+    )
 
     response = client.get(
         "/api/aks/openapi/proxy",
@@ -349,6 +354,31 @@ def test_openapi_proxy_returns_503_when_service_ip_missing(
     # is silently stuck — see docs/features_change/2026-05-27-openapi-peering-recovery.md.
     assert body["recovery_action"] == "peer_with_platform"
     assert "elb-openapi" in body["recovery_hint"]
+
+
+def test_openapi_proxy_503_returns_rbac_hint_when_detected(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the LB-pending cause is the BYO node-subnet RBAC gap (GitHub #33),
+    the proxy's 503 detail carries recovery_action=grant_lb_subnet_rbac so the
+    SPA offers the specific one-click fix instead of the generic peering hint."""
+    _patch_service_ip(monkeypatch, None)
+    monkeypatch.setattr(
+        "api.services.aks.openapi_lb_rbac.detect_lb_subnet_rbac_missing",
+        lambda *a, **k: True,
+    )
+
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={"resource_group": "rg-elb", "cluster_name": "aks-elb", "path": "/healthz"},
+    )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["code"] == "openapi_service_not_reachable"
+    assert body["recovery_action"] == "grant_lb_subnet_rbac"
+    assert "subnet" in body["recovery_hint"].lower()
 
 
 def test_openapi_proxy_502_includes_peer_with_platform_recovery_hint(

@@ -92,6 +92,36 @@ def _lb_pending_recovery_hint(
     return _peering_recovery_hint()
 
 
+async def _lb_pending_recovery_hint_async(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, str]:
+    """Async-safe variant of ``_lb_pending_recovery_hint`` for the proxy route.
+
+    The "Try it" proxy handler (``api.routes.aks.openapi_proxy``) runs on the
+    event loop, but ``detect_lb_subnet_rbac_missing`` does a blocking ARM /
+    Kubernetes events read. Offload it to a worker thread so the event loop is
+    never blocked, mirroring how the proxy already offloads its RBAC gate.
+    Best-effort and additive: any failure degrades to the generic peering hint,
+    never raises. Runs only on the already-degraded (LB-IP-missing) path.
+    """
+    import asyncio
+
+    try:
+        return await asyncio.to_thread(
+            _lb_pending_recovery_hint,
+            cred,
+            subscription_id,
+            resource_group,
+            cluster_name,
+        )
+    except Exception:
+        LOGGER.debug("lb-pending hint (async): detection failed", exc_info=True)
+        return _peering_recovery_hint()
+
+
 def _k8s_service_proxy_url(server: str, path: str) -> str:
     target = path.lstrip("/")
     return (

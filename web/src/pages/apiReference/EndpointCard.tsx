@@ -9,6 +9,10 @@ import {
   RepairPeeringButton,
   isPeerWithPlatformRecovery,
 } from "@/pages/apiReference/RepairPeeringButton";
+import {
+  GrantLbSubnetRbacButton,
+  isGrantLbSubnetRbacRecovery,
+} from "@/pages/apiReference/GrantLbSubnetRbacButton";
 import { ResponseViewer } from "@/pages/apiReference/ResponseViewer";
 import { SectionLabel } from "@/pages/apiReference/SectionLabel";
 import { getDefaultRequestExampleKey, isSimpleEndpoint } from "@/pages/apiReference/spec";
@@ -920,6 +924,20 @@ export function EndpointCard({
             {response &&
               (response.status === 502 || response.status === 503) &&
               proxyInfo &&
+              isGrantLbSubnetRbacRecovery(safeParseJson(response.body)) && (
+                <GrantLbSubnetRbacButton
+                  subscriptionId={proxyInfo.sub}
+                  resourceGroup={proxyInfo.rg}
+                  clusterName={proxyInfo.clusterName}
+                  onResolved={() => execute()}
+                  size="block"
+                />
+              )}
+
+            {response &&
+              (response.status === 502 || response.status === 503) &&
+              proxyInfo &&
+              !isGrantLbSubnetRbacRecovery(safeParseJson(response.body)) &&
               isPeerWithPlatformRecovery(safeParseJson(response.body)) && (
                 <RepairPeeringButton
                   subscriptionId={proxyInfo.sub}
