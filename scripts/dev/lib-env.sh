@@ -101,7 +101,16 @@ _azd_env_file() {
       name="$(basename "${dirs[0]}")"
     fi
   fi
-  [[ -n "$name" && -f "$root/.azure/$name/.env" ]] && printf '%s' "$root/.azure/$name/.env"
+  # NOTE: terminate with an `if` block, NOT a `[[ ... ]] && printf` one-liner.
+  # As the function's last command, a one-liner whose test is false returns
+  # exit 1, which makes `f="$(_azd_env_file)"` in a `set -Eeuo pipefail`
+  # caller (quick-deploy.sh) abort the whole script silently when no azd env
+  # exists — exactly the GitHub Actions build-images failure mode. The `if`
+  # block returns 0 when the file is absent, so the caller degrades to its
+  # empty-fallback path instead of dying.
+  if [[ -n "$name" && -f "$root/.azure/$name/.env" ]]; then
+    printf '%s' "$root/.azure/$name/.env"
+  fi
 }
 
 # load_azd_env
@@ -126,8 +135,11 @@ load_azd_env() {
   # "non-empty") is essential: a killed interactive prompt leaves the prompt
   # text on stdout, which is non-whitespace but carries no keys.
   if ! grep -qE '^[A-Za-z_][A-Za-z0-9_]*=' <<< "$values"; then
+    # `|| true`: defence-in-depth so a non-zero from the resolver can never
+    # trip a `set -e` caller even if the function is later changed to return
+    # an error code.
     local f
-    f="$(_azd_env_file)"
+    f="$(_azd_env_file)" || true
     if [[ -n "$f" ]]; then
       values="$(cat "$f" 2>/dev/null || true)"
     fi
