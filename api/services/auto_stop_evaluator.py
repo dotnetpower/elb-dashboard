@@ -48,7 +48,7 @@ also stops a database admin action from being killed mid-flight.
 """
 
 _ACTIVE_ROW_STALE_SECONDS = int(
-    os.environ.get("AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", "14400")
+    os.environ.get("AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", "7200")
 )
 """Max age (seconds) for a jobstate row in an active status to still count
 as "cluster in use".
@@ -58,11 +58,20 @@ A crashed / ``worker_lost`` task can leave its jobstate row pinned in
 this cap a single zombie row keeps the cluster alive indefinitely — the
 auto-stop never fires (cost leak) AND the SPA countdown / Extend controls
 disappear because the evaluator reports ``active_jobs:N`` with no
-``next_stop_at``. No Celery task can run longer than ``CELERY_TASK_TIME_LIMIT``
-(default 3600 s), so a row untouched for the 4 h default is provably dead.
-Genuinely-running BLAST is covered separately by the live K8s ``app=blast``
-probe (`auto_stop_live.probe_live_blast_activity`), so aging out a stale
-state row never strands an in-flight search. Rows with no parseable
+``next_stop_at``.
+
+Default 2 h. The hard floor is Celery's ``CELERY_TASK_TIME_LIMIT`` (default
+3600 s): no task attempt can hold a row ``running`` longer than that before
+the worker is SIGKILLed and the row freezes, so a row untouched for 2 h is
+provably from a dead task (2x the hard limit, leaving margin for retry
+backoff up to 300 s). The ``warmup`` orchestrator declares
+``warmup_timeout_seconds=4h`` but is still bound by the 1 h Celery limit, and
+its node-warm K8s Jobs are short (~10-15 min), so 2 h never ages out a live
+warmup. **If an operator raises ``CELERY_TASK_TIME_LIMIT`` to allow genuinely
+long tasks, raise this above that limit too.** Genuinely-running BLAST is
+covered separately by the live K8s ``app=blast`` probe
+(`auto_stop_live.probe_live_blast_activity`); ``warmup`` / ``prepare_db`` are
+NOT, so this cap is their only over-stay guard. Rows with no parseable
 timestamp fail safe (still counted as active)."""
 
 Verdict = Literal["stop", "keep", "warn"]

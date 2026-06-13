@@ -193,6 +193,42 @@ def test_active_row_without_timestamp_fails_safe() -> None:
     assert decision.reason == "active_jobs:1"
 
 
+def test_stale_threshold_default_is_two_hours() -> None:
+    """The default staleness cap must sit above Celery's 1 h hard task
+    time limit (so a live task is never aged out) yet low enough to clear
+    a real zombie promptly. Lock the 2 h boundary: a row 1 h55 m stale
+    still counts; 2 h05 m does not. Regression guard for the 4 h → 2 h
+    default change (the 4 h default left the cluster alive ~2 extra hours).
+    """
+    just_under = _FakeJob(
+        type="warmup",
+        status="running",
+        updated_at=(_NOW - timedelta(minutes=115)).isoformat(timespec="seconds"),
+    )
+    under = evaluate_cluster(
+        _pref(idle_minutes=60),
+        repo=_FakeRepo([just_under]),
+        now=_NOW,
+        power_state="Running",
+    )
+    assert under.reason == "active_jobs:1"
+
+    just_over = _FakeJob(
+        type="warmup",
+        status="running",
+        updated_at=(_NOW - timedelta(minutes=125)).isoformat(timespec="seconds"),
+    )
+    over = evaluate_cluster(
+        _pref(idle_minutes=60),
+        repo=_FakeRepo([just_over]),
+        now=_NOW,
+        power_state="Running",
+    )
+    # Aged out → not active; idle clock anchored ~2 h ago → deadline passed.
+    assert over.verdict == "stop"
+    assert over.active_job_count == 0
+
+
 def test_active_jobs_count_uses_single_query() -> None:
     """Regression: the evaluator must not issue one query per job_type."""
 
