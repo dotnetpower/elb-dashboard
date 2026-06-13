@@ -249,10 +249,19 @@ def list_external_blast_jobs(
     directly through the sibling OpenAPI service live in the cluster's
     ConfigMaps and are invisible to that route. This proxy lets the BLAST
     Jobs page join both sources.
+
+    The listing is served through the shared external-jobs cache (TTL +
+    negative cache + in-flight de-duplication, same wrapper the combined
+    `/api/blast/jobs` route uses). Without it, a stale or unreachable base
+    URL costs the full ``_LIST_TIMEOUT_SECONDS`` then 503 on *every* poll,
+    so this facade felt slower than the cached combined route (issue #30).
     """
+    from api.services.blast.external_jobs import _external_list_jobs_cached
+
     LOGGER.info("external BLAST list requested caller_oid=%s", redact_oid(caller.object_id))
     del caller
-    return external_blast.list_jobs()
+    rows = _external_list_jobs_cached({})
+    return {"jobs": rows, "count": len(rows)}
 
 
 @router.get("/jobs/{job_id}")

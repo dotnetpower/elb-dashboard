@@ -525,6 +525,66 @@ def test_external_blast_list_uses_short_timeout(monkeypatch) -> None:
     assert raised.value.detail["code"] == "openapi_unreachable"
 
 
+def test_external_blast_facade_list_is_cached(monkeypatch) -> None:
+    """The direct facade ``GET /api/v1/elastic-blast/jobs`` MUST serve repeat
+    polls from the shared external-jobs cache rather than hitting the sibling
+    on every request (issue #30 — the facade previously had no cache, so a
+    stale/unreachable base URL cost ``_LIST_TIMEOUT_SECONDS`` then 503 on each
+    poll while the combined ``/api/blast/jobs`` route felt faster).
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    hits = {"count": 0}
+
+    def list_jobs(**_kwargs):
+        hits["count"] += 1
+        return {"jobs": [{"job_id": "facade-1"}], "count": 1}
+
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
+    client = TestClient(app)
+
+    first = client.get("/api/v1/elastic-blast/jobs")
+    second = client.get("/api/v1/elastic-blast/jobs")
+
+    assert first.status_code == 200
+    assert first.json() == {"jobs": [{"job_id": "facade-1"}], "count": 1}
+    assert second.json() == first.json()
+    # Both polls share the TTL cache → exactly one upstream round-trip.
+    assert hits["count"] == 1
+
+
+def test_external_blast_facade_list_caches_upstream_failure(monkeypatch) -> None:
+    """A failing sibling MUST be negatively cached so SPA/API polling does not
+    keep paying the upstream round-trip to learn the same failure again.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    hits = {"count": 0}
+
+    def list_jobs(**_kwargs):
+        hits["count"] += 1
+        raise HTTPException(
+            503,
+            detail={"code": "openapi_unreachable", "message": "stale base url"},
+        )
+
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
+    client = TestClient(app)
+
+    first = client.get("/api/v1/elastic-blast/jobs")
+    second = client.get("/api/v1/elastic-blast/jobs")
+
+    assert first.status_code == 503
+    assert second.status_code == 503
+    assert first.json()["code"] == "openapi_unreachable"
+    # Negative cache short-circuits the repeat poll.
+    assert hits["count"] == 1
+
+
 def test_external_blast_delete_job_calls_v1_endpoint(monkeypatch) -> None:
     from api.services import external_blast
 
