@@ -68,8 +68,6 @@ interface FlowNode extends SimulationNodeDatum {
   r?: number;
   status?: string;
   born?: number | null;
-  anchorX?: number;
-  anchorY?: number;
 }
 
 interface FlowLink {
@@ -91,6 +89,9 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
   // gentle nudge so the graph does not visibly bounce while the operator reads.
   const firstBuildRef = useRef(true);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  // Bumped when the OS "reduce motion" preference flips, so the graph re-builds
+  // and immediately honours the new setting without waiting for a remount.
+  const [motionPrefTick, setMotionPrefTick] = useState(0);
 
   // Subscriptions for the Topic lane come from the live Service Bus counts.
   const subscriptions = useMemo(
@@ -98,20 +99,37 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     [snapshot.sb_counts],
   );
 
+  // React to a live change of the prefers-reduced-motion media query.
+  useEffect(() => {
+    const mq = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    if (!mq) return;
+    const onChange = () => setMotionPrefTick((n) => n + 1);
+    mq.addEventListener?.("change", onChange);
+    return () => mq.removeEventListener?.("change", onChange);
+  }, []);
+
   // Track container size (responsive width, fixed-ish height from CSS). Only
-  // commit a new size when the rounded dimensions actually change, so a
-  // ResizeObserver burst does not trigger a stream of full graph rebuilds.
+  // commit a new size when the rounded dimensions actually change, and debounce
+  // through requestAnimationFrame so a drag-resize burst coalesces into a
+  // single rebuild instead of restarting the simulation on every pixel.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    let raf = 0;
     const ro = new ResizeObserver((entries) => {
       const r = entries[0]?.contentRect;
       if (!r) return;
       const next = { w: Math.round(r.width), h: Math.round(r.height) };
-      setSize((cur) => (cur.w === next.w && cur.h === next.h ? cur : next));
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        setSize((cur) => (cur.w === next.w && cur.h === next.h ? cur : next));
+      });
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, []);
 
   useEffect(() => {
@@ -138,9 +156,21 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
 
     const svg = select(svgEl);
     svg.selectAll("*").remove();
+    // A concise summary for screen readers (the per-node detail lives on the
+    // focusable job buttons and the producer/cluster titles).
+    svg.attr(
+      "aria-label",
+      `Service Bus message flow: ${producers.length} producer${
+        producers.length === 1 ? "" : "s"
+      }, ${broker.length} active job${broker.length === 1 ? "" : "s"}, ${
+        clusters.length
+      } consumer cluster${clusters.length === 1 ? "" : "s"}`,
+    );
 
     // ---------- static broker boundary + lane labels ----------
-    const boundary = svg.append("g");
+    // Decorative chrome — hidden from assistive tech so the only exposed nodes
+    // are the interactive job buttons (added later with role=button).
+    const boundary = svg.append("g").attr("aria-hidden", "true");
     boundary
       .append("rect")
       .attr("x", bx0)
@@ -162,7 +192,10 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
 
     const diamond = (x: number, y: number, r: number) =>
       `M${x},${y - r} L${x + r},${y} L${x},${y + r} L${x - r},${y} Z`;
-    const labels = svg.append("g");
+    // Submitter aliases are UPNs (can be long) and cluster names can be long
+    // too; clip them so a wide label does not run off the SVG edge.
+    const truncate = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+    const labels = svg.append("g").attr("aria-hidden", "true");
     labels
       .append("path")
       .attr("d", diamond(bx0 + 16, by0 + 14, 5))
@@ -279,9 +312,24 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
       }
     });
 
+    // Pre-group job nodes by submitter alias once, so the per-tick session
+    // bounding-box pass is O(jobs) instead of O(sessions × jobs).
+    const membersByAlias = new Map<string, FlowNode[]>();
+    jobNodes.forEach((j) => {
+      const list = membersByAlias.get(j.alias);
+      if (list) list.push(j);
+      else membersByAlias.set(j.alias, [j]);
+    });
+
     // ---------- layers ----------
-    const linkLayer = svg.append("g").attr("fill", "none").attr("stroke-linecap", "round");
-    const sessionLayer = svg.append("g");
+    // Links and session hulls are decorative; only the node layer carries the
+    // focusable job buttons, so hide the rest from assistive tech.
+    const linkLayer = svg
+      .append("g")
+      .attr("fill", "none")
+      .attr("stroke-linecap", "round")
+      .attr("aria-hidden", "true");
+    const sessionLayer = svg.append("g").attr("aria-hidden", "true");
     const nodeLayer = svg.append("g");
 
     const linkSel = linkLayer
@@ -310,7 +358,7 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
       .select("text")
       .attr("fill", "var(--text-faint)")
       .attr("opacity", 0)
-      .text((a) => `${a} · ${jobNodes.filter((j) => j.alias === a).length}`);
+      .text((a) => `${truncate(a, 18)} · ${membersByAlias.get(a)?.length ?? 0}`);
 
     const nodeSel = nodeLayer
       .selectAll<SVGGElement, FlowNode>("g.mf-node")
@@ -355,7 +403,16 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
             .attr("text-anchor", "end")
             .attr("font-size", 11)
             .attr("fill", "var(--text-primary)")
-            .text(`${d.alias}${d.pkind === "api" ? " ·api" : ""} (${d.count})`);
+            .text(`${truncate(d.alias, 22)}${d.pkind === "api" ? " ·api" : ""} (${d.count})`);
+          sel
+            .append("title")
+            .text(`${d.alias} (${d.pkind}) — ${d.count} active job${d.count === 1 ? "" : "s"}`);
+          sel
+            .attr("role", "img")
+            .attr(
+              "aria-label",
+              `${d.pkind} producer ${d.alias}, ${d.count} active job${d.count === 1 ? "" : "s"}`,
+            );
         });
 
         // clusters
@@ -375,7 +432,12 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
           .attr("dy", "-0.1em")
           .attr("font-size", 11)
           .attr("fill", "var(--text-primary)")
-          .text((d) => d.clusterName || "unassigned");
+          .text((d) => truncate(d.clusterName || "unassigned", 18));
+        clus.append("title").text((d) => d.clusterName || "unassigned");
+        clus.attr("role", "img").attr(
+          "aria-label",
+          (d) => `consumer cluster ${d.clusterName || "unassigned"}, ${d.running} running, ${d.queued} queued`,
+        );
         clus
           .append("text")
           .attr("x", 14)
@@ -409,7 +471,10 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     nodeSel
       .style("cursor", (d) => (d.kind === "job" ? "pointer" : "default"))
       .on("mouseenter", (_e, d) => {
-        hoveredRef.current = d.alias;
+        // Only producers and jobs carry a meaningful submitter alias. Cluster
+        // nodes share a sentinel alias, so hovering one must NOT set it as the
+        // active alias (that would dim every other node in the graph).
+        hoveredRef.current = d.kind === "cluster" ? null : d.alias;
         applyHover();
       })
       .on("mouseleave", () => {
@@ -510,6 +575,9 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     simRef.current = sim;
 
     const dragBehavior = d3drag<SVGGElement, FlowNode>()
+      // A pointer move under this many px still counts as a click, so a tiny
+      // jitter while clicking a job does not suppress opening its JSON detail.
+      .clickDistance(5)
       .on("start", (_event, d) => {
         sim.alphaTarget(0.12).restart();
         d.fx = d.x;
@@ -550,7 +618,7 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
         });
       nodeSel.attr("transform", (d) => `translate(${d.x ?? 0},${d.y ?? 0})`);
       sessionG.each(function (a) {
-        const members = jobNodes.filter((j) => j.alias === a);
+        const members = membersByAlias.get(a) ?? [];
         const node = select(this);
         if (!members.length) {
           node.style("display", "none");
@@ -586,6 +654,17 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     const liveIds = new Set(jobNodes.map((j) => j.id));
     for (const id of Array.from(cache.keys())) if (!liveIds.has(id)) cache.delete(id);
 
+    // A 20s refetch can drop the submitter the pointer is currently over (React
+    // does not fire mouseleave on a removed SVG node), which would leave
+    // `hoveredRef` pinned to a now-absent alias and dim the WHOLE graph. Drop a
+    // stale hover, then re-apply so an in-progress hover survives the rebuild.
+    const aliasSet = new Set<string>([
+      ...producerNodes.map((n) => n.alias),
+      ...jobNodes.map((n) => n.alias),
+    ]);
+    if (hoveredRef.current && !aliasSet.has(hoveredRef.current)) hoveredRef.current = null;
+    applyHover();
+
     return () => {
       sim.stop();
     };
@@ -593,7 +672,7 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     // selection ring, handled by the dedicated effect below. Including it here
     // would rebuild the whole SVG and restart the simulation on every job
     // click — the jarring re-settle this component is meant to avoid.
-  }, [snapshot, size, subscriptions, onSelectBox]);
+  }, [snapshot, size, subscriptions, onSelectBox, motionPrefTick]);
 
   // Selection ring: update just the selected job's stroke without rebuilding
   // the graph. Runs after the build effect (declaration order) so it re-applies
@@ -608,7 +687,7 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
 
   return (
     <div ref={containerRef} className="mf-constellation">
-      <svg ref={svgRef} role="img" aria-label="Service Bus message flow constellation" />
+      <svg ref={svgRef} role="group" aria-label="Service Bus message flow constellation" />
     </div>
   );
 }

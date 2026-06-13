@@ -26,10 +26,14 @@ describe("jobRadius", () => {
   });
   it("grows with the square root of the query size", () => {
     const small = jobRadius(1_000);
-    const big = jobRadius(100_000);
+    const big = jobRadius(10_000);
     expect(big).toBeGreaterThan(small);
-    // sqrt scaling, not linear: 100x the letters is ~10x the sqrt term.
-    expect(jobRadius(100_000) - 3.5).toBeCloseTo((Math.sqrt(100_000) / 9), 5);
+    // sqrt scaling, not linear (10_000 letters → radius below the 18px cap).
+    expect(jobRadius(10_000)).toBeCloseTo(3.5 + Math.sqrt(10_000) / 9, 5);
+  });
+  it("caps the radius so a pathological query cannot dominate the canvas", () => {
+    expect(jobRadius(1_000_000_000)).toBe(18);
+    expect(jobRadius(Number.MAX_SAFE_INTEGER)).toBe(18);
   });
 });
 

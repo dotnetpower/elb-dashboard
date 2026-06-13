@@ -38,10 +38,11 @@ export function producerKind(sources: string[] | undefined): "api" | "user" {
 }
 
 /** Job circle radius from the query letter count; minimum when unknown so we
- *  never fabricate a size. */
+ *  never fabricate a size. Capped so a pathologically large query cannot blow
+ *  the node up to fill the whole broker region. */
 export function jobRadius(querySize: number | null | undefined): number {
   if (querySize == null || querySize <= 0) return 4;
-  return 3.5 + Math.sqrt(querySize) / 9;
+  return Math.min(18, 3.5 + Math.sqrt(querySize) / 9);
 }
 
 /** Parse an ISO/string timestamp to epoch ms, or null when unknown/invalid. */
