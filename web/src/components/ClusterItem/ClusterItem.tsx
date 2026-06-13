@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { monitoringApi, type AksClusterSummary } from "@/api/endpoints";
+import { formatApiError } from "@/api/client";
+import { useToast } from "@/components/Toast";
 import { ClusterDetails } from "@/components/ClusterDetailModal";
 import { ClusterPulse } from "@/components/cards/ClusterPulse";
 import { DB_CATALOG } from "@/components/cards/storageDbCatalog";
@@ -76,6 +78,11 @@ export function ClusterItem({
     readAutoWarmupDbs(),
   );
   const autoWarmupSyncKeyRef = useRef("");
+  // Track the payload key whose save last errored so a persistent backend
+  // failure surfaces exactly ONE toast per distinct preference change rather
+  // than re-toasting on every dependency-driven re-run of the sync effect.
+  const autoWarmupErrorKeyRef = useRef("");
+  const { toast } = useToast();
 
   // Live timing model for the "Starting…" state — shared by the always-visible
   // status line and the expanded StartEstimatePanel so they never disagree.
@@ -144,9 +151,26 @@ export function ClusterItem({
     const key = JSON.stringify(payload);
     if (autoWarmupSyncKeyRef.current === key) return;
     autoWarmupSyncKeyRef.current = key;
-    void monitoringApi.saveAutoWarmupPreference(payload).catch(() => {
-      autoWarmupSyncKeyRef.current = "";
-    });
+    void monitoringApi
+      .saveAutoWarmupPreference(payload)
+      .then(() => {
+        // A later successful save clears the error latch so a subsequent
+        // failure of the SAME payload can toast again.
+        if (autoWarmupErrorKeyRef.current === key) autoWarmupErrorKeyRef.current = "";
+      })
+      .catch((err) => {
+        // Allow a retry on the next dependency change, and surface the failure
+        // so the user knows their auto-warmup database selection was NOT saved
+        // (previously this failed silently and the toggle looked persisted).
+        autoWarmupSyncKeyRef.current = "";
+        if (autoWarmupErrorKeyRef.current !== key) {
+          autoWarmupErrorKeyRef.current = key;
+          toast(
+            `Auto-warmup preference not saved: ${formatApiError(err, "storage")}`,
+            "error",
+          );
+        }
+      });
   }, [
     acrName,
     acrResourceGroup,
@@ -162,6 +186,7 @@ export function ClusterItem({
     subscriptionId,
     terminalResourceGroup,
     terminalVmName,
+    toast,
   ]);
 
   const { shardMutation, shardError, shardingDb } = useClusterShardMutation({
