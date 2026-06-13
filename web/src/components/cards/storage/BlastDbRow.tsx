@@ -28,6 +28,7 @@ import {
 } from "@/components/cards/storageDbCatalog";
 import type { DownloadedDbMeta } from "@/components/cards/storage/useBlastDb";
 import type { DbPreviewMeta } from "@/components/cards/storage/useDbPreviews";
+import { useMonotonicPercent } from "@/hooks/useMonotonicPercent";
 
 interface BlastDbRowProps {
   db: BlastDbCatalogItem;
@@ -231,10 +232,20 @@ export function BlastDbRow({
       ? (cs?.shard_count ?? 0)
       : perFileTotal;
   const progressUnit = hasPerFile || !hasShard ? "files" : "shards";
-  const copyPct =
+  const rawCopyPct =
     progressTotal > 0
       ? Math.min(100, Math.round((progressDone / progressTotal) * 100))
       : 0;
+  // Clamp the bar so it never rewinds within one copy session. A transient
+  // blob-listing failure drops `copy_status.success`, which flips the source
+  // from the fine-grained per-file percent (e.g. 80%) to the coarse shard
+  // percent (`succeeded_pods`/`shard_count`, often still 0/10 = 0%) for one
+  // poll — without this the bar visibly collapses then recovers. The reset key
+  // is the copy session start so a brand-new copy/update begins from 0.
+  const copyPct = useMonotonicPercent(rawCopyPct, {
+    resetKey: `${inProgressInfo?.startTime ?? meta?.update_started_at ?? ""}`,
+    active: copyActive,
+  });
   // Elapsed seconds: prefer the local session start (most accurate), then the
   // server-recorded update start so the ETA survives a page reload.
   const copyStartMs = inProgressInfo

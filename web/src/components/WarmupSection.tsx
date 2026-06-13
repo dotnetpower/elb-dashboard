@@ -28,6 +28,7 @@ import type { K8sNodeMetrics, WarmupDbInfo, WarmupStatus } from "@/api/endpoints
 import { formatApiError } from "@/api/client";
 import type { ApiError } from "@/api/client";
 import { useToast } from "@/components/Toast";
+import { useMonotonicPercent } from "@/hooks/useMonotonicPercent";
 import {
   WARMUP_CANDIDATES,
   type WarmupCapacity,
@@ -953,9 +954,16 @@ function WarmupNotice({
 }
 
 function WarmupProgressBar({ warm }: { warm: WarmupDbInfo }) {
-  const pct = Number.isFinite(warm.progress_pct)
-    ? Math.max(0, Math.min(100, warm.progress_pct ?? 0))
-    : 0;
+  // Clamp the percent so it never rewinds within one warmup run. The backend
+  // signal can momentarily dip when a shard finishes copying and its logs lose
+  // the azcopy "%" before the aggregate catches up (see `useMonotonicPercent`).
+  // The reset key is the run's start time (the Job startTime, fixed at creation
+  // and unique per DB generation) — NOT `source_version`, which can be absent
+  // in early polls and only get populated mid-copy, which would reset the floor
+  // and re-introduce the very rewind this guard removes.
+  const pct = useMonotonicPercent(warm.progress_pct, {
+    resetKey: `${warm.name}:${warm.started_at ?? ""}`,
+  });
   const phase = shortWarmupPhase(warm);
   const lastLogs = (warm.pod_statuses ?? [])
     .map((pod) => pod.last_log || pod.message)

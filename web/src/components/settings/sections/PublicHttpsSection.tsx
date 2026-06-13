@@ -16,6 +16,7 @@ import {
 } from "@/components/settings/publicHttpsStorage";
 import { INPUT_STYLE, SELECT_STYLE } from "@/components/settings/styles";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
+import { useMonotonicPercent } from "@/hooks/useMonotonicPercent";
 
 // Let's Encrypt rejects ACME account registration when the contact
 // email's domain has no public TLD (`urn:ietf:params:acme:error:invalidContact`).
@@ -140,6 +141,20 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
   );
   const pollTimer = useRef<number | null>(null);
   const taskRunning = runningTask !== null;
+
+  // Monotonic progress for the setup stepper. The phase index drives the bar;
+  // the backend phases are mostly forward-only, but a wait/retry phase could
+  // re-emit an earlier id, so clamp the bar so it never rewinds within one run.
+  // The reset key is this run's start so a new Enable/Disable begins from the
+  // bottom.
+  const rawPublicHttpsPct = (() => {
+    const { index, total } = lookupPublicHttpsPhase(taskPhase || "queued");
+    return Math.max(2, Math.min(100, Math.round(((index + 1) / total) * 100)));
+  })();
+  const publicHttpsProgressPct = useMonotonicPercent(rawPublicHttpsPct, {
+    resetKey: `${runningTask?.startedAt ?? ""}`,
+    active: taskRunning,
+  });
 
   // Keep the latest "which cluster is this task for" identifier in a ref
   // so `pollTask` can read it without depending on `clusterName` /
@@ -593,8 +608,8 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
           )}
         </div>
         {taskRunning && (() => {
-          const { meta, index, total } = lookupPublicHttpsPhase(taskPhase || "queued");
-          const progressPct = Math.max(2, Math.min(100, Math.round(((index + 1) / total) * 100)));
+          const { meta } = lookupPublicHttpsPhase(taskPhase || "queued");
+          const progressPct = publicHttpsProgressPct;
           return (
             <div style={{ marginTop: -4, marginBottom: 12, display: "flex", flexDirection: "column", gap: 6 }}>
               <div

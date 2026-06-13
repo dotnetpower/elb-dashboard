@@ -13,6 +13,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Radio, Server, Users, X } from "lucide-react";
 
 import { messageFlowApi, type MessageFlowBox, type MessageFlowSnapshot } from "@/api/messageFlow";
+import { useRelativeTime } from "@/hooks/useRelativeTime";
 
 import { aliasTone } from "./colors";
 import { boxWidth, querySizeLabel } from "./layout";
@@ -20,20 +21,26 @@ import { boxWidth, querySizeLabel } from "./layout";
 interface MessageFlowModalProps {
   snapshot: MessageFlowSnapshot;
   onClose: () => void;
+  /** Epoch ms of the last successful snapshot fetch (for the live "updated" badge). */
+  updatedAt?: number;
 }
 
 // Raw caller-identity GUIDs carry no diagnostic value and are PII the rest of
 // the app deliberately redacts (see api.services.sanitise.redact_oid). Strip
 // them before rendering the job JSON so the message-flow inspector never echoes
-// a raw owner/tenant GUID (charter §12 — sanitise UI output).
+// a raw owner/tenant GUID (charter §12 — sanitise UI output). The job-detail
+// endpoint returns the raw `payload` dict (which nests `metadata` and other
+// sub-objects), so the redaction MUST recurse — a shallow top-level filter would
+// leak a nested `payload.metadata.owner_oid`.
 const REDACTED_JSON_KEYS = new Set(["owner_oid", "tenant_id"]);
 
 function redactState(state: unknown): unknown {
-  if (!state || typeof state !== "object" || Array.isArray(state)) return state;
+  if (Array.isArray(state)) return state.map(redactState);
+  if (!state || typeof state !== "object") return state;
   return Object.fromEntries(
-    Object.entries(state as Record<string, unknown>).filter(
-      ([key]) => !REDACTED_JSON_KEYS.has(key),
-    ),
+    Object.entries(state as Record<string, unknown>)
+      .filter(([key]) => !REDACTED_JSON_KEYS.has(key))
+      .map(([key, value]) => [key, redactState(value)]),
   );
 }
 
@@ -213,8 +220,12 @@ function JobDetailModal({ box, onClose }: JobDetailModalProps) {
   );
 }
 
-export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
+export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowModalProps) {
   const [selectedBox, setSelectedBox] = useState<MessageFlowBox | null>(null);
+  // Submitter alias currently hovered in the Producers lane; dims unrelated
+  // broker tiles so the Producer -> Broker mapping is visible without arrows.
+  const [hoveredAlias, setHoveredAlias] = useState<string | null>(null);
+  const updatedAgo = useRelativeTime(updatedAt);
   // Mirrors `selectedBox` for the parent Escape handler so it can defer to the
   // detail modal (whose own capture-phase handler closes itself first).
   const detailOpenRef = useRef(false);
@@ -237,7 +248,23 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
 
   const producers = snapshot.producers ?? [];
   const broker = snapshot.broker ?? [];
+  // Running jobs first so the busy part of the lane is scannable at a glance;
+  // ties keep the server order (already busiest-cluster-first upstream).
+  const brokerSorted = [...broker].sort((a, b) => {
+    const ra = a.status === "running" ? 0 : 1;
+    const rb = b.status === "running" ? 0 : 1;
+    return ra - rb;
+  });
   const clusters = snapshot.consumers?.clusters ?? [];
+  // A 20s refetch can drop the submitter the pointer is currently over; React
+  // does not fire onMouseLeave on the unmounted row, so `hoveredAlias` would be
+  // stuck on a now-absent alias and dim the ENTIRE broker lane. Treat a hovered
+  // alias that no longer exists in the snapshot as "not hovered".
+  const aliasExists =
+    hoveredAlias != null &&
+    (producers.some((p) => p.alias === hoveredAlias) ||
+      broker.some((b) => b.alias === hoveredAlias));
+  const activeAlias = aliasExists ? hoveredAlias : null;
   const counts = snapshot.sb_counts;
   const queue = counts?.queue;
   const activeTotal = snapshot.active_total ?? 0;
@@ -277,7 +304,19 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
         >
           <Radio size={16} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
           <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>Message Flow</div>
-          <span style={{ fontSize: 11, color: "var(--text-faint)" }}>{snapshot.namespace_fqdn}</span>
+          <span
+            style={{
+              fontSize: 11,
+              color: "var(--text-faint)",
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={snapshot.namespace_fqdn}
+          >
+            {snapshot.namespace_fqdn}
+          </span>
           <span
             style={{
               marginLeft: "auto",
@@ -286,6 +325,7 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
               gap: 6,
               fontSize: 11,
               color: "var(--text-muted)",
+              flexShrink: 0,
             }}
           >
             <span
@@ -297,6 +337,9 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
               }}
             />
             {activeTotal} active
+            {updatedAgo ? (
+              <span style={{ color: "var(--text-faint)" }}>· updated {updatedAgo}</span>
+            ) : null}
           </span>
           <button
             type="button"
@@ -324,6 +367,44 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
               appear here as they run.
             </div>
           ) : (
+            <>
+            <div className="message-flow-legend">
+              <span className="message-flow-legend__item">
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: "var(--accent)",
+                  }}
+                />
+                running
+              </span>
+              <span className="message-flow-legend__item">
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    border: "1.5px solid var(--text-muted)",
+                  }}
+                />
+                queued
+              </span>
+              <span className="message-flow-legend__item">
+                <span
+                  style={{
+                    width: 22,
+                    height: 8,
+                    borderRadius: 3,
+                    background:
+                      "linear-gradient(90deg, var(--text-faint) 0%, var(--text-muted) 100%)",
+                  }}
+                />
+                box width = query length
+              </span>
+              <span className="message-flow-legend__item">color = submitter</span>
+            </div>
             <div className="message-flow-lanes">
               {/* Producers */}
               <div>
@@ -340,7 +421,13 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
                     return (
                       <div
                         key={p.alias}
-                        className="glass-card"
+                        className={`glass-card message-flow-producer${
+                          activeAlias === p.alias ? " is-active" : ""
+                        }`}
+                        onMouseEnter={() => setHoveredAlias(p.alias)}
+                        onMouseLeave={() =>
+                          setHoveredAlias((cur) => (cur === p.alias ? null : cur))
+                        }
                         style={{
                           display: "flex",
                           alignItems: "center",
@@ -396,34 +483,47 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
                     gap: 8,
                   }}
                 >
-                  {broker.map((b) => {
+                  {brokerSorted.map((b) => {
                     const tone = aliasTone(b.alias);
+                    const isQueued = b.status !== "running";
+                    const isSelected = selectedBox?.job_id === b.job_id;
+                    // A selected tile is never dimmed, so its selection ring stays
+                    // crisp even while a different submitter is highlighted.
+                    const isDimmed =
+                      activeAlias != null && activeAlias !== b.alias && !isSelected;
                     return (
                       <button
                         key={b.job_id}
                         type="button"
                         onClick={() => setSelectedBox(b)}
+                        onMouseEnter={() => setHoveredAlias(b.alias)}
+                        onMouseLeave={() =>
+                          setHoveredAlias((cur) => (cur === b.alias ? null : cur))
+                        }
+                        onFocus={() => setHoveredAlias(b.alias)}
+                        onBlur={() =>
+                          setHoveredAlias((cur) => (cur === b.alias ? null : cur))
+                        }
                         title={boxTooltip(b)}
                         aria-label={`View JSON for ${b.program ?? "blast"} job ${b.job_id} (${b.status})`}
-                        style={{
-                          cursor: "pointer",
-                          width: boxWidth(b.query_size),
-                          minWidth: 44,
-                          maxWidth: "100%",
-                          height: 34,
-                          padding: 0,
-                          background: tone.fill,
-                          border: `1px solid ${tone.border}`,
-                          borderLeft: `3px solid ${tone.accent}`,
-                          borderRadius: 8,
-                          // Queued jobs read as dimmer than running ones so the
-                          // lane carries a running/queued signal without text.
-                          opacity: b.status === "running" ? 1 : 0.6,
-                          transition: "transform 120ms ease-out, box-shadow 120ms ease-out",
-                          outline: selectedBox?.job_id === b.job_id ? `2px solid ${tone.accent}` : "none",
-                          outlineOffset: 1,
-                        }}
-                      />
+                        className={`message-flow-box${isQueued ? " message-flow-box--queued" : ""}${
+                          isSelected ? " is-selected" : ""
+                        }${isDimmed ? " is-dimmed" : ""}`}
+                        style={
+                          {
+                            width: boxWidth(b.query_size),
+                            "--mf-fill": tone.fill,
+                            "--mf-border": tone.border,
+                            "--mf-accent": tone.accent,
+                          } as React.CSSProperties
+                        }
+                      >
+                        <span
+                          className={`message-flow-box__dot message-flow-box__dot--${
+                            isQueued ? "queued" : "running"
+                          }`}
+                        />
+                      </button>
                     );
                   })}
                 </div>
@@ -432,29 +532,46 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
               {/* Consumers */}
               <div>
                 {laneHeader(<Server size={14} strokeWidth={1.5} />, "Consumers", "AKS clusters")}
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {clusters.map((c) => (
-                    <div
-                      key={c.cluster_name || "unassigned"}
-                      className="glass-card"
-                      style={{ padding: "10px 12px", fontSize: 12 }}
-                    >
-                      <div style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-                        {c.cluster_name || "unassigned"}
+                {clusters.length === 0 ? (
+                  <div
+                    className="glass-card"
+                    style={{
+                      padding: "10px 12px",
+                      fontSize: 12,
+                      color: "var(--text-faint)",
+                    }}
+                  >
+                    Awaiting placement — jobs are queued but not yet assigned to a
+                    cluster.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {clusters.map((c) => (
+                      <div
+                        key={c.cluster_name || "unassigned"}
+                        className="glass-card"
+                        style={{ padding: "10px 12px", fontSize: 12 }}
+                      >
+                        <div style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                          {c.cluster_name || "unassigned"}
+                        </div>
+                        {c.resource_group ? (
+                          <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
+                            {c.resource_group}
+                          </div>
+                        ) : null}
+                        <div style={{ marginTop: 6, color: "var(--text-muted)" }}>
+                          <span style={{ color: "var(--accent)" }}>● running {c.running}</span>
+                          {"  "}
+                          <span>○ queued {c.queued}</span>
+                        </div>
                       </div>
-                      {c.resource_group ? (
-                        <div style={{ fontSize: 10, color: "var(--text-faint)" }}>{c.resource_group}</div>
-                      ) : null}
-                      <div style={{ marginTop: 6, color: "var(--text-muted)" }}>
-                        <span style={{ color: "var(--accent)" }}>● running {c.running}</span>
-                        {"  "}
-                        <span>○ queued {c.queued}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
+            </>
           )}
 
           {/* Service Bus counts footer */}
@@ -501,6 +618,23 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
                 completions topic: {snapshot.completion_topic}
               </span>
             ) : null}
+          </div>
+
+          {/* Caption: clarify that the broker boxes are in-flight JOBS, not the
+              Service Bus queue depth above (which drains in well under a second
+              so it is almost always zero). Without this the two number sets read
+              as contradictory. */}
+          <div
+            style={{
+              marginTop: 8,
+              fontSize: 10,
+              lineHeight: 1.5,
+              color: "var(--text-faint)",
+            }}
+          >
+            Broker boxes are in-flight BLAST jobs (queued/running). The Service
+            Bus queue above drains in under a second, so its depth is normally
+            zero even while jobs run.
           </div>
         </div>
       </div>

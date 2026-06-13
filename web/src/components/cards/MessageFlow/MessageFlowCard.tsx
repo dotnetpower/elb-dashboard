@@ -11,7 +11,7 @@
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Maximize2, Radio } from "lucide-react";
+import { ChevronRight, Maximize2, Radio } from "lucide-react";
 
 import { messageFlowApi } from "@/api/messageFlow";
 
@@ -74,11 +74,11 @@ export function MessageFlowCard() {
                 {producers.length} submitter{producers.length === 1 ? "" : "s"}
               </span>
             </span>
-            <span style={{ color: "var(--text-faint)" }}>▶</span>
+            <ChevronRight size={12} strokeWidth={1.5} style={{ color: "var(--text-faint)" }} />
             <span>
               <strong style={{ color: "var(--text-primary)" }}>{activeTotal}</strong> active jobs
             </span>
-            <span style={{ color: "var(--text-faint)" }}>▶</span>
+            <ChevronRight size={12} strokeWidth={1.5} style={{ color: "var(--text-faint)" }} />
             <span>
               {clusters.length} cluster{clusters.length === 1 ? "" : "s"}
             </span>
@@ -97,7 +97,13 @@ export function MessageFlowCard() {
         </button>
       </div>
 
-      {open ? <MessageFlowModal snapshot={data} onClose={() => setOpen(false)} /> : null}
+      {open ? (
+        <MessageFlowModal
+          snapshot={data}
+          onClose={() => setOpen(false)}
+          updatedAt={query.dataUpdatedAt}
+        />
+      ) : null}
     </>
   );
 }

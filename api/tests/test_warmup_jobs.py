@@ -557,6 +557,67 @@ def test_infer_warmup_pod_phase_detects_copying_from_logs() -> None:
         assert status["message"] == "47.1 %, 233 Done, 0 Failed, 31 Pending, 0 Skipped"
 
 
+def test_attach_pod_progress_post_copy_phases_do_not_regress_to_zero() -> None:
+    # Regression guard for the progress-bar saw-tooth: once a shard finishes
+    # copying and moves to verifying the local DB or touching it into RAM, its
+    # logs no longer contain an azcopy "%". The aggregate must treat those
+    # post-copy phases as 100, not fall back to 0.
+    databases = [
+        {
+            "name": "core_nt",
+            "nodes_ready": 0,
+            "nodes_failed": 0,
+            "nodes_active": 2,
+            "total_jobs": 2,
+            "status": "Loading",
+            "progress_pct": 0,
+        }
+    ]
+    pods = [
+        {
+            "metadata": {
+                "name": "warm-core-nt-00-a",
+                "creationTimestamp": "2026-05-16T16:35:57Z",
+                "labels": {"db": "core_nt", "shard": "00"},
+            },
+            "spec": {"nodeName": "aks-blast-000001"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{"name": "warmup", "state": {"running": {}}}],
+            },
+        },
+        {
+            "metadata": {
+                "name": "warm-core-nt-01-b",
+                "creationTimestamp": "2026-05-16T16:35:57Z",
+                "labels": {"db": "core_nt", "shard": "01"},
+            },
+            "spec": {"nodeName": "aks-blast-000002"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{"name": "warmup", "state": {"running": {}}}],
+            },
+        },
+    ]
+
+    attach_pod_progress_to_database_status(
+        databases,
+        pods,
+        {
+            # blastdbcmd / "database:" markers → verifying_db (post-copy).
+            "warm-core-nt-00-a": "blastdbcmd -info -db core_nt",
+            # vmtouch marker → touching_memory (post-copy).
+            "warm-core-nt-01-b": "vmtouch memory limit: 102G",
+        },
+    )
+
+    assert databases[0]["phase_counts"] == {
+        "verifying_db": 1,
+        "touching_memory": 1,
+    }
+    assert databases[0]["progress_pct"] == 100.0
+
+
 def test_attach_pod_progress_to_database_status_adds_phase_counts() -> None:
     databases = [
         {
@@ -609,7 +670,11 @@ def test_attach_pod_progress_to_database_status_adds_phase_counts() -> None:
     assert databases[0]["active_phase_label"] == "Touching files into RAM"
     assert databases[0]["active_message"] == "vmtouch memory limit: 102G"
     assert databases[0]["phase_counts"] == {"copying_files": 1, "touching_memory": 1}
-    assert databases[0]["progress_pct"] == 0
+    # The `touching_memory` shard already finished copying, so it counts as 100;
+    # the still-copying shard has no azcopy "%" yet and counts as 0. Aggregate
+    # is (0 + 100) / 2 = 50 — post-copy phases must not regress to 0 (that was
+    # the source of the progress-bar saw-tooth).
+    assert databases[0]["progress_pct"] == 50.0
     assert len(databases[0]["pod_statuses"]) == 2
 
 

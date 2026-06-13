@@ -1893,6 +1893,105 @@ textarea.form-input {
   }
 }
 
+/* Broker tile — one per in-flight job. Textless by design (detail on hover
+   tooltip + click-through modal); the submitter colour rides in via the
+   `--mf-fill` / `--mf-border` / `--mf-accent` custom properties so a single
+   class can carry every palette entry. Hover/focus lift the tile to signal it
+   is clickable; `:focus-visible` keeps keyboard users oriented. */
+.message-flow-box {
+  position: relative;
+  height: 34px;
+  min-width: 44px;
+  max-width: 100%;
+  padding: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--mf-fill, rgba(110, 159, 255, 0.16));
+  border: 1px solid var(--mf-border, rgba(110, 159, 255, 0.32));
+  border-left: 3px solid var(--mf-accent, rgba(110, 159, 255, 0.85));
+  transition:
+    transform 120ms ease-out,
+    box-shadow 120ms ease-out,
+    opacity 160ms ease-out;
+}
+
+.message-flow-box:hover,
+.message-flow-box:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  outline: none;
+}
+
+.message-flow-box:focus-visible {
+  border-color: var(--mf-accent, rgba(110, 159, 255, 0.85));
+  box-shadow: 0 0 0 2px var(--mf-accent, rgba(110, 159, 255, 0.85));
+}
+
+/* Queued (not-yet-running) tiles use a dashed border instead of reduced
+   opacity, so contrast stays AA and they don't read as "disabled". */
+.message-flow-box--queued {
+  border-style: dashed;
+  border-left-style: solid;
+}
+
+.message-flow-box.is-selected {
+  box-shadow: 0 0 0 2px var(--mf-accent, rgba(110, 159, 255, 0.85));
+}
+
+/* Producer-hover focus: dim every tile that does NOT belong to the hovered
+   submitter so the Producer -> Broker mapping is visible without arrows. */
+.message-flow-box.is-dimmed {
+  opacity: 0.28;
+}
+
+/* Status dot drawn inside a textless tile (running = solid, queued = ring).
+   A non-text signal that survives on touch / keyboard where the hover tooltip
+   is unavailable. */
+.message-flow-box__dot {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.message-flow-box__dot--running {
+  background: var(--mf-accent, rgba(110, 159, 255, 0.85));
+}
+
+.message-flow-box__dot--queued {
+  background: transparent;
+  border: 1.5px solid var(--mf-accent, rgba(110, 159, 255, 0.85));
+}
+
+/* Producer rows become hoverable highlight triggers. */
+.message-flow-producer {
+  cursor: default;
+  transition: background 140ms ease-out;
+}
+
+.message-flow-producer.is-active {
+  background: var(--glass-surface-hover, rgba(255, 255, 255, 0.06));
+}
+
+/* Compact legend bar above the lanes. */
+.message-flow-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.message-flow-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .glass-dialog ul,
 .glass-dialog ol {
   text-align: left;

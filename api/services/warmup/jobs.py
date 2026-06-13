@@ -534,6 +534,17 @@ def _warmup_log_message(log_text: str) -> str:
     return ""
 
 
+# Phases a pod only reaches AFTER its per-shard file copy has finished: the
+# terminal states plus the post-download local steps (verifying the BLAST DB,
+# touching files into RAM). Their logs no longer carry an azcopy "%", so
+# treating them like an in-flight copy would fall back to 0 and make the DB
+# progress bar saw-tooth down from ~100% the instant copying completes. They
+# represent "copy done" and must therefore count as 100.
+_POST_COPY_PROGRESS_PHASES = frozenset(
+    {"completed", "failed", "verifying_db", "touching_memory"}
+)
+
+
 def _aggregate_pod_progress_pct(
     pod_details: list[dict[str, Any]],
     *,
@@ -544,10 +555,7 @@ def _aggregate_pod_progress_pct(
     values: list[float] = []
     for detail in pod_details:
         phase = str(detail.get("phase") or "")
-        if phase == "completed":
-            values.append(100.0)
-            continue
-        if phase == "failed":
+        if phase in _POST_COPY_PROGRESS_PHASES:
             values.append(100.0)
             continue
         progress = _azcopy_progress_pct(

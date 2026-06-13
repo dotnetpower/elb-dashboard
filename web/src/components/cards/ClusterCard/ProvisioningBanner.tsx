@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { AlertCircle, CheckCircle2, ExternalLink, Loader2, Square } from "lucide-react";
 
+import { useMonotonicPercent } from "@/hooks/useMonotonicPercent";
+
 const formatTime = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
 
 /** Human label for a Celery task phase published by provision_aks. Keeps
@@ -142,21 +144,29 @@ export function ProvisioningBanner({
   // are in the long arm phase, smoothly interpolate within that step
   // using arm_elapsed_seconds (capped at the 10 min mid-point so the bar
   // never claims "almost done" while ARM is still running).
-  const percent = (() => {
+  const rawPercent = (() => {
     if (step && totalSteps && totalSteps > 0) {
-      let base = ((step - 1) / totalSteps) * 100;
-      let span = (1 / totalSteps) * 100;
-      if (taskPhase === "arm_create_or_update" && armElapsed) {
-        const fraction = Math.min(armElapsed / (10 * 60), 1);
-        base += span * fraction;
-        span = 0;
-      } else if (taskPhase === "completed") {
+      const base = ((step - 1) / totalSteps) * 100;
+      const span = (1 / totalSteps) * 100;
+      if (taskPhase === "arm_create_or_update") {
+        // Interpolate from the START of the arm step (base) up to base+span as
+        // arm_elapsed_seconds climbs to the 10 min cap. The first arm tick has
+        // no arm_elapsed yet (fraction 0) so it sits at `base` — using the old
+        // `base + span/2` mid-step value here made the bar jump up then dip
+        // back down on the next tick once arm_elapsed arrived.
+        const fraction = armElapsed ? Math.min(armElapsed / (10 * 60), 1) : 0;
+        return Math.min(100, Math.round(base + span * fraction));
+      }
+      if (taskPhase === "completed") {
         return 100;
       }
       return Math.min(100, Math.round(base + span / 2));
     }
     return null;
   })();
+  // Clamp so a transient interpolation dip (e.g. the first arm tick, or a
+  // step counter that briefly regresses) never rewinds the visible bar.
+  const percent = useMonotonicPercent(rawPercent, { resetKey: clusterName });
 
   return (
     <div
@@ -219,7 +229,7 @@ export function ProvisioningBanner({
 
       {/* Sub-progress: message + step progress bar + per-pool chips. All
           three are independent — render whichever data is present. */}
-      {(message || percent !== null) && (
+      {(message || rawPercent !== null) && (
         <div style={{ marginTop: 10 }}>
           {message && (
             <div
@@ -235,7 +245,7 @@ export function ProvisioningBanner({
                 : ""}
             </div>
           )}
-          {percent !== null && (
+          {rawPercent !== null && (
             <div
               style={{
                 height: 4,

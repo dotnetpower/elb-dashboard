@@ -17,6 +17,8 @@ import type { SidecarMetric } from "@/hooks/useSidecarMetrics";
 import { useSidecarLogs } from "@/hooks/useSidecarLogs";
 import { ChevronRight, Maximize2, Pause, Play } from "lucide-react";
 
+import { SidecarLogModal, type LevelFilter } from "./SidecarLogModal";
+
 const SIDECAR_ROLES: Record<SidecarContainer, string> = {
   frontend: "nginx · :8081",
   api: "FastAPI · :8080",
@@ -38,6 +40,7 @@ const VISIBLE_LOG_LINES = 6;
 
 export function SidecarLiveTile({ container, metric, globalFilter, globalPaused }: SidecarLiveTileProps) {
   const [paused, setPaused] = useState(false);
+  const [expanded, setExpanded] = useState<LevelFilter | null>(null);
   const effectivePaused = paused || Boolean(globalPaused);
 
   const { lines, source, dropped } = useSidecarLogs(container, { paused: effectivePaused });
@@ -86,9 +89,25 @@ export function SidecarLiveTile({ container, metric, globalFilter, globalPaused 
         <span className={`live-tile__dot live-tile__dot--${health}`} aria-hidden="true" />
         <span className="live-tile__name">{container}</span>
         <span className="live-tile__role">{SIDECAR_ROLES[container]}</span>
-        {errCount > 0 && <span className="live-tile__pill live-tile__pill--danger">{errCount} ERR</span>}
+        {errCount > 0 && (
+          <button
+            type="button"
+            className="live-tile__pill live-tile__pill--danger live-tile__pill--button"
+            onClick={() => setExpanded("ERR")}
+            title={`Inspect the ${errCount} error line${errCount === 1 ? "" : "s"}`}
+          >
+            {errCount} ERR
+          </button>
+        )}
         {errCount === 0 && warnCount > 0 && (
-          <span className="live-tile__pill live-tile__pill--warning">{warnCount} WARN</span>
+          <button
+            type="button"
+            className="live-tile__pill live-tile__pill--warning live-tile__pill--button"
+            onClick={() => setExpanded("WARN")}
+            title={`Inspect the ${warnCount} warning line${warnCount === 1 ? "" : "s"}`}
+          >
+            {warnCount} WARN
+          </button>
         )}
         <div className="live-tile__actions">
           <button
@@ -103,9 +122,9 @@ export function SidecarLiveTile({ container, metric, globalFilter, globalPaused 
           <button
             type="button"
             className="live-tile__icon-btn"
-            title="Expand (coming soon)"
-            aria-label="Expand"
-            disabled
+            onClick={() => setExpanded("ALL")}
+            title="Expand logs"
+            aria-label="Expand logs"
           >
             <Maximize2 size={12} strokeWidth={2} />
           </button>
@@ -152,13 +171,23 @@ export function SidecarLiveTile({ container, metric, globalFilter, globalPaused 
         </span>
         <button
           type="button"
-          className="live-tile__inspect"
-          disabled
-          title="Inspector view — coming in Phase 2"
+          className="live-tile__inspect live-tile__inspect--active"
+          onClick={() => setExpanded("ALL")}
+          title="Open the full log view"
         >
-          Inspector <ChevronRight size={12} strokeWidth={2} />
+          Full logs <ChevronRight size={12} strokeWidth={2} />
         </button>
       </footer>
+
+      {expanded && (
+        <SidecarLogModal
+          container={container}
+          role={SIDECAR_ROLES[container]}
+          liveLines={lines}
+          initialLevel={expanded}
+          onClose={() => setExpanded(null)}
+        />
+      )}
     </article>
   );
 }
