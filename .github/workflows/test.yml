@@ -55,25 +55,21 @@ jobs:
         run: uv run ruff check api
 
       - name: pytest (fast loop — parallel, slow/subprocess excluded)
-        # `-n 2` overrides pytest.ini's `-n auto` for CI only (local dev keeps
-        # `auto`). The hosted runner has 4 vCPUs, so `auto` spawns 4 workers;
-        # near the end of the suite their combined peak memory intermittently
-        # tripped the OOM killer, which SIGKILLs a worker ("[gwN] node down:
-        # Not properly terminated", no Python traceback). xdist's controller
-        # then blocks forever waiting on the dead worker, which is how the step
-        # used to run to the job cap. Halving the worker count halves peak
-        # memory and removes the OOM crash; the suite still finishes in well
-        # under a minute.
+        # Diagnostic command: `-v` names every test as it finishes (per xdist
+        # worker) and `--max-worker-restart=0` makes the controller abort and
+        # report immediately when a worker dies, instead of blocking forever on
+        # the dead node and running to the timeout. An xdist worker is being
+        # SIGKILLed near the end of the suite ("[gwN] node down: Not properly
+        # terminated", no Python traceback, no faulthandler dump — the C dump
+        # thread dies with the process), and we need the crashing test's id.
         #
-        # The remaining safety nets (from pytest.ini + below) bound any future
-        # stall regardless of cause: `--timeout=60` per test, `--session-timeout=300`
-        # for a graceful whole-run abort, and this step-level `timeout-minutes`
-        # as the final hard backstop — even if the xdist controller fully
-        # deadlocks on a dead worker (the in-process session timeout cannot fire
-        # in that case), Actions OS-kills the step at 6 minutes instead of
-        # letting it hang to the job cap. Set CI=true so CI-aware code paths
+        # The remaining safety nets bound any stall regardless of cause:
+        # `--timeout=60` per test and `--session-timeout=300` (pytest.ini) plus
+        # this step-level `timeout-minutes` as the final OS-level backstop —
+        # Actions OS-kills the step at 6 minutes even if the xdist controller
+        # fully deadlocks on a dead worker. Set CI=true so CI-aware code paths
         # (logging, color, etc.) behave correctly.
         timeout-minutes: 6
         env:
           CI: "true"
-        run: uv run pytest -q api/tests -n 2
+        run: uv run pytest api/tests -v --max-worker-restart=0
