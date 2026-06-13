@@ -361,6 +361,13 @@ export interface ServiceBusStatusResponse {
   config: ServiceBusConfig;
   env_enabled: boolean;
   effective_enabled: boolean;
+  /**
+   * Raw deployment master switch (`SERVICEBUS_ENABLED`), independent of the
+   * saved config row. When `config.enabled` is true but this is false, the
+   * integration is dormant because the deployment never opted in — the
+   * Settings section surfaces this so the operator knows why it is not live.
+   */
+  env_gate_enabled: boolean;
   counts: ServiceBusCounts;
 }
 

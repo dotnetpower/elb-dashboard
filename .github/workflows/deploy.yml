@@ -111,6 +111,13 @@ jobs:
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
       CONTAINER_APP_FQDN: ${{ vars.CONTAINER_APP_FQDN }}
+      # Per-deployment override for the optional Service Bus master switch.
+      # quick-deploy.sh's control_plane_env_pairs honours a SET env var over the
+      # control-plane-env.json default (which is OFF per charter §12a Rule 4), so
+      # setting the GitHub repo variable SERVICEBUS_ENABLED=true pins the gate ON
+      # for every production deploy instead of being reset to false. Unset/empty
+      # falls through to the repo default (OFF), preserving the opt-in posture.
+      SERVICEBUS_ENABLED: ${{ vars.SERVICEBUS_ENABLED }}
     steps:
       - name: Resolve deploy parameters
         # Manual dispatch carries explicit inputs; the auto (workflow_run) path

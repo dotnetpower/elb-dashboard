@@ -37,7 +37,35 @@ def test_get_defaults_disabled(client: TestClient) -> None:
     body = r.json()
     assert body["config"]["enabled"] is False
     assert body["effective_enabled"] is False
+    assert body["env_gate_enabled"] is False
     assert body["counts"]["available"] is False
+
+
+def test_env_gate_reported_independently_of_config(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The env gate is surfaced separately so the SPA can explain why an
+    operator-enabled config is still not live (deployment gate OFF)."""
+    # Config enabled with a namespace, but the deployment master switch OFF.
+    payload = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+    }
+    assert client.put("/api/settings/service-bus", json=payload).status_code == 200
+
+    body = client.get("/api/settings/service-bus").json()
+    assert body["config"]["enabled"] is True
+    assert body["env_gate_enabled"] is False  # gate OFF
+    assert body["effective_enabled"] is False  # so the integration is dormant
+
+    # Flip the deployment master switch ON; now both agree and it is live.
+    monkeypatch.setenv("SERVICEBUS_ENABLED", "true")
+    body = client.get("/api/settings/service-bus").json()
+    assert body["env_gate_enabled"] is True
+    assert body["effective_enabled"] is True
 
 
 def test_put_then_get_round_trip(client: TestClient) -> None:

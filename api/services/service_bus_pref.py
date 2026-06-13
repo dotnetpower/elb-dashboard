@@ -226,6 +226,23 @@ def normalise_config(
     return cfg
 
 
+def service_bus_env_gate_on() -> bool:
+    """True when the deployment master switch ``SERVICEBUS_ENABLED`` is on.
+
+    This reflects ONLY the env gate (``SERVICEBUS_ENABLED`` in
+    ``control-plane-env.json`` / the Container App env), independent of the
+    saved config row. The Settings UI uses it to explain precisely why an
+    operator-enabled config is still not live: the deployment never opted in,
+    so the integration stays dormant regardless of the runtime toggle.
+    """
+    return str(os.environ.get("SERVICEBUS_ENABLED", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def service_bus_enabled() -> bool:
     """True only when BOTH the env gate AND the saved config say enabled.
 
@@ -235,13 +252,7 @@ def service_bus_enabled() -> bool:
     config row can never re-activate the subsystem on a deployment that did not
     opt in, and vice-versa.
     """
-    env_on = str(os.environ.get("SERVICEBUS_ENABLED", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if not env_on:
+    if not service_bus_env_gate_on():
         return False
     cfg = get_service_bus_config()
     return cfg.enabled and bool(cfg.namespace_fqdn)

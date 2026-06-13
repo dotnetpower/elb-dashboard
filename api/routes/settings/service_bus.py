@@ -33,6 +33,7 @@ from api.services.service_bus_pref import (
     normalise_config,
     save_service_bus_config,
     service_bus_enabled,
+    service_bus_env_gate_on,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -70,6 +71,10 @@ def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, A
         "config": cfg.public_dict(),
         "env_enabled": service_bus_enabled() or cfg.enabled,
         "effective_enabled": service_bus_enabled(),
+        # Raw deployment master switch, independent of the saved config. Lets
+        # the SPA distinguish "deployment gate OFF" from "namespace missing"
+        # when an operator-enabled config is still not live.
+        "env_gate_enabled": service_bus_env_gate_on(),
         "counts": counts,
     }
 

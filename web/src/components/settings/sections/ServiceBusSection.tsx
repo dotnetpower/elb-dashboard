@@ -12,7 +12,7 @@
  * SAS connection string lives in a Key Vault secret referenced by name only.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plug, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, Loader2, Plug, RefreshCw, Trash2 } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import {
@@ -62,6 +62,8 @@ type PurgeTarget = "main" | "dlq" | null;
 export function ServiceBusSection({ config }: { config: ResourceConfig | null }) {
   const [cfg, setCfg] = useState<ServiceBusConfig | null>(null);
   const [counts, setCounts] = useState<ServiceBusCounts | null>(null);
+  const [effectiveEnabled, setEffectiveEnabled] = useState(false);
+  const [envGateEnabled, setEnvGateEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -79,6 +81,8 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
       const res = await settingsApi.getServiceBus();
       setCfg(res.config);
       setCounts(res.counts);
+      setEffectiveEnabled(res.effective_enabled);
+      setEnvGateEnabled(res.env_gate_enabled);
     } catch (err) {
       setError(formatApiError(err));
     } finally {
@@ -178,6 +182,56 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
 
   return (
     <Section heading="Service Bus integration">
+      {cfg.enabled && !effectiveEnabled && (
+        <div
+          role="status"
+          style={{
+            display: "flex",
+            gap: 10,
+            alignItems: "flex-start",
+            padding: "10px 12px",
+            marginBottom: 12,
+            borderRadius: 8,
+            border: "1px solid var(--warning-border, rgba(240,198,116,0.4))",
+            background: "var(--warning-surface, rgba(240,198,116,0.08))",
+            fontSize: 12.5,
+            lineHeight: 1.5,
+            color: "var(--text-muted)",
+          }}
+        >
+          <AlertTriangle
+            size={15}
+            strokeWidth={1.5}
+            style={{ flexShrink: 0, marginTop: 1, color: "var(--warning)" }}
+          />
+          <div>
+            <strong style={{ color: "var(--text-primary)" }}>
+              Enabled in settings, but not active yet.
+            </strong>{" "}
+            {!envGateEnabled ? (
+              <>
+                The deployment master switch <code>SERVICEBUS_ENABLED</code> is
+                OFF, so the integration stays dormant and does not appear on the
+                dashboard. Pin <code>SERVICEBUS_ENABLED=true</code> (azd env or a
+                GitHub repo variable) and redeploy the control plane to activate
+                it. Both the deployment gate and this config must be ON.
+              </>
+            ) : !cfg.namespace_fqdn ? (
+              <>
+                No namespace is configured yet. Set the{" "}
+                <strong>Namespace FQDN</strong> below and save — the integration
+                only goes live once a namespace is attached.
+              </>
+            ) : (
+              <>
+                The integration is not reporting as live. Save the configuration,
+                then use <strong>Test connection</strong> to confirm the
+                namespace is reachable.
+              </>
+            )}
+          </div>
+        </div>
+      )}
       <Group title="Integration">
         <Row
           label="Enable Service Bus"
