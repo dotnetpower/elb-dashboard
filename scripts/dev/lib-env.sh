@@ -14,6 +14,7 @@
 #   strip_quotes <value>                       -> echoes value with one layer of surrounding "" removed
 #   load_simple_env_file <file> [SKIP_KEY...]  -> export KEY=VALUE lines that are currently UNSET
 #   load_azd_env                               -> export `azd env get-values` keys that are currently UNSET
+#                                                 (falls back to the env's .env file when the CLI yields nothing)
 #
 # Risky contracts:
 #   * The "currently unset" test MUST use `${!key+x}` (set-vs-unset), NOT
@@ -27,6 +28,16 @@
 #     docs/features_change/2026-05/2026-05-25-frontend-env-leak-hardening.md.
 #   * SKIP keys are never imported from the file even if unset — used to keep
 #     web/.env.local local-dev toggles out of cloud deploys.
+#   * load_azd_env MUST stay resilient to a slow/absent/prompting `azd` CLI:
+#     when `azd env get-values` yields no usable KEY=VALUE data (azd missing,
+#     not logged in, killed by the timeout, or blocked on the "Select an
+#     environment" prompt — all observed in practice) it falls back to reading
+#     `.azure/<env>/.env` directly, so a per-deployment control-plane pin
+#     stored only in azd env (e.g. SERVICEBUS_ENABLED=true) still reaches the
+#     deploy. The "usable" test checks for an actual assignment line, not just
+#     non-empty output, because a killed prompt leaves prompt text on stdout.
+#     Removing that fallback re-opens the redeploy-resets-toggle bug class
+#     (see docs/features_change/2026-06/ for the Service Bus case).
 #
 # Validation: `bash -n scripts/dev/lib-env.sh`; the consuming scripts run it
 # on every deploy. A regression test lives in
@@ -71,16 +82,55 @@ load_simple_env_file() {
   done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" || true)
 }
 
+# _azd_env_file
+#   Best-effort path to the active azd environment's `.env` file, used as a
+#   fallback when `azd env get-values` is slow/unavailable. Resolution order:
+#   $AZURE_ENV_NAME, then .azure/config.json `defaultEnvironment`, then the
+#   sole directory under .azure/ when exactly one exists. Echoes nothing when
+#   it cannot resolve a real file.
+_azd_env_file() {
+  local root="${REPO_ROOT:-$PWD}" name=""
+  if [[ -n "${AZURE_ENV_NAME:-}" ]]; then
+    name="$AZURE_ENV_NAME"
+  elif [[ -f "$root/.azure/config.json" ]]; then
+    name="$(sed -n 's/.*"defaultEnvironment"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.azure/config.json" | head -n1)"
+  fi
+  if [[ -z "$name" ]]; then
+    local dirs=("$root"/.azure/*/)
+    if [[ ${#dirs[@]} -eq 1 && -d "${dirs[0]}" ]]; then
+      name="$(basename "${dirs[0]}")"
+    fi
+  fi
+  [[ -n "$name" && -f "$root/.azure/$name/.env" ]] && printf '%s' "$root/.azure/$name/.env"
+}
+
 # load_azd_env
 #   Import the keys reported by `azd env get-values` into the environment,
-#   but only for keys that are not already SET. No-op when azd is absent.
+#   but only for keys that are not already SET. When the CLI yields nothing
+#   (azd absent, not logged in, or killed by the timeout) it falls back to
+#   reading the env's `.env` file directly so per-deployment pins survive.
 load_azd_env() {
-  command -v azd >/dev/null 2>&1 || return 0
-  local values
-  if command -v timeout >/dev/null 2>&1; then
-    values="$(timeout 8s azd env get-values 2>/dev/null || true)"
-  else
-    values="$(azd env get-values 2>/dev/null || true)"
+  local values=""
+  if command -v azd >/dev/null 2>&1; then
+    # Redirect stdin from /dev/null so azd can never block on an interactive
+    # prompt (e.g. "Select an environment to use:" when no default env is
+    # configured) — it fails fast instead of burning the whole timeout.
+    if command -v timeout >/dev/null 2>&1; then
+      values="$(timeout 8s azd env get-values </dev/null 2>/dev/null || true)"
+    else
+      values="$(azd env get-values </dev/null 2>/dev/null || true)"
+    fi
+  fi
+  # Fall back to the on-disk env file when the CLI produced no usable
+  # KEY=VALUE data. Testing for an actual assignment line (not merely
+  # "non-empty") is essential: a killed interactive prompt leaves the prompt
+  # text on stdout, which is non-whitespace but carries no keys.
+  if ! grep -qE '^[A-Za-z_][A-Za-z0-9_]*=' <<< "$values"; then
+    local f
+    f="$(_azd_env_file)"
+    if [[ -n "$f" ]]; then
+      values="$(cat "$f" 2>/dev/null || true)"
+    fi
   fi
   local key value
   while IFS='=' read -r key value; do

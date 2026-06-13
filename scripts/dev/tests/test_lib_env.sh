@@ -61,4 +61,39 @@ pass "skip list honoured"
 [[ "$(strip_quotes '"quoted"')" == "quoted" ]] || fail "strip_quotes broke"
 pass "strip_quotes removes one layer of double quotes"
 
+# load_azd_env .env-file fallback: when `azd env get-values` yields nothing
+# (azd absent / not logged in / killed by the timeout) the per-deployment pin
+# stored in .azure/<env>/.env must still reach the process env. Simulate a
+# repo root whose only azd env dir holds a SERVICEBUS_ENABLED pin, force the
+# CLI path to be empty by pointing AZURE_ENV_NAME at it with no `azd` on PATH.
+sandbox="$(mktemp -d)"
+trap 'rm -f "$tmp"; rm -rf "$sandbox"' EXIT
+mkdir -p "$sandbox/.azure/elb-dashboard" "$sandbox/bin"
+cat > "$sandbox/.azure/elb-dashboard/.env" <<'EOF'
+AZURE_ENV_NAME="elb-dashboard"
+SERVICEBUS_ENABLED="true"
+EXPLICIT_WINS="from_file"
+EOF
+# Fake azd that prints nothing (simulates not-logged-in / empty get-values)
+# while leaving the rest of PATH — and therefore coreutils — intact.
+cat > "$sandbox/bin/azd" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$sandbox/bin/azd"
+(
+  # Subshell so PATH/REPO_ROOT mutations do not leak into later assertions.
+  REPO_ROOT="$sandbox"
+  AZURE_ENV_NAME="elb-dashboard"
+  PATH="$sandbox/bin:$PATH"   # fake azd wins -> empty get-values -> file fallback
+  unset SERVICEBUS_ENABLED || true
+  export EXPLICIT_WINS="from_export"   # pre-set export must survive
+  load_azd_env
+  [[ "${SERVICEBUS_ENABLED:-__missing__}" == "true" ]] \
+    || { printf 'FAIL: azd env file fallback did not import pin -> %s\n' "${SERVICEBUS_ENABLED:-__missing__}" >&2; exit 1; }
+  [[ "${EXPLICIT_WINS}" == "from_export" ]] \
+    || { printf 'FAIL: fallback overwrote explicit export -> %s\n' "${EXPLICIT_WINS}" >&2; exit 1; }
+) || fail "load_azd_env .env-file fallback"
+pass "load_azd_env falls back to .azure/<env>/.env when CLI yields nothing"
+
 printf '\033[32mALL PASS\033[0m\n'

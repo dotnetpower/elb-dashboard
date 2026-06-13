@@ -190,9 +190,20 @@ load_simple_env_file "$REPO_ROOT/web/.env.local" \
   VITE_AZURE_CLIENT_ID \
   VITE_AZURE_REDIRECT_URI \
   API_CLIENT_ID
-if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${ACR_NAME:-}" || -z "${ACR_LOGIN_SERVER:-}" || -z "${CONTAINER_APP_NAME:-}" ]]; then
-  load_azd_env
-fi
+# Always import azd env (fills UNSET keys only — explicit CLI/file exports
+# always win via the `${!key+x}` guard, and it is a no-op when azd is absent
+# or unreachable thanks to the `command -v azd` + `timeout 8s` guards in
+# load_azd_env). This must run UNCONDITIONALLY: gating it on the core target
+# vars (AZURE_RESOURCE_GROUP / ACR_NAME / ACR_LOGIN_SERVER / CONTAINER_APP_NAME)
+# being unset meant that whenever a deploy passed those four explicitly (the
+# normal moonchoi flow), azd env was skipped entirely — so a per-deployment
+# control-plane toggle that lives ONLY in azd env (e.g. SERVICEBUS_ENABLED=true)
+# never reached control_plane_env_pairs and got reset to the control-plane-env
+# .json default ("false") on every such redeploy. Importing azd env here keeps
+# those pinned toggles alive across redeploys (the survives-redeploy contract;
+# see control_plane_env_pairs above and infra/main.parameters.json
+# serviceBusEnabled) while leaving explicit target overrides untouched.
+load_azd_env
 
 [[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal|all> [tag] [--logs] [--rebuild-terminal-base] [--no-build|--build-only] [--yes]"
 
