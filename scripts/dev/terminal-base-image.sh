@@ -64,6 +64,11 @@ ensure_terminal_base_image() {
   image="$(terminal_base_image)"
   log="${LOG_DIR:-/tmp}/build-elb-terminal-base.log"
   force_rebuild="${TERMINAL_BASE_REBUILD:-${REBUILD_TERMINAL_BASE:-false}}"
+  # Ensure the log directory exists before the `> "$log"` redirect below; a
+  # caller-supplied LOG_DIR (e.g. quick-deploy.sh) is not guaranteed to be
+  # pre-created, and a failed redirect would otherwise skip the base build
+  # entirely (bash aborts the command before `az acr build` runs).
+  mkdir -p "$(dirname "$log")" 2>/dev/null || true
 
   if [[ "$force_rebuild" != "true" && "$force_rebuild" != "1" ]] && terminal_base_exists; then
     terminal_base_log "==> Reusing terminal toolchain base: $image"
