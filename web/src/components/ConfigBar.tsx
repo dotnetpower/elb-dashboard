@@ -1,10 +1,12 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Settings, ChevronDown, ChevronUp } from "lucide-react";
 
 import type { MonitoringConfig } from "@/pages/Dashboard";
 import { SubscriptionPicker } from "@/components/SubscriptionPicker";
 import { ResourcePicker } from "@/components/ResourcePicker";
 import { armProxyApi } from "@/api/endpoints";
+import { fetchResourceGroups } from "@/api/resourceGroups";
 import { isAksManagedResourceGroup } from "@/lib/aksManagedRg";
 
 interface Props {
@@ -15,10 +17,11 @@ interface Props {
 
 export function ConfigBar({ config, onChange, onOpenSettings }: Props) {
   const [expanded, setExpanded] = useState(true);
+  const queryClient = useQueryClient();
   const sub = config.subscriptionId;
   const rgFetcher = sub
     ? async () => {
-        const groups = await armProxyApi.listResourceGroups(sub);
+        const groups = await fetchResourceGroups(queryClient, sub);
         // Hide Azure-managed infrastructure RGs (`MC_…`, `ME_…`) entirely;
         // they may inherit `elb-*` tags but are never dashboard workspaces.
         // RGs without any `elb-*` tag remain visible but disabled so users

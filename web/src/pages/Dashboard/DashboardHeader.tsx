@@ -1,6 +1,8 @@
 import { HelpCircle, LayoutGrid, Settings as SettingsIcon } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { armProxyApi } from "@/api/endpoints";
+import { fetchResourceGroups } from "@/api/resourceGroups";
 import { ResourcePicker } from "@/components/ResourcePicker";
 import { saveConfig, type ResourceConfig } from "@/components/SetupWizard";
 import { isAksManagedResourceGroup } from "@/lib/aksManagedRg";
@@ -58,6 +60,7 @@ export function DashboardHeader({
   onReopenGettingStarted,
   onOpenSettings,
 }: DashboardHeaderProps) {
+  const queryClient = useQueryClient();
   return (
     <header className="dashboard-hero" aria-label="Dashboard overview">
       <div className="dashboard-hero__topline">
@@ -119,7 +122,8 @@ export function DashboardHeader({
               fetcher={
                 config.subscriptionId
                   ? async () => {
-                      const groups = await armProxyApi.listResourceGroups(
+                      const groups = await fetchResourceGroups(
+                        queryClient,
                         config.subscriptionId,
                       );
                       const items = groups.map((g) => {

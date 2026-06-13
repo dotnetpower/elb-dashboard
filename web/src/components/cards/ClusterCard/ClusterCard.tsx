@@ -4,6 +4,10 @@ import { AlertTriangle, Info } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
 import { armProxyApi } from "@/api/armProxy";
+import {
+  RESOURCE_GROUPS_STALE_MS,
+  resourceGroupsQueryKey,
+} from "@/api/resourceGroups";
 import { formatApiError } from "@/api/client";
 import { ClusterItem } from "@/components/ClusterItem";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -138,10 +142,10 @@ export function ClusterCard({
   // can be warned before they submit a duplicate name. Fetched lazily; the
   // SPA tolerates an empty list (the modal then skips the duplicate warning).
   const rgListQuery = useQuery({
-    queryKey: ["arm", "resource-groups", subscriptionId],
+    queryKey: resourceGroupsQueryKey(subscriptionId),
     queryFn: () => armProxyApi.listResourceGroups(subscriptionId),
     enabled: Boolean(subscriptionId),
-    staleTime: 60_000,
+    staleTime: RESOURCE_GROUPS_STALE_MS,
   });
   // Stable reference so downstream hooks that take this array as a dep
   // don't re-run on every parent render. The mapped array changes only when
