@@ -78,6 +78,11 @@ def _compact_progress_details(details: Mapping[str, Any]) -> dict[str, Any]:
         "completed_at",
         "duration_ms",
         "duration_source",
+        # Human-readable failure detail (e.g. the exception text behind a
+        # machine ``error_code`` like ``terminal_az_login_failed``). Without
+        # this in the allow-list the detail was silently dropped and the Run
+        # details page could only show the opaque code.
+        "error",
         "exit_code",
         "elastic_blast_submit_duration_ms",
         "k8s",
@@ -159,8 +164,19 @@ def _merge_progress_payload(
             **compact_details,
         }
     )
+    # ``error_code`` is the machine classification (e.g.
+    # ``terminal_az_login_failed``); a caller may ALSO pass a human-readable
+    # ``error`` detail (the underlying exception text) via ``details``. Keep the
+    # detail as the step's displayed ``error`` and stash the bare code under
+    # ``error_code`` so neither is lost. Previously the code unconditionally
+    # clobbered the detail, so the Run details page showed only the opaque code.
+    detail_error = str(compact_details.get("error") or "").strip()
     if error_code:
-        step["error"] = error_code
+        if detail_error and detail_error != error_code:
+            step["error"] = detail_error
+            step["error_code"] = error_code
+        else:
+            step["error"] = error_code
     if step_status in {"completed", "skipped"}:
         step["success"] = True
         step.setdefault("completed_at", updated_at)
@@ -233,6 +249,16 @@ def _merge_progress_payload(
         )
     progress.update({"phase": phase, "status": status, "steps": steps})
     payload["_progress"] = progress
+    # Mirror the human failure detail to a top-level ``error`` so the job
+    # projection surfaces it as ``output.error`` (the frontend's second
+    # failure-text candidate). Only carry it while the job is actually failed,
+    # and drop it once the job completes so a transient failure detail cannot
+    # linger as a red banner on a job that later succeeded (same stale-error
+    # class as the ``worker_lost`` completed-suppression fix).
+    if status == "failed" and detail_error:
+        payload["error"] = detail_error
+    elif status == "completed":
+        payload.pop("error", None)
     return payload
 
 

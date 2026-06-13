@@ -168,6 +168,32 @@ def test_local_to_blast_job_exposes_error_for_frontend():
     assert out["error"] == "boom"
 
 
+def test_local_to_blast_job_combines_machine_code_with_human_detail():
+    # `_retry_or_fail` failures carry an opaque machine code on the row plus a
+    # human-readable detail mirrored to payload.error. The projection surfaces
+    # BOTH so the operator sees the classification AND the actual reason — the
+    # raw code stays available under error_code for any frontend logic.
+    out = _local_to_blast_job(
+        _state(
+            status="failed",
+            phase="terminal_az_login_failed",
+            error_code="terminal_az_login_failed",
+            payload={"error": "az login --identity failed: ManagedIdentity unavailable"},
+        )
+    )
+    assert out["error_code"] == "terminal_az_login_failed"
+    assert out["error"] == (
+        "terminal_az_login_failed: az login --identity failed: ManagedIdentity unavailable"
+    )
+
+
+def test_local_to_blast_job_surfaces_human_detail_when_no_machine_code():
+    out = _local_to_blast_job(
+        _state(status="failed", phase="failed", error_code=None, payload={"error": "boom detail"})
+    )
+    assert out["error"] == "boom detail"
+
+
 def test_local_to_blast_job_external_origin_row_synthesizes_steps():
     # A synced `/v1/jobs` row embeds the sibling snapshot under
     # payload['external'] and carries no dashboard `_progress`. The projection

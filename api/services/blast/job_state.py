@@ -323,21 +323,35 @@ def _split_child_summaries_from_repo(
 
 def _job_error_for_response(state: Any) -> str:
     error_code = str(getattr(state, "error_code", "") or "")
-    if not error_code:
-        return ""
+    payload = getattr(state, "payload", None)
+    detail = ""
+    if isinstance(payload, dict):
+        detail = str(payload.get("error") or "").strip()
     status = str(getattr(state, "status", "") or "").strip().casefold()
     # A successfully-completed job has no user-facing error. A stale
-    # error_code can linger on the row when a job was transiently demoted
-    # (e.g. `worker_lost` while the submit worker died mid-flight) and then
-    # later reconciled to `completed` once its results were detected: the
-    # reconcile / artifact-finalize paths flip status+phase but do NOT clear
-    # the top-level error_code column, so the Run details page painted a red
-    # `worker_lost` on a job that actually succeeded. Suppress it here — the
-    # success banner already represents the terminal outcome.
+    # error_code / payload.error can linger on the row when a job was
+    # transiently demoted (e.g. `worker_lost` while the submit worker died
+    # mid-flight) and then later reconciled to `completed` once its results
+    # were detected: the reconcile / artifact-finalize paths flip status+phase
+    # but do NOT always clear the error fields, so the Run details page painted
+    # a red error on a job that actually succeeded. Suppress here (before any
+    # other branch) — the success banner already represents the outcome.
     if status == "completed":
         return ""
+    if not error_code:
+        # No machine code, but a human failure detail mirrored to payload.error
+        # is still worth surfacing rather than reporting no error at all.
+        return detail
     if status == "running" and error_code in _NON_ERROR_RUNNING_ERROR_CODES:
         return ""
+    # When a human-readable detail accompanies an opaque machine code (the
+    # `_retry_or_fail` final-failure path: error_code="terminal_az_login_failed"
+    # + payload.error=<the actual az/kubectl error>), show BOTH so the operator
+    # sees the classification AND the reason. The submit-failed path already
+    # stores the full text as error_code with no separate payload.error, so it
+    # returns the detailed text unchanged.
+    if detail and detail != error_code and detail not in error_code:
+        return f"{error_code}: {detail}"
     return error_code
 
 

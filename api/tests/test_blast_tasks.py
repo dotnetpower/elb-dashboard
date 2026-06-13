@@ -2999,6 +2999,44 @@ def test_merge_progress_payload_demotes_orphan_running_steps_on_failed_update() 
     assert steps["configuring"]["status"] == "completed"
 
 
+def test_merge_progress_payload_keeps_human_detail_alongside_machine_code() -> None:
+    # Regression: `_retry_or_fail` persists a short machine `error_code`
+    # (e.g. "terminal_az_login_failed") plus a human-readable `error` detail
+    # (the underlying az/kubectl failure). The detail used to be dropped by the
+    # compact allow-list and the bare code clobbered the step error, so the Run
+    # details page could only show the opaque code. After the merge the step
+    # keeps the human detail as `error`, stashes the code under `error_code`,
+    # and the detail is mirrored to a top-level payload `error`.
+    payload = blast._merge_progress_payload(
+        {},
+        phase="terminal_az_login_failed",
+        status="failed",
+        error_code="terminal_az_login_failed",
+        details={"error": "az login --identity failed: ManagedIdentity unavailable"},
+    )
+
+    step = payload["_progress"]["steps"]["terminal_az_login_failed"]
+    assert step["status"] == "failed"
+    assert step["success"] is False
+    assert step["error"] == "az login --identity failed: ManagedIdentity unavailable"
+    assert step["error_code"] == "terminal_az_login_failed"
+    # Mirrored to top-level so the projection surfaces it as output.error.
+    assert payload["error"] == "az login --identity failed: ManagedIdentity unavailable"
+
+
+def test_merge_progress_payload_drops_top_level_error_on_completion() -> None:
+    # A transient failure detail must not linger as a red banner once the job
+    # completes (same stale-error class as the worker_lost suppression).
+    payload = blast._merge_progress_payload(
+        {"error": "az login --identity failed", "_progress": {"steps": {}}},
+        phase="completed",
+        status="completed",
+        error_code="",
+        details={},
+    )
+    assert "error" not in payload
+
+
 def test_merge_progress_payload_completes_steps_when_phase_advances() -> None:
     payload = blast._merge_progress_payload(
         {
