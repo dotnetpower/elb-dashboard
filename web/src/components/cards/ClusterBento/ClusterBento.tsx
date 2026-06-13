@@ -38,7 +38,6 @@ import {
 import { blastApi, monitoringApi } from "@/api/endpoints";
 import type { AksClusterSummary } from "@/api/endpoints";
 import { useNodeSummary } from "@/components/ClusterDetailModal/useNodeSummary";
-import type { NodeSummary } from "@/components/ClusterDetailModal/useNodeSummary";
 import {
   getAksProvisioningLabel,
   isAksProvisioning,
@@ -61,6 +60,13 @@ import type { ClusterHealth } from "./atoms";
 import { isActiveJobState, jobClusterName, toJobRowView } from "./jobMapping";
 import { groupEvents } from "./eventMapping";
 import { CapacityGateCell } from "./CapacityGateCell";
+import { submitTimeline, submitWindow } from "./submitMetrics";
+import {
+  SummaryRow,
+  emptyNodeSummary,
+  topologyNodesLabel,
+  topologyPoolsLabel,
+} from "./clusterSummaryHelpers";
 
 const ACTIVE_JOBS_PREVIEW = 4;
 const REQUEST_METRICS_WINDOW_SEC = 900; // 15 min
@@ -910,70 +916,6 @@ function ReadinessPill({
   );
 }
 
-function emptyNodeSummary(): NodeSummary {
-  return {
-    total: 0,
-    systemCount: 0,
-    userCount: 0,
-    cpuUsedM: 0,
-    cpuTotalM: 0,
-    memUsedKi: 0,
-    memTotalKi: 0,
-    cpuPct: 0,
-    memPct: 0,
-    notReady: 0,
-    hot: 0,
-    pressure: [],
-  };
-}
-
-function SummaryRow({
-  icon,
-  label,
-  value,
-  hint,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  hint?: string;
-}) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <span style={{ color: "var(--text-faint)", display: "inline-flex" }}>{icon}</span>
-      <span
-        style={{
-          color: "var(--text-faint)",
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-          fontSize: 9,
-          fontWeight: 600,
-        }}
-      >
-        {label}
-      </span>
-      <span
-        style={{
-          marginLeft: "auto",
-          color: "var(--text-primary)",
-          fontVariantNumeric: "tabular-nums",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-        title={hint ? `${value} · ${hint}` : value}
-      >
-        {value}
-        {hint && (
-          <span style={{ color: "var(--text-faint)", marginLeft: 6, fontSize: 10 }}>
-            · {hint}
-          </span>
-        )}
-      </span>
-    </div>
-  );
-}
-
 function EmptySubmitState({ hint }: { hint?: string }) {
   return (
     <div
@@ -1004,109 +946,3 @@ function EmptySubmitState({ hint }: { hint?: string }) {
   );
 }
 
-/** Live ready user-pool nodes (when k8s reachable) vs configured fallback. */
-function topologyNodesLabel(
-  cluster: import("@/api/endpoints").AksClusterSummary,
-  ns: NodeSummary,
-): string {
-  if (ns.total > 0) {
-    return `${ns.userCount + ns.systemCount} ready · user ${ns.userCount}`;
-  }
-  return cluster.node_count?.toString() ?? "—";
-}
-
-function topologyPoolsLabel(
-  cluster: import("@/api/endpoints").AksClusterSummary,
-  ns: NodeSummary,
-): string {
-  const pools = cluster.agent_pools ?? [];
-  if (pools.length > 0) {
-    const sys = pools.filter((p) => (p.mode ?? "").toLowerCase() === "system").length;
-    const usr = pools.filter((p) => (p.mode ?? "").toLowerCase() === "user").length;
-    if (sys + usr > 0) {
-      return `system ${sys} · user ${usr}`;
-    }
-    return pools.length.toString();
-  }
-  if (ns.total > 0) {
-    return `system ${ns.systemCount > 0 ? 1 : 0} · user ${ns.userCount > 0 ? 1 : 0}`;
-  }
-  return "—";
-}
-
-/**
- * Build a per-minute "submits started" timeline for the last `windowMin`
- * minutes. Used by the hero sparkline so the line shown directly under
- * "Submit pipeline · 15m" is the actual submit volume — previously the
- * sparkline displayed `/api/blast/*` request RPM, which made the bento
- * lie when the cluster had zero submits but normal browser polling.
- */
-function submitTimeline(
-  jobs: import("@/api/endpoints").BlastJobSummary[],
-  windowMin: number,
-): number[] {
-  const buckets = new Array(windowMin).fill(0) as number[];
-  if (jobs.length === 0) return buckets;
-  const now = Date.now();
-  const start = now - windowMin * 60 * 1000;
-  for (const j of jobs) {
-    const ts = j.created_at ? Date.parse(j.created_at) : NaN;
-    if (!Number.isFinite(ts) || ts < start || ts > now) continue;
-    const idx = Math.min(windowMin - 1, Math.max(0, Math.floor((ts - start) / 60_000)));
-    buckets[idx] += 1;
-  }
-  return buckets;
-}
-
-// ---- submit-window aggregation ---------------------------------------------
-
-function submitWindow(jobs: import("@/api/endpoints").BlastJobSummary[]): {
-  last15m: number;
-  last1h: number;
-  last24h: number;
-  last24hActive: number;
-  delta: number | null;
-  avgRuntimeSec: number | null;
-} {
-  const now = Date.now();
-  const w15 = now - 15 * 60 * 1000;
-  const w1h = now - 60 * 60 * 1000;
-  const w24h = now - 24 * 60 * 60 * 1000;
-  const w15Prev = now - 30 * 60 * 1000;
-
-  let last15m = 0;
-  let last1h = 0;
-  let last24h = 0;
-  let last24hActive = 0;
-  let prev15m = 0;
-  let runtimeSum = 0;
-  let runtimeCount = 0;
-
-  for (const j of jobs) {
-    const ts = j.created_at ? Date.parse(j.created_at) : NaN;
-    if (!Number.isFinite(ts)) continue;
-    if (ts >= w15) last15m += 1;
-    if (ts >= w1h) last1h += 1;
-    if (ts >= w24h) {
-      last24h += 1;
-      const isActive =
-        j.status !== "completed" && j.status !== "failed" && j.status !== "cancelled";
-      if (isActive) last24hActive += 1;
-      const upd = j.updated_at ? Date.parse(j.updated_at) : ts;
-      if (!isActive && Number.isFinite(upd) && upd > ts) {
-        runtimeSum += (upd - ts) / 1000;
-        runtimeCount += 1;
-      }
-    }
-    if (ts >= w15Prev && ts < w15) prev15m += 1;
-  }
-  const delta = prev15m === 0 ? (last15m === 0 ? 0 : 1) : (last15m - prev15m) / prev15m;
-  return {
-    last15m,
-    last1h,
-    last24h,
-    last24hActive,
-    delta: jobs.length === 0 ? null : delta,
-    avgRuntimeSec: runtimeCount === 0 ? null : runtimeSum / runtimeCount,
-  };
-}
