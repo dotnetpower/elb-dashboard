@@ -114,8 +114,32 @@ class StreamedFile:
     filename: str
 
 
-def _base_url(value: str | None = None) -> str:
+def _base_url(
+    value: str | None = None,
+    *,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+) -> str:
     value = (value or os.environ.get(_BASE_URL_ENV, "")).strip().rstrip("/")
+    if not value and subscription_id and resource_group and cluster_name:
+        # Per-cluster outbound scoping (#26): when the caller knows which AKS
+        # cluster the request targets, prefer that cluster's public HTTPS
+        # endpoint so a multi-cluster revision does not send the call to the
+        # globally most-recently-written runtime endpoint. A miss (no domain
+        # configured for this cluster yet) falls through to the legacy global
+        # runtime key below — backward compatible.
+        from api.services.openapi.runtime import get_public_tls_base_url
+
+        value = (
+            get_public_tls_base_url(
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+            )
+            .strip()
+            .rstrip("/")
+        )
     if not value:
         from api.services.openapi.runtime import get_openapi_base_url
 
@@ -131,13 +155,28 @@ def _base_url(value: str | None = None) -> str:
     return value
 
 
-def _headers(*, api_token: str | None = None, internal_token: str | None = None) -> dict[str, str]:
+def _headers(
+    *,
+    api_token: str | None = None,
+    internal_token: str | None = None,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+) -> dict[str, str]:
     headers = {"Accept": "application/json"}
     api_token = (api_token or os.environ.get(_API_AUTH_ENV, "")).strip()
     if not api_token:
+        # Per-cluster outbound scoping (#26): pass the cluster context so the
+        # per-cluster token key is read first, with the legacy global key as a
+        # fallback. Empty context preserves the global-key behaviour. The token
+        # value is never logged (charter §12).
         from api.services.openapi.runtime import get_openapi_api_token
 
-        api_token = get_openapi_api_token()
+        api_token = get_openapi_api_token(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
     if api_token:
         headers["X-ELB-API-Token"] = api_token
     token = (internal_token or os.environ.get(_INTERNAL_AUTH_ENV, "")).strip()
@@ -221,8 +260,18 @@ def submit_job(
     *,
     base_url: str | None = None,
     api_token: str | None = None,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
 ) -> dict[str, Any]:
     """POST the canonical submit body to the sibling OpenAPI service.
+
+    When the full ``subscription_id`` / ``resource_group`` / ``cluster_name``
+    context is supplied (and no explicit ``base_url`` / ``api_token`` override),
+    the base URL and API token are resolved from the **per-cluster** runtime
+    cache keys (#26) so a multi-cluster revision targets the requested cluster
+    rather than the globally most-recently-written endpoint/token. Empty
+    context preserves the legacy global-key behaviour.
 
     When the forwarded payload carries an ``idempotency_key`` the sibling can
     safely dedupe a re-send, so this client retries up to
@@ -254,9 +303,19 @@ def submit_job(
     last_transport_exc: HTTPException | None = None
     for attempt_index in range(attempts):
         with httpx.Client(
-            base_url=_base_url(base_url),
+            base_url=_base_url(
+                base_url,
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+            ),
             timeout=_DEFAULT_TIMEOUT_SECONDS,
-            headers=_headers(api_token=api_token),
+            headers=_headers(
+                api_token=api_token,
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+            ),
         ) as client:
             try:
                 resp = client.post("/api/v1/elastic-blast/submit", json=payload)
@@ -309,11 +368,24 @@ def get_job(
     *,
     base_url: str | None = None,
     api_token: str | None = None,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
 ) -> dict[str, Any]:
     with httpx.Client(
-        base_url=_base_url(base_url),
+        base_url=_base_url(
+            base_url,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
         timeout=_DEFAULT_TIMEOUT_SECONDS,
-        headers=_headers(api_token=api_token),
+        headers=_headers(
+            api_token=api_token,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
     ) as client:
         try:
             resp = client.get(f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}")
@@ -367,18 +439,38 @@ def delete_job(
         return cast(dict[str, Any], resp.json())
 
 
-def list_jobs(*, base_url: str | None = None, api_token: str | None = None) -> dict[str, Any]:
+def list_jobs(
+    *,
+    base_url: str | None = None,
+    api_token: str | None = None,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+) -> dict[str, Any]:
     """List all jobs tracked by the external ElasticBLAST OpenAPI service.
 
     The legacy `/v1/jobs` endpoint is the only listing surface exposed by the
     sibling service today; the newer `/api/v1/elastic-blast/...` contract has
     submit/get/file but no list. The shape is `{"jobs": [...], "count": N}`.
+
+    Supplying the cluster context resolves the per-cluster base URL + token
+    (#26); empty context keeps the legacy global-key resolution.
     """
 
     with httpx.Client(
-        base_url=_base_url(base_url),
+        base_url=_base_url(
+            base_url,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
         timeout=_LIST_TIMEOUT_SECONDS,
-        headers=_headers(api_token=api_token),
+        headers=_headers(
+            api_token=api_token,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
     ) as client:
         try:
             resp = client.get("/v1/jobs")
