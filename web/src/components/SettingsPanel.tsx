@@ -104,6 +104,12 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
   const trapRef = useFocusTrap<HTMLDivElement>(open);
   const [active, setActive] = useState<SectionId>(initialSection ?? "appearance");
   const { reset } = usePreferences();
+  // Mirror the topbar gear dot inside the panel so the user can see *which*
+  // section needs attention. Without this, the gear shows a dot but every
+  // section in the left-nav looks identical once the panel is open. The hook
+  // is shared (Layout gear, UpdatesSection) and broadcast-synced, so this extra
+  // consumer just reads the same status while the panel is mounted.
+  const { attention: updateAttention } = useUpgradeAvailability();
   const config = useMemo<ResourceConfig | null>(() => (open ? loadSavedConfig() : null), [open]);
   // The Reset button clears the browser-local preferences in
   // `localStorage["elb-prefs"]` (theme, preview flags, telemetry/connection
@@ -181,6 +187,7 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
           >
             {SECTIONS.map((section) => {
               const selected = section.id === active;
+              const needsAttention = section.id === "updates" && updateAttention;
               return (
                 <button
                   key={section.id}
@@ -204,6 +211,21 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
                 >
                   {section.icon}
                   {section.label}
+                  {needsAttention && (
+                    <span
+                      aria-label="An update is available"
+                      role="img"
+                      title="An update is available"
+                      style={{
+                        marginLeft: "auto",
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        background: "var(--warning, #d8a657)",
+                        flexShrink: 0,
+                      }}
+                    />
+                  )}
                 </button>
               );
             })}

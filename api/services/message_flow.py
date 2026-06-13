@@ -19,6 +19,11 @@ Risky contracts: The broker boxes intentionally reflect ACTIVE ``JobState``
     never stored on the job row (only sha256 + counts), so ``query_size`` is the
     sequence-letter count, never the raw upload. Submitter aliases come from
     ``owner_upn`` and are shown as-is by the SPA; never emit a raw ``owner_oid``.
+    Consumers are grouped by cluster NAME (not the sub/rg/name triple) so a job
+    that is queued before its rg/sub are backfilled does not split one logical
+    cluster into two cards; the tradeoff is that two genuinely-distinct clusters
+    sharing a name across resource groups would merge (acceptable in the
+    single-tenant-per-deployment model).
 Validation: ``uv run pytest -q api/tests/test_message_flow.py``.
 """
 
@@ -38,8 +43,10 @@ _ACTIVE_STATUSES = frozenset({"queued", "running"})
 
 # Hard caps so a pathological jobstate table can never make this snapshot
 # unbounded. The list read is already limited; these bound the response shape.
+# The broker boxes are tiny (textless, tooltip-on-hover) so a larger cap stays
+# cheap to render while still being bounded.
 _DEFAULT_LIST_LIMIT = 200
-_MAX_BROKER_BOXES = 60
+_MAX_BROKER_BOXES = 120
 
 
 def _payload_dict(state: Any) -> dict[str, Any]:
@@ -182,7 +189,7 @@ def build_message_flow(
     read_truncated = len(active) >= list_limit
 
     producers: dict[str, dict[str, Any]] = {}
-    clusters: dict[tuple[str, str, str], dict[str, Any]] = {}
+    clusters: dict[str, dict[str, Any]] = {}
     broker: list[dict[str, Any]] = []
 
     for state in active:
@@ -199,8 +206,15 @@ def build_message_flow(
 
         sub_id = getattr(state, "subscription_id", None) or ""
         rg = getattr(state, "resource_group", None) or ""
-        cluster_name = getattr(state, "cluster_name", None) or ""
-        key = (sub_id, rg, cluster_name)
+        cluster_name = (getattr(state, "cluster_name", None) or "").strip()
+        # Group consumers by cluster NAME, not the (sub, rg, name) triple.
+        # A job that is queued but not yet placed on a cluster carries an empty
+        # rg/sub; once it starts the same row gains them. Keying on the full
+        # triple therefore split one real cluster into two cards ("elb-cluster-01"
+        # with an rg AND a second one without), and every not-yet-placed job into
+        # its own "unassigned" card. Collapsing on the name (empty name -> a
+        # single "unassigned" bucket) keeps one card per logical consumer.
+        key = cluster_name or "\x00unassigned"
         cluster = clusters.setdefault(
             key,
             {
@@ -212,6 +226,13 @@ def build_message_flow(
                 "total": 0,
             },
         )
+        # Backfill rg/sub the first time a row for this cluster carries them, so a
+        # bucket created from a not-yet-placed job still shows its rg/sub once a
+        # running row arrives.
+        if not cluster["resource_group"] and rg:
+            cluster["resource_group"] = rg
+        if not cluster["subscription_id"] and sub_id:
+            cluster["subscription_id"] = sub_id
         cluster["total"] += 1
         if status == "running":
             cluster["running"] += 1

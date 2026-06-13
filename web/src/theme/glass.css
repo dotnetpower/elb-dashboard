@@ -1877,6 +1877,22 @@ textarea.form-input {
   text-align: center;
 }
 
+/* Message Flow modal — three lanes (Producers / Broker / Consumers). The
+   broker lane gets the most room since it tiles one box per in-flight job;
+   on narrow viewports the lanes stack so nothing is pinched into a sliver. */
+.message-flow-lanes {
+  display: grid;
+  grid-template-columns: minmax(200px, 0.85fr) minmax(0, 2.1fr) minmax(200px, 0.95fr);
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .message-flow-lanes {
+    grid-template-columns: 1fr;
+  }
+}
+
 .glass-dialog ul,
 .glass-dialog ol {
   text-align: left;

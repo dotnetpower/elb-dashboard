@@ -244,6 +244,132 @@ def test_resolve_aks_vnet_subnet_id_empty_when_unset(
     assert _resolve_aks_vnet_subnet_id() == ""
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("yes", True),
+        ("on", True),
+        ("false", False),
+        ("0", False),
+        ("", False),
+        ("anything", False),
+    ],
+)
+def test_container_insights_reenable_flag(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    from api.tasks.azure.provision import _container_insights_reenable_enabled
+
+    monkeypatch.setenv("AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS", value)
+    assert _container_insights_reenable_enabled() is expected
+
+
+def test_container_insights_reenable_flag_unset_defaults_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.azure.provision import _container_insights_reenable_enabled
+
+    monkeypatch.delenv("AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS", raising=False)
+    assert _container_insights_reenable_enabled() is False
+
+
+def test_maybe_enqueue_container_insights_disabled_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default-OFF: no enqueue even when the workspace ARM id is present."""
+    import api.tasks.azure.provision as provision
+
+    monkeypatch.delenv("AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS", raising=False)
+    monkeypatch.setenv("LOG_ANALYTICS_WORKSPACE_RESOURCE_ID", "/ws/log-elb")
+
+    def _boom(*_a: Any, **_k: Any) -> Any:  # pragma: no cover - must not run
+        raise AssertionError("enable_aks_container_insights must not be enqueued")
+
+    monkeypatch.setattr(
+        "api.tasks.azure.enable_aks_container_insights",
+        type("T", (), {"delay": staticmethod(_boom)}),
+    )
+    assert provision._maybe_enqueue_container_insights("sub", "rg", "c1") == ""
+
+
+def test_maybe_enqueue_container_insights_skips_without_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opted in but no workspace ARM id injected -> safe no-op (not an error)."""
+    import api.tasks.azure.provision as provision
+
+    monkeypatch.setenv("AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS", "true")
+    monkeypatch.delenv("LOG_ANALYTICS_WORKSPACE_RESOURCE_ID", raising=False)
+
+    def _boom(*_a: Any, **_k: Any) -> Any:  # pragma: no cover - must not run
+        raise AssertionError("must not enqueue without a workspace resource id")
+
+    monkeypatch.setattr(
+        "api.tasks.azure.enable_aks_container_insights",
+        type("T", (), {"delay": staticmethod(_boom)}),
+    )
+    assert provision._maybe_enqueue_container_insights("sub", "rg", "c1") == ""
+
+
+def test_maybe_enqueue_container_insights_enqueues_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.tasks.azure.provision as provision
+
+    monkeypatch.setenv("AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS", "true")
+    monkeypatch.setenv(
+        "LOG_ANALYTICS_WORKSPACE_RESOURCE_ID",
+        "/subscriptions/s/resourceGroups/rg-elb-dashboard/providers/"
+        "Microsoft.OperationalInsights/workspaces/log-elb-dashboard",
+    )
+    captured: dict[str, Any] = {}
+
+    class _Result:
+        id = "ci-task-1"
+
+    def _delay(**kwargs: Any) -> _Result:
+        captured.update(kwargs)
+        return _Result()
+
+    monkeypatch.setattr(
+        "api.tasks.azure.enable_aks_container_insights",
+        type("T", (), {"delay": staticmethod(_delay)}),
+    )
+    task_id = provision._maybe_enqueue_container_insights("sub-9", "rg-aks", "elb-c9")
+    assert task_id == "ci-task-1"
+    assert captured == {
+        "subscription_id": "sub-9",
+        "resource_group": "rg-aks",
+        "cluster_name": "elb-c9",
+        "workspace_resource_id": (
+            "/subscriptions/s/resourceGroups/rg-elb-dashboard/providers/"
+            "Microsoft.OperationalInsights/workspaces/log-elb-dashboard"
+        ),
+    }
+
+
+def test_maybe_enqueue_container_insights_swallows_enqueue_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broker failure must not roll back a successful provision."""
+    import api.tasks.azure.provision as provision
+
+    monkeypatch.setenv("AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS", "true")
+    monkeypatch.setenv("LOG_ANALYTICS_WORKSPACE_RESOURCE_ID", "/ws/log-elb")
+
+    def _delay(**_kwargs: Any) -> Any:
+        raise RuntimeError("broker down")
+
+    monkeypatch.setattr(
+        "api.tasks.azure.enable_aks_container_insights",
+        type("T", (), {"delay": staticmethod(_delay)}),
+    )
+    assert provision._maybe_enqueue_container_insights("sub", "rg", "c1") == ""
+
+
 def test_grant_network_contributor_on_subnet_creates_assignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

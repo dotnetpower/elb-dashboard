@@ -99,6 +99,71 @@ def test_discover_k8s_log_targets_filters_to_job_and_maps_phases(monkeypatch) ->
     ]
 
 
+def test_discover_k8s_log_targets_includes_init_containers(monkeypatch) -> None:
+    """A failed BLAST search pod's init container (`import-query-batches`) must
+    be discovered — it runs before the main `blast` container and is where a
+    query-staging failure is logged."""
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "blastn-batch-s00-job-000-e2fc8081-abcde",
+                            "labels": {},
+                            "ownerReferences": [
+                                {"kind": "Job", "name": "blastn-batch-s00-job-000-e2fc8081"}
+                            ],
+                        },
+                        "spec": {
+                            "initContainers": [{"name": "import-query-batches"}],
+                            "containers": [
+                                {
+                                    "name": "blast",
+                                    "env": [
+                                        {"name": "BLAST_ELB_JOB_ID", "value": "job-abcde2fc8081"}
+                                    ],
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def get(self, url, *, timeout):
+            return FakeResponse()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        k8s,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (FakeSession(), "https://k8s"),
+    )
+
+    targets = k8s.discover_k8s_log_targets(
+        object(),
+        "sub-1",
+        "rg-elb",
+        "elb-cluster",
+        namespace="default",
+        job_id="dashboard-job",
+        elastic_job_id="job-abcde2fc8081",
+    )
+
+    container_names = {target.container_name for target in targets}
+    assert "import-query-batches" in container_names
+    assert "blast" in container_names
+
+
 def test_stream_k8s_log_lines_uses_following_pod_log_api(monkeypatch) -> None:
     class FakeResponse:
         def raise_for_status(self):

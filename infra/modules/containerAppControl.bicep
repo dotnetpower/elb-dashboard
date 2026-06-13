@@ -56,11 +56,17 @@ param featureLabTools string = 'true'
 @description('Frontend feature flag for the browser terminal. Set to false to hide menu entries, dashboard card, shortcuts, and route access.')
 param featureTerminal string = 'true'
 
+@description('Per-deployment override for the optional Service Bus BLAST integration env gate (SERVICEBUS_ENABLED). Empty (default) keeps the repo default from control-plane-env.json (OFF, charter section 12a Rule 4); a non-empty value (e.g. true from azd env) wins so the toggle survives every redeploy.')
+param serviceBusEnabled string = ''
+
 @description('App Insights connection string for telemetry from inside the containers.')
 param applicationInsightsConnectionString string
 
 @description('Log Analytics workspace id (customerId GUID). Used by the api sidecar to KQL `ContainerAppConsoleLogs_CL` for the Live Wall log tail when the historical project-local log files are not available (i.e. always, in deployment). Empty disables the LA fallback and the Live Wall log tiles stay blank.')
 param logAnalyticsWorkspaceId string = ''
+
+@description('Log Analytics workspace ARM resource id (full /subscriptions/.../workspaces/<name> path). Injected so the AKS provision task can re-enable Container Insights (the omsagent addon) on a freshly recreated cluster when AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS is true. Empty disables that auto-enable path.')
+param logAnalyticsWorkspaceResourceId string = ''
 
 @description('Platform Storage account name (used to derive the table endpoint for jobstate / jobhistory access).')
 param platformStorageAccountName string = ''
@@ -119,6 +125,16 @@ var platformAcrName = empty(acrLoginServer) ? '' : split(acrLoginServer, '.')[0]
 // api/worker/beat PATCH so both deploy paths converge. The literal entries
 // below keep their inline documentation; only the VALUES come from the JSON.
 var controlPlaneEnv = loadJsonContent('../control-plane-env.json')
+
+// Per-deployment override for the Service Bus env gate. The repo default in
+// control-plane-env.json stays OFF (charter §12a Rule 4); when a deployment
+// exports SERVICEBUS_ENABLED (via azd env), that non-empty value wins for all
+// three sidecars so the toggle is not reset to the JSON default on the next
+// full `azd provision`. Mirrors the override scripts/dev/quick-deploy.sh
+// applies on its api/worker/beat PATCH path, so both deploy routes converge.
+var effectiveServiceBusEnabled = empty(serviceBusEnabled)
+  ? controlPlaneEnv.api.SERVICEBUS_ENABLED
+  : serviceBusEnabled
 
 resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
@@ -258,6 +274,19 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // to KQL against the LA workspace. Empty disables the fallback
             // and the tiles render `: ready` + heartbeats only.
             { name: 'LOG_ANALYTICS_WORKSPACE_ID', value: logAnalyticsWorkspaceId }
+            // Full ARM resource id of the same Log Analytics workspace. The
+            // AKS provision task uses it to re-enable Container Insights (the
+            // omsagent addon) on a freshly recreated cluster — the addon does
+            // not survive a delete + recreate. Gated by
+            // AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS (default false) so it is
+            // a no-op unless an operator opts in.
+            { name: 'LOG_ANALYTICS_WORKSPACE_RESOURCE_ID', value: logAnalyticsWorkspaceResourceId }
+            // Opt-in: when true, a cluster provisioned/recreated through the
+            // dashboard auto-re-enables Container Insights against the platform
+            // Log Analytics workspace. Default false because the addon ships
+            // node/pod telemetry to the shared 1 GiB/day-capped workspace and
+            // could starve the dashboard's own traces on a busy cluster.
+            { name: 'AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS', value: 'false' }
             // Display-only contract for /api/terminal/ticket. The actual
             // browser caller comes from the validated MSAL token; the shell
             // process itself runs as this fixed Unix account in the terminal
@@ -311,7 +340,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // (Charter §12a Rule 4): the api submit routes do not enqueue to
             // Service Bus and the beat tasks no-op until both this AND the saved
             // config row opt in. NOT the Celery broker — that stays Redis.
-            { name: 'SERVICEBUS_ENABLED', value: controlPlaneEnv.api.SERVICEBUS_ENABLED }
+            { name: 'SERVICEBUS_ENABLED', value: effectiveServiceBusEnabled }
             // Dev-stage job visibility (issue: recent searches only showed
             // API-submitted jobs). Default ON for the single-tenant
             // development phase: every authenticated tenant member can see and
@@ -437,13 +466,21 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // `az acr build` against this registry. Without it the upgrade
             // fails pre-flight with "PLATFORM_ACR_NAME is not set".
             { name: 'PLATFORM_ACR_NAME', value: platformAcrName }
+            // AKS provision (api.tasks.azure.provision_aks) runs in the worker.
+            // These two drive the opt-in Container Insights re-enable for a
+            // recreated cluster (the omsagent addon does not survive a delete +
+            // recreate). LOG_ANALYTICS_WORKSPACE_RESOURCE_ID is the full ARM id
+            // of the platform workspace; the flag defaults false so the worker
+            // is a no-op unless an operator opts in. Keep in sync with the api
+            // sidecar.
+            { name: 'LOG_ANALYTICS_WORKSPACE_RESOURCE_ID', value: logAnalyticsWorkspaceResourceId }
+            { name: 'AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS', value: 'false' }
             // BLAST capacity gate (issue #23) — must match the api sidecar.
-            // Default OFF preserves the existing submit-lock path.
             { name: 'BLAST_GATE_ENABLED', value: controlPlaneEnv.worker.BLAST_GATE_ENABLED }
             // Service Bus integration master switch — must match the api/beat
             // sidecars so the worker-run drain/publish/cleanup tasks gate
             // identically. Default OFF (Charter §12a Rule 4).
-            { name: 'SERVICEBUS_ENABLED', value: controlPlaneEnv.worker.SERVICEBUS_ENABLED }
+            { name: 'SERVICEBUS_ENABLED', value: effectiveServiceBusEnabled }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // worker-run pipeline/rollback tasks branch identically. Default
             // OFF (Charter §12a Rule 4).
@@ -490,7 +527,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Service Bus integration master switch — must match the api/worker
             // sidecars so the beat scheduler only emits drain/publish/cleanup
             // ticks when the integration is on. Default OFF (Charter §12a Rule 4).
-            { name: 'SERVICEBUS_ENABLED', value: controlPlaneEnv.beat.SERVICEBUS_ENABLED }
+            { name: 'SERVICEBUS_ENABLED', value: effectiveServiceBusEnabled }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // beat-driven reconciler drives validating→confirming→succeeded
             // identically. Default OFF (Charter §12a Rule 4).

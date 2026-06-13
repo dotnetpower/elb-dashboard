@@ -20,6 +20,9 @@
     "allowedOrigins": {
       "value": "${ALLOWED_ORIGINS}"
     },
+    "serviceBusEnabled": {
+      "value": "${SERVICEBUS_ENABLED=}"
+    },
     "lockdownPrivateNetworking": {
       "value": "${LOCKDOWN_PRIVATE_NETWORKING=false}"
     },

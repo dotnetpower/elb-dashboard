@@ -10,7 +10,9 @@ Edit boundaries: Pure unit tests — no real credentials, no real K8s API.
 Key entry points: the `test_*` functions below.
 Risky contracts: The system-namespace delete gate is load-bearing — the
 frontend also hides the button, but the backend must remain the authoritative
-gate (OWASP A01). Log helpers must pick a single representative pod.
+gate (OWASP A01). Log helpers must aggregate every matching pod (Running
+first, then newest) and every container of each pod, capped at
+`_MAX_LOG_PODS`, so a fan-out Job's output is shown in full.
 Validation: `uv run pytest -q api/tests/test_k8s_workload_ops.py`.
 """
 
@@ -241,8 +243,10 @@ def test_deployment_logs_selects_running_pod(monkeypatch: pytest.MonkeyPatch) ->
         namespace="default",
         deployment_name="my-dep",
     )
+    # Running pod is shown first, but every matching pod is aggregated now.
     assert out.startswith("# logs from pod run-pod")
     assert "hello logs" in out
+    assert "# logs from pod old-pod" in out
     # The label selector must be derived from the deployment matchLabels.
     pod_list_call = next(
         c for c in session.get_calls if c["params"] and "labelSelector" in c["params"]
@@ -326,6 +330,116 @@ def test_logs_reject_invalid_name() -> None:
             namespace="default",
             job_name="Bad Name",
         )
+
+
+def test_job_logs_aggregates_all_pods(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fan-out Job's pods are all shown, Running first, then newest."""
+    pods_body = {
+        "items": [
+            {
+                "metadata": {"name": "p-old", "creationTimestamp": "2021-01-01T00:00:00Z"},
+                "status": {"phase": "Succeeded"},
+            },
+            {
+                "metadata": {"name": "p-run", "creationTimestamp": "2020-01-01T00:00:00Z"},
+                "status": {"phase": "Running"},
+            },
+        ]
+    }
+    _patch_session(
+        monkeypatch,
+        _FakeSession(
+            {
+                "/pods": _FakeResponse(json_body=pods_body),
+                "/pods/p-run/log": _FakeResponse(text="run output"),
+                "/pods/p-old/log": _FakeResponse(text="old output"),
+            }
+        ),
+    )
+    out = wl.k8s_job_logs(
+        credential=_CRED,  # type: ignore[arg-type]
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="cluster",
+        namespace="blast",
+        job_name="elb-search-0",
+    )
+    # Both pods are present and the Running pod's block comes first.
+    assert out.startswith("# logs from pod p-run")
+    assert "run output" in out
+    assert "# logs from pod p-old" in out
+    assert "old output" in out
+
+
+def test_job_logs_caps_pod_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """More pods than `_MAX_LOG_PODS` are capped with an omission marker."""
+    total = wl._MAX_LOG_PODS + 5
+    pods_body = {
+        "items": [
+            {
+                "metadata": {
+                    "name": f"p-{i:03d}",
+                    "creationTimestamp": f"2021-01-{(i % 28) + 1:02d}T00:00:00Z",
+                },
+                "status": {"phase": "Succeeded"},
+            }
+            for i in range(total)
+        ]
+    }
+    _patch_session(
+        monkeypatch,
+        _FakeSession({"/pods": _FakeResponse(json_body=pods_body)}),
+    )
+    out = wl.k8s_job_logs(
+        credential=_CRED,  # type: ignore[arg-type]
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="cluster",
+        namespace="blast",
+        job_name="big-job",
+    )
+    assert out.count("# logs from pod ") == wl._MAX_LOG_PODS
+    assert "5 more pod(s) not shown" in out
+
+
+def test_pod_logs_aggregate_all_containers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A multi-container pod shows every container's log, init first."""
+    pods_body = {
+        "items": [
+            {
+                "metadata": {"name": "p-1", "creationTimestamp": "2021-01-01T00:00:00Z"},
+                "status": {"phase": "Running"},
+            }
+        ]
+    }
+    pod_spec = {
+        "spec": {
+            "initContainers": [{"name": "fetch-db"}],
+            "containers": [{"name": "blast"}],
+        }
+    }
+    _patch_session(
+        monkeypatch,
+        _FakeSession(
+            {
+                "/pods": _FakeResponse(json_body=pods_body),
+                "/pods/p-1/log": _FakeResponse(text="container output"),
+                "/pods/p-1": _FakeResponse(json_body=pod_spec),
+            }
+        ),
+    )
+    out = wl.k8s_job_logs(
+        credential=_CRED,  # type: ignore[arg-type]
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="cluster",
+        namespace="blast",
+        job_name="multi-container-job",
+    )
+    assert "# logs from pod p-1" in out
+    # Init container is listed before the main container.
+    assert out.index("--- container: fetch-db ---") < out.index("--- container: blast ---")
+    assert out.count("container output") == 2
 
 
 # --------------------------------------------------------------------------- #

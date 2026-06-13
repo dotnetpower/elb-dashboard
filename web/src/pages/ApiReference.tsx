@@ -18,6 +18,10 @@ import {
   RepairPeeringButton,
   isPeerWithPlatformRecovery,
 } from "@/pages/apiReference/RepairPeeringButton";
+import {
+  GrantLbSubnetRbacButton,
+  isGrantLbSubnetRbacRecovery,
+} from "@/pages/apiReference/GrantLbSubnetRbacButton";
 import { resolveApiReferenceClusterContext } from "@/pages/apiReference/clusterContext";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import {
@@ -374,7 +378,19 @@ export function ApiReference() {
       {specQuery.isError && !clusterStopped && (
         <SpecErrorState
           message={(specQuery.error as Error).message}
+          showGrantRbac={isGrantLbSubnetRbacRecovery(specQuery.error)}
           showRepair={isPeerWithPlatformRecovery(specQuery.error)}
+          subscriptionId={sub}
+          resourceGroup={clusterRg}
+          clusterName={clusterName}
+          onResolved={() => specQuery.refetch()}
+        />
+      )}
+
+      {specQuery.isSuccess && !clusterStopped && isGrantLbSubnetRbacRecovery(specQuery.data) && (
+        <SpecErrorState
+          message="The elb-openapi internal LoadBalancer has no IP yet — the AKS cluster identity is missing Network Contributor on its node subnet."
+          showGrantRbac
           subscriptionId={sub}
           resourceGroup={clusterRg}
           clusterName={clusterName}
@@ -385,7 +401,10 @@ export function ApiReference() {
       {/* Spec returned 200 with `degraded: true` — the api sidecar reached
           the proxy route but the upstream elb-openapi did not answer. Render
           the same recovery affordance as the hard error case. */}
-      {specQuery.isSuccess && !clusterStopped && isPeerWithPlatformRecovery(specQuery.data) && (
+      {specQuery.isSuccess &&
+        !clusterStopped &&
+        !isGrantLbSubnetRbacRecovery(specQuery.data) &&
+        isPeerWithPlatformRecovery(specQuery.data) && (
         <SpecErrorState
           message="The elb-openapi service did not respond. The dashboard could not load the live OpenAPI spec."
           showRepair
@@ -926,6 +945,7 @@ function SkeletonLine({
 function SpecErrorState({
   message,
   showRepair,
+  showGrantRbac,
   subscriptionId,
   resourceGroup,
   clusterName,
@@ -933,11 +953,13 @@ function SpecErrorState({
 }: {
   message: string;
   showRepair?: boolean;
+  showGrantRbac?: boolean;
   subscriptionId?: string;
   resourceGroup?: string;
   clusterName?: string;
   onResolved?: () => void;
 }) {
+  const hasTarget = Boolean(subscriptionId && resourceGroup && clusterName);
   return (
     <PanelState border="1px solid rgba(242,114,111,0.2)" padding="16px 20px">
       <AlertTriangle
@@ -945,11 +967,20 @@ function SpecErrorState({
         style={{ color: "var(--danger)", verticalAlign: "middle", marginRight: 6 }}
       />
       <span style={{ fontSize: 12 }}>Failed to load openapi.json: {message}</span>
-      {showRepair && subscriptionId && resourceGroup && clusterName && (
+      {showGrantRbac && hasTarget && (
+        <GrantLbSubnetRbacButton
+          subscriptionId={subscriptionId!}
+          resourceGroup={resourceGroup!}
+          clusterName={clusterName!}
+          onResolved={() => onResolved?.()}
+          size="block"
+        />
+      )}
+      {showRepair && !showGrantRbac && hasTarget && (
         <RepairPeeringButton
-          subscriptionId={subscriptionId}
-          resourceGroup={resourceGroup}
-          clusterName={clusterName}
+          subscriptionId={subscriptionId!}
+          resourceGroup={resourceGroup!}
+          clusterName={clusterName!}
           onResolved={() => onResolved?.()}
           size="block"
         />

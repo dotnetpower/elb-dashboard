@@ -4,8 +4,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.41.2.15936",
-      "templateHash": "7401787754002625914"
+      "version": "0.44.1.10279",
+      "templateHash": "3790678166936918181"
     }
   },
   "parameters": {
@@ -71,6 +71,13 @@
       "defaultValue": "",
       "metadata": {
         "description": "Comma-separated CORS allowed origins for the api ingress. Leave empty to allow same-origin only (recommended once the SPA is served by the frontend sidecar)."
+      }
+    },
+    "serviceBusEnabled": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Per-deployment override for the optional Service Bus BLAST integration env gate. Empty (default) keeps the repo default from infra/control-plane-env.json (OFF, charter section 12a Rule 4); set to true (via azd env SERVICEBUS_ENABLED) to pin it ON so it survives every redeploy instead of being reset to the JSON default."
       }
     },
     "lockdownPrivateNetworking": {
@@ -211,8 +218,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "5561476277327742745"
+              "version": "0.44.1.10279",
+              "templateHash": "14516756872684744755"
             }
           },
           "parameters": {
@@ -377,8 +384,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "2932919340260590273"
+              "version": "0.44.1.10279",
+              "templateHash": "15372477481324960194"
             }
           },
           "parameters": {
@@ -524,8 +531,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "1900502743401611813"
+              "version": "0.44.1.10279",
+              "templateHash": "8124526977275326746"
             }
           },
           "parameters": {
@@ -607,8 +614,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "4290041250608947366"
+              "version": "0.44.1.10279",
+              "templateHash": "14742416693708909327"
             }
           },
           "parameters": {
@@ -671,8 +678,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "12247042406848856430"
+              "version": "0.44.1.10279",
+              "templateHash": "17716553746764613981"
             }
           },
           "parameters": {
@@ -801,8 +808,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "11070257963419586149"
+              "version": "0.44.1.10279",
+              "templateHash": "16525578872496525161"
             }
           },
           "parameters": {
@@ -919,8 +926,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "4021317242990107715"
+              "version": "0.44.1.10279",
+              "templateHash": "10214824588332532783"
             }
           },
           "parameters": {
@@ -1062,8 +1069,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "18213738371853647902"
+              "version": "0.44.1.10279",
+              "templateHash": "976419781130434905"
             }
           },
           "parameters": {
@@ -1309,8 +1316,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "11582500986259011289"
+              "version": "0.44.1.10279",
+              "templateHash": "7001624463012248718"
             }
           },
           "parameters": {
@@ -1570,8 +1577,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "10133005944342634199"
+              "version": "0.44.1.10279",
+              "templateHash": "13036906424734829973"
             }
           },
           "parameters": {
@@ -1771,8 +1778,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "7706441266121964756"
+              "version": "0.44.1.10279",
+              "templateHash": "15369740944421386750"
             }
           },
           "parameters": {
@@ -2016,8 +2023,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "13265573457851719166"
+              "version": "0.44.1.10279",
+              "templateHash": "7848496921255661391"
             }
           },
           "parameters": {
@@ -2168,11 +2175,17 @@
           "featureTerminal": {
             "value": "[parameters('featureTerminal')]"
           },
+          "serviceBusEnabled": {
+            "value": "[parameters('serviceBusEnabled')]"
+          },
           "applicationInsightsConnectionString": {
             "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('monitoring-{0}', variables('resourceToken'))), '2025-04-01').outputs.appInsightsConnectionString.value]"
           },
           "logAnalyticsWorkspaceId": {
             "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('monitoring-{0}', variables('resourceToken'))), '2025-04-01').outputs.workspaceCustomerId.value]"
+          },
+          "logAnalyticsWorkspaceResourceId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('monitoring-{0}', variables('resourceToken'))), '2025-04-01').outputs.workspaceResourceId.value]"
           },
           "platformStorageAccountName": {
             "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('storage-{0}', variables('resourceToken'))), '2025-04-01').outputs.storageAccountName.value]"
@@ -2196,8 +2209,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.41.2.15936",
-              "templateHash": "15806686543323713065"
+              "version": "0.44.1.10279",
+              "templateHash": "8263643833992305178"
             }
           },
           "parameters": {
@@ -2305,6 +2318,13 @@
                 "description": "Frontend feature flag for the browser terminal. Set to false to hide menu entries, dashboard card, shortcuts, and route access."
               }
             },
+            "serviceBusEnabled": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Per-deployment override for the optional Service Bus BLAST integration env gate (SERVICEBUS_ENABLED). Empty (default) keeps the repo default from control-plane-env.json (OFF, charter section 12a Rule 4); a non-empty value (e.g. true from azd env) wins so the toggle survives every redeploy."
+              }
+            },
             "applicationInsightsConnectionString": {
               "type": "string",
               "metadata": {
@@ -2316,6 +2336,13 @@
               "defaultValue": "",
               "metadata": {
                 "description": "Log Analytics workspace id (customerId GUID). Used by the api sidecar to KQL `ContainerAppConsoleLogs_CL` for the Live Wall log tail when the historical project-local log files are not available (i.e. always, in deployment). Empty disables the LA fallback and the Live Wall log tiles stay blank."
+              }
+            },
+            "logAnalyticsWorkspaceResourceId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Log Analytics workspace ARM resource id (full /subscriptions/.../workspaces/<name> path). Injected so the AKS provision task can re-enable Container Insights (the omsagent addon) on a freshly recreated cluster when AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS is true. Empty disables that auto-enable path."
               }
             },
             "platformStorageAccountName": {
@@ -2369,16 +2396,41 @@
             }
           },
           "variables": {
+            "$fxv#0": {
+              "_comment": "Single source of truth for control-plane GUARD/POLICY env toggles. Read by BOTH infra/modules/containerAppControl.bicep (loadJsonContent, applied on full azd/postprovision deploys) AND scripts/dev/quick-deploy.sh (applied as --set-env-vars on every api/worker/beat PATCH, including the GitHub Actions deploy.yml path). Without this shared source, a fast/GHA deploy patches images only and never applies a Bicep env-default change (e.g. ENFORCE_DASHBOARD_RBAC), so a no-RBAC user could still load the dashboard after an apparent redeploy. Keep values as strings. Per-sidecar maps mirror the env arrays in containerAppControl.bicep; only the policy/guard toggles live here (operational vars like LOG_LEVEL and param-derived vars stay inline in Bicep).",
+              "api": {
+                "OPENAPI_ALLOW_PUBLIC_LB": "true",
+                "ENFORCE_OPENAPI_EXEC_RBAC": "false",
+                "ENFORCE_DASHBOARD_RBAC": "true",
+                "BLAST_GATE_ENABLED": "false",
+                "BLAST_JOBS_SHARED_VISIBILITY": "true",
+                "STRICT_BLUEGREEN": "false",
+                "SERVICEBUS_ENABLED": "false"
+              },
+              "worker": {
+                "BLAST_GATE_ENABLED": "false",
+                "STRICT_BLUEGREEN": "false",
+                "SERVICEBUS_ENABLED": "false"
+              },
+              "beat": {
+                "BLAST_GATE_ENABLED": "false",
+                "STRICT_BLUEGREEN": "false",
+                "SERVICEBUS_ENABLED": "false"
+              }
+            },
             "moduleTags": "[union(parameters('tags'), createObject('role', 'control-plane'))]",
             "bootstrapImage": "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest",
             "apiImage": "[if(parameters('useBootstrapImage'), variables('bootstrapImage'), format('{0}/elb-api:{1}', parameters('acrLoginServer'), parameters('apiImageTag')))]",
             "frontendImage": "[if(parameters('useBootstrapImage'), variables('bootstrapImage'), format('{0}/elb-frontend:{1}', parameters('acrLoginServer'), parameters('frontendImageTag')))]",
             "terminalImage": "[if(parameters('useBootstrapImage'), variables('bootstrapImage'), format('{0}/elb-terminal:{1}', parameters('acrLoginServer'), parameters('terminalImageTag')))]",
+            "prepareDbImage": "[if(empty(parameters('acrLoginServer')), '', format('{0}/elb-prepare-db:{1}', parameters('acrLoginServer'), parameters('apiImageTag')))]",
             "storageDnsSuffix": "[environment().suffixes.storage]",
             "tableEndpoint": "[if(empty(parameters('platformStorageAccountName')), '', format('https://{0}.table.{1}', parameters('platformStorageAccountName'), variables('storageDnsSuffix')))]",
             "blobEndpoint": "[if(empty(parameters('platformStorageAccountName')), '', format('https://{0}.blob.{1}', parameters('platformStorageAccountName'), variables('storageDnsSuffix')))]",
             "platformResourceGroupName": "[resourceGroup().name]",
-            "platformAcrName": "[if(empty(parameters('acrLoginServer')), '', split(parameters('acrLoginServer'), '.')[0])]"
+            "platformAcrName": "[if(empty(parameters('acrLoginServer')), '', split(parameters('acrLoginServer'), '.')[0])]",
+            "controlPlaneEnv": "[variables('$fxv#0')]",
+            "effectiveServiceBusEnabled": "[if(empty(parameters('serviceBusEnabled')), variables('controlPlaneEnv').api.SERVICEBUS_ENABLED, parameters('serviceBusEnabled'))]"
           },
           "resources": [
             {
@@ -2414,7 +2466,7 @@
                   "registries": "[if(parameters('useBootstrapImage'), createArray(), createArray(createObject('server', parameters('acrLoginServer'), 'identity', parameters('sharedIdentityResourceId'))))]"
                 },
                 "template": {
-                  "containers": "[if(parameters('useBootstrapImage'), createArray(createObject('name', 'bootstrap', 'image', variables('bootstrapImage'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'))), createArray(createObject('name', 'api', 'image', variables('apiImage'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'api'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'SHARED_IDENTITY_PRINCIPAL_ID', 'value', parameters('sharedIdentityPrincipalId')), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'AZURE_TABLE_ENDPOINT', 'value', variables('tableEndpoint')), createObject('name', 'AZURE_BLOB_ENDPOINT', 'value', variables('blobEndpoint')), createObject('name', 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', 'value', parameters('platformPrivateEndpointSubnetId')), createObject('name', 'PLATFORM_AKS_SUBNET_ID', 'value', parameters('platformAksSubnetId')), createObject('name', 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('applicationInsightsConnectionString')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'FRONTEND_UPSTREAM', 'value', 'http://127.0.0.1:8081'), createObject('name', 'TERMINAL_UPSTREAM', 'value', 'http://127.0.0.1:7681'), createObject('name', 'TERMINAL_EXEC_UPSTREAM', 'value', 'http://127.0.0.1:7682'), createObject('name', 'STORAGE_ACCOUNT_NAME', 'value', parameters('platformStorageAccountName')), createObject('name', 'PLATFORM_ACR_NAME', 'value', variables('platformAcrName')), createObject('name', 'LOG_ANALYTICS_WORKSPACE_ID', 'value', parameters('logAnalyticsWorkspaceId')), createObject('name', 'TERMINAL_SHELL_USER', 'value', 'azureuser'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'OPENAPI_ALLOW_PUBLIC_LB', 'value', 'true'), createObject('name', 'ENFORCE_OPENAPI_EXEC_RBAC', 'value', 'false'), createObject('name', 'BLAST_GATE_ENABLED', 'value', 'false'), createObject('name', 'BLAST_JOBS_SHARED_VISIBILITY', 'value', 'true'), createObject('name', 'STRICT_BLUEGREEN', 'value', 'false'), createObject('name', 'LOG_LEVEL', 'value', 'INFO')), 'probes', createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', '/api/health', 'port', 8080, 'scheme', 'HTTP'), 'periodSeconds', 30, 'timeoutSeconds', 5, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', '/api/health', 'port', 8080, 'scheme', 'HTTP'), 'periodSeconds', 10, 'timeoutSeconds', 3, 'failureThreshold', 3))), createObject('name', 'frontend', 'image', variables('frontendImage'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'frontend'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'VITE_API_BASE_URL', 'value', ''), createObject('name', 'VITE_AUTH_DEV_BYPASS', 'value', 'false'), createObject('name', 'VITE_AZURE_REDIRECT_URI', 'value', '__RUNTIME__'), createObject('name', 'VITE_AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'VITE_AZURE_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'VITE_FEATURE_CUSTOM_DB', 'value', parameters('featureCustomDb')), createObject('name', 'VITE_FEATURE_LAB_TOOLS', 'value', parameters('featureLabTools')), createObject('name', 'VITE_FEATURE_TERMINAL', 'value', parameters('featureTerminal')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'worker', 'image', variables('apiImage'), 'command', createArray('python3', '/app/api/wait_redis.py'), 'args', createArray('python3', '/app/api/run_celery_workers.py'), 'resources', createObject('cpu', json('1.0'), 'memory', '2.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'worker'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'SHARED_IDENTITY_PRINCIPAL_ID', 'value', parameters('sharedIdentityPrincipalId')), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'AZURE_TABLE_ENDPOINT', 'value', variables('tableEndpoint')), createObject('name', 'AZURE_BLOB_ENDPOINT', 'value', variables('blobEndpoint')), createObject('name', 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', 'value', parameters('platformPrivateEndpointSubnetId')), createObject('name', 'PLATFORM_AKS_SUBNET_ID', 'value', parameters('platformAksSubnetId')), createObject('name', 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('applicationInsightsConnectionString')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'TERMINAL_EXEC_UPSTREAM', 'value', 'http://127.0.0.1:7682'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'STORAGE_ACCOUNT_NAME', 'value', parameters('platformStorageAccountName')), createObject('name', 'PLATFORM_ACR_NAME', 'value', variables('platformAcrName')), createObject('name', 'BLAST_GATE_ENABLED', 'value', 'false'), createObject('name', 'STRICT_BLUEGREEN', 'value', 'false'), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'beat', 'image', variables('apiImage'), 'command', createArray('python3', '/app/api/wait_redis.py'), 'args', createArray('celery', '-A', 'api.celery_app:celery_app', 'beat', '--loglevel=info', '--schedule=/tmp/celerybeat-schedule', '--pidfile=/tmp/celerybeat.pid'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'beat'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('applicationInsightsConnectionString')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'PLATFORM_ACR_NAME', 'value', variables('platformAcrName')), createObject('name', 'BLAST_GATE_ENABLED', 'value', 'false'), createObject('name', 'STRICT_BLUEGREEN', 'value', 'false'), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'redis', 'image', format('{0}/library/redis:7-alpine', parameters('acrLoginServer')), 'command', createArray('redis-server'), 'args', createArray('--save', '', '--appendonly', 'no', '--maxmemory', '384mb', '--maxmemory-policy', 'allkeys-lru', '--bind', '127.0.0.1', '--protected-mode', 'no'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi')), createObject('name', 'terminal', 'image', variables('terminalImage'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'terminal'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'SHARED_IDENTITY_PRINCIPAL_ID', 'value', parameters('sharedIdentityPrincipalId')), createObject('name', 'AZCOPY_AUTO_LOGIN_TYPE', 'value', 'MSI'), createObject('name', 'AZCOPY_MSI_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'ELB_SKIP_DB_VERIFY', 'value', 'true'), createObject('name', 'ELB_DISABLE_AUTO_SHUTDOWN', 'value', '1'), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'AZURE_REGION', 'value', parameters('location')), createObject('name', 'STORAGE_ACCOUNT_NAME', 'value', parameters('platformStorageAccountName')), createObject('name', 'PLATFORM_ACR_NAME', 'value', variables('platformAcrName')), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'EXEC_MAX_CONCURRENCY', 'value', '4'), createObject('name', 'EXEC_MAX_BODY_BYTES', 'value', '8388608')), 'probes', createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', '/healthz', 'port', 7682, 'scheme', 'HTTP'), 'periodSeconds', 30, 'timeoutSeconds', 5, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', '/healthz', 'port', 7682, 'scheme', 'HTTP'), 'periodSeconds', 10, 'timeoutSeconds', 3, 'failureThreshold', 3)))))]",
+                  "containers": "[if(parameters('useBootstrapImage'), createArray(createObject('name', 'bootstrap', 'image', variables('bootstrapImage'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'))), createArray(createObject('name', 'api', 'image', variables('apiImage'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'api'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'SHARED_IDENTITY_PRINCIPAL_ID', 'value', parameters('sharedIdentityPrincipalId')), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'AZURE_TABLE_ENDPOINT', 'value', variables('tableEndpoint')), createObject('name', 'AZURE_BLOB_ENDPOINT', 'value', variables('blobEndpoint')), createObject('name', 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', 'value', parameters('platformPrivateEndpointSubnetId')), createObject('name', 'PLATFORM_AKS_SUBNET_ID', 'value', parameters('platformAksSubnetId')), createObject('name', 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('applicationInsightsConnectionString')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'FRONTEND_UPSTREAM', 'value', 'http://127.0.0.1:8081'), createObject('name', 'TERMINAL_UPSTREAM', 'value', 'http://127.0.0.1:7681'), createObject('name', 'TERMINAL_EXEC_UPSTREAM', 'value', 'http://127.0.0.1:7682'), createObject('name', 'STORAGE_ACCOUNT_NAME', 'value', parameters('platformStorageAccountName')), createObject('name', 'PLATFORM_ACR_NAME', 'value', variables('platformAcrName')), createObject('name', 'PREPARE_DB_AKS_AZCOPY_IMAGE', 'value', variables('prepareDbImage')), createObject('name', 'LOG_ANALYTICS_WORKSPACE_ID', 'value', parameters('logAnalyticsWorkspaceId')), createObject('name', 'LOG_ANALYTICS_WORKSPACE_RESOURCE_ID', 'value', parameters('logAnalyticsWorkspaceResourceId')), createObject('name', 'AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS', 'value', 'false'), createObject('name', 'TERMINAL_SHELL_USER', 'value', 'azureuser'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'OPENAPI_ALLOW_PUBLIC_LB', 'value', variables('controlPlaneEnv').api.OPENAPI_ALLOW_PUBLIC_LB), createObject('name', 'ENFORCE_OPENAPI_EXEC_RBAC', 'value', variables('controlPlaneEnv').api.ENFORCE_OPENAPI_EXEC_RBAC), createObject('name', 'ENFORCE_DASHBOARD_RBAC', 'value', variables('controlPlaneEnv').api.ENFORCE_DASHBOARD_RBAC), createObject('name', 'BLAST_GATE_ENABLED', 'value', variables('controlPlaneEnv').api.BLAST_GATE_ENABLED), createObject('name', 'SERVICEBUS_ENABLED', 'value', variables('effectiveServiceBusEnabled')), createObject('name', 'BLAST_JOBS_SHARED_VISIBILITY', 'value', variables('controlPlaneEnv').api.BLAST_JOBS_SHARED_VISIBILITY), createObject('name', 'STRICT_BLUEGREEN', 'value', variables('controlPlaneEnv').api.STRICT_BLUEGREEN), createObject('name', 'LOG_LEVEL', 'value', 'INFO')), 'probes', createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', '/api/health', 'port', 8080, 'scheme', 'HTTP'), 'periodSeconds', 30, 'timeoutSeconds', 5, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', '/api/health', 'port', 8080, 'scheme', 'HTTP'), 'periodSeconds', 10, 'timeoutSeconds', 3, 'failureThreshold', 3))), createObject('name', 'frontend', 'image', variables('frontendImage'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'frontend'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'VITE_API_BASE_URL', 'value', ''), createObject('name', 'VITE_AUTH_DEV_BYPASS', 'value', 'false'), createObject('name', 'VITE_AZURE_REDIRECT_URI', 'value', '__RUNTIME__'), createObject('name', 'VITE_AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'VITE_AZURE_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'VITE_FEATURE_CUSTOM_DB', 'value', parameters('featureCustomDb')), createObject('name', 'VITE_FEATURE_LAB_TOOLS', 'value', parameters('featureLabTools')), createObject('name', 'VITE_FEATURE_TERMINAL', 'value', parameters('featureTerminal')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'worker', 'image', variables('apiImage'), 'command', createArray('python3', '/app/api/wait_redis.py'), 'args', createArray('python3', '/app/api/run_celery_workers.py'), 'resources', createObject('cpu', json('1.0'), 'memory', '2.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'worker'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'SHARED_IDENTITY_PRINCIPAL_ID', 'value', parameters('sharedIdentityPrincipalId')), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'AZURE_TABLE_ENDPOINT', 'value', variables('tableEndpoint')), createObject('name', 'AZURE_BLOB_ENDPOINT', 'value', variables('blobEndpoint')), createObject('name', 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', 'value', parameters('platformPrivateEndpointSubnetId')), createObject('name', 'PLATFORM_AKS_SUBNET_ID', 'value', parameters('platformAksSubnetId')), createObject('name', 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('applicationInsightsConnectionString')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'TERMINAL_EXEC_UPSTREAM', 'value', 'http://127.0.0.1:7682'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'STORAGE_ACCOUNT_NAME', 'value', parameters('platformStorageAccountName')), createObject('name', 'PLATFORM_ACR_NAME', 'value', variables('platformAcrName')), createObject('name', 'LOG_ANALYTICS_WORKSPACE_RESOURCE_ID', 'value', parameters('logAnalyticsWorkspaceResourceId')), createObject('name', 'AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS', 'value', 'false'), createObject('name', 'BLAST_GATE_ENABLED', 'value', variables('controlPlaneEnv').worker.BLAST_GATE_ENABLED), createObject('name', 'SERVICEBUS_ENABLED', 'value', variables('effectiveServiceBusEnabled')), createObject('name', 'STRICT_BLUEGREEN', 'value', variables('controlPlaneEnv').worker.STRICT_BLUEGREEN), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'beat', 'image', variables('apiImage'), 'command', createArray('python3', '/app/api/wait_redis.py'), 'args', createArray('celery', '-A', 'api.celery_app:celery_app', 'beat', '--loglevel=info', '--schedule=/tmp/celerybeat-schedule', '--pidfile=/tmp/celerybeat.pid'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'beat'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('applicationInsightsConnectionString')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'PLATFORM_ACR_NAME', 'value', variables('platformAcrName')), createObject('name', 'BLAST_GATE_ENABLED', 'value', variables('controlPlaneEnv').beat.BLAST_GATE_ENABLED), createObject('name', 'SERVICEBUS_ENABLED', 'value', variables('effectiveServiceBusEnabled')), createObject('name', 'STRICT_BLUEGREEN', 'value', variables('controlPlaneEnv').beat.STRICT_BLUEGREEN), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'redis', 'image', format('{0}/library/redis:7-alpine', parameters('acrLoginServer')), 'command', createArray('redis-server'), 'args', createArray('--save', '', '--appendonly', 'no', '--maxmemory', '384mb', '--maxmemory-policy', 'allkeys-lru', '--bind', '127.0.0.1', '--protected-mode', 'no'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi')), createObject('name', 'terminal', 'image', variables('terminalImage'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'terminal'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'SHARED_IDENTITY_PRINCIPAL_ID', 'value', parameters('sharedIdentityPrincipalId')), createObject('name', 'AZCOPY_AUTO_LOGIN_TYPE', 'value', 'MSI'), createObject('name', 'AZCOPY_MSI_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'ELB_SKIP_DB_VERIFY', 'value', 'true'), createObject('name', 'ELB_DISABLE_AUTO_SHUTDOWN', 'value', '1'), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'AZURE_REGION', 'value', parameters('location')), createObject('name', 'STORAGE_ACCOUNT_NAME', 'value', parameters('platformStorageAccountName')), createObject('name', 'PLATFORM_ACR_NAME', 'value', variables('platformAcrName')), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'EXEC_MAX_CONCURRENCY', 'value', '4'), createObject('name', 'EXEC_MAX_BODY_BYTES', 'value', '8388608')), 'probes', createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', '/healthz', 'port', 7682, 'scheme', 'HTTP'), 'periodSeconds', 30, 'timeoutSeconds', 5, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', '/healthz', 'port', 7682, 'scheme', 'HTTP'), 'periodSeconds', 10, 'timeoutSeconds', 3, 'failureThreshold', 3)))))]",
                   "scale": {
                     "minReplicas": 1,
                     "maxReplicas": 1

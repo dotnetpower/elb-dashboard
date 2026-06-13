@@ -7,12 +7,12 @@
  * shows a single calm notice instead of empty lanes — the integration is
  * optional and an idle queue is the normal state.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Radio, Server, Users, X } from "lucide-react";
 
-import { messageFlowApi, type MessageFlowSnapshot } from "@/api/messageFlow";
+import { messageFlowApi, type MessageFlowBox, type MessageFlowSnapshot } from "@/api/messageFlow";
 
 import { aliasTone } from "./colors";
 import { boxWidth, querySizeLabel } from "./layout";
@@ -49,12 +49,182 @@ function laneHeader(icon: React.ReactNode, title: string, subtitle: string) {
   );
 }
 
+/** Native hover tooltip for a broker box — the box itself is intentionally
+ *  textless, so all the per-job detail lives here (and in the click-through
+ *  detail modal). */
+function boxTooltip(b: MessageFlowBox): string {
+  const lines = [
+    `${b.program ?? "blast"} · ${querySizeLabel(b.query_size)}`,
+    `status: ${b.status}${b.phase ? ` (${b.phase})` : ""}`,
+  ];
+  if (b.db) lines.push(`db: ${b.db}`);
+  lines.push(`submitter: ${b.alias}`);
+  lines.push(`cluster: ${b.cluster_name || "unassigned"}`);
+  lines.push("click to view job JSON");
+  return lines.join("\n");
+}
+
+/** A small read-only key/value row used in the detail modal summary. */
+function summaryItem(label: string, value: React.ReactNode) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 12, color: "var(--text-primary)" }}>{value}</span>
+    </div>
+  );
+}
+
+interface JobDetailModalProps {
+  box: MessageFlowBox;
+  onClose: () => void;
+}
+
+/** Click-through detail for a single broker box, rendered as its own modal on
+ *  top of the flow modal (its own portal + higher z-index backdrop). Shows a
+ *  compact summary plus the redacted JobState JSON fetched on demand. */
+function JobDetailModal({ box, onClose }: JobDetailModalProps) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    // Capture phase so this handler runs before the parent flow modal's
+    // Escape handler and can stop it from also closing the whole flow modal.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+
+  const detailQuery = useQuery({
+    queryKey: ["message-flow-job", box.job_id],
+    queryFn: () => messageFlowApi.getJobDetail(box.job_id),
+    retry: false,
+  });
+
+  const tone = aliasTone(box.alias);
+
+  return createPortal(
+    <div
+      className="glass-dialog-backdrop"
+      style={{ zIndex: 1100 }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Job detail for ${box.program ?? "blast"} ${box.job_id}`}
+    >
+      <div
+        className="glass-card glass-card--strong glass-dialog"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          maxWidth: 720,
+          width: "calc(100vw - 48px)",
+          maxHeight: "88vh",
+          display: "flex",
+          flexDirection: "column",
+          padding: 0,
+          overflow: "hidden",
+          textAlign: "left",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "14px 18px",
+            borderBottom: "1px solid var(--glass-border)",
+          }}
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: 3,
+              background: tone.accent,
+              flexShrink: 0,
+            }}
+          />
+          <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+            {box.program ?? "blast"}
+          </div>
+          <span style={{ fontSize: 11, color: "var(--text-faint)" }}>{box.job_id}</span>
+          <button
+            type="button"
+            className="glass-button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{ marginLeft: "auto", padding: 6 }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: 18, overflowY: "auto" }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+              gap: 12,
+              marginBottom: 16,
+            }}
+          >
+            {summaryItem("Status", `${box.status}${box.phase ? ` · ${box.phase}` : ""}`)}
+            {summaryItem("Query size", querySizeLabel(box.query_size))}
+            {summaryItem("Database", box.db ?? "—")}
+            {summaryItem("Submitter", box.alias)}
+            {summaryItem("Cluster", box.cluster_name || "unassigned")}
+          </div>
+
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 8 }}>
+            Job JSON
+          </div>
+          {detailQuery.isLoading ? (
+            <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading…</div>
+          ) : detailQuery.isError ? (
+            <div style={{ color: "var(--warning)", fontSize: 12 }}>Could not load job detail.</div>
+          ) : (
+            <pre
+              style={{
+                margin: 0,
+                maxHeight: 360,
+                overflow: "auto",
+                fontSize: 11,
+                lineHeight: 1.5,
+                color: "var(--text-muted)",
+                background: "var(--glass-surface-deep, rgba(0,0,0,0.18))",
+                borderRadius: 8,
+                padding: 12,
+              }}
+            >
+              {JSON.stringify(redactState(detailQuery.data?.state ?? detailQuery.data), null, 2)}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
-  const [selectedJob, setSelectedJob] = useState<string | null>(null);
+  const [selectedBox, setSelectedBox] = useState<MessageFlowBox | null>(null);
+  // Mirrors `selectedBox` for the parent Escape handler so it can defer to the
+  // detail modal (whose own capture-phase handler closes itself first).
+  const detailOpenRef = useRef(false);
+  useEffect(() => {
+    detailOpenRef.current = selectedBox !== null;
+  }, [selectedBox]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !detailOpenRef.current) onClose();
     };
     window.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;
@@ -64,13 +234,6 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
       document.body.style.overflow = prev;
     };
   }, [onClose]);
-
-  const detailQuery = useQuery({
-    queryKey: ["message-flow-job", selectedJob],
-    queryFn: () => messageFlowApi.getJobDetail(selectedJob as string),
-    enabled: Boolean(selectedJob),
-    retry: false,
-  });
 
   const producers = snapshot.producers ?? [];
   const broker = snapshot.broker ?? [];
@@ -93,7 +256,7 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
         className="glass-card glass-card--strong glass-dialog"
         onClick={(e) => e.stopPropagation()}
         style={{
-          maxWidth: 1080,
+          maxWidth: 1440,
           width: "calc(100vw - 48px)",
           maxHeight: "92vh",
           display: "flex",
@@ -161,14 +324,7 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
               appear here as they run.
             </div>
           ) : (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1.4fr 1fr",
-                gap: 18,
-                alignItems: "start",
-              }}
-            >
+            <div className="message-flow-lanes">
               {/* Producers */}
               <div>
                 {laneHeader(
@@ -203,7 +359,15 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
                             flexShrink: 0,
                           }}
                         />
-                        <span style={{ color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        <span
+                          style={{
+                            color: "var(--text-primary)",
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
                           {p.alias}
                         </span>
                         <span style={{ marginLeft: "auto", color: "var(--text-muted)" }}>
@@ -224,44 +388,42 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
                     ? `showing first ${snapshot.active_shown ?? broker.length} of ${activeTotal}`
                     : (snapshot.request_queue ?? "requests queue"),
                 )}
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    alignContent: "flex-start",
+                    gap: 8,
+                  }}
+                >
                   {broker.map((b) => {
                     const tone = aliasTone(b.alias);
                     return (
                       <button
                         key={b.job_id}
                         type="button"
-                        onClick={() => setSelectedJob(b.job_id)}
-                        title="View job JSON"
-                        aria-label={`View JSON for ${b.program ?? "blast"} job (${b.status})`}
+                        onClick={() => setSelectedBox(b)}
+                        title={boxTooltip(b)}
+                        aria-label={`View JSON for ${b.program ?? "blast"} job ${b.job_id} (${b.status})`}
                         style={{
-                          textAlign: "left",
                           cursor: "pointer",
                           width: boxWidth(b.query_size),
-                          minWidth: 56,
+                          minWidth: 44,
                           maxWidth: "100%",
+                          height: 34,
+                          padding: 0,
                           background: tone.fill,
                           border: `1px solid ${tone.border}`,
                           borderLeft: `3px solid ${tone.accent}`,
                           borderRadius: 8,
-                          padding: "6px 10px",
-                          color: "var(--text-primary)",
-                          transition: "background 160ms ease-out",
-                          outline: selectedJob === b.job_id ? `1px solid ${tone.accent}` : "none",
+                          // Queued jobs read as dimmer than running ones so the
+                          // lane carries a running/queued signal without text.
+                          opacity: b.status === "running" ? 1 : 0.6,
+                          transition: "transform 120ms ease-out, box-shadow 120ms ease-out",
+                          outline: selectedBox?.job_id === b.job_id ? `2px solid ${tone.accent}` : "none",
+                          outlineOffset: 1,
                         }}
-                      >
-                        <div style={{ fontSize: 12, fontWeight: 600 }}>
-                          {b.program ?? "blast"}
-                          <span style={{ fontWeight: 400, color: "var(--text-muted)" }}>
-                            {" "}
-                            · {querySizeLabel(b.query_size)}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                          {b.status}
-                          {b.db ? ` · ${b.db}` : ""}
-                        </div>
-                      </button>
+                      />
                     );
                   })}
                 </div>
@@ -273,7 +435,7 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {clusters.map((c) => (
                     <div
-                      key={`${c.subscription_id}/${c.resource_group}/${c.cluster_name}`}
+                      key={c.cluster_name || "unassigned"}
                       className="glass-card"
                       style={{ padding: "10px 12px", fontSize: 12 }}
                     >
@@ -294,49 +456,6 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
               </div>
             </div>
           )}
-
-          {/* JSON detail panel */}
-          {selectedJob ? (
-            <div className="glass-card" style={{ marginTop: 18, padding: 14 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <span style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: 13 }}>
-                  Job JSON
-                </span>
-                <span style={{ fontSize: 11, color: "var(--text-faint)" }}>{selectedJob}</span>
-                <button
-                  type="button"
-                  className="glass-button"
-                  onClick={() => setSelectedJob(null)}
-                  style={{ marginLeft: "auto", fontSize: 11 }}
-                >
-                  Close
-                </button>
-              </div>
-              {detailQuery.isLoading ? (
-                <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading…</div>
-              ) : detailQuery.isError ? (
-                <div style={{ color: "var(--warning)", fontSize: 12 }}>
-                  Could not load job detail.
-                </div>
-              ) : (
-                <pre
-                  style={{
-                    margin: 0,
-                    maxHeight: 320,
-                    overflow: "auto",
-                    fontSize: 11,
-                    lineHeight: 1.5,
-                    color: "var(--text-muted)",
-                    background: "var(--glass-surface-deep, rgba(0,0,0,0.18))",
-                    borderRadius: 8,
-                    padding: 12,
-                  }}
-                >
-                  {JSON.stringify(redactState(detailQuery.data?.state ?? detailQuery.data), null, 2)}
-                </pre>
-              )}
-            </div>
-          ) : null}
 
           {/* Service Bus counts footer */}
           <div
@@ -385,6 +504,10 @@ export function MessageFlowModal({ snapshot, onClose }: MessageFlowModalProps) {
           </div>
         </div>
       </div>
+
+      {selectedBox ? (
+        <JobDetailModal box={selectedBox} onClose={() => setSelectedBox(null)} />
+      ) : null}
     </div>,
     document.body,
   );

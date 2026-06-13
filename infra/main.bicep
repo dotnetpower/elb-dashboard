@@ -52,6 +52,9 @@ param featureTerminal string = 'true'
 @description('Comma-separated CORS allowed origins for the api ingress. Leave empty to allow same-origin only (recommended once the SPA is served by the frontend sidecar).')
 param allowedOrigins string = ''
 
+@description('Per-deployment override for the optional Service Bus BLAST integration env gate. Empty (default) keeps the repo default from infra/control-plane-env.json (OFF, charter section 12a Rule 4); set to true (via azd env SERVICEBUS_ENABLED) to pin it ON so it survives every redeploy instead of being reset to the JSON default.')
+param serviceBusEnabled string = ''
+
 @description('If true, every backing resource (Storage, Key Vault, ACR) gets publicNetworkAccess=Disabled and private endpoints. The very first deploy must keep this false so the postprovision hook can push images and seed secrets; flip to true on the second azd provision.')
 param lockdownPrivateNetworking bool = false
 
@@ -357,8 +360,10 @@ module controlApp 'modules/containerAppControl.bicep' = {
     featureCustomDb: featureCustomDb
     featureLabTools: featureLabTools
     featureTerminal: featureTerminal
+    serviceBusEnabled: serviceBusEnabled
     applicationInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     logAnalyticsWorkspaceId: monitoring.outputs.workspaceCustomerId
+    logAnalyticsWorkspaceResourceId: monitoring.outputs.workspaceResourceId
     platformStorageAccountName: storage.outputs.storageAccountName
     subscriptionId: subscription().subscriptionId
     allowedOrigins: allowedOriginsArray

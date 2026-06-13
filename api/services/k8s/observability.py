@@ -4,7 +4,7 @@ Responsibility: Kubernetes pod log and event observability helpers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `k8s_pod_logs`, `k8s_pod_describe`, `k8s_pod_delete`, `k8s_list_events`,
-`_capped`, `SYSTEM_NAMESPACES`
+`fetch_pod_all_container_logs`, `compute_pod_display_status`, `_capped`, `SYSTEM_NAMESPACES`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
 `k8s_pod_delete` MUST refuse system namespaces server-side — frontend gating is not enough.
 Validation: `uv run pytest -q api/tests/test_k8s_list_events.py api/tests/test_k8s_pod_describe.py
@@ -36,6 +36,242 @@ SYSTEM_NAMESPACES: frozenset[str] = frozenset(
 )
 
 
+def _list_pod_container_names(pod_obj: dict[str, Any]) -> list[str]:
+    """Return every container name (init + regular) declared on a pod object.
+
+    Init containers are listed first because they run before the main
+    containers, so showing their logs first mirrors the execution order.
+    """
+
+    spec = pod_obj.get("spec", {}) if isinstance(pod_obj.get("spec"), dict) else {}
+    names: list[str] = []
+    for key in ("initContainers", "containers"):
+        for container in spec.get(key, []) or []:
+            if isinstance(container, dict) and container.get("name"):
+                names.append(str(container["name"]))
+    return names
+
+
+def _index_container_statuses(pod_obj: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map container name -> its status entry (init + regular merged)."""
+
+    status = pod_obj.get("status", {}) if isinstance(pod_obj.get("status"), dict) else {}
+    out: dict[str, dict[str, Any]] = {}
+    for key in ("initContainerStatuses", "containerStatuses"):
+        for cs in status.get(key, []) or []:
+            if isinstance(cs, dict) and cs.get("name"):
+                out[str(cs["name"])] = cs
+    return out
+
+
+def _container_state_summary(cs: dict[str, Any]) -> tuple[str, str]:
+    """Return ``(short_state, detail_message)`` for a container status entry.
+
+    ``short_state`` is a compact label for the block header (e.g.
+    ``Running``, ``Terminated exit 1 (Error)``, ``Waiting (CrashLoopBackOff)``).
+    ``detail_message`` is the container's ``state.*.message`` (kubelet's reason
+    text, often the only place the real crash cause is recorded) or "".
+    """
+
+    state = cs.get("state") if isinstance(cs.get("state"), dict) else {}
+    running = state.get("running") if isinstance(state.get("running"), dict) else None
+    waiting = state.get("waiting") if isinstance(state.get("waiting"), dict) else None
+    terminated = state.get("terminated") if isinstance(state.get("terminated"), dict) else None
+    if running is not None:
+        return "Running", ""
+    if waiting is not None:
+        reason = str(waiting.get("reason") or "Waiting")
+        return f"Waiting ({reason})", str(waiting.get("message") or "")
+    if terminated is not None:
+        reason = str(terminated.get("reason") or "")
+        exit_code = terminated.get("exitCode")
+        label = f"Terminated exit {exit_code}"
+        if reason:
+            label += f" ({reason})"
+        return label, str(terminated.get("message") or "")
+    return "Unknown", ""
+
+
+def fetch_pod_all_container_logs(
+    session: Any,
+    server: str,
+    namespace: str,
+    pod_name: str,
+    tail_lines: int,
+) -> str:
+    """Return the tail of logs for *every* container of a single pod.
+
+    The Kubernetes pod log endpoint serves one container at a time and 400s
+    for a multi-container pod when no ``container`` is given, so a container-
+    less GET would hide every BLAST init/sidecar container's output. This
+    reads the pod spec + status and for each container (init first):
+
+    * fetches its current log,
+    * when the log GET fails because the container is waiting
+      (``CrashLoopBackOff`` / ``ImagePullBackOff`` / ``PodInitializing``),
+      surfaces the kubelet waiting reason + message instead of a bare
+      ``(log unavailable)`` — the error is otherwise invisible,
+    * when the container has restarted (``restartCount > 0``) ALSO fetches the
+      ``previous=true`` instance log, because a crashed container's *current*
+      log is the fresh restart and the real failure output lives in the
+      previous instance, and
+    * prefixes each block with a ``--- container: <name> [<state>] ---``
+      header so the operator can tell which container produced what and why it
+      is unhealthy.
+
+    A single, cleanly-running, single-container pod with output returns its
+    body unchanged (no header) so the calm common case stays byte-for-byte
+    compatible. The pod-spec read degrades to a container-less GET if it fails.
+    """
+
+    try:
+        pod_resp = session.get(
+            f"{server}/api/v1/namespaces/{namespace}/pods/{pod_name}",
+            timeout=10,
+        )
+        pod_resp.raise_for_status()
+        pod_obj = pod_resp.json() if isinstance(pod_resp.json(), dict) else {}
+    except Exception:
+        pod_obj = {}
+
+    containers = _list_pod_container_names(pod_obj)
+    statuses = _index_container_statuses(pod_obj)
+
+    def _one(container: str | None, *, previous: bool = False) -> str:
+        params: dict[str, Any] = {"tailLines": tail_lines}
+        if container:
+            params["container"] = container
+        if previous:
+            params["previous"] = "true"
+        response = session.get(
+            f"{server}/api/v1/namespaces/{namespace}/pods/{pod_name}/log",
+            params=params,
+            timeout=15,
+        )
+        response.raise_for_status()
+        return cast(str, response.text)
+
+    # Fast path: a single, cleanly-running container with output keeps the
+    # legacy raw-body shape so a healthy pod's log view is unchanged.
+    if len(containers) <= 1:
+        only = containers[0] if containers else None
+        cs = statuses.get(only, {}) if only else {}
+        restarts = int(cs.get("restartCount") or 0)
+        short_state, _detail = _container_state_summary(cs) if cs else ("Unknown", "")
+        clean = restarts == 0 and (not cs or short_state == "Running")
+        try:
+            body = _one(only)
+        except Exception as exc:
+            body = ""
+            fetch_error = exc
+        else:
+            fetch_error = None
+        if clean and fetch_error is None and body.strip():
+            return body
+        return _render_container_block(
+            session,
+            server,
+            namespace,
+            pod_name,
+            tail_lines,
+            only or "(default)",
+            cs,
+            body,
+            fetch_error,
+            _one,
+        )
+
+    blocks: list[str] = []
+    for name in containers:
+        cs = statuses.get(name, {})
+        try:
+            body = _one(name)
+        except Exception as exc:
+            body = ""
+            fetch_error: Exception | None = exc
+        else:
+            fetch_error = None
+        blocks.append(
+            _render_container_block(
+                session,
+                server,
+                namespace,
+                pod_name,
+                tail_lines,
+                name,
+                cs,
+                body,
+                fetch_error,
+                _one,
+            )
+        )
+    return "\n".join(blocks)
+
+
+def _render_container_block(
+    session: Any,
+    server: str,
+    namespace: str,
+    pod_name: str,
+    tail_lines: int,
+    name: str,
+    cs: dict[str, Any],
+    body: str,
+    fetch_error: Exception | None,
+    fetch_log: Any,
+) -> str:
+    """Compose one container's log block, surfacing crash/previous output.
+
+    ``fetch_log(container, previous=...)`` is the bound GET helper from the
+    caller so the previous-instance read reuses the same session/params.
+    """
+
+    short_state, detail = _container_state_summary(cs) if cs else ("", "")
+    restarts = int(cs.get("restartCount") or 0)
+    header = f"--- container: {name}"
+    if short_state and short_state != "Running":
+        header += f" [{short_state}]"
+    elif restarts:
+        header += f" [restarts={restarts}]"
+    header += " ---"
+
+    lines: list[str] = [header]
+    trimmed = body.rstrip()
+    if trimmed:
+        lines.append(trimmed)
+    elif fetch_error is not None:
+        # The log GET failed. When the container is waiting (CrashLoopBackOff,
+        # ImagePullBackOff, PodInitializing) the kubelet reason/message is the
+        # only diagnostic available — surface it instead of a bare error.
+        if detail:
+            lines.append(f"(no log; {short_state}: {detail})")
+        elif short_state:
+            lines.append(f"(no log; container state: {short_state})")
+        else:
+            lines.append(f"(log unavailable: {type(fetch_error).__name__})")
+    else:
+        # Empty body, no error: still show the state so an operator is not
+        # left staring at a blank box for a crashed/terminated container.
+        if detail:
+            lines.append(f"(no output; {short_state}: {detail})")
+        elif short_state and short_state != "Running":
+            lines.append(f"(no output; container state: {short_state})")
+        else:
+            lines.append("(no output)")
+
+    # A restarted container's current log is the fresh restart; the failure
+    # output is in the previous instance. Fetch it so crashes are visible.
+    if restarts:
+        try:
+            prev = fetch_log(name, previous=True).rstrip()
+        except Exception:
+            prev = ""
+        if prev:
+            lines.append(f"--- container: {name} (previous instance, restarts={restarts}) ---")
+            lines.append(prev)
+    return "\n".join(lines)
+
+
 def k8s_pod_logs(
     credential: TokenCredential,
     subscription_id: str,
@@ -45,7 +281,7 @@ def k8s_pod_logs(
     pod_name: str,
     tail_lines: int = 200,
 ) -> str:
-    """Return pod logs via the Kubernetes API."""
+    """Return pod logs via the Kubernetes API for every container of the pod."""
 
     if not _SAFE_K8S_NAME_RE.match(namespace) or not _SAFE_K8S_NAME_RE.match(pod_name):
         raise ValueError("Invalid namespace or pod name")
@@ -54,13 +290,7 @@ def k8s_pod_logs(
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
-        response = session.get(
-            f"{server}/api/v1/namespaces/{namespace}/pods/{pod_name}/log",
-            params={"tailLines": tail_lines},
-            timeout=15,
-        )
-        response.raise_for_status()
-        return cast(str, response.text)
+        return fetch_pod_all_container_logs(session, server, namespace, pod_name, tail_lines)
     finally:
         session.close()
 
@@ -210,6 +440,82 @@ def _capped(value: Any, limit: int) -> str:
     return text[:limit]
 
 
+def compute_pod_display_status(pod: dict[str, Any]) -> str:
+    """Return the kubectl-style STATUS for a pod (container reason, not phase).
+
+    ``status.phase`` alone hides the real problem: a CrashLoopBackOff pod still
+    reports phase ``Running``, an ImagePullBackOff pod reports ``Pending``.
+    This mirrors ``kubectl get pods`` / the Azure portal Pods column by
+    surfacing the failing container's waiting/terminated reason (including init
+    containers, prefixed ``Init:``) so an operator sees ``CrashLoopBackOff`` /
+    ``Error`` / ``Init:Error`` / ``ImagePullBackOff`` instead of a misleading
+    healthy-looking phase. Falls back to the phase when nothing is wrong.
+    """
+
+    status = pod.get("status", {}) if isinstance(pod.get("status"), dict) else {}
+    meta = pod.get("metadata", {}) if isinstance(pod.get("metadata"), dict) else {}
+    reason = str(status.get("reason") or status.get("phase") or "Unknown")
+
+    def _state(cs: dict[str, Any], key: str) -> dict[str, Any]:
+        state = cs.get("state") if isinstance(cs.get("state"), dict) else {}
+        node = state.get(key) if isinstance(state.get(key), dict) else {}
+        return node if isinstance(node, dict) else {}
+
+    # Init containers run first; a failing one blocks the pod and is the real
+    # status until it completes.
+    init_statuses = status.get("initContainerStatuses")
+    initializing = False
+    if isinstance(init_statuses, list):
+        for cs in init_statuses:
+            if not isinstance(cs, dict):
+                continue
+            terminated = _state(cs, "terminated")
+            waiting = _state(cs, "waiting")
+            if terminated:
+                if int(terminated.get("exitCode") or 0) == 0:
+                    continue  # init container finished OK
+                t_reason = str(terminated.get("reason") or "")
+                if t_reason:
+                    reason = f"Init:{t_reason}"
+                elif terminated.get("signal"):
+                    reason = f"Init:Signal:{terminated.get('signal')}"
+                else:
+                    reason = f"Init:ExitCode:{terminated.get('exitCode')}"
+                initializing = True
+                break
+            w_reason = str(waiting.get("reason") or "")
+            if w_reason and w_reason != "PodInitializing":
+                reason = f"Init:{w_reason}"
+                initializing = True
+                break
+
+    if not initializing:
+        container_statuses = status.get("containerStatuses")
+        if isinstance(container_statuses, list):
+            # kubectl walks containers in reverse so the first listed container
+            # wins ties; emulate that ordering.
+            for cs in reversed(container_statuses):
+                if not isinstance(cs, dict):
+                    continue
+                waiting = _state(cs, "waiting")
+                terminated = _state(cs, "terminated")
+                w_reason = str(waiting.get("reason") or "")
+                t_reason = str(terminated.get("reason") or "")
+                if w_reason:
+                    reason = w_reason
+                elif t_reason:
+                    reason = t_reason
+                elif terminated:
+                    if terminated.get("signal"):
+                        reason = f"Signal:{terminated.get('signal')}"
+                    else:
+                        reason = f"ExitCode:{terminated.get('exitCode')}"
+
+    if meta.get("deletionTimestamp"):
+        reason = "Terminating"
+    return reason
+
+
 def k8s_pod_describe(
     credential: TokenCredential,
     subscription_id: str,
@@ -258,6 +564,75 @@ def k8s_pod_describe(
         session.close()
 
     return _format_pod_describe(pod, events)
+
+
+def _append_container_describe(
+    lines: list[str], c: dict[str, Any], cs: dict[str, Any]
+) -> None:
+    """Append one container's describe block (image, ready, restarts, state).
+
+    Used for both init and regular containers so a failed init container's
+    terminated reason/exitCode/message is rendered identically to a main
+    container's. ``cs`` is the matching container status entry (possibly {}).
+    """
+
+    cname = _capped(c.get("name"), 64)
+    lines.append(f"  {cname}:")
+    lines.append(f"    Image:          {_capped(c.get('image'), 512)}")
+    if cs.get("imageID"):
+        lines.append(f"    Image ID:       {_capped(cs.get('imageID'), 512)}")
+    ports = c.get("ports") if isinstance(c.get("ports"), list) else []
+    if ports:
+        lines.append(
+            "    Ports:          "
+            + ", ".join(
+                f"{p.get('containerPort')}/{p.get('protocol', 'TCP')}"
+                for p in ports
+                if isinstance(p, dict) and p.get("containerPort") is not None
+            )
+        )
+    lines.append(f"    Ready:          {bool(cs.get('ready'))}")
+    lines.append(f"    Restart Count:  {int(cs.get('restartCount') or 0)}")
+    for state_key in ("state", "lastState"):
+        st = cs.get(state_key) if isinstance(cs.get(state_key), dict) else {}
+        if not st:
+            continue
+        for kind in ("running", "waiting", "terminated"):
+            detail = st.get(kind) if isinstance(st.get(kind), dict) else None
+            if detail is None:
+                continue
+            title = "State:         " if state_key == "state" else "Last State:    "
+            if kind == "running":
+                lines.append(
+                    f"    {title} Running (started {_capped(detail.get('startedAt'), 32)})"
+                )
+            elif kind == "waiting":
+                lines.append(
+                    f"    {title} Waiting ({_capped(detail.get('reason') or 'Unknown', 64)})"
+                )
+                if detail.get("message"):
+                    lines.append(f"      Message: {_capped(detail.get('message'), 512)}")
+            else:  # terminated
+                lines.append(
+                    f"    {title} Terminated (exit {detail.get('exitCode')}, "
+                    f"{_capped(detail.get('reason') or 'Unknown', 64)})"
+                )
+                if detail.get("message"):
+                    lines.append(f"      Message: {_capped(detail.get('message'), 512)}")
+    resources = c.get("resources") if isinstance(c.get("resources"), dict) else {}
+    if resources:
+        req = resources.get("requests") if isinstance(resources.get("requests"), dict) else {}
+        lim = resources.get("limits") if isinstance(resources.get("limits"), dict) else {}
+        if req:
+            lines.append(
+                "    Requests:       "
+                + ", ".join(f"{k}={_capped(v, 32)}" for k, v in list(req.items())[:5])
+            )
+        if lim:
+            lines.append(
+                "    Limits:         "
+                + ", ".join(f"{k}={_capped(v, 32)}" for k, v in list(lim.items())[:5])
+            )
 
 
 def _format_pod_describe(pod: dict[str, Any], events: list[dict[str, Any]]) -> str:
@@ -315,6 +690,25 @@ def _format_pod_describe(pod: dict[str, Any], events: list[dict[str, Any]]) -> s
             if isinstance(cs, dict) and cs.get("name"):
                 container_statuses[str(cs["name"])] = cs
 
+    init_statuses_raw = status.get("initContainerStatuses")
+    init_statuses: dict[str, dict[str, Any]] = {}
+    if isinstance(init_statuses_raw, list):
+        for cs in init_statuses_raw:
+            if isinstance(cs, dict) and cs.get("name"):
+                init_statuses[str(cs["name"])] = cs
+
+    # Init containers run before the main containers and are a common BLAST
+    # failure point (DB download / staging). A failed init container's
+    # terminated reason/exitCode/message must be visible here, otherwise the
+    # describe view shows a healthy-looking pod with no clue why it is stuck.
+    spec_init = spec.get("initContainers") if isinstance(spec.get("initContainers"), list) else []
+    if spec_init:
+        lines.append("Init Containers:")
+        for c in spec_init:
+            if not isinstance(c, dict):
+                continue
+            _append_container_describe(lines, c, init_statuses.get(_capped(c.get("name"), 64), {}))
+
     spec_containers = spec.get("containers") if isinstance(spec.get("containers"), list) else []
     lines.append("Containers:")
     if not spec_containers:
@@ -322,64 +716,7 @@ def _format_pod_describe(pod: dict[str, Any], events: list[dict[str, Any]]) -> s
     for c in spec_containers:
         if not isinstance(c, dict):
             continue
-        cname = _capped(c.get("name"), 64)
-        cs = container_statuses.get(cname, {})
-        lines.append(f"  {cname}:")
-        lines.append(f"    Image:          {_capped(c.get('image'), 512)}")
-        if cs.get("imageID"):
-            lines.append(f"    Image ID:       {_capped(cs.get('imageID'), 512)}")
-        ports = c.get("ports") if isinstance(c.get("ports"), list) else []
-        if ports:
-            lines.append(
-                "    Ports:          "
-                + ", ".join(
-                    f"{p.get('containerPort')}/{p.get('protocol', 'TCP')}"
-                    for p in ports
-                    if isinstance(p, dict) and p.get("containerPort") is not None
-                )
-            )
-        lines.append(f"    Ready:          {bool(cs.get('ready'))}")
-        lines.append(f"    Restart Count:  {int(cs.get('restartCount') or 0)}")
-        for state_key in ("state", "lastState"):
-            st = cs.get(state_key) if isinstance(cs.get(state_key), dict) else {}
-            if not st:
-                continue
-            for kind in ("running", "waiting", "terminated"):
-                detail = st.get(kind) if isinstance(st.get(kind), dict) else None
-                if detail is None:
-                    continue
-                title = "State:         " if state_key == "state" else "Last State:    "
-                if kind == "running":
-                    lines.append(
-                        f"    {title} Running (started {_capped(detail.get('startedAt'), 32)})"
-                    )
-                elif kind == "waiting":
-                    lines.append(
-                        f"    {title} Waiting ({_capped(detail.get('reason') or 'Unknown', 64)})"
-                    )
-                    if detail.get("message"):
-                        lines.append(f"      Message: {_capped(detail.get('message'), 512)}")
-                else:  # terminated
-                    lines.append(
-                        f"    {title} Terminated (exit {detail.get('exitCode')}, "
-                        f"{_capped(detail.get('reason') or 'Unknown', 64)})"
-                    )
-                    if detail.get("message"):
-                        lines.append(f"      Message: {_capped(detail.get('message'), 512)}")
-        resources = c.get("resources") if isinstance(c.get("resources"), dict) else {}
-        if resources:
-            req = resources.get("requests") if isinstance(resources.get("requests"), dict) else {}
-            lim = resources.get("limits") if isinstance(resources.get("limits"), dict) else {}
-            if req:
-                lines.append(
-                    "    Requests:       "
-                    + ", ".join(f"{k}={_capped(v, 32)}" for k, v in list(req.items())[:5])
-                )
-            if lim:
-                lines.append(
-                    "    Limits:         "
-                    + ", ".join(f"{k}={_capped(v, 32)}" for k, v in list(lim.items())[:5])
-                )
+        _append_container_describe(lines, c, container_statuses.get(_capped(c.get("name"), 64), {}))
 
     conditions = status.get("conditions") if isinstance(status.get("conditions"), list) else []
     if conditions:

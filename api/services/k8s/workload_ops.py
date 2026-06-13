@@ -16,7 +16,7 @@ Validation: `uv run pytest -q api/tests/test_k8s_workload_ops.py`.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from azure.core.credentials import TokenCredential
 
@@ -25,17 +25,24 @@ from api.services.k8s.observability import (
     SYSTEM_NAMESPACES,
     _capped,
     _format_event_age,
+    fetch_pod_all_container_logs,
 )
 
+# Upper bound on how many pods of a single Deployment/Job we aggregate logs
+# for, so a fan-out BLAST Job with hundreds of pods cannot produce an
+# unbounded response body. Newest/Running pods are shown first.
+_MAX_LOG_PODS = 25
 
-def _select_pod_for_logs(
+
+def _select_pods_for_logs(
     session: Any, server: str, namespace: str, label_selector: str
-) -> str | None:
-    """Return the name of the most relevant pod matching ``label_selector``.
+) -> list[str]:
+    """Return all pod names matching ``label_selector``, most relevant first.
 
-    Prefers a ``Running`` pod, then falls back to the newest pod of any phase
-    (mirroring how ``kubectl logs deploy/x`` / ``kubectl logs job/x`` pick a
-    representative pod). Returns ``None`` when no pod matches.
+    Running pods come first (newest first), then the remaining pods of any
+    phase (newest first), mirroring how an operator reads a fan-out Job:
+    the live pods, then the completed/failed ones. Returns an empty list when
+    no pod matches. The caller caps the list at ``_MAX_LOG_PODS``.
     """
 
     response = session.get(
@@ -47,33 +54,53 @@ def _select_pod_for_logs(
     items = response.json().get("items", []) or []
     pods = [p for p in items if isinstance(p, dict)]
     if not pods:
-        return None
+        return []
 
     def _created(pod: dict[str, Any]) -> str:
         meta = pod.get("metadata", {}) if isinstance(pod.get("metadata"), dict) else {}
         return str(meta.get("creationTimestamp") or "")
 
-    running = [
-        p
-        for p in pods
-        if isinstance(p.get("status"), dict) and p["status"].get("phase") == "Running"
+    def _running(pod: dict[str, Any]) -> bool:
+        status = pod.get("status")
+        return isinstance(status, dict) and status.get("phase") == "Running"
+
+    running = sorted((p for p in pods if _running(p)), key=_created, reverse=True)
+    others = sorted((p for p in pods if not _running(p)), key=_created, reverse=True)
+    names = [
+        str(p.get("metadata", {}).get("name") or "")
+        for p in (*running, *others)
     ]
-    pool = running or pods
-    pool.sort(key=_created, reverse=True)
-    name = pool[0].get("metadata", {}).get("name")
-    return cast("str | None", name)
+    return [n for n in names if n]
 
 
-def _fetch_pod_log_via_session(
-    session: Any, server: str, namespace: str, pod_name: str, tail_lines: int
+def _aggregate_pod_logs(
+    session: Any, server: str, namespace: str, pod_names: list[str], tail_lines: int
 ) -> str:
-    response = session.get(
-        f"{server}/api/v1/namespaces/{namespace}/pods/{pod_name}/log",
-        params={"tailLines": tail_lines},
-        timeout=15,
-    )
-    response.raise_for_status()
-    return cast(str, response.text)
+    """Concatenate every container's log for each selected pod.
+
+    Each pod block is prefixed with ``# logs from pod <name>``. The list is
+    capped at ``_MAX_LOG_PODS``; when more pods exist a trailing marker says
+    how many were omitted so the view never silently drops output.
+    """
+
+    selected = pod_names[:_MAX_LOG_PODS]
+    blocks: list[str] = []
+    for pod_name in selected:
+        try:
+            body = fetch_pod_all_container_logs(
+                session, server, namespace, pod_name, tail_lines
+            ).rstrip()
+        except Exception as exc:
+            body = f"(log unavailable: {type(exc).__name__})"
+        blocks.append(f"# logs from pod {pod_name}\n{body or '(no output)'}")
+    out = "\n\n".join(blocks)
+    omitted = len(pod_names) - len(selected)
+    if omitted > 0:
+        out += (
+            f"\n\n# … {omitted} more pod(s) not shown "
+            f"(showing newest {len(selected)} of {len(pod_names)})"
+        )
+    return out
 
 
 def k8s_deployment_logs(
@@ -85,11 +112,12 @@ def k8s_deployment_logs(
     deployment_name: str,
     tail_lines: int = 200,
 ) -> str:
-    """Return logs from a representative pod of a Deployment.
+    """Return logs from every pod (and container) of a Deployment.
 
     Resolves the Deployment's ``spec.selector.matchLabels`` to a label
-    selector, picks a representative pod, and tails its logs. The output is
-    prefixed with the chosen pod name because a Deployment can own many pods.
+    selector and aggregates the logs of all matching pods (Running first,
+    then newest), each pod block prefixed with its name. A Deployment can own
+    many pods, so showing only one would hide most of the output.
     """
 
     if not _SAFE_K8S_NAME_RE.match(namespace) or not _SAFE_K8S_NAME_RE.match(deployment_name):
@@ -115,11 +143,10 @@ def k8s_deployment_logs(
         if not match_labels:
             return "(deployment has no pod selector)"
         label_selector = ",".join(f"{k}={v}" for k, v in match_labels.items())
-        pod_name = _select_pod_for_logs(session, server, namespace, label_selector)
-        if not pod_name:
+        pod_names = _select_pods_for_logs(session, server, namespace, label_selector)
+        if not pod_names:
             return "(no pods found for this deployment)"
-        body = _fetch_pod_log_via_session(session, server, namespace, pod_name, tail_lines)
-        return f"# logs from pod {pod_name}\n{body}"
+        return _aggregate_pod_logs(session, server, namespace, pod_names, tail_lines)
     finally:
         session.close()
 
@@ -133,10 +160,13 @@ def k8s_job_logs(
     job_name: str,
     tail_lines: int = 200,
 ) -> str:
-    """Return logs from a representative pod of a Job.
+    """Return logs from every pod (and container) of a Job.
 
-    Job pods carry the ``job-name=<name>`` label by default; the newest /
-    Running pod's logs are returned, prefixed with the chosen pod name.
+    Job pods carry the ``job-name=<name>`` label by default; a fan-out BLAST
+    search Job produces one pod per query batch (plus retries when a Spot node
+    is reclaimed). All matching pods are aggregated (Running first, then
+    newest), each block prefixed with its pod name, so the view shows the
+    whole Job instead of a single representative pod.
     """
 
     if not _SAFE_K8S_NAME_RE.match(namespace) or not _SAFE_K8S_NAME_RE.match(job_name):
@@ -146,11 +176,10 @@ def k8s_job_logs(
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
-        pod_name = _select_pod_for_logs(session, server, namespace, f"job-name={job_name}")
-        if not pod_name:
+        pod_names = _select_pods_for_logs(session, server, namespace, f"job-name={job_name}")
+        if not pod_names:
             return "(no pods found for this job)"
-        body = _fetch_pod_log_via_session(session, server, namespace, pod_name, tail_lines)
-        return f"# logs from pod {pod_name}\n{body}"
+        return _aggregate_pod_logs(session, server, namespace, pod_names, tail_lines)
     finally:
         session.close()
 

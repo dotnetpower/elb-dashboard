@@ -161,3 +161,35 @@ def test_format_pod_describe_handles_waiting_and_terminated_states() -> None:
     text = _format_pod_describe(pod, [])
     assert "Waiting (CrashLoopBackOff)" in text
     assert "Terminated (exit 137, OOMKilled)" in text
+
+
+def test_format_pod_describe_renders_failed_init_container() -> None:
+    """A failed init container's terminated reason/exitCode/message is shown."""
+    pod = _pod()
+    spec = pod["spec"]
+    status = pod["status"]
+    assert isinstance(spec, dict) and isinstance(status, dict)
+    spec["initContainers"] = [
+        {"name": "fetch-db", "image": "myacr.azurecr.io/prepare-db:1.0.0"}
+    ]
+    status["initContainerStatuses"] = [
+        {
+            "name": "fetch-db",
+            "ready": False,
+            "restartCount": 4,
+            "state": {
+                "terminated": {
+                    "exitCode": 1,
+                    "reason": "Error",
+                    "message": "azcopy: failed to download BLASTDB",
+                }
+            },
+        }
+    ]
+    text = _format_pod_describe(pod, [])
+    assert "Init Containers:" in text
+    assert "fetch-db:" in text
+    assert "Restart Count:  4" in text
+    assert "Terminated (exit 1, Error)" in text
+    assert "azcopy: failed to download BLASTDB" in text
+

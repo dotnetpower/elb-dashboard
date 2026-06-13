@@ -76,7 +76,17 @@ def test_dashboard_rbac_enforced_by_default() -> None:
 def test_bicep_references_every_guard_key() -> None:
     """Each guard key in the JSON must be wired into the Bicep via a
     `controlPlaneEnv.<sidecar>.<KEY>` reference, so a key that exists only in
-    the JSON (and is therefore never deployed by a full provision) fails CI."""
+    the JSON (and is therefore never deployed by a full provision) fails CI.
+
+    Exception — per-deployment override keys: a key the deployment can pin via
+    an azd-env override (charter §12a Rule 4) is wired through a single
+    `empty(param) ? controlPlaneEnv.api.<KEY> : param` var applied to every
+    sidecar, so the per-sidecar `controlPlaneEnv.worker/beat.<KEY>` literals are
+    intentionally replaced by that var. Such a key is satisfied when both the
+    override var and its `controlPlaneEnv.api.<KEY>` fallback are present.
+    """
+    # key -> the override var that deploys it to all sidecars.
+    override_vars = {"SERVICEBUS_ENABLED": "effectiveServiceBusEnabled"}
     data = _load()
     bicep = _BICEP_PATH.read_text(encoding="utf-8")
     missing: list[str] = []
@@ -85,8 +95,16 @@ def test_bicep_references_every_guard_key() -> None:
             continue
         for key in section:
             ref = f"controlPlaneEnv.{sidecar}.{key}"
-            if ref not in bicep:
-                missing.append(ref)
+            if ref in bicep:
+                continue
+            override_var = override_vars.get(key)
+            if (
+                override_var
+                and override_var in bicep
+                and f"controlPlaneEnv.api.{key}" in bicep
+            ):
+                continue
+            missing.append(ref)
     assert not missing, f"Bicep is missing references: {missing}"
 
 

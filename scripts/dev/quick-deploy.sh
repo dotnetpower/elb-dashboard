@@ -88,18 +88,31 @@ fi
 
 # Echo `KEY=VALUE` lines for the given sidecar (api|worker|beat|...), or
 # nothing when the file is absent or the sidecar has no guard toggles.
+#
+# Per-deployment override: when a control-plane key is ALSO present in the
+# process environment (e.g. exported from azd env), that value wins over the
+# repo default in control-plane-env.json. This keeps the repo default OFF for
+# opt-in guards (charter §12a Rule 4) while letting a specific deployment pin a
+# toggle (e.g. SERVICEBUS_ENABLED=true) so it survives every redeploy instead of
+# being reset to the JSON default. Set-vs-unset is tested explicitly (a key
+# absent from the environment falls through to the JSON value; an exported empty
+# string is honoured as an intentional override) to avoid the `${!key:-}`
+# empty-vs-unset bug class.
 control_plane_env_pairs() {
   local sidecar="$1"
   [[ -f "$CONTROL_PLANE_ENV_FILE" ]] || return 0
   python3 - "$CONTROL_PLANE_ENV_FILE" "$sidecar" <<'PY'
-import json, sys
+import json, os, sys
 path, sidecar = sys.argv[1], sys.argv[2]
 data = json.load(open(path))
 section = data.get(sidecar) or {}
 for k, v in section.items():
     if k.startswith("_"):
         continue
-    print(f"{k}={v}")
+    # azd-env / process-env override wins when the key is SET (even to ""),
+    # otherwise fall back to the repo default from the JSON.
+    value = os.environ[k] if k in os.environ else v
+    print(f"{k}={value}")
 PY
 }
 

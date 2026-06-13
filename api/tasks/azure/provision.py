@@ -68,6 +68,78 @@ def _resolve_aks_vnet_subnet_id() -> str:
         return f"{vnet_id}/subnets/snet-aks"
     return ""
 
+
+def _container_insights_reenable_enabled() -> bool:
+    """Whether a freshly-provisioned cluster should auto-enable Container Insights.
+
+    Default OFF. Container Insights (the `omsagent` addon) does NOT survive a
+    cluster delete + recreate, so each new cluster comes up without it unless
+    re-enabled. Auto re-enable is opt-in because the addon ships node/pod
+    metrics + container stdout to the SAME `log-elb-dashboard` Log Analytics
+    workspace the dashboard's own api/worker/beat telemetry uses, and that
+    workspace is capped at 1 GiB/day — a busy BLAST cluster could exhaust the
+    quota and starve the dashboard's own traces. Operators opt in with
+    `AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS=true` once they have sized the
+    workspace (or pointed it at a dedicated one) accordingly.
+    """
+    flag = os.environ.get("AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS", "").strip().lower()
+    return flag in {"1", "true", "yes", "on"}
+
+
+def _maybe_enqueue_container_insights(
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> str:
+    """Best-effort enqueue of Container Insights enablement for a new cluster.
+
+    Returns the enqueued task id, or "" when the feature is disabled, the
+    platform Log Analytics workspace ARM id is not injected
+    (`LOG_ANALYTICS_WORKSPACE_RESOURCE_ID`), or the enqueue fails. Never
+    raises — a failure here must not roll back a successful provision; the
+    operator can still enable Container Insights from Settings → AKS
+    Observability. Delegates to the existing `enable_aks_container_insights`
+    Celery task, which carries the LinkedAuthorizationFailed self-heal and
+    workspace-RG RBAC retry logic.
+    """
+    if not _container_insights_reenable_enabled():
+        return ""
+    workspace_resource_id = os.environ.get(
+        "LOG_ANALYTICS_WORKSPACE_RESOURCE_ID", ""
+    ).strip()
+    if not workspace_resource_id:
+        LOGGER.warning(
+            "AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS is set but "
+            "LOG_ANALYTICS_WORKSPACE_RESOURCE_ID is empty; skipping Container "
+            "Insights auto-enable for cluster=%s. Enable it from Settings -> "
+            "AKS Observability instead.",
+            cluster_name,
+        )
+        return ""
+    try:
+        from api.tasks.azure import enable_aks_container_insights
+
+        result = enable_aks_container_insights.delay(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            workspace_resource_id=workspace_resource_id,
+        )
+        LOGGER.info(
+            "Container Insights auto-enable enqueued for cluster=%s task=%s",
+            cluster_name,
+            result.id,
+        )
+        return str(result.id)
+    except Exception as exc:
+        LOGGER.warning(
+            "Container Insights auto-enable enqueue failed for cluster=%s: %s",
+            cluster_name,
+            exc,
+        )
+        return ""
+
+
 # Ordered list of (machine_phase, human_label, step_number). `total_steps`
 # is `len(_PROVISION_STEPS)` and is shipped with every progress tick so
 # the FE banner can render "Step 3 of 5". Keep the keys in sync with
@@ -767,6 +839,16 @@ def provision_aks(
         LOGGER.warning(
             "auto OpenAPI deploy enqueue failed after AKS provision: %s", exc
         )
+    # Container Insights (omsagent addon) does not survive a cluster delete +
+    # recreate, so a re-provisioned cluster loses its AKS Observability link.
+    # Best-effort re-enable when the operator has opted in
+    # (`AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS=true`) and the platform
+    # Log Analytics workspace ARM id is injected. Never blocks the provision.
+    container_insights_task_id = _maybe_enqueue_container_insights(
+        subscription_id,
+        resource_group,
+        cluster_name,
+    )
     return {
         "cluster_name": cluster_name,
         "provisioning_state": "Succeeded",
@@ -779,6 +861,7 @@ def provision_aks(
         "dashboard_mi_rbac": mi_summary,
         "vnet_peering": peering_summary,
         "openapi_task_id": openapi_task_id,
+        "container_insights_task_id": container_insights_task_id,
         "pools": [
             {"name": SYSTEM_POOL_NAME, "mode": "System", "vm_size": sys_sku, "count": sys_count},
             {"name": BLAST_POOL_NAME, "mode": "User", "vm_size": blast_sku, "count": blast_count},

@@ -60,6 +60,38 @@ def _peering_recovery_hint() -> dict[str, str]:
     }
 
 
+def _lb_pending_recovery_hint(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, str]:
+    """Pick the most specific recovery hint when the LB IP is missing.
+
+    When the ``elb-openapi`` internal LoadBalancer has no IP, the cause is
+    usually one of two BYO-network gaps: (1) the cluster identity lacks Network
+    Contributor on the node subnet (the LB controller's ARM call 403s, GitHub
+    #33), or (2) a missing VNet peering. Case 1 has a distinct, one-click fix
+    (`/api/aks/openapi/lb-subnet-rbac`), so probe the Service events and return
+    the `grant_lb_subnet_rbac` hint when that signature is present; otherwise
+    fall back to the generic peering hint. Best-effort and additive — a probe
+    failure degrades to the peering hint, never raises.
+    """
+    try:
+        from api.services.aks.openapi_lb_rbac import (
+            detect_lb_subnet_rbac_missing,
+            lb_subnet_rbac_recovery_hint,
+        )
+
+        if detect_lb_subnet_rbac_missing(
+            cred, subscription_id, resource_group, cluster_name
+        ):
+            return lb_subnet_rbac_recovery_hint()
+    except Exception:
+        LOGGER.debug("lb-pending hint: rbac detection failed", exc_info=True)
+    return _peering_recovery_hint()
+
+
 def _k8s_service_proxy_url(server: str, path: str) -> str:
     target = path.lstrip("/")
     return (
@@ -938,7 +970,7 @@ def aks_openapi_spec(
                 "paths": {},
                 "degraded": True,
                 "degraded_reason": "openapi_service_not_reachable",
-                **_peering_recovery_hint(),
+                **_lb_pending_recovery_hint(cred, sub, resource_group, cluster_name),
             }
         base_url = f"http://{ip}"
 

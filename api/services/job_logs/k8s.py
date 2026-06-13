@@ -95,10 +95,12 @@ def resolve_elastic_blast_job_id(payload: dict[str, Any] | None) -> str:
 def _pod_env_has_value(pod: dict[str, Any], name: str, values: set[str]) -> bool:
     if not values:
         return False
-    for container in pod.get("spec", {}).get("containers", []) or []:
-        for env in container.get("env", []) or []:
-            if env.get("name") == name and str(env.get("value") or "") in values:
-                return True
+    spec = pod.get("spec", {}) if isinstance(pod.get("spec"), dict) else {}
+    for group_key in ("initContainers", "containers"):
+        for container in spec.get(group_key, []) or []:
+            for env in container.get("env", []) or []:
+                if env.get("name") == name and str(env.get("value") or "") in values:
+                    return True
     return False
 
 
@@ -167,18 +169,29 @@ def discover_k8s_log_targets(
             pod_name = str(metadata.get("name") or "")
             if not pod_name or not _SAFE_K8S_NAME_RE.match(pod_name):
                 continue
-            for container in pod.get("spec", {}).get("containers", []) or []:
-                container_name = str(container.get("name") or "")
-                if not container_name or not _SAFE_K8S_NAME_RE.match(container_name):
-                    continue
-                targets.append(
-                    K8sLogTarget(
-                        namespace=namespace,
-                        pod_name=pod_name,
-                        container_name=container_name,
-                        phase=_target_phase(pod_name, container_name),
+            spec = pod.get("spec", {}) if isinstance(pod.get("spec"), dict) else {}
+            # Iterate init containers too: ElasticBLAST's batch search pod runs
+            # `import-query-batches` as an init container, and when it fails the
+            # main `blast` container never starts (empty log). Excluding init
+            # containers here is exactly why a failed search showed no error in
+            # the live/persisted log stream.
+            seen_containers: set[str] = set()
+            for group_key in ("initContainers", "containers"):
+                for container in spec.get(group_key, []) or []:
+                    container_name = str(container.get("name") or "")
+                    if not container_name or not _SAFE_K8S_NAME_RE.match(container_name):
+                        continue
+                    if container_name in seen_containers:
+                        continue
+                    seen_containers.add(container_name)
+                    targets.append(
+                        K8sLogTarget(
+                            namespace=namespace,
+                            pod_name=pod_name,
+                            container_name=container_name,
+                            phase=_target_phase(pod_name, container_name),
+                        )
                     )
-                )
         return sorted(targets, key=lambda target: target.key)
     finally:
         session.close()

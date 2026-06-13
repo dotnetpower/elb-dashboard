@@ -259,6 +259,14 @@ Clicking **View Grafana** at the top of the blade jumps to the Managed Grafana w
 
     After the learning tour, **delete the Grafana workspace and turn off Container insights** to stop ongoing ingestion charges. Re-enabling it later is a one-click operation on the same Monitor blade.
 
+!!! warning "Container Insights does not survive a cluster delete + recreate"
+
+    The `omsagent` (Container Insights) addon lives on the AKS cluster resource, so **deleting and recreating the cluster drops it** — the new cluster comes up with cluster observability off even if the previous one had it enabled. The dashboard's own [Application Insights](https://learn.microsoft.com/azure/azure-monitor/app/app-insights-overview) telemetry (api / worker / beat) is unaffected because it lives on the Container App, not the cluster.
+
+    To restore it after a recreate, re-enable Container Insights from **Settings → AKS Observability** (one click; it re-applies the `omsagent` addon pointing at the platform Log Analytics workspace).
+
+    Operators who want this to happen automatically for **dashboard-provisioned** clusters can set `AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS=true` on the api / worker sidecars. The provision task then re-enables Container Insights on every cluster it creates, using the `LOG_ANALYTICS_WORKSPACE_RESOURCE_ID` injected by the deployment. It is **off by default**: the addon ships node/pod telemetry to the same `log-elb-dashboard` workspace the control plane uses, which is capped at 1 GiB/day, so a busy BLAST cluster could exhaust the quota and starve the dashboard's own traces. Opt in only after sizing the workspace (or pointing the addon at a dedicated one). Clusters created by `elastic-blast submit` directly are outside this path and still need the manual re-enable.
+
 ### ElasticBLAST Execution Dashboard (Grafana)
 
 If you do choose to enable Managed Grafana — either during the learning tour above or for a real in-cluster incident — the repo ships a curated dashboard JSON tailored to the ElasticBLAST workload at [grafana/dashboards/elb-blast-execution.json](https://github.com/dotnetpower/elb-dashboard/blob/main/grafana/dashboards/elb-blast-execution.json). It is a single Prometheus-backed view of a running BLAST job and is designed for the **Azure Monitor managed Prometheus default scrape set (cAdvisor + node-exporter + kubelet)** — no kube-state-metrics required.

@@ -162,6 +162,68 @@ def test_active_jobs_grouped_into_producers_and_clusters(_enable) -> None:
     assert clusters[0]["total"] == 3
 
 
+def test_consumers_dedup_same_cluster_when_rg_sub_backfilled(_enable) -> None:
+    """One logical cluster split across rg-present/rg-absent rows merges into one
+    card, and not-yet-placed jobs collapse into a single ``unassigned`` bucket."""
+    rows = [
+        # Placed, running row carries rg + sub.
+        _job(
+            job_id="r1",
+            status="running",
+            owner_upn="a@b.com",
+            cluster_name="elb-cluster-01",
+            resource_group="rg-elb-cluster",
+            subscription_id="sub-1",
+        ),
+        # Same cluster, queued before rg/sub were backfilled (both empty).
+        _job(
+            job_id="r2",
+            status="queued",
+            owner_upn="a@b.com",
+            cluster_name="elb-cluster-01",
+            resource_group="",
+            subscription_id="",
+        ),
+        # Two not-yet-placed jobs with no cluster name at all -> one bucket.
+        _job(
+            job_id="u1",
+            status="queued",
+            owner_upn="a@b.com",
+            cluster_name="",
+            resource_group="",
+            subscription_id="",
+        ),
+        _job(
+            job_id="u2",
+            status="queued",
+            owner_upn="a@b.com",
+            cluster_name="",
+            resource_group="rg-other",
+            subscription_id="sub-9",
+        ),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+    clusters = {c["cluster_name"]: c for c in snap["consumers"]["clusters"]}
+    # elb-cluster-01 is a single card despite the rg-present / rg-absent split.
+    assert "elb-cluster-01" in clusters
+    named = clusters["elb-cluster-01"]
+    assert named["running"] == 1
+    assert named["queued"] == 1
+    assert named["total"] == 2
+    # rg/sub backfilled from the running row.
+    assert named["resource_group"] == "rg-elb-cluster"
+    assert named["subscription_id"] == "sub-1"
+    # Both empty-name jobs collapse into a single "unassigned" bucket.
+    assert "" in clusters
+    unassigned = clusters[""]
+    assert unassigned["queued"] == 2
+    assert unassigned["total"] == 2
+    # Exactly two consumer cards total (named + unassigned).
+    assert len(snap["consumers"]["clusters"]) == 2
+
+
 def test_external_and_servicebus_aliases(_enable) -> None:
     rows = [
         _job(

@@ -207,6 +207,85 @@ def test_helper_reuses_passed_cluster_without_arm_get(monkeypatch: pytest.Monkey
 
 
 # --------------------------------------------------------------------------- #
+# Detection — detect_lb_subnet_rbac_missing
+# --------------------------------------------------------------------------- #
+
+
+def _patch_events(monkeypatch: pytest.MonkeyPatch, events: list[dict[str, Any]]) -> None:
+    monkeypatch.setattr(
+        "api.services.k8s.observability.k8s_list_events",
+        lambda *a, **k: events,
+    )
+
+
+def test_detect_true_on_subnet_403_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SyncLoadBalancerFailed event on the elb-openapi Service whose message
+    is a subnet AuthorizationFailed is the #33 signature → True."""
+    from api.services.aks.openapi_lb_rbac import detect_lb_subnet_rbac_missing
+
+    _patch_events(
+        monkeypatch,
+        [
+            {
+                "involved_name": "elb-openapi",
+                "reason": "SyncLoadBalancerFailed",
+                "message": (
+                    "Error syncing load balancer: failed to ensure load balancer: "
+                    "GET .../subnets/snet-aks RESPONSE 403: AuthorizationFailed"
+                ),
+            }
+        ],
+    )
+    assert detect_lb_subnet_rbac_missing(object(), "s", "rg", "c1") is True
+
+
+def test_detect_false_on_unrelated_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An LB failure that is not a subnet-auth problem (e.g. quota) must not be
+    misclassified as the RBAC gap."""
+    from api.services.aks.openapi_lb_rbac import detect_lb_subnet_rbac_missing
+
+    _patch_events(
+        monkeypatch,
+        [
+            {
+                "involved_name": "elb-openapi",
+                "reason": "SyncLoadBalancerFailed",
+                "message": "Error syncing load balancer: quota exceeded for public IPs",
+            }
+        ],
+    )
+    assert detect_lb_subnet_rbac_missing(object(), "s", "rg", "c1") is False
+
+
+def test_detect_false_for_other_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A subnet-403 event on a DIFFERENT Service must not match."""
+    from api.services.aks.openapi_lb_rbac import detect_lb_subnet_rbac_missing
+
+    _patch_events(
+        monkeypatch,
+        [
+            {
+                "involved_name": "some-other-svc",
+                "reason": "SyncLoadBalancerFailed",
+                "message": "subnets/snet-x 403 AuthorizationFailed",
+            }
+        ],
+    )
+    assert detect_lb_subnet_rbac_missing(object(), "s", "rg", "c1") is False
+
+
+def test_detect_false_on_events_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read failure degrades to False (caller falls back to the generic hint)."""
+    from api.services.aks.openapi_lb_rbac import detect_lb_subnet_rbac_missing
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("k8s unreachable")
+
+    monkeypatch.setattr("api.services.k8s.observability.k8s_list_events", _boom)
+    assert detect_lb_subnet_rbac_missing(object(), "s", "rg", "c1") is False
+
+
+# --------------------------------------------------------------------------- #
 # Route — POST /api/aks/openapi/lb-subnet-rbac
 # --------------------------------------------------------------------------- #
 
@@ -407,3 +486,63 @@ def test_deploy_tolerates_lb_subnet_rbac_failure(monkeypatch: pytest.MonkeyPatch
     assert out["status"] == "failed"
     assert out["openapi_deploy"]["code"] == "openapi_pls_misconfigured"
 
+
+
+# --------------------------------------------------------------------------- #
+# spec route — degraded payload picks the specific RBAC hint when detected
+# --------------------------------------------------------------------------- #
+
+
+def _spec_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.delenv("OPENAPI_PUBLIC_BASE_URL", raising=False)
+    # No public TLS base, and the LB IP is missing → the route takes the
+    # "not reachable" branch where the recovery hint is chosen.
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_public_tls_base_url", lambda **k: ""
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_get_service_ip", lambda *a, **k: None
+    )
+    from api.main import app
+
+    return TestClient(app)
+
+
+def test_spec_returns_rbac_hint_when_detected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the LB-pending cause is the subnet-RBAC gap, the degraded spec
+    payload carries recovery_action=grant_lb_subnet_rbac (not the peering hint)."""
+    monkeypatch.setattr(
+        "api.services.aks.openapi_lb_rbac.detect_lb_subnet_rbac_missing",
+        lambda *a, **k: True,
+    )
+    client = _spec_client(monkeypatch)
+    r = client.get(
+        "/api/aks/openapi/spec",
+        params={"resource_group": "rg-elb-cluster", "cluster_name": "elb-cluster-01"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["degraded"] is True
+    assert body["recovery_action"] == "grant_lb_subnet_rbac"
+
+
+def test_spec_falls_back_to_peering_hint_when_not_rbac(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the subnet-RBAC signature is absent, the route keeps the generic
+    peering recovery hint (backward compatible)."""
+    monkeypatch.setattr(
+        "api.services.aks.openapi_lb_rbac.detect_lb_subnet_rbac_missing",
+        lambda *a, **k: False,
+    )
+    client = _spec_client(monkeypatch)
+    r = client.get(
+        "/api/aks/openapi/spec",
+        params={"resource_group": "rg-elb-cluster", "cluster_name": "elb-cluster-01"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["degraded"] is True
+    assert body["recovery_action"] == "peer_with_platform"

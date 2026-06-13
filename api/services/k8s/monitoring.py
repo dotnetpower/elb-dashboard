@@ -43,6 +43,7 @@ from api.services.k8s.nodes import (
 )
 from api.services.k8s.observability import (
     SYSTEM_NAMESPACES,
+    compute_pod_display_status,
     k8s_list_events,
     k8s_pod_delete,
     k8s_pod_describe,
@@ -302,7 +303,11 @@ def k8s_get_pods(
                     "namespace": meta.get("namespace", ""),
                     "name": meta.get("name", ""),
                     "ready": f"{ready}/{total}",
-                    "status": status.get("phase", "Unknown"),
+                    # kubectl-style status: surface the failing container's
+                    # reason (CrashLoopBackOff / Error / Init:Error / …) instead
+                    # of the misleading phase, otherwise a crashing pod reads as
+                    # "Running" and the error is invisible in the Pods list.
+                    "status": compute_pod_display_status(item),
                     "restarts": restarts,
                     "age": meta.get("creationTimestamp", ""),
                     "node": spec.get("nodeName", ""),

@@ -100,3 +100,60 @@ def test_k8s_get_pods_namespace_scopes_url() -> None:
         m.k8s_get_pods(MagicMock(), "sub", "rg", "aks", namespace="default")
     args, _kwargs = session.get.call_args
     assert args[0] == "https://aks/api/v1/namespaces/default/pods"
+
+
+def test_k8s_get_pods_surfaces_crashloop_status() -> None:
+    """A crashing pod must read as CrashLoopBackOff, not phase 'Running'."""
+    items = [
+        {
+            "metadata": {"namespace": "default", "name": "blast-crash"},
+            "spec": {"containers": [{"name": "blastn"}]},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [
+                    {
+                        "name": "blastn",
+                        "ready": False,
+                        "restartCount": 5,
+                        "state": {
+                            "waiting": {
+                                "reason": "CrashLoopBackOff",
+                                "message": "back-off restarting",
+                            }
+                        },
+                    }
+                ],
+            },
+        }
+    ]
+    _session, patcher = _patch_session(items)
+    with patcher:
+        out = m.k8s_get_pods(MagicMock(), "sub", "rg", "aks")
+    assert out[0]["status"] == "CrashLoopBackOff"
+    assert out[0]["restarts"] == 5
+
+
+def test_k8s_get_pods_surfaces_init_failure_status() -> None:
+    """A pod blocked on a failed init container reads as Init:Error."""
+    items = [
+        {
+            "metadata": {"namespace": "default", "name": "blast-init-fail"},
+            "spec": {
+                "initContainers": [{"name": "fetch-db"}],
+                "containers": [{"name": "blastn"}],
+            },
+            "status": {
+                "phase": "Pending",
+                "initContainerStatuses": [
+                    {
+                        "name": "fetch-db",
+                        "state": {"terminated": {"exitCode": 1, "reason": "Error"}},
+                    }
+                ],
+            },
+        }
+    ]
+    _session, patcher = _patch_session(items)
+    with patcher:
+        out = m.k8s_get_pods(MagicMock(), "sub", "rg", "aks")
+    assert out[0]["status"] == "Init:Error"

@@ -14,7 +14,15 @@
  * we keep a single module-level instance keyed by the active connection
  * string.
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 import {
   ApplicationInsights,
@@ -92,25 +100,61 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
   const { prefs } = usePreferences();
   const { accounts } = useMsal();
   const [deploymentConnectionString, setDeploymentConnectionString] = useState("");
-  const fetchedOnceRef = useRef(false);
+  // True once a NON-EMPTY deployment string has resolved. We keep retrying
+  // until then so a transient empty/error response does not leave the SPA
+  // permanently blank (see the focus/visibility effect below).
+  const resolvedRef = useRef(false);
 
   const signedIn = accounts.length > 0;
 
   // Look up the deployment-injected connection string lazily after sign-in.
   // The endpoint requires a bearer token, so calling it before MSAL has an
   // active account would return 401 and spam the SPA error console.
-  useEffect(() => {
-    if (!signedIn || fetchedOnceRef.current) return;
-    fetchedOnceRef.current = true;
+  //
+  // Idempotent + self-healing: once a non-empty value resolves we stop
+  // (resolvedRef), so this is at most one extra request per wake event until
+  // the string is known. A Container App revision swap restarts the api
+  // sidecar; a request landing in that window returns empty/errors, which
+  // previously stuck the panel blank until a manual page refresh. Leaving
+  // resolvedRef false on empty/error lets the focus/visibility effect retry.
+  const refreshDeploymentString = useCallback(() => {
+    if (!signedIn || resolvedRef.current) return;
     settingsApi
       .getAppInsightsStatus()
       .then((status) => {
-        setDeploymentConnectionString(status.deployment_connection_string ?? "");
+        const cs = (status.deployment_connection_string ?? "").trim();
+        if (cs) {
+          resolvedRef.current = true;
+          setDeploymentConnectionString(cs);
+        }
       })
       .catch(() => {
-        // Non-fatal — keep going with whatever the user supplied.
+        // Non-fatal — keep going with whatever the user supplied. resolvedRef
+        // stays false so the next focus/visibility regain retries.
       });
   }, [signedIn]);
+
+  useEffect(() => {
+    refreshDeploymentString();
+  }, [refreshDeploymentString]);
+
+  // Retry on tab focus / visibility regain until the string is known. This is
+  // what makes a revision swap self-heal: the operator switching back to the
+  // dashboard tab re-fetches and the connection string reappears without a
+  // manual refresh. No-op once resolvedRef is true (guarded inside the
+  // callback), so it does not add steady-state traffic.
+  useEffect(() => {
+    if (!signedIn) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshDeploymentString();
+    };
+    window.addEventListener("focus", refreshDeploymentString);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refreshDeploymentString);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [signedIn, refreshDeploymentString]);
 
   const userConnectionString = prefs.appInsightsConnectionString.trim();
   const effective = userConnectionString || deploymentConnectionString.trim();

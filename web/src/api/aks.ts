@@ -278,6 +278,21 @@ export interface AksPeerWithPlatformResponse {
   error?: string;
 }
 
+/** Result of POST /api/aks/openapi/lb-subnet-rbac — grants the AKS cluster
+ *  identity Network Contributor on its BYO node subnet so the elb-openapi
+ *  internal LoadBalancer can get an IP (GitHub #33). `status` is `granted`
+ *  (role now/already assigned) or `skipped` (managed-VNet, or no resolvable
+ *  cluster identity). `note` carries the cloud-controller token-cache caveat. */
+export interface AksLbSubnetRbacResponse {
+  status: "granted" | "skipped" | "error";
+  reason?: string;
+  principal_id?: string;
+  subnet_id?: string;
+  role?: string;
+  note?: string;
+  error?: string;
+}
+
 export const aksApi = {
   listSkus: () => api.get<AksSkuListResponse>("/aks/skus"),
 
@@ -516,6 +531,18 @@ export const aksApi = {
    *  `recovery_action === "peer_with_platform"`. */
   peerWithPlatform: (subscriptionId: string, rg: string, clusterName: string) =>
     api.post<AksPeerWithPlatformResponse>("/aks/peer-with-platform", {
+      subscription_id: subscriptionId,
+      resource_group: rg,
+      cluster_name: clusterName,
+    }),
+
+  /** Grant the AKS cluster identity Network Contributor on its BYO node
+   *  subnet (idempotent). Use from the API Reference page when the OpenAPI
+   *  spec / proxy surfaces report `recovery_action === "grant_lb_subnet_rbac"`
+   *  (the elb-openapi internal LoadBalancer is stuck <pending> on a
+   *  subnet AuthorizationFailed). Mirrors the grant provision_aks performs. */
+  grantLbSubnetRbac: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.post<AksLbSubnetRbacResponse>("/aks/openapi/lb-subnet-rbac", {
       subscription_id: subscriptionId,
       resource_group: rg,
       cluster_name: clusterName,
