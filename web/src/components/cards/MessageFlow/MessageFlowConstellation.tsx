@@ -489,11 +489,24 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     // stays calm instead of bouncing every 20 seconds.
     const firstBuild = firstBuildRef.current;
     firstBuildRef.current = false;
-    sim
-      .alpha(firstBuild ? 0.9 : 0.25)
-      .alphaDecay(firstBuild ? 0.045 : 0.12)
-      .alphaTarget(0)
-      .restart();
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+    if (reduceMotion) {
+      // Honour prefers-reduced-motion: advance the layout synchronously and
+      // paint the settled state once, with no animated re-settle. Drag (direct
+      // manipulation) is exempt and still works.
+      sim.alpha(firstBuild ? 0.9 : 0.25).alphaDecay(0.1);
+      for (let i = 0; i < 300 && sim.alpha() > sim.alphaMin(); i += 1) sim.tick();
+      ticked();
+      sim.stop();
+    } else {
+      sim
+        .alpha(firstBuild ? 0.9 : 0.25)
+        .alphaDecay(firstBuild ? 0.045 : 0.12)
+        .alphaTarget(0)
+        .restart();
+    }
     simRef.current = sim;
 
     const dragBehavior = d3drag<SVGGElement, FlowNode>()
