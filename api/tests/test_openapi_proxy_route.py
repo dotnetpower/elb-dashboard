@@ -164,7 +164,9 @@ def test_openapi_proxy_uses_runtime_token_when_env_token_missing(
 
     from api.services.openapi import runtime as openapi_runtime
 
-    monkeypatch.setattr(openapi_runtime, "get_openapi_api_token", lambda: "runtime-token")
+    monkeypatch.setattr(
+        openapi_runtime, "get_openapi_api_token", lambda **_kwargs: "runtime-token"
+    )
     calls: list[dict[str, Any]] = []
 
     class StubAsyncClient:
@@ -236,6 +238,86 @@ def test_openapi_proxy_uses_runtime_token_when_env_token_missing(
 
     assert response.status_code == 200
     assert calls[0]["headers"]["X-ELB-API-Token"] == "runtime-token"
+
+
+def test_openapi_proxy_threads_cluster_context_into_token_lookup(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime-token fallback MUST pass the request's cluster context so a
+    multi-cluster dashboard reads *this* cluster's per-cluster token key rather
+    than the globally most-recently-written one (issue #26).
+    """
+    _patch_service_ip(monkeypatch, "10.0.0.50")
+    monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
+
+    from api.services.openapi import runtime as openapi_runtime
+
+    token_calls: list[dict[str, Any]] = []
+
+    def fake_token(**kwargs: Any) -> str:
+        token_calls.append(kwargs)
+        return "cluster-scoped-token"
+
+    monkeypatch.setattr(openapi_runtime, "get_openapi_api_token", fake_token)
+
+    class StubAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> StubAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {"method": method, "url": url, "headers": dict(headers or {})}
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
+        ) -> httpx.Response:
+            resp = httpx.Response(200, json={"status": "ok"})
+            if stream:
+                body = resp.content
+                resp = httpx.Response(
+                    resp.status_code,
+                    headers=dict(resp.headers),
+                    stream=httpx.ByteStream(body),
+                )
+            return resp
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubAsyncClient)
+
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={
+            "subscription_id": "sub-123",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "path": "/v1/jobs",
+        },
+    )
+
+    assert response.status_code == 200
+    assert token_calls, "runtime token fallback was not invoked"
+    assert token_calls[0] == {
+        "subscription_id": "sub-123",
+        "resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+    }
 
 
 def test_openapi_proxy_forwards_query_path_and_json_body(

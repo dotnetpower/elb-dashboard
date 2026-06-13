@@ -407,7 +407,18 @@ async def aks_openapi_proxy(
     if not api_token:
         from api.services.openapi.runtime import get_openapi_api_token
 
-        api_token = get_openapi_api_token()
+        # Thread the cluster context so a multi-cluster dashboard reads the
+        # token cached for *this* cluster rather than the globally
+        # most-recently-written one (issue #26). The per-cluster key falls
+        # back to the legacy global key on a miss, so single-cluster
+        # behaviour is unchanged. Mirrors the cluster context already passed
+        # to get_public_tls_base_url / get_openapi_api_token_status above and
+        # below.
+        api_token = get_openapi_api_token(
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
     if not api_token:
         try:
             from api.services.openapi.token import get_openapi_api_token_status
