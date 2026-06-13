@@ -31,6 +31,7 @@ on:
       - "scripts/dev/acr-build-access.sh"
       - "scripts/dev/terminal-base-image.sh"
       - "scripts/dev/az-context.sh"
+      - "scripts/dev/lib-env.sh"
       - ".github/workflows/build-images.yml"
   workflow_dispatch:
     inputs:
