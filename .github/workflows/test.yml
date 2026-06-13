@@ -55,21 +55,22 @@ jobs:
         run: uv run ruff check api
 
       - name: pytest (fast loop — parallel, slow/subprocess excluded)
-        # Diagnostic command: `-v` names every test as it finishes (per xdist
-        # worker) and `--max-worker-restart=0` makes the controller abort and
-        # report immediately when a worker dies, instead of blocking forever on
-        # the dead node and running to the timeout. An xdist worker is being
-        # SIGKILLed near the end of the suite ("[gwN] node down: Not properly
-        # terminated", no Python traceback, no faulthandler dump — the C dump
-        # thread dies with the process), and we need the crashing test's id.
+        # An xdist worker is intermittently SIGKILLed near the end of the suite
+        # ("[gwN] node down: Not properly terminated", no Python traceback, no
+        # faulthandler dump — the C dump thread dies with the process), which is
+        # the signature of the kernel OOM-killer firing at peak memory. When it
+        # happens the controller used to block forever on the dead worker and
+        # run to the job cap. `--max-worker-restart=4` lets xdist respawn the
+        # crashed worker and reschedule its tests so an isolated crash recovers
+        # to green instead of wedging the run.
         #
-        # The remaining safety nets bound any stall regardless of cause:
-        # `--timeout=60` per test and `--session-timeout=300` (pytest.ini) plus
-        # this step-level `timeout-minutes` as the final OS-level backstop —
-        # Actions OS-kills the step at 6 minutes even if the xdist controller
-        # fully deadlocks on a dead worker. Set CI=true so CI-aware code paths
-        # (logging, color, etc.) behave correctly.
+        # Backstops bound any stall regardless of cause: `--timeout=60` per test
+        # and `--session-timeout=300` (pytest.ini), plus this step-level
+        # `timeout-minutes` as the final OS-level guard — Actions OS-kills the
+        # step at 6 minutes even if the controller fully deadlocks on a dead
+        # worker. Set CI=true so CI-aware code paths (logging, color, etc.)
+        # behave correctly.
         timeout-minutes: 6
         env:
           CI: "true"
-        run: uv run pytest api/tests -v --max-worker-restart=0
+        run: uv run pytest -q api/tests --max-worker-restart=4
