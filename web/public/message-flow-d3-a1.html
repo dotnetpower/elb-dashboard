@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Message Flow — Bounded Lanes (A1)</title>
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      :root {
+        --font-sans:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+        --bg-canvas: #111217;
+        --bg-primary: #181b1f;
+        --bg-secondary: #1e2228;
+        --bg-tertiary: #242830;
+        --border-weak: rgba(255, 255, 255, 0.06);
+        --border-medium: rgba(255, 255, 255, 0.1);
+        --text-primary: #e4e7ec;
+        --text-muted: #9da5b4;
+        --text-faint: #8a8f9e;
+        --accent: #6e9fff;
+        --success: #73bf69;
+        --warning: #f2994a;
+        --teal: #5ccab4;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(820px 360px at 12% -6%, rgba(110, 159, 255, 0.08), transparent 60%),
+          var(--bg-canvas);
+        color: var(--text-primary);
+        font-family: var(--font-sans);
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+      }
+      button { font: inherit; cursor: pointer; }
+      .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 22px 56px; }
+      header.page { display: flex; align-items: flex-end; gap: 18px; flex-wrap: wrap; margin-bottom: 20px; }
+      .page h1 { margin: 0; font-size: 21px; letter-spacing: -0.01em; }
+      .page .kicker { margin: 0 0 3px; color: var(--accent); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; }
+      .page p.sub { margin: 6px 0 0; color: var(--text-muted); font-size: 13px; max-width: 720px; }
+      .toolbar { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+      .btn { border: 1px solid var(--border-medium); background: var(--bg-secondary); color: var(--text-primary); border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 600; transition: border-color 140ms ease, background 140ms ease; }
+      .btn:hover { border-color: var(--accent); }
+      .btn.is-on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--bg-secondary)); }
+      .panel { border: 1px solid var(--border-weak); background: var(--bg-primary); border-radius: 16px; padding: 16px 16px 6px; box-shadow: 0 14px 40px rgba(2, 6, 23, 0.4); }
+      .stage { position: relative; width: 100%; height: 540px; border-radius: 12px; overflow: hidden; background: var(--bg-canvas); border: 1px solid var(--border-weak); }
+      .stage svg { display: block; width: 100%; height: 100%; }
+      .col-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; fill: var(--text-faint); }
+      .legend { display: flex; flex-wrap: wrap; gap: 16px; padding: 12px 4px 6px; font-size: 11.5px; color: var(--text-muted); }
+      .legend .item { display: inline-flex; align-items: center; gap: 6px; }
+      .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+      .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+      .ring { width: 9px; height: 9px; border-radius: 50%; border: 1.5px dashed var(--text-muted); display: inline-block; }
+      .line-fresh { width: 20px; height: 0; border-top: 2px solid var(--accent); display: inline-block; opacity: 0.8; }
+      .line-old { width: 20px; height: 0; border-top: 1px solid var(--text-faint); opacity: 0.4; display: inline-block; }
+      #tip { position: fixed; pointer-events: none; z-index: 50; opacity: 0; transform: translate(-50%, -120%); transition: opacity 120ms ease; background: var(--bg-tertiary); border: 1px solid var(--border-medium); border-radius: 8px; padding: 8px 10px; font-size: 11.5px; color: var(--text-primary); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); white-space: nowrap; }
+      #tip .t-sub { color: var(--text-faint); font-size: 10.5px; margin-top: 2px; }
+      .foot { margin-top: 10px; color: var(--text-faint); font-size: 11px; }
+      .mockbadge { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent); background: color-mix(in srgb, var(--warning) 12%, transparent); border-radius: 999px; padding: 2px 9px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="page">
+        <div>
+          <p class="kicker">Dashboard · Message Flow</p>
+          <h1>Bounded Lanes (A1)</h1>
+          <p class="sub">
+            Producers&nbsp;→&nbsp;Broker&nbsp;→&nbsp;Consumers. The broker is a bordered region
+            with a <strong>Queue</strong> lane (requests) above a <strong>Topic</strong> lane
+            (completions + subscriptions). Calm by default: the layout settles and holds still;
+            link weight reflects message age. <span class="mockbadge">Mock data</span>
+          </p>
+        </div>
+        <div class="toolbar">
+          <button class="btn" id="toggle-drift">Gentle drift: off</button>
+          <button class="btn" id="reseed">↻ Re-seed</button>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="stage" id="stage"><svg></svg></div>
+        <div class="legend">
+          <span class="item"><span class="swatch" style="background: var(--bg-tertiary); border:1px solid var(--border-medium)"></span> api producer · <span class="dot" style="background: var(--accent)"></span> user</span>
+          <span class="item"><span class="dot" style="background: var(--accent)"></span> running</span>
+          <span class="item"><span class="ring"></span> queued</span>
+          <span class="item"><span class="swatch" style="border:1px dashed var(--text-faint); background:transparent"></span> session</span>
+          <span class="item"><span class="dot" style="background: var(--teal)"></span> topic subscription</span>
+          <span class="item"><span class="line-fresh"></span> recent <span class="line-old"></span> older link</span>
+        </div>
+        <p class="foot">
+          Standalone proposal — D3 v7 from CDN, mock data. Ported into
+          <code>MessageFlowModal.tsx</code> against the real <code>MessageFlowSnapshot</code>
+          (+ <code>request_queue</code> / <code>completion_topic</code> / subscription counts) with
+          a bundled <code>d3</code> dependency. If live data drops out the view renders an explicit
+          empty state — never a fake-alive simulation.
+        </p>
+      </section>
+    </div>
+
+    <div id="tip"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <script>
+      // ---- Palette (mirrors web/src/components/cards/MessageFlow/colors.ts) ----
+      // Slightly desaturated vs. the dynamic proposals so the still image reads calm.
+      const PALETTE = [
+        { accent: "rgba(122,160,224,0.82)", fill: "rgba(122,160,224,0.14)" },
+        { accent: "rgba(132,190,166,0.82)", fill: "rgba(132,190,166,0.14)" },
+        { accent: "rgba(190,164,214,0.82)", fill: "rgba(190,164,214,0.14)" },
+        { accent: "rgba(214,176,132,0.82)", fill: "rgba(214,176,132,0.14)" },
+        { accent: "rgba(138,186,204,0.82)", fill: "rgba(138,186,204,0.14)" },
+        { accent: "rgba(204,156,170,0.82)", fill: "rgba(204,156,170,0.14)" },
+        { accent: "rgba(170,186,148,0.82)", fill: "rgba(170,186,148,0.14)" },
+        { accent: "rgba(158,164,206,0.82)", fill: "rgba(158,164,206,0.14)" },
+      ];
+      function hashStr(a) { let h = 0; for (let i = 0; i < a.length; i++) h = (h * 31 + a.charCodeAt(i)) | 0; return Math.abs(h); }
+      const toneOf = (a) => PALETTE[hashStr(a) % PALETTE.length];
+
+      // ---- Mock world (matches MessageFlowSnapshot + queue/topic + sessions) ----
+      const API_PRODUCERS = ["api-gateway", "svc-batch", "api-pipeline"];
+      const USER_PRODUCERS = ["amelia", "rohan"];
+      const CLUSTERS = ["elb-cluster-01", "elb-cluster-eu", "elb-gpu-pool"];
+      const PROGRAMS = ["blastn", "blastp", "tblastn"];
+      const DBS = ["core_nt", "nr", "swissprot", "refseq_protein"];
+      const REQUEST_QUEUE = "elb-requests";
+      const COMPLETION_TOPIC = "elb-completions";
+      const SUBSCRIPTIONS = ["dashboard", "autostop", "audit"];
+      const rnd = (n) => Math.floor(Math.random() * n);
+      const pick = (a) => a[rnd(a.length)];
+
+      let seq = 0;
+      function makeJob(alias, kind, cluster, ageS, status) {
+        return {
+          job_id: "job-" + (seq++).toString(36) + Math.random().toString(36).slice(2, 5),
+          program: pick(PROGRAMS), db: pick(DBS),
+          status, query_size: Math.round(200 + Math.pow(10, 1 + Math.random() * 3.3)),
+          alias, kind, cluster_name: cluster,
+          born: performance.now() - ageS * 1000, session_id: null,
+        };
+      }
+      function makeWorld() {
+        seq = 0;
+        // api-dominant producers, one or two human users — kept small so the
+        // still picture is uncluttered.
+        const apis = d3.shuffle(API_PRODUCERS.slice()).slice(0, 2);
+        const users = d3.shuffle(USER_PRODUCERS.slice()).slice(0, 1 + rnd(2));
+        const clusters = CLUSTERS.slice(0, 2 + rnd(2));
+        const producers = [
+          ...apis.map((a) => ({ alias: a, kind: "api" })),
+          ...users.map((a) => ({ alias: a, kind: "user" })),
+        ];
+        const jobs = [], sessions = [];
+        producers.forEach((p) => {
+          const nSessions = p.kind === "api" ? 1 + rnd(2) : 1;
+          for (let s = 0; s < nSessions; s++) {
+            const sessAge = rnd(60);
+            const sess = { id: "sess-" + jobs.length + "-" + s, alias: p.alias, kind: p.kind, born: performance.now() - sessAge * 1000, job_ids: [] };
+            const n = p.kind === "api" ? 2 + rnd(4) : 1 + rnd(2);
+            for (let j = 0; j < n; j++) {
+              const ageS = Math.max(0, sessAge - rnd(8));
+              let status; const r = Math.random();
+              if (ageS < 7) status = r < 0.66 ? "queued" : "running";
+              else status = r < 0.78 ? "running" : "completed";
+              const job = makeJob(p.alias, p.kind, pick(clusters), ageS, status);
+              job.session_id = sess.id; sess.job_ids.push(job.job_id); jobs.push(job);
+            }
+            sessions.push(sess);
+          }
+        });
+        const consumers = clusters.map((c) => ({
+          cluster_name: c,
+          running: jobs.filter((b) => b.cluster_name === c && b.status === "running").length,
+          queued: jobs.filter((b) => b.cluster_name === c && b.status === "queued").length,
+        }));
+        return { producers, jobs, sessions, consumers, clusters,
+          queue: REQUEST_QUEUE, topic: COMPLETION_TOPIC, subscriptions: SUBSCRIPTIONS };
+      }
+
+      // ---- Tooltip ----
+      const tip = document.getElementById("tip");
+      function showTip(html, evt) { tip.innerHTML = html; tip.style.left = evt.clientX + "px"; tip.style.top = evt.clientY + "px"; tip.style.opacity = "1"; }
+      function hideTip() { tip.style.opacity = "0"; }
+      const qlabel = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k letters" : n + " letters");
+      function jobTip(b) {
+        const age = Math.round((performance.now() - b.born) / 1000);
+        return `<div><strong>${b.program}</strong> · ${qlabel(b.query_size)}</div>` +
+          `<div class="t-sub">${b.status} · age ${age}s · db ${b.db}</div>` +
+          `<div class="t-sub">${b.kind === "api" ? "api" : "user"} ${b.alias} → ${b.cluster_name}</div>`;
+      }
+
+      // ---- Age → static link style (NO animation; weight + opacity only) ----
+      function ageStyle(born, now) {
+        const age = (now - born) / 1000;
+        if (age < 10) return { w: 1.8, op: 0.42 };
+        if (age < 30) return { w: 1.2, op: 0.24 };
+        return { w: 0.8, op: 0.12 };
+      }
+
+      // ---- State ----
+      let driftOn = false;
+      const svg = d3.select("#stage").select("svg");
+      let world, sim, w, h, geom, layers = {}, hovered = null;
+
+      function sizeOf() { const r = document.getElementById("stage").getBoundingClientRect(); return { w: r.width, h: r.height }; }
+
+      function geometry(w, h) {
+        const bx0 = w * 0.30, bx1 = w * 0.70, by0 = 38, by1 = h - 26;
+        return { prodX: w * 0.13, clusX: w * 0.88, cx: (bx0 + bx1) / 2, cy: (by0 + by1) / 2,
+          bx0, bx1, by0, by1, bw: bx1 - bx0, bh: by1 - by0, mid: (by0 + by1) / 2 };
+      }
+
+      function diamond(x, y, r) { return `M${x},${y - r} L${x + r},${y} L${x},${y + r} L${x - r},${y} Z`; }
+
+      function build(wld) {
+        world = wld;
+        svg.selectAll("*").remove();
+        const sz = sizeOf(); w = sz.w; h = sz.h; geom = geometry(w, h);
+
+        layers.boundary = svg.append("g");
+        layers.brokerLabels = svg.append("g");
+        layers.link = svg.append("g").attr("fill", "none").attr("stroke-linecap", "round");
+        layers.session = svg.append("g");
+        layers.node = svg.append("g");
+
+        svg.append("text").attr("class", "col-label").attr("x", geom.prodX).attr("y", 20).attr("text-anchor", "middle").text("Producers");
+        svg.append("text").attr("class", "col-label").attr("x", geom.cx).attr("y", 20).attr("text-anchor", "middle").text("Broker");
+        svg.append("text").attr("class", "col-label").attr("x", geom.clusX).attr("y", 20).attr("text-anchor", "middle").text("Consumers");
+
+        drawBoundary();
+        buildNodes();
+      }
+
+      function drawBoundary() {
+        const g = layers.boundary, L = layers.brokerLabels;
+        g.append("rect").attr("x", geom.bx0).attr("y", geom.by0).attr("width", geom.bw).attr("height", geom.bh)
+          .attr("rx", 14).attr("fill", "rgba(255,255,255,0.01)").attr("stroke", "var(--border-medium)").attr("stroke-width", 1.1);
+        g.append("line").attr("x1", geom.bx0 + 12).attr("x2", geom.bx1 - 12).attr("y1", geom.mid).attr("y2", geom.mid)
+          .attr("stroke", "var(--border-weak)").attr("stroke-dasharray", "4 6");
+        // Queue (top) + Topic (bottom) labels with a small glyph.
+        L.append("path").attr("d", diamond(geom.bx0 + 16, geom.by0 + 14, 5)).attr("fill", "var(--bg-tertiary)").attr("stroke", "var(--accent)").attr("stroke-width", 1);
+        L.append("text").attr("x", geom.bx0 + 27).attr("y", geom.by0 + 17).attr("font-size", 10).attr("fill", "var(--text-muted)").text(`Queue · ${world.queue}`);
+        L.append("rect").attr("x", geom.bx0 + 11).attr("y", geom.mid + 9).attr("width", 10).attr("height", 10).attr("rx", 2).attr("fill", "var(--bg-tertiary)").attr("stroke", "var(--teal)").attr("stroke-width", 1);
+        L.append("text").attr("x", geom.bx0 + 27).attr("y", geom.mid + 17).attr("font-size", 10).attr("fill", "var(--text-muted)").text(`Topic · ${world.topic}`);
+        // subscription pucks along the bottom-right of the topic lane.
+        world.subscriptions.forEach((s, i) => {
+          const gx = geom.bx1 - 16, gy = geom.mid + 28 + i * 19;
+          L.append("circle").attr("cx", gx).attr("cy", gy).attr("r", 3.5).attr("fill", "var(--teal)").attr("opacity", 0.8);
+          L.append("text").attr("x", gx - 9).attr("y", gy + 3).attr("text-anchor", "end").attr("font-size", 9).attr("fill", "var(--text-faint)").text(s);
+        });
+      }
+
+      function buildNodes() {
+        const producers = world.producers.map((p, i) => ({
+          id: "p:" + p.alias, type: "producer", alias: p.alias, kind: p.kind,
+          count: world.jobs.filter((j) => j.alias === p.alias).length,
+          fx: geom.prodX, fy: 46 + ((i + 0.5) / world.producers.length) * (h - 74),
+        }));
+        const clusters = world.consumers.map((c, i) => ({
+          id: "c:" + c.cluster_name, type: "cluster", cluster_name: c.cluster_name,
+          running: c.running, queued: c.queued,
+          fx: geom.clusX, fy: 46 + ((i + 0.5) / world.consumers.length) * (h - 74),
+        }));
+        const jobNodes = world.jobs.map((b) => ({
+          id: b.job_id, type: "job", ...b, r: 3.5 + Math.sqrt(b.query_size) / 9,
+          x: geom.cx + (Math.random() - 0.5) * geom.bw * 0.6,
+          y: geom.cy + (Math.random() - 0.5) * geom.bh * 0.6,
+        }));
+        const pById = new Map(producers.map((d) => [d.alias, d]));
+        const cById = new Map(clusters.map((d) => [d.cluster_name, d]));
+
+        const nodes = [...producers, ...clusters, ...jobNodes];
+        const links = [];
+        jobNodes.forEach((j) => {
+          const p = pById.get(j.alias);
+          if (p) links.push({ id: "l1:" + j.id, source: p, target: j, alias: j.alias, born: j.born });
+          if (j.status !== "queued") {
+            const c = cById.get(j.cluster_name);
+            if (c) links.push({ id: "l2:" + j.id, source: j, target: c, alias: j.alias, born: j.born });
+          }
+        });
+        world._nodes = nodes; world._jobNodes = jobNodes;
+
+        layers.link.selectAll("path").data(links, (d) => d.id).join(
+          (enter) => enter.append("path").attr("stroke", (d) => toneOf(d.alias).accent),
+        );
+
+        // Sessions: calm dashed rectangles around member jobs. Kept very faint
+        // at rest so the still image reads clean; the box + label surface only
+        // when the owning submitter is hovered (see applyHover).
+        layers.session.selectAll("g.sess").data(world.sessions, (d) => d.id).join(
+          (enter) => {
+            const g = enter.append("g").attr("class", "sess");
+            g.append("rect").attr("rx", 7).attr("fill", "none")
+              .attr("stroke", (d) => toneOf(d.alias).accent).attr("stroke-opacity", 0.1)
+              .attr("stroke-dasharray", "4 5").attr("stroke-width", 1);
+            g.append("text").attr("class", "sess-label").attr("font-size", 9)
+              .attr("fill", "var(--text-faint)").attr("opacity", 0)
+              .text((d) => `${d.alias} · ${d.job_ids.length}`);
+            return g;
+          },
+        );
+
+        const nodeSel = layers.node.selectAll("g.node").data(nodes, (d) => d.id).join(
+          (enter) => {
+            const g = enter.append("g").attr("class", "node");
+            const prod = g.filter((d) => d.type === "producer");
+            prod.each(function (d) {
+              const sel = d3.select(this);
+              if (d.kind === "api") {
+                sel.append("rect").attr("x", -9).attr("y", -9).attr("width", 18).attr("height", 18).attr("rx", 5)
+                  .attr("fill", "var(--bg-tertiary)").attr("stroke", toneOf(d.alias).accent).attr("stroke-width", 1.3);
+                sel.append("path").attr("d", "M-4,-3 H4 M-4,0 H4 M-4,3 H4").attr("stroke", toneOf(d.alias).accent).attr("stroke-width", 1).attr("opacity", 0.75);
+              } else {
+                sel.append("circle").attr("r", 7).attr("fill", toneOf(d.alias).fill).attr("stroke", toneOf(d.alias).accent).attr("stroke-width", 1.3);
+              }
+              sel.append("text").attr("x", -14).attr("dy", "0.32em").attr("text-anchor", "end")
+                .attr("font-size", 11).attr("fill", "var(--text-primary)").text(`${d.alias}${d.kind === "api" ? " ·api" : ""} (${d.count})`);
+            });
+            const clus = g.filter((d) => d.type === "cluster");
+            clus.append("rect").attr("x", -8).attr("y", -16).attr("width", 16).attr("height", 32).attr("rx", 8)
+              .attr("fill", "var(--bg-tertiary)").attr("stroke", "var(--border-medium)");
+            clus.append("text").attr("x", 14).attr("dy", "-0.1em").attr("font-size", 11).attr("fill", "var(--text-primary)").text((d) => d.cluster_name);
+            clus.append("text").attr("x", 14).attr("dy", "1.15em").attr("font-size", 9).attr("fill", "var(--text-faint)").text((d) => `● ${d.running} · ○ ${d.queued}`);
+            const job = g.filter((d) => d.type === "job");
+            job.append("circle").attr("class", "job-core").attr("r", (d) => d.r)
+              .attr("fill", (d) => (d.status === "queued" ? "transparent" : toneOf(d.alias).fill))
+              .attr("stroke", (d) => toneOf(d.alias).accent).attr("stroke-width", 1.2)
+              .attr("stroke-dasharray", (d) => (d.status === "queued" ? "3 3" : null));
+            // A single, STATIC soft ring for running jobs (no pulse).
+            job.filter((d) => d.status === "running").append("circle").attr("r", (d) => d.r + 2.5)
+              .attr("fill", "none").attr("stroke", (d) => toneOf(d.alias).accent).attr("stroke-opacity", 0.18);
+            return g;
+          },
+        );
+        nodeSel.style("cursor", (d) => (d.type === "job" ? "grab" : "default"))
+          .on("mousemove", (e, d) => { if (d.type === "job") showTip(jobTip(d), e); })
+          .on("mouseenter", (e, d) => { hovered = d.alias; applyHover(); })
+          .on("mouseleave", () => { hovered = null; hideTip(); applyHover(); });
+        layers.nodeSel = nodeSel;
+
+        // Deterministic per-job offset so a status group spreads into a calm
+        // band instead of piling onto one point (the main source of clutter).
+        const spread = (id, range) => ((hashStr(id) % 1000) / 1000 - 0.5) * range;
+
+        if (sim) sim.stop();
+        sim = d3.forceSimulation(nodes)
+          .force("collide", d3.forceCollide((d) => (d.type === "job" ? d.r + 3 : 15)))
+          .force("x", d3.forceX((d) => {
+            if (d.type !== "job") return d.fx;
+            if (d.status === "queued") return geom.bx0 + geom.bw * 0.32 + spread(d.id, geom.bw * 0.22);
+            if (d.status === "running") return geom.cx + spread(d.id, geom.bw * 0.5);
+            return geom.bx0 + geom.bw * 0.7 + spread(d.id, geom.bw * 0.22);
+          }).strength((d) => (d.type === "job" ? 0.05 : 0)))
+          .force("y", d3.forceY((d) => {
+            if (d.type !== "job") return d.fy;
+            if (d.status === "queued") return geom.by0 + geom.bh * 0.27 + spread(d.id + "y", geom.bh * 0.12);
+            if (d.status === "completed") return geom.by0 + geom.bh * 0.73 + spread(d.id + "y", geom.bh * 0.12);
+            return geom.mid + spread(d.id + "y", geom.bh * 0.14);
+          }).strength((d) => (d.type === "job" ? 0.06 : 0)))
+          .on("tick", ticked);
+
+        // Settle quickly, then come to REST (no perpetual jitter).
+        sim.alpha(0.9).alphaDecay(0.045).alphaTarget(0).restart();
+
+        const drag = d3.drag()
+          .on("start", (e, d) => { sim.alphaTarget(0.12).restart(); d.fx = d.x; d.fy = d.y; })
+          .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+          .on("end", (e, d) => { sim.alphaTarget(driftOn ? 0.004 : 0); d.fx = null; d.fy = null; });
+        nodeSel.filter((d) => d.type === "job").call(drag);
+
+        applyHover();
+      }
+
+      function applyHover() {
+        if (!layers.nodeSel) return;
+        layers.nodeSel.style("opacity", (d) =>
+          hovered == null || d.alias === hovered || d.type === "cluster" ? 1 : 0.16);
+        layers.link.selectAll("path").attr("opacity", (d) =>
+          hovered == null ? 1 : d.alias === hovered ? 1 : 0.06);
+        // Session boxes stay near-invisible at rest; only the hovered
+        // submitter's sessions surface (box + label), which keeps the default
+        // picture calm while still exposing the grouping on demand.
+        layers.session.selectAll("g.sess").each(function (d) {
+          const on = hovered != null && d.alias === hovered;
+          const g = d3.select(this);
+          g.select("rect").attr("stroke-opacity", on ? 0.5 : 0.1);
+          g.select(".sess-label").attr("opacity", on ? 1 : 0);
+          g.style("opacity", hovered == null || on ? 1 : 0.5);
+        });
+      }
+
+      function ticked() {
+        const now = performance.now();
+        world._nodes.forEach((d) => {
+          if (d.type !== "job") return;
+          d.x = Math.max(geom.bx0 + 6, Math.min(geom.bx1 - 6, d.x));
+          d.y = Math.max(geom.by0 + 6, Math.min(geom.by1 - 6, d.y));
+        });
+        layers.link.selectAll("path")
+          .attr("d", (l) => {
+            const sx = l.source.x, sy = l.source.y, tx = l.target.x, ty = l.target.y, mx = (sx + tx) / 2;
+            return `M${sx},${sy} C${mx},${sy} ${mx},${ty} ${tx},${ty}`;
+          })
+          .attr("stroke-width", (l) => ageStyle(l.born, now).w)
+          .attr("stroke-opacity", (l) => {
+            const s = ageStyle(l.born, now);
+            return hovered && l.alias !== hovered ? s.op * 0.18 : s.op;
+          });
+        layers.nodeSel.attr("transform", (d) => `translate(${d.x},${d.y})`);
+        layers.session.selectAll("g.sess").each(function (s) {
+          const members = world._jobNodes.filter((j) => j.session_id === s.id);
+          if (!members.length) { d3.select(this).style("display", "none"); return; }
+          d3.select(this).style("display", null);
+          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+          members.forEach((m) => { x0 = Math.min(x0, m.x - m.r); y0 = Math.min(y0, m.y - m.r); x1 = Math.max(x1, m.x + m.r); y1 = Math.max(y1, m.y + m.r); });
+          const pad = 7;
+          d3.select(this).select("rect").attr("x", x0 - pad).attr("y", y0 - pad).attr("width", x1 - x0 + pad * 2).attr("height", y1 - y0 + pad * 2);
+          d3.select(this).select("text").attr("x", x0 - pad + 2).attr("y", y0 - pad - 3);
+        });
+      }
+
+      // ---- Wire up ----
+      world = makeWorld();
+      build(world);
+
+      document.getElementById("reseed").addEventListener("click", () => { world = makeWorld(); build(world); });
+      const driftBtn = document.getElementById("toggle-drift");
+      driftBtn.addEventListener("click", () => {
+        driftOn = !driftOn;
+        driftBtn.textContent = driftOn ? "Gentle drift: on" : "Gentle drift: off";
+        driftBtn.classList.toggle("is-on", driftOn);
+        if (sim) sim.alphaTarget(driftOn ? 0.004 : 0).restart();
+      });
+
+      let rz;
+      window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => build(world), 240); });
+    </script>
+  </body>
+</html>
