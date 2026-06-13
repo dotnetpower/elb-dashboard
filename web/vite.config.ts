@@ -110,6 +110,9 @@ export default defineConfig({
           if (id.includes("node_modules/lucide-react")) {
             return "vendor-icons";
           }
+          if (id.includes("node_modules/d3-")) {
+            return "vendor-d3";
+          }
           if (id.includes("/src/pages/blastResults/") || id.includes("/src/pages/BlastJobs/")) {
             return "blast-results";
           }

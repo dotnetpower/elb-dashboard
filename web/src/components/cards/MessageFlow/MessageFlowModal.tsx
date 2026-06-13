@@ -1,22 +1,24 @@
 /**
  * MessageFlowModal — the expanded Service Bus message-flow view.
  *
- * Lays out the three lanes (Producers -> Broker -> Consumers) and lets the
- * operator click any broker box to inspect the real JobState JSON (fetched
- * from the monitor job-detail endpoint). When there are no active messages it
- * shows a single calm notice instead of empty lanes — the integration is
- * optional and an idle queue is the normal state.
+ * Renders the {@link MessageFlowConstellation} D3 force-graph (Producers →
+ * Broker → Consumers, with a bounded Queue/Topic broker region) and lets the
+ * operator click or keyboard-activate any broker job node to inspect the real
+ * JobState JSON (fetched from the monitor job-detail endpoint). When there are
+ * no active messages it shows a single calm notice instead of an empty graph —
+ * the integration is optional and an idle queue is the normal state.
  */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Radio, Server, Users, X } from "lucide-react";
+import { Radio, X } from "lucide-react";
 
 import { messageFlowApi, type MessageFlowBox, type MessageFlowSnapshot } from "@/api/messageFlow";
 import { useRelativeTime } from "@/hooks/useRelativeTime";
 
 import { aliasTone } from "./colors";
-import { boxWidth, querySizeLabel } from "./layout";
+import { MessageFlowConstellation } from "./MessageFlowConstellation";
+import { querySizeLabel } from "./layout";
 
 interface MessageFlowModalProps {
   snapshot: MessageFlowSnapshot;
@@ -42,33 +44,6 @@ function redactState(state: unknown): unknown {
       .filter(([key]) => !REDACTED_JSON_KEYS.has(key))
       .map(([key, value]) => [key, redactState(value)]),
   );
-}
-
-function laneHeader(icon: React.ReactNode, title: string, subtitle: string) {
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-primary)", fontWeight: 600 }}>
-        {icon}
-        {title}
-      </div>
-      <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 2 }}>{subtitle}</div>
-    </div>
-  );
-}
-
-/** Native hover tooltip for a broker box — the box itself is intentionally
- *  textless, so all the per-job detail lives here (and in the click-through
- *  detail modal). */
-function boxTooltip(b: MessageFlowBox): string {
-  const lines = [
-    `${b.program ?? "blast"} · ${querySizeLabel(b.query_size)}`,
-    `status: ${b.status}${b.phase ? ` (${b.phase})` : ""}`,
-  ];
-  if (b.db) lines.push(`db: ${b.db}`);
-  lines.push(`submitter: ${b.alias}`);
-  lines.push(`cluster: ${b.cluster_name || "unassigned"}`);
-  lines.push("click to view job JSON");
-  return lines.join("\n");
 }
 
 /** A small read-only key/value row used in the detail modal summary. */
@@ -222,9 +197,6 @@ function JobDetailModal({ box, onClose }: JobDetailModalProps) {
 
 export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowModalProps) {
   const [selectedBox, setSelectedBox] = useState<MessageFlowBox | null>(null);
-  // Submitter alias currently hovered in the Producers lane; dims unrelated
-  // broker tiles so the Producer -> Broker mapping is visible without arrows.
-  const [hoveredAlias, setHoveredAlias] = useState<string | null>(null);
   const updatedAgo = useRelativeTime(updatedAt);
   // Mirrors `selectedBox` for the parent Escape handler so it can defer to the
   // detail modal (whose own capture-phase handler closes itself first).
@@ -246,25 +218,6 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
     };
   }, [onClose]);
 
-  const producers = snapshot.producers ?? [];
-  const broker = snapshot.broker ?? [];
-  // Running jobs first so the busy part of the lane is scannable at a glance;
-  // ties keep the server order (already busiest-cluster-first upstream).
-  const brokerSorted = [...broker].sort((a, b) => {
-    const ra = a.status === "running" ? 0 : 1;
-    const rb = b.status === "running" ? 0 : 1;
-    return ra - rb;
-  });
-  const clusters = snapshot.consumers?.clusters ?? [];
-  // A 20s refetch can drop the submitter the pointer is currently over; React
-  // does not fire onMouseLeave on the unmounted row, so `hoveredAlias` would be
-  // stuck on a now-absent alias and dim the ENTIRE broker lane. Treat a hovered
-  // alias that no longer exists in the snapshot as "not hovered".
-  const aliasExists =
-    hoveredAlias != null &&
-    (producers.some((p) => p.alias === hoveredAlias) ||
-      broker.some((b) => b.alias === hoveredAlias));
-  const activeAlias = aliasExists ? hoveredAlias : null;
   const counts = snapshot.sb_counts;
   const queue = counts?.queue;
   const activeTotal = snapshot.active_total ?? 0;
@@ -372,8 +325,8 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               <span className="message-flow-legend__item">
                 <span
                   style={{
-                    width: 8,
-                    height: 8,
+                    width: 9,
+                    height: 9,
                     borderRadius: "50%",
                     background: "var(--accent)",
                   }}
@@ -383,10 +336,10 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               <span className="message-flow-legend__item">
                 <span
                   style={{
-                    width: 8,
-                    height: 8,
+                    width: 9,
+                    height: 9,
                     borderRadius: "50%",
-                    border: "1.5px solid var(--text-muted)",
+                    border: "1.5px dashed var(--text-muted)",
                   }}
                 />
                 queued
@@ -394,183 +347,47 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               <span className="message-flow-legend__item">
                 <span
                   style={{
-                    width: 22,
-                    height: 8,
+                    width: 12,
+                    height: 12,
                     borderRadius: 3,
-                    background:
-                      "linear-gradient(90deg, var(--text-faint) 0%, var(--text-muted) 100%)",
+                    background: "var(--bg-tertiary)",
+                    border: "1px solid var(--border-medium)",
                   }}
                 />
-                box width = query length
-              </span>
-              <span className="message-flow-legend__item">color = submitter</span>
-            </div>
-            <div className="message-flow-lanes">
-              {/* Producers */}
-              <div>
-                {laneHeader(
-                  <Users size={14} strokeWidth={1.5} />,
-                  "Producers",
-                  snapshot.scope === "shared"
-                    ? "All active submitters"
-                    : "Your active submissions",
-                )}
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {producers.map((p) => {
-                    const tone = aliasTone(p.alias);
-                    return (
-                      <div
-                        key={p.alias}
-                        className={`glass-card message-flow-producer${
-                          activeAlias === p.alias ? " is-active" : ""
-                        }`}
-                        onMouseEnter={() => setHoveredAlias(p.alias)}
-                        onMouseLeave={() =>
-                          setHoveredAlias((cur) => (cur === p.alias ? null : cur))
-                        }
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          padding: "8px 10px",
-                          fontSize: 12,
-                          borderLeft: `3px solid ${tone.accent}`,
-                        }}
-                      >
-                        <span
-                          style={{
-                            width: 10,
-                            height: 10,
-                            borderRadius: "50%",
-                            background: tone.accent,
-                            flexShrink: 0,
-                          }}
-                        />
-                        <span
-                          style={{
-                            color: "var(--text-primary)",
-                            minWidth: 0,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {p.alias}
-                        </span>
-                        <span style={{ marginLeft: "auto", color: "var(--text-muted)" }}>
-                          {p.job_count}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Broker */}
-              <div>
-                {laneHeader(
-                  <Radio size={14} strokeWidth={1.5} />,
-                  "Broker",
-                  snapshot.broker_truncated
-                    ? `showing first ${snapshot.active_shown ?? broker.length} of ${activeTotal}`
-                    : (snapshot.request_queue ?? "requests queue"),
-                )}
-                <div
+                api producer ·{" "}
+                <span
                   style={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    alignContent: "flex-start",
-                    gap: 8,
+                    width: 9,
+                    height: 9,
+                    borderRadius: "50%",
+                    background: "var(--accent)",
+                    display: "inline-block",
                   }}
-                >
-                  {brokerSorted.map((b) => {
-                    const tone = aliasTone(b.alias);
-                    const isQueued = b.status !== "running";
-                    const isSelected = selectedBox?.job_id === b.job_id;
-                    // A selected tile is never dimmed, so its selection ring stays
-                    // crisp even while a different submitter is highlighted.
-                    const isDimmed =
-                      activeAlias != null && activeAlias !== b.alias && !isSelected;
-                    return (
-                      <button
-                        key={b.job_id}
-                        type="button"
-                        onClick={() => setSelectedBox(b)}
-                        onMouseEnter={() => setHoveredAlias(b.alias)}
-                        onMouseLeave={() =>
-                          setHoveredAlias((cur) => (cur === b.alias ? null : cur))
-                        }
-                        onFocus={() => setHoveredAlias(b.alias)}
-                        onBlur={() =>
-                          setHoveredAlias((cur) => (cur === b.alias ? null : cur))
-                        }
-                        title={boxTooltip(b)}
-                        aria-label={`View JSON for ${b.program ?? "blast"} job ${b.job_id} (${b.status})`}
-                        className={`message-flow-box${isQueued ? " message-flow-box--queued" : ""}${
-                          isSelected ? " is-selected" : ""
-                        }${isDimmed ? " is-dimmed" : ""}`}
-                        style={
-                          {
-                            width: boxWidth(b.query_size),
-                            "--mf-fill": tone.fill,
-                            "--mf-border": tone.border,
-                            "--mf-accent": tone.accent,
-                          } as React.CSSProperties
-                        }
-                      >
-                        <span
-                          className={`message-flow-box__dot message-flow-box__dot--${
-                            isQueued ? "queued" : "running"
-                          }`}
-                        />
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Consumers */}
-              <div>
-                {laneHeader(<Server size={14} strokeWidth={1.5} />, "Consumers", "AKS clusters")}
-                {clusters.length === 0 ? (
-                  <div
-                    className="glass-card"
-                    style={{
-                      padding: "10px 12px",
-                      fontSize: 12,
-                      color: "var(--text-faint)",
-                    }}
-                  >
-                    Awaiting placement — jobs are queued but not yet assigned to a
-                    cluster.
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {clusters.map((c) => (
-                      <div
-                        key={c.cluster_name || "unassigned"}
-                        className="glass-card"
-                        style={{ padding: "10px 12px", fontSize: 12 }}
-                      >
-                        <div style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-                          {c.cluster_name || "unassigned"}
-                        </div>
-                        {c.resource_group ? (
-                          <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                            {c.resource_group}
-                          </div>
-                        ) : null}
-                        <div style={{ marginTop: 6, color: "var(--text-muted)" }}>
-                          <span style={{ color: "var(--accent)" }}>● running {c.running}</span>
-                          {"  "}
-                          <span>○ queued {c.queued}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+                />{" "}
+                user
+              </span>
+              <span className="message-flow-legend__item">node size = query length</span>
+              <span className="message-flow-legend__item">color = submitter</span>
+              <span className="message-flow-legend__item">link weight = message age</span>
             </div>
+            <MessageFlowConstellation
+              snapshot={snapshot}
+              onSelectBox={setSelectedBox}
+              selectedJobId={selectedBox?.job_id ?? null}
+            />
+            {snapshot.broker_truncated ? (
+              <div
+                style={{
+                  marginTop: 6,
+                  fontSize: 11,
+                  color: "var(--text-faint)",
+                  textAlign: "center",
+                }}
+              >
+                Showing the first {snapshot.active_shown ?? 0} of {activeTotal} active
+                jobs to keep the graph readable.
+              </div>
+            ) : null}
             </>
           )}
 
@@ -620,7 +437,7 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
             ) : null}
           </div>
 
-          {/* Caption: clarify that the broker boxes are in-flight JOBS, not the
+          {/* Caption: clarify that the broker nodes are in-flight JOBS, not the
               Service Bus queue depth above (which drains in well under a second
               so it is almost always zero). Without this the two number sets read
               as contradictory. */}
@@ -632,7 +449,7 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               color: "var(--text-faint)",
             }}
           >
-            Broker boxes are in-flight BLAST jobs (queued/running). The Service
+            Broker nodes are in-flight BLAST jobs (queued/running). The Service
             Bus queue above drains in under a second, so its depth is normally
             zero even while jobs run.
           </div>
