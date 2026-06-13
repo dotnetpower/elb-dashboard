@@ -11,7 +11,6 @@ Validation: `uv run pytest -q api/tests/test_storage_usage_cache.py`.
 
 from __future__ import annotations
 
-import atexit
 import json
 import logging
 import os
@@ -19,13 +18,13 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from azure.core.credentials import TokenCredential
 
+from api.services.background_refresh import DaemonRefreshPool
 from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
@@ -360,7 +359,12 @@ def _evict_over_capacity(_now: float) -> None:
 
 
 def _start_refresh_thread(target: Any) -> None:
-    """Submit ``target`` to the shared storage-usage refresher pool."""
+    """Submit ``target`` to the shared storage-usage refresher pool.
+
+    Backed by a bounded daemon worker pool so a refresh blocked on a stuck
+    Storage/ARM call never leaves a non-daemon thread that blocks interpreter /
+    xdist-worker shutdown — see ``DaemonRefreshPool``.
+    """
 
     def run() -> None:
         try:
@@ -368,22 +372,15 @@ def _start_refresh_thread(target: Any) -> None:
         except Exception:
             LOGGER.warning("storage usage refresh thread failed", exc_info=True)
 
-    pool = _refresher_pool()
-    try:
-        pool.submit(run)
-    except RuntimeError:
-        thread = threading.Thread(
-            target=run, name="storage-usage-refresh-fallback", daemon=True
-        )
-        thread.start()
+    _refresher_pool().submit(run)
 
 
 _REFRESHER_POOL_MAX_WORKERS = 4
-_REFRESHER_POOL: ThreadPoolExecutor | None = None
+_REFRESHER_POOL: DaemonRefreshPool | None = None
 _REFRESHER_POOL_LOCK = threading.Lock()
 
 
-def _refresher_pool() -> ThreadPoolExecutor:
+def _refresher_pool() -> DaemonRefreshPool:
     global _REFRESHER_POOL
     pool = _REFRESHER_POOL
     if pool is not None:
@@ -397,23 +394,15 @@ def _refresher_pool() -> ThreadPoolExecutor:
                 )
             except ValueError:
                 workers = _REFRESHER_POOL_MAX_WORKERS
-            _REFRESHER_POOL = ThreadPoolExecutor(
+            _REFRESHER_POOL = DaemonRefreshPool(
                 max_workers=workers,
-                thread_name_prefix="storage-usage-refresh",
+                # Bounded backlog so a sustained Storage/ARM outage cannot grow
+                # the queue without limit; excess refreshes are dropped and the
+                # stale cache is served instead.
+                max_queue=max(32, workers * 16),
+                name="storage-usage-refresh",
             )
         return _REFRESHER_POOL
-
-
-def _shutdown_refresher_pool() -> None:
-    global _REFRESHER_POOL
-    with _REFRESHER_POOL_LOCK:
-        pool = _REFRESHER_POOL
-        _REFRESHER_POOL = None
-    if pool is not None:
-        pool.shutdown(wait=False, cancel_futures=True)
-
-
-atexit.register(_shutdown_refresher_pool)
 
 
 def _monotonic() -> float:

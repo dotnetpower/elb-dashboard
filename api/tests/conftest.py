@@ -11,24 +11,10 @@ Risky contracts: The autouse fixtures reset process-level singletons used by
 Validation: `uv run pytest -q api/tests`.
 """
 
-import faulthandler
 import os
-import sys
 from collections.abc import Generator
 
 import pytest
-
-# Watchdog: if the test session (or any xdist worker) stalls, dump the stack of
-# every thread to stderr so a CI hang is diagnosable. faulthandler runs from a
-# dedicated C thread that fires regardless of the GIL, so it surfaces hangs the
-# pytest-timeout `thread` method cannot (e.g. a C-level loop holding the GIL, or
-# a stall outside any test item's call phase such as worker collection/teardown).
-# Normal runs finish in seconds and never trip this. Override the interval with
-# ELB_TEST_FAULTHANDLER_TIMEOUT (seconds); set to 0 to disable.
-_FAULTHANDLER_TIMEOUT = float(os.environ.get("ELB_TEST_FAULTHANDLER_TIMEOUT", "180"))
-if _FAULTHANDLER_TIMEOUT > 0:
-    faulthandler.enable()
-    faulthandler.dump_traceback_later(_FAULTHANDLER_TIMEOUT, repeat=True, file=sys.stderr)
 
 # The cgroup metrics reporter is a deployment-only background daemon thread that
 # `create_app()` starts at import. In tests it just spams "redis connection

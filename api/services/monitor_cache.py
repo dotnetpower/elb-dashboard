@@ -12,7 +12,6 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
-import atexit
 import json
 import logging
 import os
@@ -20,10 +19,11 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from api.services.background_refresh import DaemonRefreshPool
 
 LOGGER = logging.getLogger(__name__)
 
@@ -425,11 +425,12 @@ def _start_refresh_thread(target: Callable[[], object]) -> None:
 
     Previously spawned a brand-new ``threading.Thread`` per stale entry.
     Under SSE + multiple monitor routes that meant 10+ thread spawns
-    per dashboard tick. A capped ``ThreadPoolExecutor`` keeps the
-    background refresh fan-out bounded; over-cap submits queue (which
-    is exactly what we want — never run more than N concurrent ARM
-    refreshes against the same subscription).
+    per dashboard tick. A capped daemon worker pool keeps the background
+    refresh fan-out bounded (never more than N concurrent ARM refreshes
+    against the same subscription) without leaking a non-daemon thread that
+    blocks interpreter / xdist-worker shutdown — see ``DaemonRefreshPool``.
     """
+
     def run() -> None:
         try:
             target()
@@ -438,17 +439,7 @@ def _start_refresh_thread(target: Callable[[], object]) -> None:
             # the worker from emitting a second unhandled-exception trace.
             return
 
-    pool = _refresher_pool()
-    try:
-        pool.submit(run)
-    except RuntimeError:
-        # ``submit`` raises after ``shutdown(...)``; fall back to a
-        # fresh daemon thread so we never silently drop a refresh
-        # during the shutdown window.
-        thread = threading.Thread(
-            target=run, name="monitor-snapshot-refresh-fallback", daemon=True
-        )
-        thread.start()
+    _refresher_pool().submit(run)
 
 
 _REFRESHER_POOL_MAX_WORKERS = 8
@@ -464,34 +455,28 @@ def _resolve_refresher_pool_max_workers() -> int:
     return _REFRESHER_POOL_MAX_WORKERS
 
 
-_REFRESHER_POOL: ThreadPoolExecutor | None = None
+_REFRESHER_POOL: DaemonRefreshPool | None = None
 _REFRESHER_POOL_LOCK = threading.Lock()
 
 
-def _refresher_pool() -> ThreadPoolExecutor:
+def _refresher_pool() -> DaemonRefreshPool:
     global _REFRESHER_POOL
     pool = _REFRESHER_POOL
     if pool is not None:
         return pool
     with _REFRESHER_POOL_LOCK:
         if _REFRESHER_POOL is None:
-            _REFRESHER_POOL = ThreadPoolExecutor(
-                max_workers=_resolve_refresher_pool_max_workers(),
-                thread_name_prefix="monitor-snapshot-refresh",
+            workers = _resolve_refresher_pool_max_workers()
+            _REFRESHER_POOL = DaemonRefreshPool(
+                max_workers=workers,
+                # Bounded backlog: under a sustained ARM outage every poll tick
+                # enqueues a refresh while all workers are blocked; cap the
+                # backlog so memory stays bounded (excess refreshes are dropped
+                # and the stale cache is served instead).
+                max_queue=max(64, workers * 16),
+                name="monitor-snapshot-refresh",
             )
         return _REFRESHER_POOL
-
-
-def _shutdown_refresher_pool() -> None:
-    global _REFRESHER_POOL
-    with _REFRESHER_POOL_LOCK:
-        pool = _REFRESHER_POOL
-        _REFRESHER_POOL = None
-    if pool is not None:
-        pool.shutdown(wait=False, cancel_futures=True)
-
-
-atexit.register(_shutdown_refresher_pool)
 
 
 def _with_cache_meta(
