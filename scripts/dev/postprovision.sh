@@ -172,14 +172,24 @@ if [ -z "$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" ] && command -v azd >/dev/n
     | awk -F= '/^APPLICATIONINSIGHTS_CONNECTION_STRING=/{gsub(/"/, "", $2); print $2; exit}')"
 fi
 if [ -z "$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" ]; then
-  # Fall back to the live App Insights component in the platform RG. Omitting
-  # `--app` lists every component in the group; take the first. Non-fatal:
-  # any failure (extension missing, no component, RBAC) leaves the value empty.
-  APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="$(az monitor app-insights component show \
-    -g "$AZURE_RESOURCE_GROUP" --query "[0].connectionString" -o tsv \
-    --only-show-errors 2>/dev/null || true)"
-  if [ -n "$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" ]; then
-    progress note "Resolved APPLICATIONINSIGHTS_CONNECTION_STRING from the App Insights component in $AZURE_RESOURCE_GROUP."
+  # Fall back to the live App Insights component in the platform RG. Resolve it
+  # through the GENERIC ARM resource provider (`az resource list/show`), NOT
+  # `az monitor app-insights component show`: the latter needs the
+  # `application-insights` CLI extension and, when that extension is absent in
+  # a non-interactive `azd up` run, the auto-install prompt blocks on stdin and
+  # HANGS the whole deploy (a `|| true` cannot rescue a hung process). The
+  # generic provider is core CLI, never prompts, and returns the same value.
+  # Empty result is acceptable (telemetry off, zero cost) when no component
+  # exists. The query is non-fatal under `set -e` via `|| true`.
+  appi_id="$(az resource list -g "$AZURE_RESOURCE_GROUP" \
+    --resource-type 'microsoft.insights/components' \
+    --query "[0].id" -o tsv --only-show-errors 2>/dev/null || true)"
+  if [ -n "$appi_id" ]; then
+    APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="$(az resource show --ids "$appi_id" \
+      --query "properties.ConnectionString" -o tsv --only-show-errors 2>/dev/null || true)"
+    if [ -n "$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" ]; then
+      progress note "Resolved APPLICATIONINSIGHTS_CONNECTION_STRING from the App Insights component in $AZURE_RESOURCE_GROUP."
+    fi
   fi
 fi
 # Live Wall log-tail fallback target. Empty is acceptable (the api sidecar
@@ -639,6 +649,20 @@ if [ -n "$LOG_ANALYTICS_WORKSPACE_ID_VAL" ] && [ -n "${SHARED_IDENTITY_PRINCIPAL
   fi
 fi
 
+# Full ARM resource id of the LA workspace, injected into api/worker as
+# LOG_ANALYTICS_WORKSPACE_RESOURCE_ID so the AKS provision task can re-enable
+# Container Insights on a recreated cluster (opt-in via
+# AKS_PROVISION_ENABLE_CONTAINER_INSIGHTS). Reuse LA_WS_RID if the grant block
+# above already resolved it; otherwise resolve it here from the customer GUID.
+LA_WS_RID_VAL="${LA_WS_RID:-}"
+if [ -z "$LA_WS_RID_VAL" ] && [ -n "$LOG_ANALYTICS_WORKSPACE_ID_VAL" ]; then
+  LA_WS_RID_VAL="$(az monitor log-analytics workspace list \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "[?customerId=='$LOG_ANALYTICS_WORKSPACE_ID_VAL'].id | [0]" \
+    -o tsv 2>/dev/null || true)"
+fi
+ts "    LA workspace ARM id: ${LA_WS_RID_VAL:-<unset>}"
+
 az deployment group create \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --name "$DEPLOY_NAME" \
@@ -662,6 +686,7 @@ az deployment group create \
       featureTerminal="$VITE_FEATURE_TERMINAL_VAL" \
       applicationInsightsConnectionString="$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" \
       logAnalyticsWorkspaceId="$LOG_ANALYTICS_WORKSPACE_ID_VAL" \
+      logAnalyticsWorkspaceResourceId="$LA_WS_RID_VAL" \
       platformStorageAccountName="${STORAGE_ACCOUNT_NAME:-}" \
       platformPrivateEndpointSubnetId="$PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL" \
       platformAksSubnetId="$PLATFORM_AKS_SUBNET_ID_VAL" \

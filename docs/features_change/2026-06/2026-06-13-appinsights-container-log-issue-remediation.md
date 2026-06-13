@@ -14,7 +14,7 @@ surfaced four actionable defects. App Insights itself held **zero telemetry for
 | 1 | HIGH | `deploy_openapi_service` raised `RuntimeError("acr_resource_group is required …")` on every SPA-triggered deploy (10x). | The `/aks/openapi/deploy` route forwarded `body["acr_resource_group"]` verbatim; a SPA build that saved a config without the ACR RG queued a task guaranteed to raise. | Route now resolves the ACR RG with the same precedence as the auto-deploy path: body → `PLATFORM_ACR_RESOURCE_GROUP` → `AZURE_RESOURCE_GROUP`. |
 | 2 | HIGH | `worker` sidecar OOM-killed (SIGKILL signal 9 → `WorkerLostError`), ongoing in the last 24h. | **Deployment drift** — the repo (Bicep + compiled `main.json`) already pins `worker` at `1.0 vCPU / 2.0Gi`, but the live revision still runs the stale `0.5 vCPU / 1.0Gi` because `quick-deploy.sh` only patches container images, never resources. | No code change — a full Bicep redeploy applies the already-committed `1.0/2.0`. |
 | 4 | MEDIUM | 58x `requests.exceptions.HTTPError: 503 … /apis/metrics.k8s.io` tracebacks in the `api` log. | metrics-server returns 503 (APIService unhealthy) / 404 (not installed) on freshly started or scaling AKS; `k8s_top_nodes` / `k8s_top_pods` called `raise_for_status()` and the traceback flooded the log even though the route degrades correctly. | Both helpers now treat a 503/404 from `metrics.k8s.io` as "metrics unavailable" → return an empty list and log at DEBUG, no raise. |
-| 6 | MEDIUM | App Insights received **zero** telemetry for 30 days even though the resource exists and is healthy. | `postprovision.sh` set the sidecar `APPLICATIONINSIGHTS_CONNECTION_STRING` from `${APPLICATIONINSIGHTS_CONNECTION_STRING:-}`, which is empty whenever the shell env is unset (the common standalone-run case). The Container App baked an empty value → telemetry off. | `postprovision.sh` now resolves the connection string from shell env → `azd env get-values` → the live App Insights component in the platform RG (`az monitor app-insights component show`). Empty is still acceptable (telemetry off, zero cost) when no component exists. |
+| 6 | MEDIUM | App Insights received **zero** telemetry for 30 days even though the resource exists and is healthy. | `postprovision.sh` set the sidecar `APPLICATIONINSIGHTS_CONNECTION_STRING` from `${APPLICATIONINSIGHTS_CONNECTION_STRING:-}`, which is empty whenever the shell env is unset (the common standalone-run case). The Container App baked an empty value → telemetry off. | `postprovision.sh` now resolves the connection string from shell env → `azd env get-values` → the live App Insights component in the platform RG, looked up via the **generic ARM provider** (`az resource list/show`). Empty is still acceptable (telemetry off, zero cost) when no component exists. |
 
 ### Capacity-signals interaction (verified safe)
 
@@ -49,7 +49,12 @@ pending pods, watermarks and slots, and `_pool_headroom(top_nodes)` yields
   to `[]` on metrics-server 503/404 (`getattr`-guarded so fakes without a
   `status_code` are unaffected).
 - `scripts/dev/postprovision.sh` — multi-source resolution of
-  `APPLICATIONINSIGHTS_CONNECTION_STRING_VAL`.
+  `APPLICATIONINSIGHTS_CONNECTION_STRING_VAL`. The App Insights fallback uses
+  the generic ARM provider (`az resource list/show`) rather than
+  `az monitor app-insights component show` — the latter needs the
+  `application-insights` CLI extension and HANGS a non-interactive `azd up`
+  when the extension is absent and the auto-install prompt blocks on stdin
+  (a `|| true` cannot rescue a hung process).
 
 No Bicep change in this commit (the worker `1.0/2.0` bump is already committed in
 `infra/modules/containerAppControl.bicep` / `infra/main.json`).
