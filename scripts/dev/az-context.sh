@@ -286,8 +286,19 @@ prepare_deploy_env_from_az_login() {
   # incident). Forcing an explicit override on every cross-sub deploy
   # makes the mistake noisy instead of silent.
   if command -v azd >/dev/null 2>&1; then
-    local azd_sub
-    azd_sub="$(azd env get-values 2>/dev/null \
+    local azd_sub azd_values
+    # Guard the azd call the same way lib-env.sh::load_azd_env does: a slow,
+    # unauthenticated, or prompting `azd` (e.g. "Select an environment") would
+    # otherwise hang the WHOLE deploy indefinitely here — observed blocking
+    # quick-deploy at the sub-mismatch guard with no output. `timeout 8s` +
+    # `</dev/null` make it fail fast (no env discovered → skip the guard) so an
+    # explicit-override deploy is never held hostage by a wedged azd CLI.
+    if command -v timeout >/dev/null 2>&1; then
+      azd_values="$(timeout 8s azd env get-values </dev/null 2>/dev/null || true)"
+    else
+      azd_values="$(azd env get-values </dev/null 2>/dev/null || true)"
+    fi
+    azd_sub="$(printf '%s\n' "$azd_values" \
       | awk -F'=' '/^AZURE_SUBSCRIPTION_ID=/{gsub(/"/,"",$2); print $2; exit}')"
     if [[ -n "$azd_sub" && "$azd_sub" != "$current_sub" ]]; then
       if [[ "${ELB_ALLOW_SUB_MISMATCH:-0}" != "1" ]]; then
