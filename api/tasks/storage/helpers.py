@@ -20,7 +20,15 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
-# Standard BLAST databases available from NCBI
+# Standard BLAST databases available from NCBI — descriptive metadata only.
+#
+# WARNING: This is NOT an exhaustive catalog and MUST NOT be used to validate
+# whether a database can be warmed/downloaded. NCBI publishes many more
+# databases than are listed here (e.g. ``18S_fungal_sequences``,
+# ``ITS_RefSeq_Fungi``). The authoritative "does this DB exist" check is the
+# workload Storage catalog (``api.services.storage.data.list_databases``).
+# Gating on membership in this dict previously rejected valid prepared
+# databases with a misleading "unknown database" error.
 BLAST_DATABASES: dict[str, dict[str, str]] = {
     "nt": {"description": "Nucleotide collection (nt)", "size_hint": "~200 GB"},
     "nr": {"description": "Non-redundant protein sequences", "size_hint": "~150 GB"},

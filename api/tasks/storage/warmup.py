@@ -24,9 +24,6 @@ from celery import shared_task
 import api.tasks.storage as _facade
 from api.services.feature_events import TERMINAL_STATUSES, record_feature_event
 from api.tasks.storage.helpers import (
-    BLAST_DATABASES,
-)
-from api.tasks.storage.helpers import (
     publish_db_metadata_invalidate as _publish_db_metadata_invalidate,
 )
 from api.tasks.storage.helpers import (
@@ -177,16 +174,13 @@ def warmup_database(
             ),
         }
 
-    db_info = BLAST_DATABASES.get(database_name)
-    if not db_info:
-        _update_state(
-            job_id,
-            "failed",
-            status="failed",
-            error_code=f"unknown database: {database_name}",
-        )
-        return {"status": "failed", "error": f"unknown database: {database_name}"}
-
+    # The authoritative "does this database exist" check is the workload
+    # Storage catalog lookup below (list_databases + file_count + copy_status).
+    # Do NOT re-introduce a gate against a hardcoded BLAST_DATABASES dict here:
+    # NCBI ships far more databases than any static list can track (e.g.
+    # 18S_fungal_sequences, ITS_RefSeq_Fungi), and any prepared database must
+    # be warmable. Gating on a hardcoded catalog rejected valid prepared DBs
+    # with a misleading "unknown database" error.
     _record_task_progress(self, "checking_storage", database=database_name)
     _update_state(job_id, "downloading", status="running")
 
