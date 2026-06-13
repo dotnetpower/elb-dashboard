@@ -66,13 +66,23 @@ def test_read_procfs_self_returns_positive_reading() -> None:
 
 def test_procfs_fallback_compatible_with_compute_cpu_pct() -> None:
     """Two procfs readings must be safe to feed into compute_cpu_pct."""
+    import time
+
     from api.services.cgroup_reporter import compute_cpu_pct, read_procfs_self
 
     a = read_procfs_self()
-    # Burn a tiny bit of CPU so utime+stime move forward.
+    # Burn CPU for a fixed ~50 ms window. The window MUST be comfortably
+    # larger than one scheduler clock tick (typically 10 ms): with a sub-tick
+    # window a single 10 ms utime/stime increment lands against a ~1 ms wall
+    # delta and the ratio spikes past 1000 % (a flake under the `-n auto`
+    # parallel load CI runs). A single thread can't exceed one core, so over a
+    # 50 ms window pct converges near 100 % with only modest tick quantization.
     s = 0
-    for i in range(50_000):
+    i = 0
+    end = time.perf_counter() + 0.05
+    while time.perf_counter() < end:
         s += i
+        i += 1
     b = read_procfs_self()
     pct = compute_cpu_pct(a, b)
     assert pct >= 0.0

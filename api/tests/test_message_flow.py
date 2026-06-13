@@ -15,12 +15,18 @@ Validation: ``uv run pytest -q api/tests/test_message_flow.py``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from api.services import message_flow
 from fastapi.testclient import TestClient
+
+
+def _recent_iso(seconds_ago: float) -> str:
+    """ISO timestamp ``seconds_ago`` before now (UTC), for settling-window tests."""
+    return (datetime.now(UTC) - timedelta(seconds=seconds_ago)).isoformat()
 
 
 def _job(
@@ -38,6 +44,8 @@ def _job(
     phase: str | None = None,
     query_label: str | None = None,
     created_at: str = "2026-06-13T00:00:00+00:00",
+    updated_at: str | None = None,
+    error_code: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         job_id=job_id,
@@ -52,6 +60,8 @@ def _job(
         phase=phase,
         query_label=query_label,
         created_at=created_at,
+        updated_at=updated_at,
+        error_code=error_code,
         payload=payload or {},
     )
 
@@ -160,6 +170,114 @@ def test_active_jobs_grouped_into_producers_and_clusters(_enable) -> None:
     assert clusters[0]["running"] == 2
     assert clusters[0]["queued"] == 1
     assert clusters[0]["total"] == 3
+
+
+def test_pending_and_reducing_are_active(_enable) -> None:
+    """The broadened active set keeps ``pending`` and ``reducing`` jobs visible
+    (a ``reducing`` job is still running its result-merge phase). ``reducing``
+    folds into the consumer "running" badge, ``pending`` into "queued"."""
+    rows = [
+        _job(job_id="p1", status="pending", owner_upn="a@b.com"),
+        _job(job_id="r1", status="reducing", owner_upn="a@b.com"),
+        _job(job_id="run1", status="running", owner_upn="a@b.com"),
+        _job(job_id="q1", status="queued", owner_upn="a@b.com"),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["active_total"] == 4
+    assert {b["job_id"] for b in snap["broker"]} == {"p1", "r1", "run1", "q1"}
+    assert all(b["lifecycle"] == "active" for b in snap["broker"])
+    cluster = snap["consumers"]["clusters"][0]
+    # running + reducing -> running badge; queued + pending -> queued badge.
+    assert cluster["running"] == 2
+    assert cluster["queued"] == 2
+    assert cluster["total"] == 4
+    assert cluster["settling"] == 0
+
+
+def test_recently_terminal_jobs_settle_without_inflating_counts(_enable) -> None:
+    """A just-finished/failed job lingers as a ``settling`` box with its real
+    terminal status, but does NOT count toward producer/consumer active totals."""
+    rows = [
+        _job(
+            job_id="run1",
+            status="running",
+            owner_upn="a@b.com",
+            payload={"submission_source": "dashboard"},
+        ),
+        _job(
+            job_id="done1",
+            status="completed",
+            owner_upn="a@b.com",
+            updated_at=_recent_iso(10),
+        ),
+        _job(
+            job_id="fail1",
+            status="failed",
+            owner_upn="a@b.com",
+            updated_at=_recent_iso(20),
+            error_code="database_not_found",
+        ),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["active_total"] == 1
+    assert snap["settling_total"] == 2
+    boxes = {b["job_id"]: b for b in snap["broker"]}
+    assert boxes["run1"]["lifecycle"] == "active"
+    assert boxes["done1"]["lifecycle"] == "settling"
+    assert boxes["done1"]["status"] == "completed"
+    assert boxes["fail1"]["lifecycle"] == "settling"
+    assert boxes["fail1"]["status"] == "failed"
+    assert boxes["fail1"]["error_code"] == "database_not_found"
+    # Active boxes always come before settling ones.
+    lifecycles = [b["lifecycle"] for b in snap["broker"]]
+    assert lifecycles == ["active", "settling", "settling"]
+    # Producers count active jobs only (1), not the settling pair.
+    assert sum(p["job_count"] for p in snap["producers"]) == 1
+    # Consumer running/queued reflect active only; settling tracked separately.
+    cluster = snap["consumers"]["clusters"][0]
+    assert cluster["running"] == 1
+    assert cluster["queued"] == 0
+    assert cluster["settling"] == 2
+    assert cluster["total"] == 1
+
+
+def test_old_terminal_jobs_excluded(_enable) -> None:
+    """A terminal job older than the settling window is dropped entirely."""
+    rows = [
+        _job(
+            job_id="old1",
+            status="completed",
+            owner_upn="a@b.com",
+            updated_at=_recent_iso(600),  # 10 minutes ago, well past the 90s window
+        ),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["active_total"] == 0
+    assert snap["settling_total"] == 0
+    assert snap["broker"] == []
+
+
+def test_settling_window_env_override(_enable, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``MESSAGE_FLOW_SETTLING_SECONDS`` tunes how long a terminal job lingers."""
+    monkeypatch.setenv("MESSAGE_FLOW_SETTLING_SECONDS", "5")
+    rows = [
+        _job(
+            job_id="done1",
+            status="completed",
+            owner_upn="a@b.com",
+            updated_at=_recent_iso(20),  # outside the tightened 5s window
+        ),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["settling_total"] == 0
 
 
 def test_consumers_dedup_same_cluster_when_rg_sub_backfilled(_enable) -> None:

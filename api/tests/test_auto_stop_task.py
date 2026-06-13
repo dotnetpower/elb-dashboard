@@ -24,7 +24,9 @@ from api.services.auto_stop_evaluator import IdleDecision
 
 
 @pytest.fixture(autouse=True)
-def _file_backend(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def _file_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, request: pytest.FixtureRequest
+) -> None:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
     # Driver pulls `get_state_repo()` inside the task body — stub it so the
@@ -39,6 +41,29 @@ def _file_backend(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         "api.tasks.azure.idle_autostop._live_blast_signal",
         lambda _pref, _power_state: (None, None),
     )
+    # The beat driver resolves cluster power_state via one batched ARM call
+    # (`_batch_power_states` → `management.azure.com`). The run()-driver tests
+    # mock `evaluate_cluster`, so the power_state value is irrelevant to them;
+    # stub the batch probe to "Running" for every pref so they stay hermetic
+    # and don't pay a real ARM connect/retry (~2 s, flaky in CI). The two tests
+    # that exercise the batch path itself opt out by name.
+    if "batch_power_states" not in request.node.name:
+        monkeypatch.setattr(
+            "api.tasks.azure.idle_autostop._batch_power_states",
+            lambda prefs: (
+                {
+                    (p.subscription_id, p.resource_group, p.cluster_name): "Running"
+                    for p in prefs
+                },
+                {
+                    "rg_groups": len(
+                        {(p.subscription_id, p.resource_group) for p in prefs}
+                    ),
+                    "rg_failed": 0,
+                    "failed_rgs": [],
+                },
+            ),
+        )
 
 
 def _pref(**overrides: object) -> AutoStopPreference:

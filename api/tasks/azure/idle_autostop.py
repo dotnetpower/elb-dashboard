@@ -476,4 +476,4 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     return summary
 
 
-__all__ = ["_live_blast_signal", "auto_stop_aks", "evaluate_idle_clusters"]
+__all__ = ["_batch_power_states", "_live_blast_signal", "auto_stop_aks", "evaluate_idle_clusters"]

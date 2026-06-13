@@ -23,9 +23,15 @@ export function MessageFlowCard() {
   const query = useQuery({
     queryKey: ["message-flow"],
     queryFn: () => messageFlowApi.get(),
-    refetchInterval: 20_000,
+    // Poll faster while something is in flight or fading out so a status change
+    // surfaces quickly; back off to a calm cadence when the queue is idle.
+    refetchInterval: (q) => {
+      const d = q.state.data;
+      const visible = (d?.active_total ?? 0) + (d?.settling_total ?? 0);
+      return visible > 0 ? 8_000 : 20_000;
+    },
     retry: false,
-    staleTime: 10_000,
+    staleTime: 5_000,
   });
 
   const data = query.data;
@@ -35,6 +41,7 @@ export function MessageFlowCard() {
   const producers = data.producers ?? [];
   const clusters = data.consumers?.clusters ?? [];
   const activeTotal = data.active_total ?? 0;
+  const settlingTotal = data.settling_total ?? 0;
 
   return (
     <>
@@ -52,7 +59,7 @@ export function MessageFlowCard() {
         <Radio size={14} strokeWidth={1.5} style={{ color: "var(--accent)", flexShrink: 0 }} />
         <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>Message Flow</span>
 
-        {activeTotal === 0 ? (
+        {activeTotal === 0 && settlingTotal === 0 ? (
           <span style={{ color: "var(--text-faint)" }}>no active messages</span>
         ) : (
           <>
@@ -78,6 +85,9 @@ export function MessageFlowCard() {
             <span>
               <strong style={{ color: "var(--text-primary)" }}>{activeTotal}</strong> active jobs
             </span>
+            {settlingTotal > 0 ? (
+              <span style={{ color: "var(--text-faint)" }}>· {settlingTotal} finishing</span>
+            ) : null}
             <ChevronRight size={12} strokeWidth={1.5} style={{ color: "var(--text-faint)" }} />
             <span>
               {clusters.length} cluster{clusters.length === 1 ? "" : "s"}

@@ -834,6 +834,17 @@ def test_canonical_jobs_list_subscription_scope_discovers_clusters(monkeypatch):
             else {}
         ),
     )
+    # Active rows (the "running" job below) trigger a per-job detail refresh
+    # via `external_blast.get_job`. Without this stub it makes a real HTTP GET
+    # to the fake `http://elb-cluster-b` base URL and burns the full client
+    # timeout (~10 s) before degrading — the detail miss is swallowed, so the
+    # assertions still pass, but the test would needlessly tarpit CI. Return a
+    # no-op detail so the merge keeps the original row.
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda job_id, **_kwargs: {"job_id": job_id, "status": "running"},
+    )
 
     jobs_by_base = {
         "http://elb-cluster-a": {

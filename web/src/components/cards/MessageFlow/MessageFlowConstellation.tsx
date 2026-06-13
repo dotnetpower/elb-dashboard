@@ -32,7 +32,7 @@ import { select } from "d3-selection";
 
 import type { MessageFlowBox, MessageFlowSnapshot } from "@/api/messageFlow";
 
-import { aliasTone } from "./colors";
+import { aliasTone, isErrorStatus, jobTone } from "./colors";
 import {
   ageStyle,
   bornMs,
@@ -76,6 +76,10 @@ interface FlowLink {
   target: FlowNode;
   alias: string;
   born: number | null;
+  /** Job status driving link styling (running links stay bright regardless of age). */
+  status: string;
+  /** "active" while in flight, "settling" while a terminal job fades out. */
+  lifecycle: "active" | "settling";
 }
 
 export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId }: Props) {
@@ -304,11 +308,35 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
 
     const links: FlowLink[] = [];
     jobNodes.forEach((j) => {
+      const status = (j.status ?? "").toLowerCase();
+      const lifecycle = j.box?.lifecycle === "settling" ? "settling" : "active";
       const p = pById.get(j.alias);
-      if (p) links.push({ id: "l1:" + j.id, source: p, target: j, alias: j.alias, born: j.born ?? null });
-      if (j.status !== "queued") {
+      if (p)
+        links.push({
+          id: "l1:" + j.id,
+          source: p,
+          target: j,
+          alias: j.alias,
+          born: j.born ?? null,
+          status,
+          lifecycle,
+        });
+      // Job → cluster link only once the job has left the waiting lanes
+      // (queued/pending are not yet placed on a cluster). Running/reducing and
+      // recently-terminal settling jobs keep the link so the fade-out reads.
+      const waiting = status === "queued" || status === "pending";
+      if (!waiting) {
         const c = cByName.get(j.box?.cluster_name || "");
-        if (c) links.push({ id: "l2:" + j.id, source: j, target: c, alias: j.alias, born: j.born ?? null });
+        if (c)
+          links.push({
+            id: "l2:" + j.id,
+            source: j,
+            target: c,
+            alias: j.alias,
+            born: j.born ?? null,
+            status,
+            lifecycle,
+          });
       }
     });
 
@@ -328,6 +356,13 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
       .append("g")
       .attr("fill", "none")
       .attr("stroke-linecap", "round")
+      .attr("aria-hidden", "true");
+    // Particles ride above the links but below the nodes, so the "energy"
+    // travelling producer → job → cluster reads clearly without obscuring the
+    // interactive job glyphs.
+    const particleLayer = svg
+      .append("g")
+      .attr("class", "mf-particles")
       .attr("aria-hidden", "true");
     const sessionLayer = svg.append("g").attr("aria-hidden", "true");
     const nodeLayer = svg.append("g");
@@ -446,23 +481,59 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
           .attr("fill", "var(--text-faint)")
           .text((d) => `● ${d.running} · ○ ${d.queued}`);
 
-        // jobs
+        // jobs — status-aware visuals. Terminal states (failed/cancelled/
+        // completed) override the submitter colour so a finished or failed job
+        // reads unambiguously; in-flight states keep the submitter's tone.
         const job = g.filter((d) => d.kind === "job");
-        job
-          .append("circle")
-          .attr("class", "mf-job-core")
-          .attr("r", (d) => d.r ?? 4)
-          .attr("fill", (d) => (d.status === "queued" ? "transparent" : aliasTone(d.alias).fill))
-          .attr("stroke", (d) => aliasTone(d.alias).accent)
-          .attr("stroke-width", 1.2)
-          .attr("stroke-dasharray", (d) => (d.status === "queued" ? "3 3" : null));
-        job
-          .filter((d) => d.status === "running")
-          .append("circle")
-          .attr("r", (d) => (d.r ?? 4) + 2.5)
-          .attr("fill", "none")
-          .attr("stroke", (d) => aliasTone(d.alias).accent)
-          .attr("stroke-opacity", 0.18);
+        job.each(function (d) {
+          const sel = select(this);
+          const status = (d.status ?? "").toLowerCase();
+          const tone = jobTone(status, d.alias);
+          const waiting = status === "queued" || status === "pending";
+          const settling = d.box?.lifecycle === "settling";
+          const r = d.r ?? 4;
+
+          sel
+            .append("circle")
+            .attr("class", "mf-job-core")
+            .attr("r", r)
+            .attr("fill", waiting ? "transparent" : tone.fill)
+            .attr("stroke", tone.accent)
+            .attr("stroke-width", 1.2)
+            .attr(
+              "stroke-dasharray",
+              waiting ? "3 3" : status === "cancelled" ? "1 3" : null,
+            );
+
+          // Running/reducing get a soft halo; the CSS pulse animates it (and is
+          // disabled under prefers-reduced-motion). Reducing pulses a touch
+          // slower to read as "merging results" rather than "scanning".
+          if (status === "running" || status === "reducing") {
+            sel
+              .append("circle")
+              .attr(
+                "class",
+                status === "reducing" ? "mf-halo mf-halo--reducing" : "mf-halo",
+              )
+              .attr("r", r + 2.5)
+              .attr("fill", "none")
+              .attr("stroke", tone.accent)
+              .attr("stroke-opacity", 0.2);
+          }
+
+          // Failed jobs carry a small broken-cross marker on top of the danger
+          // tone so colour is never the only error signal (WCAG).
+          if (isErrorStatus(status)) {
+            sel
+              .append("path")
+              .attr("d", `M${-r * 0.6},${-r * 0.6} L${r * 0.6},${r * 0.6} M${r * 0.6},${-r * 0.6} L${-r * 0.6},${r * 0.6}`)
+              .attr("stroke", "rgba(255,255,255,0.9)")
+              .attr("stroke-width", 1.1)
+              .attr("stroke-linecap", "round");
+          }
+
+          if (settling) sel.classed("mf-node--settling", true);
+        });
         job.append("title").text((d) => (d.box ? jobTooltip(d.box) : ""));
 
         return g;
@@ -515,9 +586,13 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
 
     function applyHover() {
       const hv = hoveredRef.current;
-      nodeSel.style("opacity", (d) =>
-        hv == null || d.alias === hv || d.kind === "cluster" ? 1 : 0.16,
-      );
+      nodeSel.style("opacity", (d) => {
+        const dim = !(hv == null || d.alias === hv || d.kind === "cluster");
+        if (dim) return 0.16;
+        // Settling (recently-terminal, fading) jobs sit at a calmer base so the
+        // eye is drawn to the live in-flight work, not the finished tail.
+        return d.kind === "job" && d.box?.lifecycle === "settling" ? 0.5 : 1;
+      });
       linkSel.attr("opacity", (d) => (hv == null ? 1 : d.alias === hv ? 1 : 0.06));
       sessionG.each(function (a) {
         const on = hv != null && a === hv;
@@ -594,6 +669,79 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
       });
     nodeSel.filter((d) => d.kind === "job").call(dragBehavior);
 
+    // ---------- moving "energy" particles ----------
+    // Glowing dots travel producer → job → cluster along the active links so a
+    // live job reads as energy in motion, not a static dot. Running/reducing
+    // links carry two faster particles; queued/pending links carry one slow
+    // drifting particle. Settling (fading) links carry none. Honours
+    // prefers-reduced-motion: when set, no particles animate (the static
+    // status glyphs already convey state).
+    interface Particle {
+      link: FlowLink;
+      dur: number;
+      offset: number;
+    }
+    const particleData: Particle[] = [];
+    links.forEach((l) => {
+      if (l.lifecycle === "settling") return;
+      if (l.status === "running" || l.status === "reducing") {
+        const dur = l.status === "reducing" ? 2400 : 1600;
+        particleData.push({ link: l, dur, offset: 0 });
+        particleData.push({ link: l, dur, offset: 0.5 });
+      } else {
+        // queued/pending: a single slow particle drifting toward the broker.
+        particleData.push({ link: l, dur: 3000, offset: (spread01(l.id) + 0.5) % 1 });
+      }
+    });
+
+    const particleSel = particleLayer
+      .selectAll<SVGCircleElement, Particle>("circle")
+      .data(particleData)
+      .join("circle")
+      .attr("class", "mf-particle")
+      .attr("r", (p) =>
+        p.link.status === "running" || p.link.status === "reducing" ? 2 : 1.5,
+      )
+      .attr("fill", (p) => jobTone(p.link.status, p.link.alias).accent)
+      // `color` drives the CSS drop-shadow glow (currentColor) so the halo
+      // matches the particle's own tone.
+      .style("color", (p) => jobTone(p.link.status, p.link.alias).accent);
+
+    // Evaluate the link's cubic bezier (same control points as the rendered
+    // path) at parameter t, reading live node positions each frame.
+    const cubicAt = (l: FlowLink, t: number): { x: number; y: number } => {
+      const sx = l.source.x ?? 0;
+      const sy = l.source.y ?? 0;
+      const tx = l.target.x ?? 0;
+      const ty = l.target.y ?? 0;
+      const mx = (sx + tx) / 2;
+      const u = 1 - t;
+      const x = u * u * u * sx + 3 * u * u * t * mx + 3 * u * t * t * mx + t * t * t * tx;
+      const y = u * u * u * sy + 3 * u * u * t * sy + 3 * u * t * t * ty + t * t * t * ty;
+      return { x, y };
+    };
+
+    let particleRaf = 0;
+    const animateParticles = (ts: number) => {
+      const hv = hoveredRef.current;
+      particleSel
+        .attr("transform", (p) => {
+          const t = (ts / p.dur + p.offset) % 1;
+          const pt = cubicAt(p.link, t);
+          return `translate(${pt.x},${pt.y})`;
+        })
+        .attr("opacity", (p) => {
+          const t = (ts / p.dur + p.offset) % 1;
+          const fade = Math.sin(Math.PI * t); // 0 at the ends, 1 at mid-flight
+          const dim = hv && p.link.alias !== hv ? 0.12 : 1;
+          return (0.15 + 0.8 * fade) * dim;
+        });
+      particleRaf = requestAnimationFrame(animateParticles);
+    };
+    if (!reduceMotion && particleData.length) {
+      particleRaf = requestAnimationFrame(animateParticles);
+    }
+
     function ticked() {
       const now = Date.now();
       jobNodes.forEach((d) => {
@@ -610,11 +758,20 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
           const mx = (sx + tx) / 2;
           return `M${sx},${sy} C${mx},${sy} ${mx},${ty} ${tx},${ty}`;
         })
-        .attr("stroke-width", (l) => ageStyle(l.born, now).w)
+        .attr("stroke-width", (l) => {
+          // Running/reducing links stay bright + thick regardless of age so a
+          // long-running job's connection never fades to near-invisible (the
+          // old age-only model made a live job look like it had vanished).
+          if (l.lifecycle === "settling") return 0.8;
+          if (l.status === "running" || l.status === "reducing") return 1.7;
+          return ageStyle(l.born, now).w;
+        })
         .attr("stroke-opacity", (l) => {
-          const s = ageStyle(l.born, now);
+          const running = l.status === "running" || l.status === "reducing";
+          const base =
+            l.lifecycle === "settling" ? 0.12 : running ? 0.42 : ageStyle(l.born, now).op;
           const hv = hoveredRef.current;
-          return hv && l.alias !== hv ? s.op * 0.18 : s.op;
+          return hv && l.alias !== hv ? base * 0.18 : base;
         });
       nodeSel.attr("transform", (d) => `translate(${d.x ?? 0},${d.y ?? 0})`);
       sessionG.each(function (a) {
@@ -667,6 +824,7 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
 
     return () => {
       sim.stop();
+      cancelAnimationFrame(particleRaf);
     };
     // `selectedJobId` is intentionally NOT a dependency: it only changes the
     // selection ring, handled by the dedicated effect below. Including it here

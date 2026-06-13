@@ -105,4 +105,9 @@ describe("jobTooltip", () => {
     expect(t).toContain("cluster: unassigned");
     expect(t).not.toContain("db:");
   });
+  it("notes a settling (fading) job and surfaces its error code", () => {
+    const t = jobTooltip(box({ status: "failed", lifecycle: "settling", error_code: "database_not_found" }));
+    expect(t).toContain("(finishing — fading out)");
+    expect(t).toContain("error: database_not_found");
+  });
 });

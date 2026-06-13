@@ -54,6 +54,22 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, *, snapshot: str, keys: list[
         lambda _s, _d: list(keys),
         raising=True,
     )
+    # The prepare-db route resolves shared taxonomy keys via NCBI S3 HEAD
+    # requests (`shared_taxonomy_keys` -> ncbi-blast-databases.s3.amazonaws.com).
+    # No test in this file asserts on taxonomy keys, so stub it to empty to keep
+    # the route hermetic (a real S3 round-trip is slow + flaky in CI). Patch
+    # both the source module and the route's re-imported reference.
+    monkeypatch.setattr(
+        "api.routes.storage.common.shared_taxonomy_keys",
+        lambda _s: [],
+        raising=True,
+    )
+    monkeypatch.setattr(
+        prepare_db_module,
+        "shared_taxonomy_keys",
+        lambda _s: [],
+        raising=False,
+    )
     monkeypatch.setattr(
         "api.services.storage.public_access.ensure_local_storage_access",
         lambda *_a, **_kw: {"action": "noop"},

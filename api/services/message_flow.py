@@ -13,9 +13,18 @@ Edit boundaries: Pure aggregation/shaping over ``state_repo`` rows and the
     auth + graceful degradation.
 Key entry points: ``build_message_flow``.
 Risky contracts: The broker boxes intentionally reflect ACTIVE ``JobState``
-    rows (status ``queued``/``running``), NOT raw Service Bus queue messages —
-    the request queue drains in under a second so its depth is almost always
-    zero (see docs/architecture/service-bus-integration.md). Raw query FASTA is
+    rows (status ``queued``/``pending``/``running``/``reducing`` — the canonical
+    in-flight set shared with ``JobStateRepository.list_active`` and the
+    auto-stop gate; a ``reducing`` job is still running its result-merge phase
+    and MUST keep showing), NOT raw Service Bus queue messages — the request
+    queue drains in under a second so its depth is almost always zero (see
+    docs/architecture/service-bus-integration.md). Recently-terminal rows
+    (``completed``/``failed``/``cancelled`` whose ``updated_at`` is within
+    ``_SETTLING_WINDOW_SECONDS``) ride along as ``lifecycle="settling"`` boxes so
+    the card does not yank a finished/failed job the instant it leaves the active
+    set — the SPA fades them out and shows the terminal status. Settling boxes
+    are REAL jobstate rows, never fabricated, and do NOT inflate the
+    producer/consumer active counts. Raw query FASTA is
     never stored on the job row (only sha256 + counts), so ``query_size`` is the
     sequence-letter count, never the raw upload. Submitter aliases come from
     ``owner_upn`` and are shown as-is by the SPA; never emit a raw ``owner_oid``.
@@ -30,6 +39,8 @@ Validation: ``uv run pytest -q api/tests/test_message_flow.py``.
 from __future__ import annotations
 
 import logging
+import os
+from datetime import UTC, datetime
 from typing import Any
 
 from api.services.sanitise import redact_oid
@@ -37,9 +48,39 @@ from api.services.sanitise import redact_oid
 LOGGER = logging.getLogger(__name__)
 
 # Statuses that mean a job is in flight and therefore worth drawing in the
-# broker lane. Anything else (completed/failed/cancelled/deleted) is not an
-# "active message".
-_ACTIVE_STATUSES = frozenset({"queued", "running"})
+# broker lane as a live message. This is the canonical active set shared with
+# ``JobStateRepository.list_active`` and ``auto_stop_evaluator`` — keep it in
+# sync. A ``reducing`` job is still running its result-merge phase, so dropping
+# it here made a long run visibly vanish mid-flight; ``pending`` covers the
+# freshly-submitted-but-not-yet-queued window.
+_ACTIVE_STATUSES = frozenset({"queued", "pending", "running", "reducing"})
+
+# Active statuses that represent compute actively on the cluster (folded into
+# the consumer "running" badge) vs jobs still waiting (folded into "queued").
+_RUNNING_LIKE = frozenset({"running", "reducing"})
+_QUEUED_LIKE = frozenset({"queued", "pending"})
+
+# Terminal statuses we keep drawing for a short settling window after the job
+# leaves the active set, so the card does not yank a finished/failed job the
+# instant it completes. ``deleted`` is a soft-delete the repo already filters
+# out, so it is intentionally NOT here.
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _settling_window_seconds() -> int:
+    """How long (seconds) a terminal job lingers as a ``settling`` broker box.
+
+    Configurable via ``MESSAGE_FLOW_SETTLING_SECONDS`` for tuning; defaults to
+    90s — long enough for an operator to notice a job finished or failed without
+    keeping stale rows on the card indefinitely.
+    """
+    raw = os.getenv("MESSAGE_FLOW_SETTLING_SECONDS", "").strip()
+    if raw.isdigit():
+        parsed = int(raw)
+        if 0 < parsed <= 3600:
+            return parsed
+    return 90
+
 
 # Hard caps so a pathological jobstate table can never make this snapshot
 # unbounded. The list read is already limited; these bound the response shape.
@@ -47,6 +88,42 @@ _ACTIVE_STATUSES = frozenset({"queued", "running"})
 # cheap to render while still being bounded.
 _DEFAULT_LIST_LIMIT = 200
 _MAX_BROKER_BOXES = 120
+
+
+def _parse_iso_ms(value: Any) -> float | None:
+    """Parse an ISO-8601 timestamp string to epoch ms, or ``None`` when absent
+    or unparseable. Tolerates a trailing ``Z`` and naive (UTC-assumed) stamps."""
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp() * 1000.0
+
+
+def _is_settling(state: Any, *, now_ms: float, window_ms: float) -> bool:
+    """True when a terminal row finished recently enough to keep showing.
+
+    Uses ``updated_at`` (the terminal-transition time) and falls back to
+    ``created_at``. A terminal row with no usable timestamp is treated as
+    just-finished (shown) rather than hidden, so a clock/serialisation gap never
+    silently drops a job the operator was watching.
+    """
+    finished = _parse_iso_ms(getattr(state, "updated_at", None))
+    if finished is None:
+        finished = _parse_iso_ms(getattr(state, "created_at", None))
+    if finished is None:
+        return True
+    return (now_ms - finished) <= window_ms
+
 
 
 def _payload_dict(state: Any) -> dict[str, Any]:
@@ -139,14 +216,22 @@ def _counts(cfg: Any) -> dict[str, Any]:
         return {"available": False, "reason": "error"}
 
 
-def _active_rows(caller_oid: str, *, list_limit: int) -> tuple[list[Any], str]:
-    """Return ``(active_rows, scope)`` for the caller.
+def _visible_rows(
+    caller_oid: str, *, list_limit: int
+) -> tuple[list[Any], list[Any], str, int]:
+    """Return ``(active_rows, settling_rows, scope, total_read)`` for the caller.
 
     ``scope`` is ``"shared"`` when the dev shared-visibility flag relaxes the
     per-owner boundary (every submitter's active jobs are visible), else
     ``"own"`` (only the caller's own active jobs). The SPA renders the producer
     lane subtitle from this so an operator is never misled into reading a
     self-only view as a deployment-wide one.
+
+    ``settling_rows`` are recently-terminal jobs (completed/failed/cancelled
+    within the settling window) so the card can fade a finished/failed job out
+    instead of dropping it the instant it leaves the active set. ``total_read``
+    is the raw row count returned by the repository, used to detect a truncated
+    table read.
     """
     from api.services.blast.job_state import blast_shared_visibility_enabled
     from api.services.state_repo import get_state_repo
@@ -158,8 +243,20 @@ def _active_rows(caller_oid: str, *, list_limit: int) -> tuple[list[Any], str]:
     else:
         rows = repo.list_for_owner(caller_oid, limit=list_limit, include_payload=True)
         scope = "own"
-    active = [r for r in rows if (getattr(r, "status", "") or "").lower() in _ACTIVE_STATUSES]
-    return active, scope
+
+    now_ms = datetime.now(UTC).timestamp() * 1000.0
+    window_ms = _settling_window_seconds() * 1000.0
+    active: list[Any] = []
+    settling: list[Any] = []
+    for r in rows:
+        status = (getattr(r, "status", "") or "").lower()
+        if status in _ACTIVE_STATUSES:
+            active.append(r)
+        elif status in _TERMINAL_STATUSES and _is_settling(
+            r, now_ms=now_ms, window_ms=window_ms
+        ):
+            settling.append(r)
+    return active, settling, scope, len(rows)
 
 
 def build_message_flow(
@@ -174,6 +271,12 @@ def build_message_flow(
     this returns ``{"enabled": False}`` and skips all jobstate work. When ON it
     always returns a full (possibly empty) snapshot; the route layer adds
     graceful degradation around unexpected failures.
+
+    The broker lane is active jobs (``lifecycle="active"``) followed by
+    recently-terminal jobs (``lifecycle="settling"``) so a finished/failed job
+    fades out instead of vanishing the instant it leaves the active set. Only
+    active jobs contribute to the producer/consumer counts; settling jobs are
+    drawn but counted separately via ``settling_total``.
     """
     from api.services.service_bus_pref import get_service_bus_config, service_bus_enabled
 
@@ -181,32 +284,17 @@ def build_message_flow(
         return {"enabled": False}
 
     cfg = get_service_bus_config()
-    active, scope = _active_rows(caller_oid, list_limit=list_limit)
-    # When the active set is larger than the table read window the counts below
-    # are a floor, not the true total. Surface that honestly via
-    # ``read_truncated`` so the SPA can label "showing first N" instead of
-    # implying it sees every active job.
-    read_truncated = len(active) >= list_limit
+    active, settling, scope, total_read = _visible_rows(caller_oid, list_limit=list_limit)
+    # When the table read window is hit the counts below are a floor, not the
+    # true total. Surface that honestly via ``read_truncated`` so the SPA can
+    # label "showing first N" instead of implying it sees every active job.
+    read_truncated = total_read >= list_limit
 
     producers: dict[str, dict[str, Any]] = {}
     clusters: dict[str, dict[str, Any]] = {}
     broker: list[dict[str, Any]] = []
 
-    for state in active:
-        payload = _payload_dict(state)
-        source = _submission_source(payload)
-        alias = _submitter_alias(state, source)
-        status = (getattr(state, "status", "") or "").lower()
-
-        prod = producers.setdefault(
-            alias, {"alias": alias, "job_count": 0, "sources": set()}
-        )
-        prod["job_count"] += 1
-        prod["sources"].add(source)
-
-        sub_id = getattr(state, "subscription_id", None) or ""
-        rg = getattr(state, "resource_group", None) or ""
-        cluster_name = (getattr(state, "cluster_name", None) or "").strip()
+    def _ensure_cluster(rg: str, sub_id: str, cluster_name: str) -> dict[str, Any]:
         # Group consumers by cluster NAME, not the (sub, rg, name) triple.
         # A job that is queued but not yet placed on a cluster carries an empty
         # rg/sub; once it starts the same row gains them. Keying on the full
@@ -223,6 +311,7 @@ def build_message_flow(
                 "subscription_id": sub_id,
                 "running": 0,
                 "queued": 0,
+                "settling": 0,
                 "total": 0,
             },
         )
@@ -233,28 +322,72 @@ def build_message_flow(
             cluster["resource_group"] = rg
         if not cluster["subscription_id"] and sub_id:
             cluster["subscription_id"] = sub_id
+        return cluster
+
+    def _append_box(state: Any, *, lifecycle: str) -> None:
+        payload = _payload_dict(state)
+        source = _submission_source(payload)
+        alias = _submitter_alias(state, source)
+        status = (getattr(state, "status", "") or "").lower()
+        cluster_name = (getattr(state, "cluster_name", None) or "").strip()
+        if len(broker) >= max_boxes:
+            return
+        broker.append(
+            {
+                "job_id": getattr(state, "job_id", ""),
+                "program": getattr(state, "program", None),
+                "db": getattr(state, "db", None),
+                "status": status,
+                "phase": getattr(state, "phase", None),
+                "query_label": getattr(state, "query_label", None),
+                "query_size": _query_size(payload),
+                "alias": alias,
+                "submission_source": source,
+                "cluster_name": cluster_name,
+                "created_at": getattr(state, "created_at", None),
+                "updated_at": getattr(state, "updated_at", None),
+                "lifecycle": lifecycle,
+                "error_code": getattr(state, "error_code", None) or None,
+            }
+        )
+
+    # ---- active jobs: full aggregation (producers + consumer counts + boxes) --
+    for state in active:
+        payload = _payload_dict(state)
+        source = _submission_source(payload)
+        alias = _submitter_alias(state, source)
+        status = (getattr(state, "status", "") or "").lower()
+
+        prod = producers.setdefault(
+            alias, {"alias": alias, "job_count": 0, "sources": set()}
+        )
+        prod["job_count"] += 1
+        prod["sources"].add(source)
+
+        sub_id = getattr(state, "subscription_id", None) or ""
+        rg = getattr(state, "resource_group", None) or ""
+        cluster_name = (getattr(state, "cluster_name", None) or "").strip()
+        cluster = _ensure_cluster(rg, sub_id, cluster_name)
         cluster["total"] += 1
-        if status == "running":
+        # Fold reducing into "running" (compute still on the cluster) and pending
+        # into "queued" (still waiting) so the two-badge consumer card stays
+        # consistent with the broadened active set.
+        if status in _RUNNING_LIKE:
             cluster["running"] += 1
-        elif status == "queued":
+        elif status in _QUEUED_LIKE:
             cluster["queued"] += 1
 
-        if len(broker) < max_boxes:
-            broker.append(
-                {
-                    "job_id": getattr(state, "job_id", ""),
-                    "program": getattr(state, "program", None),
-                    "db": getattr(state, "db", None),
-                    "status": status,
-                    "phase": getattr(state, "phase", None),
-                    "query_label": getattr(state, "query_label", None),
-                    "query_size": _query_size(payload),
-                    "alias": alias,
-                    "submission_source": source,
-                    "cluster_name": cluster_name,
-                    "created_at": getattr(state, "created_at", None),
-                }
-            )
+        _append_box(state, lifecycle="active")
+
+    # ---- settling jobs: drawn + cluster node kept (so the link resolves) but
+    # they do NOT inflate the producer/consumer active counts. -----------------
+    for state in settling:
+        sub_id = getattr(state, "subscription_id", None) or ""
+        rg = getattr(state, "resource_group", None) or ""
+        cluster_name = (getattr(state, "cluster_name", None) or "").strip()
+        cluster = _ensure_cluster(rg, sub_id, cluster_name)
+        cluster["settling"] += 1
+        _append_box(state, lifecycle="settling")
 
     producer_list = sorted(
         (
@@ -265,9 +398,10 @@ def build_message_flow(
     )
     cluster_list = sorted(
         clusters.values(),
-        key=lambda c: (-c["total"], c["cluster_name"]),
+        key=lambda c: (-c["total"], -c["settling"], c["cluster_name"]),
     )
 
+    visible_total = len(active) + len(settling)
     return {
         "enabled": True,
         "scope": scope,
@@ -276,10 +410,12 @@ def build_message_flow(
         "completion_topic": getattr(cfg, "completion_topic", ""),
         "sb_counts": _counts(cfg),
         "active_total": len(active),
+        "settling_total": len(settling),
         "active_shown": len(broker),
-        "broker_truncated": len(active) > len(broker),
+        "broker_truncated": visible_total > len(broker),
         "read_truncated": read_truncated,
         "producers": producer_list,
         "broker": broker,
         "consumers": {"clusters": cluster_list},
     }
+

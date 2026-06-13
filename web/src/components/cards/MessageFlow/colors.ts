@@ -39,3 +39,45 @@ export function aliasTone(alias: string): AliasTone {
   if (!alias) return PALETTE[0];
   return PALETTE[hashAlias(alias) % PALETTE.length];
 }
+
+/**
+ * Status-driven tone override for terminal/error states. Returns `null` for
+ * in-flight states (queued/pending/running/reducing) so the renderer keeps the
+ * submitter's {@link aliasTone} colour identity; returns a fixed danger/neutral/
+ * done tone for failed/cancelled/completed so a finished or failed job reads
+ * unambiguously regardless of who submitted it.
+ */
+export function statusTone(status: string): AliasTone | null {
+  switch ((status || "").toLowerCase()) {
+    case "failed":
+      return {
+        accent: "rgba(224, 123, 138, 0.92)",
+        fill: "rgba(224, 123, 138, 0.18)",
+        border: "rgba(224, 123, 138, 0.42)",
+      };
+    case "cancelled":
+      return {
+        accent: "rgba(168, 173, 188, 0.82)",
+        fill: "rgba(168, 173, 188, 0.12)",
+        border: "rgba(168, 173, 188, 0.3)",
+      };
+    case "completed":
+      return {
+        accent: "rgba(126, 200, 167, 0.9)",
+        fill: "rgba(126, 200, 167, 0.16)",
+        border: "rgba(126, 200, 167, 0.34)",
+      };
+    default:
+      return null;
+  }
+}
+
+/** True for a failed job — used to add the broken-cross error marker. */
+export function isErrorStatus(status: string): boolean {
+  return (status || "").toLowerCase() === "failed";
+}
+
+/** Effective tone for a job node: status override (terminal) else alias tone. */
+export function jobTone(status: string, alias: string): AliasTone {
+  return statusTone(status) ?? aliasTone(alias);
+}

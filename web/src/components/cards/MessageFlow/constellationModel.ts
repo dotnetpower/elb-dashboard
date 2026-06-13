@@ -82,6 +82,8 @@ export function jobTooltip(b: MessageFlowBox): string {
     `${b.program ?? "blast"} · ${querySizeLabel(b.query_size)}`,
     `status: ${b.status}${b.phase ? ` (${b.phase})` : ""}`,
   ];
+  if (b.lifecycle === "settling") lines.push("(finishing — fading out)");
+  if (b.error_code) lines.push(`error: ${b.error_code}`);
   if (b.db) lines.push(`db: ${b.db}`);
   lines.push(`submitter: ${b.alias}`);
   lines.push(`cluster: ${b.cluster_name || "unassigned"}`);

@@ -180,6 +180,22 @@ def _baseline_patches(
         },
         raising=True,
     )
+    # Kubelet RBAC pre-flight: the `mode=aks` path resolves the kubelet
+    # identity OID via a real ARM lookup (`management.azure.com`). Untouched
+    # it fails in the test environment and degrades to `probe_failed` (after
+    # ~5 s of ARM connect/retry backoff first), which falls through to
+    # dispatch. Stub it to the same `probe_failed` outcome instantly so the
+    # aks tests stay hermetic and fast; a test exercising the RBAC-block path
+    # overrides this after calling `_baseline_patches`.
+    from api.services.k8s.prepare_db_preflight import KubeletStorageAccessResult
+
+    monkeypatch.setattr(
+        "api.services.k8s.prepare_db_preflight.kubelet_storage_blob_data_access",
+        lambda *_a, **_kw: KubeletStorageAccessResult(
+            status="probe_failed", reason="stubbed in tests"
+        ),
+        raising=True,
+    )
 
 
 def test_mode_server_side_default_path_unchanged(

@@ -162,6 +162,12 @@ function JobDetailModal({ box, onClose }: JobDetailModalProps) {
             {summaryItem("Database", box.db ?? "—")}
             {summaryItem("Submitter", box.alias)}
             {summaryItem("Cluster", box.cluster_name || "unassigned")}
+            {box.error_code
+              ? summaryItem(
+                  "Error",
+                  <span style={{ color: "var(--danger)" }}>{box.error_code}</span>,
+                )
+              : null}
           </div>
 
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 8 }}>
@@ -221,6 +227,8 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
   const counts = snapshot.sb_counts;
   const queue = counts?.queue;
   const activeTotal = snapshot.active_total ?? 0;
+  const settlingTotal = snapshot.settling_total ?? 0;
+  const visibleTotal = activeTotal + settlingTotal;
 
   return createPortal(
     <div
@@ -290,6 +298,9 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               }}
             />
             {activeTotal} active
+            {settlingTotal > 0 ? (
+              <span style={{ color: "var(--text-faint)" }}>· {settlingTotal} finishing</span>
+            ) : null}
             {updatedAgo ? (
               <span style={{ color: "var(--text-faint)" }}>· updated {updatedAgo}</span>
             ) : null}
@@ -307,7 +318,7 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
 
         {/* Body */}
         <div style={{ padding: 20, overflowY: "auto" }}>
-          {activeTotal === 0 ? (
+          {visibleTotal === 0 ? (
             <div
               style={{
                 padding: "40px 16px",
@@ -347,6 +358,42 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               <span className="message-flow-legend__item">
                 <span
                   style={{
+                    width: 9,
+                    height: 9,
+                    borderRadius: "50%",
+                    background: "rgba(126, 200, 167, 0.9)",
+                  }}
+                />
+                reducing
+              </span>
+              <span className="message-flow-legend__item">
+                <span
+                  style={{
+                    position: "relative",
+                    width: 10,
+                    height: 10,
+                    borderRadius: "50%",
+                    background: "rgba(224, 123, 138, 0.4)",
+                    border: "1px solid rgba(224, 123, 138, 0.92)",
+                  }}
+                />
+                failed
+              </span>
+              <span className="message-flow-legend__item">
+                <span
+                  style={{
+                    width: 9,
+                    height: 9,
+                    borderRadius: "50%",
+                    background: "rgba(168, 173, 188, 0.5)",
+                    opacity: 0.55,
+                  }}
+                />
+                finishing (fading)
+              </span>
+              <span className="message-flow-legend__item">
+                <span
+                  style={{
                     width: 12,
                     height: 12,
                     borderRadius: 3,
@@ -368,7 +415,7 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               </span>
               <span className="message-flow-legend__item">node size = query length</span>
               <span className="message-flow-legend__item">color = submitter</span>
-              <span className="message-flow-legend__item">link weight = message age</span>
+              <span className="message-flow-legend__item">moving dots = live energy</span>
             </div>
             <MessageFlowConstellation
               snapshot={snapshot}
@@ -384,8 +431,8 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
                   textAlign: "center",
                 }}
               >
-                Showing the first {snapshot.active_shown ?? 0} of {activeTotal} active
-                jobs to keep the graph readable.
+                Showing the first {snapshot.active_shown ?? 0} of {visibleTotal} jobs
+                to keep the graph readable.
               </div>
             ) : null}
             </>

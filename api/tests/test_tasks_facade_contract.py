@@ -36,6 +36,7 @@ _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.azure.assign_aks_roles",  # .delay
     "api.tasks.azure._grant_network_contributor_on_subnet",
     "api.tasks.azure.enable_aks_container_insights",  # .delay
+    "api.tasks.azure.idle_autostop._batch_power_states",
     "api.tasks.azure.idle_autostop._live_blast_signal",
     "api.tasks.azure.peering.delete_vnet_peering_on_cluster",
     "api.tasks.azure.peering.ensure_vnet_peering_with_cluster",

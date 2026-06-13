@@ -67,6 +67,31 @@ def _env_baseline(
 
 
 @pytest.fixture(autouse=True)
+def _block_jwks_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make bearer-token validation hermetic by default.
+
+    ``api.auth._validate_token`` calls ``_get_jwks_client`` (a synchronous OIDC
+    discovery + JWKS fetch to ``login.microsoftonline.com``) BEFORE it can
+    reject a malformed token. Any test that sends a garbage/invalid bearer
+    token (``Authorization: Bearer not-a-jwt``) would otherwise do a real HTTPS
+    round-trip — slow and flaky on CI, where the host resolves AAD. Default the
+    JWKS client to one that raises ``PyJWTError`` so the existing
+    ``except jwt.PyJWTError -> 401 "invalid token"`` path is exercised with no
+    network. Valid-token tests (``test_security_audit_4_8``, ``test_strict_jwt``)
+    override this with their own ``_get_jwks_client`` stub inside the test body
+    (monkeypatch last-write-wins); ``AUTH_DEV_BYPASS`` tests never reach
+    ``_validate_token`` at all. No test depends on the real JWKS fetch.
+    """
+    import api.auth as _auth
+    import jwt as _jwt
+
+    def _no_network(_tenant_id: str) -> object:
+        raise _jwt.PyJWTError("JWKS fetch disabled in tests")
+
+    monkeypatch.setattr(_auth, "_get_jwks_client", _no_network, raising=True)
+
+
+@pytest.fixture(autouse=True)
 def _stub_blast_submit_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default-pass for the BLAST submit fail-closed gates.
 

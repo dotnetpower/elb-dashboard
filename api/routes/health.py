@@ -256,7 +256,15 @@ def readiness() -> Any:
         from api.celery_app import celery_app
 
         conn = celery_app.connection()
-        conn.ensure_connection(max_retries=1, timeout=2)
+        # Fail-fast on purpose: `max_retries=0` makes a single connect attempt
+        # and raises immediately on failure instead of sleeping the kombu retry
+        # interval (`interval_start`, ~2 s) before one retry. A readiness probe
+        # is re-fired by the orchestrator on its own cadence, so an internal
+        # retry only adds latency (and can push the probe past the caller's
+        # timeout, making a briefly-degraded broker look fully down). This
+        # mirrors the Storage probe's documented `retry_total=0` philosophy
+        # below and removes a ~2 s tarpit per readiness call when Redis is down.
+        conn.ensure_connection(max_retries=0, timeout=2)
         conn.close()
         components["redis"] = {"status": "ok"}
     except Exception as exc:

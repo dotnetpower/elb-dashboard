@@ -245,7 +245,12 @@ def _gate_broker() -> GateResult:
         from api.celery_app import celery_app
 
         conn = celery_app.connection()
-        conn.ensure_connection(max_retries=1, timeout=2)
+        # Fail-fast: `max_retries=0` makes a single connect attempt and raises
+        # immediately. `max_retries=1` would sleep the kombu retry interval
+        # (~2 s) before one retry — pure latency for a fail-closed gate that
+        # already returns a `fail` row when the broker is unreachable. Mirrors
+        # the readiness probe and pre-flight broker check.
+        conn.ensure_connection(max_retries=0, timeout=2)
         conn.close()
     except Exception as exc:
         LOGGER.warning("submit gate: broker probe failed: %s", type(exc).__name__)

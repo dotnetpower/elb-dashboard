@@ -15,6 +15,15 @@ import type { ServiceBusCounts } from "@/api/settings";
 
 export type SubmissionSource = "dashboard" | "external_api" | "servicebus";
 
+/**
+ * Where a broker job sits in its lifecycle for the constellation:
+ * - `active` — currently in flight (queued/pending/running/reducing).
+ * - `settling` — recently terminal (completed/failed/cancelled) and fading out;
+ *   the backend keeps it for a short window so a finished/failed job does not
+ *   vanish the instant it leaves the active set.
+ */
+export type JobLifecycle = "active" | "settling";
+
 export interface MessageFlowProducer {
   alias: string;
   job_count: number;
@@ -34,6 +43,12 @@ export interface MessageFlowBox {
   submission_source: SubmissionSource;
   cluster_name: string;
   created_at: string | null;
+  /** Terminal-transition time, used to time the settling fade. */
+  updated_at?: string | null;
+  /** `active` while in flight, `settling` while a terminal job fades out. */
+  lifecycle?: JobLifecycle;
+  /** Short error identifier for a failed job (never a full error body). */
+  error_code?: string | null;
 }
 
 export interface MessageFlowCluster {
@@ -42,6 +57,9 @@ export interface MessageFlowCluster {
   subscription_id: string;
   running: number;
   queued: number;
+  /** Recently-terminal jobs targeting this cluster (fading out); never counted
+   *  in running/queued/total. */
+  settling?: number;
   total: number;
 }
 
@@ -54,9 +72,11 @@ export interface MessageFlowSnapshot {
   completion_topic?: string;
   sb_counts?: ServiceBusCounts;
   active_total?: number;
-  /** Number of broker boxes actually returned (≤ active_total). */
+  /** Recently-terminal jobs still drawn (fading out), not part of active_total. */
+  settling_total?: number;
+  /** Number of broker boxes actually returned (≤ active_total + settling_total). */
   active_shown?: number;
-  /** True when more active jobs exist than the broker box cap. */
+  /** True when more visible jobs exist than the broker box cap. */
   broker_truncated?: boolean;
   /** True when the table read window was hit (counts are a floor, not total). */
   read_truncated?: boolean;

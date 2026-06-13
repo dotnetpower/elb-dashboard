@@ -14,7 +14,25 @@ Validation: `uv run pytest -q api/tests/test_external_job_projection.py`.
 
 from __future__ import annotations
 
+import pytest
 from api.services.blast.external_job_projection import _external_to_blast_job
+
+
+@pytest.fixture(autouse=True)
+def _stub_database_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the projection hermetic on the detail view.
+
+    ``_external_to_blast_job(..., include_database_metadata=True)`` resolves
+    Storage-backed DB metadata via a real blob read against the workload
+    account. No test in this module asserts on ``database_metadata``, so stub
+    the resolver to ``None`` — otherwise the detail-view tests pay a ~2 s blob
+    connect timeout to the fake account (and are flaky in CI where the host
+    actually resolves ``*.blob.core.windows.net``).
+    """
+    monkeypatch.setattr(
+        "api.services.blast.external_job_projection._database_metadata_for_response",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def test_external_job_id_is_always_a_string_when_present() -> None:

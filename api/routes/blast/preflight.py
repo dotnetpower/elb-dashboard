@@ -358,7 +358,13 @@ def blast_pre_flight(
         from api.celery_app import celery_app
 
         conn = celery_app.connection()
-        conn.ensure_connection(max_retries=1, timeout=2)
+        # Fail-fast: `max_retries=0` does a single connect attempt and raises
+        # immediately on failure. `max_retries=1` would sleep the kombu retry
+        # interval (~2 s) before its one retry, tarpiting the pre-flight call
+        # whenever Redis is briefly unreachable — the broker check already
+        # degrades to a `fail` row, so the retry only adds latency. Mirrors the
+        # readiness probe (api/routes/health.py).
+        conn.ensure_connection(max_retries=0, timeout=2)
         conn.close()
         checks.append(
             {

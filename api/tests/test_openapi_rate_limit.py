@@ -35,6 +35,18 @@ def _stub_slow_proxy_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
     import api.services.k8s.monitoring as k8s_mon
 
     monkeypatch.setattr(k8s_mon, "k8s_get_service_ip", lambda *a, **k: None)
+    # With the Service IP missing, the proxy route builds a degraded response
+    # whose recovery hint probes `detect_lb_subnet_rbac_missing` — a blocking
+    # ARM / Kubernetes events read against `management.azure.com` (~5 s of real
+    # connect/retry that 404s in tests). These tests assert only on the
+    # rate-limit middleware (429 vs not-429), so stub the probe to "not
+    # missing" (degrades to the generic peering hint, the same fallback as a
+    # probe failure) to keep the route hermetic and fast.
+    import api.services.aks.openapi_lb_rbac as lb_rbac
+
+    monkeypatch.setattr(
+        lb_rbac, "detect_lb_subnet_rbac_missing", lambda *a, **k: False
+    )
 
 
 def _build_client(

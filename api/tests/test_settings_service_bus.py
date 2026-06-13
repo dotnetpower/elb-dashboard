@@ -31,6 +31,27 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _stub_entity_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the status route off the live Service Bus data plane.
+
+    ``GET /api/settings/service-bus`` probes live entity counts whenever the
+    saved config is ``enabled`` (``_runtime_counts`` \u2192 ``service_bus.entity_counts``),
+    which opens a real management/AMQP connection to the namespace. No test
+    here asserts on live counts (the only ``counts`` assertion is the
+    ``disabled`` path, which never calls ``entity_counts``), so raise
+    ``ServiceBusUnavailable`` \u2014 mirroring the real "namespace unreachable"
+    outcome \u2014 instantly instead of paying the ~5 s connect/retry to the fake
+    namespace (slow + flaky in CI).
+    """
+    from api.services import service_bus
+
+    def _unavailable(_cfg: object) -> dict[str, object]:
+        raise service_bus.ServiceBusUnavailable("stubbed in tests")
+
+    monkeypatch.setattr(service_bus, "entity_counts", _unavailable)
+
+
 def test_get_defaults_disabled(client: TestClient) -> None:
     r = client.get("/api/settings/service-bus")
     assert r.status_code == 200

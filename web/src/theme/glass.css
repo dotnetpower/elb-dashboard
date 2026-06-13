@@ -1933,6 +1933,52 @@ textarea.form-input {
   border-radius: 4px;
 }
 
+/* Running/reducing halo pulse — a calm breathing ring around an in-flight job
+   so a live run reads as active energy, not a static dot. Reducing pulses a
+   touch slower to read as "merging results". Disabled under reduced motion. */
+.mf-halo {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: mf-pulse 2s ease-in-out infinite;
+}
+.mf-halo--reducing {
+  animation-duration: 3.2s;
+}
+@keyframes mf-pulse {
+  0%,
+  100% {
+    opacity: 0.08;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.28;
+    transform: scale(1.35);
+  }
+}
+
+/* Recently-terminal (settling) job nodes fade gently while they linger. */
+.mf-node--settling {
+  transition: opacity 240ms ease-out;
+}
+
+/* Energy particles travelling along the active links. The glow is a soft drop
+   shadow; movement is driven by the rAF loop in the renderer. */
+.mf-particle {
+  filter: drop-shadow(0 0 2px currentColor);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mf-halo,
+  .mf-halo--reducing {
+    animation: none;
+    opacity: 0.18;
+  }
+  .mf-particle {
+    display: none;
+  }
+}
+
 @media (max-width: 900px) {
   .mf-constellation {
     height: 380px;

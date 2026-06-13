@@ -771,11 +771,17 @@ def test_blast_submit_rejects_storage_account_mismatch_before_queue(
     assert "database URL must belong" in body["message"]
 
 
-@pytest.mark.slow
 def test_blast_preflight_blocks_precise_multi_query(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    # Fast-fail the ARM/Storage seams (aks_cluster + database checks) the same
+    # way the other pre-flight tests do: a fake credential makes the SDK token
+    # fetch raise immediately, so the route degrades those checks without a
+    # real `management.azure.com` / `*.blob.core.windows.net` round-trip
+    # (~5 s each). This test only asserts on `sharding_precision` (pure
+    # computation), so the degraded aks/database checks are irrelevant.
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
 
     r = client.post(
         "/api/blast/pre-flight",
@@ -803,11 +809,13 @@ def test_blast_preflight_blocks_precise_multi_query(
     )
 
 
-@pytest.mark.slow
 def test_blast_preflight_allows_precise_multi_query_uniform_search_space(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    # See `test_blast_preflight_blocks_precise_multi_query`: fast-fail the
+    # ARM/Storage seams so this `sharding_precision`-only test stays hermetic.
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
 
     r = client.post(
         "/api/blast/pre-flight",
@@ -831,11 +839,13 @@ def test_blast_preflight_allows_precise_multi_query_uniform_search_space(
     assert precision_check["precision"]["precision_level"] == "precise_tabular"
 
 
-@pytest.mark.slow
 def test_blast_preflight_reports_web_blast_compatibility(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    # See `test_blast_preflight_blocks_precise_multi_query`: fast-fail the
+    # ARM/Storage seams so this compatibility-only test stays hermetic.
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
 
     r = client.post(
         "/api/blast/pre-flight",
@@ -919,11 +929,13 @@ def test_blast_jobs_submit_blocks_false_precise_with_unverified_database(
     assert body["compatibility"]["mode"] == "calibration_required"
 
 
-@pytest.mark.slow
 def test_blast_preflight_allows_precise_multi_query_split_search_spaces(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    # See `test_blast_preflight_blocks_precise_multi_query`: fast-fail the
+    # ARM/Storage seams so this `sharding_precision`-only test stays hermetic.
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
 
     r = client.post(
         "/api/blast/pre-flight",
