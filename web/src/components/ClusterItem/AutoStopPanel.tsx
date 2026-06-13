@@ -29,6 +29,9 @@ const REASON_LABELS: Record<string, string> = {
   cooldown: "Cluster was recently stopped (cooldown).",
   extended: "Auto-stop is paused by Extend.",
   state_repo_unreachable: "Idle check could not read job state — staying running.",
+  evaluator_unavailable: "Idle check is temporarily unavailable — staying running.",
+  history_scan_truncated: "Too many recent jobs to scan — staying running.",
+  power_state_unknown: "Cluster power state is unknown — staying running.",
   no_preference: "Auto-stop has not been enabled for this cluster.",
 };
 
@@ -320,6 +323,20 @@ export function AutoStopPanel({
     (status?.verdict === "keep" ||
       status?.verdict === "warn" ||
       status?.verdict === "stop");
+  // Auto-stop is enabled and the cluster is running, but the evaluator
+  // returned a "keep" with NO projected deadline (empty next_stop_at).
+  // This is a legitimate non-idle keep state — an active job, a recent
+  // stop's cooldown, a user Extend grant, or a degraded read. Without an
+  // explicit surface the panel renders neither a countdown nor an Extend
+  // button, which reads as "auto-stop is broken / stuck". Show a muted
+  // explanation and keep Extend available so the user can still push the
+  // (future) idle deadline out.
+  const armedNoDeadline =
+    clusterIsRunning &&
+    Boolean(status?.enabled) &&
+    status?.editable !== false &&
+    status?.verdict === "keep" &&
+    !status?.next_stop_at;
   // Anchor the live countdown on the relative `seconds_until_stop`
   // snapshot plus the client time it arrived (`dataUpdatedAt`) rather than
   // the absolute `next_stop_at`, so the tick is immune to client/server
@@ -582,6 +599,48 @@ export function AutoStopPanel({
                 disabled={extendMutation.isPending}
                 onClick={() => extendMutation.mutate(30)}
                 title="Push the auto-stop deadline out by 30 minutes"
+                style={{ fontSize: 10, padding: "2px 8px", color: "var(--accent)" }}
+              >
+                {extendMutation.isPending ? (
+                  <Loader2 size={10} className="spin" />
+                ) : (
+                  "Extend 30 min"
+                )}
+              </button>
+            </PermissionGate>
+          </span>
+        )}
+
+        {/* Armed but no projected deadline (verdict "keep" with an empty
+            next_stop_at): an active job, cooldown, Extend grant, or a
+            degraded read. Surface a muted explanation + keep Extend
+            available so the panel never silently hides both the countdown
+            and the Extend control. Mutually exclusive with the keep
+            countdown above (that branch requires a non-empty deadline). */}
+        {armedNoDeadline && (
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              marginLeft: "auto",
+              fontSize: 11,
+              color: "var(--text-muted)",
+            }}
+            title="Auto-stop is enabled. The idle countdown begins once this clears (no active jobs, no cooldown, no Extend)."
+          >
+            <Clock size={11} strokeWidth={1.5} style={{ color: "var(--text-faint)" }} />
+            <span>
+              Auto-stop armed ·{" "}
+              {reasonText(status?.reason ?? "", status?.active_job_count ?? 0)}
+            </span>
+            <PermissionGate need="can_write" permissions={permissions}>
+              <button
+                type="button"
+                className="glass-button"
+                disabled={extendMutation.isPending}
+                onClick={() => extendMutation.mutate(30)}
+                title="Pause auto-stop for another 30 minutes"
                 style={{ fontSize: 10, padding: "2px 8px", color: "var(--accent)" }}
               >
                 {extendMutation.isPending ? (

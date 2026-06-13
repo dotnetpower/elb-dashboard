@@ -13,12 +13,16 @@ Key entry points: `evaluate_cluster`, `IdleDecision`, `ACTIVE_JOB_STATUSES`,
     `ACTIVE_JOB_TYPES`.
 Risky contracts: `ACTIVE_JOB_STATUSES` mirrors
     `JobStateRepository.list_active` — if that set ever changes, sync
-    here so the "no active jobs" gate stays accurate.
+    here so the "no active jobs" gate stays accurate. A jobstate row in an
+    active status older than `_ACTIVE_ROW_STALE_SECONDS` is treated as a
+    crashed-worker zombie and dropped from the active count, so a stuck row
+    can no longer pin the cluster alive forever.
 Validation: `uv run pytest -q api/tests/test_auto_stop_evaluator.py`.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
@@ -42,6 +46,24 @@ A submitted-but-not-yet-K8s-visible BLAST run is the most common false
 negative; covering ``warmup`` / ``prepare_db`` / ``shard`` / ``oracle``
 also stops a database admin action from being killed mid-flight.
 """
+
+_ACTIVE_ROW_STALE_SECONDS = int(
+    os.environ.get("AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", "14400")
+)
+"""Max age (seconds) for a jobstate row in an active status to still count
+as "cluster in use".
+
+A crashed / ``worker_lost`` task can leave its jobstate row pinned in
+``running`` / ``queued`` forever (never writing a terminal status). Without
+this cap a single zombie row keeps the cluster alive indefinitely — the
+auto-stop never fires (cost leak) AND the SPA countdown / Extend controls
+disappear because the evaluator reports ``active_jobs:N`` with no
+``next_stop_at``. No Celery task can run longer than ``CELERY_TASK_TIME_LIMIT``
+(default 3600 s), so a row untouched for the 4 h default is provably dead.
+Genuinely-running BLAST is covered separately by the live K8s ``app=blast``
+probe (`auto_stop_live.probe_live_blast_activity`), so aging out a stale
+state row never strands an in-flight search. Rows with no parseable
+timestamp fail safe (still counted as active)."""
 
 Verdict = Literal["stop", "keep", "warn"]
 
@@ -106,6 +128,8 @@ def _scan_cluster_jobs(
     pref: AutoStopPreference,
     *,
     limit: int = 200,
+    now: datetime | None = None,
+    stale_after_seconds: int | None = None,
 ) -> tuple[int, datetime | None, bool, bool]:
     """Single Table query → (active_count, latest_activity_ts, ok, truncated).
 
@@ -117,8 +141,17 @@ def _scan_cluster_jobs(
     is the safe default. The active counter is still safe (active jobs
     are by definition recent and rarely number > 200).
 
+    Zombie age-out: a row in an active status whose most-recent timestamp
+    is older than ``stale_after_seconds`` (default `_ACTIVE_ROW_STALE_SECONDS`)
+    is treated as a crashed / ``worker_lost`` leftover and is NOT counted
+    as active — otherwise one stuck row pins the cluster alive forever and
+    suppresses the SPA auto-stop countdown. The row's timestamp still seeds
+    the idle-clock ``latest`` anchor. Rows with no parseable timestamp fail
+    safe (still counted active).
+
     Returns:
-        active_count: jobs in ACTIVE_JOB_STATUSES whose type ∈ ACTIVE_JOB_TYPES.
+        active_count: jobs in ACTIVE_JOB_STATUSES whose type ∈ ACTIVE_JOB_TYPES
+            AND whose latest timestamp is within the staleness window.
         latest_activity_ts: most recent ``updated_at`` / ``created_at`` across
             ALL non-deleted rows in scope (terminal jobs included — they
             seed the idle clock).
@@ -126,6 +159,12 @@ def _scan_cluster_jobs(
         truncated: True when the scan hit ``limit`` — the latest
             timestamp may be stale. Upstream uses this to refuse stop.
     """
+    current = now or datetime.now(UTC)
+    cap = (
+        stale_after_seconds
+        if stale_after_seconds is not None
+        else _ACTIVE_ROW_STALE_SECONDS
+    )
     try:
         rows = list(
             repo.list_for_scope(
@@ -145,21 +184,25 @@ def _scan_cluster_jobs(
     for row in rows:
         row_type = (getattr(row, "type", "") or "")
         row_status = (getattr(row, "status", "") or "")
-        if row_type in allowed_types and row_status in ACTIVE_JOB_STATUSES:
-            active += 1
+        row_latest: datetime | None = None
         for field in ("updated_at", "created_at"):
             raw = getattr(row, field, "") or ""
             if not raw:
                 continue
-            try:
-                text = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
-                ts = datetime.fromisoformat(text)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=UTC)
-            except (TypeError, ValueError):
+            ts = _parse_iso(raw)
+            if ts is None:
                 continue
+            if row_latest is None or ts > row_latest:
+                row_latest = ts
             if latest is None or ts > latest:
                 latest = ts
+        if row_type in allowed_types and row_status in ACTIVE_JOB_STATUSES:
+            # A row with no parseable timestamp fails safe (counted). A
+            # fresh active row counts. A row untouched for longer than the
+            # cap is a zombie (crashed worker) and is dropped so it cannot
+            # keep the cluster alive forever.
+            if row_latest is None or (current - row_latest).total_seconds() <= cap:
+                active += 1
     return active, latest, True, len(rows) >= limit
 
 
@@ -292,7 +335,7 @@ def evaluate_cluster(
             cluster_power_state=power_state,
         )
 
-    active_count, latest, ok, truncated = _scan_cluster_jobs(repo, pref)
+    active_count, latest, ok, truncated = _scan_cluster_jobs(repo, pref, now=current)
     if not ok:
         # Table unreachable — fail safe (never stop without a quorum read).
         return IdleDecision(

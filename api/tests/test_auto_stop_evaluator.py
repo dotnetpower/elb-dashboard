@@ -147,6 +147,52 @@ def test_active_jobs_block_stop() -> None:
     assert decision.active_job_count == 2
 
 
+def test_stale_active_row_does_not_block_stop() -> None:
+    """A jobstate row stuck in an active status longer than the staleness
+    cap is a crashed / ``worker_lost`` zombie and must NOT keep the cluster
+    alive — otherwise auto-stop never fires and the SPA loses its countdown
+    (the real-world `auto-warmup` row stuck ``running`` for 10 h).
+    """
+    stale_ts = (_NOW - timedelta(hours=10)).isoformat(timespec="seconds")
+    jobs = [_FakeJob(type="warmup", status="running", updated_at=stale_ts)]
+    decision = evaluate_cluster(
+        _pref(idle_minutes=60),
+        repo=_FakeRepo(jobs),
+        now=_NOW,
+        power_state="Running",
+    )
+    # Zombie dropped → not active; idle clock anchored at the stale
+    # timestamp (10 h ago) → deadline long past → stop, NOT active_jobs.
+    assert decision.verdict == "stop"
+    assert decision.reason.startswith("idle:")
+    assert decision.active_job_count == 0
+
+
+def test_fresh_active_row_still_blocks_stop() -> None:
+    """A genuinely-running active row (recent timestamp) still keeps the
+    cluster alive — the staleness age-out must only drop zombies."""
+    fresh_ts = (_NOW - timedelta(minutes=5)).isoformat(timespec="seconds")
+    jobs = [_FakeJob(type="warmup", status="running", updated_at=fresh_ts)]
+    decision = evaluate_cluster(
+        _pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running"
+    )
+    assert decision.verdict == "keep"
+    assert decision.reason == "active_jobs:1"
+    assert decision.active_job_count == 1
+
+
+def test_active_row_without_timestamp_fails_safe() -> None:
+    """A row with no parseable timestamp cannot be aged out — it still
+    counts as active so a brand-new submission (no timestamp yet) is never
+    dropped."""
+    jobs = [_FakeJob(type="blast", status="running")]
+    decision = evaluate_cluster(
+        _pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running"
+    )
+    assert decision.verdict == "keep"
+    assert decision.reason == "active_jobs:1"
+
+
 def test_active_jobs_count_uses_single_query() -> None:
     """Regression: the evaluator must not issue one query per job_type."""
 
