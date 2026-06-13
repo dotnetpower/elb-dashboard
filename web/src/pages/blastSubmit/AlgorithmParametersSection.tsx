@@ -181,6 +181,7 @@ export function AlgorithmParametersSection({
                     className="glass-input"
                     value={form.outfmt}
                     onChange={(event) => set("outfmt", parseInt(event.target.value, 10))}
+                    disabled={form.outfmt_taxonomy_columns}
                   >
                     {OUTPUT_FORMAT_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>
@@ -188,6 +189,23 @@ export function AlgorithmParametersSection({
                       </option>
                     ))}
                   </select>
+                </label>
+                <label className="blast-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={form.outfmt_taxonomy_columns}
+                    onChange={(event) => {
+                      const on = event.target.checked;
+                      set("outfmt_taxonomy_columns", on);
+                      // Taxonomy columns require a tabular layout; force outfmt 7
+                      // so the visible format matches the emitted specifier.
+                      if (on) set("outfmt", 7);
+                    }}
+                  />
+                  <span>
+                    Include taxonomy columns (taxid + scientific name){" "}
+                    <Tip text="Adds the subject tax id and scientific name columns to a tabular result via -outfmt 7 std staxids sscinames. Works with sharding (the merge keeps the extended # Fields header). Requires a database that ships taxonomy data, e.g. core_nt." />
+                  </span>
                 </label>
                 {webBlastSearchsp && (
                   <label>

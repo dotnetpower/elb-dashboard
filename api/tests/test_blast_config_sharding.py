@@ -157,6 +157,24 @@ def test_extended_outfmt_via_additional_options_is_accepted() -> None:
     assert "-outfmt 7 std staxids sscinames" in options
 
 
+def test_taxonomy_columns_path_omits_integer_outfmt_field() -> None:
+    """The New Search "taxonomy columns" toggle emits the multi-token outfmt via
+    additional_options and omits the integer `outfmt` field (#29 #4). The result
+    must carry exactly ONE `-outfmt` flag so the shard merge's parser reads the
+    full specifier; a double flag would make it grab only the leading code and
+    drop the staxids/sscinames columns."""
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    # No integer `outfmt` key (the frontend sends undefined when taxonomy is on).
+    params["additional_options"] = "-outfmt 7 std staxids sscinames"
+    cfg = _parse(generate_config(params))
+    options = cfg.get("blast", "options")
+    assert options.count("-outfmt") == 1
+    assert "-outfmt 7 std staxids sscinames" in options
+    # Sharding still engages (the merge gate sees outfmt 7 → tabular).
+    assert cfg.get("blast", "db-partitions") == "5"
+
+
 def test_approximate_sharding_uses_full_dbsize_when_available() -> None:
     params = _base_params()
     params["allow_approximate_sharding"] = True

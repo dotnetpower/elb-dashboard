@@ -141,6 +141,14 @@ export interface FormState {
   evalue: number;
   max_target_seqs: number;
   outfmt: number;
+  /**
+   * When true, request subject taxonomy columns (taxid + scientific name) in a
+   * tabular result. Emits the verified canonical `-outfmt 7 std staxids
+   * sscinames` specifier via `additional_options` and suppresses the integer
+   * `outfmt` field so the submit never carries a double `-outfmt` flag (the
+   * shard merge reads the full specifier from the single flag). See issue #29.
+   */
+  outfmt_taxonomy_columns: boolean;
   word_size: string;
   gap_open: string;
   gap_extend: string;
@@ -178,6 +186,7 @@ export const INITIAL: FormState = {
   evalue: 0.05,
   max_target_seqs: 100,
   outfmt: 5,
+  outfmt_taxonomy_columns: false,
   word_size: "",
   gap_open: "",
   gap_extend: "",
