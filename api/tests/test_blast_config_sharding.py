@@ -117,9 +117,9 @@ def test_approximate_sharding_accepts_outfmt7() -> None:
 def test_outfmt_field_rejects_multi_token_specifier() -> None:
     """A multi-token specifier in the `outfmt` field is rejected at the boundary.
 
-    Quotes are forbidden in this field, so a value like `7 std staxids` would be
-    emitted UNQUOTED into the ini and silently break in the cluster ~60 s later.
-    The guard turns that into an actionable 422 pointing at additional_options.
+    A value like `7 std staxids` would be emitted into the ini and silently
+    break in the cluster ~60 s later. The guard turns that into an actionable
+    422 pointing at additional_options with the UNQUOTED canonical form.
     """
     params = _base_params()
     params["outfmt"] = "7 std staxids sstrand qseq sseq"
@@ -127,16 +127,34 @@ def test_outfmt_field_rejects_multi_token_specifier() -> None:
         generate_config(params)
 
 
+def test_outfmt_field_rejection_recommends_unquoted_form() -> None:
+    """The rejection message must recommend the UNQUOTED canonical form.
+
+    Quoting the multi-token specifier (`-outfmt "7 std staxids"`) breaks the
+    sibling's raw `${VAR}` substitution into the Job YAML, so the guidance must
+    NOT tell the user to quote it. Regression guard for issue #29 #1.
+    """
+    params = _base_params()
+    params["outfmt"] = "7 std staxids"
+    with pytest.raises(ValueError) as exc_info:
+        generate_config(params)
+    message = str(exc_info.value)
+    assert "UNQUOTED" in message
+    assert "do not add quotes" in message
+
+
 def test_extended_outfmt_via_additional_options_is_accepted() -> None:
-    """The sanctioned path for an extended tabular layout is additional_options,
-    which permits the protecting quotes around the multi-token specifier."""
+    """The sanctioned path for an extended tabular layout is additional_options
+    carrying the UNQUOTED multi-token specifier (the deployed blast-run-aks.sh
+    argv patch rejoins the `-outfmt` tokens, so no quotes are needed — and
+    quoting would break the generated Job YAML)."""
     params = _base_params()
     params["allow_approximate_sharding"] = True
-    params["additional_options"] = '-outfmt "7 std staxids sstrand qseq sseq"'
+    params["additional_options"] = "-outfmt 7 std staxids sscinames"
     cfg = _parse(generate_config(params))
     assert cfg.get("blast", "db-partitions") == "5"
     options = cfg.get("blast", "options")
-    assert '-outfmt "7 std staxids sstrand qseq sseq"' in options
+    assert "-outfmt 7 std staxids sscinames" in options
 
 
 def test_approximate_sharding_uses_full_dbsize_when_available() -> None:
@@ -245,19 +263,20 @@ def test_sharded_merge_rejects_additional_outfmt_equals_unsupported() -> None:
 
 
 def test_sharded_merge_allows_tabular_std_outfmt() -> None:
-    """An extended `std`-prefixed tabular layout must travel through
-    additional_options (quoted), NOT the bare outfmt field.
+    """An extended `std`-prefixed tabular layout travels through
+    additional_options as the UNQUOTED canonical form, NOT the bare outfmt field.
 
-    Passing `6 std qlen` directly in the `outfmt` field would emit it UNQUOTED
-    into the ini (`-outfmt 6 std qlen`) and break in the cluster, so the guard
-    now rejects that. The quoted additional_options form is the sanctioned path
-    and survives elastic-blast's shlex.split as a single token.
+    Passing `6 std qlen` directly in the `outfmt` field would emit it into the
+    ini and break in the cluster, so the guard rejects that. The unquoted
+    additional_options form is the sanctioned path: the deployed blast-run-aks.sh
+    argv patch rejoins the `-outfmt` tokens, and quoting would break the
+    generated Job YAML.
     """
     params = _base_params()
     params["allow_approximate_sharding"] = True
-    params["additional_options"] = '-outfmt "6 std qlen"'
+    params["additional_options"] = "-outfmt 6 std qlen"
     cfg = _parse(generate_config(params))
-    assert '-outfmt "6 std qlen"' in cfg.get("blast", "options")
+    assert "-outfmt 6 std qlen" in cfg.get("blast", "options")
 
 
 def test_unsharded_submit_allows_non_tabular_outfmt() -> None:

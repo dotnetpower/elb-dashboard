@@ -285,19 +285,30 @@ def generate_config(params: dict[str, Any]) -> str:
         if _re_outfmt.search(r'["\'`;&|$(){}\\\n\r]', outfmt_str):
             raise ValueError(f"outfmt contains forbidden characters: {outfmt_str[:50]}")
         # The `outfmt` field cannot carry a multi-token format specifier (e.g.
-        # `7 std staxids ...`). Quotes are forbidden above, so a multi-token
-        # value would be emitted UNQUOTED into the ini (`-outfmt 7 std staxids`),
-        # and elastic-blast's shlex.split would then hand `std`, `staxids`, … to
-        # BLAST as stray positional args — a silent failure that only surfaces
-        # ~60 s later in the cluster. Reject it at the boundary with an
-        # actionable message: extended tabular layouts must go through
-        # `additional_options` (which permits the protecting quotes) as
-        # `-outfmt "7 std staxids ..."`.
+        # `7 std staxids ...`). A multi-token value here would be emitted into
+        # the ini and elastic-blast's shlex.split would then hand `std`,
+        # `staxids`, … to BLAST as stray positional args — a silent failure that
+        # only surfaces ~60 s later in the cluster. Reject it at the boundary
+        # with an actionable message pointing at `additional_options`.
+        #
+        # The canonical wire format for an extended layout is the UNQUOTED
+        # multi-token specifier: `-outfmt 7 std staxids sscinames`. Do NOT quote
+        # it — the sibling runtime injects ELB_BLAST_OPTIONS into the K8s Job
+        # YAML via a raw `${VAR}` regex substitution with no YAML escaping
+        # (`value: "${ELB_BLAST_OPTIONS}"`), so a quoted value
+        # (`-outfmt "7 std staxids"`) produces `value: "-outfmt "7 std staxids""`
+        # and breaks `kubectl apply`. The deployed `blast-run-aks.sh` rebuilds
+        # the argv and rejoins the `-outfmt` tokens up to the next `-flag` into a
+        # single blastn argument, so the unquoted form survives the shell
+        # word-split. Lead the layout with `std` (or `qseqid`) because the
+        # read-side merge groups by qseqid.
         if " " in outfmt_str:
             raise ValueError(
                 "outfmt only accepts a single format code here (e.g. 5, 6, 7). "
                 "For an extended tabular layout, pass it via additional_options "
-                'as -outfmt "7 std staxids ..." so the specifier stays quoted.'
+                "UNQUOTED as -outfmt 7 std staxids sscinames (do not add quotes; "
+                "quotes break the generated Job YAML). Lead with std so the "
+                "qseqid column stays first."
             )
         options_parts.append(f"-outfmt {outfmt_str}")
 
