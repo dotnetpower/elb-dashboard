@@ -2,12 +2,29 @@ import { test, expect } from "../fixtures/uiTest";
 
 test("Dashboard destructive controls are isolated behind mocked mutations", async ({ uiPage, uiMocks }) => {
   await uiPage.goto("/");
-  await uiPage.getByLabel(/aks-e2e .*Expand cluster row/i).click();
+  // The Stop/Delete actions are only mounted while the cluster row is expanded.
+  // Poll-expand until the Stop button appears (a single click can race the
+  // row's collapse-state persistence).
+  const stopButton = uiPage.getByRole("button", { name: "Stop" });
+  const collapsedRow = uiPage.getByLabel(/aks-e2e .*Expand cluster row/i);
+  await expect(async () => {
+    if (await stopButton.count()) return;
+    await collapsedRow.first().click();
+    await expect(stopButton).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
 
-  await uiPage.getByRole("button", { name: "Stop" }).click();
-  await expect.poll(() => uiMocks.aksActions.map((row) => row.action)).toContain("stop");
+  // The dashboard polls cluster status on an interval, so the row re-renders
+  // continuously and never satisfies Playwright's "stable" actionability check.
+  // The button is visible + enabled, so click with force to skip the stability
+  // wait, and retry until the mocked stop action is recorded.
+  await expect(async () => {
+    await stopButton.click({ force: true, timeout: 2_000 });
+    expect(uiMocks.aksActions.map((row) => row.action)).toContain("stop");
+  }).toPass({ timeout: 15_000 });
 
-  await uiPage.getByRole("button", { name: "Delete" }).click();
+  // Same continuous-rerender row: force the Delete click, then drive the
+  // type-to-confirm dialog.
+  await uiPage.getByRole("button", { name: "Delete" }).click({ force: true });
   await expect(uiPage.getByRole("dialog", { name: /Delete cluster/i })).toBeVisible();
   // The delete dialog requires typing the cluster name to enable the confirm
   // button (type-to-confirm guard on irreversible AKS deletion).

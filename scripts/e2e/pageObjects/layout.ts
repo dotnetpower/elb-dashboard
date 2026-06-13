@@ -20,9 +20,14 @@ export class LayoutPage {
   async toggleTheme() {
     const currentTheme = await this.page.evaluate(() => document.documentElement.dataset.theme ?? "");
     await this.page.getByTitle("Settings").click();
-    await expect(this.page.getByRole("dialog", { name: "Settings" })).toBeVisible();
-    await this.page
-      .getByRole("group", { name: "Theme" })
+    const dialog = this.page.getByRole("dialog", { name: "Settings" });
+    await expect(dialog).toBeVisible();
+    // Settings is section-navigated; select the Appearance section so the Theme
+    // control is mounted (the panel may open on a different remembered section).
+    await dialog.getByRole("button", { name: "Appearance" }).click();
+    const themeGroup = dialog.getByRole("group", { name: "Theme" });
+    await expect(themeGroup).toBeVisible();
+    await themeGroup
       .getByRole("button", { name: currentTheme === "dark" ? /Light/i : /Dark/i })
       .click();
     await expect

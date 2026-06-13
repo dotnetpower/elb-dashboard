@@ -30,8 +30,20 @@ const BUSY_NODE = {
 
 async function openClusterDetail(uiPage: import("@playwright/test").Page) {
   await uiPage.goto("/");
-  await uiPage.getByLabel(/aks-e2e .*Expand cluster row/i).click();
-  await uiPage.getByRole("button", { name: "Open cluster detail" }).click();
+  // The cluster row toggles between "Expand cluster row" / "Collapse cluster
+  // row". The "Open cluster detail" button is only mounted while expanded.
+  // Poll-expand until the detail button is present (a single click can race the
+  // row's collapse-state persistence), then open the modal. Scroll it into view
+  // first — the expanded row can push it below the fold.
+  const openDetail = uiPage.getByRole("button", { name: "Open cluster detail" });
+  const collapsedRow = uiPage.getByLabel(/aks-e2e .*Expand cluster row/i);
+  await expect(async () => {
+    if (await openDetail.count()) return;
+    await collapsedRow.first().click();
+    await expect(openDetail).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
+  await openDetail.scrollIntoViewIfNeeded();
+  await openDetail.click();
   await expect(uiPage.getByRole("dialog", { name: /aks-e2e Details/i })).toBeVisible();
 }
 

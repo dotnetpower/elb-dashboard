@@ -588,6 +588,14 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     jsonResponse(route, { lines: [{ ts: now, text: "e2e log line" }] }),
   );
 
+  // Message Flow card defaults to the integration-OFF snapshot so the card
+  // hides itself and existing dashboard scenarios are unchanged. The dedicated
+  // message-flow scenario re-registers this route with an enabled snapshot
+  // (Playwright matches the most-recently-registered route first).
+  await page.route("**/api/monitor/message-flow", (route) =>
+    jsonResponse(route, { enabled: false }),
+  );
+
   await page.route("**/api/terminal/health", (route) =>
     jsonResponse(route, { status: "ok", user: "azureuser", cwd: "/home/azureuser" }),
   );
