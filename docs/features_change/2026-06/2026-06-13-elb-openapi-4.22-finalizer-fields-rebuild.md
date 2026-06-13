@@ -69,6 +69,16 @@ Build + push the sibling image to ACR FIRST, then move the pin:
   → `if ! zcat "$f" | awk '/^# Fields:/ || !/^#/' >> "$MERGE_INPUT"; then`.
 - argv patch live: `blast-run-aks.sh` carries `ELB_BLAST_ARGV` rebuild (lines 86-130).
 - Live sharded `core_nt` `-outfmt 7 std staxids sscinames` submit on `elb-cluster-01`
-  (OpenAPI plane, job `a4a2ee33aeee`) — merged result `# Fields:` header carries the
-  extended columns and the dashboard Scientific Name / Taxonomy populate. (See the
-  issue comment for the merged-file excerpt.)
+  (OpenAPI plane, job `a4a2ee33aeee`, `core_nt_precise` → 5 shards):
+  - The batch pod rendered the multi-token specifier as a **single** blastn
+    argument: `blastn -db core_nt_shard_00 … -outfmt 7 std staxids sscinames -searchsp …`
+    (argv patch works — no YAML break, no shell word-split).
+  - `merged_results.out.gz` `# Fields:` header carries the extended columns:
+    `… bit score, subject tax ids, subject sci names`.
+  - Data rows are 14-column with the taxid + scientific name populated, e.g.
+    `NR_024570.1 … 998  562  Escherichia coli` (taxid `562`).
+  - `merge-report.json` resolved columns by name: `qseqid=0, subject=1, evalue=10,
+    bitscore=11` (std-first keeps qseqid leading → single query group, not collapsed).
+  - The dashboard results parser (`api/services/blast/results_parser.py`) already
+    aliases `subject tax ids` → `staxids` and `subject sci names` → `sscinames`,
+    so the Scientific Name column + Taxonomy tab populate from this header.
