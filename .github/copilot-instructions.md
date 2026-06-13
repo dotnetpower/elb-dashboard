@@ -20,6 +20,13 @@
 
 > **Design-critique the plan (step 3) and the result (before done) for non-trivial backend/infra work** using the [self-critique-review skill](../.github/skills/self-critique-review/SKILL.md) rubric — contract/state-machine consistency, unbounded retry/wait loops, idempotency, concurrency races, partial-failure, observability. The mechanical self-review in §13 (consumer grep + tests + diff) cannot see these design-level defects, which are where most Critical/High critique findings come from. Designing them out up front is cheaper than patching them after a critique.
 
+> **Issue discipline (NON-NEGOTIABLE).** If the work you do maps to a registered GitHub issue, you OWN that issue for the session:
+> 1. **Comment** on the issue with what you shipped (commit SHA), the validation evidence, and — for partial work — the explicit remaining gaps. Never leave a worked issue silent.
+> 2. **Close it** (`gh issue close <N>`) only when **every** acceptance criterion is met; otherwise leave it open with the gap spelled out. Partial work that satisfies only some criteria never closes the issue.
+> 3. **Re-verify before closing**: run `gh issue view <N>`, read the acceptance criteria, and confirm each one against the implemented diff + validation. Do not close on optimism.
+>
+> This applies whether or not a commit message names the issue. The full mechanics (commit-reference trigger, wording) are in §13 "GitHub issue closure hygiene".
+
 ---
 
 ## 1. Mission
