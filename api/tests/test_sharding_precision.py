@@ -16,7 +16,12 @@ Validation: `uv run pytest -q api/tests/test_sharding_precision.py`.
 from __future__ import annotations
 
 import pytest
-from api.services.sharding_precision import build_precision_report, normalize_sharding_mode
+from api.services.sharding_precision import (
+    build_precision_report,
+    merge_format_for_outfmt,
+    normalize_sharding_mode,
+    outfmt_spec_value,
+)
 
 
 def test_default_sharding_mode_is_off() -> None:
@@ -93,6 +98,36 @@ def test_additional_outfmt_equals_unsupported_is_blocked() -> None:
     assert report.eligible is False
     assert report.precision_level == "blocked"
     assert "outfmt 5" in report.blocking_errors[0]
+
+
+def test_merge_format_accepts_extended_non_std_layout_with_evalue_bitscore() -> None:
+    """An extended, non-std-leading tabular layout that carries evalue + bitscore
+    is merge-compatible (the merge resolves columns by name). #29 #2."""
+    assert (
+        merge_format_for_outfmt("7 qseqid sseqid staxids sstrand pident evalue bitscore")
+        == "tabular"
+    )
+    assert merge_format_for_outfmt("7 std staxids sscinames") == "tabular"
+    assert merge_format_for_outfmt("6 std qlen") == "tabular"
+
+
+def test_merge_format_blocks_layout_missing_rank_columns() -> None:
+    """A tabular layout missing evalue or bitscore cannot be re-ranked across
+    shards, so it is blocked at submit (mirrors the merge fail-closed)."""
+    assert merge_format_for_outfmt("7 qseqid sseqid staxids") is None
+    assert merge_format_for_outfmt("7 staxids evalue") is None  # no bitscore
+
+
+def test_outfmt_spec_value_rejoins_unquoted_multi_token() -> None:
+    """`outfmt_spec_value` returns the FULL specifier (not just the leading code)
+    so the submit gate sees the whole extended layout."""
+    assert (
+        outfmt_spec_value("-evalue 0.05 -outfmt 7 std staxids sscinames -dust yes")
+        == "7 std staxids sscinames"
+    )
+    assert outfmt_spec_value('-outfmt "7 qseqid evalue bitscore"') == "7 qseqid evalue bitscore"
+    assert outfmt_spec_value("-outfmt 7") == "7"
+    assert outfmt_spec_value("-evalue 0.05") is None
 
 
 def test_precise_single_query_requires_search_space() -> None:

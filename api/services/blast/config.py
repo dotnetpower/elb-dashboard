@@ -25,8 +25,8 @@ from api.services.aks_skus import (
 from api.services.sharding_precision import (
     build_precision_report,
     normalize_sharding_mode,
-    option_value,
     outfmt_is_merge_compatible,
+    outfmt_spec_value,
     uniform_query_effective_search_space,
 )
 from api.services.storage.url_validation import validate_storage_blob_reference
@@ -313,12 +313,19 @@ def generate_config(params: dict[str, Any]) -> str:
         options_parts.append(f"-outfmt {outfmt_str}")
 
     if cfg.has_option("blast", "db-partitions") or cfg.has_option("blast", "db-auto-partition"):
-        additional_outfmt = option_value(additional, "-outfmt") if additional else None
+        # Use the FULL specifier (code + field codes), not just the leading
+        # code, so an extended layout that omits evalue/bitscore is rejected
+        # here at submit instead of failing in the finalizer merge minutes
+        # later. `outfmt_spec_value` rejoins the multi-token `-outfmt` value.
+        additional_outfmt = outfmt_spec_value(additional) if additional else None
         merge_outfmt = additional_outfmt if additional_outfmt is not None else outfmt_str
         if not outfmt_is_merge_compatible(merge_outfmt):
             raise ValueError(
-                "sharded BLAST result merge currently supports only outfmt 5, "
-                "outfmt 6, outfmt 7, or outfmt '6 std...'/'7 std...'"
+                "sharded BLAST result merge supports outfmt 5 (XML), or a "
+                "tabular outfmt 6/7 whose field list includes evalue and "
+                "bitscore (e.g. '7 std staxids sscinames' or "
+                "'7 qseqid sseqid staxids evalue bitscore'). The merge re-ranks "
+                "shard hits by evalue/bitscore, so both columns are required."
             )
 
         report = build_precision_report(

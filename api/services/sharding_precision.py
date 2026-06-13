@@ -90,9 +90,70 @@ def option_value(options: str, option: str) -> str | None:
     return None
 
 
+def outfmt_spec_value(options: str) -> str | None:
+    """Return the FULL ``-outfmt`` specifier (code + field codes) or ``None``.
+
+    Unlike :func:`option_value` (which returns only the single token after the
+    flag, i.e. the leading numeric code), this rejoins every token after
+    ``-outfmt`` up to the next ``-flag`` so an extended layout like
+    ``-outfmt 7 qseqid sseqid staxids evalue bitscore`` is returned whole. This
+    mirrors ``terminal/merge-sharded-results.sh::parse_outfmt_spec`` so the
+    submit-time sharding gate can validate the same field list the runtime merge
+    will resolve. Handles both the UNQUOTED multi-token form (separate tokens)
+    and a quoted single-token form.
+    """
+    try:
+        tokens = shlex.split(options or "")
+    except ValueError as exc:
+        raise ValueError(f"invalid blast options: {exc}") from exc
+    spec: str | None = None
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == "-outfmt" and i + 1 < n:
+            parts: list[str] = []
+            j = i + 1
+            while j < n and not tokens[j].startswith("-"):
+                parts.append(tokens[j])
+                j += 1
+            spec = " ".join(parts)
+            i = j
+            continue
+        if tok.startswith("-outfmt="):
+            spec = tok.split("=", 1)[1]
+        i += 1
+    return spec.strip() if spec is not None else None
+
+
 def outfmt_is_merge_compatible(value: object | None) -> bool:
     """Return True for output layouts the shard merge engine supports."""
     return merge_format_for_outfmt(value) is not None
+
+
+# Standard 12-column BLAST tabular layout (the ``std`` token), mirrored from
+# ``terminal/merge-sharded-results.sh::_STD_TABULAR_FIELDS`` so the submit-time
+# gate and the runtime merge agree on which fields ``std`` expands to.
+_STD_TABULAR_FIELDS: tuple[str, ...] = (
+    "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+    "qstart", "qend", "sstart", "send", "evalue", "bitscore",
+)
+
+
+def _expand_outfmt_field_codes(field_tokens: list[str]) -> list[str]:
+    """Expand a tabular outfmt field list, replacing ``std`` with its 12 codes.
+
+    Mirrors ``expand_outfmt_fields`` in the merge script. Field codes are
+    lower-cased so the ``evalue`` / ``bitscore`` presence check is
+    case-insensitive.
+    """
+    fields: list[str] = []
+    for tok in field_tokens:
+        if tok == "std":
+            fields.extend(_STD_TABULAR_FIELDS)
+        else:
+            fields.append(tok.lower())
+    return fields
 
 
 def merge_format_for_outfmt(value: object | None) -> Literal["tabular", "xml"] | None:
@@ -101,6 +162,17 @@ def merge_format_for_outfmt(value: object | None) -> Literal["tabular", "xml"] |
     outfmt 7 is the same 12-column tabular layout as outfmt 6 with added
     comment lines; the shard merge skips the comment lines and re-emits its
     own, so 7 merges via the same tabular path as 6 (plain or ``std``).
+
+    Extended / reordered tabular layouts (e.g.
+    ``7 qseqid sseqid staxids sstrand pident evalue bitscore``) are accepted as
+    long as the expanded field list carries both ``evalue`` and ``bitscore`` —
+    the shard merge resolves its group/rank columns by NAME and cannot re-rank
+    shard hits without those two (it raises ``ValueError`` otherwise). Requiring
+    them here surfaces a malformed layout at submit time instead of ~minutes
+    later when the finalizer merge runs. ``qseqid`` is optional (a missing query
+    column makes the merge treat every hit as one query group, correct for a
+    single-query search) so it is not required by this gate. This mirrors
+    ``terminal/merge-sharded-results.sh::resolve_tabular_columns``.
     """
     if value in (None, ""):
         return "tabular"
@@ -109,8 +181,13 @@ def merge_format_for_outfmt(value: object | None) -> Literal["tabular", "xml"] |
         return "tabular"
     if parts[0] == "5" and len(parts) == 1:
         return "xml"
-    if parts[0] in ("6", "7") and (len(parts) == 1 or parts[1] == "std"):
-        return "tabular"
+    if parts[0] in ("6", "7"):
+        if len(parts) == 1:
+            return "tabular"
+        fields = _expand_outfmt_field_codes(parts[1:])
+        if "evalue" in fields and "bitscore" in fields:
+            return "tabular"
+        return None
     return None
 
 

@@ -175,6 +175,32 @@ def test_taxonomy_columns_path_omits_integer_outfmt_field() -> None:
     assert cfg.get("blast", "db-partitions") == "5"
 
 
+def test_sharded_accepts_non_std_extended_layout_with_rank_columns() -> None:
+    """A non-std-leading taxonomy layout that carries evalue + bitscore builds a
+    sharded config (the merge resolves columns by name). #29 #2."""
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["additional_options"] = (
+        "-outfmt 7 qseqid sseqid staxids sstrand pident evalue bitscore"
+    )
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-partitions") == "5"
+    assert (
+        "-outfmt 7 qseqid sseqid staxids sstrand pident evalue bitscore"
+        in cfg.get("blast", "options")
+    )
+
+
+def test_sharded_rejects_tabular_layout_missing_rank_columns() -> None:
+    """A sharded tabular layout without evalue/bitscore is rejected at submit
+    (the merge cannot re-rank shard hits without them). #29 #2."""
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["additional_options"] = "-outfmt 7 qseqid sseqid staxids"
+    with pytest.raises(ValueError, match="evalue and bitscore"):
+        generate_config(params)
+
+
 def test_approximate_sharding_uses_full_dbsize_when_available() -> None:
     params = _base_params()
     params["allow_approximate_sharding"] = True

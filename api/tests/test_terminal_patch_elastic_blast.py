@@ -89,9 +89,12 @@ def test_patch_partitioned_outfmt_gate_allows_outfmt7(tmp_path: Path) -> None:
     patch_module.patch_partitioned_outfmt_gate(tmp_path)
 
     text = target.read_text()
+    # The gate now allows any tabular 6/7 layout (incl. non-std extended);
+    # the per-code `startswith('std')` restriction is removed.
     assert "outfmt_code not in {'5', '6', '7'}" in text
-    assert "outfmt_code == '7' and outfmt_extended" in text
-    assert "outfmt 6, outfmt 7," in text
+    assert "outfmt_extended.startswith('std')" not in text
+    assert "outfmt_code == '7' and outfmt_extended" not in text
+    assert "tabular outfmt 6/7 (optionally with an extended field list)" in text
 
 
 def test_patch_partitioned_outfmt_gate_is_idempotent(tmp_path: Path) -> None:
