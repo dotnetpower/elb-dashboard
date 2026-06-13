@@ -20,6 +20,10 @@ import {
 } from "@/pages/apiReference/RepairPeeringButton";
 import { resolveApiReferenceClusterContext } from "@/pages/apiReference/clusterContext";
 import { SVC_NAME } from "@/pages/apiReference/constants";
+import {
+  readOpenApiPodStartup,
+  type OpenApiSpecDegraded,
+} from "@/pages/apiReference/openApiPodStartup";
 import { parseSpec } from "@/pages/apiReference/spec";
 import { TagSection } from "@/pages/apiReference/TagSection";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
@@ -156,6 +160,15 @@ export function ApiReference() {
     queryFn: () => aksApi.proxyOpenApiSpec(sub, clusterRg, clusterName),
     enabled: Boolean(baseUrl),
     staleTime: 60_000,
+    // While the pod is still cold-starting (image pull on a fresh node), the
+    // spec route degrades to `openapi_pod_starting`. Poll until it serves so
+    // the "Starting…" panel flips to the live API Reference on its own — no
+    // manual refresh. A crash-looping pod (`openapi_pod_not_ready`) is NOT
+    // auto-polled to avoid hammering a known-bad rollout.
+    refetchInterval: (query) => {
+      const data = query.state.data as OpenApiSpecDegraded | undefined;
+      return data?.degraded_reason === "openapi_pod_starting" ? 8_000 : false;
+    },
   });
 
   const deploymentQuery = useQuery({
@@ -382,6 +395,20 @@ export function ApiReference() {
           onResolved={() => specQuery.refetch()}
         />
       )}
+
+      {/* Spec returned 200 with `degraded_reason: openapi_pod_starting` (or
+          `openapi_pod_not_ready`) — the elb-openapi pod is still booting (image
+          cold-pull on a fresh node) or restarting. This is NOT a peering break,
+          so render a calm "Starting…" state instead of the red repair error. */}
+      {specQuery.isSuccess &&
+        !clusterStopped &&
+        readOpenApiPodStartup(specQuery.data) && (
+          <OpenApiPodStartingState
+            data={readOpenApiPodStartup(specQuery.data)!}
+            refreshing={specQuery.isFetching}
+            onRefresh={() => specQuery.refetch()}
+          />
+        )}
 
       {baseUrl && hasOpenApiImage && clusterName && !clusterStopped && (
         <PlsTransitionBanner
@@ -927,6 +954,62 @@ function SpecErrorState({
           size="block"
         />
       )}
+    </PanelState>
+  );
+}
+
+function OpenApiPodStartingState({
+  data,
+  refreshing,
+  onRefresh,
+}: {
+  data: OpenApiSpecDegraded;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  // `openapi_pod_starting` is benign and self-resolving (the page auto-polls
+  // and flips to the live API Reference once the pod serves).
+  // `openapi_pod_not_ready` means the pod is up but failing readiness (e.g.
+  // CrashLoopBackOff) — still NOT a peering problem, so we surface a muted
+  // warning that points at the pod logs rather than the "Repair VNet peering"
+  // affordance.
+  const failed = data.degraded_reason === "openapi_pod_not_ready";
+  const accent = failed ? "var(--warning)" : "var(--accent)";
+  const tint = failed ? "rgba(242,153,74,0.1)" : "rgba(122,167,255,0.1)";
+  const border = failed
+    ? "1px solid rgba(242,153,74,0.2)"
+    : "1px solid rgba(122,167,255,0.2)";
+  const title = failed ? "elb-openapi pod is not ready" : "elb-openapi is starting";
+  const message =
+    data.pod_message ??
+    (failed
+      ? "The elb-openapi pod is up but not passing its readiness check. Check the pod logs."
+      : "The elb-openapi pod is starting. This usually finishes within ~2 minutes on a fresh node while the container image is pulled.");
+  return (
+    <PanelState border={border}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <StateIcon background={tint}>
+          {failed ? (
+            <AlertTriangle size={16} style={{ color: accent }} />
+          ) : (
+            <Loader2 size={16} className="spin" style={{ color: accent }} />
+          )}
+        </StateIcon>
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>{title}</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{message}</div>
+        </div>
+      </div>
+      <button
+        type="button"
+        className="glass-button"
+        style={{ fontSize: 12 }}
+        onClick={onRefresh}
+        disabled={refreshing}
+      >
+        <RefreshCw size={12} className={refreshing ? "spin" : ""} />{" "}
+        {refreshing ? "Checking…" : "Check again"}
+      </button>
     </PanelState>
   );
 }

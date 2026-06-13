@@ -101,6 +101,34 @@ def _fetch_openapi_spec_via_k8s_proxy(
     return None
 
 
+def _classify_openapi_startup(
+    cred: Any,
+    sub: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any] | None:
+    """Best-effort probe of the ``elb-openapi`` rollout startup state.
+
+    Wraps ``get_openapi_pod_startup_state`` so the spec route can tell a
+    still-starting pod (benign, self-resolving image cold-pull) from a
+    genuinely unreachable endpoint (VNet peering). Returns ``None`` on any
+    failure so the caller keeps its existing peering-repair fallback.
+    """
+
+    try:
+        from api.services.openapi.pod_phase import get_openapi_pod_startup_state
+
+        return get_openapi_pod_startup_state(
+            cred,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+    except Exception as exc:
+        LOGGER.warning("openapi/spec: startup-state probe failed: %s", exc)
+        return None
+
+
 class OpenApiTokenRequest(BaseModel):
     subscription_id: str = ""
     resource_group: str
@@ -932,6 +960,33 @@ def aks_openapi_spec(
                 return proxied
         except Exception as exc:
             LOGGER.warning("openapi/spec: k8s service proxy fetch failed: %s", exc)
+
+    # The spec fetch failed. Before blaming VNet peering (the historical
+    # default), check whether the elb-openapi pod is simply still starting —
+    # e.g. a fresh blastpool node cold-pulling the ~370 MB image takes ~90 s,
+    # during which the LB has an IP but no Ready endpoint. Showing the
+    # "Repair VNet peering" affordance in that window reads as an error for a
+    # benign, self-resolving state. Only fall through to the peering hint when
+    # the pod is genuinely Ready-but-unreachable (real peering break) or the
+    # probe itself could not determine the state.
+    startup = _classify_openapi_startup(cred, sub, resource_group, cluster_name)
+    if startup is not None and startup["state"] in ("starting", "failed"):
+        return {
+            "openapi": "3.0.0",
+            "info": {"title": "elb-openapi (starting)", "version": "0.0.0"},
+            "paths": {},
+            "degraded": True,
+            "degraded_reason": (
+                "openapi_pod_starting"
+                if startup["state"] == "starting"
+                else "openapi_pod_not_ready"
+            ),
+            "pod_state": startup["state"],
+            "pod_reason": startup["reason"],
+            "pod_message": startup["message"],
+            "ready_replicas": startup["ready_replicas"],
+            "desired_replicas": startup["desired_replicas"],
+        }
 
     return {
         "openapi": "3.0.0",
