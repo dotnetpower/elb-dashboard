@@ -1550,6 +1550,44 @@ textarea.form-input {
   }
 }
 
+/* Indeterminate progress bar — used when a long-running operation is genuinely
+   active but no determinate byte/percent signal is available yet (e.g. a warmup
+   pod is still bootstrapping azcopy before it emits a "%"). A muted highlight
+   slides across the track to honestly signal "working, progress unknown"
+   without fabricating an advancing percentage. The track is the parent element;
+   this fills it. */
+.progress-indeterminate {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+.progress-indeterminate::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: inherit;
+  background: var(--accent);
+  opacity: 0.85;
+  animation: progress-indeterminate-slide 1.25s ease-in-out infinite;
+}
+@keyframes progress-indeterminate-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(310%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-indeterminate::after {
+    animation: none;
+    width: 100%;
+    opacity: 0.4;
+  }
+}
+
 @keyframes blink {
   0%,
   100% {
@@ -1935,7 +1973,12 @@ textarea.form-input {
 
 /* Running/reducing halo pulse — a calm breathing ring around an in-flight job
    so a live run reads as active energy, not a static dot. Reducing pulses a
-   touch slower to read as "merging results". Disabled under reduced motion. */
+   touch slower to read as "merging results". Disabled under reduced motion.
+   The pulse animates OPACITY ONLY (not transform: scale): the halo is a child
+   of the interactive .mf-node <g>, so a scaling halo would perpetually resize
+   the node's bounding box and make the click target never settle (it is never
+   "stable" for pointer actionability — e.g. Playwright clicks time out, and
+   the live hit region subtly reflows). Opacity keeps the geometry fixed. */
 .mf-halo {
   transform-box: fill-box;
   transform-origin: center;
@@ -1948,11 +1991,9 @@ textarea.form-input {
   0%,
   100% {
     opacity: 0.08;
-    transform: scale(1);
   }
   50% {
-    opacity: 0.28;
-    transform: scale(1.35);
+    opacity: 0.32;
   }
 }
 

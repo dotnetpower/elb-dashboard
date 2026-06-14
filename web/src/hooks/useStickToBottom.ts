@@ -164,6 +164,10 @@ export function useStickToBottom({
   // below can call it without re-subscribing when it would otherwise change
   // identity each render.
   const requestScrollRef = useRef<() => void>(() => {});
+  // Latest `isFollowing` accessor in a ref so the scroll listener effect can
+  // read the current anchor logic without re-subscribing every render.
+  const isFollowingRef = useRef<() => boolean>(() => false);
+  isFollowingRef.current = isFollowing;
   requestScrollRef.current = () => {
     if (typeof window === "undefined") return;
     if (rafRef.current !== null) return;
@@ -186,7 +190,7 @@ export function useStickToBottom({
     if (!enabled || typeof window === "undefined") return;
     const onScroll = () => {
       if (selfScrollingRef.current) return;
-      followingRef.current = isFollowing();
+      followingRef.current = isFollowingRef.current();
     };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);

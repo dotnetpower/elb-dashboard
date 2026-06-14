@@ -601,7 +601,17 @@ case "$service" in
     # cannot reach MSAL (AADSTS700038 otherwise).
     if [[ -z "${VITE_AZURE_CLIENT_ID:-}" || "${VITE_AZURE_CLIENT_ID:-}" == "00000000-0000-0000-0000-000000000000" ]]; then
       if command -v azd >/dev/null 2>&1; then
-        azd_client_id="$(azd env get-values 2>/dev/null | awk -F= '/^API_CLIENT_ID=/{gsub(/"/, "", $2); print $2; exit}')"
+        # Guard the azd call exactly like lib-env.sh::load_azd_env: redirect
+        # stdin from /dev/null so a prompting azd ("Select an environment")
+        # cannot block, and cap it with `timeout` so a slow/wedged CLI never
+        # holds the Vite dev server past the e2e readiness window. The client
+        # id is optional (dev-bypass needs no MSAL), so failing fast here is
+        # always safe.
+        if command -v timeout >/dev/null 2>&1; then
+          azd_client_id="$(timeout 8s azd env get-values </dev/null 2>/dev/null | awk -F= '/^API_CLIENT_ID=/{gsub(/"/, "", $2); print $2; exit}' || true)"
+        else
+          azd_client_id="$(azd env get-values </dev/null 2>/dev/null | awk -F= '/^API_CLIENT_ID=/{gsub(/"/, "", $2); print $2; exit}' || true)"
+        fi
         if [[ -n "${azd_client_id:-}" && "$azd_client_id" != "00000000-0000-0000-0000-000000000000" ]]; then
           export VITE_AZURE_CLIENT_ID="$azd_client_id"
           echo "[local-run] Picked up VITE_AZURE_CLIENT_ID from azd env (API_CLIENT_ID=$azd_client_id)." >&2
