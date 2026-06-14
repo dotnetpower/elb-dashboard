@@ -58,13 +58,27 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3).status==200 else 1)"
 
-# Two workers because the api sidecar terminates WebSockets and
-# does streaming upload/download proxying — one worker is too few even
-# at low concurrency.
+# Single uvicorn worker — REQUIRED, do not raise above 1.
+#
+# The api sidecar holds several process-local, one-shot security stores that
+# are written by one HTTP request and read back by a *second* connection:
+#   * terminal WebSocket tickets   (api/routes/terminal/ws.py `_tickets`)
+#   * BLAST log SSE tickets         (api/routes/blast/logs.py `_tickets`)
+#   * sidecar-metrics SSE tickets   (api/routes/monitor/sidecars.py `_sidecar_tickets`)
+#   * sidecar-log SSE tickets       (api/routes/monitor/logs.py `_log_tickets`)
+# plus the in-process `/api/me` / health caches. With >1 worker the issue and
+# the redeem land on different processes, so the ticket lookup misses and the
+# browser gets a 403 on every terminal WebSocket / SSE upgrade. The whole
+# control plane is intentionally a single pinned replica with in-process state
+# (the redis broker is a sibling sidecar), and the api container is sized at
+# 0.5 vCPU, so a second worker buys no real parallelism for this async,
+# I/O-bound workload — it only breaks the ticket flows. Any CPU-bound work must
+# be offloaded to a thread / Celery, never to extra uvicorn workers.
+# Guarded by api/tests/test_dockerfile_single_worker.py.
 CMD ["uvicorn", "api.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8080", \
-     "--workers", "2", \
+     "--workers", "1", \
      "--proxy-headers", \
      "--no-server-header", \
      "--forwarded-allow-ips", "*"]
