@@ -335,6 +335,10 @@ class JobStateRepository:
         resource_group: str | None = None,
         cluster_name: str | None = None,
         storage_account: str | None = None,
+        job_title: str | None = None,
+        program: str | None = None,
+        db: str | None = None,
+        query_label: str | None = None,
     ) -> JobState:
         """Patch the named properties of an existing job row (MERGE).
 
@@ -346,6 +350,17 @@ class JobStateRepository:
         passing a value when it should overwrite an empty column. They are NOT
         re-derived from ``payload`` (the external payload nests its fields under
         an ``external`` key that ``canonical_job_metadata`` does not inspect).
+
+        The ``job_title`` / ``program`` / ``db`` / ``query_label`` parameters
+        exist for the same backfill reason: a ``/v1/jobs`` row first synced from
+        a transient upstream row that lacked program/db was persisted with the
+        canonical defaults (``program``/``job_title`` = ``"blast"``, ``db`` =
+        ``""``). The list view reads these columns directly
+        (``include_payload=False``), so a stuck degenerate value showed an API
+        job as "blast" with no database. The sync backfill passes a value only
+        when the stored column is the degenerate default and the upstream now
+        carries a real value; like the scope args they are written verbatim and
+        NOT re-derived from ``payload``.
         """
         with self._state_client() as t:
             try:
@@ -411,6 +426,18 @@ class JobStateRepository:
             if storage_account is not None:
                 e["storage_account"] = storage_account
                 patch["storage_account"] = storage_account
+            if job_title is not None:
+                e["job_title"] = job_title
+                patch["job_title"] = job_title
+            if program is not None:
+                e["program"] = program
+                patch["program"] = program
+            if db is not None:
+                e["db"] = db
+                patch["db"] = db
+            if query_label is not None:
+                e["query_label"] = query_label
+                patch["query_label"] = query_label
             ts = updated_at or _now_iso()
             e["updated_at"] = ts
             patch["updated_at"] = ts

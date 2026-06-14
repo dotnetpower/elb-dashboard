@@ -374,11 +374,46 @@ def _sync_external_jobs_to_table(
                     cur_val = str(getattr(existing, col, "") or "")
                     if new_val and not cur_val:
                         scope_backfill[col] = new_val
+                # Heal the identity columns (program / db / job_title /
+                # query_label) when they were stored as the canonical default.
+                # A row first synced from a transient /v1/jobs row that lacked
+                # program/db was persisted with program/title = "blast", db = ""
+                # (canonical_job_metadata reads the payload top level, not its
+                # nested ``external`` key, so a ``{"external": ...}`` payload
+                # yields the defaults). The scope-only backfill above never
+                # touched these, and the list view reads the columns directly
+                # (include_payload=False), so the API job stayed stuck showing
+                # "blast" with no database even after the sibling list carried
+                # the real values. Fill ONLY when the stored column is the
+                # degenerate default AND the fresh projection has a real value;
+                # a row that already carries good metadata is never overwritten.
+                meta_backfill: dict[str, str] = {}
+                fresh_program = str(converted.get("program") or "")
+                fresh_db = str(converted.get("db") or "")
+                fresh_title = str(converted.get("job_title") or "")
+                fresh_query = str(converted.get("query_label") or "")
+                cur_program = str(getattr(existing, "program", "") or "")
+                cur_db = str(getattr(existing, "db", "") or "")
+                cur_title = str(getattr(existing, "job_title", "") or "")
+                cur_query = str(getattr(existing, "query_label", "") or "")
+                if fresh_program and fresh_program != "blast" and cur_program in {"", "blast"}:
+                    meta_backfill["program"] = fresh_program
+                if fresh_db and not cur_db:
+                    meta_backfill["db"] = fresh_db
+                if (
+                    fresh_title
+                    and fresh_title != "blast"
+                    and (cur_title in {"", "blast"} or cur_title == job_id)
+                ):
+                    meta_backfill["job_title"] = fresh_title
+                if fresh_query and fresh_query not in {"", "query.fa"} and not cur_query:
+                    meta_backfill["query_label"] = fresh_query
                 status_changed = bool(
                     ext_status and (ext_status != cur_status or ext_phase != cur_phase)
                 )
-                if status_changed or scope_backfill:
+                if status_changed or scope_backfill or meta_backfill:
                     update_kwargs: dict[str, Any] = dict(scope_backfill)
+                    update_kwargs.update(meta_backfill)
                     if status_changed:
                         update_kwargs["status"] = ext_status
                         update_kwargs["phase"] = ext_phase
@@ -633,6 +668,14 @@ def collect_and_sync_external_jobs(
         return result
 
     candidate_rows: list[dict[str, Any]] = []
+    # Rows already shown as a local Table row this request (pre-seeded into
+    # ``seen`` by the caller). They are NOT re-displayed, but they ARE still
+    # synced so a row first persisted with degenerate program/db/title (from a
+    # transient empty /v1/jobs row) heals toward the authoritative upstream
+    # values. ``_sync_external_jobs_to_table`` only writes when the stored
+    # column is the degenerate default, so a row with good metadata is a no-op.
+    preexisting_ids = set(seen)
+    heal_rows: dict[str, dict[str, Any]] = {}
     budget = max(0, int(detail_enrich_budget))
     for target in targets:
         t_kwargs = target["kwargs"]
@@ -653,7 +696,22 @@ def collect_and_sync_external_jobs(
             if not isinstance(ext_row, dict):
                 continue
             job_id = str(ext_row.get("job_id") or "")
-            if not job_id or job_id in seen:
+            if not job_id:
+                continue
+            if job_id in preexisting_ids:
+                # Already a local row this request — capture once for the heal
+                # pass (no display dup, no detail-enrichment budget spent).
+                if job_id not in heal_rows:
+                    heal_rows[job_id] = apply_remembered_query_label(
+                        _external_row_with_scope_defaults(
+                            ext_row,
+                            subscription_id=t_sub,
+                            resource_group=t_rg,
+                            cluster_name=t_cluster,
+                        )
+                    )
+                continue
+            if job_id in seen:
                 continue
             seen.add(job_id)
             ext_row = _external_row_with_scope_defaults(
@@ -677,9 +735,12 @@ def collect_and_sync_external_jobs(
             candidate_rows.append(ext_row)
 
     result.rows = candidate_rows
-    if candidate_rows:
+    # Display the freshly-discovered rows; sync both those AND the heal-only
+    # rows (disjoint by job_id) so existing degenerate local rows converge.
+    sync_input = candidate_rows + list(heal_rows.values())
+    if sync_input:
         created, updated, tombstoned_ids = _sync_external_jobs_to_table(
-            candidate_rows,
+            sync_input,
             caller_oid="",
             tenant_id=tenant_id,
         )

@@ -1452,6 +1452,13 @@ def test_sync_external_jobs_updates_drifted_status(monkeypatch):
     class ExistingRow:
         status = "running"
         phase = "running"
+        # Already carries good identity metadata, so the heal backfill is a
+        # no-op here and this test stays focused on status-drift behaviour.
+        job_id = "abc123"
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "query.fa"
 
     class FakeRepo:
         def get_many(self, ids):
@@ -1499,6 +1506,142 @@ def test_sync_external_jobs_updates_drifted_status(monkeypatch):
     ]
 
 
+def test_sync_external_jobs_heals_degenerate_identity_columns(monkeypatch):
+    """A row first synced from a transient /v1/jobs row that lacked program/db
+    was persisted with the canonical defaults (program/job_title="blast",
+    db=""). The list view reads those columns directly (include_payload=False),
+    so the API job stayed stuck showing "blast" with no database. Once the
+    sibling list carries the real program/db, the sync MUST heal the identity
+    columns durably."""
+    from api.routes import _blast_shared as shared
+
+    updated_calls: list[dict[str, object]] = []
+    created: list[object] = []
+
+    class DegenerateRow:
+        job_id = "abc123"
+        status = "running"
+        phase = "running"
+        job_title = "blast"
+        program = "blast"
+        db = ""
+        query_label = ""
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"abc123": DegenerateRow()}
+
+        def update(self, job_id, **kwargs):
+            updated_calls.append({"job_id": job_id, **kwargs})
+
+        def create(self, state):
+            created.append(state)
+            return state
+
+    fake_repo = FakeRepo()
+
+    class FakeRepoFactory:
+        def __call__(self):
+            return fake_repo
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", FakeRepoFactory())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "abc123",
+                "status": "running",
+                "created_at": "2026-06-14T02:55:00Z",
+                "program": "blastn",
+                "db": "https://stg.blob.core.windows.net/blast-db/core_nt/core_nt",
+                "cluster_name": "elb-cluster-01",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    assert result == (0, 1, set())
+    assert created == []
+    assert len(updated_calls) == 1
+    call = updated_calls[0]
+    assert call["job_id"] == "abc123"
+    # Identity columns healed from the fresh projection (db -> basename).
+    assert call["program"] == "blastn"
+    assert call["db"] == "core_nt"
+    assert call["job_title"] == "blastn - core_nt"
+    # Status/phase unchanged (already "running") so they are NOT in the patch.
+    assert "status" not in call
+    assert "phase" not in call
+
+
+def test_sync_external_jobs_does_not_overwrite_good_identity_columns(monkeypatch):
+    """A row that already carries real program/db/title MUST NOT be clobbered
+    by the heal backfill — even if the fresh upstream values differ in casing
+    or path. The heal only fills the degenerate canonical default."""
+    from api.routes import _blast_shared as shared
+
+    updated_calls: list[dict[str, object]] = []
+
+    class GoodRow:
+        job_id = "abc123"
+        status = "running"
+        phase = "running"
+        job_title = "My custom search"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "NC_003310.1"
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"abc123": GoodRow()}
+
+        def update(self, job_id, **kwargs):
+            updated_calls.append({"job_id": job_id, **kwargs})
+
+        def create(self, state):  # pragma: no cover - defensive
+            raise AssertionError("must not create an existing row")
+
+    fake_repo = FakeRepo()
+
+    class FakeRepoFactory:
+        def __call__(self):
+            return fake_repo
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", FakeRepoFactory())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "abc123",
+                "status": "running",
+                "created_at": "2026-06-14T02:55:00Z",
+                "program": "tblastn",
+                "db": "swissprot",
+                "job_title": "Upstream title",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    # No status drift and no degenerate columns -> nothing to write at all.
+    assert result == (0, 0, set())
+    assert updated_calls == []
+
+
 def test_sync_external_jobs_clears_stale_error_code_on_terminal_flip(monkeypatch):
     """When the sibling now reports success but the Table row still carries a
     stale ``error_code`` (e.g. a transient ``worker_lost`` left by a
@@ -1510,9 +1653,14 @@ def test_sync_external_jobs_clears_stale_error_code_on_terminal_flip(monkeypatch
     created: list[object] = []
 
     class ExistingRow:
+        job_id = "abc123"
         status = "running"
         phase = "worker_lost"
         error_code = "worker_lost"
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "query.fa"
 
     class FakeRepo:
         def get_many(self, ids):
@@ -1572,8 +1720,13 @@ def test_sync_external_jobs_skips_unchanged_status(monkeypatch):
     created: list[object] = []
 
     class ExistingRow:
+        job_id = "abc123"
         status = "completed"
         phase = "completed"
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "query.fa"
 
     class FakeRepo:
         def get_many(self, ids):
@@ -1625,12 +1778,17 @@ def test_sync_external_jobs_backfills_empty_cluster_scope(monkeypatch):
     created: list[object] = []
 
     class ExistingRow:
+        job_id = "bf-job-1"
         status = "running"
         phase = "running"
         subscription_id = ""
         resource_group = ""
         cluster_name = ""
         storage_account = ""
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "query.fa"
 
     class FakeRepo:
         def get_many(self, ids):
@@ -1697,12 +1855,17 @@ def test_sync_external_jobs_does_not_overwrite_existing_cluster_scope(monkeypatc
     updated_calls: list[dict[str, object]] = []
 
     class ExistingRow:
+        job_id = "bf-job-2"
         status = "running"
         phase = "running"
         subscription_id = "sub-1"
         resource_group = "rg-elb-cluster"
         cluster_name = "elb-cluster-01"
         storage_account = "stexisting"
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "query.fa"
 
     class FakeRepo:
         def get_many(self, ids):
