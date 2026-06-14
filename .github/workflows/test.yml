@@ -31,7 +31,7 @@ jobs:
   backend:
     name: ruff + pytest (api/)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -55,9 +55,22 @@ jobs:
         run: uv run ruff check api
 
       - name: pytest (fast loop — parallel, slow/subprocess excluded)
-        # The default pytest.ini addopts already wire `-n auto`, the marker
-        # filter, and the `--timeout=60` safety net. Set CI=true so any
-        # CI-aware code paths (logging, color, etc.) behave correctly.
+        # An xdist worker is intermittently SIGKILLed near the end of the suite
+        # ("[gwN] node down: Not properly terminated", no Python traceback, no
+        # faulthandler dump — the C dump thread dies with the process), which is
+        # the signature of the kernel OOM-killer firing at peak memory. When it
+        # happens the controller used to block forever on the dead worker and
+        # run to the job cap. `--max-worker-restart=4` lets xdist respawn the
+        # crashed worker and reschedule its tests so an isolated crash recovers
+        # to green instead of wedging the run.
+        #
+        # Backstops bound any stall regardless of cause: `--timeout=60` per test
+        # and `--session-timeout=300` (pytest.ini), plus this step-level
+        # `timeout-minutes` as the final OS-level guard — Actions OS-kills the
+        # step at 6 minutes even if the controller fully deadlocks on a dead
+        # worker. Set CI=true so CI-aware code paths (logging, color, etc.)
+        # behave correctly.
+        timeout-minutes: 6
         env:
           CI: "true"
-        run: uv run pytest -q api/tests
+        run: uv run pytest -q api/tests --max-worker-restart=4

@@ -16,6 +16,12 @@ from collections.abc import Generator
 
 import pytest
 
+# The cgroup metrics reporter is a deployment-only background daemon thread that
+# `create_app()` starts at import. In tests it just spams "redis connection
+# refused" every few seconds (no Redis in CI) and adds one useless thread per
+# worker. Disable it so the suite stays quiet and thread-clean.
+os.environ.setdefault("SIDECAR_REPORTER_DISABLED", "true")
+
 # Disable the blast-db-metadata Redis pub/sub invalidation by default in
 # tests. Subscribers spawn daemon threads; publishes attempt a real Redis
 # connection. Individual tests that exercise the invalidation channel can
