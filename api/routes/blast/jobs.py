@@ -475,6 +475,55 @@ def blast_jobs_by_accession(
     }
 
 
+def _maybe_recover_external_failure_error(repo: Any, state: Any) -> Any:
+    """Self-heal a pre-existing external failed row that has no ``error_code``.
+
+    The sync-time recovery in ``_sync_external_jobs_to_table`` only fires on the
+    FAILED transition, so an external job that was already ``failed`` before
+    that recovery shipped — or a submit-time failure (memory-fit / config
+    rejection) that leaves no Storage ``FAILURE.txt`` for the detail-view
+    enrichment to read — keeps the generic "no error detail" banner forever.
+    On the single-job detail render we recover the real cause from the sibling
+    ``/jobs/{id}`` detail ONCE and persist it into the indexed ``error_code``
+    column so subsequent renders read it without another upstream call.
+
+    Best-effort: only fires for an external-origin ``failed`` row with an empty
+    ``error_code``; a sibling outage / unresolved endpoint degrades to the row
+    unchanged (generic banner preserved). Never raises.
+    """
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    if not isinstance(payload.get("external"), dict):
+        return state
+    if str(getattr(state, "status", "") or "").lower() != "failed":
+        return state
+    if (str(getattr(state, "error_code", "") or "")).strip():
+        return state
+    from api.services.blast.external_jobs import _recover_external_failure_error
+
+    infrastructure = {
+        "subscription_id": str(getattr(state, "subscription_id", "") or ""),
+        "resource_group": str(getattr(state, "resource_group", "") or ""),
+        "cluster_name": str(getattr(state, "cluster_name", "") or ""),
+    }
+    recovered = _recover_external_failure_error(str(state.job_id), infrastructure)
+    if not recovered:
+        return state
+    try:
+        repo.update(state.job_id, error_code=recovered)
+    except Exception as exc:
+        LOGGER.debug(
+            "external failure error persist skipped job_id=%s: %s",
+            state.job_id,
+            type(exc).__name__,
+        )
+    # Reflect the recovered cause in this response. ``state`` is a mutable
+    # ``JobState`` dataclass, so the attribute assignment always succeeds even
+    # when the persist above failed (the in-memory value still feeds the
+    # projection so the banner is correct for this render).
+    state.error_code = recovered
+    return state
+
+
 @router.get("/jobs/{job_id}")
 def blast_job_get(
     request: Request,
@@ -492,6 +541,7 @@ def blast_job_get(
         if state is not None:
             _assert_job_owner(state.owner_oid, caller)
             state = _refresh_running_blast_state(repo, state)
+            state = _maybe_recover_external_failure_error(repo, state)
             split_children = None
             if _local_list_row_may_have_split_children(state):
                 split_children = _split_child_summary_from_repo(repo, state.job_id)

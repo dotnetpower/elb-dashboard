@@ -60,6 +60,88 @@ def test_job_detail_skips_split_child_lookup_for_non_split_job(monkeypatch) -> N
     assert "database_metadata" not in body
 
 
+def test_job_detail_recovers_external_failed_error_and_persists(monkeypatch) -> None:
+    """An external-origin failed row with no error_code (failed before
+    sync-time recovery shipped, or a submit-time failure with no Storage
+    FAILURE.txt) recovers the real sibling cause on the detail render, persists
+    it to error_code, and surfaces it in the banner — not the generic
+    'no error detail' placeholder."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    owner_oid = "00000000-0000-0000-0000-000000000000"
+    real_error = (
+        "BLAST database core_nt memory requirements exceed memory available "
+        'on selected machine type "Standard_E16s_v5"'
+    )
+    persisted: dict[str, object] = {}
+
+    state = SimpleNamespace(
+        job_id="ext-fail",
+        task_id=None,
+        type="blast",
+        owner_oid=owner_oid,
+        status="failed",
+        phase="failed",
+        created_at="2026-06-14T00:00:00Z",
+        updated_at="2026-06-14T00:01:00Z",
+        error_code="",
+        parent_job_id=None,
+        subscription_id="sub-1",
+        resource_group="rg-1",
+        cluster_name="elb-cluster-01",
+        storage_account="",
+        payload={"external": {"job_id": "ext-fail", "status": "failed"}},
+    )
+
+    class Repo:
+        def get(self, job_id: str):
+            return state
+
+        def update(self, job_id: str, **kwargs):
+            persisted.update(kwargs)
+            if "error_code" in kwargs:
+                state.error_code = kwargs["error_code"]
+            return state
+
+        def list_children(self, *_a, **_k):
+            return []
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+
+    # The detail render resolves the sibling endpoint from the row's scope and
+    # fetches the per-job detail (the LIST snapshot carries no ``error``).
+    from api.services import external_blast
+
+    calls: list[str] = []
+
+    def fake_get_job(job_id, **_kwargs):
+        calls.append(job_id)
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "error": {"code": "BLAST_FAILED", "message": real_error},
+        }
+
+    monkeypatch.setattr(external_blast, "get_job", fake_get_job)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/ext-fail",
+        params={"include_database_metadata": "false"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert real_error in (body.get("error") or "")
+    assert "no error detail" not in (body.get("error") or "").lower()
+    # Persisted to the indexed column so subsequent renders skip the fetch.
+    assert real_error in str(persisted.get("error_code") or "")
+    assert calls == ["ext-fail"]
+
+
 def test_jobs_list_swr_serves_stale_and_revalidates(monkeypatch) -> None:
     """The jobs list is served stale-while-revalidate: fresh → cache hit,
     stale → immediate stale payload + one background rebuild, then the rebuilt

@@ -62,14 +62,30 @@ No API surface or IaC change. Two backend service edits:
     banner. A genuinely specific snapshot error still wins when no column value
     is present (precedence: persisted column error → snapshot error → generic
     placeholder).
+- `api/routes/blast/jobs.py`
+  - `blast_job_get` (the single-job **detail** render) now calls
+    `_maybe_recover_external_failure_error(repo, state)` after the K8s refresh.
+    For an external-origin `failed` row with an **empty** `error_code` it
+    recovers the sibling cause once via the same `_recover_external_failure_error`
+    helper and **persists it to the indexed `error_code` column**, so the detail
+    view self-heals even for jobs that failed *before* the sync-time recovery
+    shipped, and for submit-time failures (memory-fit / config rejection) that
+    leave no Storage `FAILURE.txt` for the existing `_enrich_external_failure_detail`
+    path to read. Persist-once: subsequent renders read the column and skip the
+    upstream call. Best-effort: a sibling outage leaves the row unchanged.
+
+## Two recovery surfaces, one helper
+
+| Surface | When it fires | Covers |
+| --- | --- | --- |
+| `_sync_external_jobs_to_table` (list/Message-Flow poll) | on the `failed` **transition** | every *future* external failure, before the user opens it |
+| `blast_job_get` detail render | external `failed` row with empty `error_code` | *pre-existing* failed rows + submit-time failures with no `FAILURE.txt` |
+
+Both write the same indexed `error_code` column, so whichever fires first wins
+and the other becomes a no-op (the empty-`error_code` guard).
 
 ## Scope / known limitation
 
-- The recovery fires on the failed **transition** only. Rows that were already
-  in `failed` state before this change shipped are not back-filled (they keep
-  the generic banner until they age out of Recent searches) — this is a
-  deliberate tradeoff to keep the fetch strictly once-per-job and avoid a
-  per-poll re-fetch for any job the sibling genuinely has no error for.
 - The underlying job failure itself (`core_nt` on `Standard_E16s_v5`:
   251.7 GB required vs 128 GB nominal) is a correct elastic-blast memory-fit
   rejection of an under-sized machine type, surfaced via the external submit
