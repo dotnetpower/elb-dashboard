@@ -458,6 +458,55 @@ def test_stale_start_does_not_prevent_stop() -> None:
     assert decision.reason.startswith("idle:")
 
 
+def test_persisted_live_activity_resets_idle_clock_without_a_live_probe() -> None:
+    """The durable ``last_live_activity_at`` anchor keeps the cluster running
+    even when the live K8s probe is unavailable this tick.
+
+    This is the core fix for "the SPA showed a long 'Stops in' countdown but
+    the cluster stopped suddenly": an OpenAPI-submitted run leaves no jobstate
+    row, so once its pods are garbage-collected the live probe returns nothing
+    (``live_latest_activity=None``). Without the persisted high-water mark the
+    deadline would regress to ``created_at`` and the cluster would stop. With
+    it, the last real observed activity still anchors the idle clock.
+    """
+    pref = _pref(
+        idle_minutes=15,
+        # No dashboard jobstate rows; created long ago.
+        created_at=(_NOW - timedelta(hours=6)).isoformat(timespec="seconds"),
+        # A live BLAST burst finished 2 min ago and was persisted before the
+        # probe went blind.
+        last_live_activity_at=(_NOW - timedelta(minutes=2)).isoformat(timespec="seconds"),
+    )
+    # live_latest_activity is None this tick (probe blind / pods GC'd).
+    decision = evaluate_cluster(
+        pref,
+        repo=_FakeRepo([]),
+        now=_NOW,
+        power_state="Running",
+        live_active_jobs=None,
+        live_latest_activity=None,
+    )
+    # Anchor = persisted live activity (2 min ago) + 15 min = 13 min left.
+    assert decision.verdict == "keep"
+    assert decision.seconds_until_stop > 0
+
+
+def test_stale_persisted_live_activity_does_not_prevent_stop() -> None:
+    """``last_live_activity_at`` only ever moves the anchor forward — a value
+    older than the idle window must not strand the cluster running."""
+    pref = _pref(
+        idle_minutes=15,
+        created_at=(_NOW - timedelta(hours=6)).isoformat(timespec="seconds"),
+        # Last live activity was 2 h ago — past the window.
+        last_live_activity_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+    )
+    decision = evaluate_cluster(
+        pref, repo=_FakeRepo([]), now=_NOW, power_state="Running"
+    )
+    assert decision.verdict == "stop"
+    assert decision.reason.startswith("idle:")
+
+
 def test_recent_start_anchors_when_no_jobs_observed() -> None:
     """A start with no job history at all still grants a full grace,
     overriding the ``created_at`` fallback anchor."""

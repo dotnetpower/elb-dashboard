@@ -412,6 +412,20 @@ def evaluate_cluster(
     if started is not None and (latest is None or started > latest):
         latest = started
 
+    # Durable, monotonic live-activity anchor (chiefly OpenAPI-submitted runs
+    # that never write a dashboard jobstate row). Folded in exactly like
+    # ``last_started_at`` so a transient live-probe miss — the cluster API
+    # server blinking, or a finished run's Job/Pods being garbage-collected —
+    # can no longer pull the idle deadline earlier than the last real observed
+    # activity. ``mark_auto_stop_live_activity`` only ever advances this field
+    # to a real past timestamp, never into the future, so it cannot defer the
+    # stop indefinitely. This is the key fix for "the SPA showed a long
+    # 'Stops in' countdown but the cluster stopped suddenly": the live probe's
+    # high-water mark is now persisted, so it survives the probe going blind.
+    live_anchor = _parse_iso(pref.last_live_activity_at)
+    if live_anchor is not None and (latest is None or live_anchor > latest):
+        latest = live_anchor
+
     # A recent live ``app=blast`` start/finish resets the idle clock too, so
     # a cluster that just finished an OpenAPI-submitted burst (active now 0,
     # no dashboard jobstate row) still gets the full idle grace instead of

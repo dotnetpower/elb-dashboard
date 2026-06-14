@@ -478,6 +478,13 @@ def put_autostop(
         # real ``last_started_at``). Carry them forward by default.
         pref.created_at = existing.created_at
         pref.last_started_at = existing.last_started_at
+        # ``last_live_activity_at`` is the durable live-K8s-activity anchor
+        # (same role as ``last_started_at`` for OpenAPI runs). The PUT body
+        # never carries it, so restore it too — otherwise toggling the
+        # setting would wipe the high-water mark and the idle deadline would
+        # regress to ``created_at`` on the next tick, stopping a cluster that
+        # finished a BLAST burst only moments ago.
+        pref.last_live_activity_at = existing.last_live_activity_at
         # Idle-clock reset on a SHORTER window. Shrinking ``idle_minutes``
         # (e.g. 4h → 1h) recomputes ``deadline = last_activity + new_window``;
         # when the last activity predates the new (smaller) window the
@@ -771,6 +778,32 @@ def _compute_status(
                 probe = probe_live_blast_activity(pref)
                 if probe is not None:
                     live_active_jobs, live_latest_activity = probe
+                    # Persist the live high-water mark (durable, monotonic,
+                    # advance-only) so the idle deadline the SPA shows here
+                    # survives the probe going blind on a later poll — without
+                    # this the "Stops in" countdown lurches on refresh and the
+                    # beat tick can stop the cluster earlier than shown. The
+                    # advance-only guard means steady state writes nothing.
+                    if live_latest_activity is not None:
+                        try:
+                            from api.services.auto_stop import (
+                                mark_auto_stop_live_activity,
+                            )
+
+                            mark_auto_stop_live_activity(
+                                subscription_id,
+                                resource_group,
+                                cluster_name,
+                                live_latest_activity,
+                                known=pref,
+                            )
+                        except Exception as exc:
+                            LOGGER.debug(
+                                "autostop_status live anchor persist failed "
+                                "cluster=%s: %s",
+                                cluster_name,
+                                exc,
+                            )
             except Exception as exc:
                 LOGGER.debug(
                     "autostop_status live blast probe failed cluster=%s: %s",

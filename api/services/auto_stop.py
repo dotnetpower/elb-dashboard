@@ -120,6 +120,19 @@ class AutoStopPreference:
     # full ``idle_minutes`` grace. It only advances on real starts, never
     # on warn ticks, so it is a drift-free anchor like ``created_at``.
     last_started_at: str = ""
+    # Durable, monotonic anchor for live K8s ``app=blast`` activity — chiefly
+    # OpenAPI-submitted runs that never write a dashboard jobstate row. The
+    # live K8s probe (``probe_live_blast_activity``) is best-effort and
+    # REGRESSES: it returns nothing when the cluster's API server briefly
+    # blinks, or once a finished run's Job/Pods are garbage-collected. Without
+    # a durable record the idle deadline jumps backward the instant the probe
+    # stops seeing the run, which both makes the SPA "Stops in" countdown lurch
+    # on refresh AND lets the next beat tick stop the cluster earlier than the
+    # countdown last showed. ``mark_auto_stop_live_activity`` ADVANCES this
+    # field (never regresses it), and the evaluator folds it into the idle
+    # anchor exactly like ``last_started_at`` so a transient probe miss can no
+    # longer pull the deadline earlier than the last real observed activity.
+    last_live_activity_at: str = ""
     updated_at: str = ""
     # Critique #9.2: ``updated_at`` and ``last_skip_at`` BOTH drift forward
     # on every warn tick because ``mark_auto_stop_event`` writes them.
@@ -157,6 +170,7 @@ class AutoStopPreference:
             "last_skip_reason": self.last_skip_reason,
             "extend_until": self.extend_until,
             "last_started_at": self.last_started_at,
+            "last_live_activity_at": self.last_live_activity_at,
             "updated_at": self.updated_at,
             "created_at": self.created_at,
             "owner_oid": self.owner_oid,
@@ -178,6 +192,7 @@ class AutoStopPreference:
             last_skip_reason=str(value.get("last_skip_reason") or ""),
             extend_until=str(value.get("extend_until") or ""),
             last_started_at=str(value.get("last_started_at") or ""),
+            last_live_activity_at=str(value.get("last_live_activity_at") or ""),
             updated_at=str(value.get("updated_at") or ""),
             created_at=str(value.get("created_at") or ""),
             owner_oid=str(value.get("owner_oid") or ""),
@@ -446,6 +461,88 @@ def mark_auto_stop_started(
     except PreferenceUpdateConflict:
         LOGGER.warning(
             "auto_stop.mark_auto_stop_started giving up after CAS exhaustion; "
+            "in-memory snapshot returned without persisting cluster=%s",
+            cluster_name,
+        )
+        return fallback
+
+
+def mark_auto_stop_live_activity(
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    activity_at: datetime,
+    *,
+    known: AutoStopPreference | None = None,
+) -> AutoStopPreference | None:
+    """Advance the durable live-activity anchor (monotonic, best-effort).
+
+    Records the most-recent live K8s ``app=blast`` start/finish timestamp
+    observed by ``probe_live_blast_activity`` so the idle deadline survives a
+    transient probe miss — the cluster API server blinking, or a finished run
+    whose Job/Pods were garbage-collected. The live probe REGRESSES (returns
+    nothing once it stops seeing a run); persisting its high-water mark here
+    keeps both the SPA "Stops in" countdown and the beat stop decision
+    anchored on the last *real* observed activity instead of lurching back to
+    the much-older ``created_at`` anchor.
+
+    Strictly advance-only and idempotent: a no-op (returns the current row,
+    no write) when ``activity_at`` is not newer than the stored anchor or no
+    preference row exists. This makes it safe for the high-frequency status
+    route to call on every poll — once the anchor is current, later calls do
+    not touch the Table. Pass the already-loaded row via ``known`` to skip the
+    pre-check read entirely.
+
+    Atomicity: mirrors ``mark_auto_stop_started`` — re-reads the latest row
+    with its ETag and writes back with an ``If-Match`` conditional update
+    touching only ``last_live_activity_at`` + ``updated_at`` so a concurrent
+    user PUT cannot be clobbered. On CAS exhaustion it logs a warning and
+    returns the in-memory snapshot without persisting; losing one bookkeeping
+    advance is harmless because the next observation re-advances it.
+    """
+    if activity_at.tzinfo is None:
+        activity_at = activity_at.replace(tzinfo=UTC)
+
+    pref = (
+        known
+        if known is not None
+        else get_auto_stop_preference(subscription_id, resource_group, cluster_name)
+    )
+    if pref is None:
+        return None
+    existing = _parse_iso(pref.last_live_activity_at)
+    if existing is not None and activity_at <= existing:
+        # Not newer than what we already persisted — nothing to do. This is
+        # the steady-state path (no new BLAST activity since the last
+        # advance), so the hot status route does zero Table writes here.
+        return pref
+
+    fallback: AutoStopPreference | None = None
+
+    def _attempt() -> AutoStopPreference | None:
+        nonlocal fallback
+        latest = get_auto_stop_preference(subscription_id, resource_group, cluster_name)
+        if latest is None:
+            return None
+        current = _parse_iso(latest.last_live_activity_at)
+        if current is not None and activity_at <= current:
+            # A sibling writer advanced the anchor past our value between the
+            # pre-check and this attempt — idempotent no-op.
+            return latest
+        next_pref = AutoStopPreference.from_dict(latest.to_dict())
+        next_pref.etag = latest.etag
+        next_pref.last_live_activity_at = activity_at.astimezone(UTC).isoformat(
+            timespec="seconds"
+        )
+        next_pref.updated_at = _now_iso()
+        fallback = next_pref
+        return save_auto_stop_preference(next_pref)
+
+    try:
+        return cas_retry(_attempt, operation="auto_stop.mark_live_activity")
+    except PreferenceUpdateConflict:
+        LOGGER.warning(
+            "auto_stop.mark_auto_stop_live_activity giving up after CAS exhaustion; "
             "in-memory snapshot returned without persisting cluster=%s",
             cluster_name,
         )
@@ -739,6 +836,7 @@ __all__ = [
     "is_in_cooldown",
     "list_auto_stop_preferences",
     "mark_auto_stop_event",
+    "mark_auto_stop_live_activity",
     "normalise_preference",
     "preference_key",
     "save_auto_stop_preference",

@@ -30,6 +30,7 @@ from api.services.auto_stop import (
     get_auto_stop_preference,
     list_auto_stop_preferences,
     mark_auto_stop_event,
+    mark_auto_stop_live_activity,
 )
 from api.services.auto_stop_evaluator import evaluate_cluster
 from api.services.auto_stop_live import probe_live_blast_activity
@@ -48,13 +49,37 @@ def _live_blast_signal(
     degrades to ``(None, None)`` on any failure so an unreachable K8s API
     can never strand a cluster running forever — the live signal is additive
     protection only.
+
+    Side effect: when the probe reports a fresh ``live_latest_activity``, the
+    high-water mark is persisted via ``mark_auto_stop_live_activity`` (durable,
+    monotonic, advance-only). This is what keeps the idle deadline from
+    regressing on the *next* tick when the probe goes blind (K8s blip / the
+    finished run's Job/Pods garbage-collected) and stops the cluster earlier
+    than the SPA countdown last showed. The persist is best-effort — a write
+    failure never fails the tick.
     """
     if power_state != "Running":
         return None, None
     probe = probe_live_blast_activity(pref)
     if probe is None:
         return None, None
-    return probe
+    live_active_jobs, live_latest_activity = probe
+    if live_latest_activity is not None:
+        try:
+            mark_auto_stop_live_activity(
+                pref.subscription_id,
+                pref.resource_group,
+                pref.cluster_name,
+                live_latest_activity,
+                known=pref,
+            )
+        except Exception as exc:  # best-effort bookkeeping — never fail the tick
+            LOGGER.debug(
+                "auto_stop live anchor persist failed cluster=%s: %s",
+                pref.cluster_name,
+                exc,
+            )
+    return live_active_jobs, live_latest_activity
 
 
 

@@ -28,6 +28,7 @@ from api.services.auto_stop import (
     is_in_cooldown,
     list_auto_stop_preferences,
     mark_auto_stop_event,
+    mark_auto_stop_live_activity,
     mark_auto_stop_started,
     normalise_preference,
     preference_key,
@@ -226,6 +227,68 @@ def test_last_started_at_round_trips_through_dict() -> None:
     restored = AutoStopPreference.from_dict(pref.to_dict())
     assert restored.last_started_at == "2026-06-02T07:22:14+00:00"
     assert restored == pref
+
+
+def test_last_live_activity_at_round_trips_through_dict() -> None:
+    pref = _make(last_live_activity_at="2026-06-14T03:10:00+00:00")
+    restored = AutoStopPreference.from_dict(pref.to_dict())
+    assert restored.last_live_activity_at == "2026-06-14T03:10:00+00:00"
+    assert restored == pref
+
+
+def test_mark_auto_stop_live_activity_advances_and_persists(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    pref = save_auto_stop_preference(_make())
+    assert pref.last_live_activity_at == ""
+
+    ts = datetime(2026, 6, 14, 3, 10, 0, tzinfo=UTC)
+    updated = mark_auto_stop_live_activity(
+        pref.subscription_id, pref.resource_group, pref.cluster_name, ts
+    )
+    assert updated is not None
+    assert updated.last_live_activity_at == ts.isoformat(timespec="seconds")
+    # Persisted, not just returned.
+    reloaded = get_auto_stop_preference(
+        pref.subscription_id, pref.resource_group, pref.cluster_name
+    )
+    assert reloaded is not None
+    assert reloaded.last_live_activity_at == ts.isoformat(timespec="seconds")
+
+
+def test_mark_auto_stop_live_activity_is_monotonic(monkeypatch, tmp_path) -> None:
+    """An older observation must never regress the persisted high-water mark."""
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    pref = save_auto_stop_preference(_make())
+    newer = datetime(2026, 6, 14, 3, 10, 0, tzinfo=UTC)
+    older = datetime(2026, 6, 14, 2, 0, 0, tzinfo=UTC)
+
+    mark_auto_stop_live_activity(
+        pref.subscription_id, pref.resource_group, pref.cluster_name, newer
+    )
+    # An older timestamp is a no-op — the probe regressing (K8s blip / GC) must
+    # not pull the durable anchor backward.
+    result = mark_auto_stop_live_activity(
+        pref.subscription_id, pref.resource_group, pref.cluster_name, older
+    )
+    assert result is not None
+    assert result.last_live_activity_at == newer.isoformat(timespec="seconds")
+    reloaded = get_auto_stop_preference(
+        pref.subscription_id, pref.resource_group, pref.cluster_name
+    )
+    assert reloaded is not None
+    assert reloaded.last_live_activity_at == newer.isoformat(timespec="seconds")
+
+
+def test_mark_auto_stop_live_activity_noop_when_no_pref(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    result = mark_auto_stop_live_activity(
+        "sub-x", "rg-x", "cluster-x", datetime(2026, 6, 14, 3, 10, 0, tzinfo=UTC)
+    )
+    assert result is None
+
 
 
 def test_extend_auto_stop_preference_sets_future_deadline(monkeypatch, tmp_path) -> None:
