@@ -21,6 +21,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 
 def test_external_blast_submit_forwards_contract(monkeypatch):
@@ -211,6 +212,51 @@ def test_external_blast_rejects_non_xml_outfmt(monkeypatch):
     )
 
     assert response.status_code == 422
+
+
+def test_external_blast_accepts_string_outfmt_five():
+    """The OpenAPI /v1/jobs examples (and the dashboard's own API Reference
+    spec) document ``outfmt`` as the JSON string ``"5"``. A producer copying
+    that verbatim must be accepted, not rejected — on the Service Bus path a
+    rejection means a dead-letter. The string form is coerced to int 5."""
+    from api.routes.elastic_blast import ExternalBlastOptions
+
+    assert ExternalBlastOptions(outfmt="5").outfmt == 5
+    assert ExternalBlastOptions(outfmt=5).outfmt == 5
+    # Non-XML formats still fail regardless of string/int form.
+    for bad in ("6", 6, "7", "xml"):
+        with pytest.raises(ValidationError):
+            ExternalBlastOptions(outfmt=bad)
+
+
+def test_external_blast_submit_accepts_string_outfmt_five(monkeypatch):
+    """End-to-end: a submit body using the documented string ``outfmt: "5"``
+    is accepted (HTTP 202), mirroring the OpenAPI /v1/jobs contract."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    captured: dict[str, object] = {}
+
+    def _fake_submit(payload, **_kwargs):
+        captured.update(payload)
+        return {"job_id": "ext-strfmt", "status": "queued"}
+
+    monkeypatch.setattr(external_blast, "submit_job", _fake_submit)
+    monkeypatch.setattr(external_blast, "ready", lambda **_kw: {"ready": True})
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGC",
+            "db": "core_nt",
+            "options": {"outfmt": "5"},
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["options"]["outfmt"] == 5
 
 
 def test_external_blast_rejects_invalid_program(monkeypatch):

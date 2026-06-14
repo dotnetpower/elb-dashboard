@@ -211,14 +211,17 @@ def _counts(cfg: Any) -> dict[str, Any]:
     """Best-effort Service Bus runtime counts; never raises.
 
     Mirrors the degraded shape the Settings route uses so the SPA can reuse the
-    same ``available``/``reason`` handling.
+    same ``available``/``reason`` handling. As a side effect a successful read
+    feeds the DLQ rolling-window history in
+    :mod:`api.services.service_bus_telemetry` so the snapshot can surface a
+    growth-rate hint without a second admin round trip.
     """
-    from api.services import service_bus
+    from api.services import service_bus, service_bus_telemetry
 
     if not getattr(cfg, "namespace_fqdn", ""):
         return {"available": False, "reason": "not_configured"}
     try:
-        return {"available": True, **service_bus.entity_counts(cfg)}
+        raw = service_bus.entity_counts(cfg)
     except service_bus.ServiceBusAuthError:
         return {"available": False, "reason": "no_manage_claim"}
     except service_bus.ServiceBusUnavailable as exc:
@@ -226,6 +229,45 @@ def _counts(cfg: Any) -> dict[str, Any]:
     except Exception:
         LOGGER.debug("message-flow service bus counts failed", exc_info=True)
         return {"available": False, "reason": "error"}
+
+    # Record the DLQ count for the rolling window (best-effort, never raises).
+    queue = raw.get("queue") if isinstance(raw, dict) else None
+    dlq = queue.get("dead_letter_message_count") if isinstance(queue, dict) else None
+    if isinstance(dlq, int) and not isinstance(dlq, bool):
+        try:
+            service_bus_telemetry.record_dlq_sample(
+                getattr(cfg, "namespace_fqdn", "") or "",
+                getattr(cfg, "request_queue", "") or "",
+                dlq,
+            )
+        except Exception:  # noqa: BLE001 — never break counts on a telemetry hiccup
+            LOGGER.debug("dlq sample record failed", exc_info=True)
+    return {"available": True, **raw}
+
+
+def _dlq_delta(cfg: Any) -> dict[str, Any] | None:
+    """Return the DLQ growth-rate hint shape for the snapshot, or ``None``.
+
+    Thin shaping over :func:`api.services.service_bus_telemetry.dlq_delta` so
+    the SPA can render the alarm without knowing about the dataclass.
+    """
+    from api.services import service_bus_telemetry
+
+    namespace = (getattr(cfg, "namespace_fqdn", "") or "").strip()
+    queue = (getattr(cfg, "request_queue", "") or "").strip()
+    if not namespace or not queue:
+        return None
+    snapshot = service_bus_telemetry.dlq_delta(namespace, queue)
+    if snapshot is None:
+        return None
+    return {
+        "window_seconds": snapshot.window_seconds,
+        "samples": snapshot.samples,
+        "baseline_dlq": snapshot.baseline_dlq,
+        "current_dlq": snapshot.current_dlq,
+        "delta": snapshot.delta,
+        "elapsed_seconds": round(snapshot.elapsed_seconds, 1),
+    }
 
 
 def _visible_rows(
@@ -451,13 +493,15 @@ def build_message_flow(
     )
 
     visible_total = len(active) + len(settling)
+    sb_counts = _counts(cfg)
     return {
         "enabled": True,
         "scope": scope,
         "namespace_fqdn": getattr(cfg, "namespace_fqdn", ""),
         "request_queue": getattr(cfg, "request_queue", ""),
         "completion_topic": getattr(cfg, "completion_topic", ""),
-        "sb_counts": _counts(cfg),
+        "sb_counts": sb_counts,
+        "dlq_delta": _dlq_delta(cfg) if sb_counts.get("available") else None,
         "active_total": len(active),
         "settling_total": len(settling),
         "active_shown": len(broker),

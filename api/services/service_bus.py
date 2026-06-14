@@ -360,23 +360,91 @@ def _settle(receiver: Any, message: Any, action: MessageAction, stats: DrainStat
 # --------------------------------------------------------------------------- #
 
 
+def _iso_or_none(value: Any) -> str | None:
+    """Render an SDK ``datetime`` field as ISO-8601, tolerant of ``None``.
+
+    The admin SDK returns naive UTC datetimes for created/updated/accessed
+    timestamps; callers want a JSON-safe ISO string with the ``Z`` suffix.
+    """
+    if value is None:
+        return None
+    try:
+        # Treat naive timestamps as UTC (matches the SDK's contract).
+        if getattr(value, "tzinfo", None) is None:
+            value = value.replace(tzinfo=UTC)  # type: ignore[union-attr]
+        return value.isoformat().replace("+00:00", "Z")  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 — never break counts on a timestamp field
+        return None
+
+
 def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
     """Return runtime message counts for the queue (and topic subscriptions).
 
     Requires ``Manage``/``EntityRead`` claims (Entra ``Azure Service Bus Data
     Owner`` or a Manage SAS rule). When the credential lacks them this raises
     ``ServiceBusAuthError`` and the caller degrades to "counts unavailable".
+
+    The returned ``queue`` dict carries the four message counters the SPA has
+    always rendered (active/dead-letter/scheduled/total) plus an additive
+    ``telemetry`` block with the richer fields Azure Portal surfaces:
+    queue capacity (``size_in_bytes`` / ``max_size_in_mb`` / a derived
+    ``size_pct``), transfer counters (``transfer_message_count`` /
+    ``transfer_dead_letter_message_count`` — non-zero values are a strong
+    forwarding-failure signal), entity ``status`` (Active / Disabled /
+    SendDisabled / ReceiveDisabled), and ``accessed_at`` / ``updated_at`` /
+    ``created_at`` timestamps so an operator can tell a quiet queue from a
+    dead one. Every telemetry field is best-effort — a missing SDK attribute
+    silently degrades to ``None`` so an SDK version bump can never break the
+    existing counts contract.
     """
     cfg = _require_enabled_config(cfg)
     result: dict[str, Any] = {"queue": None, "dead_letter": None, "subscriptions": []}
     with _admin_client(cfg) as admin:
         try:
             q = admin.get_queue_runtime_properties(cfg.request_queue)
+            # Try to read the static queue properties too so we know the
+            # capacity ceiling (max_size_in_megabytes) and entity status. This
+            # is a separate admin call and is bounded by the SDK; if it fails
+            # we still return the counts the SPA has always rendered.
+            qprops: Any = None
+            try:
+                qprops = admin.get_queue(cfg.request_queue)
+            except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
+                # Same auth failure as the counters above — surface it.
+                raise ServiceBusAuthError(str(exc)) from exc
+            except ServiceBusError:
+                LOGGER.debug("queue static properties unavailable", exc_info=True)
+
+            size_in_bytes = getattr(q, "size_in_bytes", None)
+            max_size_in_mb = getattr(qprops, "max_size_in_megabytes", None) if qprops else None
+            size_pct: float | None = None
+            if (
+                isinstance(size_in_bytes, int)
+                and isinstance(max_size_in_mb, int)
+                and max_size_in_mb > 0
+            ):
+                size_pct = round(size_in_bytes / (max_size_in_mb * 1024 * 1024) * 100, 2)
+
             result["queue"] = {
                 "active_message_count": q.active_message_count,
                 "dead_letter_message_count": q.dead_letter_message_count,
                 "scheduled_message_count": q.scheduled_message_count,
                 "total_message_count": q.total_message_count,
+                # Additive telemetry — older SPAs that only read the four
+                # counters above keep working unchanged.
+                "telemetry": {
+                    "size_in_bytes": size_in_bytes,
+                    "max_size_in_mb": max_size_in_mb,
+                    "size_pct": size_pct,
+                    "transfer_message_count": getattr(q, "transfer_message_count", None),
+                    "transfer_dead_letter_message_count": getattr(
+                        q, "transfer_dead_letter_message_count", None
+                    ),
+                    "status": str(getattr(qprops, "status", "") or "") if qprops else None,
+                    "created_at": _iso_or_none(getattr(q, "created_at_utc", None)),
+                    "updated_at": _iso_or_none(getattr(q, "updated_at_utc", None)),
+                    "accessed_at": _iso_or_none(getattr(q, "accessed_at_utc", None)),
+                },
             }
             result["dead_letter"] = q.dead_letter_message_count
         except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
@@ -392,6 +460,14 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                             "name": sub.name,
                             "active_message_count": srt.active_message_count,
                             "dead_letter_message_count": srt.dead_letter_message_count,
+                            # Additive transfer counters per subscription so the
+                            # SPA can flag forwarding failures on a per-sub basis.
+                            "transfer_message_count": getattr(
+                                srt, "transfer_message_count", None
+                            ),
+                            "transfer_dead_letter_message_count": getattr(
+                                srt, "transfer_dead_letter_message_count", None
+                            ),
                         }
                     )
             except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:

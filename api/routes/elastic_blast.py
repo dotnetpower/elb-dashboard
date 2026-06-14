@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Path
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from api.auth import CallerIdentity, require_caller
 from api.services import external_blast
@@ -48,6 +48,24 @@ class ExternalBlastOptions(BaseModel):
         ),
     )
     max_target_seqs: int = Field(500, ge=1)
+
+    @field_validator("outfmt", mode="before")
+    @classmethod
+    def _coerce_outfmt(cls, value: Any) -> Any:
+        """Accept the documented string form ``"5"`` as well as int ``5``.
+
+        The OpenAPI ``/v1/jobs`` contract (and the dashboard's own API Reference
+        examples in ``web/src/pages/apiReference/spec.ts``) document ``outfmt``
+        as the JSON string ``"5"``, and the sibling plane accepts it. Without
+        this coercion a Service Bus producer or API caller copying the
+        documented example verbatim was rejected — and on the Service Bus path
+        that meant the message was dead-lettered. Coerce the string form to the
+        int the ``Literal[5]`` expects; any non-``5`` value (e.g. ``"6"``/``6``)
+        still fails validation so the XML-only result pipeline contract holds.
+        """
+        if isinstance(value, str) and value.strip() == "5":
+            return 5
+        return value
 
 
 class ExternalBlastSubmitRequest(BaseModel):

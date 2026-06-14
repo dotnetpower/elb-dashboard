@@ -581,3 +581,62 @@ def test_route_enabled_path(client: TestClient, monkeypatch: pytest.MonkeyPatch)
 
     reset_monitor_snapshot_cache()
 
+
+def test_snapshot_includes_dlq_delta_after_a_read(_enable, monkeypatch) -> None:
+    """A successful counts read records a DLQ sample; the snapshot exposes the
+    rolling-window delta. ``baseline_dlq == current_dlq`` on the first call
+    because we never extrapolate past observed data."""
+    from api.services import service_bus_telemetry
+
+    service_bus_telemetry.reset_for_tests()
+    rows = [
+        _job(
+            job_id="r1",
+            status="running",
+            owner_upn="a@b.com",
+            payload={"submission_source": "dashboard"},
+        ),
+    ]
+    _enable(
+        rows,
+        counts={
+            "queue": {
+                "active_message_count": 0,
+                "dead_letter_message_count": 4,
+                "scheduled_message_count": 0,
+                "total_message_count": 4,
+            },
+            "subscriptions": [],
+        },
+    )
+
+    snap = message_flow.build_message_flow("oid-x")
+    delta = snap["dlq_delta"]
+    assert delta is not None
+    assert delta["samples"] == 1
+    assert delta["baseline_dlq"] == 4
+    assert delta["current_dlq"] == 4
+    assert delta["delta"] == 0
+
+
+def test_snapshot_dlq_delta_is_none_when_counts_unavailable(_enable) -> None:
+    """If counts come back unavailable (no manage claim, transient error, …)
+    no sample is recorded, so ``dlq_delta`` is ``None``."""
+    from api.services import service_bus_telemetry
+
+    service_bus_telemetry.reset_for_tests()
+    rows = [
+        _job(
+            job_id="r1",
+            status="running",
+            owner_upn="a@b.com",
+            payload={"submission_source": "dashboard"},
+        ),
+    ]
+    from api.services import service_bus
+
+    _enable(rows, counts=service_bus.ServiceBusAuthError("forbidden"))
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["dlq_delta"] is None
+    assert snap["sb_counts"]["available"] is False
