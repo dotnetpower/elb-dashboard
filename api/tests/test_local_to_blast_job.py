@@ -230,6 +230,32 @@ def test_local_to_blast_job_external_failed_row_surfaces_error():
     assert out["output"]["steps"]["submitting"]["status"] == "failed"
 
 
+def test_local_to_blast_job_external_failed_row_uses_persisted_error_code():
+    # When `_sync_external_jobs_to_table` recovered the real sibling failure
+    # cause into the error_code column (the /v1/jobs LIST snapshot has no
+    # `error` field), the external-origin projection MUST surface THAT cause —
+    # in the banner AND the failed step's inline error — instead of the generic
+    # "no error detail" placeholder the bare snapshot would yield.
+    detail = (
+        "BLAST database core_nt memory requirements exceed memory available "
+        'on selected machine type "Standard_E16s_v5"'
+    )
+    out = _local_to_blast_job(
+        _state(
+            status="failed",
+            phase="submit_failed",
+            error_code=detail,
+            payload={"external": {"job_id": "ext-mem", "status": "failed"}},
+        )
+    )
+    assert out["error"] == detail
+    assert "no error detail" not in (out["error"] or "").lower()
+    failed_step = out["output"]["failed_step"]
+    assert out["output"]["steps"][failed_step]["error"] == detail
+    assert out["output"]["error"] == detail
+
+
+
 def test_local_to_blast_job_external_failed_row_enriched_with_cluster_detail(monkeypatch):
     # On the detail view, a synced external failed row with only a generic/empty
     # sibling error recovers the authoritative cluster-side blastn detail from

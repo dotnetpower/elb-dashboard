@@ -279,6 +279,50 @@ def _reset_external_jobs_cache() -> None:
         _SUBSCRIPTION_CLUSTERS_CACHE.clear()
 
 
+def _recover_external_failure_error(
+    job_id: str, infrastructure: dict[str, Any]
+) -> str | None:
+    """Best-effort recovery of a failed external job's real error message.
+
+    The ``/v1/jobs`` LIST snapshot the sync runs on never carries an ``error``
+    field — only the per-job detail endpoint (``GET /api/v1/elastic-blast/jobs/
+    {id}``, reached by :func:`external_blast.get_job`) does. So a synced row
+    that transitions to ``failed`` would otherwise surface the generic
+    "External BLAST job failed, but the OpenAPI service reported no error
+    detail." banner even though the sibling knows the precise cause (e.g. a
+    memory-fit rejection). This fetches that detail ONCE at the failed
+    transition and returns the sanitised message for persistence in the
+    row's ``error_code`` column.
+
+    Resolution uses the row's own ``subscription_id`` / ``resource_group`` /
+    ``cluster_name`` so the call targets the cluster the job actually ran on
+    (``external_blast.get_job`` resolves the per-cluster endpoint + token from
+    the runtime cache). Never raises — a sibling outage / unresolved endpoint
+    degrades to ``None`` (the generic banner is preserved), so error recovery
+    can never turn a successful sync into a failure.
+    """
+    from api.services import external_blast
+
+    try:
+        detail = external_blast.get_job(
+            job_id,
+            subscription_id=str(infrastructure.get("subscription_id") or ""),
+            resource_group=str(infrastructure.get("resource_group") or ""),
+            cluster_name=str(infrastructure.get("cluster_name") or ""),
+        )
+    except Exception as exc:
+        LOGGER.info(
+            "external failed-job error recovery unavailable job_id=%s: %s",
+            job_id,
+            _exception_reason(exc),
+        )
+        return None
+    if not isinstance(detail, dict):
+        return None
+    code, message = _external_error_message(detail.get("error"))
+    return message or code or None
+
+
 def _sync_external_jobs_to_table(
     external_jobs: list[dict[str, Any]],
     *,
@@ -427,6 +471,21 @@ def _sync_external_jobs_to_table(
                             getattr(existing, "error_code", "") or ""
                         ):
                             update_kwargs["error_code"] = ""
+                        # Surface the real failure cause on the FAILED transition.
+                        # The /v1/jobs LIST snapshot carries no ``error`` field,
+                        # so without this the row would render the generic
+                        # "no error detail" banner. Fetch the sibling detail ONCE
+                        # (guarded on an empty existing error_code so a stable
+                        # failed row never re-fetches) and persist its message
+                        # into the indexed error_code column.
+                        elif ext_status.lower() == "failed" and not (
+                            getattr(existing, "error_code", "") or ""
+                        ):
+                            recovered = _recover_external_failure_error(
+                                job_id, converted.get("infrastructure") or {}
+                            )
+                            if recovered:
+                                update_kwargs["error_code"] = recovered
                     try:
                         repo.update(job_id, **update_kwargs)
                         updated += 1
@@ -435,6 +494,14 @@ def _sync_external_jobs_to_table(
                 if existing is not None:
                     continue
             payload = converted.get("payload") or {"external": ext}
+            # A row first observed already in a failed state (the dashboard
+            # never saw it running) still needs the real cause recovered from
+            # the sibling detail, since the LIST snapshot has no ``error``.
+            create_error_code: str | None = None
+            if ext_status.lower() == "failed":
+                create_error_code = _recover_external_failure_error(
+                    job_id, converted.get("infrastructure") or {}
+                )
             state = JobState(
                 job_id=job_id,
                 type="blast",
@@ -446,6 +513,7 @@ def _sync_external_jobs_to_table(
                 created_at=str(converted.get("created_at") or ""),
                 updated_at=str(converted.get("updated_at") or ""),
                 payload=payload,
+                error_code=create_error_code,
                 job_title=str(converted.get("job_title") or ""),
                 program=str(converted.get("program") or ""),
                 db=str(converted.get("db") or ""),

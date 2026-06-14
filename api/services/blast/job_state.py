@@ -478,8 +478,21 @@ def _local_to_blast_job(
 
         external_snapshot = payload["external"]
         live_status = str(getattr(state, "status", "") or "")
+        # For a failed external row, prefer the authoritative error recovered
+        # from the sibling /jobs/{id} detail and persisted in the error_code
+        # column by ``_sync_external_jobs_to_table`` over the generic "no error
+        # detail" placeholder the bare /v1/jobs snapshot would otherwise yield.
+        # ``response_error`` was computed above from error_code / payload.error
+        # (and reset to None for terminal-success rows). Passing it as the
+        # step projection's ``error_message`` flows the real cause into the
+        # failed step's inline ``error`` / ``output`` too, not just the banner.
+        failed_error_override = (
+            response_error if live_status.lower() == "failed" else None
+        )
         ext_projection = _external_step_projection(
-            external_snapshot, dashboard_status=live_status
+            external_snapshot,
+            dashboard_status=live_status,
+            error_message=failed_error_override or None,
         )
         ext_steps = ext_projection["steps"]
         out["custom_status"] = {
