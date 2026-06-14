@@ -2,7 +2,7 @@
 title: OpenAPI external-payload hardening (sibling 3.7.6 / image 4.24)
 description: "Bump elb-openapi to image 4.24 / sibling VERSION 3.7.6 to fix
 four classes of stuck/misreported external-origin BLAST jobs observed in
-production: blast_version reported \"unknown\", db_version_detail.detail
+production: blast_version reported 'unknown', db_version_detail.detail
 was an escape-encoded JSON string, shard_count/shards_succeeded stayed at 0
 after marker-driven completion, and natural terminal transitions never
 woke the dashboard between sync cycles."
@@ -17,7 +17,7 @@ Live OpenAPI-sourced BLAST jobs in the moonchoi `ca-elb-dashboard`
 deployment exposed four sibling-side issues that the dashboard cannot
 work around because the sibling owns the canonical payload:
 
-* **#9** `blast_version: "unknown"` on every external row. The OpenAPI
+* **F1 — blast_version unknown.** `blast_version: "unknown"` on every external row. The OpenAPI
   image does not install the `blastn`/`blastp` binaries (only the
   `elastic-blast` Python wrapper, `kubectl`, `azcopy`, `azure-cli`), so
   `_blast_version_detail`'s binary probe always failed. The XML-scrape
@@ -25,18 +25,18 @@ work around because the sibling owns the canonical payload:
   runs and silently no-ops for the `-outfmt 6/7` tabular submits the
   dashboard now uses by default. End state: every row reported the
   literal string `unknown`.
-* **#10** `db_version_detail.detail` rendered as an escape-encoded JSON
+* **F2 — db_version_detail.detail as string.** `db_version_detail.detail` rendered as an escape-encoded JSON
   string (`"{\"dbtype\":\"nucl\",…}"`) instead of a nested object.
   `_db_version_detail` was wrapping the metadata dict in `json.dumps`
   before returning it, so the dashboard SPA had to either re-parse the
   string or display the encoded blob verbatim. The SPA chose the latter.
-* **#18** Completed jobs showed `shard_count: 0` and
+* **F3 — shard counters lost on marker completion.** Completed jobs showed `shard_count: 0` and
   `shards_succeeded: 0` on the BLAST card. `_refresh_job_status` only
   called `_k8s_job_summary` on the kubectl-driven completion path; the
   marker-driven path (the `metadata/SUCCESS.txt` short-circuit, which is
   what most fast runs hit) skipped the summary refresh, so whatever
   stale-or-empty summary was last persisted stuck forever.
-* **#16/#17** Natural terminal transitions (running → completed /
+* **F4 — no webhook on natural completion.** Natural terminal transitions (running → completed /
   failed via marker or kubectl summary) did not notify the dashboard.
   The sibling only fired `_webhook_notify` on cancel/stuck via
   `_cancel_job`, so the dashboard only learned about natural completion
