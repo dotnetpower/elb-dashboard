@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-push hook — full CI mirror on the commits being pushed.
+# pre-push hook — full CI mirror on the COMMITS being pushed.
 #
 # Runs the EXPENSIVE half of the GitHub Actions gates so a push that would turn
 # the Actions dashboard red is blocked locally first:
@@ -7,6 +7,13 @@
 #   - `uv run mkdocs build --strict` (mirrors .github/workflows/docs.yml)
 # Each runs only when the pushed range actually touches the files that CI gates
 # on, so a docs-only push never pays the pytest cost and vice-versa.
+#
+# The checks run against the PUSHED COMMIT, not the dirty working tree: each
+# pushed tip is checked out into a throwaway `git worktree` (CI's clean
+# checkout) and the gates run there. This is what lets the hook catch a
+# split-commit — e.g. a test committed one commit ahead of the source it needs.
+# A working-tree run would still have the uncommitted source and pass (false
+# green); the isolated checkout does not and is correctly blocked.
 #
 # git invokes this hook with refs on stdin:
 #   <local-ref> <local-sha> <remote-ref> <remote-sha>
@@ -21,6 +28,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/dev/git-hooks/_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
+# Throwaway worktrees created for isolated validation are tracked here and torn
+# down on any exit (success, failure, or interrupt) so they never leak into
+# `git worktree list`.
+declare -a _hook_worktrees=()
+_cleanup_worktrees() {
+  local wt
+  for wt in "${_hook_worktrees[@]:-}"; do
+    [[ -n "$wt" ]] || continue
+    git -C "$HOOK_REPO_ROOT" worktree remove --force "$wt" 2>/dev/null \
+      || rm -rf "$wt" 2>/dev/null || true
+  done
+}
+trap _cleanup_worktrees EXIT
+
 if [[ "${ELB_SKIP_HOOKS:-}" == "1" ]]; then
   hook_warn "ELB_SKIP_HOOKS=1 — skipping pre-push checks"
   exit 0
@@ -28,9 +49,11 @@ fi
 
 ZERO="0000000000000000000000000000000000000000"
 
-# Collect the set of files across every ref being pushed.
+# Collect the set of files across every ref being pushed, plus the distinct tip
+# SHAs so we can validate the exact committed snapshot CI will build.
 changed=""
 refs_seen=0
+declare -a push_shas=()
 while read -r local_ref local_sha remote_ref remote_sha; do
   [[ -z "${local_sha:-}" ]] && continue
   refs_seen=$((refs_seen + 1))
@@ -38,6 +61,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     # Branch deletion — nothing to validate.
     continue
   fi
+  push_shas+=("$local_sha")
   if [[ "$remote_sha" == "$ZERO" ]]; then
     # New branch on the remote: diff against main if we can, else inspect the
     # whole commit. Fall back to HEAD~1..HEAD when main is unavailable.
@@ -69,18 +93,53 @@ if [[ -z "${changed//[$'\n\t ']/}" ]]; then
   exit 0
 fi
 
-rc=0
+# Decide which gate sets to run from the aggregated change list (conservative:
+# if any pushed ref touched api/, run the api gates).
+run_api=0
+run_docs=0
+if paths_touch_api "$changed"; then run_api=1; fi
+if paths_touch_docs "$changed"; then run_docs=1; fi
 
-if paths_touch_api "$changed"; then
-  hook_run "ruff check api" uv run ruff check api || rc=$?
-  CI=true hook_run "pytest -q api/tests" uv run pytest -q api/tests || rc=$?
+if [[ "$run_api" -eq 0 && "$run_docs" -eq 0 ]]; then
+  exit 0
 fi
 
-if paths_touch_docs "$changed"; then
-  hook_run "docs frontmatter canon guard" \
-    uv run python scripts/docs/check_frontmatter.py || rc=$?
-  DISABLE_MKDOCS_2_WARNING=true \
-    hook_run "mkdocs build --strict" uv run mkdocs build --strict || rc=$?
+# Run the relevant CI gates inside a given checkout directory.
+run_gates_in_dir() {
+  local dir="$1" rc=0
+  if [[ "$run_api" -eq 1 ]]; then
+    hook_run_in "$dir" "ruff check api" uv run ruff check api || rc=$?
+    CI=true hook_run_in "$dir" "pytest -q api/tests" uv run pytest -q api/tests || rc=$?
+  fi
+  if [[ "$run_docs" -eq 1 ]]; then
+    hook_run_in "$dir" "docs frontmatter canon guard" \
+      uv run python scripts/docs/check_frontmatter.py || rc=$?
+    DISABLE_MKDOCS_2_WARNING=true \
+      hook_run_in "$dir" "mkdocs build --strict" uv run mkdocs build --strict || rc=$?
+  fi
+  return "$rc"
+}
+
+rc=0
+if [[ "${#push_shas[@]}" -gt 0 ]]; then
+  # Validate the committed snapshot(s) being pushed in an isolated worktree so
+  # uncommitted working-tree changes cannot mask a broken commit (split-commit).
+  mapfile -t _uniq_shas < <(printf '%s\n' "${push_shas[@]}" | awk 'NF && !seen[$0]++')
+  for sha in "${_uniq_shas[@]}"; do
+    wt="$(mktemp -d "${TMPDIR:-/tmp}/elb-prepush.XXXXXX")"
+    if git -C "$HOOK_REPO_ROOT" worktree add --detach --quiet "$wt" "$sha" 2>/dev/null; then
+      _hook_worktrees+=("$wt")
+      hook_log "validating pushed commit ${sha:0:8} in an isolated worktree (mirrors CI's clean checkout)"
+      run_gates_in_dir "$wt" || rc=$?
+    else
+      hook_warn "could not create a worktree for ${sha:0:8}; validating the working tree instead"
+      rm -rf "$wt" 2>/dev/null || true
+      run_gates_in_dir "$HOOK_REPO_ROOT" || rc=$?
+    fi
+  done
+else
+  # Manual invocation (no refs on stdin) — validate the working tree.
+  run_gates_in_dir "$HOOK_REPO_ROOT" || rc=$?
 fi
 
 if [[ "$rc" -ne 0 ]]; then

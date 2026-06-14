@@ -7,7 +7,7 @@
 # two hooks (and the installer) stay in sync with what GitHub Actions gates on.
 # Edit boundaries: pure bash, no network, no Azure. Anything that needs the
 # venv calls `uv run` so it works from a clean clone after `uv sync`.
-# Key entry points: `hook_log`, `hook_run`, `paths_touch_api`, `paths_touch_docs`.
+# Key entry points: `hook_log`, `hook_run`, `hook_run_in`, `paths_touch_api`, `paths_touch_docs`.
 # Risky contracts: the path globs here MUST mirror the `paths:` filters in
 # .github/workflows/test.yml and .github/workflows/docs.yml. When CI's path
 # filters change, update these too.
@@ -31,18 +31,28 @@ hook_ok() { printf '%s[hooks] ✓ %s%s\n' "$_C_GREEN" "$*" "$_C_RESET" >&2; }
 hook_warn() { printf '%s[hooks] ! %s%s\n' "$_C_YELLOW" "$*" "$_C_RESET" >&2; }
 hook_err() { printf '%s[hooks] ✗ %s%s\n' "$_C_RED" "$*" "$_C_RESET" >&2; }
 
-# Run a labelled check; on failure print a clear message and propagate the
-# non-zero exit so the commit/push is blocked.
-hook_run() {
-  local label="$1"; shift
+# Run a labelled check inside a specific directory; on failure print a clear
+# message and propagate the non-zero exit so the commit/push is blocked. The
+# directory parameter lets the pre-push hook validate an isolated worktree
+# checked out at the pushed commit (CI's clean checkout) instead of the dirty
+# working tree.
+hook_run_in() {
+  local dir="$1" label="$2"; shift 2
   hook_log "running: ${_C_BOLD}${label}${_C_RESET}"
-  if ( cd "$HOOK_REPO_ROOT" && "$@" ); then
+  if ( cd "$dir" && "$@" ); then
     hook_ok "$label"
   else
     local rc=$?
     hook_err "$label FAILED (exit $rc) — this is the same check CI runs, so the push/commit is blocked"
     return "$rc"
   fi
+}
+
+# Run a labelled check in the repo root (the working tree). Thin wrapper over
+# hook_run_in kept for the pre-commit hook and manual invocations.
+hook_run() {
+  local label="$1"; shift
+  hook_run_in "$HOOK_REPO_ROOT" "$label" "$@"
 }
 
 # Does the given newline-separated file list contain anything that the Tests
