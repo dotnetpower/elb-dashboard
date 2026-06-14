@@ -385,6 +385,20 @@ def _refresh(
             if generation == _GENERATION:
                 _CACHE[cache_key] = entry
                 _evict_over_capacity(now)
+            else:
+                # A generation bump raced this in-flight refresh, so we discard
+                # this now-possibly-stale result (the invalidation wanted a
+                # re-fetch). The generation counter is GLOBAL but invalidation
+                # is per-prefix, so an invalidation of an UNRELATED key also
+                # lands here for THIS key while leaving its entry in the cache.
+                # Without clearing the stuck ``refreshing`` flag that entry
+                # would block every future background refresh of this key until
+                # its stale window expires (up to _MAX_STALE_SECONDS), serving
+                # stale far longer than intended. Reset the flag so the next
+                # poll re-triggers a background refresh immediately (liveness).
+                current = _CACHE.get(cache_key)
+                if current is not None:
+                    current.refreshing = False
         return entry
     except Exception as exc:
         with _LOCK:

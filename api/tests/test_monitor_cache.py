@@ -227,6 +227,66 @@ def test_invalidate_prefix_cancels_inflight_refresh(monkeypatch: pytest.MonkeyPa
     assert after["cache"]["state"] == "refreshed"
 
 
+def test_cross_key_invalidation_does_not_stick_unrelated_refreshing_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated-key invalidation must not permanently block key Y's bg refresh.
+
+    ``_GENERATION`` is global but ``invalidate_monitor_snapshot_prefix`` only
+    removes the matched keys. So when key X is invalidated while key Y has a
+    background refresh in flight, Y's refresh sees the bumped generation and is
+    discarded — but Y's entry stays in the cache. The stuck ``refreshing`` flag
+    must be cleared so the NEXT poll of Y can re-trigger a background refresh
+    instead of serving stale until the stale window expires.
+    """
+    now = 1000.0
+    monkeypatch.setattr(monitor_cache, "_monotonic", lambda: now)
+
+    refresh_callables: list = []
+    monkeypatch.setattr(
+        monitor_cache,
+        "_start_refresh_thread",
+        lambda target: refresh_callables.append(target),
+    )
+
+    key_y = "monitor:aks:sub:rg-Y"
+    # Seed Y, then go stale so the next read queues a background refresh.
+    monitor_cache.cached_snapshot(
+        key_y, lambda: {"clusters": ["y1"]}, ttl_seconds=10, stale_seconds=300
+    )
+    now = 1015.0  # past TTL, within stale window.
+    stale = monitor_cache.cached_snapshot(
+        key_y, lambda: {"clusters": ["y2-bg"]}, ttl_seconds=10, stale_seconds=300
+    )
+    assert stale["cache"]["state"] == "stale"
+    assert refresh_callables, "stale read should have queued a background refresh"
+    # The entry is now flagged refreshing=True under the hood.
+    assert monitor_cache._CACHE[key_y].refreshing is True
+
+    # Invalidate an UNRELATED key X — this bumps the global generation but leaves
+    # Y's entry in the cache.
+    monitor_cache.cached_snapshot(
+        "monitor:aks:sub:rg-X", lambda: {"clusters": ["x1"]}, ttl_seconds=10
+    )
+    assert monitor_cache.invalidate_monitor_snapshot_prefix("monitor:aks:sub:rg-X") == 1
+
+    # Y's in-flight background refresh now resolves against the bumped generation.
+    # It must be discarded (generation mismatch) BUT must clear Y's stuck flag.
+    refresh_callables[0]()
+    assert monitor_cache._CACHE[key_y].refreshing is False, (
+        "cross-key invalidation left Y's refreshing flag stuck -> bg refresh blocked"
+    )
+
+    # Proof of liveness: the next stale poll of Y re-triggers a background refresh
+    # (a second callable is queued) instead of being blocked by the stuck flag.
+    refresh_callables.clear()
+    again = monitor_cache.cached_snapshot(
+        key_y, lambda: {"clusters": ["y3-bg"]}, ttl_seconds=10, stale_seconds=300
+    )
+    assert again["cache"]["state"] == "stale"
+    assert refresh_callables, "Y should re-queue a background refresh after the flag was cleared"
+
+
 def test_invalidate_prefix_no_match_is_noop() -> None:
     monitor_cache.cached_snapshot("monitor:aks:sub:rg", lambda: {"a": 1}, ttl_seconds=30)
     assert monitor_cache.invalidate_monitor_snapshot_prefix("monitor:storage:sub:rg") == 0
