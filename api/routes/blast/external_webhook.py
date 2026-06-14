@@ -77,13 +77,29 @@ def _expected_token() -> str:
     it into the AKS pod as ``ELB_OPENAPI_INTERNAL_TOKEN`` so the sibling can attach it on
     the inbound webhook. Keeping both names mapped to one value keeps the trust boundary
     explicit ("one cluster, one secret").
+
+    Lookup precedence:
+      1. ``ELB_OPENAPI_INTERNAL_TOKEN`` env (explicit override / test path)
+      2. ``ELB_OPENAPI_API_TOKEN`` env (legacy / manual config)
+      3. Ops Redis runtime cache (the worker's ``deploy_openapi_service`` writes the
+         minted token here via ``save_openapi_api_token``; this is the production
+         path because the api sidecar does not carry the token in its env)
     """
 
-    return (
+    env_token = (
         os.environ.get("ELB_OPENAPI_INTERNAL_TOKEN")
         or os.environ.get("ELB_OPENAPI_API_TOKEN")
         or ""
     ).strip()
+    if env_token:
+        return env_token
+    try:
+        from api.services.openapi.runtime import get_openapi_api_token
+
+        return (get_openapi_api_token() or "").strip()
+    except Exception as exc:  # pragma: no cover — Redis import / connect failure
+        LOGGER.debug("openapi webhook: runtime token lookup failed: %s", type(exc).__name__)
+        return ""
 
 
 def _verify_token(request: Request) -> None:
