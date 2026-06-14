@@ -110,6 +110,102 @@ def test_drain_bridges_valid_message(monkeypatch: pytest.MonkeyPatch) -> None:
     assert rec.last_status == "queued"
 
 
+def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The consumer is the writer: a drained message creates the durable
+    jobstate row at drain time (reusing the external-jobs sync) and records the
+    message-flow trace stages enqueued → received → row_created → routed →
+    submitted, keyed by the OpenAPI job id."""
+    _enable(monkeypatch)
+    import datetime
+
+    synced: list[tuple] = []
+    history: list[tuple] = []
+
+    def _fake_sync(rows, **kw):
+        synced.append((rows, kw))
+        return (len(rows), 0, set())
+
+    class _FakeRepo:
+        def append_history(self, job_id, event, payload=None):
+            history.append((job_id, event, payload or {}))
+
+    monkeypatch.setattr(
+        "api.services.blast.external_jobs._sync_external_jobs_to_table", _fake_sync
+    )
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FakeRepo())
+    monkeypatch.setattr(external_blast, "submit_job", lambda p, **k: {"job_id": "openapi-9"})
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
+
+    enq = datetime.datetime(2026, 6, 14, 0, 0, 0, tzinfo=datetime.UTC)
+
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+        handler(
+            _msg(
+                {
+                    "program": "blastn",
+                    "db": "core_nt",
+                    "query_fasta": ">s\nACGT",
+                    "external_correlation_id": "corr-9",
+                },
+                enqueued_time_utc=enq,
+            )
+        )
+        from api.services.service_bus import DrainStats
+
+        s = DrainStats(received=1)
+        s.completed = 1
+        return s
+
+    monkeypatch.setattr(service_bus, "drain_requests", fake_drain)
+
+    sb_tasks.drain_and_resubmit()
+
+    # Row created via the proven sync, keyed by the OpenAPI job id + shared owner.
+    assert synced, "drain must create a jobstate row"
+    rows, kw = synced[0]
+    assert rows[0]["job_id"] == "openapi-9"
+    assert rows[0]["submission_source"] == "servicebus"
+    assert rows[0]["external_correlation_id"] == "corr-9"
+    assert kw.get("caller_oid") == ""
+
+    # Trace stages recorded, keyed by the OpenAPI job id.
+    events = [e for (jid, e, _p) in history if jid == "openapi-9"]
+    for stage in ("mf.enqueued", "mf.received", "mf.row_created", "mf.routed", "mf.submitted"):
+        assert stage in events, f"missing trace stage {stage}"
+    # The enqueued stage carries the real SB enqueue time, not the write time.
+    enq_payload = next(p for (jid, e, p) in history if e == "mf.enqueued")
+    assert enq_payload["stage_ts"].startswith("2026-06-14T00:00:00")
+
+
+def test_publish_transitions_records_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A published transition records the status stage + completion_published on
+    the job's message trace, keyed by the OpenAPI job id."""
+    _enable(monkeypatch)
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-t", openapi_job_id="openapi-t", last_status="queued", done=False
+        )
+    )
+    monkeypatch.setattr(external_blast, "get_job", lambda jid, **k: {"status": "running"})
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
+
+    history: list[tuple] = []
+
+    class _FakeRepo:
+        def append_history(self, job_id, event, payload=None):
+            history.append((job_id, event))
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FakeRepo())
+
+    sb_tasks.publish_transitions()
+
+    events = [e for (jid, e) in history if jid == "openapi-t"]
+    assert "mf.running" in events
+    assert "mf.completion_published" in events
+
+
 def test_drain_dedups_duplicate_correlation(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
     from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
@@ -212,6 +308,35 @@ def test_message_correlation_id_falls_back_to_message_id() -> None:
     payload = sb_tasks._build_request_payload(msg, _enabled_cfg())
     assert payload is not None
     assert payload["external_correlation_id"] == "sb-msg-42"
+
+
+def test_event_id_is_deterministic_per_corr_status() -> None:
+    """The completion event_id is stable for the same (corr, status) and differs
+    across status — so an external subscriber can dedupe idempotently."""
+    a = sb_tasks._event_id("corr-1", "succeeded")
+    b = sb_tasks._event_id("corr-1", "succeeded")
+    c = sb_tasks._event_id("corr-1", "failed")
+    d = sb_tasks._event_id("corr-2", "succeeded")
+    assert a == b
+    assert a != c
+    assert a != d
+    assert len(a) == 32
+
+
+def test_transition_event_carries_idempotency_keys() -> None:
+    ev = sb_tasks._transition_event(
+        correlation_id="corr-9",
+        openapi_job_id="op-9",
+        status="succeeded",
+        attempt=1,
+    )
+    assert ev["event"] == "blast.transition"
+    assert ev["event_id"] == sb_tasks._event_id("corr-9", "succeeded")
+    assert ev["attempt"] == 1
+    assert ev["external_correlation_id"] == "corr-9"
+    assert ev["status"] == "succeeded"
+    # result_ref carries pointers only (never result bytes; charter §9).
+    assert "result_ref" in ev and "api" in ev["result_ref"]
 
 
 def test_publish_transitions_emits_on_change(monkeypatch: pytest.MonkeyPatch) -> None:

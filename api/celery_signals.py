@@ -36,6 +36,7 @@ from celery.signals import (
     task_revoked,
     worker_init,
     worker_process_init,
+    worker_shutdown,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -131,6 +132,27 @@ def _record_task_terminal_state(
 @worker_init.connect  # type: ignore[untyped-decorator]
 def _on_worker_init(**_kwargs: object) -> None:
     _start_reporter("worker")
+    # Optional resident Service Bus consumer (issue #36 Tier 3, default-OFF).
+    # Starts a single daemon loop on the worker main process when
+    # SERVICEBUS_RESIDENT_CONSUMER is enabled, so SB-submitted jobs drain within
+    # ~1 s instead of waiting the 30 s beat. No-op when the gate is off; the beat
+    # drain task stays registered as the fallback either way.
+    try:
+        from api.services.blast.resident_consumer import start_resident_consumer
+
+        start_resident_consumer()
+    except Exception:
+        LOGGER.debug("resident consumer start skipped", exc_info=True)
+
+
+@worker_shutdown.connect  # type: ignore[untyped-decorator]
+def _on_worker_shutdown(**_kwargs: object) -> None:
+    try:
+        from api.services.blast.resident_consumer import stop_resident_consumer
+
+        stop_resident_consumer()
+    except Exception:
+        LOGGER.debug("resident consumer stop skipped", exc_info=True)
 
 
 @worker_process_init.connect  # type: ignore[untyped-decorator]

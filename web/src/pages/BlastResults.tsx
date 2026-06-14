@@ -11,6 +11,7 @@ import {
 } from "@/pages/blastResults/BlastResultsTabs";
 import { ExecutionStepsCard } from "@/pages/blastResults/ExecutionStepsCard";
 import { JobDetailsCard } from "@/pages/blastResults/JobDetailsCard";
+import { MessageTraceCard } from "@/pages/blastResults/MessageTraceCard";
 import { ResultsCard } from "@/pages/blastResults/ResultsCard";
 import { AlignmentsTabBody } from "@/pages/blastResults/analytics/AlignmentsTabBody";
 import { DescriptionsTabBody } from "@/pages/blastResults/analytics/DescriptionsTabBody";
@@ -203,6 +204,7 @@ export function BlastResults() {
       {tab === "run" && (
         <>
           <JobDetailsCard jobId={jobId!} state={state} />
+          <MessageTraceCard jobId={jobId!} isActive={state.isRunning} />
           <ExecutionStepsCard state={state} />
         </>
       )}

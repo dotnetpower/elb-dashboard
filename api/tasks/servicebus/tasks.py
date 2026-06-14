@@ -116,6 +116,79 @@ def _result_ref(openapi_job_id: str) -> dict[str, str]:
     }
 
 
+def _event_id(correlation_id: str, status: str) -> str:
+    """Deterministic id for a (correlation_id, status) completion event.
+
+    At-least-once delivery means a subscriber can receive the same terminal
+    transition twice (a publish that succeeded but whose ``mark_done`` write was
+    retried, a re-poll after a worker restart, …). A stable ``event_id`` lets the
+    external consumer dedupe idempotently without guessing. It is a short
+    hex digest of ``corr:status`` — same inputs always yield the same id.
+    """
+    import hashlib
+
+    return hashlib.sha256(f"{correlation_id}:{status}".encode()).hexdigest()[:32]
+
+
+def _transition_event(
+    *,
+    correlation_id: str,
+    openapi_job_id: str,
+    status: str,
+    attempt: int,
+    error_code: str | None = None,
+) -> dict[str, Any]:
+    """Build a completion-topic ``blast.transition`` event with idempotency keys.
+
+    Every event carries ``event_id`` (stable per corr+status) and ``attempt``
+    (1 on the first publish of this status, ≥2 on a re-publish) so a subscriber
+    can dedupe and tell an original from a retry. ``result_ref`` points at the
+    dashboard result API (pointers only — never result bytes; charter §9).
+    """
+    event: dict[str, Any] = {
+        "event": "blast.transition",
+        "event_id": _event_id(correlation_id, status),
+        "attempt": max(1, int(attempt)),
+        "external_correlation_id": correlation_id,
+        "openapi_job_id": openapi_job_id,
+        "status": status,
+        "ts": _now_iso(),
+        "result_ref": _result_ref(openapi_job_id),
+    }
+    if error_code:
+        event["error_code"] = error_code
+    return event
+
+
+def _record_transition_trace(openapi_job_id: str, status: str) -> None:
+    """Record the status stage + ``completion_published`` on a transition.
+
+    Called after a transition event is successfully published to the completion
+    topic, so the dashboard's per-job message trace shows running/terminal hops
+    and exactly when the result/transition was delivered to subscribers. Keyed
+    by ``openapi_job_id`` to match the row the consumer created at drain time.
+    Best-effort — never raises into the publish loop.
+    """
+    if not openapi_job_id:
+        return
+    try:
+        from api.services.blast.message_trace import record_stage
+        from api.services.state_repo import get_state_repo
+
+        repo = get_state_repo()
+        # Map the published status vocabulary onto a trace stage.
+        if status == _STATUS_RUNNING:
+            record_stage(repo, openapi_job_id, "running")
+        elif status == _STATUS_SUCCEEDED:
+            record_stage(repo, openapi_job_id, "succeeded")
+        elif status == _STATUS_FAILED:
+            record_stage(repo, openapi_job_id, "failed")
+        record_stage(repo, openapi_job_id, "completion_published", status=status)
+    except Exception as exc:  # pragma: no cover - best-effort
+        LOGGER.debug("transition trace skipped job=%s: %s", openapi_job_id, type(exc).__name__)
+
+
+
 def _openapi_kwargs(cfg: ServiceBusConfig) -> dict[str, str]:
     """Resolve OpenAPI base_url + token from the configured cluster.
 
@@ -222,6 +295,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         return MessageAction.DEAD_LETTER
 
     correlation_id = str(payload["external_correlation_id"])
+    received_ts = _now_iso()
 
     # Idempotency: at-least-once delivery means we may see this twice.
     existing = get_bridge(correlation_id)
@@ -244,24 +318,91 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             done=False,
         )
     )
+    # Consumer is the writer: persist the durable jobstate row NOW (at drain
+    # time) so the dashboard tracks the job immediately instead of waiting for
+    # the periodic ~70 s /v1/jobs discovery poll to create it. Reuses the proven
+    # external-jobs sync so the row shape / heal rules stay identical and the
+    # later poll is a no-op (same job_id). Also records the message-flow trace
+    # stages (enqueued → received → row_created → routed → submitted). Fully
+    # best-effort: a tracking-side failure must never abandon an
+    # already-accepted submit (that would re-submit on redelivery).
+    _persist_drain_row_and_trace(
+        cfg,
+        payload=payload,
+        correlation_id=correlation_id,
+        openapi_job_id=openapi_job_id,
+        enqueued_at=msg.enqueued_time_utc,
+        received_ts=received_ts,
+    )
     # Publish the initial "queued" transition (best-effort; a publish failure
     # is recovered by publish_transitions on the next tick).
     try:
         service_bus.publish_event(
             cfg,
-            {
-                "event": "blast.transition",
-                "external_correlation_id": correlation_id,
-                "openapi_job_id": openapi_job_id,
-                "status": _STATUS_QUEUED,
-                "ts": _now_iso(),
-                "result_ref": _result_ref(openapi_job_id),
-            },
+            _transition_event(
+                correlation_id=correlation_id,
+                openapi_job_id=openapi_job_id,
+                status=_STATUS_QUEUED,
+                attempt=1,
+            ),
         )
         mark_published(correlation_id, _STATUS_QUEUED)
     except Exception:
         LOGGER.warning("queued-event publish failed corr=%s (will retry)", correlation_id)
     return MessageAction.COMPLETE
+
+
+def _persist_drain_row_and_trace(
+    cfg: ServiceBusConfig,
+    *,
+    payload: dict[str, Any],
+    correlation_id: str,
+    openapi_job_id: str,
+    enqueued_at: Any,
+    received_ts: str,
+) -> None:
+    """Create the durable jobstate row + record message-flow trace stages.
+
+    Best-effort: any failure here is logged and swallowed so the drain handler
+    still completes the message (the submit already succeeded; abandoning would
+    cause a duplicate submit on redelivery). Only runs when an ``openapi_job_id``
+    is known (the row is keyed by it, matching the later sync + webhook paths).
+    """
+    if not openapi_job_id:
+        return
+    try:
+        from api.services.blast.external_jobs import _sync_external_jobs_to_table
+
+        ext_row = {
+            "job_id": openapi_job_id,
+            "status": _STATUS_QUEUED,
+            "program": payload.get("program"),
+            "db": payload.get("db"),
+            "created_at": received_ts,
+            "submission_source": "servicebus",
+            "external_correlation_id": correlation_id,
+            "cluster_name": getattr(cfg, "cluster_name", "") or "",
+        }
+        _sync_external_jobs_to_table([ext_row], caller_oid="", tenant_id="")
+    except Exception as exc:
+        LOGGER.warning(
+            "drain jobstate row create failed corr=%s: %s", correlation_id, type(exc).__name__
+        )
+    try:
+        from api.services.blast.message_trace import record_stage
+        from api.services.state_repo import get_state_repo
+
+        repo = get_state_repo()
+        record_stage(repo, openapi_job_id, "enqueued", stage_ts=enqueued_at)
+        record_stage(repo, openapi_job_id, "received", stage_ts=received_ts)
+        record_stage(repo, openapi_job_id, "row_created")
+        record_stage(repo, openapi_job_id, "routed", target="openapi")
+        record_stage(repo, openapi_job_id, "submitted", openapi_job_id=openapi_job_id)
+    except Exception as exc:
+        LOGGER.debug(
+            "drain trace record skipped corr=%s: %s", correlation_id, type(exc).__name__
+        )
+
 
 
 @shared_task(name="api.tasks.servicebus.drain_and_resubmit")
@@ -313,40 +454,44 @@ def publish_transitions() -> dict[str, Any]:
             # non-terminal for too long, give up and emit a timeout failure so
             # the active set stays bounded and the subscriber is not left hanging.
             if status not in _TERMINAL and _bridge_expired(rec.created_at):
-                timeout_event = {
-                    "event": "blast.transition",
-                    "external_correlation_id": rec.correlation_id,
-                    "openapi_job_id": rec.openapi_job_id,
-                    "status": _STATUS_FAILED,
-                    "error_code": "bridge_timeout",
-                    "ts": _now_iso(),
-                    "result_ref": _result_ref(rec.openapi_job_id),
-                }
+                timeout_event = _transition_event(
+                    correlation_id=rec.correlation_id,
+                    openapi_job_id=rec.openapi_job_id,
+                    status=_STATUS_FAILED,
+                    attempt=1,
+                    error_code="bridge_timeout",
+                )
                 try:
                     service_bus.publish_event(cfg, timeout_event)
                 except Exception:  # retry next tick (marker unchanged)
                     LOGGER.warning("timeout publish failed corr=%s", rec.correlation_id)
                     continue
+                _record_transition_trace(rec.openapi_job_id, _STATUS_FAILED)
                 mark_done(rec.correlation_id, _STATUS_FAILED)
                 published += 1
                 finished += 1
             continue
-        event: dict[str, Any] = {
-            "event": "blast.transition",
-            "external_correlation_id": rec.correlation_id,
-            "openapi_job_id": rec.openapi_job_id,
-            "status": status,
-            "ts": _now_iso(),
-            "result_ref": _result_ref(rec.openapi_job_id),
-        }
+        # attempt ≥ 2 only when we are re-publishing a status the marker already
+        # records (a publish that succeeded but whose mark write was retried);
+        # the normal transition path advances last_status so attempt is 1.
+        attempt = 2 if status == rec.last_status else 1
+        error_code: str | None = None
         if status == _STATUS_FAILED:
             err = job.get("error") if isinstance(job.get("error"), dict) else {}
-            event["error_code"] = str((err or {}).get("code") or "failed")
+            error_code = str((err or {}).get("code") or "failed")
+        event = _transition_event(
+            correlation_id=rec.correlation_id,
+            openapi_job_id=rec.openapi_job_id,
+            status=status,
+            attempt=attempt,
+            error_code=error_code,
+        )
         try:
             service_bus.publish_event(cfg, event)
         except Exception:
             LOGGER.warning("transition publish failed corr=%s", rec.correlation_id)
             continue
+        _record_transition_trace(rec.openapi_job_id, status)
         published += 1
         if status in _TERMINAL:
             mark_done(rec.correlation_id, status)

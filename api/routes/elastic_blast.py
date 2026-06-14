@@ -238,6 +238,53 @@ def submit_external_blast_job(
         request.program,
     )
     del caller
+
+    # Unified-ingress path (issue #36, default-OFF gate ENABLE_SB_SUBMIT_INGRESS):
+    # instead of calling /v1/jobs directly, enqueue the request onto the Service
+    # Bus queue so the dashboard's own consumer drains it (single consumer =
+    # single writer). Returns immediately with the dashboard correlation id; the
+    # OpenAPI job id is linked later by the consumer via the bridge record. A
+    # publish failure falls back to the direct path below so a Service Bus blip
+    # never drops a submit.
+    correlation_id = str(payload["external_correlation_id"])
+    from api.services.blast.submit_ingress import enqueue_submit_request, should_enqueue_submit
+
+    if should_enqueue_submit():
+        try:
+            message_id = enqueue_submit_request(payload, correlation_id)
+            LOGGER.info(
+                "external BLAST submit enqueued to service bus corr=%s msg=%s",
+                correlation_id,
+                message_id,
+            )
+            from api.services.blast.external_query_labels import remember_inline_query_label
+
+            # Key the remembered label by the correlation id; the consumer
+            # re-remembers under the OpenAPI id once it knows it.
+            remember_inline_query_label(correlation_id, request.query_fasta)
+            try:
+                from api.routes.blast.submit import _invalidate_message_flow_caches
+
+                _invalidate_message_flow_caches()
+            except Exception:  # pragma: no cover - best-effort display freshness
+                LOGGER.debug("message-flow cache invalidate skipped after enqueue")
+            return {
+                "job_id": correlation_id,
+                "status": "queued",
+                "submission_source": "servicebus",
+                "external_correlation_id": correlation_id,
+                "ingress": "service_bus",
+            }
+        except Exception as exc:
+            # Break-glass: a real publish failure falls back to the direct path
+            # so the submit is never lost. Logged so the operator can see the
+            # ingress degraded to direct.
+            LOGGER.warning(
+                "service bus enqueue failed corr=%s (%s); falling back to direct submit",
+                correlation_id,
+                type(exc).__name__,
+            )
+
     # Pre-flight the sibling's submit path. Surfaces precise structured 503s
     # (e.g. AKS stopped / workload pool empty / openapi pod down) before we
     # spend the 90 s submit timeout waiting for a request the sibling cannot
@@ -253,6 +300,15 @@ def submit_external_blast_job(
     from api.services.blast.external_query_labels import remember_inline_query_label
 
     remember_inline_query_label(str(normalised.get("job_id") or ""), request.query_fasta)
+    # Surface the new external job on the Message Flow card without waiting out
+    # the external-jobs (~70 s) + monitor (~30 s) read caches. Lazy import keeps
+    # this route free of an import-time dependency on the blast submit module.
+    try:
+        from api.routes.blast.submit import _invalidate_message_flow_caches
+
+        _invalidate_message_flow_caches()
+    except Exception:  # pragma: no cover - best-effort display freshness only
+        LOGGER.debug("message-flow cache invalidate skipped after external submit")
     return normalised
 
 

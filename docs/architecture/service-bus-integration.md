@@ -256,11 +256,86 @@ Manual actions (always behind a confirmation dialog showing the exact count):
 - Live runtime counts: active / dead-letter message counts per entity.
 - Cleanup policy editor with a dry-run preview.
 
+## Unified ingress: consumer = writer (issue #36)
+
+The dashboard's Service Bus consumer is the **single writer** of job state. When
+it drains a request message it submits to the execution plane **and** durably
+persists the `jobstate` row at that moment (reusing the proven external-jobs
+sync), so a Service-Bus-submitted job is tracked immediately instead of waiting
+for the periodic discovery poll. The full message lifecycle is recorded as a
+trace on the job's history:
+
+```
+enqueued → received → row_created → routed → submitted → running → succeeded|failed → completion_published
+```
+
+`GET /api/blast/jobs/{job_id}?history=1` returns a derived `message_trace` with
+the ordered stages plus `queue_dwell_ms` / `submit_latency_ms` / `e2e_ms`
+metrics, so the dashboard can show where a message is and how long each hop took.
+
+### Optional submit ingress + resident consumer (default-OFF)
+
+Two behavioural switches let an operator move from the historical direct
+`/v1/jobs` submit to the unified Service Bus front door, each gated default-OFF
+so the live contract only changes by explicit opt-in:
+
+- `ENABLE_SB_SUBMIT_INGRESS` — the dashboard submit API enqueues the request to
+  Service Bus instead of calling `/v1/jobs` directly, returning the dashboard
+  correlation id immediately. A publish failure falls back to the direct path
+  (break-glass), so a Service Bus blip never drops a submit.
+- `SERVICEBUS_RESIDENT_CONSUMER` — a resident long-polling consumer drains the
+  queue within ~1 s instead of waiting the 30 s beat. The beat drain task stays
+  registered as the fallback reconcile, so the resident loop is an accelerator,
+  never a single point of failure.
+
+## Result return for external services (push + pull)
+
+An external service that submits via Service Bus gets results two ways — pick the
+one that fits how the service runs:
+
+| Model | Mechanism | Suits | Payload |
+|---|---|---|---|
+| **Event subscribe (push)** | create a Subscription on the completion topic and receive `blast.transition` events | long-lived services / workflows | event + `result_ref` (pointers) |
+| **Correlation poll (pull)** | poll the dashboard status/result API by `external_correlation_id` | single-shot scripts / functions | existing status + result endpoints |
+
+Every completion event carries idempotency keys so an at-least-once redelivery is
+safe to dedupe:
+
+```json
+{
+  "event": "blast.transition",
+  "event_id": "<stable per corr+status>",
+  "attempt": 1,
+  "external_correlation_id": "...",
+  "openapi_job_id": "...",
+  "status": "succeeded",
+  "ts": "...",
+  "result_ref": {
+    "api": "GET /api/v1/elastic-blast/jobs/{id}",
+    "files": "GET /api/v1/elastic-blast/jobs/{id}/files/{file_id}"
+  }
+}
+```
+
+Rules a subscriber must follow:
+
+- **Dedupe on `event_id`.** The same `(correlation_id, status)` always yields the
+  same `event_id`; `attempt` ≥ 2 marks a re-publish. Treat a repeat as a no-op.
+- **Results are pointers, never bytes.** A completion event never carries the
+  BLAST result itself (Service Bus message size limits). Fetch the bytes through
+  the dashboard API in `result_ref` — results stream through the API proxy and
+  the dashboard never issues a SAS token to a caller.
+- **The status poll stays available as a safety net.** If a subscriber misses an
+  event (downtime, network), the correlation poll still returns the terminal
+  status + result, so a missed event is never a lost result.
+
 ## Configuration flags
 
 | Env var | Default | Sidecars | Meaning |
 |---|---|---|---|
 | `SERVICEBUS_ENABLED` | `false` | api, beat | Master switch. When false the drain/publish/cleanup beat tasks no-op and the submit routes do not enqueue. |
+| `ENABLE_SB_SUBMIT_INGRESS` | `false` | api | When true (and Service Bus enabled) the dashboard submit API enqueues to Service Bus instead of calling `/v1/jobs` directly; a publish failure falls back to the direct path. |
+| `SERVICEBUS_RESIDENT_CONSUMER` | `false` | worker | When true (and Service Bus enabled) a resident long-polling consumer drains the queue continuously (~1 s) instead of waiting the 30 s beat; the beat stays as the fallback. |
 | `CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS` | `30` | beat | Drain + transition-publish cadence. |
 | `CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS` | `3600` | beat | DLQ cleanup cadence. |
 
@@ -274,5 +349,8 @@ redeploy. The env flags only gate whether the subsystem runs at all.
 uv run pytest -q api/tests/test_service_bus_pref.py \
   api/tests/test_service_bus_drain_loop.py \
   api/tests/test_settings_service_bus.py \
-  api/tests/test_servicebus_tasks.py
+  api/tests/test_servicebus_tasks.py \
+  api/tests/test_message_trace.py \
+  api/tests/test_submit_ingress.py \
+  api/tests/test_resident_consumer.py
 ```

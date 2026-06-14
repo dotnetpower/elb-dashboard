@@ -341,6 +341,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Service Bus and the beat tasks no-op until both this AND the saved
             // config row opt in. NOT the Celery broker — that stays Redis.
             { name: 'SERVICEBUS_ENABLED', value: effectiveServiceBusEnabled }
+            // Unified-ingress front door (issue #36 Tier 2). Default OFF
+            // (Charter §12a Rule 4): when ON (and SERVICEBUS_ENABLED) the api
+            // submit route enqueues to Service Bus instead of calling /v1/jobs
+            // directly; a publish failure falls back to the direct path.
+            { name: 'ENABLE_SB_SUBMIT_INGRESS', value: controlPlaneEnv.api.ENABLE_SB_SUBMIT_INGRESS }
             // Dev-stage job visibility (issue: recent searches only showed
             // API-submitted jobs). Default ON for the single-tenant
             // development phase: every authenticated tenant member can see and
@@ -481,6 +486,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // sidecars so the worker-run drain/publish/cleanup tasks gate
             // identically. Default OFF (Charter §12a Rule 4).
             { name: 'SERVICEBUS_ENABLED', value: effectiveServiceBusEnabled }
+            // Resident low-latency consumer (issue #36 Tier 3). Default OFF
+            // (Charter §12a Rule 4): when ON (and SERVICEBUS_ENABLED) the worker
+            // runs a resident long-polling drain loop (~1s) instead of waiting
+            // the 30s beat; the beat drain stays as the fallback reconcile.
+            { name: 'SERVICEBUS_RESIDENT_CONSUMER', value: controlPlaneEnv.worker.SERVICEBUS_RESIDENT_CONSUMER }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // worker-run pipeline/rollback tasks branch identically. Default
             // OFF (Charter §12a Rule 4).

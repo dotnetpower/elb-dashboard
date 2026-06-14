@@ -198,6 +198,34 @@ def _reset_jobs_list_cache() -> None:
         LOGGER.debug("jobs list cache reset skipped: %s", type(exc).__name__)
 
 
+def _invalidate_message_flow_caches() -> None:
+    """Drop the read-side caches that gate how fast a just-submitted BLAST job
+    surfaces on the dashboard Message Flow card.
+
+    The card is served through the monitor snapshot cache (~30 s TTL) and, for
+    OpenAPI-plane jobs, the external ``/v1/jobs`` list cache (~70 s TTL). Without
+    a submit-time invalidation a freshly-submitted job waits out both caches
+    before the card can show it, which is the user-visible "appears too late"
+    latency. Mirrors the AKS lifecycle routes that invalidate their monitor
+    prefix on a mutation. Best-effort: never let a cache-reset failure turn an
+    accepted submit into a 5xx. Only meaningful in the single-replica api
+    process (the worker/beat process cannot reach this in-process cache), which
+    is the deployed topology (minReplicas == maxReplicas == 1).
+    """
+    try:
+        from api.services.blast.external_jobs import _reset_external_jobs_cache
+
+        _reset_external_jobs_cache()
+    except Exception as exc:
+        LOGGER.debug("external jobs cache reset skipped: %s", type(exc).__name__)
+    try:
+        from api.services.monitor_cache import invalidate_monitor_snapshot_prefix
+
+        invalidate_monitor_snapshot_prefix("monitor:message-flow")
+    except Exception as exc:
+        LOGGER.debug("message-flow cache invalidate skipped: %s", type(exc).__name__)
+
+
 @router.post("/submit", responses=BLAST_SUBMIT_RESPONSES)
 def blast_submit(
     request: Request,
@@ -458,6 +486,9 @@ def blast_submit(
         raise exc
     response.headers["Location"] = f"/api/operations/{task_id or job_id}"
     response.headers["Retry-After"] = str(_SUBMIT_RETRY_AFTER_SECONDS)
+    # Surface the new job on the Message Flow card without waiting out the
+    # monitor (~30 s) / external-jobs (~70 s) read caches.
+    _invalidate_message_flow_caches()
     return _submit_response(
         job_id,
         task_id,
@@ -544,6 +575,9 @@ def blast_job_submit(
     remember_inline_query_label(openapi_job_id, submit_request.query_fasta)
     response.headers["Location"] = f"/api/blast/jobs/{dashboard_job_id}"
     response.headers["Retry-After"] = str(_SUBMIT_RETRY_AFTER_SECONDS)
+    # Surface the new external job on the Message Flow card without waiting out
+    # the external-jobs (~70 s) + monitor (~30 s) read caches.
+    _invalidate_message_flow_caches()
     return {
         **upstream,
         "status": upstream.get("status") or "accepted",

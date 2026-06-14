@@ -216,6 +216,31 @@ export interface BlastJobSummary {
   refresh_blocked_reason?: string;
   /** ARM power_state of the job's cluster when the refresh was blocked (e.g. `Stopped`). */
   cluster_power_state?: string;
+  /**
+   * Message lifecycle trace (Service Bus ingress → consumer → result delivery).
+   * Present only when the job detail is fetched with `history: true`. Built by
+   * the server from the `mf.*` history events; see the Run details
+   * "Message lifecycle" card.
+   */
+  message_trace?: BlastMessageTrace;
+}
+
+/** One stage in the BLAST message lifecycle (server-ordered). */
+export interface BlastMessageTraceStage {
+  stage: string;
+  ts: string;
+}
+
+/** Derived message lifecycle trace + dwell/latency metrics. */
+export interface BlastMessageTrace {
+  stages: BlastMessageTraceStage[];
+  metrics: {
+    queue_dwell_ms: number | null;
+    submit_latency_ms: number | null;
+    e2e_ms: number | null;
+  };
+  terminal_stage: string | null;
+  last_stage: string | null;
 }
 
 export interface BlastExecutionStepsSnapshot {

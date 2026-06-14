@@ -501,7 +501,15 @@ def blast_job_get(
                 include_database_metadata=include_database_metadata,
             )
             if history:
-                out["history"] = repo.get_history(job_id, limit=200)
+                hist = repo.get_history(job_id, limit=200)
+                out["history"] = hist
+                # Derive the message lifecycle trace (enqueued → … →
+                # completion_published, with dwell/latency metrics) from the
+                # same history rows so the Run details tab can render where the
+                # message is and how long each hop took.
+                from api.services.blast.message_trace import derive_trace
+
+                out["message_trace"] = derive_trace(hist)
             out["meta"] = build_meta(request_id=request_id_from_scope(request))
             return out
     except HTTPException:
