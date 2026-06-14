@@ -133,6 +133,10 @@ The `disable_sharding` boolean is a legacy opt-out kept for older callers. New c
 | `skip_warmed_ssd_init` | `skip_warmed_ssd_init` | Skips SSD init even with warmup on | `false` | Internal optimisation; OpenAPI-only. |
 | `reuse` | `reuse` | `[cluster] reuse=` | (auto) | Set internally when warmup is on. |
 
+!!! note "Warmup wait has a deadline"
+
+    When Auto warm is on but the chosen node is still staging the database, the submit task does not block — it parks the job in the `waiting_for_warmup` phase (status still `running`) and re-enqueues itself every 30 s until the node reports the database is warm. To stop a permanently-stuck warmup (a node that never leaves `Loading`, or a generation marker that never lands) from looping forever, the wait is bounded by a deadline: **45 minutes by default**, overridable with the `BLAST_WARMUP_MAX_WAIT_SECONDS` worker environment variable. If the deadline is exceeded the job transitions to a terminal `failed` state with phase `warmup_not_ready` and `error_code=node_warmup_wait_deadline_exceeded`. The deadline is enforced in [api/tasks/blast/submit_task.py](../../api/tasks/blast/submit_task.py) (`_warmup_max_wait_seconds`). A database that is already warm skips the wait entirely.
+
 ---
 
 ## 6. Algorithm Parameters
