@@ -1,0 +1,78 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - api/**
+      - pyproject.toml
+      - uv.lock
+      - pytest.ini
+      - .github/workflows/test.yml
+  pull_request:
+    paths:
+      - api/**
+      - pyproject.toml
+      - uv.lock
+      - pytest.ini
+      - .github/workflows/test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel in-flight runs for the same ref so a fresh push supersedes the old run.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: ruff + pytest (api/)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: ruff check
+        run: uv run ruff check api
+
+      - name: pytest (fast loop — slow/subprocess excluded)
+        # Run SERIALLY on CI (`-n0` overrides pytest.ini's `-n auto`). Under
+        # pytest-xdist a worker was intermittently SIGKILLed near the end of the
+        # suite ("[gwN] node down: Not properly terminated", no Python traceback,
+        # no faulthandler dump — the worker process is killed, not hung) and the
+        # controller then blocked forever on the dead node, running the step to
+        # its timeout. Serial execution removes the worker-process layer
+        # entirely: there is no controller waiting on a dead worker, peak memory
+        # is one interpreter instead of four (avoiding the OOM that triggers the
+        # kill), and if a test ever does crash the process it fails fast with the
+        # test named instead of deadlocking. Locally the serial fast loop is ~34 s
+        # (vs ~15 s parallel); on CI it stays well under a minute. Local dev keeps
+        # `-n auto` via pytest.ini for speed.
+        #
+        # Backstops still bound any stall: `--timeout=60` per test and
+        # `--session-timeout=300` (pytest.ini), plus this step-level
+        # `timeout-minutes` as the final OS-level guard. Set CI=true so CI-aware
+        # code paths (logging, color, etc.) behave correctly.
+        timeout-minutes: 6
+        env:
+          CI: "true"
+        run: uv run pytest -q api/tests -n0
