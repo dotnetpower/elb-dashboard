@@ -19,6 +19,7 @@ import { useRelativeTime } from "@/hooks/useRelativeTime";
 import { aliasTone } from "./colors";
 import { MessageFlowConstellation } from "./MessageFlowConstellation";
 import { querySizeLabel } from "./layout";
+import { ServiceBusTelemetryPanel } from "./ServiceBusTelemetryPanel";
 
 interface MessageFlowModalProps {
   snapshot: MessageFlowSnapshot;
@@ -237,11 +238,23 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
     };
   }, [onClose]);
 
-  const counts = snapshot.sb_counts;
-  const queue = counts?.queue;
   const activeTotal = snapshot.active_total ?? 0;
   const settlingTotal = snapshot.settling_total ?? 0;
   const visibleTotal = activeTotal + settlingTotal;
+  const scope = snapshot.scope ?? "own";
+  const scopeBadge = scope === "shared" ? "All submitters" : "Your jobs only";
+  const scopeBadgeTitle =
+    scope === "shared"
+      ? "Showing every submitter on this deployment (BLAST_SHARED_VISIBILITY=true)."
+      : "Showing only jobs your identity submitted. Other submitters' jobs are hidden.";
+  const truncated = Boolean(snapshot.broker_truncated || snapshot.read_truncated);
+  // Sub-second drain → operators routinely see active_message_count=0 even when
+  // jobs are clearly running. Surface this honestly so the two number sets stop
+  // looking contradictory.
+  const activeTitle =
+    activeTotal === 0
+      ? "Service Bus queue depth drains in well under a second, so this counter is normally zero even while jobs are in flight. The broker nodes below are the real source of truth for active work."
+      : `${activeTotal} active jobs (queued, pending, running, or reducing).`;
 
   return createPortal(
     <div
@@ -279,6 +292,43 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
           <Radio size={16} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
           <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>Message Flow</div>
           <span
+            className="glass-pill"
+            style={{
+              padding: "2px 8px",
+              borderRadius: 999,
+              fontSize: 10,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              color: scope === "shared" ? "var(--warning)" : "var(--text-muted)",
+              border: "1px solid var(--glass-border)",
+              flexShrink: 0,
+            }}
+            title={scopeBadgeTitle}
+          >
+            {scopeBadge}
+          </span>
+          {truncated ? (
+            <span
+              style={{
+                padding: "2px 8px",
+                borderRadius: 999,
+                fontSize: 10,
+                letterSpacing: "0.04em",
+                textTransform: "uppercase",
+                color: "var(--warning)",
+                border: "1px solid var(--warning)",
+                flexShrink: 0,
+              }}
+              title={
+                snapshot.read_truncated
+                  ? "The JobState read window was hit — counts are a floor, not the true total."
+                  : `Showing the first ${snapshot.active_shown ?? 0} of ${visibleTotal} jobs to keep the graph readable.`
+              }
+            >
+              truncated
+            </span>
+          ) : null}
+          <span
             style={{
               fontSize: 11,
               color: "var(--text-faint)",
@@ -300,7 +350,9 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               fontSize: 11,
               color: "var(--text-muted)",
               flexShrink: 0,
+              cursor: "help",
             }}
+            title={activeTitle}
           >
             <span
               style={{
@@ -451,51 +503,8 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
             </>
           )}
 
-          {/* Service Bus counts footer */}
-          <div
-            style={{
-              marginTop: 18,
-              paddingTop: 12,
-              borderTop: "1px solid var(--glass-border)",
-              fontSize: 11,
-              color: "var(--text-muted)",
-              display: "flex",
-              gap: 16,
-              flexWrap: "wrap",
-            }}
-          >
-            <span>
-              Service Bus:{" "}
-              <strong style={{ color: "var(--text-primary)" }}>
-                {snapshot.enabled ? "enabled" : "disabled"}
-              </strong>
-            </span>
-            {counts?.available ? (
-              <>
-                <span>queue {queue?.active_message_count ?? "—"} active</span>
-                <span>{queue?.scheduled_message_count ?? 0} scheduled</span>
-                <span
-                  style={{
-                    color:
-                      (queue?.dead_letter_message_count ?? 0) > 0
-                        ? "var(--warning)"
-                        : "var(--text-muted)",
-                  }}
-                >
-                  DLQ {queue?.dead_letter_message_count ?? 0}
-                </span>
-              </>
-            ) : (
-              <span style={{ color: "var(--text-faint)" }}>
-                counts unavailable{counts?.reason ? ` (${counts.reason})` : ""}
-              </span>
-            )}
-            {snapshot.completion_topic ? (
-              <span style={{ marginLeft: "auto" }}>
-                completions topic: {snapshot.completion_topic}
-              </span>
-            ) : null}
-          </div>
+          {/* Service Bus telemetry footer (SRP: pure presentation panel). */}
+          <ServiceBusTelemetryPanel snapshot={snapshot} />
 
           {/* Caption: clarify that the broker nodes are in-flight JOBS, not the
               Service Bus queue depth above (which drains in well under a second

@@ -14,7 +14,6 @@ Validation: ``uv run pytest -q api/tests/test_service_bus_telemetry.py``.
 from __future__ import annotations
 
 import pytest
-
 from api.services import service_bus_telemetry as svc
 
 

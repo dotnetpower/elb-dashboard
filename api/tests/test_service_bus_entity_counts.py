@@ -20,7 +20,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 from api.services import service_bus
 
 

@@ -373,7 +373,8 @@ def _iso_or_none(value: Any) -> str | None:
         if getattr(value, "tzinfo", None) is None:
             value = value.replace(tzinfo=UTC)  # type: ignore[union-attr]
         return value.isoformat().replace("+00:00", "Z")  # type: ignore[union-attr]
-    except Exception:  # noqa: BLE001 — never break counts on a timestamp field
+    except Exception:
+        # Best-effort — a bad timestamp must never break the counts call.
         return None
 
 

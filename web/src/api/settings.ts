@@ -348,12 +348,35 @@ export interface ServiceBusCounts {
     dead_letter_message_count: number;
     scheduled_message_count: number;
     total_message_count: number;
+    /**
+     * Optional static + derived telemetry on the request queue. All fields
+     * may be `null` if the `get_queue` admin call failed (the counters above
+     * still come through). Additive — older snapshots simply omit this block.
+     */
+    telemetry?: {
+      size_in_bytes: number | null;
+      max_size_in_mb: number | null;
+      /** Pre-computed 0..1 fraction of `max_size_in_mb` consumed. `null`
+       *  when either input is missing or `max_size_in_mb` is 0. */
+      size_pct: number | null;
+      transfer_message_count: number | null;
+      transfer_dead_letter_message_count: number | null;
+      /** `Active`, `Disabled`, `SendDisabled`, `ReceiveDisabled`, … */
+      status: string | null;
+      created_at: string | null;
+      updated_at: string | null;
+      accessed_at: string | null;
+    } | null;
   } | null;
   dead_letter?: number | null;
   subscriptions?: Array<{
     name: string;
     active_message_count: number;
     dead_letter_message_count: number;
+    /** Transferred-out / DLQ-of-transfer counters for forwarded subscriptions.
+     *  Optional — older snapshots simply omit them. */
+    transfer_message_count?: number | null;
+    transfer_dead_letter_message_count?: number | null;
   }>;
 }
 

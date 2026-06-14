@@ -240,7 +240,8 @@ def _counts(cfg: Any) -> dict[str, Any]:
                 getattr(cfg, "request_queue", "") or "",
                 dlq,
             )
-        except Exception:  # noqa: BLE001 — never break counts on a telemetry hiccup
+        except Exception:
+            # Best-effort — a telemetry hiccup must never break counts.
             LOGGER.debug("dlq sample record failed", exc_info=True)
     return {"available": True, **raw}
 

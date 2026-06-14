@@ -57,7 +57,15 @@ export function MessageFlowCard() {
         }}
       >
         <Radio size={14} strokeWidth={1.5} style={{ color: "var(--accent)", flexShrink: 0 }} />
-        <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>Message Flow</span>
+        <span
+          style={{ color: "var(--text-primary)", fontWeight: 600 }}
+          title="Active job pipeline. The Service Bus queue itself drains in under a second, so this card tracks the work in flight on AKS rather than raw queue depth."
+        >
+          Message Flow
+        </span>
+        <span style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+          active jobs
+        </span>
 
         {activeTotal === 0 && settlingTotal === 0 ? (
           <span style={{ color: "var(--text-faint)" }}>no active messages</span>

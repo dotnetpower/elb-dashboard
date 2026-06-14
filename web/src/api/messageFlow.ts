@@ -71,6 +71,14 @@ export interface MessageFlowSnapshot {
   request_queue?: string;
   completion_topic?: string;
   sb_counts?: ServiceBusCounts;
+  /**
+   * Best-effort DLQ growth-rate hint computed from an in-process rolling
+   * window on the api sidecar. `null` when no in-window samples are stored
+   * yet (first poll, or counts are unavailable). `samples=1` means the
+   * baseline equals current — the SPA should render "since restart"
+   * honestly instead of implying a real delta.
+   */
+  dlq_delta?: MessageFlowDlqDelta | null;
   active_total?: number;
   /** Recently-terminal jobs still drawn (fading out), not part of active_total. */
   settling_total?: number;
@@ -83,6 +91,19 @@ export interface MessageFlowSnapshot {
   producers?: MessageFlowProducer[];
   broker?: MessageFlowBox[];
   consumers?: { clusters: MessageFlowCluster[] };
+}
+
+/** Rolling-window DLQ growth hint shipped alongside the Message Flow snapshot. */
+export interface MessageFlowDlqDelta {
+  window_seconds: number;
+  samples: number;
+  baseline_dlq: number;
+  current_dlq: number;
+  /** ``current_dlq - baseline_dlq``, clamped at zero so a purge never reads
+   *  as negative growth. */
+  delta: number;
+  /** How long the in-window samples actually span (seconds). */
+  elapsed_seconds: number;
 }
 
 /** Raw JobState detail returned by the monitor job endpoint (for the JSON view). */
