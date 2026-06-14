@@ -81,7 +81,12 @@ class ExternalBlastSubmitRequest(BaseModel):
         "tblastn",
         "tblastx",
     ] = Field("blastn")
-    taxid: int | None = None
+    # NCBI taxonomy ids are positive integers (the root tax tree starts at 1).
+    # A 0 / negative value is never a valid organism filter, so reject it at the
+    # boundary instead of forwarding a nonsensical -taxids/-negative_taxids arg
+    # to the sibling (which would either error mid-run or silently filter out
+    # everything).
+    taxid: int | None = Field(None, ge=1, le=2_147_483_647)
     is_inclusive: bool | None = None
     options: ExternalBlastOptions = Field(default_factory=ExternalBlastOptions)  # type: ignore[arg-type]
     priority: int = Field(50, ge=0, le=100)

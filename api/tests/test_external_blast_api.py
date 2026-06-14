@@ -272,6 +272,26 @@ def test_external_blast_rejects_invalid_program(monkeypatch):
     assert response.status_code == 422
 
 
+def test_external_blast_rejects_non_positive_taxid(monkeypatch):
+    """NCBI taxonomy ids are positive integers; 0 / negative must be rejected at
+    the boundary (not forwarded as a nonsensical organism filter)."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+
+    client = TestClient(app)
+    for bad in (-5, 0):
+        response = client.post(
+            "/api/v1/elastic-blast/submit",
+            json={"query_fasta": ">q1\nATGC", "db": "core_nt", "taxid": bad, "is_inclusive": True},
+        )
+        assert response.status_code == 422, f"taxid={bad} should be rejected"
+    # A valid positive taxid still passes validation (model-level).
+    from api.routes.elastic_blast import ExternalBlastSubmitRequest
+
+    ok = ExternalBlastSubmitRequest(query_fasta=">q\nACGT", db="core_nt", taxid=562)
+    assert ok.taxid == 562
+
+
 def test_external_blast_rejects_invalid_fasta(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
