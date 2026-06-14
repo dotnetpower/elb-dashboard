@@ -85,8 +85,9 @@ def record_stage(
     try:
         repo.append_history(job_id, f"{_EVENT_PREFIX}{stage}", payload)
     except Exception as exc:  # pragma: no cover - best-effort
-        LOGGER.debug("message_trace record failed job_id=%s stage=%s: %s", job_id, stage, stage)
-        del exc
+        LOGGER.debug(
+            "message_trace record failed job_id=%s stage=%s: %s", job_id, stage, exc
+        )
 
 
 def _parse_iso(value: Any) -> datetime | None:

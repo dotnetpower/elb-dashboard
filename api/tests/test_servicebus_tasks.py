@@ -404,6 +404,50 @@ def test_publish_transitions_gives_up_on_stuck_bridge(monkeypatch: pytest.Monkey
     assert get_bridge("corr-stuck").done is True
 
 
+def test_publish_transitions_isolates_one_failing_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tracking-store write raising on ONE bridge must not abort the tick.
+
+    Mirrors the per-item isolation of ``drain_requests`` /
+    ``reconcile_stale_jobs``: bridge B is still processed (event published, marker
+    advanced) even though bridge A's ``mark_published`` raised. Regression guard
+    for the partial-failure isolation in ``publish_transitions``.
+    """
+    _enable(monkeypatch)
+    from api.services.service_bus_tracking import BridgeRecord, get_bridge, upsert_bridge
+
+    upsert_bridge(
+        BridgeRecord(correlation_id="corr-iso-1", openapi_job_id="op-iso-1", last_status="queued")
+    )
+    upsert_bridge(
+        BridgeRecord(correlation_id="corr-iso-2", openapi_job_id="op-iso-2", last_status="queued")
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
+    monkeypatch.setattr(external_blast, "get_job", lambda jid, **k: {"status": "running"})
+
+    real_mark = sb_tasks.mark_published
+
+    def flaky_mark(corr: str, status: str) -> None:
+        if corr == "corr-iso-1":
+            raise RuntimeError("simulated tracking-store write failure")
+        real_mark(corr, status)
+
+    monkeypatch.setattr(sb_tasks, "mark_published", flaky_mark)
+
+    out = sb_tasks.publish_transitions()
+    # Both bridges were scanned; bridge A raised in mark_published (isolated),
+    # bridge B completed normally and advanced its marker.
+    assert out["scanned"] == 2
+    assert out["errors"] == 1
+    # Both events reached the topic (publish precedes the mark step); only the
+    # fully-completed bridge B is counted under `published`.
+    assert len(events) == 2
+    assert out["published"] == 1
+    assert get_bridge("corr-iso-2").last_status == "running"
+
+
 def test_dlq_cleanup_skips_when_policy_off(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _enabled_cfg()
     cfg.dlq_cleanup_enabled = False

@@ -163,6 +163,24 @@ def _apply_to_jobstate(job_id: str, ext_status: str, error_msg: str | None) -> d
 
     cur_status = str(getattr(existing, "status", "") or "").lower()
 
+    # Terminal rows are immutable against NON-terminal events. The sibling fires
+    # webhooks with a 3-retry exponential backoff, so a ``running``/``submitted``
+    # notification queued for retry can be delivered AFTER the job already reached
+    # a terminal state (the docstring hazard "the 3-retry window can outlast its
+    # own state machine moving on"). Without this guard a late ``running`` webhook
+    # would resurrect a finished ``completed``/``failed``/``cancelled`` row back to
+    # ``running``. A genuine terminal→terminal correction is still allowed (the
+    # sibling is authoritative for terminals).
+    if cur_status in _TERMINAL_STATUSES and ext_status not in _TERMINAL_STATUSES:
+        LOGGER.info(
+            "openapi webhook: ignoring non-terminal event on terminal row "
+            "job_id=%s cur=%s incoming=%s",
+            job_id,
+            cur_status,
+            ext_status,
+        )
+        return {"synced": False, "reason": "terminal_locked"}
+
     # Forward-only: a stored ``running`` row must NOT be flipped backwards by an
     # out-of-order ``submitted`` webhook that arrived late (the sibling's 3-retry
     # window can outlast its own state machine moving on). Terminal states are

@@ -322,6 +322,59 @@ def test_register_external_job_rejects_backward_transition(
     assert fake_repo.rows["job-1"].status == "running"
 
 
+@pytest.mark.parametrize("terminal_status", ["completed", "failed", "cancelled"])
+@pytest.mark.parametrize("late_status", ["running", "submitted", "queued", "submitting"])
+def test_register_external_job_terminal_row_not_resurrected_by_late_event(
+    client: TestClient, fake_repo: _FakeRepo, terminal_status: str, late_status: str
+) -> None:
+    """A late, out-of-order non-terminal webhook must NOT flip a terminal row back.
+
+    The sibling's 3-retry backoff can deliver a stale ``running``/``submitted``
+    notification after the job already finished; resurrecting the row to a
+    non-terminal status would make a finished job re-appear as in-flight.
+    """
+    fake_repo.rows["job-1"] = _FakeRow(
+        job_id="job-1", status=terminal_status, phase=terminal_status
+    )
+    r = client.post(
+        _WEBHOOK_PATH,
+        json={"job_id": "job-1", "event": late_status, "status": late_status},
+        headers=_headers(),
+    )
+    assert r.status_code == 202
+    body = r.json()
+    assert body["synced"] is False
+    assert body["reason"] == "terminal_locked"
+    assert fake_repo.updates == []
+    assert fake_repo.rows["job-1"].status == terminal_status
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "correction"),
+    [("completed", "failed"), ("failed", "completed"), ("running", "completed")],
+)
+def test_register_external_job_terminal_correction_still_applies(
+    client: TestClient, fake_repo: _FakeRepo, terminal_status: str, correction: str
+) -> None:
+    """A terminal→terminal correction (and the normal running→terminal) still writes.
+
+    The terminal-lock guard only blocks NON-terminal incoming events; the sibling
+    stays authoritative for terminal-state writes.
+    """
+    fake_repo.rows["job-1"] = _FakeRow(
+        job_id="job-1", status=terminal_status, phase=terminal_status
+    )
+    r = client.post(
+        _WEBHOOK_PATH,
+        json={"job_id": "job-1", "event": correction, "status": correction},
+        headers=_headers(),
+    )
+    assert r.status_code == 202
+    body = r.json()
+    assert body["synced"] is True
+    assert fake_repo.rows["job-1"].status == correction
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------

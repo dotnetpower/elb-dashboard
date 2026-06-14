@@ -140,9 +140,13 @@ def _transition_event(
 ) -> dict[str, Any]:
     """Build a completion-topic ``blast.transition`` event with idempotency keys.
 
-    Every event carries ``event_id`` (stable per corr+status) and ``attempt``
-    (1 on the first publish of this status, ≥2 on a re-publish) so a subscriber
-    can dedupe and tell an original from a retry. ``result_ref`` points at the
+    Every event carries a stable ``event_id`` (sha256 digest of ``corr:status``)
+    so a subscriber can dedupe an at-least-once re-delivery idempotently — this
+    is the authoritative dedup key. ``attempt`` is an informational counter that
+    in practice is always 1 (the publish loop cannot distinguish a first publish
+    from a re-publish using the bridge marker alone, so it does not try; see
+    ``publish_transitions``); it is kept in the schema for stability and for the
+    explicit ``attempt=1`` timeout-failure event. ``result_ref`` points at the
     dashboard result API (pointers only — never result bytes; charter §9).
     """
     event: dict[str, Any] = {
@@ -424,6 +428,85 @@ def drain_and_resubmit() -> dict[str, Any]:
     }
 
 
+def _publish_one_bridge(
+    cfg: ServiceBusConfig,
+    rec: BridgeRecord,
+    openapi_kwargs: dict[str, str],
+) -> tuple[int, int]:
+    """Process one active bridge: poll sibling status, publish on change.
+
+    Returns ``(published_delta, finished_delta)``. The expected transient cases
+    (status poll failure, publish failure) are handled inline and return
+    ``(0, 0)`` so the bridge is retried on the next tick. Anything unexpected
+    (a tracking-store write raising) propagates to the caller, which isolates it
+    so one bad bridge never aborts the whole tick.
+    """
+    if not rec.openapi_job_id:
+        # Never bridged to a job id (drain crashed mid-flight). Give up once it
+        # ages past the deadline so it cannot linger forever.
+        if _bridge_expired(rec.created_at):
+            mark_done(rec.correlation_id, _STATUS_FAILED)
+            return (0, 1)
+        return (0, 0)
+    try:
+        job = external_blast.get_job(rec.openapi_job_id, **openapi_kwargs)
+    except Exception:  # transient; retry next tick
+        LOGGER.debug("status poll failed corr=%s", rec.correlation_id, exc_info=True)
+        return (0, 0)
+    status = _classify(str(job.get("status") or ""))
+    if status == rec.last_status:
+        # No transition since last publish. If the job has been non-terminal for
+        # too long, give up and emit a timeout failure so the active set stays
+        # bounded and the subscriber is not left hanging.
+        if status not in _TERMINAL and _bridge_expired(rec.created_at):
+            timeout_event = _transition_event(
+                correlation_id=rec.correlation_id,
+                openapi_job_id=rec.openapi_job_id,
+                status=_STATUS_FAILED,
+                attempt=1,
+                error_code="bridge_timeout",
+            )
+            try:
+                service_bus.publish_event(cfg, timeout_event)
+            except Exception:  # retry next tick (marker unchanged)
+                LOGGER.warning("timeout publish failed corr=%s", rec.correlation_id)
+                return (0, 0)
+            _record_transition_trace(rec.openapi_job_id, _STATUS_FAILED)
+            mark_done(rec.correlation_id, _STATUS_FAILED)
+            return (1, 1)
+        return (0, 0)
+    # Reaching here means status != rec.last_status (the equal case returned
+    # above), so this is always the first publish of THIS status for THIS bridge
+    # — attempt is 1. A re-publish after a failed ``mark_published`` write also
+    # lands here with status != last_status (the marker never advanced), so
+    # attempt alone cannot distinguish an original from a retry; subscribers
+    # dedupe on the stable ``event_id`` (sha256 of corr:status) instead. The
+    # field is kept at 1 for schema stability — see ``_transition_event``.
+    attempt = 1
+    error_code: str | None = None
+    if status == _STATUS_FAILED:
+        err = job.get("error") if isinstance(job.get("error"), dict) else {}
+        error_code = str((err or {}).get("code") or "failed")
+    event = _transition_event(
+        correlation_id=rec.correlation_id,
+        openapi_job_id=rec.openapi_job_id,
+        status=status,
+        attempt=attempt,
+        error_code=error_code,
+    )
+    try:
+        service_bus.publish_event(cfg, event)
+    except Exception:
+        LOGGER.warning("transition publish failed corr=%s", rec.correlation_id)
+        return (0, 0)
+    _record_transition_trace(rec.openapi_job_id, status)
+    if status in _TERMINAL:
+        mark_done(rec.correlation_id, status)
+        return (1, 1)
+    mark_published(rec.correlation_id, status)
+    return (1, 0)
+
+
 @shared_task(name="api.tasks.servicebus.publish_transitions")
 def publish_transitions() -> dict[str, Any]:
     """Poll sibling status for active bridges and emit one event per change."""
@@ -433,72 +516,30 @@ def publish_transitions() -> dict[str, Any]:
     published = 0
     finished = 0
     scanned = 0
+    errors = 0
     openapi_kwargs = _openapi_kwargs(cfg)
     for rec in list_active_bridges(limit=_PUBLISH_MAX_ROWS):
         scanned += 1
-        if not rec.openapi_job_id:
-            # Never bridged to a job id (drain crashed mid-flight). Give up
-            # once it ages past the deadline so it cannot linger forever.
-            if _bridge_expired(rec.created_at):
-                mark_done(rec.correlation_id, _STATUS_FAILED)
-                finished += 1
-            continue
         try:
-            job = external_blast.get_job(rec.openapi_job_id, **openapi_kwargs)
-        except Exception:  # transient; retry next tick
-            LOGGER.debug("status poll failed corr=%s", rec.correlation_id, exc_info=True)
-            continue
-        status = _classify(str(job.get("status") or ""))
-        if status == rec.last_status:
-            # No transition since last publish. If the job has been
-            # non-terminal for too long, give up and emit a timeout failure so
-            # the active set stays bounded and the subscriber is not left hanging.
-            if status not in _TERMINAL and _bridge_expired(rec.created_at):
-                timeout_event = _transition_event(
-                    correlation_id=rec.correlation_id,
-                    openapi_job_id=rec.openapi_job_id,
-                    status=_STATUS_FAILED,
-                    attempt=1,
-                    error_code="bridge_timeout",
-                )
-                try:
-                    service_bus.publish_event(cfg, timeout_event)
-                except Exception:  # retry next tick (marker unchanged)
-                    LOGGER.warning("timeout publish failed corr=%s", rec.correlation_id)
-                    continue
-                _record_transition_trace(rec.openapi_job_id, _STATUS_FAILED)
-                mark_done(rec.correlation_id, _STATUS_FAILED)
-                published += 1
-                finished += 1
-            continue
-        # attempt ≥ 2 only when we are re-publishing a status the marker already
-        # records (a publish that succeeded but whose mark write was retried);
-        # the normal transition path advances last_status so attempt is 1.
-        attempt = 2 if status == rec.last_status else 1
-        error_code: str | None = None
-        if status == _STATUS_FAILED:
-            err = job.get("error") if isinstance(job.get("error"), dict) else {}
-            error_code = str((err or {}).get("code") or "failed")
-        event = _transition_event(
-            correlation_id=rec.correlation_id,
-            openapi_job_id=rec.openapi_job_id,
-            status=status,
-            attempt=attempt,
-            error_code=error_code,
-        )
-        try:
-            service_bus.publish_event(cfg, event)
+            p_delta, f_delta = _publish_one_bridge(cfg, rec, openapi_kwargs)
         except Exception:
-            LOGGER.warning("transition publish failed corr=%s", rec.correlation_id)
+            # Partial-failure isolation: a tracking write (mark_published /
+            # mark_done) or any unexpected error on ONE bridge must not abort
+            # the whole tick and starve the remaining bridges — this mirrors the
+            # per-item isolation in ``drain_requests`` and
+            # ``reconcile_stale_jobs``. Any event already published is deduped by
+            # ``event_id`` on the subscriber; the bridge marker advances on the
+            # next tick (the beat re-runs every 30 s).
+            LOGGER.warning(
+                "publish_transitions: bridge failed corr=%s",
+                getattr(rec, "correlation_id", ""),
+                exc_info=True,
+            )
+            errors += 1
             continue
-        _record_transition_trace(rec.openapi_job_id, status)
-        published += 1
-        if status in _TERMINAL:
-            mark_done(rec.correlation_id, status)
-            finished += 1
-        else:
-            mark_published(rec.correlation_id, status)
-    return {"scanned": scanned, "published": published, "finished": finished}
+        published += p_delta
+        finished += f_delta
+    return {"scanned": scanned, "published": published, "finished": finished, "errors": errors}
 
 
 def _dlq_predicate(cfg: ServiceBusConfig, total_dlq: int) -> Any:
