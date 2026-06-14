@@ -13,6 +13,13 @@ log boundaries. `get_public_tls_base_url` returns an empty string when neither
 `OPENAPI_PUBLIC_BASE_URL` env nor the public-base-url cache is set, so legacy
 call sites can short-circuit and keep using the IP-based path with zero
 behaviour change.
+The IP-based runtime endpoint (`save_openapi_base_url` / `get_openapi_base_url`)
+is now mirrored into the durable `dashboardsingletons` Storage Table in addition
+to ops Redis, so a Container App revision restart (which wipes the in-revision
+Redis) does not lose the last-known endpoint. `get_openapi_base_url` rehydrates
+Redis from the durable copy on a cold read, gated by a freshness TTL
+(`OPENAPI_RUNTIME_ENDPOINT_MAX_AGE_SECONDS`, default 1 h) so a long-Stopped
+cluster's now-unreachable cached IP is not served indefinitely.
 Multi-cluster: when a setup / disable / reconcile call passes
 ``cluster_arm_id`` the cache writes a per-cluster key under
 ``openapi:runtime:public-base-url:cluster:<sha256[:16]>`` so a second
@@ -35,6 +42,7 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import logging
@@ -52,9 +60,58 @@ _TOKEN_CLUSTER_PREFIX = f"{_TOKEN_KEY}:cluster:"
 _PUBLIC_BASE_URL_KEY = "openapi:runtime:public-base-url"
 _PUBLIC_BASE_URL_CLUSTER_PREFIX = f"{_PUBLIC_BASE_URL_KEY}:cluster:"
 
+# Upper bound on how long a durably-cached IP-based runtime endpoint may be
+# served after a Container App revision restart wiped the in-revision Redis.
+# The ephemeral Redis cache (and the in-memory client-kwargs cache) are lost on
+# every deploy; rehydrating the last-known endpoint from the durable Storage
+# Table lets external-job features keep working immediately after a restart
+# (cluster still Running) instead of waiting for the next live ``k8s_get_service_ip``
+# resolution or the 120 s reconciler tick. The freshness guard bounds the
+# staleness: a cluster that has been Stopped longer than this max-age no longer
+# serves its (now-unreachable) cached IP, so the caller degrades to
+# ``openapi_not_configured`` exactly as before this durable backing existed.
+_RUNTIME_ENDPOINT_MAX_AGE_ENV = "OPENAPI_RUNTIME_ENDPOINT_MAX_AGE_SECONDS"
+_RUNTIME_ENDPOINT_MAX_AGE_DEFAULT = 3600.0
+
 
 def _redis_url() -> str:
     return os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
+
+
+def _runtime_endpoint_max_age() -> float:
+    """Max age (seconds) a durably-cached runtime endpoint may be served.
+
+    Override with ``OPENAPI_RUNTIME_ENDPOINT_MAX_AGE_SECONDS``; default 1 hour.
+    A non-positive / unparseable override disables the durable rehydration
+    (returns ``0`` → the cold-path read is skipped, preserving pre-durable
+    behaviour exactly).
+    """
+    raw = os.environ.get(_RUNTIME_ENDPOINT_MAX_AGE_ENV, "").strip()
+    if not raw:
+        return _RUNTIME_ENDPOINT_MAX_AGE_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _RUNTIME_ENDPOINT_MAX_AGE_DEFAULT
+    return value if value > 0 else 0.0
+
+
+def _payload_age_seconds(payload: dict[str, Any]) -> float | None:
+    """Seconds since ``payload['updated_at']`` (UTC ``%Y-%m-%dT%H:%M:%SZ``).
+
+    Returns ``None`` when the timestamp is missing or unparseable so the
+    caller can treat an undatable payload as *not fresh* (fail-closed) rather
+    than serving a potentially-ancient endpoint.
+    """
+    raw = str(payload.get("updated_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = time.strptime(raw, "%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, TypeError):
+        return None
+    return max(0.0, time.time() - calendar.timegm(parsed))
+
 
 
 def _normalise_base_url(value: str) -> str:
@@ -124,7 +181,16 @@ def save_openapi_base_url(
     metadata: dict[str, Any] | None = None,
     client: Any | None = None,
 ) -> bool:
-    """Persist the currently reachable OpenAPI base URL in ops Redis."""
+    """Persist the currently reachable OpenAPI base URL in ops Redis + durably.
+
+    The hot path is the in-revision Redis sidecar. We ALSO mirror the value
+    into the durable ``dashboardsingletons`` Storage Table (same store the
+    public-HTTPS endpoint already uses) so a Container App revision restart —
+    which wipes the ephemeral Redis — does not lose the last-known endpoint.
+    ``get_openapi_base_url`` rehydrates Redis from the durable copy on a cold
+    read, gated by a freshness TTL. Returns the Redis-write success bit (the
+    durable write is best-effort and never fails the call).
+    """
     url = _normalise_base_url(base_url)
     if not url:
         return False
@@ -133,6 +199,9 @@ def save_openapi_base_url(
         "metadata": metadata or {},
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    # Durable mirror first (best-effort) so a Redis-write failure does not also
+    # skip the durable persist. Failures are logged inside the helper.
+    _durable_save_safe(_RUNTIME_KEY, payload)
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     try:
         redis_client.set(_RUNTIME_KEY, json.dumps(payload, separators=(",", ":")))
@@ -143,24 +212,72 @@ def save_openapi_base_url(
 
 
 def get_openapi_base_url(*, client: Any | None = None) -> str:
-    """Return the cached OpenAPI base URL, or an empty string if unavailable."""
+    """Return the cached OpenAPI base URL, or an empty string if unavailable.
+
+    Fast path: the in-revision Redis sidecar. Cold path (Redis miss, e.g.
+    immediately after a revision restart wiped Redis): the durable
+    ``dashboardsingletons`` Storage Table, but only when the stored endpoint
+    is still fresh (within ``OPENAPI_RUNTIME_ENDPOINT_MAX_AGE_SECONDS``). A
+    durable hit re-populates Redis so subsequent reads are hot again. A stale
+    or undatable durable row is ignored (returns ``""``) so a long-Stopped
+    cluster's unreachable IP is not served indefinitely.
+    """
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     try:
         raw = redis_client.get(_RUNTIME_KEY)
     except Exception as exc:
         LOGGER.debug("openapi runtime endpoint cache read failed: %s", exc)
+        raw = None
+    if raw is not None:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(str(raw))
+        except json.JSONDecodeError:
+            return _normalise_base_url(str(raw))
+        if isinstance(payload, dict):
+            url = _normalise_base_url(str(payload.get("base_url") or ""))
+            if url:
+                return url
+    return _rehydrate_runtime_base_url_from_durable(redis_client)
+
+
+def _rehydrate_runtime_base_url_from_durable(redis_client: Any) -> str:
+    """Cold-read the durable runtime endpoint, freshness-gated, rehydrate Redis.
+
+    Returns the base URL when a fresh durable row exists, else ``""``. Never
+    raises — a durable-read failure or missing table degrades to ``""`` (the
+    pre-durable behaviour). The freshness guard is disabled (cold read skipped)
+    when the max-age env is set to a non-positive value.
+    """
+    max_age = _runtime_endpoint_max_age()
+    if max_age <= 0:
         return ""
-    if raw is None:
-        return ""
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
     try:
-        payload = json.loads(str(raw))
-    except json.JSONDecodeError:
-        return _normalise_base_url(str(raw))
-    if not isinstance(payload, dict):
+        from api.services.state.singletons import load_singleton
+
+        durable = load_singleton(_RUNTIME_KEY) or {}
+    except Exception as exc:
+        LOGGER.debug("openapi runtime endpoint durable read failed: %s", type(exc).__name__)
         return ""
-    return _normalise_base_url(str(payload.get("base_url") or ""))
+    if not isinstance(durable, dict):
+        return ""
+    url = _normalise_base_url(str(durable.get("base_url") or ""))
+    if not url:
+        return ""
+    age = _payload_age_seconds(durable)
+    if age is None or age > max_age:
+        # Undatable or stale: do not serve a possibly-unreachable endpoint.
+        return ""
+    durable["base_url"] = url
+    try:
+        redis_client.set(_RUNTIME_KEY, json.dumps(durable, separators=(",", ":")))
+    except Exception as exc:
+        LOGGER.debug(
+            "openapi runtime endpoint cache re-populate failed: %s", type(exc).__name__
+        )
+    return url
+
 
 
 def get_openapi_runtime_metadata(*, client: Any | None = None) -> dict[str, Any]:
