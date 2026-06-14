@@ -272,6 +272,20 @@ def test_external_blast_rejects_invalid_program(monkeypatch):
     assert response.status_code == 422
 
 
+def test_external_blast_rejects_path_traversal_db():
+    """A ``..`` path segment in the db name is rejected at the boundary (422),
+    deterministically, instead of depending on upstream reachability."""
+    from api.routes.elastic_blast import ExternalBlastSubmitRequest
+    from pydantic import ValidationError
+
+    for bad in ("../../etc/passwd", "../core_nt", "a/../b", ".."):
+        with pytest.raises(ValidationError):
+            ExternalBlastSubmitRequest(query_fasta=">q\nACGT", db=bad)
+    # A legitimate sharded-prefix db with '/' and '.' is still allowed.
+    ok = ExternalBlastSubmitRequest(query_fasta=">q\nACGT", db="10shards/core_nt_shard_.v5")
+    assert ok.db == "10shards/core_nt_shard_.v5"
+
+
 def test_external_blast_rejects_non_positive_taxid(monkeypatch):
     """NCBI taxonomy ids are positive integers; 0 / negative must be rejected at
     the boundary (not forwarded as a nonsensical organism filter)."""
@@ -1441,6 +1455,248 @@ def test_sync_external_jobs_creates_missing_rows(monkeypatch):
     assert created[0].kwargs["job_id"] == "abc123"
     assert created[0].kwargs["status"] == "running"
     assert updated == []
+
+
+def test_sync_external_failed_new_row_recovers_error_into_error_code(monkeypatch):
+    """A new external row first seen already FAILED must recover the real
+    cause from the sibling /jobs/{id} detail (the LIST snapshot has no
+    ``error``) and persist it into the error_code column."""
+    from api.routes import _blast_shared as shared
+    from api.services import external_blast, state_repo
+
+    created: list[object] = []
+    calls: list[str] = []
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {}
+
+        def create(self, state):
+            created.append(state)
+            return state
+
+        def update(self, *_a, **_kw):
+            raise AssertionError("new row should be created, not updated")
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.job_id = kwargs.get("job_id")
+            self.status = kwargs.get("status")
+            self.phase = kwargs.get("phase")
+
+    def fake_get_job(job_id, **_kwargs):
+        calls.append(job_id)
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "error": {
+                "code": "BLAST_FAILED",
+                "message": "memory requirements exceed memory available on machine type",
+            },
+        }
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+    monkeypatch.setattr(external_blast, "get_job", fake_get_job)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "fail-new-1",
+                "status": "failed",
+                "created_at": "2026-06-14T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                "cluster_name": "elb-cluster",
+                "subscription_id": "sub-1",
+                "resource_group": "rg-1",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    assert result[0] == 1  # created
+    assert calls == ["fail-new-1"]
+    assert "memory requirements exceed" in (created[0].kwargs.get("error_code") or "")
+
+
+def test_sync_external_failed_transition_recovers_error(monkeypatch):
+    """An existing row transitioning to FAILED with an empty error_code must
+    fetch the sibling detail once and persist its message."""
+    from types import SimpleNamespace
+
+    from api.routes import _blast_shared as shared
+    from api.services import external_blast, state_repo
+
+    updated: list[tuple[str, dict[str, object]]] = []
+    calls: list[str] = []
+
+    existing = SimpleNamespace(
+        status="running",
+        phase="running",
+        error_code="",
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        storage_account="",
+        program="blastn",
+        db="core_nt",
+        job_title="core_nt",
+        query_label="q",
+    )
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"fail-tx-1": existing}
+
+        def create(self, state):
+            raise AssertionError("existing row should update, not create")
+
+        def update(self, job_id, **kw):
+            updated.append((job_id, kw))
+
+    def fake_get_job(job_id, **_kwargs):
+        calls.append(job_id)
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "error": {"code": "BLAST_FAILED", "message": "selected machine type too small"},
+        }
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(external_blast, "get_job", fake_get_job)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "fail-tx-1",
+                "status": "failed",
+                "created_at": "2026-06-14T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                "cluster_name": "elb-cluster",
+            }
+        ],
+        caller_oid="x",
+    )
+
+    assert result[1] == 1  # updated
+    assert calls == ["fail-tx-1"]
+    assert any(
+        "selected machine type too small" in str(kw.get("error_code") or "")
+        for _jid, kw in updated
+    )
+
+
+def test_sync_external_failed_transition_skips_recovery_when_error_code_present(monkeypatch):
+    """The recovery fetch is once-only: a failed row that already carries an
+    error_code must NOT re-hit the sibling on every poll."""
+    from types import SimpleNamespace
+
+    from api.routes import _blast_shared as shared
+    from api.services import external_blast, state_repo
+
+    calls: list[str] = []
+
+    existing = SimpleNamespace(
+        status="running",
+        phase="running",
+        error_code="prior_real_error",
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        storage_account="",
+        program="blastn",
+        db="core_nt",
+        job_title="core_nt",
+        query_label="q",
+    )
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"fail-guard-1": existing}
+
+        def create(self, state):
+            raise AssertionError("existing row should update, not create")
+
+        def update(self, job_id, **kw):
+            pass
+
+    def fake_get_job(job_id, **_kwargs):
+        calls.append(job_id)
+        return {"job_id": job_id, "status": "failed", "error": {"message": "should not be read"}}
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(external_blast, "get_job", fake_get_job)
+
+    shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "fail-guard-1",
+                "status": "failed",
+                "created_at": "2026-06-14T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                "cluster_name": "elb-cluster",
+            }
+        ],
+        caller_oid="x",
+    )
+
+    assert calls == []  # no recovery fetch when error_code already present
+
+
+def test_sync_external_failed_recovery_never_breaks_sync_on_sibling_outage(monkeypatch):
+    """If the sibling detail fetch raises, the sync must still succeed and the
+    row is created/updated without an error_code (generic banner preserved)."""
+    from api.routes import _blast_shared as shared
+    from api.services import external_blast, state_repo
+
+    created: list[object] = []
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {}
+
+        def create(self, state):
+            created.append(state)
+            return state
+
+        def update(self, *_a, **_kw):
+            pass
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.job_id = kwargs.get("job_id")
+            self.status = kwargs.get("status")
+            self.phase = kwargs.get("phase")
+
+    def boom_get_job(job_id, **_kwargs):
+        raise RuntimeError("sibling unreachable")
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+    monkeypatch.setattr(external_blast, "get_job", boom_get_job)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "fail-outage-1",
+                "status": "failed",
+                "created_at": "2026-06-14T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                "cluster_name": "elb-cluster",
+            }
+        ],
+        caller_oid="x",
+    )
+
+    assert result[0] == 1  # created despite the sibling outage
+    assert created[0].kwargs.get("error_code") is None
+
 
 
 def test_sync_external_jobs_persists_remembered_query_label(monkeypatch):

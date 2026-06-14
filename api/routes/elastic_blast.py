@@ -106,6 +106,17 @@ class ExternalBlastSubmitRequest(BaseModel):
     def validate_query_and_taxonomy(self) -> ExternalBlastSubmitRequest:
         from api.services.query_metadata import parse_fasta_metadata
 
+        # Reject path-traversal segments in the db name at the boundary. The
+        # ``db`` pattern allows ``.`` and ``/`` (legitimate for sharded prefixes
+        # like ``10shards/core_nt_shard_``), which also lets ``..`` through.
+        # Azure Blob storage does not resolve ``..`` (flat namespace) and the
+        # sibling rejects it too, but that rejection only happens once the
+        # upstream is reachable — so a ``..`` db returned 503 locally and 400
+        # in-cluster. Fail fast and deterministically with 422 here instead, so
+        # an invalid db never depends on upstream reachability.
+        if ".." in self.db.split("/"):
+            raise ValueError("db must not contain '..' path segments")
+
         try:
             parse_fasta_metadata(self.query_fasta)
         except ValueError as exc:
