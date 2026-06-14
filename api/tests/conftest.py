@@ -33,6 +33,16 @@ os.environ.setdefault("BLAST_DB_METADATA_INVALIDATE_DISABLED", "true")
 # error pays multiple seconds of real backoff sleep.
 os.environ.setdefault("OPENAPI_SUBMIT_MAX_RETRIES", "0")
 
+# Run background cache refreshes (monitor snapshot / storage usage) inline in
+# tests instead of on the shared daemon worker pool. A daemon worker blocked in
+# a C-level network call when an xdist worker's interpreter finalizes can crash
+# the worker ("[gwN] node down: Not properly terminated", no Python traceback),
+# which intermittently hung CI to the job timeout. Running inline means no such
+# thread exists at shutdown. Refresh-path tests already monkeypatch the wrappers
+# to run inline, so this only changes tests that trigger a refresh without
+# monkeypatching. Unset in production, where the daemon pool is used.
+os.environ.setdefault("ELB_TEST_INLINE_BACKGROUND_REFRESH", "1")
+
 
 @pytest.fixture(autouse=True)
 def _env_baseline(

@@ -439,6 +439,17 @@ def _start_refresh_thread(target: Callable[[], object]) -> None:
             # the worker from emitting a second unhandled-exception trace.
             return
 
+    # In the test suite, run the refresh inline so no background daemon thread
+    # survives to interpreter / pytest-xdist worker shutdown. A daemon worker
+    # blocked in a C-level network call when the interpreter finalizes can crash
+    # the worker ("[gwN] node down: Not properly terminated", no traceback),
+    # which intermittently hung CI to the job timeout. Refresh-path tests already
+    # monkeypatch this function to run inline; the gate only affects tests that
+    # trigger a refresh without monkeypatching. Unset in production (daemon pool).
+    if os.environ.get("ELB_TEST_INLINE_BACKGROUND_REFRESH"):
+        run()
+        return
+
     _refresher_pool().submit(run)
 
 
