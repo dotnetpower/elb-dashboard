@@ -18,6 +18,14 @@ from pathlib import Path
 
 def _replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text()
+    if new in text:
+        # Idempotent re-run: the final form of this replacement is already
+        # present in the file. This tolerates the sibling Dockerfile / app
+        # catching up to upstream (e.g. ``ARG ELB_REF`` advancing past the
+        # value we used to inject, OR the venv-stage block being added
+        # natively upstream so the dashboard insertion would otherwise
+        # duplicate it).
+        return
     count = text.count(old)
     if count != 1:
         raise RuntimeError(f"expected one match in {path}, found {count}")

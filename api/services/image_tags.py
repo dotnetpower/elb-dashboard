@@ -39,6 +39,16 @@ from __future__ import annotations
 # (2026-06-10), so an OpenAPI ``-outfmt 7 std staxids`` submit failed with
 # "7 is not supported for merge" until this rebuild — see
 # docs/features_change/2026-06/2026-06-10-openapi-outfmt7-gate-rebuild.md).
+# 4.24 == upstream 3.7.6 — sibling external-payload hardening: ``blast_version``
+# falls back to the pinned ElasticBLAST release BLAST+ version (``2.17.0+``)
+# when the binary probe fails and ``ELB_BLAST_VERSION`` is unset (fixes #9);
+# ``db_version_detail.detail`` is now a dict (was a ``json.dumps`` string,
+# fixes #10); every natural terminal transition in ``_refresh_job_status``
+# snapshots the final ``k8s_summary`` (fixes #18) AND emits a best-effort
+# webhook to ``CONTROL_PLANE_URL`` so the dashboard sees completed/failed
+# without waiting for the next sync cycle (fixes #16/#17). Cancel/stuck path
+# is unchanged — ``_cancel_job`` already notifies, so no double-notify. See
+# docs/features_change/2026-06/2026-06-14-openapi-external-payload-hardening.md.
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
@@ -58,7 +68,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.23",
+    "elb-openapi": "4.24",
 }
 
 # GitHub source repo for ACR Build Tasks.
