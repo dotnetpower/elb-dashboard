@@ -61,6 +61,7 @@ def build_manifests(
     num_nodes: int = 10,
     max_active_submissions: int = 2,
     api_token: str = "",
+    control_plane_url: str = "",
     pls: PlsConfig | None = None,
 ) -> str:
     """Return the multi-document JSON payload to feed ``kubectl apply -f -``.
@@ -126,11 +127,7 @@ def build_manifests(
         },
         {
             "name": "PATH",
-            "value": (
-                "/opt/venv/bin:/usr/local/sbin:"
-                "/usr/local/bin:/usr/sbin:/usr/bin:"
-                "/sbin:/bin"
-            ),
+            "value": ("/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         },
         # api_token is guaranteed non-empty by the build_manifests guard
         # above — no conditional append. Shipping a deployment without
@@ -151,6 +148,19 @@ def build_manifests(
         # endpoint `https://kubernetes.default.svc`.
         {"name": "KUBECONFIG", "value": "/etc/elb/kube/config"},
     ]
+
+    # Terminal-transition / lifecycle webhook plumbing. When the deploy task
+    # knows the dashboard's own public URL it injects both env entries; the
+    # sibling's ``_webhook_notify`` POSTs to ``{CONTROL_PLANE_URL}/api/blast/
+    # register-external-job`` with ``Authorization: Bearer
+    # <ELB_OPENAPI_INTERNAL_TOKEN>``. The dashboard reuses the existing
+    # ``ELB_OPENAPI_API_TOKEN`` as the shared secret (one cluster, one secret)
+    # so we forward the same value. Both env entries are omitted when no
+    # control_plane_url is supplied (e.g. local dev deploys) so the existing
+    # "webhook silently disabled" behaviour is preserved.
+    if control_plane_url:
+        openapi_env.append({"name": "CONTROL_PLANE_URL", "value": control_plane_url})
+        openapi_env.append({"name": "ELB_OPENAPI_INTERNAL_TOKEN", "value": api_token})
 
     # In-cluster kubeconfig consumed by the pod's own kubectl. The CLI
     # needs an explicit kubeconfig (unlike client-go's InClusterConfig).
@@ -381,16 +391,14 @@ def build_manifests(
         # (handled by the deploy task's transition guard).
         svc_annotations["service.beta.kubernetes.io/azure-pls-create"] = "true"
         svc_annotations["service.beta.kubernetes.io/azure-pls-name"] = pls.name
-        svc_annotations[
-            "service.beta.kubernetes.io/azure-pls-ip-configuration-subnet"
-        ] = pls.lb_subnet
-        svc_annotations["service.beta.kubernetes.io/azure-pls-visibility"] = (
-            pls.visibility
+        svc_annotations["service.beta.kubernetes.io/azure-pls-ip-configuration-subnet"] = (
+            pls.lb_subnet
         )
+        svc_annotations["service.beta.kubernetes.io/azure-pls-visibility"] = pls.visibility
         if pls.auto_approval:
-            svc_annotations[
-                "service.beta.kubernetes.io/azure-pls-auto-approval"
-            ] = pls.auto_approval
+            svc_annotations["service.beta.kubernetes.io/azure-pls-auto-approval"] = (
+                pls.auto_approval
+            )
 
     svc_manifest = {
         "apiVersion": "v1",

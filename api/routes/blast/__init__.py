@@ -27,6 +27,7 @@ from api.routes.blast import capacity as _capacity_routes
 from api.routes.blast import databases as _databases_routes
 from api.routes.blast import databases_oracle as _databases_oracle_routes
 from api.routes.blast import databases_shard as _databases_shard_routes
+from api.routes.blast import external_webhook as _external_webhook_routes
 from api.routes.blast import jobs as _jobs_routes
 from api.routes.blast import logs as _logs_routes
 from api.routes.blast import preflight as _preflight_routes
@@ -166,3 +167,6 @@ blast_router.include_router(_result_analytics_routes.router)
 blast_router.include_router(_results_export_routes.router)
 blast_router.include_router(_results_routes.router)
 blast_router.include_router(_capacity_routes.router)
+# External-webhook receiver for the sibling elb-openapi pod
+# (POST /api/blast/register-external-job). Auth = static bearer token, NOT MSAL.
+blast_router.include_router(_external_webhook_routes.router)

@@ -181,9 +181,7 @@ def _read_service_annotations(
         # Coerce all values to str so downstream comparisons are stable.
         return {str(k): str(v) for k, v in annotations.items()}
     except Exception as exc:
-        LOGGER.warning(
-            "openapi deploy: PLS service probe failed: %s", type(exc).__name__
-        )
+        LOGGER.warning("openapi deploy: PLS service probe failed: %s", type(exc).__name__)
         return None
     finally:
         session.close()
@@ -213,11 +211,37 @@ def _delete_openapi_service(
         )
         if response.status_code not in (200, 202, 404):
             raise RuntimeError(
-                f"kubectl delete svc {service_name} returned "
-                f"status={response.status_code}"
+                f"kubectl delete svc {service_name} returned status={response.status_code}"
             )
     finally:
         session.close()
+
+
+def _resolve_control_plane_url() -> str:
+    """Return the dashboard's own public URL for the sibling webhook env, or "".
+
+    Order of precedence:
+      1. ``DASHBOARD_PUBLIC_URL`` env (explicit override, used by tests / custom
+         hosts / private DNS).
+      2. ``CONTAINER_APP_NAME`` + ``CONTAINER_APP_ENV_DNS_SUFFIX`` — both are
+         auto-injected by the Azure Container Apps runtime on every replica,
+         so this branch is the production path with zero Bicep wiring needed.
+      3. Empty string. The manifest builder will then omit ``CONTROL_PLANE_URL``
+         entirely and the sibling's ``_webhook_notify`` becomes a no-op
+         (preserves existing local-dev / azd-less deploy behaviour).
+
+    Always https:// — the sibling enforces that scheme (only ``localhost`` is
+    exempted) so emitting a bare hostname would be rejected at runtime.
+    """
+
+    override = (os.environ.get("DASHBOARD_PUBLIC_URL") or "").strip()
+    if override:
+        return override.rstrip("/")
+    name = (os.environ.get("CONTAINER_APP_NAME") or "").strip()
+    suffix = (os.environ.get("CONTAINER_APP_ENV_DNS_SUFFIX") or "").strip()
+    if name and suffix:
+        return f"https://{name}.{suffix}"
+    return ""
 
 
 @shared_task(
@@ -487,10 +511,7 @@ def deploy_openapi_service(
         )
         if (
             existing_annotations is not None
-            and existing_annotations.get(
-                "service.beta.kubernetes.io/azure-pls-create"
-            )
-            != "true"
+            and existing_annotations.get("service.beta.kubernetes.io/azure-pls-create") != "true"
         ):
             confirm = bool(confirm_recreate) or (
                 os.environ.get("OPENAPI_PLS_CONFIRM_RECREATE") or ""
@@ -554,6 +575,7 @@ def deploy_openapi_service(
         acr_resource_group=effective_acr_resource_group,
         num_nodes=num_nodes,
         api_token=api_token,
+        control_plane_url=_resolve_control_plane_url(),
         pls=pls,
     )
     try:

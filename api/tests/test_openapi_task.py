@@ -189,9 +189,7 @@ def test_build_manifests_single_queue_owner() -> None:
     )
 
     annotations = deployment["metadata"].get("annotations", {})
-    assert annotations.get(OPENAPI_MANIFEST_REVISION_ANNOTATION) == str(
-        OPENAPI_MANIFEST_REVISION
-    )
+    assert annotations.get(OPENAPI_MANIFEST_REVISION_ANNOTATION) == str(OPENAPI_MANIFEST_REVISION)
     container = spec["template"]["spec"]["containers"][0]
     assert container["readinessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["port"] == 8000
@@ -321,10 +319,7 @@ def test_build_manifests_pls_disabled_omits_annotations() -> None:
         pls=PlsConfig(enabled=False, name="", lb_subnet="", visibility="*", auto_approval=""),
     )
     annotations = _service_annotations(manifest)
-    assert (
-        annotations.get("service.beta.kubernetes.io/azure-load-balancer-internal")
-        == "true"
-    )
+    assert annotations.get("service.beta.kubernetes.io/azure-load-balancer-internal") == "true"
     assert "service.beta.kubernetes.io/azure-pls-create" not in annotations
 
 
@@ -347,17 +342,10 @@ def test_build_manifests_pls_enabled_injects_annotations() -> None:
     assert annotations["service.beta.kubernetes.io/azure-pls-create"] == "true"
     assert annotations["service.beta.kubernetes.io/azure-pls-name"] == "pls-elb-openapi"
     assert (
-        annotations["service.beta.kubernetes.io/azure-pls-ip-configuration-subnet"]
-        == "snet-elb-lb"
+        annotations["service.beta.kubernetes.io/azure-pls-ip-configuration-subnet"] == "snet-elb-lb"
     )
-    assert (
-        annotations["service.beta.kubernetes.io/azure-pls-visibility"]
-        == "sub-aaaa,sub-bbbb"
-    )
-    assert (
-        annotations["service.beta.kubernetes.io/azure-pls-auto-approval"]
-        == "sub-aaaa"
-    )
+    assert annotations["service.beta.kubernetes.io/azure-pls-visibility"] == "sub-aaaa,sub-bbbb"
+    assert annotations["service.beta.kubernetes.io/azure-pls-auto-approval"] == "sub-aaaa"
 
 
 def test_build_manifests_pls_enabled_without_auto_approval_skips_annotation() -> None:
@@ -376,9 +364,7 @@ def test_build_manifests_pls_enabled_without_auto_approval_skips_annotation() ->
     )
     annotations = _service_annotations(manifest)
     assert annotations["service.beta.kubernetes.io/azure-pls-create"] == "true"
-    assert (
-        "service.beta.kubernetes.io/azure-pls-auto-approval" not in annotations
-    )
+    assert "service.beta.kubernetes.io/azure-pls-auto-approval" not in annotations
 
 
 def test_pls_config_from_env_rejects_enabled_without_subnet(monkeypatch) -> None:
@@ -426,3 +412,83 @@ def test_pls_config_from_env_reads_all_fields(monkeypatch) -> None:
     assert cfg.visibility == "sub-a"
     assert cfg.auto_approval == "sub-a"
 
+
+def _baseline_manifest_kwargs() -> dict[str, object]:
+    return dict(
+        image="elbacr.azurecr.io/elb-openapi:4.24",
+        mi_client_id="mi-client-id",
+        cluster_name="elb-cluster",
+        resource_group="rg-elb",
+        storage_account="elbstg",
+        region="koreacentral",
+        tenant_id="tenant-id",
+        acr_name="elbacr",
+        acr_resource_group="rg-acr",
+        num_nodes=10,
+        api_token="shared-secret",
+    )
+
+
+def _env_map(manifest: str) -> dict[str, str]:
+    docs = [json.loads(chunk) for chunk in manifest.split("\n---\n")]
+    deployment = next(doc for doc in docs if doc["kind"] == "Deployment")
+    return {
+        item["name"]: item["value"]
+        for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+
+
+def test_build_manifests_omits_webhook_env_without_control_plane_url() -> None:
+    manifest = openapi._build_manifests(**_baseline_manifest_kwargs())
+    env = _env_map(manifest)
+    # Backward-compat: deploys without a known control-plane URL must not emit
+    # webhook env vars so the sibling's _webhook_notify stays a no-op (preserves
+    # local-dev / azd-less deploy behaviour).
+    assert "CONTROL_PLANE_URL" not in env
+    assert "ELB_OPENAPI_INTERNAL_TOKEN" not in env
+    # ELB_OPENAPI_API_TOKEN still required regardless.
+    assert env["ELB_OPENAPI_API_TOKEN"] == "shared-secret"
+
+
+def test_build_manifests_emits_webhook_env_when_control_plane_url_provided() -> None:
+    manifest = openapi._build_manifests(
+        **_baseline_manifest_kwargs(),
+        control_plane_url="https://ca-elb-dashboard.example.azurecontainerapps.io",
+    )
+    env = _env_map(manifest)
+    assert env["CONTROL_PLANE_URL"] == "https://ca-elb-dashboard.example.azurecontainerapps.io"
+    # Shared secret: the dashboard webhook receiver accepts either
+    # ELB_OPENAPI_INTERNAL_TOKEN or ELB_OPENAPI_API_TOKEN, but they must carry
+    # the same value (single secret per cluster). The manifest builder forwards
+    # api_token to both env entries to keep the contract obvious.
+    assert env["ELB_OPENAPI_INTERNAL_TOKEN"] == env["ELB_OPENAPI_API_TOKEN"] == "shared-secret"
+
+
+def test_resolve_control_plane_url_prefers_explicit_override(monkeypatch) -> None:
+    from api.tasks.openapi import deploy as deploy_mod
+
+    monkeypatch.setenv("DASHBOARD_PUBLIC_URL", "https://override.example.com/")
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+    monkeypatch.setenv("CONTAINER_APP_ENV_DNS_SUFFIX", "env.koreacentral.azurecontainerapps.io")
+    assert deploy_mod._resolve_control_plane_url() == "https://override.example.com"
+
+
+def test_resolve_control_plane_url_composes_from_aca_env(monkeypatch) -> None:
+    from api.tasks.openapi import deploy as deploy_mod
+
+    monkeypatch.delenv("DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+    monkeypatch.setenv("CONTAINER_APP_ENV_DNS_SUFFIX", "env.koreacentral.azurecontainerapps.io")
+    assert (
+        deploy_mod._resolve_control_plane_url()
+        == "https://ca-elb-dashboard.env.koreacentral.azurecontainerapps.io"
+    )
+
+
+def test_resolve_control_plane_url_empty_when_aca_env_missing(monkeypatch) -> None:
+    from api.tasks.openapi import deploy as deploy_mod
+
+    monkeypatch.delenv("DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+    monkeypatch.delenv("CONTAINER_APP_ENV_DNS_SUFFIX", raising=False)
+    assert deploy_mod._resolve_control_plane_url() == ""
