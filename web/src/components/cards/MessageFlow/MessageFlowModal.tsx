@@ -49,11 +49,24 @@ function redactState(state: unknown): unknown {
 /** A small read-only key/value row used in the detail modal summary. */
 function summaryItem(label: string, value: React.ReactNode) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+    // minWidth:0 lets this grid cell shrink below its content width so a long
+    // value (e.g. a full UPN submitter) wraps inside the cell instead of
+    // overflowing into the neighbouring column.
+    <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
       <span style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
         {label}
       </span>
-      <span style={{ fontSize: 12, color: "var(--text-primary)" }}>{value}</span>
+      <span
+        style={{
+          fontSize: 12,
+          color: "var(--text-primary)",
+          minWidth: 0,
+          overflowWrap: "anywhere",
+          wordBreak: "break-word",
+        }}
+      >
+        {value}
+      </span>
     </div>
   );
 }

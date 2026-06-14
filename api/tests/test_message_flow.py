@@ -364,7 +364,111 @@ def test_external_and_servicebus_aliases(_enable) -> None:
     assert aliases == {"servicebus", "external"}
 
 
-def test_alias_never_exposes_raw_oid(_enable) -> None:
+def test_external_synced_row_labels_producer_external(_enable) -> None:
+    """A `/v1/jobs` row synced into the Table stores the sibling job under
+    ``payload={"external": job}`` with no top-level ``submission_source``. It
+    must label its producer as ``external`` (external_api), not default to a
+    dashboard user."""
+    rows = [
+        _job(
+            job_id="ext-sync-1",
+            status="running",
+            owner_upn="api",
+            payload={"external": {"job_id": "ext-sync-1", "status": "running"}},
+        ),
+        # Even when the nested external block carries an explicit source.
+        _job(
+            job_id="ext-sync-2",
+            status="queued",
+            owner_upn="api",
+            payload={"external": {"submission_source": "external_api"}},
+        ),
+    ]
+    _enable(rows)
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert {p["alias"] for p in snap["producers"]} == {"external"}
+
+
+def test_build_message_flow_syncs_external_jobs(monkeypatch, _enable) -> None:
+    """``build_message_flow`` pulls external `/v1/jobs` rows into the Table via
+    the shared orchestration before reading it, scoped to the platform
+    subscription, so directly-submitted jobs surface without opening Recent
+    searches."""
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "plat-sub")
+    _enable([])
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_sync(**kwargs: Any):
+        calls.append(kwargs)
+        return message_flow_external_result()
+
+    from api.services.blast import external_jobs
+
+    monkeypatch.setattr(external_jobs, "collect_and_sync_external_jobs", _fake_sync)
+
+    message_flow.build_message_flow("oid-x", tenant_id="tid-9")
+
+    assert len(calls) == 1
+    assert calls[0]["subscription_id"] == "plat-sub"
+    assert calls[0]["tenant_id"] == "tid-9"
+    assert calls[0]["detail_enrich_budget"] == 0
+
+
+def test_build_message_flow_sync_is_best_effort(monkeypatch, _enable) -> None:
+    """A discovery/sync failure must never break the snapshot — the card still
+    renders the locally-known rows."""
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "plat-sub")
+    rows = [
+        _job(
+            job_id="local-1",
+            status="running",
+            owner_upn="a@b.com",
+            payload={"submission_source": "dashboard"},
+        )
+    ]
+    _enable(rows)
+
+    from api.services.blast import external_jobs
+
+    def _boom(**_kwargs: Any):
+        raise RuntimeError("discovery exploded")
+
+    monkeypatch.setattr(external_jobs, "collect_and_sync_external_jobs", _boom)
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["enabled"] is True
+    assert {b["job_id"] for b in snap["broker"]} == {"local-1"}
+
+
+def test_build_message_flow_skips_sync_without_subscription(monkeypatch, _enable) -> None:
+    """No ``AZURE_SUBSCRIPTION_ID`` → no discovery attempt (no-op)."""
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    _enable([])
+
+    from api.services.blast import external_jobs
+
+    calls: list[Any] = []
+    monkeypatch.setattr(
+        external_jobs,
+        "collect_and_sync_external_jobs",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    message_flow.build_message_flow("oid-x")
+    assert calls == []
+
+
+def message_flow_external_result():
+    """Minimal stand-in for ``ExternalJobsSyncResult`` (its fields are unused by
+    the message-flow path, which re-reads the Table afterwards)."""
+    return SimpleNamespace(
+        rows=[], tombstoned_ids=set(), any_target_ok=True, target_failures=[],
+        created=0, updated=0,
+    )
+
+
     rows = [
         _job(
             job_id="j1",

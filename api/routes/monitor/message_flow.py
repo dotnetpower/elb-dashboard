@@ -61,7 +61,11 @@ def message_flow(
 
         return cached_snapshot(
             _cache_key("monitor", "message-flow", scope_key, str(limit)),
-            lambda: build_message_flow(caller.object_id, list_limit=limit),
+            lambda: build_message_flow(
+                caller.object_id,
+                list_limit=limit,
+                tenant_id=getattr(caller, "tenant_id", "") or "",
+            ),
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("message_flow", exc, empty=dict(_DISABLED)))

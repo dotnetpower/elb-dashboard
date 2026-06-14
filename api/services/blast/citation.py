@@ -143,7 +143,19 @@ def build_citation(
 
     program = str(blast.get("program") or "blastn")
     version = str(blast.get("version") or "unknown")
-    db_name = str(database.get("name") or database.get("input") or "the selected database")
+    raw_db_name = str(database.get("name") or database.get("input") or "").strip()
+    have_db_name = bool(raw_db_name)
+    db_name = raw_db_name or "the selected database"
+    # Render "queried the {name} database" only when an actual database
+    # identifier is present; otherwise emit "queried the selected database"
+    # once so the sentence does not collapse to the
+    # "queried the the selected database database" duplicate observed in #8.
+    if have_db_name:
+        text_db_phrase = f"the {db_name} database"
+        markdown_db_phrase = f"the **{db_name}** database"
+    else:
+        text_db_phrase = "the selected database"
+        markdown_db_phrase = "the selected database"
     snapshot = database.get("snapshot")
     snapshot_str = str(snapshot) if snapshot not in (None, "") else None
     search_space = database.get("search_space")
@@ -165,8 +177,8 @@ def build_citation(
         f"Sequence similarity searches were performed with NCBI BLAST+ "
         f"({program}, version {version}) executed through ElasticBLAST on a "
         f"self-managed Azure Kubernetes Service cluster via the elb-dashboard "
-        f"control plane (run {rid}{title_clause}). Searches queried the "
-        f"{db_name} database{snapshot_clause} using {options_clause}."
+        f"control plane (run {rid}{title_clause}). Searches queried "
+        f"{text_db_phrase}{snapshot_clause} using {options_clause}."
         f"{search_space_clause} "
         f"References: {_BLAST_PLUS_REFERENCE} {_ELASTIC_BLAST_REFERENCE}"
     )
@@ -175,8 +187,8 @@ def build_citation(
         f"Sequence similarity searches were performed with **NCBI BLAST+** "
         f"(`{program}`, version `{version}`) executed through **ElasticBLAST** on a "
         f"self-managed Azure Kubernetes Service cluster via the `elb-dashboard` "
-        f"control plane (run `{rid}`{title_clause}). Searches queried the "
-        f"**{db_name}** database{snapshot_clause} using {options_clause}."
+        f"control plane (run `{rid}`{title_clause}). Searches queried "
+        f"{markdown_db_phrase}{snapshot_clause} using {options_clause}."
         f"{search_space_clause}\n\n"
         f"**References**\n\n"
         f"1. {_BLAST_PLUS_REFERENCE}\n"

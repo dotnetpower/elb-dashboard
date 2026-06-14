@@ -40,10 +40,20 @@ def build_blast_provenance(
         precision = precision_value if isinstance(precision_value, dict) else None
     evidence = compatibility.get("evidence") if isinstance(compatibility, dict) else None
     evidence = evidence if isinstance(evidence, dict) else {}
+    # For externally-submitted jobs (sibling OpenAPI -> Table sync), the
+    # canonical request snapshot and top-level db/database keys are empty:
+    # the sibling stores the run identity under payload["external"]. Without
+    # this fallback the citation renders as "queried the the selected
+    # database database" (#8) because db_name resolves to "". Prefer the
+    # human-readable db_name first, then the full URL.
+    external = payload_dict.get("external")
+    external = external if isinstance(external, dict) else {}
     database = str(
         snapshot.get("database")
         or payload_dict.get("database")
         or payload_dict.get("db")
+        or external.get("db_name")
+        or external.get("db")
         or ""
     )
     query = snapshot.get("query") if isinstance(snapshot.get("query"), dict) else {}

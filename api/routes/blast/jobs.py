@@ -33,19 +33,15 @@ from api.routes._blast_shared import (
     _assert_job_owner,
     _blocked_refresh_reasons,
     _exception_reason,
-    _external_job_detail_or_row,
-    _external_list_jobs_cached,
     _external_to_blast_job,
     _local_state_matches_job_scope,
     _local_to_blast_job,
     _refresh_running_blast_state,
     _split_child_summaries_from_repo,
     _split_child_summary_from_repo,
-    _sync_external_jobs_to_table,
     blast_shared_visibility_enabled,
 )
-from api.services.blast.external_jobs import _discover_subscription_clusters
-from api.services.blast.external_query_labels import apply_remembered_query_label
+from api.services.blast.external_jobs import collect_and_sync_external_jobs
 from api.services.blast.job_state import _K8S_REFRESH_PHASES
 from api.services.blast.jobs_list_cache import (
     begin_jobs_list_revalidate,
@@ -70,19 +66,6 @@ _blast_jobs_list_cache_get = jobs_list_cache_get
 _blast_jobs_list_cache_set = jobs_list_cache_set
 _reset_blast_jobs_list_cache = reset_jobs_list_cache
 
-_EXTERNAL_LIST_DETAIL_STATUSES = frozenset(
-    {
-        "pending",
-        "queued",
-        "running",
-        "submitted",
-        "submitting",
-        "inprogress",
-        "in_progress",
-        "splitting",
-        "reducing",
-    }
-)
 _LOCAL_SPLIT_PARENT_PHASES = frozenset(
     {
         "split_queries_started",
@@ -101,107 +84,6 @@ def _local_list_row_may_have_split_children(row: Any) -> bool:
     phase = str(getattr(row, "phase", "") or "").strip().casefold()
     status = str(getattr(row, "status", "") or "").strip().casefold()
     return phase in _LOCAL_SPLIT_PARENT_PHASES or status in _LOCAL_SPLIT_PARENT_PHASES
-
-
-def _external_list_row_needs_detail(row: dict[str, Any]) -> bool:
-    status = str(row.get("status") or row.get("phase") or "").strip().casefold()
-    return status in _EXTERNAL_LIST_DETAIL_STATUSES
-
-
-def _external_row_with_scope_defaults(
-    row: dict[str, Any],
-    *,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> dict[str, Any]:
-    if not (subscription_id or resource_group or cluster_name):
-        return row
-    scoped = dict(row)
-    if subscription_id:
-        scoped.setdefault("subscription_id", subscription_id)
-    if resource_group:
-        scoped.setdefault("resource_group", resource_group)
-    if cluster_name:
-        scoped.setdefault("cluster_name", cluster_name)
-    return scoped
-
-
-def _resolve_external_list_targets(
-    blast_package: Any,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> list[dict[str, Any]]:
-    """Resolve the elb-openapi endpoint(s) to query for ``/v1/jobs`` listing.
-
-    Why this exists: the Recent searches history view lists jobs
-    subscription-scoped only (no ``cluster_name``) so it can show jobs across
-    every cluster. ``_openapi_client_kwargs_from_cluster`` needs the full
-    ``(subscription, resource_group, cluster)`` triple to resolve a base URL +
-    token, so a subscription-only call resolved to ``{}`` and could only reach
-    the OpenAPI plane through the fragile ``ELB_OPENAPI_BASE_URL`` env /
-    runtime-cache fallback. Jobs submitted directly through ``POST /v1/jobs``
-    were therefore invisible on Recent searches until a per-cluster card view
-    happened to discover and sync them.
-
-    Resolution:
-      * ``cluster_name`` scope → a single target from the package-level
-        ``_openapi_client_kwargs_from_cluster`` (or the legacy ``{}`` fallback
-        when that resolver can't reach the cluster) — unchanged behaviour.
-      * subscription-only scope → discover the subscription's ElasticBLAST
-        clusters and resolve one target per reachable cluster, deduped by base
-        URL. Falls back to the legacy ``{}`` target only when discovery finds
-        no usable cluster endpoint.
-      * no subscription → the legacy ``{}`` fallback only.
-
-    Each target carries the scope it was resolved from so the caller applies
-    the correct ``_external_row_with_scope_defaults`` / detail-enrich context.
-    """
-    targets: list[dict[str, Any]] = []
-    seen_base_urls: set[str] = set()
-
-    def _add(kwargs: dict[str, str], sub: str, rg: str, cluster: str) -> None:
-        base = str(kwargs.get("base_url") or "")
-        # The legacy ``{}`` (env / runtime-cache) fallback has no base_url and
-        # is added at most once.
-        dedup_key = base or "__env_fallback__"
-        if dedup_key in seen_base_urls:
-            return
-        seen_base_urls.add(dedup_key)
-        targets.append(
-            {
-                "kwargs": dict(kwargs),
-                "subscription_id": sub,
-                "resource_group": rg,
-                "cluster_name": cluster,
-            }
-        )
-
-    if cluster_name:
-        kwargs = blast_package._openapi_client_kwargs_from_cluster(
-            subscription_id, resource_group, cluster_name
-        )
-        _add(kwargs, subscription_id, resource_group, cluster_name)
-        return targets
-
-    if subscription_id:
-        for rg, cluster in _discover_subscription_clusters(subscription_id):
-            if not cluster:
-                continue
-            kwargs = blast_package._openapi_client_kwargs_from_cluster(
-                subscription_id, rg, cluster
-            )
-            if kwargs:
-                _add(kwargs, subscription_id, rg, cluster)
-        if targets:
-            return targets
-
-    # No cluster endpoint resolved: keep the legacy env / runtime-cache
-    # fallback so deployments that set ELB_OPENAPI_BASE_URL (or have a
-    # populated runtime cache) keep working exactly as before.
-    _add({}, subscription_id, resource_group, cluster_name)
-    return targets
 
 
 def _external_degraded_message(exc: Exception, reason: str) -> str:
@@ -475,86 +357,27 @@ def _compute_blast_jobs_response(
 
     external_degraded: dict[str, Any] = {}
     try:
-        from api.routes import blast as blast_package
-        from api.services import external_blast
-
-        targets = _resolve_external_list_targets(
-            blast_package,
-            subscription_id,
-            resource_group,
-            cluster_name,
+        # Discover external `/v1/jobs` for this scope and upsert them into the
+        # Table (cluster-shared, owner_oid=""), then merge the discovered rows
+        # into the response. The shared service owns target resolution + detail
+        # enrichment + the Table sync; the route keeps the tombstone filter +
+        # response shaping + degraded-badge policy. The sync survives AKS
+        # restarts and is the same path the Message Flow card relies on, so the
+        # two views can never drift on how `/v1/jobs` jobs reach the Table.
+        sync = collect_and_sync_external_jobs(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            tenant_id=tenant_id,
+            seen_job_ids={str(job.get("job_id")) for job in jobs},
+            detail_enrich_budget=min(
+                _EXTERNAL_DETAIL_ENRICH_LIMIT, max(0, limit - len(jobs))
+            ),
         )
-        # Collect external rows first (with detail enrichment) across every
-        # resolved target, then sync to Table Storage in one batch. The sync
-        # call tells us which rows are tombstoned in our Table so we can drop
-        # them from the list view — otherwise a soft-deleted job reappears on
-        # every poll because the upstream plane still remembers it.
-        candidate_rows: list[dict[str, Any]] = []
-        seen = {str(job.get("job_id")) for job in jobs}
-        detail_budget = min(_EXTERNAL_DETAIL_ENRICH_LIMIT, max(0, limit - len(jobs)))
-        target_failures: list[Exception] = []
-        any_target_ok = False
-        for target in targets:
-            t_kwargs = target["kwargs"]
-            t_sub = target["subscription_id"]
-            t_rg = target["resource_group"]
-            t_cluster = target["cluster_name"]
-            try:
-                external_rows = _external_list_jobs_cached(t_kwargs)
-            except Exception as exc:
-                # One unreachable cluster (e.g. Stopped) must not hide jobs on
-                # the other reachable clusters in a subscription-wide listing.
-                target_failures.append(exc)
-                continue
-            any_target_ok = True
-            if not isinstance(external_rows, list):
-                continue
-            for ext_row in external_rows:
-                if not isinstance(ext_row, dict):
-                    continue
-                job_id = str(ext_row.get("job_id") or "")
-                if not job_id or job_id in seen:
-                    continue
-                seen.add(job_id)
-                ext_row = _external_row_with_scope_defaults(
-                    ext_row,
-                    subscription_id=t_sub,
-                    resource_group=t_rg,
-                    cluster_name=t_cluster,
-                )
-                should_enrich_detail = bool(t_sub or t_rg or t_cluster)
-                if (
-                    should_enrich_detail
-                    and detail_budget > 0
-                    and _external_list_row_needs_detail(ext_row)
-                ):
-                    ext_row = _external_job_detail_or_row(external_blast, ext_row, t_kwargs)
-                    detail_budget -= 1
-                # Inline-FASTA API submits carry no query identity from the
-                # sibling; inject the defline label remembered at submit time
-                # so the row shows the real query instead of "query.fa".
-                ext_row = apply_remembered_query_label(ext_row)
-                candidate_rows.append(ext_row)
 
-        # Sync newly-discovered external jobs into Table Storage so they
-        # survive AKS restarts and appear on future list calls even when
-        # the external OpenAPI plane is unavailable.
-        #
-        # owner_oid is intentionally blank — these jobs originate from the
-        # cluster, not from a specific dashboard caller, and must be
-        # visible to every caller with ARM scope on the cluster. The
-        # route-level cluster/RG/sub filter still scopes the read.
-        tombstoned_ids: set[str] = set()
-        if candidate_rows:
-            _created, _updated, tombstoned_ids = _sync_external_jobs_to_table(
-                candidate_rows,
-                caller_oid="",
-                tenant_id=tenant_id,
-            )
-
-        for ext_row in candidate_rows:
+        for ext_row in sync.rows:
             job_id = str(ext_row.get("job_id") or "")
-            if job_id in tombstoned_ids:
+            if job_id in sync.tombstoned_ids:
                 # Soft-deleted in our Table; suppress from the list view
                 # so the row stays gone after the user's delete click.
                 continue
@@ -564,8 +387,8 @@ def _compute_blast_jobs_response(
         # reachable). A partial success — at least one cluster answered —
         # keeps the list usable and is not flagged, since the history view's
         # whole point is "show whatever jobs we can find across clusters".
-        if not any_target_ok and target_failures:
-            raise target_failures[0]
+        if not sync.any_target_ok and sync.target_failures:
+            raise sync.target_failures[0]
     except Exception as exc:
         LOGGER.info("external blast job list unavailable: %s", _exception_reason(exc))
         reason = _exception_reason(exc)

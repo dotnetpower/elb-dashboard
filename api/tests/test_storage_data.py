@@ -271,6 +271,42 @@ def test_classify_storage_failure_access_denied_mentions_az_login_locally(
     assert "az login identity" in result["message"]
 
 
+def test_classify_storage_failure_returns_not_found_for_blob_not_found_str() -> None:
+    """Azure Storage SDK raises ``ResourceNotFoundError`` whose ``str(exc)`` is
+    an HTTP response body that contains ``ErrorCode:BlobNotFound`` -- not the
+    ``ResourceNotFound`` token the old classifier used. Without this signal
+    the route degrades to 503 ``storage_unreachable`` and the SPA shows a
+    transient retry banner for a stable 'this blob does not exist' state
+    (issue #5). The classifier must surface a ``not_found`` reason so the
+    route returns 404."""
+
+    class _FakeBlobNotFound(Exception):
+        pass
+
+    _FakeBlobNotFound.__name__ = "ResourceNotFoundError"
+
+    exc = _FakeBlobNotFound(
+        "The specified blob does not exist.\n"
+        "RequestId: deadbeef\nErrorCode:BlobNotFound"
+    )
+    result = storage_data.classify_storage_failure(
+        object(), "sub", "rg-elb-01", "elbstg01", exc
+    )
+    assert result["degraded_reason"] == "not_found"
+    assert "not found" in result["message"]
+
+
+def test_classify_storage_failure_returns_not_found_for_blob_not_found_substring() -> None:
+    """Fallback path for SDK versions that surface a generic exception whose
+    message carries the BlobNotFound token but whose class name is something
+    other than ResourceNotFoundError (e.g. HttpResponseError)."""
+    exc = RuntimeError("ErrorCode:BlobNotFound")
+    result = storage_data.classify_storage_failure(
+        object(), "sub", "rg-elb-01", "elbstg01", exc
+    )
+    assert result["degraded_reason"] == "not_found"
+
+
 class FakeChunkDownload:
     def __init__(self, payload: bytes) -> None:
         self.payload = payload

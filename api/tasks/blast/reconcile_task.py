@@ -389,6 +389,28 @@ def reconcile_stale_jobs(
                 continue
 
             # 3) Nobody knows the job and it has been quiet for a while.
+            #
+            # External-origin rows (synced from the sibling /v1/jobs API) have
+            # no local Celery task, no local worker that can "die", and their
+            # authoritative status lives on the sibling. If the K8s + OpenAPI
+            # probes above could not reach the sibling we have no evidence the
+            # job actually failed -- the row is just *unsynced*. The previous
+            # behaviour escalated such rows to ``worker_lost`` after 10 min of
+            # quiet, which surfaced false-positive failures (job
+            # ``e1f0d24fdc74`` was marked worker_lost while still running and
+            # then flipped to ``completed`` 14s later, leaving a stale
+            # ``error_code`` on the row and replacing the real step timeline
+            # with a lone ``worker_lost`` entry).
+            #
+            # Only fall through to the time-based worker_lost path when the
+            # row has a local task_id (i.e. a dashboard-submitted job whose
+            # local worker can plausibly have crashed). For external rows we
+            # leave the row untouched and rely on the next external sync.
+            if not task_id:
+                payload = row.payload or {}
+                if isinstance(payload, dict) and isinstance(payload.get("external"), dict):
+                    summary["untouched"] += 1
+                    continue
             try:
                 updated_at = datetime.fromisoformat(
                     (row.updated_at or row.created_at or "").replace("Z", "+00:00")

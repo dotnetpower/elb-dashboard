@@ -9,9 +9,13 @@ Responsibility: Build a single read-only snapshot that powers the dashboard
     along as a best-effort badge.
 Edit boundaries: Pure aggregation/shaping over ``state_repo`` rows and the
     Service Bus config. No HTTP, no FastAPI, no direct ``azure.mgmt.*`` import.
-    The HTTP route in ``api.routes.monitor.message_flow`` wraps this and owns
-    auth + graceful degradation.
-Key entry points: ``build_message_flow``.
+    Before reading the Table it best-effort syncs external OpenAPI ``/v1/jobs``
+    rows in via ``collect_and_sync_external_jobs`` (the same shared orchestration
+    the Recent-searches list route uses) so directly-submitted jobs surface on
+    the card; that sync is bounded and never raises into the snapshot. The HTTP
+    route in ``api.routes.monitor.message_flow`` wraps this and owns auth +
+    graceful degradation.
+Key entry points: ``build_message_flow``, ``_sync_external_jobs_best_effort``.
 Risky contracts: The broker boxes intentionally reflect ACTIVE ``JobState``
     rows (status ``queued``/``pending``/``running``/``reducing`` — the canonical
     in-flight set shared with ``JobStateRepository.list_active`` and the
@@ -135,15 +139,23 @@ def _submission_source(payload: dict[str, Any]) -> str:
     """Best-effort server-derived submission source for an active job.
 
     Looks at the canonical top-level key first, then the nested metadata block
-    used by the OpenAPI/Service Bus projection. Defaults to ``dashboard`` which
-    is the source of an interactively-submitted job.
+    used by the OpenAPI/Service Bus projection, then the ``external`` block an
+    OpenAPI ``/v1/jobs`` row is synced under (``payload={"external": job}``).
+    Defaults to ``dashboard`` for an interactively-submitted job, but to
+    ``external_api`` when only the ``external`` block is present — otherwise a
+    directly-submitted ``/v1/jobs`` job would mislabel its producer as a
+    dashboard user.
     """
     source = payload.get("submission_source")
+    external = payload.get("external")
+    if not source and isinstance(external, dict):
+        source = external.get("submission_source")
     if not source:
         metadata = payload.get("metadata")
         if isinstance(metadata, dict):
             source = metadata.get("submission_source")
-    source = str(source or "dashboard").strip().lower()
+    default = "external_api" if isinstance(external, dict) else "dashboard"
+    source = str(source or default).strip().lower()
     if source not in {"dashboard", "external_api", "servicebus"}:
         return "dashboard"
     return source
@@ -259,11 +271,37 @@ def _visible_rows(
     return active, settling, scope, len(rows)
 
 
+def _sync_external_jobs_best_effort(*, tenant_id: str = "") -> None:
+    """Upsert external OpenAPI ``/v1/jobs`` rows for the platform subscription.
+
+    Resolves the platform subscription from ``AZURE_SUBSCRIPTION_ID`` and runs
+    the shared discovery+sync orchestration with detail enrichment disabled (the
+    card needs only the list-row fields: status / db / cluster / program). The
+    orchestration is itself best-effort, but this wrapper also swallows any
+    unexpected error so a transient discovery/sync failure can never break the
+    Message Flow snapshot. A missing subscription is a no-op.
+    """
+    subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID", "").strip()
+    if not subscription_id:
+        return
+    try:
+        from api.services.blast.external_jobs import collect_and_sync_external_jobs
+
+        collect_and_sync_external_jobs(
+            subscription_id=subscription_id,
+            tenant_id=tenant_id,
+            detail_enrich_budget=0,
+        )
+    except Exception:
+        LOGGER.debug("message-flow external jobs sync failed", exc_info=True)
+
+
 def build_message_flow(
     caller_oid: str,
     *,
     list_limit: int = _DEFAULT_LIST_LIMIT,
     max_boxes: int = _MAX_BROKER_BOXES,
+    tenant_id: str = "",
 ) -> dict[str, Any]:
     """Return the Producers/Broker/Consumers snapshot for the message-flow card.
 
@@ -271,6 +309,11 @@ def build_message_flow(
     this returns ``{"enabled": False}`` and skips all jobstate work. When ON it
     always returns a full (possibly empty) snapshot; the route layer adds
     graceful degradation around unexpected failures.
+
+    Before reading the Table it best-effort syncs external OpenAPI ``/v1/jobs``
+    submissions in (they never create a dashboard Table row on their own), so a
+    job submitted directly through the sibling plane appears on the card without
+    the operator first opening Recent searches.
 
     The broker lane is active jobs (``lifecycle="active"``) followed by
     recently-terminal jobs (``lifecycle="settling"``) so a finished/failed job
@@ -282,6 +325,12 @@ def build_message_flow(
 
     if not service_bus_enabled():
         return {"enabled": False}
+
+    # Pull external OpenAPI `/v1/jobs` rows into the Table before reading it.
+    # Best-effort and bounded (70 s caches, detail enrichment skipped, a
+    # stopped/unreachable cluster degrades to a no-op), so the card surfaces
+    # directly-submitted jobs without depending on Recent searches being opened.
+    _sync_external_jobs_best_effort(tenant_id=tenant_id)
 
     cfg = get_service_bus_config()
     active, settling, scope, total_read = _visible_rows(caller_oid, list_limit=list_limit)

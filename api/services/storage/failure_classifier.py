@@ -47,8 +47,19 @@ def classify_storage_failure(
     err_str = str(exc)
     err_type = type(exc).__name__
 
+    # The Azure SDK reports "missing blob/container/account" as one of three
+    # concrete exception types. The class name is the reliable signal: the
+    # rendered ``str(exc)`` is a free-form HTTP response body that may carry
+    # ``ErrorCode:BlobNotFound`` (no "ResourceNotFound" substring), so the old
+    # substring-only check missed the common case and the route then returned
+    # 503 for a plain "this blob does not exist" — surfacing to the SPA as
+    # ``storage_unreachable`` rather than the truthful 404. Keep the substring
+    # check as a secondary signal for SDK versions that surface a generic
+    # exception with the code in the message.
     if (
-        "ResourceNotFound" in err_str
+        err_type in {"ResourceNotFoundError", "BlobNotFoundError", "ContainerNotFoundError"}
+        or "ResourceNotFound" in err_str
+        or "BlobNotFound" in err_str
         or "AccountNotFound" in err_str
         or "ContainerNotFound" in err_str
     ):

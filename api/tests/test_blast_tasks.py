@@ -4033,6 +4033,45 @@ def test_reconcile_marks_old_quiet_row_worker_lost(monkeypatch: pytest.MonkeyPat
     assert repo.updates[0][1]["phase"] == "worker_lost"
 
 
+def test_reconcile_does_not_mark_external_origin_row_worker_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External-origin rows (synced from the sibling OpenAPI plane) have no
+    local Celery task that can die. A transient sibling-unreachable window
+    must not flip the row to ``worker_lost`` -- the sibling sync path owns
+    the truth for these rows and will refresh status next pass (issue #1)."""
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="ext-1",
+                task_id="",  # No local task — projection contract for external rows.
+                updated_at="2025-01-01T00:00:00+00:00",
+                created_at="2025-01-01T00:00:00+00:00",
+                payload={
+                    "external": {
+                        "source": "elastic-blast-azure",
+                        "job_id": "ext-1",
+                    }
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=60)
+
+    assert summary["worker_lost"] == 0
+    assert summary["untouched"] >= 1
+    assert repo.updates == []
+
+
 def test_reconcile_worker_lost_refines_stopped_cluster(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

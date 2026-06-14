@@ -6,8 +6,9 @@ dashboard projection helpers live in the sibling `external_job_projection.py`).
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `_external_list_jobs_cached`, `_sync_external_jobs_to_table`,
-`_external_job_detail_or_row`, `_openapi_client_kwargs_from_cluster`,
-`_discover_subscription_clusters`, `_reset_external_jobs_cache`
+`collect_and_sync_external_jobs`, `_external_job_detail_or_row`,
+`_openapi_client_kwargs_from_cluster`, `_discover_subscription_clusters`,
+`_reset_external_jobs_cache`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries. The projection helpers are re-exported under their original private names so
 existing consumers (`job_state`, tests) keep their import surface.
@@ -20,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import HTTPException
@@ -380,6 +382,16 @@ def _sync_external_jobs_to_table(
                     if status_changed:
                         update_kwargs["status"] = ext_status
                         update_kwargs["phase"] = ext_phase
+                        # Clear any stale ``error_code`` (e.g. a transient
+                        # ``worker_lost`` left by a false-positive reconcile
+                        # pass) when flipping to a terminal-success state. The
+                        # sibling is authoritative here -- if it now says the
+                        # job completed, the dashboard must not keep showing
+                        # the recovered error code on the row.
+                        if ext_status.lower() in {"completed", "succeeded"} and (
+                            getattr(existing, "error_code", "") or ""
+                        ):
+                            update_kwargs["error_code"] = ""
                     try:
                         repo.update(job_id, **update_kwargs)
                         updated += 1
@@ -433,6 +445,248 @@ def _sync_external_jobs_to_table(
             oldest = min(_EXTERNAL_SYNC_CACHE.items(), key=lambda kv: kv[1][0])[0]
             _EXTERNAL_SYNC_CACHE.pop(oldest, None)
     return (created, updated, tombstoned)
+
+
+# Statuses for which a list-view row is worth a per-row detail enrichment call
+# (the row is in flight, so its richer fields may have changed). Terminal rows
+# are skipped — their detail is stable and already synced. Shared by the
+# Recent-searches list route and the Message Flow discovery path so both decide
+# "needs detail" identically.
+_EXTERNAL_LIST_DETAIL_STATUSES = frozenset(
+    {
+        "pending",
+        "queued",
+        "running",
+        "submitted",
+        "submitting",
+        "inprogress",
+        "in_progress",
+        "splitting",
+        "reducing",
+    }
+)
+
+
+def _external_list_row_needs_detail(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or row.get("phase") or "").strip().casefold()
+    return status in _EXTERNAL_LIST_DETAIL_STATUSES
+
+
+def _external_row_with_scope_defaults(
+    row: dict[str, Any],
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any]:
+    """Fill empty Azure/AKS scope fields on an external row from its target.
+
+    Only ever sets a field that is absent — a value the sibling already carries
+    is never overwritten. Returns the row unchanged when there is no scope to
+    apply (the env / runtime-cache fallback target).
+    """
+    if not (subscription_id or resource_group or cluster_name):
+        return row
+    scoped = dict(row)
+    if subscription_id:
+        scoped.setdefault("subscription_id", subscription_id)
+    if resource_group:
+        scoped.setdefault("resource_group", resource_group)
+    if cluster_name:
+        scoped.setdefault("cluster_name", cluster_name)
+    return scoped
+
+
+def _resolve_external_list_targets(
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> list[dict[str, Any]]:
+    """Resolve the elb-openapi endpoint(s) to query for ``/v1/jobs`` listing.
+
+    Shared by the Recent searches list route and the Message Flow snapshot. The
+    history view lists jobs subscription-scoped (no ``cluster_name``) so it can
+    show jobs across every cluster; ``_openapi_client_kwargs_from_cluster`` needs
+    the full ``(subscription, resource_group, cluster)`` triple to resolve a
+    base URL + token, so a subscription-only call must first enumerate the
+    subscription's clusters.
+
+    Resolution:
+      * ``cluster_name`` scope → a single target from
+        ``_openapi_client_kwargs_from_cluster`` (or the legacy ``{}`` fallback).
+      * subscription-only scope → discover the subscription's ElasticBLAST
+        clusters and resolve one target per reachable cluster, deduped by base
+        URL. Falls back to the legacy ``{}`` target only when discovery finds no
+        usable cluster endpoint.
+      * no subscription → the legacy ``{}`` fallback only.
+
+    Each target carries the scope it was resolved from so the caller applies the
+    correct ``_external_row_with_scope_defaults`` / detail-enrich context.
+    """
+    targets: list[dict[str, Any]] = []
+    seen_base_urls: set[str] = set()
+
+    def _add(kwargs: dict[str, str], sub: str, rg: str, cluster: str) -> None:
+        base = str(kwargs.get("base_url") or "")
+        # The legacy ``{}`` (env / runtime-cache) fallback has no base_url and
+        # is added at most once.
+        dedup_key = base or "__env_fallback__"
+        if dedup_key in seen_base_urls:
+            return
+        seen_base_urls.add(dedup_key)
+        targets.append(
+            {
+                "kwargs": dict(kwargs),
+                "subscription_id": sub,
+                "resource_group": rg,
+                "cluster_name": cluster,
+            }
+        )
+
+    if cluster_name:
+        kwargs = _openapi_client_kwargs_from_cluster(
+            subscription_id, resource_group, cluster_name
+        )
+        _add(kwargs, subscription_id, resource_group, cluster_name)
+        return targets
+
+    if subscription_id:
+        for rg, cluster in _discover_subscription_clusters(subscription_id):
+            if not cluster:
+                continue
+            kwargs = _openapi_client_kwargs_from_cluster(subscription_id, rg, cluster)
+            if kwargs:
+                _add(kwargs, subscription_id, rg, cluster)
+        if targets:
+            return targets
+
+    # No cluster endpoint resolved: keep the legacy env / runtime-cache fallback
+    # so deployments that set ELB_OPENAPI_BASE_URL (or have a populated runtime
+    # cache) keep working exactly as before.
+    _add({}, subscription_id, resource_group, cluster_name)
+    return targets
+
+
+@dataclass
+class ExternalJobsSyncResult:
+    """Outcome of :func:`collect_and_sync_external_jobs`.
+
+    ``rows`` are the discovered external rows (scope-defaulted, query-labelled,
+    optionally detail-enriched) the caller may merge into a response. The Table
+    upsert is a side effect that has already happened; ``rows`` is provided so
+    the Recent-searches route can render them without a second Table read, while
+    the Message Flow path ignores it and re-reads the Table.
+    """
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    tombstoned_ids: set[str] = field(default_factory=set)
+    any_target_ok: bool = False
+    target_failures: list[Exception] = field(default_factory=list)
+    created: int = 0
+    updated: int = 0
+
+
+def collect_and_sync_external_jobs(
+    *,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+    tenant_id: str = "",
+    seen_job_ids: set[str] | None = None,
+    detail_enrich_budget: int = 0,
+) -> ExternalJobsSyncResult:
+    """Discover external ``/v1/jobs`` for a scope and upsert them into the Table.
+
+    Best-effort orchestration shared by the Recent-searches list route and the
+    Message Flow snapshot. Resolves the OpenAPI endpoint(s) for the given scope,
+    fetches each target's ``/v1/jobs`` list (70 s cached), applies scope defaults
+    and remembered query labels (plus up to ``detail_enrich_budget`` per-row
+    detail-enrichment calls when a scope is present), and upserts the discovered
+    rows into Azure Table Storage with a blank owner
+    (``caller_oid=""`` → cluster-shared visibility, so any caller with ARM scope
+    on the cluster — including the Message Flow card — sees them).
+
+    Resilience: a transport/auth failure against one cluster is recorded in
+    ``ExternalJobsSyncResult.target_failures`` and never aborts the other
+    targets. ``any_target_ok`` is True if at least one target answered. The
+    function never raises — the worst case is an empty result. The caller
+    decides whether all-failed should surface as a degraded badge.
+
+    ``seen_job_ids`` (if given) is mutated in place to track de-duplication
+    against rows the caller already has (e.g. local Table rows merged first);
+    pass ``None`` for an isolated discovery.
+    """
+    from api.services import external_blast
+
+    result = ExternalJobsSyncResult()
+    seen = seen_job_ids if seen_job_ids is not None else set()
+
+    try:
+        targets = _resolve_external_list_targets(
+            subscription_id, resource_group, cluster_name
+        )
+    except Exception as exc:
+        LOGGER.info(
+            "external jobs target resolution failed: %s", type(exc).__name__
+        )
+        result.target_failures.append(exc)
+        return result
+
+    candidate_rows: list[dict[str, Any]] = []
+    budget = max(0, int(detail_enrich_budget))
+    for target in targets:
+        t_kwargs = target["kwargs"]
+        t_sub = target["subscription_id"]
+        t_rg = target["resource_group"]
+        t_cluster = target["cluster_name"]
+        try:
+            external_rows = _external_list_jobs_cached(t_kwargs)
+        except Exception as exc:
+            # One unreachable cluster (e.g. Stopped) must not hide jobs on the
+            # other reachable clusters in a subscription-wide discovery.
+            result.target_failures.append(exc)
+            continue
+        result.any_target_ok = True
+        if not isinstance(external_rows, list):
+            continue
+        for ext_row in external_rows:
+            if not isinstance(ext_row, dict):
+                continue
+            job_id = str(ext_row.get("job_id") or "")
+            if not job_id or job_id in seen:
+                continue
+            seen.add(job_id)
+            ext_row = _external_row_with_scope_defaults(
+                ext_row,
+                subscription_id=t_sub,
+                resource_group=t_rg,
+                cluster_name=t_cluster,
+            )
+            should_enrich_detail = bool(t_sub or t_rg or t_cluster)
+            if (
+                should_enrich_detail
+                and budget > 0
+                and _external_list_row_needs_detail(ext_row)
+            ):
+                ext_row = _external_job_detail_or_row(external_blast, ext_row, t_kwargs)
+                budget -= 1
+            # Inline-FASTA API submits carry no query identity from the sibling;
+            # inject the defline label remembered at submit time so the row shows
+            # the real query instead of "query.fa".
+            ext_row = apply_remembered_query_label(ext_row)
+            candidate_rows.append(ext_row)
+
+    result.rows = candidate_rows
+    if candidate_rows:
+        created, updated, tombstoned_ids = _sync_external_jobs_to_table(
+            candidate_rows,
+            caller_oid="",
+            tenant_id=tenant_id,
+        )
+        result.created = created
+        result.updated = updated
+        result.tombstoned_ids = tombstoned_ids
+    return result
 
 
 def _merge_external_detail(row: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:

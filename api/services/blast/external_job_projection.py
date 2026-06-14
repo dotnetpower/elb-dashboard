@@ -451,6 +451,28 @@ def _external_to_blast_job(
         },
         job_id=str(job.get("job_id") or ""),
     )
+    # canonical_job_metadata defaults ``program`` to ``"blast"`` and builds
+    # ``job_title`` from program + db + query_label. For an external sibling row
+    # that did not yet send program/db/query (the typical state right after the
+    # sibling's /v1/jobs row appears), the title collapses to the literal
+    # string ``"blast"`` -- which then propagates to the dashboard list and the
+    # Recent searches card (issue #4). Replace that degenerate title with the
+    # openapi job id so the row stays identifiable, and pass the sentinel
+    # through to the create path so the same fallback works on first sync.
+    explicit_title = str(job.get("job_title") or job.get("title") or "").strip()
+    has_real_meta = bool(
+        explicit_title
+        or job.get("program")
+        or job.get("db_name")
+        or job.get("db")
+        or job.get("query_file")
+        or job.get("query")
+    )
+    if not has_real_meta and metadata["job_title"] == "blast":
+        fallback_id = str(job.get("job_id") or "").strip()
+        metadata["job_title"] = (
+            f"External job {fallback_id[:12]}" if fallback_id else "External job"
+        )
     db = metadata["db"]
     program = metadata["program"]
     created_at = str(job.get("created_at") or "")
@@ -530,17 +552,28 @@ def _external_to_blast_job(
         },
     )
     out.update(execution_summary)
+    # The sibling /v1/jobs payload never populates infrastructure.storage_account,
+    # but it always carries the BLAST database as a full blob URL. Derive the
+    # account from the URL (gated to the trusted workload account) so the row
+    # synced into Azure Table Storage by ``_sync_external_jobs_to_table`` ends up
+    # with a non-empty ``storage_account`` column. Without this, every later
+    # ``/jobs/{id}/file`` / ``/results/alignments`` call enters the
+    # "JobState has no recorded account" fallback path on each request
+    # (noisy INFO logs) and the storage cross-check cannot enforce its
+    # cross-account guard. The trust gate stops an attacker-influenced db URL
+    # from leaking the MI Storage token to a foreign account.
+    from api.services.blast.db_metadata import extract_trusted_storage_account
+
+    derived_storage_account = extract_trusted_storage_account(str(job.get("db") or ""))
     infrastructure = {
         "subscription_id": metadata["subscription_id"],
         "resource_group": metadata["resource_group"],
         "cluster_name": metadata["cluster_name"],
-        "storage_account": metadata["storage_account"],
+        "storage_account": metadata["storage_account"] or derived_storage_account,
     }
     if any(infrastructure.values()):
         out["infrastructure"] = {k: v for k, v in infrastructure.items() if v}
     if include_database_metadata:
-        from api.services.blast.db_metadata import extract_trusted_storage_account
-
         # External-API jobs never populate infrastructure.storage_account, but
         # they carry the BLAST database as a full blob URL. Recover the account
         # (gated to the trusted workload account) so the same Storage-backed
@@ -549,7 +582,7 @@ def _external_to_blast_job(
         # db URL from leaking the MI Storage token to a foreign account.
         storage_account = str(
             infrastructure.get("storage_account") or ""
-        ) or extract_trusted_storage_account(str(job.get("db") or ""))
+        ) or derived_storage_account
         database_metadata = _database_metadata_for_response(
             db,
             storage_account,

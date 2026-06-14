@@ -721,13 +721,13 @@ def test_canonical_jobs_list_uses_cluster_openapi_context(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     from api.main import app
-    from api.routes import blast as stubs
     from api.services import external_blast
+    from api.services.blast import external_jobs
 
     captured: dict[str, str] = {}
 
     monkeypatch.setattr(
-        stubs,
+        external_jobs,
         "_openapi_client_kwargs_from_cluster",
         lambda subscription_id, resource_group, cluster_name: {
             "base_url": f"http://{cluster_name}.{resource_group}.{subscription_id}",
@@ -799,6 +799,90 @@ def test_discover_subscription_clusters_skips_stopped(monkeypatch):
     assert ("rg-2", "stopped-b") not in pairs
 
 
+def test_collect_and_sync_external_jobs_discovers_and_upserts(monkeypatch):
+    """The shared orchestration resolves the subscription's clusters, fetches
+    each one's ``/v1/jobs`` list, and upserts the discovered rows into the
+    Table. One unreachable cluster is recorded but does not abort the others.
+    """
+    from api.services import external_blast
+    from api.services.blast import external_jobs
+    from fastapi import HTTPException
+
+    external_jobs._reset_external_jobs_cache()
+
+    monkeypatch.setattr(
+        external_jobs,
+        "_discover_subscription_clusters",
+        lambda subscription_id: [("rg-1", "up-cluster"), ("rg-2", "down-cluster")],
+    )
+    monkeypatch.setattr(
+        external_jobs,
+        "_openapi_client_kwargs_from_cluster",
+        lambda subscription_id, resource_group, cluster_name: {
+            "base_url": f"http://{cluster_name}",
+            "api_token": "tok",
+        },
+    )
+
+    def list_jobs(**kwargs):
+        if kwargs.get("base_url") == "http://down-cluster":
+            raise HTTPException(503, detail={"code": "openapi_unreachable"})
+        return {
+            "jobs": [
+                {
+                    "job_id": "ext-aaa",
+                    "status": "running",
+                    "created_at": "2026-06-13T00:00:00Z",
+                    "program": "blastn",
+                    "db": "core_nt",
+                    "cluster_name": "up-cluster",
+                }
+            ],
+            "count": 1,
+        }
+
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
+
+    synced: list[list[dict]] = []
+
+    def _fake_sync(rows, *, caller_oid, tenant_id=""):
+        synced.append(rows)
+        return (len(rows), 0, set())
+
+    monkeypatch.setattr(external_jobs, "_sync_external_jobs_to_table", _fake_sync)
+
+    result = external_jobs.collect_and_sync_external_jobs(
+        subscription_id="sub-1", tenant_id="tid-1"
+    )
+
+    # The up cluster's row was discovered, scope-defaulted, and synced.
+    assert [r["job_id"] for r in result.rows] == ["ext-aaa"]
+    assert result.rows[0]["subscription_id"] == "sub-1"
+    assert result.rows[0]["resource_group"] == "rg-1"
+    assert result.created == 1
+    assert synced and synced[0][0]["job_id"] == "ext-aaa"
+    # Partial failure: one target answered, the down one is recorded not raised.
+    assert result.any_target_ok is True
+    assert len(result.target_failures) == 1
+
+
+def test_collect_and_sync_external_jobs_never_raises(monkeypatch):
+    """Target resolution blowing up degrades to an empty result, never raises."""
+    from api.services.blast import external_jobs
+
+    external_jobs._reset_external_jobs_cache()
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("resolution exploded")
+
+    monkeypatch.setattr(external_jobs, "_resolve_external_list_targets", _boom)
+
+    result = external_jobs.collect_and_sync_external_jobs(subscription_id="sub-1")
+    assert result.rows == []
+    assert result.created == 0
+    assert len(result.target_failures) == 1
+
+
 def test_canonical_jobs_list_subscription_scope_discovers_clusters(monkeypatch):
     """Subscription-only listing (Recent searches) discovers every cluster's
     OpenAPI endpoint so jobs submitted directly through ``POST /v1/jobs`` show
@@ -813,12 +897,11 @@ def test_canonical_jobs_list_subscription_scope_discovers_clusters(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     from api.main import app
-    from api.routes import blast as stubs
-    from api.routes.blast import jobs as jobs_route
     from api.services import external_blast
+    from api.services.blast import external_jobs
 
     monkeypatch.setattr(
-        jobs_route,
+        external_jobs,
         "_discover_subscription_clusters",
         lambda subscription_id: [
             ("rg-elb-01", "elb-cluster-a"),
@@ -826,7 +909,7 @@ def test_canonical_jobs_list_subscription_scope_discovers_clusters(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        stubs,
+        external_jobs,
         "_openapi_client_kwargs_from_cluster",
         lambda subscription_id, resource_group, cluster_name: (
             {"base_url": f"http://{cluster_name}", "api_token": "tok"}
@@ -894,13 +977,12 @@ def test_canonical_jobs_list_subscription_scope_partial_cluster_failure(monkeypa
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     from api.main import app
-    from api.routes import blast as stubs
-    from api.routes.blast import jobs as jobs_route
     from api.services import external_blast
+    from api.services.blast import external_jobs
     from fastapi import HTTPException
 
     monkeypatch.setattr(
-        jobs_route,
+        external_jobs,
         "_discover_subscription_clusters",
         lambda subscription_id: [
             ("rg-elb-01", "up-cluster"),
@@ -908,7 +990,7 @@ def test_canonical_jobs_list_subscription_scope_partial_cluster_failure(monkeypa
         ],
     )
     monkeypatch.setattr(
-        stubs,
+        external_jobs,
         "_openapi_client_kwargs_from_cluster",
         lambda subscription_id, resource_group, cluster_name: {
             "base_url": f"http://{cluster_name}",
@@ -953,18 +1035,17 @@ def test_canonical_jobs_list_subscription_scope_all_clusters_down(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     from api.main import app
-    from api.routes import blast as stubs
-    from api.routes.blast import jobs as jobs_route
     from api.services import external_blast
+    from api.services.blast import external_jobs
     from fastapi import HTTPException
 
     monkeypatch.setattr(
-        jobs_route,
+        external_jobs,
         "_discover_subscription_clusters",
         lambda subscription_id: [("rg-elb-01", "down-cluster")],
     )
     monkeypatch.setattr(
-        stubs,
+        external_jobs,
         "_openapi_client_kwargs_from_cluster",
         lambda subscription_id, resource_group, cluster_name: {
             "base_url": f"http://{cluster_name}",
@@ -1053,8 +1134,8 @@ def test_canonical_jobs_list_filters_local_rows_by_scope(monkeypatch):
 def test_canonical_jobs_list_enriches_external_rows_with_detail(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
-    from api.routes import blast as stubs
     from api.services import external_blast, state_repo
+    from api.services.blast import external_jobs
 
     class EmptyRepo:
         def list_for_owner(self, *_args, **_kwargs):
@@ -1064,7 +1145,7 @@ def test_canonical_jobs_list_enriches_external_rows_with_detail(monkeypatch):
 
     monkeypatch.setattr(state_repo, "JobStateRepository", EmptyRepo)
     monkeypatch.setattr(
-        stubs,
+        external_jobs,
         "_openapi_client_kwargs_from_cluster",
         lambda subscription_id, resource_group, cluster_name: {
             "base_url": f"http://{cluster_name}.{resource_group}.{subscription_id}",
@@ -1145,8 +1226,8 @@ def test_canonical_jobs_list_shows_remembered_inline_query_label(monkeypatch):
     """
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
-    from api.routes import blast as stubs
     from api.services import external_blast, state_repo
+    from api.services.blast import external_jobs
     from api.services.blast import external_query_labels as eql
 
     class EmptyRepo:
@@ -1172,7 +1253,7 @@ def test_canonical_jobs_list_shows_remembered_inline_query_label(monkeypatch):
     )
     monkeypatch.setattr(state_repo, "JobStateRepository", EmptyRepo)
     monkeypatch.setattr(
-        stubs,
+        external_jobs,
         "_openapi_client_kwargs_from_cluster",
         lambda subscription_id, resource_group, cluster_name: {
             "base_url": f"http://{cluster_name}.{resource_group}.{subscription_id}",
@@ -1416,6 +1497,69 @@ def test_sync_external_jobs_updates_drifted_status(monkeypatch):
     assert updated_calls == [
         {"job_id": "abc123", "status": "completed", "phase": "completed"}
     ]
+
+
+def test_sync_external_jobs_clears_stale_error_code_on_terminal_flip(monkeypatch):
+    """When the sibling now reports success but the Table row still carries a
+    stale ``error_code`` (e.g. a transient ``worker_lost`` left by a
+    false-positive reconcile pass), the sync MUST clear it durably so the
+    dashboard row stops showing the recovered error indefinitely (issue #2)."""
+    from api.routes import _blast_shared as shared
+
+    updated_calls: list[dict[str, object]] = []
+    created: list[object] = []
+
+    class ExistingRow:
+        status = "running"
+        phase = "worker_lost"
+        error_code = "worker_lost"
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"abc123": ExistingRow()}
+
+        def update(self, job_id, **kwargs):
+            updated_calls.append({"job_id": job_id, **kwargs})
+
+        def create(self, state):
+            created.append(state)
+            return state
+
+    fake_repo = FakeRepo()
+
+    class FakeRepoFactory:
+        def __call__(self):
+            return fake_repo
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", FakeRepoFactory())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "abc123",
+                "status": "completed",
+                "created_at": "2026-05-20T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    assert result == (0, 1, set())
+    assert updated_calls and updated_calls[0]["job_id"] == "abc123"
+    assert updated_calls[0]["status"] == "completed"
+    assert updated_calls[0]["phase"] == "completed"
+    # The stale worker_lost MUST be cleared by an explicit "" write so the
+    # repository's patch-semantics update actually unsets the column.
+    assert updated_calls[0]["error_code"] == ""
 
 
 def test_sync_external_jobs_skips_unchanged_status(monkeypatch):

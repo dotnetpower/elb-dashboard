@@ -63,6 +63,26 @@ def test_build_citation_degrades_without_provenance() -> None:
     assert "default search parameters" in bundle.text
 
 
+def test_build_citation_without_db_name_renders_single_clause() -> None:
+    """When the provenance lacks a database name (external-API job with no
+    canonical snapshot), the Methods paragraph must read 'queried the selected
+    database' once -- not the 'queried the the selected database database'
+    duplicate that the old fallback produced (issue #8)."""
+    provenance = {
+        "schema_version": 1,
+        "job_id": "job-no-db",
+        "blast": {"program": "blastn", "version": "2.17.0+"},
+        "database": {},  # no name, no input
+        "options": {},
+    }
+    bundle = build_citation(job_id="job-no-db", provenance=provenance)
+    assert "the the" not in bundle.text
+    assert "database database" not in bundle.text
+    assert "queried the selected database" in bundle.text
+    assert "the the" not in bundle.markdown
+    assert "database database" not in bundle.markdown
+
+
 def test_citation_never_emits_storage_urls() -> None:
     bundle = build_citation(job_id="job-cite-1", provenance=_PROVENANCE)
     for blob in (bundle.text, bundle.markdown, bundle.bibtex):

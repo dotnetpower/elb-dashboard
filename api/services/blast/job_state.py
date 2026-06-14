@@ -365,8 +365,27 @@ def _local_to_blast_job(
 ) -> dict[str, Any]:
     payload = state.payload if isinstance(state.payload, dict) else {}
     progress = payload.get("_progress") if isinstance(payload.get("_progress"), dict) else None
+    is_external_origin = isinstance(payload.get("external"), dict)
+    # External-origin rows have NO local Celery task and no real per-phase
+    # progress writes -- their authoritative step timeline is derived from the
+    # embedded sibling snapshot. Reconcile / recovery paths (e.g. a transient
+    # ``worker_lost`` flip that later flipped back to ``completed``) can leave
+    # a stale single-entry ``_progress.steps`` payload behind that, if used,
+    # collapses the timeline to just that recovery step. Ignore ``_progress``
+    # on external rows so the projection always runs through the external
+    # branch below. The same flip also leaves a stale ``error_code`` on the
+    # row, cleared by the terminal-flip handling in ``_sync_external_jobs_to_table``.
+    if is_external_origin:
+        progress = None
     program = str(getattr(state, "program", None) or _payload_value(payload, "program") or "blast")
     db = str(getattr(state, "db", None) or _payload_value(payload, "db", "database") or "")
+    if not db and is_external_origin:
+        external_snapshot = payload["external"]
+        db = str(
+            external_snapshot.get("db_name")
+            or external_snapshot.get("db")
+            or ""
+        )
     infrastructure = {
         "subscription_id": getattr(state, "subscription_id", None)
         or _payload_value(payload, "subscription_id"),
@@ -379,6 +398,22 @@ def _local_to_blast_job(
         "cluster_name": getattr(state, "cluster_name", None)
         or _payload_value(payload, "aks_cluster_name", "cluster_name"),
     }
+    # External-origin rows: when status is terminal-success the embedded
+    # sibling snapshot is authoritative for ``error_code`` / ``error``. A
+    # stale ``worker_lost`` left by an earlier false-positive reconcile must
+    # not surface alongside ``status=completed``. The ``_sync_external_jobs_to_table``
+    # terminal-flip handler clears the column on the row; this is the
+    # defensive projection-side mirror so a row that has not yet been
+    # rewritten still renders cleanly.
+    response_error_code = state.error_code
+    response_error = _job_error_for_response(state)
+    if (
+        is_external_origin
+        and str(state.status or "").lower() in {"completed", "succeeded"}
+    ):
+        if response_error_code:
+            response_error_code = ""
+        response_error = None
     out = {
         "job_id": state.job_id,
         "job_id_kind": "dashboard",
@@ -393,12 +428,12 @@ def _local_to_blast_job(
         "task_id": state.task_id,
         "created_at": state.created_at,
         "updated_at": state.updated_at,
-        "error_code": state.error_code,
-        "error": _job_error_for_response(state),
+        "error_code": response_error_code,
+        "error": response_error,
         "payload": payload,
         "config_snapshot": payload.get("config_snapshot") if isinstance(payload, dict) else None,
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
-        "source": "dashboard",
+        "source": "external_api" if is_external_origin else "dashboard",
         "owner_upn": getattr(state, "owner_upn", None) or None,
     }
     out["target"] = build_target(
@@ -1054,10 +1089,11 @@ def _resolve_job_storage_account(job_id: str, supplied: str) -> str:
     if state is None:
         # Job genuinely absent from Table Storage. This happens legitimately
         # right after submit (the row is being written) and on external sync
-        # rows that have not been re-projected yet. Log the fallback so an
-        # operator inspecting access logs can spot a route that is being
-        # called with a bogus job_id repeatedly.
-        LOGGER.info(
+        # rows that have not been re-projected yet. Demoted to DEBUG: it fires
+        # on every storage-backed result request for those rows and floods
+        # App Insights without operator value (see issue #19). An operator
+        # debugging a bogus job_id can re-enable with the api logger level.
+        LOGGER.debug(
             "storage account cross-check: no JobState row for job_id=%s; "
             "accepting supplied value",
             job_id,
@@ -1065,7 +1101,7 @@ def _resolve_job_storage_account(job_id: str, supplied: str) -> str:
         return supplied
     recorded = (getattr(state, "storage_account", "") or "").strip()
     if not recorded:
-        LOGGER.info(
+        LOGGER.debug(
             "storage account cross-check: JobState has no recorded account; "
             "accepting supplied value job_id=%s",
             job_id,

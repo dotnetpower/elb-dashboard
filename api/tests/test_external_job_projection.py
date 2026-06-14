@@ -253,4 +253,90 @@ def test_external_failed_enrichment_preserves_specific_error(monkeypatch) -> Non
     assert "generic cluster blob detail" not in out["error"]
 
 
+def test_external_storage_account_derived_from_db_url_on_list_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #7 + the related sibling-sync backfill: the projected
+    ``infrastructure.storage_account`` MUST be populated from the ``db`` URL
+    even when ``include_database_metadata`` is False (the list path) and the
+    sibling did not also send a ``storage_account`` column.
+
+    Without this, ``_sync_external_jobs_to_table`` writes blank
+    ``storage_account`` to Table Storage; the dashboard then has to query the
+    /file route with no account hint, which 422s; and the cross-check warning
+    fires on every poll cycle."""
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stgworkload")
+
+    out = _external_to_blast_job(
+        {
+            "job_id": "ext-store-1",
+            "status": "running",
+            "db": "https://stgworkload.blob.core.windows.net/blast-db/core_nt",
+        },
+    )
+    assert out["infrastructure"]["storage_account"] == "stgworkload"
+
+
+def test_external_storage_account_blank_when_db_account_is_untrusted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense in depth: an attacker-controlled ``db`` URL that points at an
+    arbitrary Storage account MUST NOT leak into ``infrastructure``. The trust
+    gate in ``extract_trusted_storage_account`` is what protects the MI token
+    (see :func:`api.services.blast.db_metadata.extract_trusted_storage_account`
+    docstring); this test pins that the projection respects it."""
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stgworkload")
+
+    out = _external_to_blast_job(
+        {
+            "job_id": "ext-store-2",
+            "status": "running",
+            "db": "https://attackerctrl.blob.core.windows.net/blast-db/core_nt",
+        },
+    )
+    assert out.get("infrastructure", {}).get("storage_account", "") == ""
+
+
+def test_external_job_title_falls_back_to_openapi_id_when_sibling_has_no_meta() -> None:
+    """When the sibling /v1/jobs row carries only ``job_id`` + ``status``
+    (no program/db/query/explicit title), the projection must not collapse
+    ``job_title`` to the literal string ``"blast"`` -- that propagates to
+    the dashboard list, Recent searches, and the Methods citation (issue
+    #4). Fall back to a stable, identifiable openapi-job-id title instead."""
+    out = _external_to_blast_job(
+        {
+            "job_id": "e1f0d24fdc740000",
+            "status": "running",
+        },
+    )
+    assert out["job_title"] != "blast"
+    assert "e1f0d24fdc74" in out["job_title"]
+
+
+def test_external_job_title_keeps_program_db_when_sibling_provides_them() -> None:
+    """The fallback must not interfere with the normal happy-path title."""
+    out = _external_to_blast_job(
+        {
+            "job_id": "j-happy",
+            "status": "running",
+            "program": "blastn",
+            "db": "16S_ribosomal_RNA",
+        },
+    )
+    assert "blastn" in out["job_title"]
+    assert "16S_ribosomal_RNA" in out["job_title"]
+
+
+def test_external_job_title_keeps_explicit_title_when_sibling_provides_it() -> None:
+    """An explicit sibling-provided title wins over both heuristic and fallback."""
+    out = _external_to_blast_job(
+        {
+            "job_id": "j-explicit",
+            "status": "running",
+            "job_title": "My favourite run",
+        },
+    )
+    assert out["job_title"] == "My favourite run"
+
+
 
