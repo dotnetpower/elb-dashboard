@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { NavigateFunction } from "react-router-dom";
 
 import { formatApiError } from "@/api/client";
@@ -92,6 +92,7 @@ export function useSubmitMutation({
   toast,
   clearDraft,
 }: UseSubmitMutationArgs) {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (req: BlastSubmitRequest) => {
       // Attach a stable idempotency key so a retried or double-fired submit
@@ -108,6 +109,15 @@ export function useSubmitMutation({
     },
     onSuccess: (resp, req) => {
       clearDraft();
+      // The backend creates the job row synchronously and resets its jobs-list
+      // cache, but the SPA's global `staleTime: 60_000` means a list mounted in
+      // the last minute (Recent searches, Dashboard JobCard, the topbar chip)
+      // would NOT refetch on navigation and would only pick the new job up on
+      // its next slow timed poll. Invalidating every `["blast-jobs", ...]` query
+      // forces those lists to refetch now (mounted ones immediately, inactive
+      // ones on their next mount, bypassing staleTime), so a just-submitted job
+      // shows up right away instead of up to ~20-30 s later.
+      void queryClient.invalidateQueries({ queryKey: ["blast-jobs"] });
       toast("BLAST search submitted! Tracking your job…", "success");
       navigate(buildSubmittedJobUrl(resp, req));
     },

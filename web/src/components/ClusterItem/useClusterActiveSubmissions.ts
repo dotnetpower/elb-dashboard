@@ -3,7 +3,10 @@ import {
   isDashboardJobActive,
   jobDisplayState,
 } from "@/components/cards/ClusterBento/jobMapping";
-import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
+import {
+  blastJobsRefetchInterval,
+  useScopedBlastJobs,
+} from "@/hooks/useScopedBlastJobs";
 
 type ActiveSubmissionRow = BlastJobSummary & {
   payload?: BlastJobSummary["payload"] & { cluster_name?: string };
@@ -27,7 +30,13 @@ export function useClusterActiveSubmissions(args: {
   const { jobsQuery: blastJobsQuery } = useScopedBlastJobs({
     clusterName,
     enabled: isRunning && !isTransitioning,
-    refetchInterval: isRunning ? 60_000 : false,
+    // While running, poll every 5 s as long as a submission is queued/running
+    // so the cluster row reflects a fresh submit and its phase within seconds;
+    // ease back to 60 s once the cluster has no active jobs. Paused entirely
+    // when the cluster is stopped/transitioning.
+    refetchInterval: isRunning
+      ? blastJobsRefetchInterval({ activeMs: 5_000, idleMs: 60_000 })
+      : false,
   });
 
   const tracking =

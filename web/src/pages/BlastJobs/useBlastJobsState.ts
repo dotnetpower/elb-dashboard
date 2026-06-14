@@ -11,7 +11,7 @@ import {
   toJobRowView,
 } from "@/components/cards/ClusterBento/jobMapping";
 import { useClusterReadiness } from "@/hooks/usePrerequisites";
-import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
+import { blastJobsRefetchInterval, useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
 
 import { GROUP_ORDER, getDateGroup, type DateGroup } from "./dateGroup";
 import { jobSubmissionSource, type JobSource } from "./jobSource";
@@ -109,7 +109,9 @@ export function useBlastJobsState() {
     // discovered cluster hid the user's recent jobs whenever the fleet was
     // all-Stopped and the alphabetically-first cluster was the stale one.
     autoSelectCluster: false,
-    refetchInterval: 20_000,
+    // Poll fast while any job is queued/running so status transitions surface
+    // within a few seconds; fall back to a calm cadence once all are terminal.
+    refetchInterval: blastJobsRefetchInterval({ activeMs: 5_000, idleMs: 20_000 }),
   });
 
   const deleteMutation = useMutation({

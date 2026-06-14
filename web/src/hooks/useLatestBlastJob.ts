@@ -1,6 +1,6 @@
 import type { BlastJobSummary } from "@/api/endpoints";
 import { blastApi } from "@/api/endpoints";
-import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
+import { blastJobsRefetchInterval, useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
 import { useQuery } from "@tanstack/react-query";
 import { useMatch } from "react-router-dom";
 
@@ -32,7 +32,9 @@ export function useLatestBlastJob(): UseLatestBlastJobResult {
     // cluster so a job on a peer cluster isn't masked by an auto-pinned
     // (often Stopped, often stale) cluster.
     autoSelectCluster: false,
-    refetchInterval: 15_000,
+    // Poll fast while a job is queued/running so the chip tracks live status;
+    // ease off to 15 s once every job is terminal.
+    refetchInterval: blastJobsRefetchInterval({ activeMs: 5_000, idleMs: 15_000 }),
   });
 
   const activeJobQuery = useQuery({

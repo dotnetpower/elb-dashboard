@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildWarmupRows, type WarmupCapacity } from "./helpers";
+import {
+  buildWarmupRows,
+  isWarmupProgressIndeterminate,
+  type WarmupCapacity,
+} from "./helpers";
 
 const capacity: WarmupCapacity = {
   nodes: 3,
@@ -154,5 +158,26 @@ describe("buildWarmupRows", () => {
     expect(rows[0].storageLabel).toBe("Storage DB ready");
     expect(rows[0].canWarm).toBe(true);
     expect(rows[0].primaryAction).toBe("warm");
+  });
+});
+
+describe("isWarmupProgressIndeterminate", () => {
+  it("is indeterminate while Loading with no determinate percent yet", () => {
+    // Pod bootstrap / azcopy login window: active run, pct collapsed to 0.
+    expect(isWarmupProgressIndeterminate({ status: "Loading" }, 0)).toBe(true);
+  });
+
+  it("is indeterminate when the percent is not finite", () => {
+    expect(isWarmupProgressIndeterminate({ status: "Loading" }, Number.NaN)).toBe(true);
+  });
+
+  it("becomes determinate once a real positive percent arrives", () => {
+    expect(isWarmupProgressIndeterminate({ status: "Loading" }, 12.5)).toBe(false);
+    expect(isWarmupProgressIndeterminate({ status: "Loading" }, 100)).toBe(false);
+  });
+
+  it("is never indeterminate when the DB is not actively loading", () => {
+    expect(isWarmupProgressIndeterminate({ status: "Ready" }, 0)).toBe(false);
+    expect(isWarmupProgressIndeterminate({ status: "Failed" }, 0)).toBe(false);
   });
 });

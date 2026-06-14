@@ -35,6 +35,7 @@ import {
   type WarmupRow,
   buildWarmupRows,
   formatDuration,
+  isWarmupProgressIndeterminate,
   shortWarmupPhase,
   summariseWarmupCapacity,
 } from "@/components/warmupSection/helpers";
@@ -965,6 +966,12 @@ function WarmupProgressBar({ warm }: { warm: WarmupDbInfo }) {
     resetKey: `${warm.name}:${warm.started_at ?? ""}`,
   });
   const phase = shortWarmupPhase(warm);
+  // While the run is active but no pod has reported a byte-level "%" yet (pod
+  // bootstrap, azcopy login, the first seconds of a fast copy), show an honest
+  // indeterminate bar instead of a frozen empty 0%-width track that reads as
+  // "stuck". We never fabricate an advancing number — the bar switches to a
+  // determinate fill the instant a real positive percent arrives.
+  const indeterminate = isWarmupProgressIndeterminate(warm, pct);
   const lastLogs = (warm.pod_statuses ?? [])
     .map((pod) => pod.last_log || pod.message)
     .filter(Boolean)
@@ -973,6 +980,11 @@ function WarmupProgressBar({ warm }: { warm: WarmupDbInfo }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
       <div
+        role="progressbar"
+        aria-label={`${warm.name} warmup progress`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        {...(indeterminate ? {} : { "aria-valuenow": Math.round(pct) })}
         style={{
           height: 4,
           background: "rgba(255,255,255,0.08)",
@@ -981,15 +993,19 @@ function WarmupProgressBar({ warm }: { warm: WarmupDbInfo }) {
         }}
         title={lastLogs || undefined}
       >
-        <div
-          style={{
-            width: `${pct}%`,
-            minWidth: pct > 0 ? 8 : 0,
-            height: "100%",
-            background: "var(--accent)",
-            transition: "width 0.3s ease",
-          }}
-        />
+        {indeterminate ? (
+          <div className="progress-indeterminate" aria-hidden="true" />
+        ) : (
+          <div
+            style={{
+              width: `${pct}%`,
+              minWidth: pct > 0 ? 8 : 0,
+              height: "100%",
+              background: "var(--accent)",
+              transition: "width 0.3s ease",
+            }}
+          />
+        )}
       </div>
       <div
         style={{

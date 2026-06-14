@@ -340,6 +340,27 @@ export function formatDuration(seconds?: number): string | undefined {
   return remainder > 0 ? `${hours} hr ${remainder} min` : `${hours} hr`;
 }
 
+/**
+ * Decide whether the warmup progress bar should render in an indeterminate
+ * (animated) state instead of a determinate fill.
+ *
+ * A warmup run is genuinely active the whole time `status === "Loading"`, but
+ * the determinate percent only exists once a pod's azcopy emits a `"%"` log
+ * line. During the bootstrap window (image start, azcopy login, the first
+ * seconds of a fast small-DB copy) and any later gap where no pod reports a
+ * percent, `pct` collapses to 0 — which previously painted a frozen empty bar
+ * and made a working warmup look stuck. In that window we show an honest
+ * indeterminate bar ("active, progress unknown") rather than fabricating an
+ * advancing number. The bar becomes determinate the instant `pct` is a real
+ * positive value.
+ */
+export function isWarmupProgressIndeterminate(
+  warm: Pick<WarmupDbInfo, "status">,
+  pct: number,
+): boolean {
+  return warm.status === "Loading" && (!Number.isFinite(pct) || pct <= 0);
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "—";
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];

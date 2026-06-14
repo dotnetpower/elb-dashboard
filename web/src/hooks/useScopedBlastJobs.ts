@@ -1,13 +1,49 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { blastApi, monitoringApi } from "@/api/endpoints";
+import { blastApi, monitoringApi, type BlastJobSummary } from "@/api/endpoints";
+import { isDashboardJobActive } from "@/components/cards/ClusterBento/jobMapping";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
+
+/**
+ * Minimal structural view of the TanStack `Query` object the jobs-list
+ * `refetchInterval` callback reads. Typed as a supertype of the real
+ * `Query<{ jobs: BlastJobSummary[] }>` so the returned callback stays
+ * assignable to `useQuery`'s `refetchInterval` without fighting the generic
+ * (a bare `Query` parameter is not assignable due to its contravariant
+ * `persister` field).
+ */
+export type JobsListQueryLike = {
+  state: { data?: { jobs?: BlastJobSummary[] } | undefined };
+};
+
+/**
+ * Build a dynamic `refetchInterval` for a `["blast-jobs", ...]` query.
+ *
+ * A static slow poll makes a freshly-submitted job and its status transitions
+ * (queued → running → completed) surface a full interval late. While any job
+ * in the current list is still queued/running we poll at `activeMs` so live
+ * state lands within a few seconds; once every job is terminal we fall back to
+ * the calm `idleMs` cadence to keep idle dashboards cost-minimised. Returns the
+ * idle cadence when there is no data yet or no active job.
+ */
+export function blastJobsRefetchInterval({
+  activeMs,
+  idleMs,
+}: {
+  activeMs: number;
+  idleMs: number;
+}): (query: JobsListQueryLike) => number {
+  return (query: JobsListQueryLike): number => {
+    const jobs = query.state.data?.jobs ?? [];
+    return jobs.some(isDashboardJobActive) ? activeMs : idleMs;
+  };
+}
 
 export interface ScopedBlastJobsOptions {
   clusterName?: string;
   enabled?: boolean;
-  refetchInterval?: number | false;
+  refetchInterval?: number | false | ((query: JobsListQueryLike) => number);
   /**
    * When true (default) and no explicit `clusterName` is given, discover the
    * fleet and pin the jobs query to a single preferred cluster. Per-cluster

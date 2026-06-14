@@ -14,13 +14,21 @@ import {
 } from "@/components/cards/ClusterBento/jobMapping";
 import { useClusterReadiness } from "@/hooks/usePrerequisites";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
-import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
+import { blastJobsRefetchInterval, useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
 
 const MAX_DASHBOARD_JOBS = 5;
 
 export function JobCard() {
-  const refetchInterval = useAutoRefreshInterval();
-  const { jobsQuery: query, clusterName } = useScopedBlastJobs({ refetchInterval });
+  // Idle cadence follows the global auto-refresh dropdown, but while any job is
+  // queued/running we poll every 5 s so the Dashboard jobs card tracks live
+  // status instead of lagging a full 30 s interval behind.
+  const idleRefetchInterval = useAutoRefreshInterval();
+  const { jobsQuery: query, clusterName } = useScopedBlastJobs({
+    refetchInterval: blastJobsRefetchInterval({
+      activeMs: 5_000,
+      idleMs: idleRefetchInterval,
+    }),
+  });
   const cluster = useClusterReadiness();
 
   const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
