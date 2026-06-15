@@ -415,6 +415,15 @@ def _build_v1_jobs_payload(
             correlation_id=correlation_id,
         )
     )
+    # The sibling ``/v1/jobs`` (``JobSubmitRequest``) only accepts
+    # ``submission_source`` in {dashboard, external_api, terminal, system} and
+    # rejects ``servicebus`` with HTTP 400 (the XML ``/api/v1/elastic-blast/
+    # submit`` path silently rewrites it to ``external_api`` internally, so it
+    # never hit this). Send the sibling-accepted value on the wire while the
+    # dashboard's own tracking row stays ``servicebus`` — that row is written
+    # separately by ``_persist_drain_row_and_trace`` and is not derived from
+    # this payload field.
+    payload["submission_source"] = "external_api"
     return payload
 
 

@@ -121,11 +121,34 @@ def test_build_v1_payload_preserves_multitoken_and_stamps_metadata() -> None:
     # Multi-token outfmt + extra survive end-to-end.
     assert payload["blast_options"]["outfmt"] == "7 std staxids sstrand qseq sseq"
     assert "-searchsp" in payload["blast_options"]["extra"]
-    # Server-derived metadata.
-    assert payload["submission_source"] == "servicebus"
+    # The sibling /v1/jobs only accepts {dashboard, external_api, terminal,
+    # system}; "servicebus" 400s. We send external_api on the wire while the
+    # dashboard tracking row (written elsewhere) stays "servicebus".
+    assert payload["submission_source"] == "external_api"
     assert payload["external_correlation_id"] == "corr-1"
     # Explicit sharding profile preserved.
     assert payload["resource_profile"] == "core_nt_safe"
+
+
+def test_build_v1_payload_uses_sibling_accepted_source() -> None:
+    """The /v1/jobs payload must carry a submission_source the sibling accepts
+    (external_api), never 'servicebus' which the sibling 400s. A producer cannot
+    spoof it either."""
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    spoofed = sb._build_v1_jobs_payload(
+        _msg(
+            {
+                **_USER_BODY,
+                "submission_source": "servicebus",
+                "external_correlation_id": "corr-spoof",
+            }
+        ),
+        ServiceBusConfig(),
+    )
+    assert spoofed is not None
+    assert spoofed["submission_source"] == "external_api"
 
 
 def test_build_v1_payload_promotes_core_nt_profile_when_missing() -> None:
