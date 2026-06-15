@@ -349,3 +349,170 @@ def test_detail_route_not_found_storage_failure_maps_404(
     resp = client.get("/api/aks/openapi/databases/core_nt?storage_account=stgq")
     assert resp.status_code == 404
     assert resp.json()["degraded_reason"] == "not_found"
+
+
+# --------------------------------------------------------------------------- #
+# Shared-token auth tests (opt-in ALLOW_OPENAPI_TOKEN_AUTH gate, read-only only)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture()
+def token_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """Real-auth mode (NO dev bypass) with the opt-in shared-token gate ON.
+
+    The authoritative token is supplied via the api-sidecar env
+    (``ELB_OPENAPI_API_TOKEN``); Storage scope resolves from ``STORAGE_ACCOUNT_NAME``.
+    """
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    monkeypatch.setenv("AZURE_TENANT_ID", "common")
+    monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.setenv("ALLOW_OPENAPI_TOKEN_AUTH", "true")
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "secret-tok")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stgenv")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.routes.aks.openapi_databases._maybe_open_local_storage_access",
+        lambda *a, **k: {"action": "noop"},
+    )
+    monkeypatch.setattr(
+        "api.services.storage.database_catalog_cache.list_databases_cached",
+        lambda *a, **k: [{"name": "nr"}, {"name": "core_nt"}],
+    )
+    from api.main import app
+
+    return TestClient(app)
+
+
+def test_token_auth_correct_token_lists(token_client: TestClient) -> None:
+    resp = token_client.get(
+        "/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 2
+
+
+def test_token_auth_wrong_token_rejected(token_client: TestClient) -> None:
+    resp = token_client.get(
+        "/api/aks/openapi/databases", headers={"X-ELB-API-Token": "WRONG"}
+    )
+    assert resp.status_code == 401
+    # A present-but-wrong token is a clear 401, NOT a fall-through to MSAL.
+    assert "X-ELB-API-Token" in resp.json()["detail"]
+
+
+def test_token_auth_detail_correct_token(
+    token_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_metadata_blobs(
+        monkeypatch,
+        {"core_nt/core_nt-nucl-metadata.json": _NUCL_16S},
+    )
+    resp = token_client.get(
+        "/api/aks/openapi/databases/core_nt",
+        headers={"X-ELB-API-Token": "secret-tok"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["molecule_type"] == "dna"
+
+
+def test_token_auth_empty_expected_rejects(
+    token_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Gate ON, token header present, but the server knows NO token (env + cache
+    # both empty) -> reject, never bypass.
+    monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_api_token",
+        lambda *a, **k: "",
+    )
+    resp = token_client.get(
+        "/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"}
+    )
+    assert resp.status_code == 401
+
+
+def test_token_auth_gate_off_ignores_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default gate OFF: the X-ELB-API-Token header is ignored and, without a
+    # valid MSAL bearer (and no dev bypass), the request is 401 — proving the
+    # token path is inert unless explicitly enabled.
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    monkeypatch.delenv("ALLOW_OPENAPI_TOKEN_AUTH", raising=False)
+    monkeypatch.setenv("AZURE_TENANT_ID", "common")
+    monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "secret-tok")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stgenv")
+    from api.main import app
+
+    c = TestClient(app)
+    resp = c.get(
+        "/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"}
+    )
+    assert resp.status_code == 401
+    # Not the token-path error — it fell through to the MSAL bearer requirement.
+    assert resp.json()["detail"] == "missing bearer token"
+
+
+def test_token_auth_no_header_falls_through_to_dev_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Gate ON but no token header -> standard require_caller path (here dev
+    # bypass), confirming the dual dependency does not break the MSAL/bypass leg.
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("ALLOW_OPENAPI_TOKEN_AUTH", "true")
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "secret-tok")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stgenv")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.routes.aks.openapi_databases._maybe_open_local_storage_access",
+        lambda *a, **k: {"action": "noop"},
+    )
+    monkeypatch.setattr(
+        "api.services.storage.database_catalog_cache.list_databases_cached",
+        lambda *a, **k: [{"name": "nr"}],
+    )
+    from api.main import app
+
+    c = TestClient(app)
+    resp = c.get("/api/aks/openapi/databases")
+    assert resp.status_code == 200
+
+
+def test_resolve_expected_openapi_token_prefers_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api import auth
+
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "env-tok")
+    assert auth._resolve_expected_openapi_token() == "env-tok"
+
+
+def test_resolve_expected_openapi_token_falls_back_to_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api import auth
+
+    monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_api_token",
+        lambda *a, **k: "cache-tok",
+    )
+    assert auth._resolve_expected_openapi_token() == "cache-tok"
+
+
+def test_is_openapi_token_caller_identifies_synthetic_identity() -> None:
+    from api import auth
+
+    token_caller = auth._openapi_token_identity()
+    assert auth.is_openapi_token_caller(token_caller) is True
+    assert token_caller.object_id == auth.OPENAPI_TOKEN_OID
+    assert token_caller.raw_token == ""
+    # A normal MSAL caller is NOT mistaken for a token caller.
+    msal_caller = auth.CallerIdentity(
+        object_id="00000000-0000-0000-0000-000000000001",
+        tenant_id="t",
+        upn="u@example.com",
+        raw_token="jwt",
+        claims={},
+    )
+    assert auth.is_openapi_token_caller(msal_caller) is False
+

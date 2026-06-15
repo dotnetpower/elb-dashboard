@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests`.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 import threading
@@ -403,6 +404,115 @@ async def require_caller(
     import asyncio
 
     return await asyncio.to_thread(_validate_token, token)
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in shared-token auth for READ-ONLY OpenAPI control-plane routes.
+#
+# The cluster-independent database catalogue routes
+# (``GET /api/aks/openapi/databases[/{db_name}]``) mirror the in-cluster
+# ``elb-openapi`` ``/v1/databases*`` reads. A caller that already holds the
+# ``elb-openapi`` admin token (``X-ELB-API-Token``) can, when this opt-in gate
+# is ON, use the SAME token to authenticate the dashboard's read-only mirror —
+# one credential instead of two. This is DELIBERATELY limited to read-only
+# routes; cost-bearing / mutating actions (e.g. ensure-running) stay MSAL-only
+# because the shared token has no Azure RBAC gate.
+#
+# Charter §12a Rule 4: ships default-OFF behind ``ALLOW_OPENAPI_TOKEN_AUTH``.
+# Unset / falsey => existing behaviour (MSAL bearer only) preserved exactly.
+# --------------------------------------------------------------------------- #
+_ALLOW_OPENAPI_TOKEN_AUTH_ENV = "ALLOW_OPENAPI_TOKEN_AUTH"  # noqa: S105 - env var name, not a secret.
+# Clearly non-UUID sentinel so any code that mistakes a token caller for an
+# Azure AD principal (and tries to reuse it for a downstream Azure call) fails
+# loudly rather than leaking. Kept distinct from ``DEV_BYPASS_OID``.
+OPENAPI_TOKEN_OID: str = "openapi-token-caller"  # noqa: S105 - sentinel oid, not a secret.
+
+
+def _openapi_token_auth_enabled() -> bool:
+    """Return True only when the opt-in shared-token gate is explicitly on.
+
+    Read at call time so tests / operators can flip ``ALLOW_OPENAPI_TOKEN_AUTH``
+    without re-importing. Default (unset) is OFF — MSAL bearer only.
+    """
+    return os.environ.get(_ALLOW_OPENAPI_TOKEN_AUTH_ENV, "").lower() == "true"
+
+
+def _resolve_expected_openapi_token() -> str:
+    """Return the authoritative ``elb-openapi`` API token, or ``""`` if unknown.
+
+    Reads the deploy-time env first (``ELB_OPENAPI_API_TOKEN`` is set on the api
+    sidecar and survives a cluster stop), then the Redis runtime cache (the beat
+    reconciler re-syncs it from the AKS deployment). It deliberately never reads
+    the cluster directly — that would couple a cheap per-request auth check to a
+    slow K8s round trip and defeat the stopped-cluster use case. An empty return
+    means "token auth unavailable", which the caller treats as REJECT (never
+    bypass).
+    """
+    token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
+    if token:
+        return token
+    try:
+        from api.services.openapi.runtime import get_openapi_api_token
+
+        return (get_openapi_api_token() or "").strip()
+    except Exception as exc:  # pragma: no cover - defensive, cache optional
+        LOGGER.debug("openapi token resolve from cache failed: %s", type(exc).__name__)
+        return ""
+
+
+def _openapi_token_identity() -> CallerIdentity:
+    """Synthetic identity for a request authenticated by the shared token.
+
+    Carries a clearly non-UUID object id and an empty raw token so any code that
+    mistakes it for an Azure AD caller fails loudly instead of leaking a token.
+    Only the read-only OpenAPI database routes accept this identity.
+    """
+    return CallerIdentity(
+        object_id=OPENAPI_TOKEN_OID,
+        tenant_id=os.environ.get("AZURE_TENANT_ID", ""),
+        upn="openapi-token@local",
+        raw_token="",
+        claims={"openapi_token_auth": True},
+    )
+
+
+def is_openapi_token_caller(caller: CallerIdentity) -> bool:
+    """True when the caller authenticated via the shared ``X-ELB-API-Token``."""
+    return bool(caller) and caller.claims.get("openapi_token_auth") is True
+
+
+async def require_caller_or_openapi_token(
+    authorization: str | None = Header(default=None),
+    x_elb_api_token: str | None = Header(default=None, alias="X-ELB-API-Token"),
+) -> CallerIdentity:
+    """Like :func:`require_caller` but ALSO accepts the shared ``X-ELB-API-Token``.
+
+    Auth precedence:
+
+    1. With the opt-in gate ON (``ALLOW_OPENAPI_TOKEN_AUTH=true``) AND a
+       non-empty ``X-ELB-API-Token`` header: validate it (constant-time) against
+       the authoritative token. Match => synthetic token identity;
+       present-but-wrong (or token unknown server-side) => 401. We do NOT
+       silently fall back to MSAL on a present-but-wrong token — that would mask
+       a bad token as a confusing "missing bearer" error.
+    2. Otherwise: the standard MSAL bearer path (:func:`require_caller`). With
+       the gate OFF the ``X-ELB-API-Token`` header is ignored entirely, so the
+       existing MSAL behaviour is preserved exactly.
+
+    SECURITY: only mount this on READ-ONLY routes. The shared token has no Azure
+    RBAC gate, so it must never reach a cost-bearing or mutating action.
+    """
+    provided = (x_elb_api_token or "").strip()
+    if _openapi_token_auth_enabled() and provided:
+        expected = _resolve_expected_openapi_token()
+        # ``expected`` empty => token auth unavailable => reject (never bypass).
+        if expected and hmac.compare_digest(provided, expected):
+            return _openapi_token_identity()
+        LOGGER.warning(
+            "X-ELB-API-Token auth rejected (gate on; token mismatch or unavailable)"
+        )
+        raise AuthError(status.HTTP_401_UNAUTHORIZED, "invalid X-ELB-API-Token")
+    return await require_caller(authorization=authorization)
 
 
 def reset_caches() -> None:

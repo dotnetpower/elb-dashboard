@@ -312,6 +312,15 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Microsoft.Authorization/roleAssignments/read at the
             // subscription scope (the Reader built-in grants this).
             { name: 'ENFORCE_OPENAPI_EXEC_RBAC', value: controlPlaneEnv.api.ENFORCE_OPENAPI_EXEC_RBAC }
+            // Shared-token auth for the READ-ONLY OpenAPI database catalogue
+            // routes (GET /api/aks/openapi/databases[/{db_name}]). Default OFF
+            // preserves MSAL-bearer-only auth (Charter §12a Rule 4). Flip to
+            // 'true' to ALSO accept the shared elb-openapi `X-ELB-API-Token`
+            // on those two read-only routes, so a caller manages one
+            // credential instead of two. The shared token has no Azure RBAC
+            // gate, so this is deliberately limited to read-only routes;
+            // cost-bearing actions (ensure-running) stay MSAL-only.
+            { name: 'ALLOW_OPENAPI_TOKEN_AUTH', value: controlPlaneEnv.api.ALLOW_OPENAPI_TOKEN_AUTH }
             // Dashboard entry RBAC gate (OWASP A01 follow-up). Enabled by
             // default: a signed-in tenant member must hold at least a read
             // role (Reader / Contributor / Owner / AKS read / Storage Blob

@@ -12,10 +12,14 @@ status shaping only. The catalogue projection lives in
 ``storage.database_catalog_cache``. Do not call ``azure.mgmt.*`` or re-implement
 blob listing here.
 Key entry points: ``aks_openapi_databases``, ``aks_openapi_database``.
-Risky contracts: Every ``/api/*`` route enforces ``require_caller``. A missing
-Storage account yields HTTP 400 (never 500); a transient Storage outage yields a
-degraded payload (503 / network_blocked) classified by ``classify_storage_failure``;
-a genuinely absent database yields HTTP 404.
+Risky contracts: Both routes are READ-ONLY, so they authenticate via
+``require_caller_or_openapi_token`` — the standard MSAL bearer, PLUS (only when
+the opt-in ``ALLOW_OPENAPI_TOKEN_AUTH`` gate is on) the shared ``elb-openapi``
+``X-ELB-API-Token``. The shared token has no Azure RBAC gate, so it must never be
+extended to a cost-bearing / mutating route (ensure-running stays MSAL-only). A
+missing Storage account yields HTTP 400 (never 500); a transient Storage outage
+yields a degraded payload (503 / network_blocked) classified by
+``classify_storage_failure``; a genuinely absent database yields HTTP 404.
 Validation: ``uv run pytest -q api/tests/test_aks_openapi_databases.py``.
 """
 
@@ -28,7 +32,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Response
 
-from api.auth import CallerIdentity, require_caller
+from api.auth import CallerIdentity, require_caller_or_openapi_token
 from api.routes._blast_shared import _maybe_open_local_storage_access
 
 LOGGER = logging.getLogger(__name__)
@@ -63,7 +67,7 @@ def aks_openapi_databases(
     subscription_id: str = Query(default=""),
     storage_account: str = Query(default=""),
     resource_group: str = Query(default=""),
-    caller: CallerIdentity = Depends(require_caller),
+    caller: CallerIdentity = Depends(require_caller_or_openapi_token),
 ) -> dict[str, Any]:
     """List prepared BLAST databases from Storage, independent of cluster state.
 
@@ -114,7 +118,7 @@ def aks_openapi_database(
     subscription_id: str = Query(default=""),
     storage_account: str = Query(default=""),
     resource_group: str = Query(default=""),
-    caller: CallerIdentity = Depends(require_caller),
+    caller: CallerIdentity = Depends(require_caller_or_openapi_token),
 ) -> dict[str, Any]:
     """Return one database's metadata from Storage, independent of cluster state.
 
