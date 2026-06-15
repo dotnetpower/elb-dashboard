@@ -130,6 +130,92 @@ class ExternalBlastSubmitRequest(BaseModel):
         return self
 
 
+class BlastV1Options(BaseModel):
+    """Free-form sibling ``/v1/jobs`` BLAST options (multi-token ``outfmt``).
+
+    Mirrors the sibling ``BlastOptions``. Unlike ``ExternalBlastOptions`` (which
+    pins ``outfmt`` to ``5`` for the XML→FASTA pipeline), ``outfmt`` here is a
+    free string so a caller can request a tabular multi-token layout such as
+    ``"7 std staxids sstrand qseq sseq"``. ``extra`` carries raw CLI flags.
+    """
+
+    evalue: float | None = Field(None, gt=0)
+    max_target_seqs: int | None = Field(None, ge=1)
+    outfmt: str | None = Field(None, max_length=512)
+    extra: str | None = Field(None, max_length=2048)
+
+
+class ExternalBlastV1Request(BaseModel):
+    """Dashboard mirror of the sibling ``JobSubmitRequest`` (Mode B inline FASTA)
+    used by the Service Bus multi-token path.
+
+    The Service Bus consumer routes a message carrying ``blast_options`` to the
+    sibling ``POST /v1/jobs`` (free-form options) instead of
+    ``/api/v1/elastic-blast/submit`` (XML-locked). Validating here means a
+    malformed tabular ``outfmt`` is rejected at submit time rather than failing
+    the shard-merge finalizer minutes later: the result merge re-ranks shard
+    hits by ``evalue`` / ``bitscore`` *by name*, so a tabular layout missing
+    either cannot be merged.
+    """
+
+    query_fasta: str = Field(..., min_length=1, max_length=MAX_QUERY_FASTA_CHARS)
+    db: str = Field(..., min_length=1, max_length=256, pattern=r"^[A-Za-z0-9._/-]+$")
+    program: Literal[
+        "blastn",
+        "blastp",
+        "blastx",
+        "psiblast",
+        "rpsblast",
+        "rpstblastn",
+        "tblastn",
+        "tblastx",
+    ] = Field("blastn")
+    taxid: int | None = Field(None, ge=1, le=2_147_483_647)
+    is_inclusive: bool | None = None
+    blast_options: BlastV1Options = Field(default_factory=BlastV1Options)  # type: ignore[arg-type]
+    priority: int = Field(50, ge=0, le=100)
+    batch_len: int | None = Field(None, ge=1, le=1_000_000_000)
+    idempotency_key: str | None = Field(None, min_length=1, max_length=256)
+    resource_profile: str = Field(
+        "standard", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$"
+    )
+    external_correlation_id: str | None = Field(
+        None, min_length=1, max_length=256, pattern=r"^[A-Za-z0-9._:-]+$"
+    )
+
+    @model_validator(mode="after")
+    def validate_query_taxonomy_and_outfmt(self) -> ExternalBlastV1Request:
+        from api.services.query_metadata import parse_fasta_metadata
+
+        if ".." in self.db.split("/"):
+            raise ValueError("db must not contain '..' path segments")
+        try:
+            parse_fasta_metadata(self.query_fasta)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if self.taxid is None and self.is_inclusive is not None:
+            raise ValueError("is_inclusive requires taxid")
+        if self.taxid is not None and self.is_inclusive is None:
+            self.is_inclusive = True
+
+        # A sharded DB (e.g. core_nt) runs the shard-merge finalizer, which
+        # re-ranks by evalue + bitscore resolved by NAME. Reject a tabular
+        # layout that omits either so the failure surfaces now, not minutes
+        # later in the merge. XML (outfmt 5) and a bare numeric code merge fine.
+        outfmt = self.blast_options.outfmt
+        if outfmt is not None and str(outfmt).strip():
+            from api.services.sharding_precision import merge_format_for_outfmt
+
+            if merge_format_for_outfmt(outfmt) is None:
+                raise ValueError(
+                    "blast_options.outfmt is not shard-merge compatible: a tabular "
+                    "layout must include both evalue and bitscore (use 'std' or list "
+                    "them explicitly)"
+                )
+        return self
+
+
+
 _QUEUED_STATUSES = frozenset({"accepted", "created", "pending", "queued", "scheduled"})
 _RUNNING_STATUSES = frozenset(
     {

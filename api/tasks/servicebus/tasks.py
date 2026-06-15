@@ -21,7 +21,10 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     are BOUNDED per tick (drain/publish/cleanup caps) so a backlog drains over
     several ticks instead of spinning one tick forever. Transition events are
     emitted only on an actual status change (``last_status`` marker) so the
-    topic does not flood.
+    topic does not flood. A caller-supplied ``request_id`` pass-through value on
+    a request message is captured at drain time and echoed onto every published
+    transition event (body + topic envelope) so a topic subscriber correlates on
+    the same value the producer set.
 Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py``.
 """
 
@@ -116,6 +119,32 @@ def _result_ref(openapi_job_id: str) -> dict[str, str]:
     }
 
 
+# Bound the pass-through value so a hostile/oversized producer value cannot bloat
+# the topic message envelope (Service Bus caps total application-property size).
+_REQUEST_ID_MAX_LEN = 256
+
+
+def _extract_request_id(msg: ParsedMessage) -> str:
+    """Extract the caller-supplied ``request_id`` pass-through value, if any.
+
+    Looks first in the JSON body (``request_id``), then falls back to the
+    Service Bus application property of the same name (a producer that sets it
+    on the message envelope rather than the body). Coerced to a trimmed,
+    length-bounded string; returns ``""`` when absent. This value is NEVER
+    injected into the OpenAPI submit payload (it is not part of that contract) —
+    it only rides the bridge row + completion-topic events so it survives
+    end-to-end to a topic subscriber.
+    """
+    body = msg.body if isinstance(msg.body, dict) else {}
+    candidate = body.get("request_id")
+    if candidate is None:
+        props = msg.application_properties or {}
+        candidate = props.get("request_id")
+    if candidate is None:
+        return ""
+    return str(candidate).strip()[:_REQUEST_ID_MAX_LEN]
+
+
 def _event_id(correlation_id: str, status: str) -> str:
     """Deterministic id for a (correlation_id, status) completion event.
 
@@ -137,6 +166,7 @@ def _transition_event(
     status: str,
     attempt: int,
     error_code: str | None = None,
+    request_id: str = "",
 ) -> dict[str, Any]:
     """Build a completion-topic ``blast.transition`` event with idempotency keys.
 
@@ -148,6 +178,11 @@ def _transition_event(
     ``publish_transitions``); it is kept in the schema for stability and for the
     explicit ``attempt=1`` timeout-failure event. ``result_ref`` points at the
     dashboard result API (pointers only — never result bytes; charter §9).
+    ``request_id`` is the caller-supplied pass-through value from the request
+    queue message; it is echoed onto the event (and the topic envelope) only
+    when the producer set one, so a subscriber correlates on the SAME value.
+    It is NOT part of the ``event_id`` digest — it is constant per correlation
+    id, so including it would not change dedup semantics.
     """
     event: dict[str, Any] = {
         "event": "blast.transition",
@@ -159,6 +194,8 @@ def _transition_event(
         "ts": _now_iso(),
         "result_ref": _result_ref(openapi_job_id),
     }
+    if request_id:
+        event["request_id"] = request_id
     if error_code:
         event["error_code"] = error_code
     return event
@@ -304,14 +341,101 @@ def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[st
     return payload
 
 
+def _is_v1_jobs_message(body: dict[str, Any]) -> bool:
+    """True when a message wants the free-form ``/v1/jobs`` (multi-token) path.
+
+    The signal is a ``blast_options`` object (the sibling ``/v1/jobs`` shape).
+    A message using the XML-locked ``options`` object (``ExternalBlastOptions``)
+    keeps the existing ``/api/v1/elastic-blast/submit`` path. The two are
+    mutually exclusive by key name, so detection is unambiguous and a producer
+    explicitly opts into the tabular path by sending ``blast_options``.
+    """
+    return isinstance(body.get("blast_options"), dict)
+
+
+def _build_v1_jobs_payload(
+    msg: ParsedMessage, cfg: ServiceBusConfig
+) -> dict[str, Any] | None:
+    """Map a ``blast_options`` message to a validated ``/v1/jobs`` payload.
+
+    Returns ``None`` when the message cannot ever succeed (malformed / missing
+    required fields) so the caller dead-letters it instead of retrying forever.
+    Mirrors ``_build_request_payload`` but validates against
+    ``ExternalBlastV1Request`` (free-form ``outfmt`` + ``extra``) and stamps the
+    same server-derived metadata (``submission_source=servicebus``, sharded-DB
+    ``resource_profile`` promotion, correlation id).
+    """
+    from api.routes.elastic_blast import ExternalBlastV1Request
+    from api.services.blast.submit_payload import (
+        canonical_submit_metadata,
+        resolve_sharded_db_resource_profile,
+    )
+
+    body = dict(msg.body or {})
+    correlation_id = (
+        str(body.get("external_correlation_id") or "").strip()
+        or (msg.correlation_id or "").strip()
+        or (msg.message_id or "").strip()
+    )
+    if not correlation_id:
+        return None
+
+    candidate: dict[str, Any] = {
+        "query_fasta": body.get("query_fasta"),
+        "db": body.get("db"),
+        "program": body.get("program") or "blastn",
+        "external_correlation_id": correlation_id,
+    }
+    if isinstance(body.get("blast_options"), dict):
+        candidate["blast_options"] = body["blast_options"]
+    for key in ("taxid", "is_inclusive", "priority", "batch_len", "idempotency_key"):
+        if body.get(key) is not None:
+            candidate[key] = body[key]
+
+    try:
+        request = ExternalBlastV1Request(**candidate)
+    except Exception:
+        LOGGER.warning("service bus v1 request validation failed corr=%s", correlation_id)
+        return None
+
+    payload = request.model_dump(exclude_none=True)
+    # Server-derived sharding default (same as the XML path): a memory-heavy DB
+    # like core_nt MUST run sharded, which the sibling only does for a
+    # sharding-family resource_profile. Promote a missing/standard profile.
+    payload["resource_profile"] = resolve_sharded_db_resource_profile(
+        payload.get("db") or "", payload.get("resource_profile")
+    )
+    # Server-derived source + correlation id (a producer cannot spoof the
+    # source). ``canonical_submit_metadata`` reads the just-promoted
+    # resource_profile off ``payload`` and preserves it.
+    payload.update(
+        canonical_submit_metadata(
+            payload,
+            submission_source="servicebus",
+            correlation_id=correlation_id,
+        )
+    )
+    return payload
+
+
 def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
-    payload = _build_request_payload(msg, cfg)
+    body = dict(msg.body or {})
+    if _is_v1_jobs_message(body):
+        # Multi-token / tabular outfmt path: forward the producer's
+        # ``blast_options`` to the sibling ``/v1/jobs`` (free-form options)
+        # instead of the XML-locked ``/api/v1/elastic-blast/submit``.
+        payload = _build_v1_jobs_payload(msg, cfg)
+        submit = external_blast.submit_job_v1
+    else:
+        payload = _build_request_payload(msg, cfg)
+        submit = external_blast.submit_job
     if payload is None:
         # Cannot ever succeed → dead-letter (do not loop forever).
         return MessageAction.DEAD_LETTER
 
     correlation_id = str(payload["external_correlation_id"])
     received_ts = _now_iso()
+    request_id = _extract_request_id(msg)
 
     # Idempotency: at-least-once delivery means we may see this twice.
     existing = get_bridge(correlation_id)
@@ -320,7 +444,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         return MessageAction.COMPLETE
 
     try:
-        upstream = external_blast.submit_job(payload, **_openapi_kwargs(cfg))
+        upstream = submit(payload, **_openapi_kwargs(cfg))
     except Exception:
         LOGGER.exception("service bus → OpenAPI submit failed corr=%s", correlation_id)
         return MessageAction.ABANDON
@@ -332,6 +456,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             openapi_job_id=openapi_job_id,
             last_status="",
             done=False,
+            request_id=request_id,
         )
     )
     # Consumer is the writer: persist the durable jobstate row NOW (at drain
@@ -360,6 +485,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
                 openapi_job_id=openapi_job_id,
                 status=_STATUS_QUEUED,
                 attempt=1,
+                request_id=request_id,
             ),
         )
         mark_published(correlation_id, _STATUS_QUEUED)
@@ -477,6 +603,7 @@ def _publish_one_bridge(
                 status=_STATUS_FAILED,
                 attempt=1,
                 error_code="bridge_timeout",
+                request_id=rec.request_id,
             )
             try:
                 service_bus.publish_event(cfg, timeout_event)
@@ -505,6 +632,7 @@ def _publish_one_bridge(
         status=status,
         attempt=attempt,
         error_code=error_code,
+        request_id=rec.request_id,
     )
     try:
         service_bus.publish_event(cfg, event)

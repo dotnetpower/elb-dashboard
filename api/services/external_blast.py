@@ -386,6 +386,7 @@ def submit_job(
     subscription_id: str = "",
     resource_group: str = "",
     cluster_name: str = "",
+    submit_path: str = "/api/v1/elastic-blast/submit",
 ) -> dict[str, Any]:
     """POST the canonical submit body to the sibling OpenAPI service.
 
@@ -443,7 +444,7 @@ def submit_job(
                 resource_group=resource_group,
                 cluster_name=cluster_name,
                 send=lambda client: client.post(
-                    "/api/v1/elastic-blast/submit", json=payload
+                    submit_path, json=payload
                 ),
                 label="submit_job",
             )
@@ -488,6 +489,36 @@ def submit_job(
     raise HTTPException(
         503,
         detail={"code": "openapi_unreachable", "message": "submit failed without explicit error"},
+    )
+
+
+def submit_job_v1(
+    payload: dict[str, Any],
+    *,
+    base_url: str | None = None,
+    api_token: str | None = None,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+) -> dict[str, Any]:
+    """Submit via the sibling ``POST /v1/jobs`` (free-form ``blast_options``).
+
+    Unlike :func:`submit_job` (which posts to ``/api/v1/elastic-blast/submit``,
+    where the sibling forces ``-outfmt 5`` XML), this posts the
+    ``JobSubmitRequest`` shape directly so a caller can request a multi-token
+    tabular layout (e.g. ``-outfmt 7 std staxids sstrand qseq sseq``). Both
+    endpoints land in the same sibling job store, so status/get/file tracking is
+    identical. Shares the transport-retry + stale-token-401 self-heal contract
+    by delegating to :func:`submit_job` with the ``/v1/jobs`` path.
+    """
+    return submit_job(
+        payload,
+        base_url=base_url,
+        api_token=api_token,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        submit_path="/v1/jobs",
     )
 
 
