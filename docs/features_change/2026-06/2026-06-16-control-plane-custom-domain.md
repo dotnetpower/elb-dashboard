@@ -24,7 +24,10 @@ New **Settings → Control plane domain** section:
 
 - Text field to enter the custom domain (e.g. `https://dashboard.elasticblast.com`).
   Client- and server-side validation enforce the sibling's contract: `https://`
-  only (except `localhost`), origin form, no path / query / fragment.
+  only (except `localhost`), origin form, no path / query / fragment / credentials.
+  The value is canonicalised (lower-cased scheme + host, rebuilt from the parsed
+  components) and control characters are rejected, so a mixed-case scheme or a
+  tab/newline injection can never survive into the stored webhook target.
 - **Save domain** persists the value durably (survives Container App revision
   restarts) — no redeploy needed. **Clear** reverts to the FQDN fallback.
 - An **Effective URL** row shows what the next OpenAPI deploy will actually inject

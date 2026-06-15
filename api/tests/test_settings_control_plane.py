@@ -53,6 +53,11 @@ def fake_singleton(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
         ("https://dashboard.elasticblast.com:8443", "https://dashboard.elasticblast.com:8443"),
         ("http://localhost:8080", "http://localhost:8080"),
         ("http://127.0.0.1:8080/", "http://127.0.0.1:8080"),
+        # Mixed-case scheme + host are canonicalised to lower-case so a
+        # case-sensitive `startswith("https://")` check on the sibling cannot
+        # reject the stored webhook target.
+        ("HTTPS://Dashboard.Example.com", "https://dashboard.example.com"),
+        ("https://Dashboard.ElasticBlast.com:8443", "https://dashboard.elasticblast.com:8443"),
         ("", ""),
         ("   ", ""),
     ],
@@ -71,6 +76,10 @@ def test_normalise_accepts(raw: str, expected: str) -> None:
         "https://dashboard.elasticblast.com/#frag",  # fragment
         "https://",  # no host
         "dashboard.elasticblast.com",  # no scheme
+        "https://user:pass@dashboard.elasticblast.com",  # embedded credentials
+        "https://host\tinjected.com",  # control char (tab) injection
+        "https://host\ninjected.com",  # control char (newline) injection
+        "https://dashboard.elasticblast.com:99999",  # invalid port
     ],
 )
 def test_normalise_rejects(raw: str) -> None:

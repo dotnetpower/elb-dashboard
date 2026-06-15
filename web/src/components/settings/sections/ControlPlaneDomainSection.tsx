@@ -62,6 +62,11 @@ const SOURCE_LABEL: Record<ControlPlaneUrlSource, string> = {
 function validateUrl(raw: string): string {
   const value = raw.trim();
   if (!value) return "Enter a URL.";
+  // Reject control characters explicitly — they mirror the backend guard that
+  // blocks tab/newline injection into the webhook target.
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    return "URL must not contain control characters.";
+  }
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -77,6 +82,9 @@ function validateUrl(raw: string): string {
   }
   if (parsed.search || parsed.hash) {
     return "URL must not include a query or fragment.";
+  }
+  if (parsed.username || parsed.password) {
+    return "URL must not include credentials.";
   }
   return "";
 }

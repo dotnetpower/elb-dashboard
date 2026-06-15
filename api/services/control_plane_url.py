@@ -48,25 +48,40 @@ _LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 
 def normalise_control_plane_url(value: str) -> str:
-    """Validate + normalise a control-plane public URL.
+    """Validate + normalise a control-plane public URL to a canonical origin.
 
-    Returns the trimmed URL with any trailing slash removed, or ``""`` for an
-    empty input. Enforces the sibling's scheme contract: ``https://`` is
-    required except for a ``localhost`` / ``127.0.0.1`` host (dev), and the URL
-    must be an origin (scheme + host[:port]) with no path / query / fragment so a
-    stray ``/api`` suffix cannot corrupt the webhook target.
+    Returns a canonical ``scheme://host[:port]`` origin (lower-cased scheme +
+    host, no trailing slash), or ``""`` for an empty input. The value is
+    *rebuilt from the parsed components* rather than echoed back from the raw
+    string so that mixed-case schemes (``HTTPS://``), embedded credentials, and
+    any characters ``urlparse`` silently strips can never survive into the
+    stored webhook target.
+
+    Enforces the sibling's contract: ``https://`` is required except for a
+    ``localhost`` / ``127.0.0.1`` host (dev), and the URL must be an origin
+    (scheme + host[:port]) with no path / query / fragment / credentials so a
+    stray ``/api`` suffix or ``user:pass@`` cannot corrupt the webhook target.
 
     Raises:
-        ValueError: the URL is malformed, uses a non-localhost ``http://``
-            scheme, is missing a host, or carries a path / query / fragment.
+        ValueError: the URL is malformed, contains control characters, uses a
+            non-localhost ``http://`` scheme, is missing a host, has an invalid
+            port, or carries a path / query / fragment / credentials.
     """
-    url = (value or "").strip().rstrip("/")
-    if not url:
+    raw = (value or "").strip()
+    if not raw:
         return ""
-    parsed = urlparse(url)
+    # Reject control characters explicitly instead of letting urlparse silently
+    # strip a tab / newline and "succeed" with a different host than the operator
+    # typed — a request-smuggling / header-injection surface for the webhook.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        raise ValueError("URL must not contain control characters")
+    raw = raw.rstrip("/")
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
     if parsed.scheme not in ("https", "http"):
         raise ValueError("URL must start with https://")
-    host = (parsed.hostname or "").strip()
+    host = parsed.hostname
     if not host:
         raise ValueError("URL must include a hostname")
     if parsed.scheme == "http" and host not in _LOCALHOST_HOSTS:
@@ -75,7 +90,20 @@ def normalise_control_plane_url(value: str) -> str:
         raise ValueError("URL must not include a path")
     if parsed.query or parsed.fragment:
         raise ValueError("URL must not include a query or fragment")
-    return url
+    if parsed.username or parsed.password:
+        raise ValueError("URL must not include credentials")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("URL has an invalid port") from exc
+    # Rebuild from parsed components: ``parsed.hostname`` is already lower-cased
+    # and credential-free; an IPv6 literal needs its brackets restored for the
+    # netloc to round-trip.
+    netloc_host = f"[{host}]" if ":" in host else host
+    canonical = f"{parsed.scheme}://{netloc_host}"
+    if port is not None:
+        canonical += f":{port}"
+    return canonical
 
 
 def _normalise_stored(value: str) -> str:
