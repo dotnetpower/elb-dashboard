@@ -179,6 +179,15 @@ Calm, muted, low-contrast surfaces. **Detail moved to [docs/copilot/glass-ui.md]
 * Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`…). English only.
 * No commented-out code in commits. Delete it; git remembers.
 * No new dependency without justification in the PR description.
+* **Git workflow — commit to the current branch, never branch or open a PR.**
+  Work and commit on whatever branch is already checked out (normally `main`).
+  Do **not** create feature branches, do **not** `git checkout -b`, and do
+  **not** open pull requests (no `gh pr create`). Do **not** `git push` —
+  pushing is the maintainer's call. Leave finished work as local commits on the
+  current branch; the maintainer reviews `git log`/`git diff` and pushes when
+  ready. (PR-oriented language elsewhere in this charter — "PR description",
+  "apply to every PR" — describes review criteria for the eventual maintainer
+  push, not an instruction for the agent to open a PR.)
 
 ---
 

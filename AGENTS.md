@@ -219,6 +219,13 @@ where the failure was found, but knowing them up front saves a lot of time.
 - **English only** in source / commits / docs / UI strings. (Korean only in
   the conversation with the user.)
 - **Conventional Commits** (`feat:`, `fix:`, `chore:`, `docs:`, …).
+- **Git workflow — commit to the current branch, never branch or open a PR.**
+  Work and commit on whatever branch is already checked out (normally `main`).
+  Do **not** `git checkout -b` a feature branch, do **not** open pull requests
+  (`gh pr create`), and do **not** `git push` — pushing is the maintainer's
+  call. Leave finished work as local commits; the maintainer reviews and pushes.
+  ("PR description" / "apply to every PR" phrasing in the charter is review
+  criteria for the eventual maintainer push, not a cue to open a PR.)
 - **Python context headers**: every new `*.py` file must start with a natural
    module summary docstring plus `Responsibility`, `Edit boundaries`,
    `Key entry points`, `Risky contracts`, and `Validation`. Do not use the
