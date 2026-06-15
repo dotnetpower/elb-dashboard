@@ -694,3 +694,97 @@ export type BlastRecommendGoal =
   | "genomes"
   | "well_characterized"
   | "comprehensive";
+
+export interface CapacityGateSnapshot {
+  enabled: boolean;
+  pool: string;
+  slots: { in_use: number; max: number };
+  cpu_request_pct: number;
+  memory_request_pct: number;
+  watermark_cpu_pct: number;
+  watermark_memory_pct: number;
+  pending_pods: number;
+  decision_preview: "admit" | "deny";
+  decision_reason: string | null;
+  decision_retryable: boolean;
+  predicted_demand: { cpu_m: number; mem_mib: number };
+  active_reservations: Array<{
+    job_id: string;
+    reserved_at: string;
+    cpu_m: number;
+    mem_mib: number;
+  }>;
+  signals_degraded: boolean;
+  signals_error: string | null;
+  counters?: CapacityGateCounters;
+}
+
+export interface CapacityGateCounters {
+  admit_total: number;
+  deny_total: number;
+  release_total: number;
+  reserve_lost_total: number;
+  deny_by_reason: Record<string, number>;
+  last_event_at: string | null;
+}
+
+export interface BlastSubjectAggregate {
+  sseqid: string;
+  max_bitscore: number;
+  total_bitscore: number;
+  hsp_count: number;
+  stitle?: string;
+  sscinames?: string;
+  staxids?: string;
+}
+
+/**
+ * Score-class truncation signal surfaced from the merge step's
+ * merge-report.json. Present on the alignments payload only when the
+ * max_target_seqs cutoff split a tied score class (`overflow_count > 0`) or
+ * the opt-in diversity-aware cutoff reserved near-miss slots
+ * (`diversity_reserved_count > 0`). Absent otherwise.
+ */
+export interface BlastTieCutoff {
+  /** Number of hits in the top tied score class that were dropped because the
+   *  displayed set hit the max_target_seqs limit. */
+  overflow_count: number;
+  /** Slots reserved for lower-scoring near-miss hits by the opt-in
+   *  diversity-aware cutoff (0 when that mode is off). */
+  diversity_reserved_count: number;
+  /** The max_target_seqs value in effect for the job, when recorded. */
+  max_target_seqs?: number;
+  /** Up to 5 sample queries whose top score class was truncated. */
+  queries?: Array<{ query_id?: string; overflow_count?: number }>;
+}
+
+export interface BlastTaxonomyRow {
+  key: string;
+  organism: string;
+  taxid: string;
+  count: number;
+  best_evalue: number | null;
+  top_bitscore: number | null;
+  /** Raw NCBI Lineage string ("Viruses; Monodnaviria; …"). Present when
+   *  the caller requested `include_lineage=true` and the eutils call
+   *  succeeded for this taxid. */
+  lineage?: string;
+  /** Parsed `LineageEx` chain root → leaf. Same source as `lineage`. */
+  lineage_ex?: Array<{
+    rank: string;
+    taxid: number;
+    scientific_name: string;
+  }>;
+  /** NCBI "Blast Name" group (viruses, bacteria, mammals, plants, …)
+   *  derived server-side from the lineage chain. */
+  blast_name?: string;
+  /** How the `organism` field was populated:
+   *  - "sscinames" — pulled from the BLAST output column (authoritative).
+   *  - "stitle"    — heuristic extraction from the subject title.
+   *  Empty when the row was bucketed as `unclassified`. */
+  organism_source?: string;
+  /** Set to "name_lookup" when the taxid was resolved server-side from
+   *  the organism name via NCBI eutils (i.e. the row originated from
+   *  the stitle fallback, not from a `staxids` column). */
+  taxid_source?: string;
+}
