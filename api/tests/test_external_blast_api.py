@@ -166,6 +166,54 @@ def test_request_with_token_resync_passthrough_on_success(monkeypatch):
     assert resynced == []  # resync never attempted on success
 
 
+def test_token_resync_coalesces_concurrent_callers(monkeypatch):
+    """A burst of 401s must NOT each fire an independent cluster read — the
+    coalescing cache serves the just-recovered token to the queued callers."""
+    from api.services import external_blast
+
+    external_blast.reset_token_resync_cache()
+    calls: list[int] = []
+
+    def _fake_cluster_resync():
+        calls.append(1)
+        return "healed-token"
+
+    monkeypatch.setattr(
+        "api.services.openapi.token.resync_openapi_api_token_from_cluster",
+        _fake_cluster_resync,
+    )
+    try:
+        # Three callers within the coalesce TTL → exactly one cluster read.
+        tokens = [external_blast._resync_token_after_401() for _ in range(3)]
+        assert tokens == ["healed-token", "healed-token", "healed-token"]
+        assert len(calls) == 1, "expected a single coalesced cluster read"
+    finally:
+        external_blast.reset_token_resync_cache()
+
+
+def test_token_resync_empty_result_not_cached(monkeypatch):
+    """An empty recovery must not be cached — the next 401 retries the read."""
+    from api.services import external_blast
+
+    external_blast.reset_token_resync_cache()
+    calls: list[int] = []
+
+    def _fake_empty():
+        calls.append(1)
+        return ""
+
+    monkeypatch.setattr(
+        "api.services.openapi.token.resync_openapi_api_token_from_cluster",
+        _fake_empty,
+    )
+    try:
+        external_blast._resync_token_after_401()
+        external_blast._resync_token_after_401()
+        assert len(calls) == 2, "empty result must not suppress the next retry"
+    finally:
+        external_blast.reset_token_resync_cache()
+
+
 def test_external_blast_options_default_evalue_matches_ncbi(monkeypatch):
     """Omitting `options` must default evalue to 0.05 (NCBI megablast default)."""
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")

@@ -76,6 +76,15 @@ _READY_INFLIGHT_WAIT_SECONDS = float(
 _READY_INFLIGHT_MAX_WAIT_ROUNDS = int(
     os.environ.get("OPENAPI_READY_INFLIGHT_MAX_WAIT_ROUNDS", "2")
 )
+# Token-resync coalescing (see ``_resync_token_after_401``). A redeploy
+# invalidates the cached token for every in-flight call at once; the lock
+# serialises the recovery and the short TTL lets the queued callers reuse the
+# just-recovered token instead of each issuing its own K8s read.
+_RESYNC_LOCK = threading.Lock()
+_RESYNC_RESULT: tuple[float, str] = (0.0, "")
+_RESYNC_COALESCE_TTL_SECONDS = float(
+    os.environ.get("OPENAPI_TOKEN_RESYNC_COALESCE_TTL_SECONDS", "3.0")
+)
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 # Submit retries on transient transport failures (connection refused /
 # reset / read timeout). Only applied when the payload carries an
@@ -191,14 +200,52 @@ def _resync_token_after_401() -> str:
     Returns the recovered token (which the resync helper also writes back into
     the runtime cache / process env) or ``""`` when no live token could be read.
     Never raises — a resync failure simply surfaces the original 401.
-    """
-    try:
-        from api.services.openapi.token import resync_openapi_api_token_from_cluster
 
-        return resync_openapi_api_token_from_cluster() or ""
-    except Exception as exc:  # pragma: no cover - defensive
-        LOGGER.warning("openapi 401 token resync raised %s", type(exc).__name__)
-        return ""
+    Coalesced (self-critique: bound the concurrency fan-out). A control-plane
+    redeploy invalidates the cached token for EVERY in-flight sibling call at
+    once, so without coalescing a burst of N concurrent 401s would each fire an
+    independent ``read_cluster_openapi_token`` K8s API call (a thundering herd
+    against the API server, all reading the same value). A process-wide lock
+    serialises the resync, and a short result cache lets the callers that were
+    waiting on the lock reuse the just-recovered token instead of re-reading it.
+    The cache TTL is deliberately tiny so a genuinely new token rotation is
+    still picked up on the next 401 after the window.
+    """
+    import time as _time
+
+    now = _time.monotonic()
+    with _RESYNC_LOCK:
+        cached_ts, cached_token = _RESYNC_RESULT
+        if cached_token and (now - cached_ts) < _RESYNC_COALESCE_TTL_SECONDS:
+            # A concurrent caller already resynced moments ago — reuse it
+            # instead of issuing another K8s read for the same value.
+            return cached_token
+        try:
+            from api.services.openapi.token import resync_openapi_api_token_from_cluster
+
+            token = resync_openapi_api_token_from_cluster() or ""
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning("openapi 401 token resync raised %s", type(exc).__name__)
+            token = ""
+        # Only cache a successful recovery; an empty result must not suppress the
+        # next caller's retry (it may succeed once the pod/cluster settles).
+        if token:
+            _set_resync_result(_time.monotonic(), token)
+        return token
+
+
+def _set_resync_result(ts: float, token: str) -> None:
+    """Store the last successful resync (caller holds ``_RESYNC_LOCK``)."""
+    global _RESYNC_RESULT
+    _RESYNC_RESULT = (ts, token)
+
+
+def reset_token_resync_cache() -> None:
+    """Drop the coalesced resync result (test hook)."""
+    global _RESYNC_RESULT
+    with _RESYNC_LOCK:
+        _RESYNC_RESULT = (0.0, "")
+
 
 
 def _request_with_token_resync(

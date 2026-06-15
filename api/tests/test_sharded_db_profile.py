@@ -51,6 +51,26 @@ def test_non_standard_custom_profile_preserved() -> None:
     assert resolve_sharded_db_resource_profile("core_nt", "custom_x") == "custom_x"
 
 
+def test_sharding_defaults_are_recognised_sharding_profiles() -> None:
+    """Contract guard: every promoted default MUST itself be a profile the
+    sibling treats as 'shard this DB'. Otherwise the promotion would hand the
+    sibling a profile it does not act on and the DB would silently run
+    unsharded again (the exact bug this feature fixes). Keep this green when the
+    sibling's sharding-profile set or the per-DB default map changes."""
+    from api.services.blast.submit_payload import (
+        _SHARDED_DB_DEFAULT_PROFILE,
+        _SHARDING_RESOURCE_PROFILES,
+    )
+
+    assert _SHARDED_DB_DEFAULT_PROFILE, "expected at least one sharded-DB default"
+    for db_name, profile in _SHARDED_DB_DEFAULT_PROFILE.items():
+        assert profile in _SHARDING_RESOURCE_PROFILES, (
+            f"default profile {profile!r} for {db_name!r} is not in the sibling's "
+            f"sharding-profile set {_SHARDING_RESOURCE_PROFILES} — the sibling would "
+            "not shard it"
+        )
+
+
 def test_direct_submit_promotes_core_nt(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /api/v1/elastic-blast/submit forwards core_nt_safe to the sibling
     even when the caller sends no resource_profile."""
