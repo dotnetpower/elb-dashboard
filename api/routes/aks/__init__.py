@@ -19,6 +19,7 @@ from api.routes.aks import cancel as _cancel_routes
 from api.routes.aks import ensure_running as _ensure_running_routes
 from api.routes.aks import lifecycle as _lifecycle_routes
 from api.routes.aks import openapi as _openapi_routes
+from api.routes.aks import openapi_databases as _openapi_databases_routes
 from api.routes.aks import openapi_proxy as _openapi_proxy_routes
 from api.routes.aks import peering as _peering_routes
 from api.routes.aks import preflight as _preflight_routes
@@ -63,6 +64,12 @@ from api.routes.aks.openapi import (
 from api.routes.aks.openapi import (
     aks_openapi_token_generate as aks_openapi_token_generate,
 )
+from api.routes.aks.openapi_databases import (
+    aks_openapi_database as aks_openapi_database,
+)
+from api.routes.aks.openapi_databases import (
+    aks_openapi_databases as aks_openapi_databases,
+)
 from api.routes.aks.openapi_proxy import (
     aks_openapi_proxy as aks_openapi_proxy,
 )
@@ -78,6 +85,7 @@ aks_router.include_router(_provision_routes.router)
 aks_router.include_router(_cancel_routes.router)
 aks_router.include_router(_recent_failures_routes.router)
 aks_router.include_router(_openapi_routes.router)
+aks_router.include_router(_openapi_databases_routes.router)
 aks_router.include_router(_openapi_proxy_routes.router)
 aks_router.include_router(_ensure_running_routes.router)
 aks_router.include_router(_peering_routes.router)

@@ -29,7 +29,19 @@ export function EndpointCard({
   id: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [paramValues, setParamValues] = useState<Record<string, string>>({});
+  const [paramValues, setParamValues] = useState<Record<string, string>>(() => {
+    // Seed path-parameter defaults so a one-click "Send Request" produces a
+    // valid URL instead of a broken `/.../{db_name}` -> `/.../` path. Query
+    // params are intentionally NOT seeded: leaving them empty lets the backend
+    // fall back to its configured env (e.g. STORAGE_ACCOUNT_NAME).
+    const seed: Record<string, string> = {};
+    for (const param of ep.parameters) {
+      if (param.in === "path" && param.schema?.default != null) {
+        seed[param.name] = String(param.schema.default);
+      }
+    }
+    return seed;
+  });
   const [bodyText, setBodyText] = useState("");
   const [selectedExample, setSelectedExample] = useState("");
   const [copiedAnchor, flashCopiedAnchor] = useTransientState(false);

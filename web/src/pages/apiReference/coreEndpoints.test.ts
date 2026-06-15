@@ -61,4 +61,48 @@ describe("buildCoreEndpoints", () => {
     expect(example?.warmup?.expected_node_count).toBe(2);
   });
 
+  it("exposes the cluster-independent database list endpoint on the dashboard host", () => {
+    const list = buildCoreEndpoints(ctx).find(
+      (e) => e.path === "/api/aks/openapi/databases",
+    );
+    expect(list).toBeDefined();
+    expect(list?.method).toBe("get");
+    expect(list?.tags).toContain("Core");
+    // elb-openapi drop-in list shape.
+    expect(list?.responses?.["200"]?.fields).toEqual([
+      "databases",
+      "count",
+      "container",
+    ]);
+    // Storage scope params are optional (env fallback) and NOT seeded with
+    // defaults so empty values are omitted from the request.
+    const account = list?.parameters.find((p) => p.name === "storage_account");
+    expect(account?.in).toBe("query");
+    expect(account?.required).toBe(false);
+    expect(account?.schema?.default).toBeUndefined();
+  });
+
+  it("exposes the cluster-independent database metadata endpoint with a seeded path default", () => {
+    const detail = buildCoreEndpoints(ctx).find(
+      (e) => e.path === "/api/aks/openapi/databases/{db_name}",
+    );
+    expect(detail).toBeDefined();
+    expect(detail?.method).toBe("get");
+    expect(detail?.tags).toContain("Core");
+    // The path param carries a default so a one-click "Send Request" builds a
+    // valid URL instead of a broken `/databases/`.
+    const dbName = detail?.parameters.find((p) => p.name === "db_name");
+    expect(dbName?.in).toBe("path");
+    expect(dbName?.required).toBe(true);
+    expect(dbName?.schema?.default).toBe("core_nt");
+    // Drop-in for elb-openapi DatabaseMetadata.
+    expect(detail?.responses?.["200"]?.fields).toContain("molecule_type");
+    expect(detail?.responses?.["404"]).toBeDefined();
+  });
+
+  it("keeps ensure-running first so the other tests' [0] index holds", () => {
+    expect(buildCoreEndpoints(ctx)[0].path).toBe(
+      "/api/aks/openapi/ensure-running",
+    );
+  });
 });

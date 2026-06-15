@@ -28,6 +28,41 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
     resource_group: ctx.resourceGroup,
     cluster_name: ctx.clusterName,
   };
+  // Shared optional Storage-scope query params for the cluster-independent
+  // database endpoints. All optional: the deployed api sidecar falls back to
+  // its STORAGE_ACCOUNT_NAME / AZURE_RESOURCE_GROUP / AZURE_SUBSCRIPTION_ID env,
+  // so leaving them blank yields a one-click call against this deployment's own
+  // workload account. They are NOT seeded with defaults so empty values are
+  // omitted from the request and the env fallback wins.
+  const storageScopeParams = (): SpecEndpoint["parameters"] => [
+    {
+      name: "storage_account",
+      in: "query",
+      required: false,
+      description:
+        "Workload Storage account holding the blast-db container. Falls back " +
+        "to the STORAGE_ACCOUNT_NAME env when omitted.",
+      schema: { type: "string" },
+    },
+    {
+      name: "resource_group",
+      in: "query",
+      required: false,
+      description:
+        "Resource group of the Storage account (only used for degraded-state " +
+        "classification). Falls back to the AZURE_RESOURCE_GROUP env.",
+      schema: { type: "string" },
+    },
+    {
+      name: "subscription_id",
+      in: "query",
+      required: false,
+      description:
+        "Subscription of the Storage account. Falls back to the " +
+        "AZURE_SUBSCRIPTION_ID env.",
+      schema: { type: "string" },
+    },
+  ];
   return [
     {
       method: "post",
@@ -149,6 +184,128 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
             message:
               "subscription_id (or AZURE_SUBSCRIPTION_ID env), resource_group " +
               "and cluster_name are required.",
+          },
+        },
+      },
+    },
+    {
+      method: "get",
+      path: "/api/aks/openapi/databases",
+      summary: "List prepared BLAST databases (cluster-independent)",
+      description:
+        "Promotes the elb-openapi GET /v1/databases catalogue read to the " +
+        "always-on dashboard api sidecar. Because the catalogue is sourced " +
+        "directly from the workspace Storage account (which the api sidecar " +
+        "reaches over its private endpoint), this answers even while the AKS " +
+        "cluster — and therefore the in-cluster elb-openapi service — is " +
+        "stopped.\n\n" +
+        "storage_account is required, but in the deployed dashboard it falls " +
+        "back to the STORAGE_ACCOUNT_NAME env, so leave the params blank for a " +
+        "one-click call against this deployment's own workload account. The " +
+        "response mirrors elb-openapi's shape: { databases: [{ name }], count, " +
+        "container }.",
+      tags: ["Core"],
+      parameters: storageScopeParams(),
+      responses: {
+        "200": {
+          description:
+            "The prepared-database catalogue (drop-in for elb-openapi " +
+            "GET /v1/databases).",
+          fields: ["databases", "count", "container"],
+          example: {
+            databases: [{ name: "16S_ribosomal_RNA" }, { name: "core_nt" }],
+            count: 2,
+            container: "blast-db",
+          },
+        },
+        "400": {
+          description:
+            "storage_account is missing and no STORAGE_ACCOUNT_NAME env is set.",
+          example: {
+            status: "error",
+            code: "missing_parameters",
+            message: "storage_account (or STORAGE_ACCOUNT_NAME env) is required.",
+            databases: [],
+            count: 0,
+            container: "blast-db",
+          },
+        },
+        "503": {
+          description:
+            "Storage data plane is unreachable (e.g. network-blocked while " +
+            "debugging from a laptop). Degraded, never a 500.",
+          example: {
+            databases: [],
+            count: 0,
+            container: "blast-db",
+            degraded: true,
+            degraded_reason: "network_blocked",
+          },
+        },
+      },
+    },
+    {
+      method: "get",
+      path: "/api/aks/openapi/databases/{db_name}",
+      summary: "Get BLAST database metadata (cluster-independent)",
+      description:
+        "Promotes the elb-openapi GET /v1/databases/{db_name} metadata read to " +
+        "the always-on dashboard api sidecar, sourced from Storage so it " +
+        "answers while the cluster is stopped. The response mirrors the " +
+        "elb-openapi DatabaseMetadata shape (name, molecule_type in " +
+        "{dna, protein} plus molecule_label, snapshot, title, sequence/letter " +
+        "counts, byte sizes, cached_at).\n\n" +
+        "storage_account falls back to the STORAGE_ACCOUNT_NAME env like the " +
+        "list endpoint. Unknown db_name returns 404; an invalid name returns " +
+        "400; a transient Storage outage returns a degraded 503.",
+      tags: ["Core"],
+      parameters: [
+        {
+          name: "db_name",
+          in: "path",
+          required: true,
+          description:
+            "Database name as listed by GET /api/aks/openapi/databases " +
+            "(e.g. core_nt, nr, 16S_ribosomal_RNA).",
+          schema: { type: "string", default: "core_nt" },
+        },
+        ...storageScopeParams(),
+      ],
+      responses: {
+        "200": {
+          description:
+            "Single-database metadata (drop-in for elb-openapi " +
+            "GET /v1/databases/{db_name}).",
+          fields: [
+            "name",
+            "container",
+            "title",
+            "molecule_type",
+            "molecule_label",
+            "snapshot",
+            "number_of_sequences",
+            "number_of_letters",
+            "cached_at",
+          ],
+          example: {
+            name: "core_nt",
+            container: "blast-db",
+            title: "Core nucleotide BLAST database",
+            dbtype: "Nucleotide",
+            molecule_type: "dna",
+            molecule_label: "mixed DNA",
+            snapshot: "2026-06-01",
+            number_of_sequences: 102_456_789,
+            number_of_letters: 1_234_567_890,
+            cached_at: "2026-06-15T00:00:00+00:00",
+          },
+        },
+        "404": {
+          description: "No database with that name exists in the catalogue.",
+          example: {
+            status: "error",
+            code: "not_found",
+            message: "Database 'core_nt' not found.",
           },
         },
       },
