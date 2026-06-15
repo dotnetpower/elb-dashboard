@@ -126,8 +126,12 @@ class IdleDecision:
             ``keep`` → do nothing.
         reason: Human-readable code/phrase. Used in audit + SPA tooltip.
         next_stop_at: ISO 8601 (UTC) deadline at which the cluster
-            *would* be stopped if nothing changes. Empty when verdict is
-            ``keep`` for a non-idle reason (e.g. extended, disabled).
+            *would* be stopped if nothing changes. For an active Extend
+            grant (``reason == "extended"``) this is the grant expiry —
+            the earliest the cluster can stop while the grant holds — so
+            the SPA renders a live countdown. Empty when verdict is
+            ``keep`` for a non-idle reason with no projected time
+            (e.g. disabled, active job, cooldown, degraded read).
         seconds_until_stop: Convenience seconds-to-deadline, or 0 when
             ``next_stop_at`` is empty / past.
         active_job_count: How many active jobs were observed (for SPA
@@ -360,6 +364,25 @@ def evaluate_cluster(
         )
 
     if is_extended(pref, now=current):
+        # Surface the grant expiry as the projected stop time so the SPA
+        # renders a live countdown that reflects the user's Extend press
+        # ("Extend 30 min" → "Stops in 29:59"). ``extend_until`` is the
+        # earliest the cluster can be stopped while the grant is active —
+        # the first tick after it passes re-evaluates the idle clock. Before
+        # this, the extended verdict carried ``next_stop_at=""`` and the SPA
+        # hid the countdown, leaving only the muted "paused by Extend" note,
+        # so a successful Extend looked like a no-op (no visible time added).
+        extend_deadline = _parse_iso(pref.extend_until)
+        if extend_deadline is not None:
+            return IdleDecision(
+                verdict="keep",
+                reason="extended",
+                next_stop_at=_format_iso(extend_deadline),
+                seconds_until_stop=max(
+                    0, int((extend_deadline - current).total_seconds())
+                ),
+                cluster_power_state=power_state,
+            )
         return IdleDecision(
             verdict="keep",
             reason="extended",

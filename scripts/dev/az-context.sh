@@ -96,6 +96,17 @@ _az_context_current_azd_env_name() {
 # Mutates the in-process env (export) for every value it finds.
 # -----------------------------------------------------------------------
 _az_context_discover_workload_env() {
+  # The [8/9] step calls `az monitor app-insights component show`, which lives
+  # in the `application-insights` az extension. On a profile/CI where that
+  # extension is not yet installed, az CLI's dynamic-install defaults to
+  # `yes_prompt` and reads y/n from STDIN. The `2>/dev/null` on each call hides
+  # the prompt text but the stdin read still BLOCKS, so a non-interactive deploy
+  # hangs forever at "[8/9] managed identity + app insights" (the `|| printf ''`
+  # never fires because the process never exits). Force a non-interactive
+  # auto-install for the duration of discovery so the call completes instead of
+  # waiting on input; respect any value the operator pre-set.
+  export AZURE_EXTENSION_USE_DYNAMIC_INSTALL="${AZURE_EXTENSION_USE_DYNAMIC_INSTALL:-yes_without_prompt}"
+
   local sub
   sub="$(az account show --query id -o tsv 2>/dev/null)" || return 1
   [[ -n "$sub" ]] || return 1
@@ -181,9 +192,12 @@ _az_context_discover_workload_env() {
   fi
 
   local ai_name="" ai_conn=""
-  ai_name=$(az resource list -g "$rg" --subscription "$sub" --resource-type Microsoft.Insights/components --query "[0].name" -o tsv 2>/dev/null || printf '')
+  ai_name=$(az resource list -g "$rg" --subscription "$sub" --resource-type Microsoft.Insights/components --query "[0].name" -o tsv 2>/dev/null </dev/null || printf '')
   if [[ -n "$ai_name" ]]; then
-    ai_conn=$(az monitor app-insights component show -g "$rg" -a "$ai_name" --subscription "$sub" --query connectionString -o tsv 2>/dev/null || printf '')
+    # `</dev/null` is belt-and-suspenders alongside AZURE_EXTENSION_USE_DYNAMIC_INSTALL
+    # above: if any az prompt still fires here, it reads EOF and fails fast
+    # instead of blocking the deploy on stdin.
+    ai_conn=$(az monitor app-insights component show -g "$rg" -a "$ai_name" --subscription "$sub" --query connectionString -o tsv 2>/dev/null </dev/null || printf '')
   fi
 
   # API_CLIENT_ID is the App Registration client id used by MSAL. In a

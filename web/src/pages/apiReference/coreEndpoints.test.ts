@@ -74,12 +74,9 @@ describe("buildCoreEndpoints", () => {
       "count",
       "container",
     ]);
-    // Storage scope params are optional (env fallback) and NOT seeded with
-    // defaults so empty values are omitted from the request.
-    const account = list?.parameters.find((p) => p.name === "storage_account");
-    expect(account?.in).toBe("query");
-    expect(account?.required).toBe(false);
-    expect(account?.schema?.default).toBeUndefined();
+    // No input params: the deployed api sidecar resolves the Storage scope
+    // from its env, so the list call is one-click with nothing to fill in.
+    expect(list?.parameters).toEqual([]);
   });
 
   it("exposes the cluster-independent database metadata endpoint with a seeded path default", () => {
@@ -95,6 +92,9 @@ describe("buildCoreEndpoints", () => {
     expect(dbName?.in).toBe("path");
     expect(dbName?.required).toBe(true);
     expect(dbName?.schema?.default).toBe("core_nt");
+    // Only db_name is needed — the Storage scope comes from the api sidecar
+    // env, so no query params are exposed.
+    expect(detail?.parameters.every((p) => p.in === "path")).toBe(true);
     // Drop-in for elb-openapi DatabaseMetadata.
     expect(detail?.responses?.["200"]?.fields).toContain("molecule_type");
     expect(detail?.responses?.["404"]).toBeDefined();

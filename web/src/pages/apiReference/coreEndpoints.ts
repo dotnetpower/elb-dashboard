@@ -28,41 +28,6 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
     resource_group: ctx.resourceGroup,
     cluster_name: ctx.clusterName,
   };
-  // Shared optional Storage-scope query params for the cluster-independent
-  // database endpoints. All optional: the deployed api sidecar falls back to
-  // its STORAGE_ACCOUNT_NAME / AZURE_RESOURCE_GROUP / AZURE_SUBSCRIPTION_ID env,
-  // so leaving them blank yields a one-click call against this deployment's own
-  // workload account. They are NOT seeded with defaults so empty values are
-  // omitted from the request and the env fallback wins.
-  const storageScopeParams = (): SpecEndpoint["parameters"] => [
-    {
-      name: "storage_account",
-      in: "query",
-      required: false,
-      description:
-        "Workload Storage account holding the blast-db container. Falls back " +
-        "to the STORAGE_ACCOUNT_NAME env when omitted.",
-      schema: { type: "string" },
-    },
-    {
-      name: "resource_group",
-      in: "query",
-      required: false,
-      description:
-        "Resource group of the Storage account (only used for degraded-state " +
-        "classification). Falls back to the AZURE_RESOURCE_GROUP env.",
-      schema: { type: "string" },
-    },
-    {
-      name: "subscription_id",
-      in: "query",
-      required: false,
-      description:
-        "Subscription of the Storage account. Falls back to the " +
-        "AZURE_SUBSCRIPTION_ID env.",
-      schema: { type: "string" },
-    },
-  ];
   return [
     {
       method: "post",
@@ -199,13 +164,16 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
         "reaches over its private endpoint), this answers even while the AKS " +
         "cluster — and therefore the in-cluster elb-openapi service — is " +
         "stopped.\n\n" +
-        "storage_account is required, but in the deployed dashboard it falls " +
-        "back to the STORAGE_ACCOUNT_NAME env, so leave the params blank for a " +
-        "one-click call against this deployment's own workload account. The " +
-        "response mirrors elb-openapi's shape: { databases: [{ name }], count, " +
-        "container }.",
+        "The Storage scope (account / resource group / subscription) is " +
+        "resolved automatically from the deployed api sidecar's environment " +
+        "(STORAGE_ACCOUNT_NAME / AZURE_RESOURCE_GROUP / AZURE_SUBSCRIPTION_ID), " +
+        "so this is a one-click call against this deployment's own workload " +
+        "account — no parameters to fill in. (Direct external callers may still " +
+        "override via storage_account / resource_group / subscription_id query " +
+        "params.) The response mirrors elb-openapi's shape: " +
+        "{ databases: [{ name }], count, container }.",
       tags: ["Core"],
-      parameters: storageScopeParams(),
+      parameters: [],
       responses: {
         "200": {
           description:
@@ -255,9 +223,10 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
         "elb-openapi DatabaseMetadata shape (name, molecule_type in " +
         "{dna, protein} plus molecule_label, snapshot, title, sequence/letter " +
         "counts, byte sizes, cached_at).\n\n" +
-        "storage_account falls back to the STORAGE_ACCOUNT_NAME env like the " +
-        "list endpoint. Unknown db_name returns 404; an invalid name returns " +
-        "400; a transient Storage outage returns a degraded 503.",
+        "The Storage scope is resolved automatically from the deployed api " +
+        "sidecar's environment like the list endpoint, so only db_name is " +
+        "needed. Unknown db_name returns 404; an invalid name returns 400; a " +
+        "transient Storage outage returns a degraded 503.",
       tags: ["Core"],
       parameters: [
         {
@@ -269,7 +238,6 @@ export function buildCoreEndpoints(ctx: CoreApiContext): SpecEndpoint[] {
             "(e.g. core_nt, nr, 16S_ribosomal_RNA).",
           schema: { type: "string", default: "core_nt" },
         },
-        ...storageScopeParams(),
       ],
       responses: {
         "200": {

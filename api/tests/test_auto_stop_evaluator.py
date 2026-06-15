@@ -129,6 +129,11 @@ def test_extend_overrides_idle() -> None:
     decision = evaluate_cluster(pref, repo=_FakeRepo(), now=_NOW, power_state="Running")
     assert decision.verdict == "keep"
     assert decision.reason == "extended"
+    # The grant expiry is surfaced as the projected stop time so the SPA
+    # shows a live countdown reflecting the Extend press (not an empty
+    # "paused" note). ~10 min remain on the grant.
+    assert decision.next_stop_at != ""
+    assert 9 * 60 <= decision.seconds_until_stop <= 10 * 60
 
 
 def test_active_jobs_block_stop() -> None:
