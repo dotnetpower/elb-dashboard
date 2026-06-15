@@ -22,7 +22,12 @@ import {
 import { isFeatureEnabled, type FeatureFlag } from "@/config/runtime";
 
 export type ThemeMode = "light" | "dark" | "system";
-export type PreviewFeature = "customDb" | "labTools" | "liveWall" | "terminal";
+export type PreviewFeature =
+  | "customDb"
+  | "labTools"
+  | "liveWall"
+  | "terminal"
+  | "serviceBusPlayground";
 
 export interface Preferences {
   __v: 1;
@@ -60,6 +65,13 @@ export interface Preferences {
    * Settings → Preview section.
    */
   previewTerminalEnabled: boolean;
+  /**
+   * Preview opt-in: show the Service Bus Playground page (send BLAST request
+   * messages onto the queue and observe the consumer / completion topic).
+   * Default OFF — requires the deployment Service Bus integration to be active
+   * before a send actually enqueues.
+   */
+  previewServiceBusPlaygroundEnabled: boolean;
 }
 
 const STORAGE_KEY = "elb-prefs";
@@ -77,6 +89,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   previewLabToolsEnabled: false,
   previewLiveWallEnabled: false,
   previewTerminalEnabled: true,
+  previewServiceBusPlaygroundEnabled: false,
 };
 
 export const PREVIEW_PREF_KEYS = {
@@ -84,6 +97,7 @@ export const PREVIEW_PREF_KEYS = {
   labTools: "previewLabToolsEnabled",
   liveWall: "previewLiveWallEnabled",
   terminal: "previewTerminalEnabled",
+  serviceBusPlayground: "previewServiceBusPlaygroundEnabled",
 } satisfies Record<PreviewFeature, keyof Preferences>;
 
 const PREVIEW_RUNTIME_FLAGS: Partial<Record<PreviewFeature, FeatureFlag>> = {

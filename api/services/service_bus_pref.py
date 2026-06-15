@@ -51,6 +51,17 @@ DEFAULT_DLQ_MAX_AGE_DAYS = 7
 DEFAULT_DLQ_MAX_COUNT = 5000
 DEFAULT_DLQ_CLEANUP_BATCH = 500
 
+# Deployment-level entity-name overrides. When SET (non-empty) they win over the
+# saved Table/file config so an operator can pin the request queue / completion
+# topic via the Container App env without editing the Settings row (charter
+# §12a Rule 4: unset = existing behaviour preserved, i.e. the saved config value
+# — or its default — is used). An env value that fails the entity-name regex is
+# ignored (logged) so a typo can never silently point the integration at a bad
+# entity. ``SERVICEBUS_RESPONSE_TOPIC`` is the completion topic the dashboard
+# publishes transition events to and external subscribers consume.
+_REQUEST_QUEUE_ENV = "SERVICEBUS_REQUEST_QUEUE"
+_RESPONSE_TOPIC_ENV = "SERVICEBUS_RESPONSE_TOPIC"
+
 # Bounds — keep the cleanup task bounded (charter self-critique: no runaway loop).
 _DLQ_MAX_AGE_DAYS_CEIL = 365
 _DLQ_MAX_COUNT_CEIL = 1_000_000
@@ -274,7 +285,41 @@ def get_service_bus_config() -> ServiceBusConfig:
         found = _get_table()
     else:
         found = _get_file()
-    return found if found is not None else ServiceBusConfig()
+    cfg = found if found is not None else ServiceBusConfig()
+    return _apply_entity_env_overrides(cfg)
+
+
+def _apply_entity_env_overrides(cfg: ServiceBusConfig) -> ServiceBusConfig:
+    """Overlay ``SERVICEBUS_REQUEST_QUEUE`` / ``SERVICEBUS_RESPONSE_TOPIC``.
+
+    A non-empty, well-formed env value wins over the saved entity name so a
+    deployment can pin the request queue / completion topic without editing the
+    Settings row. Unset env keys leave the config untouched (existing behaviour
+    preserved). A malformed env value is ignored (logged) — never silently
+    points the integration at an invalid entity. Mutates and returns ``cfg`` in
+    place; ``cfg`` is a fresh object per call so this never leaks across rows.
+    """
+    queue_override = os.environ.get(_REQUEST_QUEUE_ENV, "").strip()
+    if queue_override:
+        if _RE_ENTITY.match(queue_override):
+            cfg.request_queue = queue_override
+        else:
+            LOGGER.warning(
+                "%s=%r is not a valid Service Bus entity name; ignoring override",
+                _REQUEST_QUEUE_ENV,
+                queue_override,
+            )
+    topic_override = os.environ.get(_RESPONSE_TOPIC_ENV, "").strip()
+    if topic_override:
+        if _RE_ENTITY.match(topic_override):
+            cfg.completion_topic = topic_override
+        else:
+            LOGGER.warning(
+                "%s=%r is not a valid Service Bus entity name; ignoring override",
+                _RESPONSE_TOPIC_ENV,
+                topic_override,
+            )
+    return cfg
 
 
 def save_service_bus_config(cfg: ServiceBusConfig) -> ServiceBusConfig:

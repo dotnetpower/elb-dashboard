@@ -143,6 +143,15 @@ def _on_worker_init(**_kwargs: object) -> None:
         start_resident_consumer()
     except Exception:
         LOGGER.debug("resident consumer start skipped", exc_info=True)
+    # Optional demo external-completion consumer (default-OFF). Subscribes to the
+    # completion topic on a dedicated subscription and records observations for
+    # the Playground. Purely observational — never executes BLAST.
+    try:
+        from api.services.service_bus_external_consumer import start_external_consumer
+
+        start_external_consumer()
+    except Exception:
+        LOGGER.debug("external completion consumer start skipped", exc_info=True)
 
 
 @worker_shutdown.connect  # type: ignore[untyped-decorator]
@@ -153,6 +162,12 @@ def _on_worker_shutdown(**_kwargs: object) -> None:
         stop_resident_consumer()
     except Exception:
         LOGGER.debug("resident consumer stop skipped", exc_info=True)
+    try:
+        from api.services.service_bus_external_consumer import stop_external_consumer
+
+        stop_external_consumer()
+    except Exception:
+        LOGGER.debug("external completion consumer stop skipped", exc_info=True)
 
 
 @worker_process_init.connect  # type: ignore[untyped-decorator]

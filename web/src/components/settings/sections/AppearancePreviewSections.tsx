@@ -87,6 +87,17 @@ export function PreviewSection() {
             />
           }
         />
+        <Row
+          label="Service Bus Playground"
+          hint="Show the Service Bus Playground page: send BLAST request messages onto the queue and watch the consumer execute them. Requires the deployment Service Bus integration to be active. Disabled by default."
+          control={
+            <Toggle
+              checked={prefs.previewServiceBusPlaygroundEnabled}
+              onChange={(value) => setPref("previewServiceBusPlaygroundEnabled", value)}
+              label="Service Bus Playground preview"
+            />
+          }
+        />
       </Group>
       <StatusLine kind="info">
         Preview selections are stored in this browser only and take effect immediately.

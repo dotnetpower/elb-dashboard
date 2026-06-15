@@ -44,6 +44,11 @@ const SequenceDetail = lazy(() =>
   })),
 );
 const DiagnosticsPage = lazy(() => import("@/pages/diagnostics/DiagnosticsPage"));
+const ServiceBusPlayground = lazy(() =>
+  import("@/pages/ServiceBusPlayground").then((module) => ({
+    default: module.ServiceBusPlayground,
+  })),
+);
 
 function OptionalFeatureRoute({
   enabled,
@@ -117,6 +122,7 @@ function AppRoutes() {
   const labToolsEnabled = usePreviewFeatureEnabled("labTools");
   const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
   const terminalEnabled = usePreviewFeatureEnabled("terminal");
+  const serviceBusPlaygroundEnabled = usePreviewFeatureEnabled("serviceBusPlayground");
 
   return (
     <ErrorBoundary>
@@ -164,6 +170,14 @@ function AppRoutes() {
             element={
               <OptionalFeatureRoute enabled={labToolsEnabled}>
                 <ToolsPage />
+              </OptionalFeatureRoute>
+            }
+          />
+          <Route
+            path="/blast/playground"
+            element={
+              <OptionalFeatureRoute enabled={serviceBusPlaygroundEnabled}>
+                <ServiceBusPlayground />
               </OptionalFeatureRoute>
             }
           />

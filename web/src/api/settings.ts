@@ -416,6 +416,57 @@ export interface ServiceBusPurgeResponse {
   removed: number;
 }
 
+/** Request body for the Playground send (mirrors the OpenAPI submit contract). */
+export interface ServiceBusSendRequest {
+  query_fasta: string;
+  db: string;
+  program?: string;
+  taxid?: number | null;
+  is_inclusive?: boolean | null;
+  options?: {
+    outfmt?: 5;
+    word_size?: number;
+    dust?: boolean;
+    evalue?: number;
+    max_target_seqs?: number;
+  };
+  external_correlation_id?: string;
+  /** When true the backend validates and returns without enqueueing. */
+  dry_run?: boolean;
+}
+
+export interface ServiceBusSendResponse {
+  status: "queued" | "valid";
+  dry_run?: boolean;
+  message_id?: string;
+  external_correlation_id: string;
+  queue: string;
+}
+
+export interface ServiceBusDrainResponse {
+  status: string;
+  received?: number;
+  completed?: number;
+  abandoned?: number;
+  dead_lettered?: number;
+}
+
+export interface ServiceBusObservedCompletion {
+  event_id: string;
+  external_correlation_id: string;
+  openapi_job_id: string;
+  status: string;
+  ts: string;
+  observed_at: string;
+}
+
+export interface ServiceBusObservedCompletionsResponse {
+  events: ServiceBusObservedCompletion[];
+  consumer_enabled: boolean;
+  subscription: string;
+  topic: string;
+}
+
 function querystring(params: Record<string, string>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) usp.set(k, v);
@@ -544,4 +595,22 @@ export const settingsApi = {
   /** Manual purge of the main queue or its DLQ (operator action). */
   purgeServiceBus: (body: { dead_letter: boolean; max_messages?: number }) =>
     api.post<ServiceBusPurgeResponse>("/settings/service-bus/purge", body),
+
+  /** Playground: enqueue a BLAST request message onto the request queue.
+   *  Intentionally Reader-accessible; the enqueue runs under the backend MI.
+   *  Pass `dry_run: true` to validate without enqueueing. */
+  sendServiceBus: (body: ServiceBusSendRequest) =>
+    api.post<ServiceBusSendResponse>("/settings/service-bus/send", body),
+
+  /** Playground: force one real request-queue drain pass now (accelerates the
+   *  30 s beat so a just-sent message is picked up immediately). */
+  drainServiceBus: () =>
+    api.post<ServiceBusDrainResponse>("/settings/service-bus/drain", {}),
+
+  /** Playground: recent completion-topic events observed by the demo external
+   *  consumer (empty when the consumer is not running). */
+  getObservedCompletions: (limit = 50) =>
+    api.get<ServiceBusObservedCompletionsResponse>(
+      `/settings/service-bus/observed-completions?limit=${limit}`,
+    ),
 };

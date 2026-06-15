@@ -2,7 +2,7 @@ import { type PropsWithChildren, useState, useRef, useEffect, useCallback } from
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn, Dna, Settings as SettingsIcon } from "lucide-react";
+import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn, Dna, Radio, Settings as SettingsIcon } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { LatestJobChip } from "@/components/LatestJobChip";
@@ -190,6 +190,7 @@ export function Layout({ children }: PropsWithChildren) {
   const labToolsEnabled = usePreviewFeatureEnabled("labTools");
   const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
   const terminalEnabled = usePreviewFeatureEnabled("terminal");
+  const serviceBusPlaygroundEnabled = usePreviewFeatureEnabled("serviceBusPlayground");
   // Responsive nav tiers. Tier A (>=1320 px) shows the full horizontal nav.
   // Tier B (720–1320 px) collapses the Tools group (Lab Tools / Terminal /
   // API) into a "More ▾" dropdown so Dashboard / New Search / Recent
@@ -305,6 +306,11 @@ export function Layout({ children }: PropsWithChildren) {
           {customDbEnabled && (
             <NavLink to="/blast/databases/build" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
               <Database size={14} strokeWidth={1.5} /> Custom DB
+            </NavLink>
+          )}
+          {serviceBusPlaygroundEnabled && (
+            <NavLink to="/blast/playground" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+              <Radio size={14} strokeWidth={1.5} /> Playground
             </NavLink>
           )}
           {useToolsDropdown ? (

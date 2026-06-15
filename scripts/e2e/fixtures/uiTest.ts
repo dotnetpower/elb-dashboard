@@ -28,6 +28,7 @@ export const test = base.extend<UiFixtures>({
           previewLabToolsEnabled: true,
           previewLiveWallEnabled: true,
           previewTerminalEnabled: true,
+          previewServiceBusPlaygroundEnabled: true,
         }),
       );
       for (const key of Object.keys(window.localStorage)) {

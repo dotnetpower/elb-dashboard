@@ -128,12 +128,15 @@ _az_context_discover_workload_env() {
   fi
 
   _az_context_log "discovering workload env from rg=$rg sub=$sub"
+  _az_context_log "  (this runs ~18 serial ARM lookups; ~15s warm, up to ~60s cold)"
 
   local tenant_id="" loc=""
+  _az_context_log "  [1/9] tenant + location"
   tenant_id=$(az account show --query tenantId -o tsv 2>/dev/null || printf '')
   loc=$(az group show -n "$rg" --subscription "$sub" --query location -o tsv 2>/dev/null || printf '')
 
   local acr_name="" acr_login_server=""
+  _az_context_log "  [2/9] container registry"
   acr_name=$(az acr list -g "$rg" --subscription "$sub" --query "[?starts_with(name, 'acrelbdashboard')] | [0].name" -o tsv 2>/dev/null || printf '')
   [[ -z "$acr_name" ]] && acr_name=$(az acr list -g "$rg" --subscription "$sub" --query "[0].name" -o tsv 2>/dev/null || printf '')
   if [[ -n "$acr_name" ]]; then
@@ -141,6 +144,7 @@ _az_context_discover_workload_env() {
   fi
 
   local app_name="" app_fqdn=""
+  _az_context_log "  [3/9] container app"
   app_name=$(az containerapp list -g "$rg" --subscription "$sub" --query "[?starts_with(name, 'ca-elb-')] | [0].name" -o tsv 2>/dev/null || printf '')
   [[ -z "$app_name" ]] && app_name=$(az containerapp list -g "$rg" --subscription "$sub" --query "[0].name" -o tsv 2>/dev/null || printf '')
   if [[ -n "$app_name" ]]; then
@@ -148,22 +152,27 @@ _az_context_discover_workload_env() {
   fi
 
   local cae_name=""
+  _az_context_log "  [4/9] container app environment"
   cae_name=$(az containerapp env list -g "$rg" --subscription "$sub" --query "[?starts_with(name, 'cae-elb-')] | [0].name" -o tsv 2>/dev/null || printf '')
   [[ -z "$cae_name" ]] && cae_name=$(az containerapp env list -g "$rg" --subscription "$sub" --query "[0].name" -o tsv 2>/dev/null || printf '')
 
   local storage_name=""
+  _az_context_log "  [5/9] storage account"
   storage_name=$(az storage account list -g "$rg" --subscription "$sub" --query "[?starts_with(name, 'stelbdashboard')] | [0].name" -o tsv 2>/dev/null || printf '')
   [[ -z "$storage_name" ]] && storage_name=$(az storage account list -g "$rg" --subscription "$sub" --query "[0].name" -o tsv 2>/dev/null || printf '')
 
   local kv_name=""
+  _az_context_log "  [6/9] key vault"
   kv_name=$(az keyvault list -g "$rg" --subscription "$sub" --query "[?starts_with(name, 'kv-elb-')] | [0].name" -o tsv 2>/dev/null || printf '')
   [[ -z "$kv_name" ]] && kv_name=$(az keyvault list -g "$rg" --subscription "$sub" --query "[0].name" -o tsv 2>/dev/null || printf '')
 
   local law_id=""
+  _az_context_log "  [7/9] log analytics workspace"
   law_id=$(az monitor log-analytics workspace list -g "$rg" --subscription "$sub" --query "[?starts_with(name, 'log-elb-')] | [0].id" -o tsv 2>/dev/null || printf '')
   [[ -z "$law_id" ]] && law_id=$(az monitor log-analytics workspace list -g "$rg" --subscription "$sub" --query "[0].id" -o tsv 2>/dev/null || printf '')
 
   local mi_name="" mi_resource="" mi_client="" mi_principal=""
+  _az_context_log "  [8/9] managed identity + app insights"
   mi_name=$(az identity list -g "$rg" --subscription "$sub" --query "[?starts_with(name, 'id-elb-')] | [0].name" -o tsv 2>/dev/null || printf '')
   if [[ -n "$mi_name" ]]; then
     mi_resource=$(az identity show -g "$rg" -n "$mi_name" --subscription "$sub" --query id -o tsv 2>/dev/null || printf '')
@@ -188,6 +197,7 @@ _az_context_discover_workload_env() {
   # produced (postprovision.sh injects it as a plain env value; cli-upgrade
   # rounds occasionally produce a secretRef form).
   local api_client="" secret_ref=""
+  _az_context_log "  [9/9] MSAL app registration client id"
   if [[ -n "$app_name" ]]; then
     api_client=$(az containerapp show -n "$app_name" -g "$rg" --subscription "$sub" \
       --query "properties.template.containers[].env[] | [?(name=='API_CLIENT_ID' || name=='VITE_AZURE_CLIENT_ID') && value!=null] | [0].value" \
@@ -274,6 +284,33 @@ prepare_deploy_env_from_az_login() {
   local current_sub
   if ! current_sub=$(az account show --query id -o tsv 2>/dev/null); then
     printf '\033[31mERROR:\033[0m Not logged in to Azure CLI. Run: az login\n' >&2
+    exit 1
+  fi
+
+  # Token-freshness preflight. `az account show` reads cached account
+  # metadata and succeeds even when the access/refresh token has expired.
+  # If we skip this, the FIRST ARM lookup inside discovery is what trips
+  # the expiry — and in a non-TTY deploy shell `az` then blocks forever
+  # waiting on an interactive re-auth prompt that nobody can answer, which
+  # is exactly the "stuck at discovering workload env" symptom. Force a
+  # real token acquisition up front (bounded by `timeout` so a wedged auth
+  # broker can't hang here either) and, if it fails, tell the operator to
+  # run `az login` instead of silently hanging later.
+  _az_context_log "verifying az login token is valid ..."
+  local token_check_rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 25s az account get-access-token --output none </dev/null >/dev/null 2>&1 || token_check_rc=$?
+  else
+    az account get-access-token --output none </dev/null >/dev/null 2>&1 || token_check_rc=$?
+  fi
+  if [[ "$token_check_rc" -ne 0 ]]; then
+    printf '\033[31mERROR:\033[0m Azure CLI login has expired or needs re-authentication.\n' >&2
+    if [[ "$token_check_rc" -eq 124 ]]; then
+      printf '       (token check timed out after 25s — the auth broker did not respond)\n' >&2
+    fi
+    printf '       Re-authenticate, then re-run this deploy:\n' >&2
+    printf '         az login\n' >&2
+    printf '       (device-code login if no browser is available: az login --use-device-code)\n' >&2
     exit 1
   fi
 

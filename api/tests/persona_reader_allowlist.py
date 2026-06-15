@@ -116,4 +116,25 @@ READER_ALLOWLIST: tuple[ReaderAllowedRoute, ...] = (
         function="get_task_status",
         why="Reader must poll Celery task status for read-only flows.",
     ),
+    # ---- Service Bus Playground send (INTENTIONAL policy relaxation) ----
+    # A subscription Reader may enqueue a BLAST request via the Playground.
+    # This is a deliberate exception to "Reader is read-only": the enqueue runs
+    # under the shared MI (no SAS token to the browser) and triggers BLAST
+    # execution. Granting it to Reader is a conscious product decision recorded
+    # in the feature change note; the route itself is require_caller-only.
+    ReaderAllowedRoute(
+        module="api.routes.settings.service_bus",
+        function="send",
+        why="Service Bus Playground send is intentionally Reader-accessible.",
+    ),
+    ReaderAllowedRoute(
+        module="api.routes.settings.service_bus",
+        function="drain_now",
+        why="Playground 'drain now' accelerates the beat the Reader already triggers via send.",
+    ),
+    ReaderAllowedRoute(
+        module="api.routes.settings.service_bus",
+        function="observed_completions",
+        why="Read-only view of completion-topic events observed by the demo consumer.",
+    ),
 )
