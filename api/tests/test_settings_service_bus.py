@@ -297,6 +297,66 @@ def test_send_enqueues_and_returns_message_id(
     assert sent["db"] == "core_nt"
 
 
+def test_send_preserves_blast_options_for_v1_path(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body with `blast_options` (the /v1/jobs shape) must survive into the
+    queue message — the consumer routes it to /v1/jobs (multi-token outfmt).
+    Validates the M2 critique fix: the XML model would drop blast_options."""
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    captured: dict[str, object] = {}
+
+    def _fake_send(cfg: object, body: dict, **kwargs: object) -> str:
+        captured["body"] = body
+        return "msg-v1"
+
+    monkeypatch.setattr(service_bus, "send_request", _fake_send)
+    r = client.post(
+        "/api/settings/service-bus/send",
+        json={
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">q1\nACGTACGTACGTACGTACGT\n",
+            "blast_options": {
+                "evalue": 0.05,
+                "outfmt": "7 std staxids sstrand qseq sseq",
+                "extra": "-word_size 28 -searchsp 32156241807668",
+            },
+            "resource_profile": "core_nt_safe",
+        },
+    )
+    assert r.status_code == 200, r.text
+    sent = captured["body"]
+    assert isinstance(sent, dict)
+    # Multi-token outfmt + extra survive (the XML model would have dropped them).
+    assert sent["blast_options"]["outfmt"] == "7 std staxids sstrand qseq sseq"
+    assert "-searchsp" in sent["blast_options"]["extra"]
+    assert "options" not in sent  # the XML options object is not synthesised
+
+
+def test_send_rejects_unmergeable_v1_outfmt(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tabular outfmt the shard merge cannot re-rank is rejected at send."""
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    monkeypatch.setattr(service_bus, "send_request", lambda *a, **k: "nope")
+    r = client.post(
+        "/api/settings/service-bus/send",
+        json={
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">q1\nACGTACGTACGTACGTACGT\n",
+            "blast_options": {"outfmt": "7 qseqid sseqid"},
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "invalid_request"
+
+
 def test_send_propagates_request_id_into_queue_body(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

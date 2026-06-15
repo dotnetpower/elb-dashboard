@@ -190,20 +190,34 @@ def purge(
 
 
 def _validate_send_body(body: dict[str, Any]) -> Any:
-    """Validate a Playground send body against the OpenAPI submit contract.
+    """Validate a Playground send body against the matching submit contract.
 
-    Reuses ``ExternalBlastSubmitRequest`` (the same model the queue consumer
-    validates each drained message against) so a message accepted here is
-    byte-for-byte the shape a direct ``POST /api/v1/elastic-blast/submit`` would
-    produce — a send that validates here can never dead-letter on the consumer
-    for a schema reason. Imported lazily to avoid a route-import cycle (the
-    elastic_blast module imports service helpers that import this package).
-    Raises ``HTTPException(400)`` with a stable code on any validation error.
+    Two shapes are accepted, mirroring the queue consumer's routing:
+
+    * A body carrying ``blast_options`` (the sibling ``/v1/jobs`` shape) is
+      validated against ``ExternalBlastV1Request`` so a multi-token tabular
+      ``outfmt`` (e.g. ``"7 std staxids sstrand qseq sseq"``) + ``extra`` survive
+      into the queue message. The consumer routes it to ``/v1/jobs``.
+    * Any other body keeps ``ExternalBlastSubmitRequest`` (the XML-locked
+      ``/api/v1/elastic-blast/submit`` contract).
+
+    Validating the SAME model the consumer uses means a send accepted here can
+    never dead-letter on the consumer for a schema reason. Imported lazily to
+    avoid a route-import cycle. Raises ``HTTPException(400)`` on any validation
+    error.
     """
-    from api.routes.elastic_blast import ExternalBlastSubmitRequest
+    from api.routes.elastic_blast import (
+        ExternalBlastSubmitRequest,
+        ExternalBlastV1Request,
+    )
 
+    model = (
+        ExternalBlastV1Request
+        if isinstance(body.get("blast_options"), dict)
+        else ExternalBlastSubmitRequest
+    )
     try:
-        return ExternalBlastSubmitRequest(**body)
+        return model(**body)
     except HTTPException:
         raise
     except Exception as exc:
