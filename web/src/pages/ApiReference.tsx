@@ -229,6 +229,14 @@ export function ApiReference() {
       .filter((group) => group.endpoints.length > 0);
   }, [spec]);
 
+  // The spec-derived tag sections (System, Cluster, Databases, Jobs …) only
+  // render when the cluster is up and the live OpenAPI document parsed. The
+  // always-on Core control-plane section, by contrast, must render even while
+  // the cluster is stopped (its ensure-running endpoint is how the cluster is
+  // woken), so it is placed inside the same two-column layout but gated
+  // separately from the spec groups below.
+  const showApiGroups = Boolean(spec && grouped.length > 0 && !clusterStopped);
+
   return (
     <div className="page-stack mono-page api-reference-page">
       <ApiHero
@@ -245,22 +253,6 @@ export function ApiReference() {
           clusters={candidates}
           selectedName={clusterName}
           onSelect={onSelectCluster}
-        />
-      )}
-
-      {/* Always-on control-plane section. Rendered whenever a cluster context
-          is known — including while the cluster is stopped — because its
-          ensure-running endpoint is exactly how the cluster is woken. It lives
-          on a different host (the dashboard api sidecar) than the spec-derived
-          elb-openapi groups below, hence the distinct accent + host banner. */}
-      {enabled && clusterName && (
-        <CoreApiSection
-          context={{
-            subscriptionId: sub,
-            resourceGroup: clusterRg,
-            clusterName,
-          }}
-          originLabel={typeof window !== "undefined" ? window.location.origin : ""}
         />
       )}
 
@@ -457,31 +449,48 @@ export function ApiReference() {
 
       {!clusterStopped && <ApiResponseContractPanel loading={contractLoading} />}
 
-      {spec && grouped.length > 0 && !clusterStopped && (
-        // A1: two-column layout — sticky sidebar (tag list + endpoint search +
-        // method chips) on the left, tag sections on the right. The sidebar is
-        // sticky to `top: 16px` so scrolling through long specs still keeps
-        // navigation in reach without taking over the viewport.
+      {/* Two-column layout — sticky sidebar (tag list + endpoint search +
+          method chips) on the left, tag sections on the right. The Core
+          control-plane section is the FIRST section in the right column (above
+          the spec-derived "System" group) so it reads consistently with the
+          other groups, sharing the same card flow but keeping its teal accent +
+          host banner. It renders even while the cluster is stopped (the spec
+          groups and sidebar do not), because its ensure-running endpoint is
+          exactly how the cluster is woken. */}
+      {enabled && clusterName && (
         <div
           className="api-reference-layout"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(240px, 280px) 1fr",
-            gap: 16,
-            alignItems: "start",
-          }}
+          style={
+            showApiGroups
+              ? {
+                  display: "grid",
+                  gridTemplateColumns: "minmax(240px, 280px) 1fr",
+                  gap: 16,
+                  alignItems: "start",
+                }
+              : { display: "flex", flexDirection: "column", gap: 16 }
+          }
         >
-          <ApiReferenceSidebar groups={grouped} />
+          {showApiGroups && <ApiReferenceSidebar groups={grouped} />}
           <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
-            {grouped.map(({ tag, endpoints }) => (
-              <TagSection
-                key={tag.name}
-                tag={tag}
-                endpoints={endpoints}
-                baseUrl={spec.baseUrl}
-                proxyInfo={{ sub, rg: clusterRg, clusterName }}
-              />
-            ))}
+            <CoreApiSection
+              context={{
+                subscriptionId: sub,
+                resourceGroup: clusterRg,
+                clusterName,
+              }}
+              originLabel={typeof window !== "undefined" ? window.location.origin : ""}
+            />
+            {showApiGroups &&
+              grouped.map(({ tag, endpoints }) => (
+                <TagSection
+                  key={tag.name}
+                  tag={tag}
+                  endpoints={endpoints}
+                  baseUrl={spec!.baseUrl}
+                  proxyInfo={{ sub, rg: clusterRg, clusterName }}
+                />
+              ))}
           </div>
         </div>
       )}

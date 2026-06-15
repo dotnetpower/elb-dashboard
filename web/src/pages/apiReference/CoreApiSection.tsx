@@ -33,15 +33,7 @@ export function CoreApiSection({
   const ready = Boolean(context.resourceGroup && context.clusterName);
 
   return (
-    <section
-      id="tag-Core"
-      style={{
-        border: `1px solid ${CORE_ACCENT_BORDER}`,
-        borderRadius: 12,
-        background: CORE_ACCENT_SOFT,
-        padding: "4px 14px 10px",
-      }}
-    >
+    <section id="tag-Core">
       <button
         type="button"
         onClick={() => setOpen((isOpen) => !isOpen)}
@@ -170,7 +162,7 @@ export function CoreApiSection({
             </div>
           )}
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
             {endpoints.map((endpoint) => (
               <EndpointCard
                 key={`${endpoint.method}-${endpoint.path}`}
