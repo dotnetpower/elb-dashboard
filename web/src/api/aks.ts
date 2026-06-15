@@ -539,6 +539,7 @@ export const aksApi = {
     rg: string,
     clusterName: string,
     operatorEmail: string,
+    customDomain?: string,
   ) =>
     api.post<{ id: string; task_id: string; statusQueryGetUri: string; status: string }>(
       "/aks/openapi/public-https",
@@ -547,6 +548,7 @@ export const aksApi = {
         resource_group: rg,
         cluster_name: clusterName,
         operator_email: operatorEmail,
+        custom_domain: customDomain ?? "",
       },
     ),
 
@@ -563,6 +565,16 @@ export const aksApi = {
         public_base_url?: string;
         ingress_lb_ip?: string;
         cert_expires_at?: string;
+        custom_domain?: string;
+        cloudapp_fqdn?: string;
+        dns_record?: {
+          status?: string;
+          record_type?: string;
+          record_name?: string;
+          zone_name?: string;
+          target?: string;
+          detail?: string;
+        } | null;
         error?: string;
       }>
     >(`/aks/openapi/public-https/${encodeURIComponent(taskId)}/status`),

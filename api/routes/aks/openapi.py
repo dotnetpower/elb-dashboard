@@ -946,6 +946,9 @@ def aks_openapi_spec(
 # ``api/tests/test_openapi_public_https.py`` imports it from this module.
 # ---------------------------------------------------------------------------
 from api.routes.aks.openapi_public_https import (  # noqa: E402
+    _validate_custom_domain as _validate_custom_domain,
+)
+from api.routes.aks.openapi_public_https import (  # noqa: E402
     _validate_operator_email as _validate_operator_email,
 )
 from api.routes.aks.openapi_public_https import router as _public_https_router  # noqa: E402

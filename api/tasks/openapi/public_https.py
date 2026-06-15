@@ -757,6 +757,7 @@ def setup_openapi_public_https(
     resource_group: str,
     cluster_name: str,
     operator_email: str = "",
+    custom_domain: str = "",
     caller_oid: str = "",
 ) -> dict[str, Any]:
     """Install / refresh the public HTTPS path in front of `elb-openapi`.
@@ -768,6 +769,15 @@ def setup_openapi_public_https(
     existing Certificate Secret when present, so cert renewal stays on
     cert-manager's own 60-day schedule and we do not burn a Let's
     Encrypt rate-limit slot per click.
+
+    When ``custom_domain`` is provided (e.g. ``api.elasticblast.com``) the
+    Ingress host + TLS host + issued certificate use it instead of the
+    auto-generated ``*.cloudapp.azure.com`` FQDN, and a best-effort Azure DNS
+    record (CNAME -> the cloudapp FQDN, or A -> the LB IP for an apex) is
+    upserted so the Let's Encrypt HTTP-01 challenge can validate the domain.
+    A DNS write failure (missing zone / no RBAC) degrades to a manual
+    instruction in the result instead of aborting — the cert still issues
+    once the operator adds the record.
     """
 
     started = time.time()
@@ -795,7 +805,16 @@ def setup_openapi_public_https(
         subscription_id=subscription_id,
         cluster_name=cluster_name,
     )
-    fqdn = cloudapp_fqdn(dns_label=dns_label, region=region)
+    cloudapp = cloudapp_fqdn(dns_label=dns_label, region=region)
+    # The effective host the Ingress + certificate use. With a custom domain the
+    # cloudapp FQDN stays the stable CNAME target (DNS step below); without one
+    # the cloudapp FQDN is the host directly (legacy behaviour, 100% unchanged).
+    custom_domain = (custom_domain or "").strip().lower().rstrip(".")
+    fqdn = custom_domain or cloudapp
+    # Initialised before the try so the failure path can surface the DNS
+    # degrade instruction even if the pipeline aborts later (e.g. the cert wait
+    # times out because the custom-domain record is missing).
+    dns_record: dict[str, Any] = {}
 
     record_progress(self, "ensure_kubeconfig", cluster_name=cluster_name)
     try:
@@ -907,6 +926,30 @@ def setup_openapi_public_https(
                 nsg_exc,
             )
 
+        # Step 3c: point the custom domain at the public ingress (best-effort).
+        # Only runs when a custom_domain was supplied. We write a CNAME ->
+        # cloudapp FQDN (stable across LB IP churn) for a sub-domain, or an A
+        # record -> LB IP for an apex. A missing zone / no DNS RBAC degrades to
+        # a manual instruction (dns_record["status"]) rather than aborting — the
+        # HTTP-01 challenge (step 8) still succeeds once the record resolves.
+        dns_record = {}
+        if custom_domain:
+            from api.services.azure_dns import ensure_public_dns_record
+
+            record_progress(self, "ensure_custom_domain_dns", fqdn=custom_domain)
+            dns_record = ensure_public_dns_record(
+                subscription_id=subscription_id,
+                custom_domain=custom_domain,
+                cloudapp_fqdn=cloudapp,
+                lb_ip=ingress_lb_ip,
+            )
+            LOGGER.info(
+                "public-https: custom domain dns status=%s record=%s/%s",
+                dns_record.get("status"),
+                dns_record.get("record_name"),
+                dns_record.get("zone_name"),
+            )
+
         # Step 4: install cert-manager with the same systempool patch.
         # cert-manager ships Deployments only (no install-time Jobs),
         # so no pre-delete is needed — strategic merge patch on the
@@ -1002,6 +1045,9 @@ def setup_openapi_public_https(
                 "ingress_lb_ip": ingress_lb_ip,
                 "cert_issuer": OPENAPI_CLUSTER_ISSUER_NAME,
                 "cert_expires_at": cert_expires_at,
+                "custom_domain": custom_domain,
+                "cloudapp_fqdn": cloudapp,
+                "dns_record_status": dns_record.get("status", "") if custom_domain else "",
                 "source": "setup_openapi_public_https",
             },
         )
@@ -1025,6 +1071,8 @@ def setup_openapi_public_https(
             "error": str(exc)[:800],
             "diagnostics": diagnostics[:2000] if diagnostics else "",
             "fqdn": fqdn,
+            "custom_domain": custom_domain,
+            "dns_record": dns_record if custom_domain else None,
             "elapsed_seconds": int(time.time() - started),
         }
 
@@ -1044,6 +1092,9 @@ def setup_openapi_public_https(
         "ingress_lb_ip": ingress_lb_ip,
         "cert_expires_at": cert_expires_at,
         "cluster_issuer": OPENAPI_CLUSTER_ISSUER_NAME,
+        "custom_domain": custom_domain,
+        "cloudapp_fqdn": cloudapp,
+        "dns_record": dns_record if custom_domain else None,
         "elapsed_seconds": elapsed,
     }
 

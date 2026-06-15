@@ -14,11 +14,9 @@ dependencies = [
   "httpx==0.27.2",
   "pyjwt[crypto]==2.10.0",
   "websockets==13.1",
-
   # Celery + Redis broker
   "celery==5.4.0",
   "redis==5.2.0",
-
   # Azure SDK surface — covers everything api/services/* uses
   "azure-identity==1.19.0",
   "azure-storage-blob==12.23.1",
@@ -38,12 +36,10 @@ dependencies = [
   "azure-mgmt-applicationinsights==4.1.0",
   "azure-mgmt-loganalytics==12.0.0",
   "azure-containerregistry==1.2.0",
-
   # Azure Service Bus — OPTIONAL external BLAST integration surface (queue-backed
   # submit ingestion + transition-event topic). NOT the Celery broker (that stays
   # the in-revision Redis sidecar). Gated OFF by default via SERVICEBUS_ENABLED.
   "azure-servicebus==7.12.3",
-
   # Azure Monitor OpenTelemetry distro — server-side telemetry (api + worker).
   # Browser telemetry uses the App Insights JS SDK separately (web/).
   "azure-monitor-opentelemetry==1.6.4",
@@ -53,15 +49,13 @@ dependencies = [
   "azure-monitor-query==1.4.1",
   "opentelemetry-instrumentation-fastapi==0.49b2",
   "opentelemetry-instrumentation-celery==0.49b2",
-
   # Kubernetes Python client (used by services.monitoring k8s_* helpers)
   "kubernetes==31.0.0",
-
   # Pydantic for request/response models
   "pydantic==2.9.2",
-
   # XML parsing hardened against XXE / billion-laughs (NCBI Taxonomy efetch)
   "defusedxml==0.7.1",
+  "azure-mgmt-dns==8.2.0",
 ]
 
 [dependency-groups]

@@ -58,6 +58,31 @@ export function isPublicLetsEncryptEmail(value: string): boolean {
   return /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$/.test(text);
 }
 
+/**
+ * Validate the optional public-HTTPS custom domain. Empty is VALID (the
+ * endpoint falls back to the auto-generated `*.cloudapp.azure.com` FQDN).
+ * A non-empty value must be a bare public-TLD FQDN (no scheme/path/port) —
+ * Let's Encrypt rejects private-use TLDs, so they are gated here too. Mirrors
+ * the backend `_validate_custom_domain` so the Enable button reflects the same
+ * rule before the request leaves the browser.
+ */
+export function isValidCustomDomain(value: string): boolean {
+  let host = (value ?? "").trim().toLowerCase().replace(/\/+$/, "");
+  if (!host) return true; // optional
+  for (const scheme of ["https://", "http://"]) {
+    if (host.startsWith(scheme)) {
+      host = host.slice(scheme.length);
+      break;
+    }
+  }
+  host = host.split("/", 1)[0];
+  const fqdnRe =
+    /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
+  if (!fqdnRe.test(host)) return false;
+  const tld = host.split(".").pop() ?? "";
+  return !PRIVATE_USE_TLDS.has(tld);
+}
+
 // Ordered phases emitted by `setup_openapi_public_https.record_progress(...)`
 // in api/tasks/openapi/public_https.py. Keep the ids in sync with the task;
 // the SPA renders the stepper from this list and falls back to the raw
@@ -74,6 +99,7 @@ export const PUBLIC_HTTPS_PHASES: PublicHttpsPhaseMeta[] = [
   { id: "patch_dns_label", label: "Patching Azure DNS label", hint: "Annotating the LoadBalancer Service with a stable FQDN." },
   { id: "wait_external_ip", label: "Waiting for public IP", hint: "Azure assigns the LB's EXTERNAL-IP. Usually 30-90s." },
   { id: "ensure_node_subnet_nsg", label: "Opening node-subnet firewall", hint: "Allowing Internet 80/443 to the LB on the BYO node-subnet NSG so the ACME challenge can reach ingress." },
+  { id: "ensure_custom_domain_dns", label: "Configuring custom domain DNS", hint: "Upserting the CNAME/A record in your Azure DNS zone (skipped when no custom domain is set)." },
   { id: "install_cert_manager", label: "Installing cert-manager", hint: "Applying CRDs + controller + webhook." },
   { id: "wait_cert_manager_webhook", label: "Waiting for cert-manager webhook", hint: "Webhook Pod must become Available before any Issuer applies." },
   { id: "apply_cluster_issuer", label: "Applying ClusterIssuer", hint: "Registering the Let's Encrypt prod ACME account." },

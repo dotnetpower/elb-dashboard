@@ -73,6 +73,12 @@ param aksClusterResourceGroup string = ''
 @description('If true and `aksClusterResourceGroup` is non-empty, grants the shared UAMI Contributor + User Access Administrator on that RG. Set to false when equivalent roles already exist outside this template.')
 param assignWorkloadClusterRoles bool = true
 
+@description('Optional name of an existing public DNS zone (e.g. `elasticblast.com`) the shared UAMI may manage so the OpenAPI public-HTTPS task can auto-create the custom-domain CNAME/A record. Leave empty to disable DNS automation (the task then prints a manual "create this record" instruction). Charter §12a Rule 4: empty = no new role granted.')
+param openApiCustomDnsZoneName string = ''
+
+@description('Resource group of `openApiCustomDnsZoneName`. Defaults to the platform RG when empty.')
+param openApiCustomDnsZoneResourceGroup string = ''
+
 @description('If true, create Application Insights. The default deployment creates only Log Analytics; Application Insights can be enabled later with ENABLE_APPLICATION_INSIGHTS=true.')
 param enableApplicationInsights bool = false
 
@@ -258,6 +264,23 @@ module workloadClusterRoles 'modules/workloadClusterRoles.bicep' = if (assignWor
   scope: resourceGroup(aksClusterResourceGroup)
   params: {
     uamiPrincipalId: identity.outputs.identityPrincipalId
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DNS Zone Contributor (custom-domain automation for OpenAPI public HTTPS)
+//
+// Scoped to a single operator-owned public DNS zone so the public-HTTPS task
+// can upsert the custom-domain CNAME/A record. Conditional + default-OFF: only
+// deploys when `openApiCustomDnsZoneName` is set. Skipped entirely otherwise, so
+// a deployment without a custom domain grants no new role (charter §12a Rule 4).
+// ---------------------------------------------------------------------------
+module dnsZoneRoles 'modules/dnsZoneRoles.bicep' = if (!empty(openApiCustomDnsZoneName)) {
+  name: 'dns-zone-roles-${resourceToken}'
+  scope: resourceGroup(empty(openApiCustomDnsZoneResourceGroup) ? rgName : openApiCustomDnsZoneResourceGroup)
+  params: {
+    uamiPrincipalId: identity.outputs.identityPrincipalId
+    dnsZoneName: openApiCustomDnsZoneName
   }
 }
 

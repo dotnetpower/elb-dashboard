@@ -239,6 +239,21 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-mgmt-dns"
+version = "8.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-common" },
+    { name = "azure-mgmt-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/11/4d/1ec6359c0977b8a41b033f0bdf221662e12b94b8fdbce4fe5672c9d007f0/azure_mgmt_dns-8.2.0.tar.gz", hash = "sha256:627b9ea3df0bf78a895acadc5148dec84c2898063bfaabfff8b14baa983b596e", size = 138189, upload-time = "2024-10-21T06:17:19.74Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/3f/e3563ec509be28b0bd99e0a177b97d2576a8013d8eb0184bfd904450b88b/azure_mgmt_dns-8.2.0-py3-none-any.whl", hash = "sha256:76695ca547f758a2954c8f7db9ffde0bacd2d9105ccf0dbb0ec81c014f64c37c", size = 201904, upload-time = "2024-10-21T06:17:21.68Z" },
+]
+
+[[package]]
 name = "azure-mgmt-keyvault"
 version = "10.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -736,6 +751,7 @@ dependencies = [
     { name = "azure-mgmt-compute" },
     { name = "azure-mgmt-containerregistry" },
     { name = "azure-mgmt-containerservice" },
+    { name = "azure-mgmt-dns" },
     { name = "azure-mgmt-keyvault" },
     { name = "azure-mgmt-loganalytics" },
     { name = "azure-mgmt-monitor" },
@@ -790,6 +806,7 @@ requires-dist = [
     { name = "azure-mgmt-compute", specifier = "==33.0.0" },
     { name = "azure-mgmt-containerregistry", specifier = "==10.3.0" },
     { name = "azure-mgmt-containerservice", specifier = "==32.1.0" },
+    { name = "azure-mgmt-dns", specifier = "==8.2.0" },
     { name = "azure-mgmt-keyvault", specifier = "==10.3.1" },
     { name = "azure-mgmt-loganalytics", specifier = "==12.0.0" },
     { name = "azure-mgmt-monitor", specifier = "==6.0.2" },

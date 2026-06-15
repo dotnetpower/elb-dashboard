@@ -22,6 +22,7 @@ import {
   DEFAULT_PRIVATE_USE_TLDS,
   formatElapsedSeconds,
   isPublicLetsEncryptEmail,
+  isValidCustomDomain,
   lookupPublicHttpsPhase,
   setPrivateUseTlds,
 } from "./publicHttpsHelpers";
@@ -43,6 +44,7 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
   const [statusLoading, setStatusLoading] = useState(false);
   const [email, setEmail] = useState("");
   const [emailEdited, setEmailEdited] = useState(false);
+  const [customDomain, setCustomDomain] = useState("");
   const [error, setError] = useState<string | null>(null);
   // Running task is hydrated from localStorage so switching to another
   // Settings tab (which unmounts this component) and coming back keeps
@@ -165,8 +167,9 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
 
   const subscriptionId = config?.subscriptionId ?? "";
   const emailValid = isPublicLetsEncryptEmail(email);
+  const customDomainValid = isValidCustomDomain(customDomain);
   const canAct = Boolean(subscriptionId && selectedClusterRg && clusterName);
-  const canEnable = canAct && emailValid;
+  const canEnable = canAct && emailValid && customDomainValid;
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -324,6 +327,7 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
         selectedClusterRg,
         clusterName,
         email,
+        customDomain.trim(),
       );
       const taskId = res.task_id || res.id;
       const next: RunningPublicHttpsTask = {
@@ -432,6 +436,26 @@ export function PublicHttpsSection({ config }: { config: ResourceConfig | null }
               placeholder="ops@example.com"
               style={INPUT_STYLE}
               required
+            />
+          </Field>
+        )}
+        {!enabled && (
+          <Field
+            label="Custom domain (optional)"
+            hint={
+              customDomain && !customDomainValid
+                ? "Enter a bare public FQDN such as api.example.com (no scheme/path). Private TLDs are rejected by Let's Encrypt."
+                : "Leave empty to use the auto-generated *.cloudapp.azure.com FQDN. If set, a CNAME is created in your Azure DNS zone and the certificate is issued for this domain."
+            }
+          >
+            <input
+              type="text"
+              value={customDomain}
+              onChange={(event) => setCustomDomain(event.target.value)}
+              placeholder="api.example.com"
+              style={INPUT_STYLE}
+              spellCheck={false}
+              autoCapitalize="none"
             />
           </Field>
         )}

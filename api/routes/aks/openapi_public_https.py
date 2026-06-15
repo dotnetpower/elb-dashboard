@@ -40,6 +40,7 @@ class OpenApiPublicHttpsRequest(BaseModel):
     resource_group: str
     cluster_name: str
     operator_email: str = ""
+    custom_domain: str = ""
 
 
 # IANA reserved + commonly-private TLDs that Let's Encrypt rejects at
@@ -63,6 +64,14 @@ _PRIVATE_USE_TLDS: frozenset[str] = frozenset(
     }
 )
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$")
+
+# A single FQDN label (1-63 chars, no leading/trailing hyphen) joined by dots,
+# total length <= 253. Only lower-case here — `_validate_custom_domain` lowers
+# the input first. Bare host only (no scheme / path / port).
+_FQDN_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+    r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
 
 
 def _validate_operator_email(value: str) -> str:
@@ -102,6 +111,60 @@ def _validate_operator_email(value: str) -> str:
                 "Let's Encrypt rejects private-use TLDs "
                 f"(.{tld}). Use a public TLD email such as ops@example.com."
             ),
+        )
+    return text
+
+
+def _validate_custom_domain(value: str) -> str:
+    """Validate the optional custom domain (bare FQDN), or return ``""``.
+
+    Empty input is allowed (the endpoint falls back to the auto-generated
+    ``*.cloudapp.azure.com`` FQDN). A non-empty value is lower-cased, stripped of
+    any pasted scheme / path / trailing dot, and must be a public-TLD FQDN with
+    at least two labels — Let's Encrypt rejects private-use TLDs at ACME order
+    time, so we gate them here the same way as the operator email.
+    """
+    text = (value or "").strip().lower().rstrip(".")
+    if not text:
+        return ""
+    for scheme in ("https://", "http://"):
+        if text.startswith(scheme):
+            text = text[len(scheme) :]
+            break
+    text = text.rstrip("/")
+    if "/" in text:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_custom_domain",
+                "message": (
+                    "custom_domain must be a bare FQDN such as api.example.com "
+                    "(no path)."
+                ),
+            },
+        )
+    if not _FQDN_RE.match(text):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_custom_domain",
+                "message": (
+                    "custom_domain must be a bare public FQDN such as "
+                    "api.example.com (no scheme, path, or port)."
+                ),
+            },
+        )
+    tld = text.rsplit(".", 1)[-1]
+    if tld in _PRIVATE_USE_TLDS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "private_tld",
+                "message": (
+                    f"Let's Encrypt rejects private-use TLDs (.{tld}). "
+                    "Use a public domain such as api.example.com."
+                ),
+            },
         )
     return text
 
@@ -174,10 +237,12 @@ def aks_openapi_public_https_enable(
     from api.tasks.openapi import setup_openapi_public_https
 
     email = _validate_operator_email(body.operator_email)
+    custom_domain = _validate_custom_domain(body.custom_domain)
     LOGGER.info(
-        "openapi public-https enable requested cluster=%s caller_oid=%s",
+        "openapi public-https enable requested cluster=%s caller_oid=%s custom_domain=%s",
         body.cluster_name,
         redact_oid(caller.object_id),
+        custom_domain or "-",
     )
     result = _safe_delay(
         setup_openapi_public_https,
@@ -185,6 +250,7 @@ def aks_openapi_public_https_enable(
         resource_group=body.resource_group,
         cluster_name=body.cluster_name,
         operator_email=email,
+        custom_domain=custom_domain,
         caller_oid=caller.object_id or "",
     )
     return {

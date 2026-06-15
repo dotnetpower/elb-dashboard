@@ -904,6 +904,37 @@ def test_route_validate_operator_email_blocks_private_tlds() -> None:
     )
 
 
+def test_route_validate_custom_domain() -> None:
+    """The optional custom domain must accept a public FQDN, normalise it, and
+    reject malformed / private-TLD / scheme-bearing values before the task is
+    enqueued (Let's Encrypt rejects private-use TLDs at ACME order time).
+    """
+    import pytest as _pytest
+    from api.routes.aks.openapi import _validate_custom_domain
+    from fastapi import HTTPException
+
+    # Empty is allowed (falls back to the cloudapp FQDN).
+    assert _validate_custom_domain("") == ""
+    assert _validate_custom_domain("   ") == ""
+
+    # Accepts + normalises.
+    assert _validate_custom_domain("api.elasticblast.com") == "api.elasticblast.com"
+    assert _validate_custom_domain("  API.Elasticblast.com  ") == "api.elasticblast.com"
+    assert _validate_custom_domain("https://api.elasticblast.com/") == "api.elasticblast.com"
+    for bad in (
+        "api.local",  # private TLD
+        "api.internal",
+        "single-label",  # no dot
+        "api..elasticblast.com",  # empty label
+        "api.elasticblast.com:8443",  # port
+        "api.elasticblast.com/path",  # path survives → invalid host
+        "-bad.example.com",  # leading hyphen
+    ):
+        with _pytest.raises(HTTPException) as exc_info:
+            _validate_custom_domain(bad)
+        assert exc_info.value.status_code == 400, bad
+
+
 def test_email_masking_does_not_leak_local_part() -> None:
     from api.tasks.openapi.public_https import _mask_email
 

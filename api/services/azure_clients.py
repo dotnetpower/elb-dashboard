@@ -4,7 +4,7 @@ Responsibility: Azure SDK client factories for service wrappers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `_get_mi_credential`, `credential_for_caller`, `resource_client`,
-`network_client`, `compute_client`, `storage_client`, `subscription_client`,
+`network_client`, `dns_client`, `compute_client`, `storage_client`, `subscription_client`,
 `authorization_client`, `msi_client`, `reset_mgmt_client_pool`
 Risky contracts: Use managed identity/DefaultAzureCredential only; do not add client secrets or
 OBO flows. Pooled ARM clients are reused across threads/requests keyed by
@@ -27,6 +27,7 @@ from azure.keyvault.secrets import SecretClient
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerregistry import ContainerRegistryManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
+from azure.mgmt.dns import DnsManagementClient
 from azure.mgmt.keyvault import KeyVaultManagementClient
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
@@ -170,6 +171,15 @@ def network_client(credential: TokenCredential, subscription_id: str) -> Network
         credential,
         subscription_id,
         lambda: NetworkManagementClient(credential, subscription_id),
+    )
+
+
+def dns_client(credential: TokenCredential, subscription_id: str) -> DnsManagementClient:
+    return _pooled_mgmt_client(
+        "dns",
+        credential,
+        subscription_id,
+        lambda: DnsManagementClient(credential, subscription_id),
     )
 
 
