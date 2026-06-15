@@ -89,6 +89,21 @@ def test_record_and_list_round_trip(fake_redis: _FakeRedis) -> None:
     assert "observed_at" in events[0]
 
 
+def test_record_preserves_request_id(fake_redis: _FakeRedis) -> None:
+    """A request_id on the observed completion event round-trips through the
+    observer store (end-to-end pass-through visible to the Playground)."""
+    from api.services.service_bus_completions import list_recent, record_completion
+
+    event = _event("c")
+    event["request_id"] = "req-roundtrip-5"
+    record_completion(event)
+    events = list_recent(10)
+    assert events[0]["request_id"] == "req-roundtrip-5"
+    # An event without request_id stores an empty string (no KeyError downstream).
+    record_completion(_event("d"))
+    assert list_recent(10)[0]["request_id"] == ""
+
+
 def test_ring_is_capped(fake_redis: _FakeRedis) -> None:
     from api.services import service_bus_completions as obs
 

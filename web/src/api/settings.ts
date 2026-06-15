@@ -431,6 +431,8 @@ export interface ServiceBusSendRequest {
     max_target_seqs?: number;
   };
   external_correlation_id?: string;
+  /** Caller-supplied pass-through tracking value, echoed to the completion topic. */
+  request_id?: string;
   /** When true the backend validates and returns without enqueueing. */
   dry_run?: boolean;
 }
@@ -440,6 +442,7 @@ export interface ServiceBusSendResponse {
   dry_run?: boolean;
   message_id?: string;
   external_correlation_id: string;
+  request_id?: string;
   queue: string;
 }
 
@@ -454,6 +457,7 @@ export interface ServiceBusDrainResponse {
 export interface ServiceBusObservedCompletion {
   event_id: string;
   external_correlation_id: string;
+  request_id?: string;
   openapi_job_id: string;
   status: string;
   ts: string;

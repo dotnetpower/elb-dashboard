@@ -297,6 +297,53 @@ def test_send_enqueues_and_returns_message_id(
     assert sent["db"] == "core_nt"
 
 
+def test_send_propagates_request_id_into_queue_body(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller-supplied request_id is attached to the enqueued message body
+    (popped before OpenAPI validation, re-added to the queue payload) and echoed
+    back in the response so the consumer can carry it to the completion topic."""
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    captured: dict[str, object] = {}
+
+    def _fake_send(cfg: object, body: dict, **kwargs: object) -> str:
+        captured["body"] = body
+        return "msg-rid"
+
+    monkeypatch.setattr(service_bus, "send_request", _fake_send)
+    r = client.post(
+        "/api/settings/service-bus/send",
+        json={**_VALID_SEND_BODY, "request_id": "req-from-ui-42"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["request_id"] == "req-from-ui-42"
+    sent = captured["body"]
+    assert isinstance(sent, dict)
+    assert sent["request_id"] == "req-from-ui-42"
+
+
+def test_send_dry_run_echoes_request_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    monkeypatch.setattr(
+        service_bus,
+        "send_request",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no send on dry_run")),
+    )
+    r = client.post(
+        "/api/settings/service-bus/send",
+        json={**_VALID_SEND_BODY, "request_id": "req-dry", "dry_run": True},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["request_id"] == "req-dry"
+
+
 def test_send_maps_unavailable_to_503(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

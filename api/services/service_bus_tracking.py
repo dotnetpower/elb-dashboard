@@ -5,8 +5,10 @@ Responsibility: Persist the mapping a Service-Bus-originated BLAST request needs
     event per status change: ``external_correlation_id`` → sibling
     ``openapi_job_id`` plus the LAST published status (the de-dup marker that
     makes "publish every transition" emit each transition exactly once) and a
-    ``done`` terminal flag. Also the drain de-dup key: a correlation id that
-    already has a row must not be submitted twice (Service Bus is at-least-once).
+    ``done`` terminal flag. Also carries the caller-supplied ``request_id``
+    pass-through value so every published transition can echo it. Also the drain
+    de-dup key: a correlation id that already has a row must not be submitted
+    twice (Service Bus is at-least-once).
 Edit boundaries: Reusable persistence logic only. No Service Bus SDK, no HTTP
     shaping, no event payload construction (that lives in the tasks). Mirrors the
     Table/file backend gating of ``performance_pref`` / ``service_bus_pref``.
@@ -71,6 +73,12 @@ class BridgeRecord:
     done: bool = False
     created_at: str = ""
     updated_at: str = ""
+    # Caller-supplied pass-through tracking value (e.g. ``request_id``) taken
+    # from the request queue message. Persisted here so every transition event
+    # the publisher emits to the completion topic can echo it — a topic
+    # subscriber then correlates on the SAME value the producer set. Empty when
+    # the producer did not supply one.
+    request_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +88,7 @@ class BridgeRecord:
             "done": self.done,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "request_id": self.request_id,
         }
 
     @classmethod
@@ -91,6 +100,7 @@ class BridgeRecord:
             done=bool(value.get("done")),
             created_at=str(value.get("created_at") or ""),
             updated_at=str(value.get("updated_at") or ""),
+            request_id=str(value.get("request_id") or ""),
         )
 
 

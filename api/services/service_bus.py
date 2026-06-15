@@ -245,11 +245,18 @@ def publish_event(cfg: ServiceBusConfig | None, event: dict[str, Any]) -> None:
     if not cfg.completion_topic:
         LOGGER.debug("publish_event skipped: no completion_topic configured")
         return
+    # Echo the caller-supplied pass-through value onto the message envelope (not
+    # just the JSON body) when present, so a topic subscriber can correlate /
+    # filter on it without parsing the payload. Omitted when the producer set
+    # none, keeping the envelope unchanged for the common case.
+    request_id = str(event.get("request_id") or "").strip()
+    application_properties = {"request_id": request_id} if request_id else None
     message = ServiceBusMessage(
         json.dumps(event, default=str),
         content_type="application/json",
         subject=str(event.get("event") or "blast.transition"),
         correlation_id=str(event.get("external_correlation_id") or "") or None,
+        application_properties=application_properties,
     )
     with _client(cfg) as client, client.get_topic_sender(cfg.completion_topic) as sender:
         sender.send_messages(message)

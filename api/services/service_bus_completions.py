@@ -64,6 +64,7 @@ def record_completion(event: dict[str, Any]) -> None:
     entry = {
         "event_id": str(event.get("event_id") or ""),
         "external_correlation_id": str(event.get("external_correlation_id") or ""),
+        "request_id": str(event.get("request_id") or ""),
         "openapi_job_id": str(event.get("openapi_job_id") or ""),
         "status": str(event.get("status") or ""),
         "ts": str(event.get("ts") or ""),

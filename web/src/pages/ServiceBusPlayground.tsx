@@ -78,6 +78,7 @@ export function ServiceBusPlayground() {
   const [wordSize, setWordSize] = useState("28");
   const [evalue, setEvalue] = useState("0.05");
   const [maxTargetSeqs, setMaxTargetSeqs] = useState("500");
+  const [requestId, setRequestId] = useState("");
   const [codeTab, setCodeTab] = useState<CodeTab>("python-send");
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [recentSends, setRecentSends] = useState<
@@ -120,10 +121,12 @@ export function ServiceBusPlayground() {
         body.taxid = taxidNum;
         body.is_inclusive = isInclusive;
       }
+      const rid = requestId.trim();
+      if (rid) body.request_id = rid;
       if (dryRun) body.dry_run = true;
       return body;
     },
-    [queryFasta, db, program, wordSize, evalue, maxTargetSeqs, taxid, isInclusive],
+    [queryFasta, db, program, wordSize, evalue, maxTargetSeqs, taxid, isInclusive, requestId],
   );
 
   const sendMutation = useMutation({
@@ -351,6 +354,19 @@ export function ServiceBusPlayground() {
             <code>outfmt</code> is fixed to <code>5</code> (BLAST XML) — required by the
             downstream result pipeline.
           </p>
+          <div>
+            <label style={labelStyle} htmlFor="pg-request-id">
+              request_id <span className="muted">(optional pass-through)</span>
+            </label>
+            <input
+              id="pg-request-id"
+              value={requestId}
+              onChange={(e) => setRequestId(e.target.value)}
+              placeholder="e.g. caller tracking id — echoed to the completion topic"
+              maxLength={256}
+              style={inputStyle}
+            />
+          </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="button"
@@ -522,6 +538,21 @@ export function ServiceBusPlayground() {
                 <span style={{ fontFamily: "var(--font-mono, monospace)" }}>
                   {e.external_correlation_id.slice(0, 12)}…
                 </span>
+                {e.request_id && (
+                  <span
+                    title={`request_id: ${e.request_id}`}
+                    style={{
+                      fontFamily: "var(--font-mono, monospace)",
+                      opacity: 0.7,
+                      padding: "1px 5px",
+                      borderRadius: 4,
+                      background: "var(--bg-secondary)",
+                    }}
+                  >
+                    req {e.request_id.slice(0, 12)}
+                    {e.request_id.length > 12 ? "…" : ""}
+                  </span>
+                )}
                 <span style={{ flex: 1 }} />
                 <span style={{ opacity: 0.8 }}>{e.status}</span>
               </div>

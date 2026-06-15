@@ -144,3 +144,89 @@ def test_multiple_distinct_messages_all_processed(monkeypatch: pytest.MonkeyPatc
     )
     assert stats.completed == 5
     assert sorted(receiver.completed) == ["m0", "m1", "m2", "m3", "m4"]
+
+
+class _FakeTopicSender:
+    def __init__(self) -> None:
+        self.sent: list[Any] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def send_messages(self, message: Any) -> None:
+        self.sent.append(message)
+
+
+class _FakeTopicClient:
+    def __init__(self, sender: _FakeTopicSender) -> None:
+        self._sender = sender
+
+    def get_topic_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
+        return self._sender
+
+
+def _patch_topic_client(monkeypatch: pytest.MonkeyPatch, sender: _FakeTopicSender) -> None:
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield _FakeTopicClient(sender)
+
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+
+
+def _topic_cfg() -> ServiceBusConfig:
+    return ServiceBusConfig(
+        enabled=True,
+        auth_mode="entra",
+        namespace_fqdn="x.servicebus.windows.net",
+        completion_topic="elastic-blast-completions",
+    )
+
+
+def test_publish_event_stamps_request_id_on_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``request_id`` on the event body is echoed onto the message envelope
+    (``application_properties``) so a topic subscriber correlates without
+    parsing the payload."""
+    sender = _FakeTopicSender()
+    _patch_topic_client(monkeypatch, sender)
+
+    service_bus.publish_event(
+        _topic_cfg(),
+        {
+            "event": "blast.transition",
+            "external_correlation_id": "corr-1",
+            "status": "running",
+            "request_id": "req-abc-123",
+        },
+    )
+    assert len(sender.sent) == 1
+    msg = sender.sent[0]
+    assert dict(msg.application_properties or {}).get("request_id") == "req-abc-123"
+    # Body still carries it too (round-trips for body-only subscribers).
+    import json
+
+    body = json.loads(b"".join(msg.body).decode("utf-8"))
+    assert body["request_id"] == "req-abc-123"
+
+
+def test_publish_event_no_request_id_leaves_envelope_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``request_id`` on the event → no ``application_properties`` stamped
+    (the common case stays byte-identical to before)."""
+    sender = _FakeTopicSender()
+    _patch_topic_client(monkeypatch, sender)
+
+    service_bus.publish_event(
+        _topic_cfg(),
+        {
+            "event": "blast.transition",
+            "external_correlation_id": "corr-2",
+            "status": "queued",
+        },
+    )
+    assert len(sender.sent) == 1
+    assert not (sender.sent[0].application_properties or {})
+

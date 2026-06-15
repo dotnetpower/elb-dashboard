@@ -306,10 +306,18 @@ def send(
     send ceiling.
     """
     dry_run = bool(body.pop("dry_run", False))
+    # Caller-supplied pass-through tracking value. Popped BEFORE validation so it
+    # is never treated as an OpenAPI submit option (it is not part of that
+    # contract), then re-attached to the queue message body so the consumer can
+    # echo it onto every completion-topic event. Length-bounded to keep the
+    # message envelope small.
+    request_id = str(body.pop("request_id", "") or "").strip()[:256]
     request = _validate_send_body(body)
     payload: dict[str, Any] = request.model_dump(exclude_none=True)
     correlation_id = str(payload.get("external_correlation_id") or "").strip() or uuid.uuid4().hex
     payload["external_correlation_id"] = correlation_id
+    if request_id:
+        payload["request_id"] = request_id
 
     if dry_run:
         # Validation is independent of the data plane — usable offline so an
@@ -319,6 +327,7 @@ def send(
             "status": "valid",
             "dry_run": True,
             "external_correlation_id": correlation_id,
+            "request_id": request_id,
             "queue": get_service_bus_config().request_queue,
         }
 
@@ -376,6 +385,7 @@ def send(
         "status": "queued",
         "message_id": message_id,
         "external_correlation_id": correlation_id,
+        "request_id": request_id,
         "queue": cfg.request_queue,
     }
 

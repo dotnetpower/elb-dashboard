@@ -54,6 +54,7 @@ def _msg(body: dict, **kw) -> ParsedMessage:
         content_type="application/json",
         enqueued_time_utc=kw.get("enqueued_time_utc"),
         sequence_number=kw.get("sequence_number"),
+        application_properties=kw.get("application_properties") or {},
     )
 
 
@@ -340,6 +341,96 @@ def test_transition_event_carries_idempotency_keys() -> None:
     assert ev["status"] == "succeeded"
     # result_ref carries pointers only (never result bytes; charter §9).
     assert "result_ref" in ev and "api" in ev["result_ref"]
+    # No request_id supplied → key omitted (envelope stays clean downstream).
+    assert "request_id" not in ev
+
+
+def test_extract_request_id_body_then_props_then_missing() -> None:
+    # Body wins.
+    assert (
+        sb_tasks._extract_request_id(_msg({"request_id": "  rid-body  "})) == "rid-body"
+    )
+    # Falls back to the message application property.
+    assert (
+        sb_tasks._extract_request_id(
+            _msg({}, application_properties={"request_id": "rid-prop"})
+        )
+        == "rid-prop"
+    )
+    # Absent → empty string.
+    assert sb_tasks._extract_request_id(_msg({"db": "core_nt"})) == ""
+    # Non-string is coerced and length-bounded.
+    long_value = "x" * 1000
+    out = sb_tasks._extract_request_id(_msg({"request_id": long_value}))
+    assert out == "x" * sb_tasks._REQUEST_ID_MAX_LEN
+
+
+def test_transition_event_includes_request_id_when_present() -> None:
+    ev = sb_tasks._transition_event(
+        correlation_id="corr-r",
+        openapi_job_id="op-r",
+        status="running",
+        attempt=1,
+        request_id="req-xyz",
+    )
+    assert ev["request_id"] == "req-xyz"
+    # request_id must NOT change the dedup digest (constant per correlation id).
+    assert ev["event_id"] == sb_tasks._event_id("corr-r", "running")
+
+
+def test_drain_propagates_request_id_to_bridge_and_queued_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-supplied request_id on the queue message is persisted on the
+    bridge row and echoed onto the initial queued completion event."""
+    _enable(monkeypatch)
+    events: list[dict] = []
+    monkeypatch.setattr(external_blast, "submit_job", lambda p, **k: {"job_id": "op-rid"})
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
+
+    action = sb_tasks._drain_handler(
+        _msg(
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">s\nACGT",
+                "external_correlation_id": "corr-rid",
+                "request_id": "req-trace-7",
+            }
+        ),
+        _enabled_cfg(),
+    )
+    assert action == MessageAction.COMPLETE
+    from api.services.service_bus_tracking import get_bridge
+
+    rec = get_bridge("corr-rid")
+    assert rec is not None and rec.request_id == "req-trace-7"
+    assert events and events[0]["status"] == "queued"
+    assert events[0]["request_id"] == "req-trace-7"
+
+
+def test_publish_transitions_echoes_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The transition publisher echoes the persisted request_id on every
+    subsequent event it emits to the completion topic."""
+    _enable(monkeypatch)
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-echo",
+            openapi_job_id="op-echo",
+            last_status="queued",
+            request_id="req-echo-9",
+        )
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
+    monkeypatch.setattr(external_blast, "get_job", lambda jid, **k: {"status": "running"})
+
+    out = sb_tasks.publish_transitions()
+    assert out["published"] == 1
+    assert events[0]["status"] == "running"
+    assert events[0]["request_id"] == "req-echo-9"
 
 
 def test_publish_transitions_emits_on_change(monkeypatch: pytest.MonkeyPatch) -> None:
