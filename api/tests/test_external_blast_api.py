@@ -86,6 +86,86 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
     assert "caller_oid" not in captured
 
 
+# --------------------------------------------------------------------------- #
+# Token self-heal on a stale-token 401 (job-detail recovery / sync / submit).
+# --------------------------------------------------------------------------- #
+
+
+def test_request_with_token_resync_retries_once_on_401(monkeypatch):
+    """A 401 triggers exactly one token resync + retry with the healed token."""
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "_resync_token_after_401", lambda: "healed-token")
+    calls: list[int] = []
+
+    def send(_client):
+        calls.append(1)
+        return SimpleNamespace(status_code=401 if len(calls) == 1 else 200)
+
+    resp = external_blast._request_with_token_resync(
+        base_url="http://sibling.invalid",
+        timeout=5.0,
+        api_token=None,
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        send=send,
+        label="get_job",
+    )
+    assert resp.status_code == 200
+    assert len(calls) == 2  # original + one retry
+
+
+def test_request_with_token_resync_surfaces_401_when_no_token(monkeypatch):
+    """When no live token can be recovered the original 401 is returned (no retry)."""
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "_resync_token_after_401", lambda: "")
+    calls: list[int] = []
+
+    def send(_client):
+        calls.append(1)
+        return SimpleNamespace(status_code=401)
+
+    resp = external_blast._request_with_token_resync(
+        base_url="http://sibling.invalid",
+        timeout=5.0,
+        api_token=None,
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        send=send,
+        label="get_job",
+    )
+    assert resp.status_code == 401
+    assert len(calls) == 1  # no retry without a recovered token
+
+
+def test_request_with_token_resync_passthrough_on_success(monkeypatch):
+    """A non-401 response returns immediately and never attempts a resync."""
+    from api.services import external_blast
+
+    resynced: list[int] = []
+    monkeypatch.setattr(
+        external_blast,
+        "_resync_token_after_401",
+        lambda: resynced.append(1) or "x",
+    )
+
+    resp = external_blast._request_with_token_resync(
+        base_url="http://sibling.invalid",
+        timeout=5.0,
+        api_token="tok",
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        send=lambda _client: SimpleNamespace(status_code=200),
+        label="list_jobs",
+    )
+    assert resp.status_code == 200
+    assert resynced == []  # resync never attempted on success
+
+
 def test_external_blast_options_default_evalue_matches_ncbi(monkeypatch):
     """Omitting `options` must default evalue to 0.05 (NCBI megablast default)."""
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")

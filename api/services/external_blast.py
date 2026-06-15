@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import quote
@@ -185,6 +185,82 @@ def _headers(
     return headers
 
 
+def _resync_token_after_401() -> str:
+    """Re-read the live elb-openapi token from the cluster after a 401.
+
+    Returns the recovered token (which the resync helper also writes back into
+    the runtime cache / process env) or ``""`` when no live token could be read.
+    Never raises — a resync failure simply surfaces the original 401.
+    """
+    try:
+        from api.services.openapi.token import resync_openapi_api_token_from_cluster
+
+        return resync_openapi_api_token_from_cluster() or ""
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("openapi 401 token resync raised %s", type(exc).__name__)
+        return ""
+
+
+def _request_with_token_resync(
+    *,
+    base_url: str,
+    timeout: float,
+    api_token: str | None,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    send: Callable[[httpx.Client], httpx.Response],
+    label: str,
+) -> httpx.Response:
+    """Send a sibling request, self-healing a stale-token 401 exactly once.
+
+    A 401 from the sibling almost always means the dashboard's *ephemeral*
+    runtime token cache was wiped by a control-plane redeploy while the
+    elb-openapi pod kept its minted token (the same failure mode the ``/v1/
+    ready`` probe already self-heals). Without this, the BLAST job-detail
+    recovery (:func:`get_job`), the jobs-list sync (:func:`list_jobs`), and a
+    Service-Bus-driven :func:`submit_job` would all surface a spurious auth
+    failure — and for the recovery path that hides the real failure reason
+    behind the generic "no error detail" banner.
+
+    Builds an httpx client with the resolved (or overridden) ``X-ELB-API-Token``,
+    runs ``send(client)``, and on a 401 re-reads the live token from the
+    deployment, syncs it into the runtime cache, and retries ONCE with the
+    recovered token. Never resyncs more than once, so a pod that genuinely
+    rejects a freshly read token cannot loop. Transport errors raised by
+    ``send`` propagate to the caller unchanged (the caller owns retry/backoff).
+    """
+
+    def _client(token_override: str | None) -> httpx.Client:
+        return httpx.Client(
+            base_url=base_url,
+            timeout=timeout,
+            headers=_headers(
+                api_token=token_override,
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+            ),
+        )
+
+    with _client(api_token) as client:
+        resp = send(client)
+    if resp.status_code != 401:
+        return resp
+    healed = _resync_token_after_401()
+    if not healed:
+        # No live token recovered — surface the original 401 to the caller.
+        return resp
+    LOGGER.warning(
+        "openapi %s returned 401 — token resynced from cluster; retrying once",
+        label,
+        extra={"event": "openapi_token_resync_retry"},
+    )
+    with _client(healed) as client:
+        return send(client)
+
+
+
 def _safe_filename(value: str) -> str:
     name = value.strip().strip('"') or "blast_result.xml"
     name = name.split("/", 1)[-1].split("\\", 1)[-1]
@@ -301,58 +377,63 @@ def submit_job(
 
     attempts = 1 + (_SUBMIT_MAX_TRANSPORT_RETRIES if has_idempotency_key else 0)
     last_transport_exc: HTTPException | None = None
+    resolved_base = _base_url(
+        base_url,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
     for attempt_index in range(attempts):
-        with httpx.Client(
-            base_url=_base_url(
-                base_url,
-                subscription_id=subscription_id,
-                resource_group=resource_group,
-                cluster_name=cluster_name,
-            ),
-            timeout=_DEFAULT_TIMEOUT_SECONDS,
-            headers=_headers(
+        try:
+            # A stale-token 401 self-heals once inside the helper (idempotent:
+            # the retry reuses the same idempotency_key, so the sibling dedupes
+            # a job the first attempt may have created).
+            resp = _request_with_token_resync(
+                base_url=resolved_base,
+                timeout=_DEFAULT_TIMEOUT_SECONDS,
                 api_token=api_token,
                 subscription_id=subscription_id,
                 resource_group=resource_group,
                 cluster_name=cluster_name,
-            ),
-        ) as client:
-            try:
-                resp = client.post("/api/v1/elastic-blast/submit", json=payload)
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                # 4xx/5xx with a response body: surface immediately. The
-                # sibling already decided — retrying won't change it (and a
-                # 5xx may itself indicate a created-but-failed job).
-                _raise_upstream_error(exc)
-            except httpx.HTTPError as exc:
-                # Transport-level failure (connection refused / reset /
-                # read timeout). Retry only when idempotent.
-                transport_exc = HTTPException(
-                    503,
-                    detail={
-                        "code": "openapi_unreachable",
-                        "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
-                        "attempt": attempt_index + 1,
-                        "max_attempts": attempts,
-                    },
+                send=lambda client: client.post(
+                    "/api/v1/elastic-blast/submit", json=payload
+                ),
+                label="submit_job",
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # 4xx/5xx with a response body: surface immediately. The
+            # sibling already decided — retrying won't change it (and a
+            # 5xx may itself indicate a created-but-failed job).
+            _raise_upstream_error(exc)
+        except httpx.HTTPError as exc:
+            # Transport-level failure (connection refused / reset /
+            # read timeout). Retry only when idempotent.
+            transport_exc = HTTPException(
+                503,
+                detail={
+                    "code": "openapi_unreachable",
+                    "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+                    "attempt": attempt_index + 1,
+                    "max_attempts": attempts,
+                },
+            )
+            last_transport_exc = transport_exc
+            if attempt_index + 1 < attempts:
+                backoff = _SUBMIT_RETRY_BACKOFF_SECONDS[
+                    min(attempt_index, len(_SUBMIT_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                LOGGER.info(
+                    "openapi submit transport failure attempt=%s/%s sleep=%ss reason=%s",
+                    attempt_index + 1,
+                    attempts,
+                    backoff,
+                    type(exc).__name__,
                 )
-                last_transport_exc = transport_exc
-                if attempt_index + 1 < attempts:
-                    backoff = _SUBMIT_RETRY_BACKOFF_SECONDS[
-                        min(attempt_index, len(_SUBMIT_RETRY_BACKOFF_SECONDS) - 1)
-                    ]
-                    LOGGER.info(
-                        "openapi submit transport failure attempt=%s/%s sleep=%ss reason=%s",
-                        attempt_index + 1,
-                        attempts,
-                        backoff,
-                        type(exc).__name__,
-                    )
-                    _time.sleep(backoff)
-                    continue
-                raise transport_exc from exc
-            return cast(dict[str, Any], resp.json())
+                _time.sleep(backoff)
+                continue
+            raise transport_exc from exc
+        return cast(dict[str, Any], resp.json())
     # Defensive: the loop above always either returns or raises. If we
     # somehow exit without doing either, surface the last transport error.
     if last_transport_exc is not None:
@@ -372,35 +453,38 @@ def get_job(
     resource_group: str = "",
     cluster_name: str = "",
 ) -> dict[str, Any]:
-    with httpx.Client(
-        base_url=_base_url(
-            base_url,
-            subscription_id=subscription_id,
-            resource_group=resource_group,
-            cluster_name=cluster_name,
-        ),
-        timeout=_DEFAULT_TIMEOUT_SECONDS,
-        headers=_headers(
+    resolved_base = _base_url(
+        base_url,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    try:
+        resp = _request_with_token_resync(
+            base_url=resolved_base,
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
             api_token=api_token,
             subscription_id=subscription_id,
             resource_group=resource_group,
             cluster_name=cluster_name,
-        ),
-    ) as client:
-        try:
-            resp = client.get(f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}")
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            _raise_upstream_error(exc)
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                503,
-                detail={
-                    "code": "openapi_unreachable",
-                    "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
-                },
-            ) from exc
-        return cast(dict[str, Any], resp.json())
+            send=lambda client: client.get(
+                f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}"
+            ),
+            label="get_job",
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        _raise_upstream_error(exc)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "openapi_unreachable",
+                "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+            },
+        ) from exc
+    return cast(dict[str, Any], resp.json())
+
 
 
 def delete_job(
@@ -457,35 +541,35 @@ def list_jobs(
     (#26); empty context keeps the legacy global-key resolution.
     """
 
-    with httpx.Client(
-        base_url=_base_url(
-            base_url,
-            subscription_id=subscription_id,
-            resource_group=resource_group,
-            cluster_name=cluster_name,
-        ),
-        timeout=_LIST_TIMEOUT_SECONDS,
-        headers=_headers(
+    resolved_base = _base_url(
+        base_url,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    try:
+        resp = _request_with_token_resync(
+            base_url=resolved_base,
+            timeout=_LIST_TIMEOUT_SECONDS,
             api_token=api_token,
             subscription_id=subscription_id,
             resource_group=resource_group,
             cluster_name=cluster_name,
-        ),
-    ) as client:
-        try:
-            resp = client.get("/v1/jobs")
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            _raise_upstream_error(exc)
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                503,
-                detail={
-                    "code": "openapi_unreachable",
-                    "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
-                },
-            ) from exc
-        return cast(dict[str, Any], resp.json())
+            send=lambda client: client.get("/v1/jobs"),
+            label="list_jobs",
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        _raise_upstream_error(exc)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "openapi_unreachable",
+                "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+            },
+        ) from exc
+    return cast(dict[str, Any], resp.json())
 
 
 def reset_ready_cache() -> None:

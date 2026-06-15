@@ -268,6 +268,9 @@ def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
     # Server-derived metadata.
     assert payload["submission_source"] == "servicebus"
     assert payload["external_correlation_id"] == "corr-shape"
+    # core_nt with a missing/standard profile is promoted to the sharding
+    # default so the sibling builds a sharded (memory-fitting) config.
+    assert payload["resource_profile"] == "core_nt_safe"
     # Options object + flat keys merged; outfmt is fixed to 5 by the model.
     assert payload["options"]["max_target_seqs"] == 250
     assert payload["options"]["word_size"] == 11

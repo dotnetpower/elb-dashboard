@@ -87,6 +87,47 @@ _BLAST_SUBMIT_OPTION_KEYS = frozenset(
 _SEARCHSP_OPTION_RE = re.compile(r"(?<!\S)-searchsp(?:\s|=|$)")
 _SUBMISSION_SOURCES = frozenset({"dashboard", "external_api", "servicebus"})
 
+# Resource profiles the sibling OpenAPI plane treats as "shard this DB" (it
+# splits the DB across nodes + applies the verified search-space correction).
+# Mirrors the sibling's submit branch in docker-openapi/app/main.py.
+_SHARDING_RESOURCE_PROFILES = frozenset({"core_nt_precise", "precise", "core_nt_safe"})
+
+# Server-derived default profile for databases whose memory footprint exceeds a
+# single node so they MUST run sharded. core_nt's bytes_to_cache is ~252 GB,
+# which does not fit the 128 GB blast pool node — submitting it with the
+# "standard" profile makes the sibling build a non-sharded config that
+# elastic-blast rejects ("memory requirements exceed memory available"). The
+# dashboard's own catalogue / API Reference already pairs core_nt with
+# ``core_nt_safe``; this makes the Service Bus + direct OpenAPI submit paths
+# apply that same default when the caller omits a profile. Keyed by bare DB
+# name (see ``extract_db_name``). Only the sibling can shard, and it only
+# shards core_nt today, so a static map is sufficient and accurate; generalise
+# this in lockstep if the sibling gains sharding for more databases.
+_SHARDED_DB_DEFAULT_PROFILE: dict[str, str] = {"core_nt": "core_nt_safe"}
+
+
+def resolve_sharded_db_resource_profile(
+    database: str, requested_profile: Any
+) -> str:
+    """Promote a missing/standard profile to a DB's sharding default.
+
+    Returns the resource profile the submit should carry. An explicit
+    sharding-family profile (or any non-``standard`` caller value) is preserved;
+    only an empty / ``standard`` profile is upgraded to the DB's sharding
+    default. Unknown databases are returned unchanged (``standard`` default).
+    Pure + side-effect-free so both submit paths can call it.
+    """
+    from api.services.blast.db_metadata import extract_db_name
+
+    requested = str(requested_profile or "").strip()
+    if requested in _SHARDING_RESOURCE_PROFILES:
+        return requested
+    db_name = extract_db_name(database) or str(database or "").strip()
+    default = _SHARDED_DB_DEFAULT_PROFILE.get(db_name)
+    if default and requested in ("", "standard"):
+        return default
+    return requested or "standard"
+
 
 def canonical_submit_metadata(
     body: dict[str, Any],

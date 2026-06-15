@@ -195,6 +195,7 @@ def test_entry_points_thread_context(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Resp:
         def __init__(self, payload: dict[str, Any]) -> None:
             self._payload = payload
+            self.status_code = 200
 
         def raise_for_status(self) -> None:
             return None

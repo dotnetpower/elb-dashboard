@@ -25,6 +25,7 @@ from api.services import external_blast
 from api.services.blast.submit_payload import (
     canonical_submit_metadata,
     canonical_submit_snapshot,
+    resolve_sharded_db_resource_profile,
     submit_contracts,
 )
 from api.services.sanitise import redact_oid
@@ -232,6 +233,14 @@ def submit_external_blast_job(
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
     payload = request.model_dump(exclude_none=True)
+    # Server-derived sharding default: a DB that exceeds a single node's RAM
+    # (e.g. core_nt) MUST run sharded, which the sibling only does for a
+    # sharding-family resource_profile. Promote a missing/standard profile so a
+    # caller that omits it still gets a runnable job instead of a memory-fit
+    # rejection. An explicit profile is preserved.
+    payload["resource_profile"] = resolve_sharded_db_resource_profile(
+        payload.get("db") or "", payload.get("resource_profile")
+    )
     payload.update(
         canonical_submit_metadata(
             payload,

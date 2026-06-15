@@ -225,7 +225,10 @@ def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[st
     required fields) — the caller dead-letters it rather than retrying forever.
     """
     from api.routes.elastic_blast import ExternalBlastSubmitRequest
-    from api.services.blast.submit_payload import canonical_submit_metadata
+    from api.services.blast.submit_payload import (
+        canonical_submit_metadata,
+        resolve_sharded_db_resource_profile,
+    )
 
     body = dict(msg.body or {})
     correlation_id = (
@@ -282,6 +285,15 @@ def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[st
         return None
 
     payload = request.model_dump(exclude_none=True)
+    # Server-derived sharding default (mirrors the direct /api/v1 submit path):
+    # a memory-heavy DB like core_nt MUST run sharded, which the sibling only
+    # does for a sharding-family resource_profile. A Service Bus producer that
+    # omits the profile would otherwise get a non-sharded config that
+    # elastic-blast rejects on the memory-fit check. Promote a missing/standard
+    # profile; an explicit profile is preserved.
+    payload["resource_profile"] = resolve_sharded_db_resource_profile(
+        payload.get("db") or "", payload.get("resource_profile")
+    )
     payload.update(
         canonical_submit_metadata(
             payload,
