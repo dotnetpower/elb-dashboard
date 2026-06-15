@@ -34,6 +34,7 @@ import { settingsApi, type ServiceBusSendRequest } from "@/api/settings";
 import { useToast } from "@/components/Toast";
 
 type CodeTab = "python-send" | "python-consume" | "curl";
+type SubmitMode = "xml" | "tabular";
 
 const PROGRAMS = [
   "blastn",
@@ -45,6 +46,129 @@ const PROGRAMS = [
   "rpsblast",
   "rpstblastn",
 ] as const;
+
+// Curated FASTA examples (kept in sync with the API Reference spec presets).
+const MONKEYPOX_FASTA =
+  [
+    ">NC_003310.1:c48509-48048 Monkeypox virus, complete genome",
+    "ATGGAGAAGCGAGAAGTTAATAAAGCTCTGTATGATCTTCAACGTAGTACTATGGTGTACAGTTCCGACG",
+    "ATACTCCTCCTCGTTGGTCTACGACAATGGATGCTGATACACGGCCTACAGATTCTGATGCTGATGCTAT",
+    "AATAGATGATGTATCCCGCGAAAAATCAATGAGAGAGGATAATAAGTCTTTTGATGATGTTATTCCGGTT",
+    "AAAAAAATTATTTATTGGAAAGGTGTTAACCCTGTCACCGTTATTAATGAGTACTGCCAAATAACTAGGA",
+    "GAGATTGGTCTTTTCGTATTGAATCAGTGGGGCCTAGTAACTCTCCTACATTTTATGCCTGTGTAGACAT",
+    "TGACGGAAGAGTATTCGATAAGGCAGATGGAAAATCTAAACGAGATGCTAAAAATAATGCAGCTAAATTG",
+    "GCTGTAGATAAACTTCTTAGTTATGTCATCATTAGATTCTGA",
+  ].join("\n") + "\n";
+
+const SMALL_16S_FASTA =
+  [
+    ">NR_024570.1 Escherichia coli str. K-12 substr. MG1655 16S ribosomal RNA, partial sequence",
+    "AAATTGAAGAGTTTGATCATGGCTCAGATTGAACGCTGGCGGCAGGCCTAACACATGCAA",
+    "GTCGAACGGTAACAGGAAGAAGCTTGCTTCTTTGCTGACGAGTGGCGGACGGGTGAGTAA",
+    "TGTCTGGGAAACTGCCTGATGGAGGGGGATAACTACTGGAAACGGTAGCTAATACCGCAT",
+    "AACGTCGCAAGACCAAAGAGGGGGACCTTCGGGCCTCTTGCCATCGGATGTGCCCAGATG",
+    "GGATTAGCTAGTAGGTGGGGTAACGGCTCACCTAGGCGACGATCCCTAGCTGGTCTGAGA",
+    "GGATGACCAGCCACACTGGAACTGAGACACGGTCCAGACTCCTACGGGAGGCAGCAGTGG",
+    "GGAATATTGCACAATGGGCGCAAGCCTGATGCAGCCATGCCGCGTGTATGAAGAAGGCCT",
+    "TCGGGTTGTAAAGTACTTTCAGCGGGGAGGAAGGGAGTAAAGTTAATACCTTTGCTCATT",
+    "GACGTTACCCGCAGAAGAAGCACCGGCTAACTCCGTGCCAGCAGCCGCGGTAATACGGAG",
+  ].join("\n") + "\n";
+
+// Web BLAST-equivalent CLI flags for a core_nt run (search-space correction
+// makes the e-values match NCBI Web BLAST). No `-outfmt` here — the format is
+// carried by the `outfmt` field so the standard columns are never duplicated.
+const CORE_NT_EXTRA = "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668";
+
+interface PlaygroundPreset {
+  key: string;
+  label: string;
+  hint: string;
+  fasta: string;
+  db: string;
+  program: (typeof PROGRAMS)[number];
+  taxid: string;
+  isInclusive: boolean;
+  mode: SubmitMode;
+  // XML mode
+  wordSize: string;
+  evalue: string;
+  maxTargetSeqs: string;
+  // Tabular mode
+  outfmt: string;
+  extra: string;
+  resourceProfile: string;
+}
+
+const PRESETS: PlaygroundPreset[] = [
+  {
+    key: "16s-xml",
+    label: "16S rRNA · XML (fast)",
+    hint: "Lightweight: E. coli 16S rRNA against the ~50 MB 16S_ribosomal_RNA DB. Best for a quick end-to-end smoke before core_nt is staged.",
+    fasta: SMALL_16S_FASTA,
+    db: "16S_ribosomal_RNA",
+    program: "blastn",
+    taxid: "",
+    isInclusive: true,
+    mode: "xml",
+    wordSize: "28",
+    evalue: "0.01",
+    maxTargetSeqs: "50",
+    outfmt: "7 std staxids sstrand qseq sseq",
+    extra: "",
+    resourceProfile: "standard",
+  },
+  {
+    key: "core-nt-xml",
+    label: "Monkeypox → core_nt · XML",
+    hint: "Web BLAST-equivalent core_nt search returning BLAST XML (outfmt 5). core_nt is sharded; the backend auto-promotes the resource profile to core_nt_safe.",
+    fasta: MONKEYPOX_FASTA,
+    db: "core_nt",
+    program: "blastn",
+    taxid: "",
+    isInclusive: true,
+    mode: "xml",
+    wordSize: "28",
+    evalue: "0.05",
+    maxTargetSeqs: "100",
+    outfmt: "7 std staxids sstrand qseq sseq",
+    extra: "",
+    resourceProfile: "core_nt_safe",
+  },
+  {
+    key: "core-nt-tab7",
+    label: "Monkeypox → core_nt · Tabular (outfmt 7)",
+    hint: "Same core_nt search but tabular output with comment lines (outfmt 7). Routes to the sibling /v1/jobs path; the shard merge re-ranks the standard 12 columns by evalue/bitscore.",
+    fasta: MONKEYPOX_FASTA,
+    db: "core_nt",
+    program: "blastn",
+    taxid: "",
+    isInclusive: true,
+    mode: "tabular",
+    wordSize: "28",
+    evalue: "0.05",
+    maxTargetSeqs: "100",
+    outfmt: "7",
+    extra: CORE_NT_EXTRA,
+    resourceProfile: "core_nt_safe",
+  },
+  {
+    key: "core-nt-multitoken",
+    label: "Monkeypox → core_nt · Multi-token (7 std staxids …)",
+    hint: "Adds taxonomy + strand + sequence columns via an extended outfmt specifier. `std` MUST lead so the shard merge can re-rank by the fixed std positions; the trailing columns (staxids/sstrand/qseq/sseq) are preserved.",
+    fasta: MONKEYPOX_FASTA,
+    db: "core_nt",
+    program: "blastn",
+    taxid: "",
+    isInclusive: true,
+    mode: "tabular",
+    wordSize: "28",
+    evalue: "0.05",
+    maxTargetSeqs: "100",
+    outfmt: "7 std staxids sstrand qseq sseq",
+    extra: CORE_NT_EXTRA,
+    resourceProfile: "core_nt_safe",
+  },
+];
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
@@ -64,26 +188,49 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 4,
 };
 
-const DEFAULT_FASTA = ">query1\nACGTACGTACGTACGTACGTACGTACGTACGT\n";
+const DEFAULT_PRESET = PRESETS[0];
 
 export function ServiceBusPlayground() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const [queryFasta, setQueryFasta] = useState(DEFAULT_FASTA);
-  const [db, setDb] = useState("core_nt");
-  const [program, setProgram] = useState<(typeof PROGRAMS)[number]>("blastn");
-  const [taxid, setTaxid] = useState("");
-  const [isInclusive, setIsInclusive] = useState(true);
-  const [wordSize, setWordSize] = useState("28");
-  const [evalue, setEvalue] = useState("0.05");
-  const [maxTargetSeqs, setMaxTargetSeqs] = useState("500");
+  const [presetKey, setPresetKey] = useState(DEFAULT_PRESET.key);
+  const [queryFasta, setQueryFasta] = useState(DEFAULT_PRESET.fasta);
+  const [db, setDb] = useState(DEFAULT_PRESET.db);
+  const [program, setProgram] = useState<(typeof PROGRAMS)[number]>(DEFAULT_PRESET.program);
+  const [taxid, setTaxid] = useState(DEFAULT_PRESET.taxid);
+  const [isInclusive, setIsInclusive] = useState(DEFAULT_PRESET.isInclusive);
+  const [mode, setMode] = useState<SubmitMode>(DEFAULT_PRESET.mode);
+  const [wordSize, setWordSize] = useState(DEFAULT_PRESET.wordSize);
+  const [evalue, setEvalue] = useState(DEFAULT_PRESET.evalue);
+  const [maxTargetSeqs, setMaxTargetSeqs] = useState(DEFAULT_PRESET.maxTargetSeqs);
+  const [outfmt, setOutfmt] = useState(DEFAULT_PRESET.outfmt);
+  const [extra, setExtra] = useState(DEFAULT_PRESET.extra);
+  const [resourceProfile, setResourceProfile] = useState(DEFAULT_PRESET.resourceProfile);
   const [requestId, setRequestId] = useState("");
   const [codeTab, setCodeTab] = useState<CodeTab>("python-send");
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [recentSends, setRecentSends] = useState<
     Array<{ correlationId: string; messageId: string; at: string }>
   >([]);
+
+  const applyPreset = useCallback((key: string) => {
+    const preset = PRESETS.find((p) => p.key === key);
+    if (!preset) return;
+    setPresetKey(preset.key);
+    setQueryFasta(preset.fasta);
+    setDb(preset.db);
+    setProgram(preset.program);
+    setTaxid(preset.taxid);
+    setIsInclusive(preset.isInclusive);
+    setMode(preset.mode);
+    setWordSize(preset.wordSize);
+    setEvalue(preset.evalue);
+    setMaxTargetSeqs(preset.maxTargetSeqs);
+    setOutfmt(preset.outfmt);
+    setExtra(preset.extra);
+    setResourceProfile(preset.resourceProfile);
+  }, []);
 
   const status = useQuery({
     queryKey: ["service-bus", "status"],
@@ -109,13 +256,30 @@ export function ServiceBusPlayground() {
         query_fasta: queryFasta,
         db: db.trim(),
         program,
-        options: {
+      };
+      if (mode === "tabular") {
+        // Free-form /v1/jobs path — multi-token outfmt + raw extra flags.
+        body.blast_options = {
+          evalue: Number(evalue) || 0.05,
+          max_target_seqs: Number(maxTargetSeqs) || 500,
+        };
+        const of = outfmt.trim();
+        if (of) body.blast_options.outfmt = of;
+        const ex = extra.trim();
+        if (ex) body.blast_options.extra = ex;
+        const rp = resourceProfile.trim();
+        if (rp) body.resource_profile = rp;
+      } else {
+        // XML-locked /api/v1/elastic-blast/submit path.
+        body.options = {
           outfmt: 5,
           word_size: Number(wordSize) || 28,
           evalue: Number(evalue) || 0.05,
           max_target_seqs: Number(maxTargetSeqs) || 500,
-        },
-      };
+        };
+        const rp = resourceProfile.trim();
+        if (rp && rp !== "standard") body.resource_profile = rp;
+      }
       const taxidNum = Number(taxid.trim());
       if (taxid.trim() && Number.isFinite(taxidNum) && taxidNum >= 1) {
         body.taxid = taxidNum;
@@ -126,7 +290,21 @@ export function ServiceBusPlayground() {
       if (dryRun) body.dry_run = true;
       return body;
     },
-    [queryFasta, db, program, wordSize, evalue, maxTargetSeqs, taxid, isInclusive, requestId],
+    [
+      queryFasta,
+      db,
+      program,
+      mode,
+      wordSize,
+      evalue,
+      maxTargetSeqs,
+      outfmt,
+      extra,
+      resourceProfile,
+      taxid,
+      isInclusive,
+      requestId,
+    ],
   );
 
   const sendMutation = useMutation({
@@ -238,6 +416,37 @@ export function ServiceBusPlayground() {
         <section className="glass-card" style={{ display: "grid", gap: 12 }}>
           <h2 style={{ margin: 0, fontSize: 14 }}>① Request</h2>
           <div>
+            <label style={labelStyle} htmlFor="pg-preset">
+              Example
+            </label>
+            <select
+              id="pg-preset"
+              value={presetKey}
+              onChange={(e) => applyPreset(e.target.value)}
+              style={inputStyle}
+            >
+              {PRESETS.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <p className="muted" style={{ margin: "4px 0 0", fontSize: 11, lineHeight: 1.5 }}>
+              {PRESETS.find((p) => p.key === presetKey)?.hint}
+            </p>
+          </div>
+          <div>
+            <label style={labelStyle}>Output format</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              <ModeButton active={mode === "xml"} onClick={() => setMode("xml")}>
+                XML · outfmt 5
+              </ModeButton>
+              <ModeButton active={mode === "tabular"} onClick={() => setMode("tabular")}>
+                Tabular · multi-token
+              </ModeButton>
+            </div>
+          </div>
+          <div>
             <label style={labelStyle} htmlFor="pg-fasta">
               Query FASTA
             </label>
@@ -313,47 +522,121 @@ export function ServiceBusPlayground() {
               Inclusive
             </label>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-            <div>
-              <label style={labelStyle} htmlFor="pg-word">
-                word_size
-              </label>
-              <input
-                id="pg-word"
-                value={wordSize}
-                onChange={(e) => setWordSize(e.target.value)}
-                inputMode="numeric"
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label style={labelStyle} htmlFor="pg-evalue">
-                evalue
-              </label>
-              <input
-                id="pg-evalue"
-                value={evalue}
-                onChange={(e) => setEvalue(e.target.value)}
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label style={labelStyle} htmlFor="pg-mts">
-                max_target
-              </label>
-              <input
-                id="pg-mts"
-                value={maxTargetSeqs}
-                onChange={(e) => setMaxTargetSeqs(e.target.value)}
-                inputMode="numeric"
-                style={inputStyle}
-              />
-            </div>
-          </div>
-          <p className="muted" style={{ margin: 0, fontSize: 11 }}>
-            <code>outfmt</code> is fixed to <code>5</code> (BLAST XML) — required by the
-            downstream result pipeline.
-          </p>
+          {mode === "xml" ? (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                <div>
+                  <label style={labelStyle} htmlFor="pg-word">
+                    word_size
+                  </label>
+                  <input
+                    id="pg-word"
+                    value={wordSize}
+                    onChange={(e) => setWordSize(e.target.value)}
+                    inputMode="numeric"
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <label style={labelStyle} htmlFor="pg-evalue">
+                    evalue
+                  </label>
+                  <input
+                    id="pg-evalue"
+                    value={evalue}
+                    onChange={(e) => setEvalue(e.target.value)}
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <label style={labelStyle} htmlFor="pg-mts">
+                    max_target
+                  </label>
+                  <input
+                    id="pg-mts"
+                    value={maxTargetSeqs}
+                    onChange={(e) => setMaxTargetSeqs(e.target.value)}
+                    inputMode="numeric"
+                    style={inputStyle}
+                  />
+                </div>
+              </div>
+              <p className="muted" style={{ margin: 0, fontSize: 11, lineHeight: 1.5 }}>
+                <code>outfmt</code> is fixed to <code>5</code> (BLAST XML) — the XML→FASTA
+                result pipeline needs it. The message is bridged to{" "}
+                <code>/api/v1/elastic-blast/submit</code>.
+              </p>
+            </>
+          ) : (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <label style={labelStyle} htmlFor="pg-evalue-t">
+                    evalue
+                  </label>
+                  <input
+                    id="pg-evalue-t"
+                    value={evalue}
+                    onChange={(e) => setEvalue(e.target.value)}
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <label style={labelStyle} htmlFor="pg-mts-t">
+                    max_target
+                  </label>
+                  <input
+                    id="pg-mts-t"
+                    value={maxTargetSeqs}
+                    onChange={(e) => setMaxTargetSeqs(e.target.value)}
+                    inputMode="numeric"
+                    style={inputStyle}
+                  />
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle} htmlFor="pg-outfmt">
+                  outfmt <span className="muted">(multi-token — keep std leading)</span>
+                </label>
+                <input
+                  id="pg-outfmt"
+                  value={outfmt}
+                  onChange={(e) => setOutfmt(e.target.value)}
+                  placeholder="7 std staxids sstrand qseq sseq"
+                  style={{ ...inputStyle, fontFamily: "var(--font-mono, monospace)" }}
+                />
+              </div>
+              <div>
+                <label style={labelStyle} htmlFor="pg-extra">
+                  extra <span className="muted">(raw CLI flags — no -outfmt here)</span>
+                </label>
+                <input
+                  id="pg-extra"
+                  value={extra}
+                  onChange={(e) => setExtra(e.target.value)}
+                  placeholder="-word_size 28 -dust yes -soft_masking false"
+                  style={{ ...inputStyle, fontFamily: "var(--font-mono, monospace)" }}
+                />
+              </div>
+              <div>
+                <label style={labelStyle} htmlFor="pg-rp">
+                  resource_profile
+                </label>
+                <input
+                  id="pg-rp"
+                  value={resourceProfile}
+                  onChange={(e) => setResourceProfile(e.target.value)}
+                  placeholder="standard"
+                  style={inputStyle}
+                />
+              </div>
+              <p className="muted" style={{ margin: 0, fontSize: 11, lineHeight: 1.5 }}>
+                Tabular messages route to the sibling <code>/v1/jobs</code>. A sharded DB
+                (e.g. <code>core_nt</code>) re-ranks the standard 12 columns by
+                evalue/bitscore, so a tabular layout must keep <code>std</code> leading.
+              </p>
+            </>
+          )}
           <div>
             <label style={labelStyle} htmlFor="pg-request-id">
               request_id <span className="muted">(optional pass-through)</span>
@@ -583,6 +866,34 @@ function CodeTabButton({
         padding: "4px 10px",
         background: active ? "var(--accent-subtle, var(--bg-tertiary))" : "transparent",
         borderColor: active ? "var(--accent)" : "var(--border-subtle)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ModeButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="glass-button"
+      style={{
+        flex: 1,
+        fontSize: 12,
+        padding: "6px 10px",
+        background: active ? "var(--accent-subtle, var(--bg-tertiary))" : "transparent",
+        borderColor: active ? "var(--accent)" : "var(--border-subtle)",
+        color: active ? "var(--text-primary)" : "var(--text-secondary)",
       }}
     >
       {children}

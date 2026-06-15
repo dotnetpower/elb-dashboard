@@ -416,7 +416,16 @@ export interface ServiceBusPurgeResponse {
   removed: number;
 }
 
-/** Request body for the Playground send (mirrors the OpenAPI submit contract). */
+/** Request body for the Playground send (mirrors the OpenAPI submit contract).
+ *
+ * Two mutually-exclusive option shapes mirror the queue consumer's routing:
+ *  - `options` → the XML-locked `/api/v1/elastic-blast/submit` contract
+ *    (`outfmt` fixed to 5). The consumer bridges it to the XML→FASTA pipeline.
+ *  - `blast_options` → the free-form `/v1/jobs` contract. A body carrying
+ *    `blast_options` is routed to the sibling `POST /v1/jobs` so a multi-token
+ *    tabular `outfmt` (e.g. `"7 std staxids sstrand qseq sseq"`) + raw `extra`
+ *    CLI flags survive into the queue message.
+ */
 export interface ServiceBusSendRequest {
   query_fasta: string;
   db: string;
@@ -430,6 +439,15 @@ export interface ServiceBusSendRequest {
     evalue?: number;
     max_target_seqs?: number;
   };
+  /** Free-form `/v1/jobs` options (multi-token tabular `outfmt` + raw `extra`). */
+  blast_options?: {
+    evalue?: number;
+    max_target_seqs?: number;
+    outfmt?: string;
+    extra?: string;
+  };
+  /** Sharding/precision profile (e.g. `core_nt_safe`). Backend auto-promotes core_nt. */
+  resource_profile?: string;
   external_correlation_id?: string;
   /** Caller-supplied pass-through tracking value, echoed to the completion topic. */
   request_id?: string;
