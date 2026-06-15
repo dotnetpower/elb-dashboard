@@ -237,6 +237,80 @@ def test_drain_dead_letters_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert action == MessageAction.DEAD_LETTER
 
 
+def test_drain_dead_letters_on_permanent_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sibling 4xx (permanent rejection) dead-letters immediately instead of
+    abandoning, so a request the sibling will always reject does not burn the
+    whole delivery count re-POSTing it."""
+    from fastapi import HTTPException
+
+    _enable(monkeypatch)
+
+    def _reject(_p, **_k):
+        raise HTTPException(400, detail={"code": "openapi_http_400"})
+
+    monkeypatch.setattr(external_blast, "submit_job", _reject)
+    action = sb_tasks._drain_handler(
+        _msg(
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">s\nACGT",
+                "external_correlation_id": "corr-4xx",
+            }
+        ),
+        _enabled_cfg(),
+    )
+    assert action == MessageAction.DEAD_LETTER
+
+
+def test_drain_abandons_on_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sibling 5xx / 503 transport error is transient → abandon for redelivery."""
+    from fastapi import HTTPException
+
+    _enable(monkeypatch)
+
+    def _unavailable(_p, **_k):
+        raise HTTPException(503, detail={"code": "openapi_unreachable"})
+
+    monkeypatch.setattr(external_blast, "submit_job", _unavailable)
+    action = sb_tasks._drain_handler(
+        _msg(
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">s\nACGT",
+                "external_correlation_id": "corr-5xx",
+            }
+        ),
+        _enabled_cfg(),
+    )
+    assert action == MessageAction.ABANDON
+
+
+def test_drain_abandons_on_retryable_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """408/429 are retryable 4xx → abandon, not dead-letter."""
+    from fastapi import HTTPException
+
+    _enable(monkeypatch)
+
+    def _rate_limited(_p, **_k):
+        raise HTTPException(429, detail={"code": "rate_limited"})
+
+    monkeypatch.setattr(external_blast, "submit_job", _rate_limited)
+    action = sb_tasks._drain_handler(
+        _msg(
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">s\nACGT",
+                "external_correlation_id": "corr-429",
+            }
+        ),
+        _enabled_cfg(),
+    )
+    assert action == MessageAction.ABANDON
+
+
 def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
     """A Service Bus message maps to the SAME shape as POST /api/v1/elastic-blast/submit.
 

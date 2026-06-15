@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from celery import shared_task
+from fastapi import HTTPException
 
 from api.services import external_blast, service_bus
 from api.services.service_bus import MessageAction, ParsedMessage
@@ -454,7 +455,27 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
 
     try:
         upstream = submit(payload, **_openapi_kwargs(cfg))
+    except HTTPException as exc:
+        # Distinguish a permanent rejection from a transient one. A 4xx (e.g.
+        # the sibling 400s a bad option / unsupported field, or a 422 validation
+        # error) will NEVER succeed on retry, so dead-letter it immediately
+        # instead of abandoning — abandoning burns the whole delivery count
+        # (~10 retries) re-POSTing a request the sibling already rejected, which
+        # delays the rest of the queue and floods the logs. A 5xx (sibling
+        # overloaded / mid-restart) or a 503 transport error IS transient, so
+        # abandon it for redelivery. 408/429 are retryable 4xx exceptions.
+        status = int(getattr(exc, "status_code", 0) or 0)
+        permanent = 400 <= status < 500 and status not in (408, 429)
+        LOGGER.warning(
+            "service bus → OpenAPI submit %s corr=%s status=%s",
+            "rejected (dead-letter)" if permanent else "failed (retry)",
+            correlation_id,
+            status,
+        )
+        return MessageAction.DEAD_LETTER if permanent else MessageAction.ABANDON
     except Exception:
+        # Unknown/unexpected error — treat as transient (abandon → redelivery)
+        # so a transient glitch never loses a submit.
         LOGGER.exception("service bus → OpenAPI submit failed corr=%s", correlation_id)
         return MessageAction.ABANDON
 
