@@ -119,7 +119,11 @@ def aks_openapi_database(
     """Return one database's metadata from Storage, independent of cluster state.
 
     Mirrors the ``elb-openapi`` ``GET /v1/databases/{db_name}`` DatabaseMetadata
-    shape but is served by the always-on api sidecar. Unknown name -> 404;
+    shape but is served by the always-on api sidecar. The metadata is read from
+    the SAME NCBI metadata blobs as ``elb-openapi``
+    (``{db}/{db}-nucl-metadata.json`` / ``-prot-metadata.json``), so single-volume
+    databases (16S/18S/ITS) carry a correct ``molecule_type`` / counts / title
+    rather than the catalogue cache's null enrichment. Unknown name -> 404;
     transient Storage outage -> degraded 503; missing Storage account -> 400.
     """
     if not _DB_NAME_RE.match(db_name):
