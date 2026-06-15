@@ -18,8 +18,6 @@
  * instead of disappearing or showing fabricated numbers.
  */
 
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   Box,
@@ -27,7 +25,6 @@ import {
   Database,
   HardDrive,
   Layers,
-  Loader2,
   PlayCircle,
   Radio,
   Send,
@@ -35,14 +32,7 @@ import {
   TimerReset,
 } from "lucide-react";
 
-import { blastApi, monitoringApi } from "@/api/endpoints";
 import type { AksClusterSummary } from "@/api/endpoints";
-import { useNodeSummary } from "@/components/ClusterDetailModal/useNodeSummary";
-import {
-  getAksProvisioningLabel,
-  isAksProvisioning,
-  isAksProvisioningFailed,
-} from "@/utils/aksStatus";
 
 import {
   BentoCell,
@@ -56,23 +46,19 @@ import {
   TrendBadge,
   fmtDuration,
 } from "./atoms";
-import type { ClusterHealth } from "./atoms";
-import { isActiveJobState, jobClusterName, toJobRowView } from "./jobMapping";
-import { groupEvents } from "./eventMapping";
 import { CapacityGateCell } from "./CapacityGateCell";
-import { submitTimeline, submitWindow } from "./submitMetrics";
+import { ClusterReadinessBento } from "./ClusterReadinessBento";
+import {
+  SUBMIT_SPARK_WINDOW_MIN,
+  useClusterBentoModel,
+} from "./useClusterBentoModel";
 import {
   SummaryRow,
-  emptyNodeSummary,
   topologyNodesLabel,
   topologyPoolsLabel,
 } from "./clusterSummaryHelpers";
 
 const ACTIVE_JOBS_PREVIEW = 4;
-const REQUEST_METRICS_WINDOW_SEC = 900; // 15 min
-const EVENTS_LIMIT = 30;
-const EVENT_LINES_VISIBLE = 12;
-const SUBMIT_SPARK_WINDOW_MIN = 60;
 /** Latency threshold (ms) above which the cluster header degrades. */
 const P95_DEGRADED_MS = 2000;
 
@@ -91,191 +77,35 @@ export function ClusterBento({
   isRunning,
   transition,
 }: Props) {
-  // ---- data sources -------------------------------------------------------
-  const { topQuery, summary: nodeSummary } = useNodeSummary({
-    subscriptionId,
-    resourceGroup,
-    clusterName: cluster.name,
-    isRunning,
-  });
-
-  const jobsQuery = useQuery({
-    queryKey: ["blast-jobs", subscriptionId, resourceGroup, cluster.name],
-    queryFn: () =>
-      blastApi.listJobs({
-        subscriptionId,
-        resourceGroup,
-        clusterName: cluster.name,
-      }),
-    enabled: isRunning,
-    staleTime: 30_000,
-    refetchInterval: isRunning ? 60_000 : false,
-    retry: 0,
-  });
-  const jobsDegraded =
-    (jobsQuery.data as unknown as { degraded?: boolean } | undefined)?.degraded === true;
-
-  const metricsQuery = useQuery({
-    queryKey: ["request-metrics-blast", REQUEST_METRICS_WINDOW_SEC],
-    queryFn: () =>
-      monitoringApi.requestMetrics({
-        windowSeconds: REQUEST_METRICS_WINDOW_SEC,
-        pathPrefix: "/api/blast",
-        rpmBuckets: 60,
-      }),
-    enabled: isRunning,
-    staleTime: 25_000,
-    refetchInterval: isRunning ? 30_000 : false,
-    retry: 0,
-  });
-
-  const eventsQuery = useQuery({
-    queryKey: ["aks-events", subscriptionId, resourceGroup, cluster.name, EVENTS_LIMIT],
-    queryFn: () =>
-      monitoringApi.aksEvents(subscriptionId, resourceGroup, cluster.name, {
-        limit: EVENTS_LIMIT,
-      }),
-    enabled: isRunning,
-    staleTime: 20_000,
-    refetchInterval: isRunning ? 45_000 : false,
-    retry: 0,
-  });
-
-  // ---- derived view models -----------------------------------------------
-  const allJobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data]);
-
-  const clusterJobs = useMemo(
-    () => allJobs.filter((j) => jobClusterName(j) === cluster.name),
-    [allJobs, cluster.name],
-  );
-  const hasSubmitRequests = clusterJobs.length > 0;
-  const submitCountsUnavailable = jobsDegraded && hasSubmitRequests;
-
-  const jobRows = useMemo(() => clusterJobs.map(toJobRowView), [clusterJobs]);
-  const activeJobs = useMemo(
-    () => jobRows.filter((j) => isActiveJobState(j.state)),
-    [jobRows],
-  );
-  const failed15m = useMemo(() => {
-    const cutoff = Date.now() - 15 * 60 * 1000;
-    return clusterJobs.filter(
-      (j) =>
-        (j.status === "failed" || j.phase === "Failed") &&
-        j.updated_at &&
-        Date.parse(j.updated_at) >= cutoff,
-    ).length;
-  }, [clusterJobs]);
-
-  const submits = useMemo(() => submitWindow(clusterJobs), [clusterJobs]);
-  const submitSpark = useMemo(
-    () => submitTimeline(clusterJobs, SUBMIT_SPARK_WINDOW_MIN),
-    [clusterJobs],
-  );
-  const submitSparkPeak = useMemo(
-    () => (submitSpark.length === 0 ? 0 : Math.max(...submitSpark)),
-    [submitSpark],
-  );
-
-  const metrics = metricsQuery.data;
-  const metricsDegraded =
-    (metrics as { degraded?: boolean } | undefined)?.degraded === true;
-  const p95 = metrics?.p95_ms ?? null;
-  const apiErrors = metrics?.errors ?? 0;
-  const apiRpmPeak = useMemo<number>(
-    () => (metrics?.rpm ?? []).reduce((m, b) => (b.count > m ? b.count : m), 0),
-    [metrics],
-  );
-
-  const events = useMemo(() => eventsQuery.data?.events ?? [], [eventsQuery.data]);
-  const eventsDegraded =
-    (eventsQuery.data as unknown as { degraded?: boolean } | undefined)?.degraded ===
-    true;
-  const eventLines = useMemo(() => groupEvents(events, EVENT_LINES_VISIBLE), [events]);
-  /** Events folded into the visible 12 (sum of group counts). */
-  const eventLinesShownEvents = useMemo(
-    () => eventLines.reduce((sum, e) => sum + e.count, 0),
-    [eventLines],
-  );
-
-  // Peak (most-loaded) user-pool node — far more useful than the
-  // cluster-wide average, which dilutes hot user nodes against idle
-  // system nodes.
-  const nodes = useMemo(() => topQuery.data?.nodes ?? [], [topQuery.data]);
-  const userNodePeaks = useMemo(() => {
-    const userNodes = nodes.filter((n) => {
-      const pool = (n.pool ?? "").toLowerCase();
-      return pool && pool !== "system" && !pool.startsWith("agentpool");
-    });
-    if (userNodes.length === 0) return { cpu: null, mem: null, cpuNode: "", memNode: "" };
-    let cpuMaxNode = userNodes[0];
-    let memMaxNode = userNodes[0];
-    for (const n of userNodes) {
-      if ((n.cpu_pct ?? 0) > (cpuMaxNode.cpu_pct ?? 0)) cpuMaxNode = n;
-      if ((n.memory_pct ?? 0) > (memMaxNode.memory_pct ?? 0)) memMaxNode = n;
-    }
-    return {
-      cpu: (cpuMaxNode.cpu_pct ?? 0) / 100,
-      mem: (memMaxNode.memory_pct ?? 0) / 100,
-      cpuNode: cpuMaxNode.name,
-      memNode: memMaxNode.name,
-    };
-  }, [nodes]);
-
-  const cpuPct =
-    userNodePeaks.cpu ?? (nodeSummary.total > 0 ? nodeSummary.cpuPct / 100 : null);
-  const memPct =
-    userNodePeaks.mem ?? (nodeSummary.total > 0 ? nodeSummary.memPct / 100 : null);
-  const cpuTone =
-    cpuPct == null
-      ? "var(--text-muted)"
-      : cpuPct >= 0.85
-        ? "var(--danger)"
-        : cpuPct >= 0.7
-          ? "var(--warning)"
-          : "var(--teal)";
-  const memTone =
-    memPct == null
-      ? "var(--text-muted)"
-      : memPct >= 0.85
-        ? "var(--danger)"
-        : memPct >= 0.7
-          ? "var(--warning)"
-          : "var(--teal)";
-  const p95Tone =
-    p95 == null
-      ? "var(--text-muted)"
-      : p95 > 2000
-        ? "var(--danger)"
-        : p95 > 1000
-          ? "var(--warning)"
-          : "var(--text-primary)";
-  const errTone =
-    apiErrors > 5 ? "var(--danger)" : apiErrors > 0 ? "var(--warning)" : "var(--success)";
-
-  const health: ClusterHealth = useMemo(() => {
-    if (isAksProvisioning(cluster)) return "provisioning";
-    if (isAksProvisioningFailed(cluster)) return "degraded";
-    if (!isRunning) return "down";
-    if (cluster.power_state && cluster.power_state !== "Running") return "down";
-    if (nodeSummary.notReady > 0 || nodeSummary.pressure.length > 0) return "degraded";
-    if (cpuPct != null && cpuPct >= 0.95) return "degraded";
-    if (memPct != null && memPct >= 0.95) return "degraded";
-    if (jobsDegraded && metricsDegraded && eventsDegraded && nodeSummary.total === 0) {
-      return "unknown";
-    }
-    return "healthy";
-  }, [
-    isRunning,
-    cluster,
+  const {
+    topQuery,
+    nodeSummary,
+    jobsDegraded,
+    hasSubmitRequests,
+    submitCountsUnavailable,
+    activeJobs,
+    failed15m,
+    submits,
+    submitSpark,
+    submitSparkPeak,
+    metrics,
+    metricsDegraded,
+    p95,
+    apiErrors,
+    apiRpmPeak,
+    events,
+    eventsDegraded,
+    eventLines,
+    eventLinesShownEvents,
+    userNodePeaks,
     cpuPct,
     memPct,
-    jobsDegraded,
-    metricsDegraded,
-    eventsDegraded,
-    nodeSummary.total,
-    nodeSummary.notReady,
-    nodeSummary.pressure.length,
-  ]);
+    cpuTone,
+    memTone,
+    p95Tone,
+    errTone,
+    health,
+  } = useClusterBentoModel({ cluster, subscriptionId, resourceGroup, isRunning });
 
   const showReadinessPanel = !isRunning || transition != null;
   if (showReadinessPanel) {
@@ -719,200 +549,6 @@ function DegradedHint({ reason }: { reason: string }) {
     >
       {reason}
     </div>
-  );
-}
-
-function ClusterReadinessBento({
-  cluster,
-  transition,
-}: {
-  cluster: AksClusterSummary;
-  transition?: "starting" | "stopping";
-}) {
-  const provisioningLabel = getAksProvisioningLabel(cluster);
-  const isStarting =
-    transition === "starting" ||
-    provisioningLabel === "Starting" ||
-    cluster.power_state === "Starting";
-  const isStopping = transition === "stopping";
-  const isProvisioning = isAksProvisioning(cluster);
-  const title = isStarting
-    ? "Cluster is starting"
-    : isStopping
-      ? "Cluster is stopping"
-      : cluster.power_state === "Stopped"
-        ? "Cluster is stopped"
-        : isProvisioning
-          ? "Cluster is provisioning"
-          : "Cluster is not workload-ready";
-  const body = isStarting
-    ? "AKS is coming online. Submit metrics, node activity, and warm-cache controls appear after the workload nodes report Running."
-    : isStopping
-      ? "AKS is shutting down. Live workload metrics are paused until the next start completes."
-      : cluster.power_state === "Stopped"
-        ? "Start the cluster to enable submit monitoring, node metrics, and automatic warmup."
-        : "The control plane can see this cluster, but workload checks are not ready yet.";
-  const nextStep = isStarting
-    ? "Auto warm will be reconciled by Celery after the cluster becomes ready."
-    : isStopping
-      ? "Queued Celery work remains tracked while the browser can be refreshed safely."
-      : cluster.power_state === "Stopped"
-        ? "Use Start on the cluster header when you are ready to run BLAST jobs."
-        : "Keep this view open or refresh later; the dashboard will update automatically.";
-
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "minmax(0, 1.4fr) minmax(260px, 0.8fr)",
-        gap: 10,
-      }}
-    >
-      <BentoCell span={[1, 1]} accent={isStarting ? "var(--accent)" : "var(--warning)"}>
-        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-          <div
-            style={{
-              width: 34,
-              height: 34,
-              borderRadius: 8,
-              display: "grid",
-              placeItems: "center",
-              background: isStarting
-                ? "rgba(122, 167, 255, 0.12)"
-                : "rgba(240, 198, 116, 0.10)",
-              color: isStarting ? "var(--accent)" : "var(--warning)",
-              flexShrink: 0,
-            }}
-          >
-            {isStarting || isStopping || isAksProvisioning(cluster) ? (
-              <Loader2 size={17} className="spin" />
-            ) : (
-              <PlayCircle size={17} />
-            )}
-          </div>
-          <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-            <div
-              style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
-            >
-              <div
-                style={{ fontSize: 16, fontWeight: 650, color: "var(--text-primary)" }}
-              >
-                {title}
-              </div>
-              <ReadinessPill
-                label={
-                  isStarting
-                    ? "Starting"
-                    : isStopping
-                      ? "Stopping"
-                      : (provisioningLabel ?? cluster.power_state ?? "Waiting")
-                }
-                tone={
-                  isStarting
-                    ? "var(--accent)"
-                    : isStopping
-                      ? "var(--warning)"
-                      : "var(--text-muted)"
-                }
-                spinning={isStarting || isStopping || isProvisioning}
-              />
-            </div>
-            <div
-              style={{
-                fontSize: 12,
-                lineHeight: 1.55,
-                color: "var(--text-muted)",
-                maxWidth: 680,
-              }}
-            >
-              {body}
-            </div>
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                width: "fit-content",
-                padding: "6px 9px",
-                border: "1px solid var(--border-weak)",
-                borderRadius: 7,
-                color: "var(--text-muted)",
-                background: "rgba(255,255,255,0.025)",
-                fontSize: 11,
-              }}
-            >
-              <Activity size={11} color="var(--accent)" />
-              {nextStep}
-            </div>
-          </div>
-        </div>
-      </BentoCell>
-
-      <BentoCell span={[1, 1]}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-          <Layers size={11} color="var(--accent)" />
-          <Eyebrow>Cluster summary</Eyebrow>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 7, fontSize: 11 }}>
-          <SummaryRow
-            icon={<Box size={11} />}
-            label="Nodes"
-            value={cluster.node_count?.toString() ?? "—"}
-          />
-          <SummaryRow
-            icon={<Cpu size={11} />}
-            label="SKU"
-            value={cluster.node_sku ?? "—"}
-          />
-          <SummaryRow
-            icon={<Database size={11} />}
-            label="Pools"
-            value={
-              cluster.agent_pools?.length
-                ? topologyPoolsLabel(cluster, emptyNodeSummary())
-                : "—"
-            }
-          />
-          <SummaryRow
-            icon={<Activity size={11} />}
-            label="K8s"
-            value={cluster.k8s_version ?? "—"}
-          />
-        </div>
-      </BentoCell>
-    </div>
-  );
-}
-
-function ReadinessPill({
-  label,
-  tone,
-  spinning,
-}: {
-  label: string;
-  tone: string;
-  spinning: boolean;
-}) {
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        padding: "3px 8px",
-        borderRadius: 999,
-        border: "1px solid var(--border-weak)",
-        color: tone,
-        background: "rgba(255,255,255,0.03)",
-        fontSize: 10,
-        fontWeight: 650,
-        letterSpacing: "0.03em",
-        textTransform: "uppercase",
-      }}
-    >
-      {spinning && <Loader2 size={10} className="spin" />}
-      {label}
-    </span>
   );
 }
 
