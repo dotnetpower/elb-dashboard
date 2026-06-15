@@ -124,6 +124,15 @@ def _baseline_patches(
         lambda: snapshot,
         raising=True,
     )
+    # The AKS-fanout dispatch logic now lives in
+    # `api.services.storage.prepare_db_aks_dispatch` and resolves the NCBI
+    # snapshot through the `common` module, so patch the source too (the
+    # route-module attr above still covers the server-side path).
+    monkeypatch.setattr(
+        "api.routes.storage.common._resolve_latest_dir",
+        lambda: snapshot,
+        raising=True,
+    )
     monkeypatch.setattr(
         prepare_db_module,
         "_list_keys",
