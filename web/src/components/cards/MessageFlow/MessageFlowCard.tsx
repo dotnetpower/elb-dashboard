@@ -1,6 +1,7 @@
 /**
  * MessageFlowCard — a compact dashboard strip that visualizes the optional
- * Service Bus message flow (Producers -> Broker -> Consumers).
+ * Service Bus message flow (Actors -> Queue -> Workers -> Topic, a closed loop
+ * where each completion returns to the submitting actor).
  *
  * Renders NOTHING unless the Service Bus integration is effective-enabled, so
  * the default (integration off) dashboard is unchanged. When on, it shows a

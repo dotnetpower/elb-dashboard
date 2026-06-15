@@ -58,6 +58,11 @@ export function useDeployTask({
   const [startingDeploy, setStartingDeploy] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
+  // Rebuild-and-redeploy: a separate orchestrator task id we poll while the
+  // ACR image builds. Once the build succeeds the status carries a
+  // ``deploy_task_id`` and we hand off to the normal deploy tracking above.
+  const [rebuildInstanceId, setRebuildInstanceId] = useState<string | null>(null);
+  const [startingRebuild, setStartingRebuild] = useState(false);
 
   useEffect(() => {
     const stored = readStoredDeploy(storageKey);
@@ -82,6 +87,67 @@ export function useDeployTask({
     },
     retry: 1,
   });
+
+  const rebuildStatusQuery = useQuery({
+    queryKey: ["openapi-rebuild-status", rebuildInstanceId],
+    queryFn: () => aksApi.rebuildDeployOpenApiStatus(rebuildInstanceId!),
+    enabled: Boolean(rebuildInstanceId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.runtime_status;
+      return status && FINISHED_STATUSES.has(status) ? false : 5_000;
+    },
+    retry: 1,
+  });
+  const rebuildOutput = rebuildStatusQuery.data?.output;
+  const rebuildPhase =
+    (rebuildStatusQuery.data?.custom_status as { phase?: string } | null | undefined)
+      ?.phase ?? null;
+  const rebuildInProgress = startingRebuild || Boolean(rebuildInstanceId);
+
+  // Build succeeded → hand off to the normal deploy tracking by adopting the
+  // chained deploy task id (so the existing status banner + guards take over).
+  useEffect(() => {
+    if (!rebuildInstanceId) return;
+    const deployTaskId = rebuildOutput?.deploy_task_id;
+    if (
+      rebuildStatusQuery.data?.runtime_status === "Completed" &&
+      rebuildOutput?.status !== "failed" &&
+      deployTaskId
+    ) {
+      const startedAt = Date.now();
+      setDeployStartedAt(startedAt);
+      setDeployInstanceId(deployTaskId);
+      writeStoredDeploy(storageKey, deployTaskId, startedAt);
+      setRebuildInstanceId(null);
+    }
+  }, [
+    rebuildInstanceId,
+    rebuildOutput?.deploy_task_id,
+    rebuildOutput?.status,
+    rebuildStatusQuery.data?.runtime_status,
+    storageKey,
+  ]);
+
+  // Build failed (or the orchestrator task failed) → surface the error and
+  // stop rebuild tracking; deploy is never reached when the build fails.
+  useEffect(() => {
+    if (!rebuildInstanceId) return;
+    const rs = rebuildStatusQuery.data?.runtime_status;
+    const failed =
+      rs === "Failed" ||
+      rs === "Terminated" ||
+      (rs === "Completed" && rebuildOutput?.status === "failed");
+    if (failed) {
+      const code = rebuildOutput?.error_code;
+      setDeployError(`OpenAPI rebuild failed${code ? ` (${code})` : ""}.`);
+      setRebuildInstanceId(null);
+    }
+  }, [
+    rebuildInstanceId,
+    rebuildOutput?.status,
+    rebuildOutput?.error_code,
+    rebuildStatusQuery.data?.runtime_status,
+  ]);
 
   const waitElapsed = Math.max(0, Math.floor((now - deployStartedAt) / 1000));
   const deployOutput = deployStatusQuery.data?.output;
@@ -235,7 +301,14 @@ export function useDeployTask({
   const canDeploy =
     Boolean(subscriptionId && resourceGroup && clusterName && acrName) &&
     imageBuilt &&
-    !deployIsActive;
+    !deployIsActive &&
+    !rebuildInProgress;
+
+  // Rebuild rebuilds the image first, so it does NOT require imageBuilt.
+  const canRebuild =
+    Boolean(subscriptionId && resourceGroup && clusterName && acrName) &&
+    !deployIsActive &&
+    !rebuildInProgress;
 
   const handleDeploy = async () => {
     setStartingDeploy(true);
@@ -263,6 +336,29 @@ export function useDeployTask({
     }
   };
 
+  const handleRebuildDeploy = async () => {
+    setStartingRebuild(true);
+    setDeployError(null);
+    setDeployInstanceId(null);
+    clearStoredDeploy(storageKey);
+    try {
+      const response = await aksApi.rebuildDeployOpenApi(
+        subscriptionId,
+        resourceGroup,
+        clusterName,
+        acrName,
+        storageAccount,
+        storageResourceGroup,
+        acrResourceGroup,
+      );
+      setRebuildInstanceId(response.id);
+    } catch (err: unknown) {
+      setDeployError(formatApiError(err));
+    } finally {
+      setStartingRebuild(false);
+    }
+  };
+
   return {
     deployInstanceId,
     deployState,
@@ -275,5 +371,9 @@ export function useDeployTask({
     handleCancelTracking,
     deployRecoveryAction,
     deployRecoveryHint,
+    canRebuild,
+    handleRebuildDeploy,
+    rebuildInProgress,
+    rebuildPhase,
   } as const;
 }

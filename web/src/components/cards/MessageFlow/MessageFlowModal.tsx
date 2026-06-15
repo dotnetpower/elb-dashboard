@@ -1,12 +1,13 @@
 /**
  * MessageFlowModal — the expanded Service Bus message-flow view.
  *
- * Renders the {@link MessageFlowConstellation} D3 force-graph (Producers →
- * Broker → Consumers, with a bounded Queue/Topic broker region) and lets the
- * operator click or keyboard-activate any broker job node to inspect the real
- * JobState JSON (fetched from the monitor job-detail endpoint). When there are
- * no active messages it shows a single calm notice instead of an empty graph —
- * the integration is optional and an idle queue is the normal state.
+ * Renders the {@link MessageFlowConstellation} D3 force-graph as a closed loop
+ * (Actors → Queue box → Workers → Topic box, with the completion looping back
+ * over the top to the submitting actor) and lets the operator click or
+ * keyboard-activate any job node to inspect the real JobState JSON (fetched
+ * from the monitor job-detail endpoint). When there are no active messages it
+ * shows a single calm notice instead of an empty graph — the integration is
+ * optional and an idle queue is the normal state.
  */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -506,10 +507,11 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
           {/* Service Bus telemetry footer (SRP: pure presentation panel). */}
           <ServiceBusTelemetryPanel snapshot={snapshot} />
 
-          {/* Caption: clarify that the broker nodes are in-flight JOBS, not the
-              Service Bus queue depth above (which drains in well under a second
-              so it is almost always zero). Without this the two number sets read
-              as contradictory. */}
+          {/* Caption: clarify that the Queue/Topic boxes hold in-flight and
+              completed JOBS, not the Service Bus queue depth above (which drains
+              in well under a second so it is almost always zero), and name the
+              closed-loop dual role so the two number sets do not read as
+              contradictory. */}
           <div
             style={{
               marginTop: 8,
@@ -518,9 +520,11 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               color: "var(--text-faint)",
             }}
           >
-            Broker nodes are in-flight BLAST jobs (queued/running). The Service
-            Bus queue above drains in under a second, so its depth is normally
-            zero even while jobs run.
+            The Queue and Topic boxes show in-flight and just-completed BLAST
+            jobs; the Service Bus queue itself drains in under a second, so its
+            depth above is normally zero even while jobs run. A submitter is both
+            a producer and a subscriber — the dashed loop returns each completion
+            to the actor that submitted it.
           </div>
         </div>
       </div>

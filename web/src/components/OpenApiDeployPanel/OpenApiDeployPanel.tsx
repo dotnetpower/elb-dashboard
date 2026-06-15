@@ -67,6 +67,10 @@ export function OpenApiDeployPanel({
     handleCancelTracking,
     deployRecoveryAction,
     deployRecoveryHint,
+    canRebuild,
+    handleRebuildDeploy,
+    rebuildInProgress,
+    rebuildPhase,
   } = useDeployTask({
     subscriptionId,
     resourceGroup,
@@ -130,6 +134,10 @@ export function OpenApiDeployPanel({
         onDeploy={handleDeploy}
         onRetry={onRetry}
         onCancelTracking={handleCancelTracking}
+        canRebuild={canRebuild}
+        rebuildInProgress={rebuildInProgress}
+        rebuildPhase={rebuildPhase}
+        onRebuildDeploy={handleRebuildDeploy}
       />
     </div>
   );

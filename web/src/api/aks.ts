@@ -435,6 +435,50 @@ export const aksApi = {
       {},
     ),
 
+  /** Build the pinned ``elb-openapi`` image in ACR, then redeploy it —
+   *  one action that enforces the charter rollout order (build FIRST,
+   *  deploy only on a succeeded build). Poll {@link rebuildDeployOpenApiStatus}
+   *  with the returned id; once it reports the build succeeded the status
+   *  carries a ``deploy_task_id`` to switch to {@link openApiDeployStatus}.
+   *  ``dryRun`` performs no side effects (a safe probe). */
+  rebuildDeployOpenApi: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    acrName: string,
+    storageAccount?: string,
+    storageResourceGroup?: string,
+    acrResourceGroup?: string,
+    dryRun?: boolean,
+  ) =>
+    api.post<{ id: string; statusQueryGetUri?: string }>(
+      "/aks/openapi/rebuild-deploy",
+      {
+        subscription_id: subscriptionId,
+        resource_group: rg,
+        cluster_name: clusterName,
+        acr_name: acrName,
+        acr_resource_group: acrResourceGroup,
+        storage_account: storageAccount,
+        storage_resource_group: storageResourceGroup,
+        ...(dryRun ? { dry_run: true } : {}),
+      },
+    ),
+
+  rebuildDeployOpenApiStatus: (instanceId: string) =>
+    api.get<
+      OrchestrationStatus<{
+        status?: string;
+        stage?: string;
+        error_code?: string;
+        image?: string;
+        build_run_id?: string;
+        build_status?: string;
+        deploy_task_id?: string;
+        deploy_status_url?: string;
+      }>
+    >(`/aks/openapi/rebuild-deploy/${encodeURIComponent(instanceId)}/status`),
+
   proxyOpenApiSpec: (subscriptionId: string, rg: string, clusterName: string) =>
     api.get<Record<string, unknown>>(
       `/aks/openapi/spec?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,

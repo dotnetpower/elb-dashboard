@@ -1960,6 +1960,16 @@ textarea.form-input {
   fill: var(--text-faint);
 }
 
+/* Smaller caption under a column label naming its dual role / disambiguation
+   (e.g. "produce + subscribe", "queue consumers"). */
+.mf-col-sublabel {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  fill: var(--text-faint);
+  opacity: 0.7;
+}
+
 /* Keyboard focus ring for a job node (SVG <g tabindex=0>). A visible outline so
    keyboard users can see which job they are about to open. */
 .mf-node:focus {

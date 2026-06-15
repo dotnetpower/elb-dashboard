@@ -1,4 +1,4 @@
-import { Loader2, RefreshCw, Rocket, RotateCw, X } from "lucide-react";
+import { Hammer, Loader2, RefreshCw, Rocket, RotateCw, X } from "lucide-react";
 
 import type { DeployState } from "./useDeployTask";
 
@@ -16,6 +16,11 @@ export interface DeployActionsProps {
   onDeploy: () => void;
   onRetry: () => void;
   onCancelTracking: () => void;
+  /** Rebuild-and-redeploy (build the pinned image then deploy). */
+  canRebuild: boolean;
+  rebuildInProgress: boolean;
+  rebuildPhase: string | null;
+  onRebuildDeploy: () => void;
 }
 
 export function DeployActions({
@@ -32,6 +37,10 @@ export function DeployActions({
   onDeploy,
   onRetry,
   onCancelTracking,
+  canRebuild,
+  rebuildInProgress,
+  rebuildPhase,
+  onRebuildDeploy,
 }: DeployActionsProps) {
   return (
     <div
@@ -74,6 +83,30 @@ export function DeployActions({
         ) : (
           <>
             <Rocket size={12} /> Deploy elb-openapi
+          </>
+        )}
+      </button>
+      <button
+        type="button"
+        className="glass-button"
+        onClick={onRebuildDeploy}
+        disabled={!canRebuild}
+        title={
+          !acrName
+            ? "ACR is not configured"
+            : "Build the pinned elb-openapi image in ACR, then redeploy it (one action)"
+        }
+        style={{ fontSize: 12 }}
+      >
+        {rebuildInProgress ? (
+          <>
+            <Loader2 size={12} className="spin" /> Building
+            {rebuildPhase ? ` (${rebuildPhase})` : "..."}
+          </>
+        ) : (
+          <>
+            <Hammer size={12} /> Rebuild &amp; Deploy
+            {pinnedTag ? ` v${pinnedTag}` : ""}
           </>
         )}
       </button>

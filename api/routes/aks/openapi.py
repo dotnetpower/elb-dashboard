@@ -280,6 +280,142 @@ def aks_openapi_deploy(
     }
 
 
+@router.post("/openapi/rebuild-deploy")
+def aks_openapi_rebuild_deploy(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Build the pinned ``elb-openapi`` image in ACR, then redeploy it (one action).
+
+    Chains the charter rollout order (build FIRST, deploy only on a succeeded
+    build) into a single Celery task so the SPA exposes one "Rebuild & Deploy"
+    button instead of requiring a manual ACR build then a separate deploy. The
+    returned ``id`` is the orchestrator task id; poll
+    ``GET /aks/openapi/rebuild-deploy/{id}/status``. Once that reports the build
+    succeeded it carries a ``deploy_task_id`` the SPA switches to polling via the
+    existing ``GET /aks/openapi/deploy/{id}/status`` route.
+
+    ``dry_run: true`` performs no side effects (no build, no deploy) — a safe
+    probe that returns the image ref + target coordinates the task would act on.
+    """
+    from api.tasks.openapi import rebuild_and_redeploy_openapi
+
+    rg = body.get("resource_group", "") or ""
+    cluster_name = body.get("cluster_name", "") or ""
+    acr_name = body.get("acr_name", "") or ""
+    if not (rg and cluster_name and acr_name):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "missing_parameters",
+                "message": (
+                    "resource_group, cluster_name and acr_name are required to "
+                    "rebuild and deploy the OpenAPI service."
+                ),
+            },
+        )
+
+    # Same ACR-RG precedence as the deploy route: explicit body value wins, then
+    # the platform env. The ACR registry name is ``acr_name``.
+    acr_resource_group = (
+        (body.get("acr_resource_group", "") or "").strip()
+        or os.environ.get("PLATFORM_ACR_RESOURCE_GROUP", "").strip()
+        or os.environ.get("AZURE_RESOURCE_GROUP", "").strip()
+    )
+
+    result = _safe_delay(
+        rebuild_and_redeploy_openapi,
+        subscription_id=body.get("subscription_id", "") or "",
+        resource_group=rg,
+        cluster_name=cluster_name,
+        acr_name=acr_name,
+        acr_resource_group=acr_resource_group,
+        storage_account=body.get("storage_account", "") or "",
+        storage_resource_group=body.get("storage_resource_group", "") or "",
+        tenant_id=caller.tenant_id or "",
+        caller_oid=caller.object_id or "",
+        confirm_recreate=bool(body.get("confirm_recreate", False)),
+        dry_run=bool(body.get("dry_run", False)),
+    )
+    return {
+        "id": result.id,
+        "instance_id": result.id,
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/aks/openapi/rebuild-deploy/{result.id}/status",
+        "status": "queued",
+    }
+
+
+@router.get("/openapi/rebuild-deploy/{instance_id}/status")
+def aks_openapi_rebuild_deploy_status(
+    instance_id: str = Path(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Translate the rebuild-and-redeploy Celery ``AsyncResult`` into the
+    orchestrator-style envelope the SPA consumes.
+
+    While the build runs, ``custom_status.phase`` reflects the build stage
+    (``scheduling_build`` / ``building`` / ``build_succeeded`` / …). On success
+    the ``output`` carries ``deploy_task_id`` + ``deploy_status_url`` so the SPA
+    switches to polling the existing deploy status route; a failed build returns
+    ``output.status == "failed"`` with an ``error_code`` and never a deploy task.
+    """
+    del caller  # auth already enforced by the dependency
+
+    from celery.result import AsyncResult
+
+    from api.celery_app import celery_app
+
+    result = AsyncResult(instance_id, app=celery_app)
+    status = (result.status or "PENDING").upper()
+    runtime_status = {
+        "PENDING": "Pending",
+        "RECEIVED": "Pending",
+        "STARTED": "Running",
+        "RETRY": "Running",
+        "PROGRESS": "Running",
+        "SUCCESS": "Completed",
+        "FAILURE": "Failed",
+        "REVOKED": "Terminated",
+    }.get(status, "Running")
+
+    custom_status: dict[str, Any] = {"phase": status.lower()}
+    output: dict[str, Any] | None = None
+
+    if not result.ready():
+        info = result.info if isinstance(result.info, dict) else None
+        if info:
+            custom_status.update({k: v for k, v in info.items() if k != "exc_type"})
+    elif result.successful():
+        payload = result.result if isinstance(result.result, dict) else {}
+        output = dict(payload)
+        # The task returns status="deploy_enqueued" on success, or
+        # status="failed" (with error_code) when the build/schedule failed.
+        # Surface "failed" as a Failed envelope so the SPA shows the error even
+        # though the Celery task itself completed normally.
+        if str(payload.get("status", "")).lower() == "failed":
+            runtime_status = "Failed"
+            custom_status.update({"phase": "failed"})
+        else:
+            custom_status.update({"phase": "completed"})
+    else:
+        # FAILURE / REVOKED
+        err = ""
+        try:
+            err = str(result.result or result.info or "")[:500]
+        except Exception:
+            err = "task failed"
+        custom_status.update({"phase": "failed"})
+        output = {"status": "failed", "error": err}
+
+    return {
+        "instance_id": instance_id,
+        "runtime_status": runtime_status,
+        "custom_status": custom_status,
+        "output": output,
+    }
+
+
 def _deploy_failure_is_upstream_reach(output: dict[str, Any] | None) -> bool:
     """Return True when a failed deploy payload looks like an upstream-reach
     (likely VNet peering) issue rather than image / scheduling / identity.

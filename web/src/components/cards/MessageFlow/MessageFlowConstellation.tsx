@@ -1,15 +1,24 @@
 /**
- * MessageFlowConstellation — the "Bounded Lanes (A1)" force-graph rendering of
+ * MessageFlowConstellation — the "Closed Loop (A4)" force-graph rendering of
  * the Service Bus message flow.
  *
- * Producers (left) → Broker (a bordered region with a Queue lane above a Topic
- * lane) → Consumers (right). Jobs are force-positioned by status: queued jobs
- * settle into the Queue lane, running jobs into the broker centre. Producers
- * are api-dominant (rounded-square glyph) with the occasional human user
- * (circle). Connection lines thin and fade with message age. Hovering a
- * submitter surfaces its session group (jobs sharing an alias) and dims the
+ * Four stages: Actors (left) → Queue box → Workers (queue consumers / AKS
+ * clusters) → Topic box (right). A submitter is BOTH a producer and a
+ * completion subscriber, so the flow is a closed loop: the completion sweeps
+ * back over the top from the Topic box to the submitting actor (the dashed loop
+ * arc). Jobs are force-positioned by lifecycle: queued jobs settle into the
+ * Queue box, running jobs between the Queue and Workers, completed (settling)
+ * jobs into the Topic box. Actors are api-dominant (rounded-square glyph) with
+ * the occasional human user (circle), and carry a "producer + subscriber" label
+ * once they have completed work. Hovering a submitter surfaces its session
+ * group (jobs sharing an alias), brightens its completion loop, and dims the
  * rest. Clicking a job calls `onSelectBox` so the parent can open the JSON
  * detail modal.
+ *
+ * The completion loop maps a real per-actor completion count (claim-check
+ * pattern) — it is NOT a claim that the submitter owns a named Service Bus
+ * subscription; the named subscriptions are the dashboard's own system
+ * subscribers, shown inside the Topic box ("SYSTEM SUBS").
  *
  * This is a pure presentation component over the live `MessageFlowSnapshot`.
  * It never fabricates data: there is no synthetic "session" entity on the
@@ -59,6 +68,9 @@ interface FlowNode extends SimulationNodeDatum {
   // producer
   pkind?: "api" | "user";
   count?: number;
+  /** Completed (settling) jobs this submitter has — drives the dual-role
+   *  "producer + subscriber" label and the completion-loop arc. */
+  completed?: number;
   // cluster
   clusterName?: string;
   running?: number;
@@ -68,6 +80,21 @@ interface FlowNode extends SimulationNodeDatum {
   r?: number;
   status?: string;
   born?: number | null;
+}
+
+/**
+ * A completion-loop arc: the over-the-top return path from the Topic back to a
+ * submitter that has completed jobs. It models the claim-check completion
+ * notification (a submitter is BOTH a producer and a completion subscriber),
+ * mapping a real per-actor completion count — NOT a claim that the submitter
+ * owns a named Service Bus subscription (those are the system subs in the Topic).
+ */
+interface LoopArc {
+  id: string;
+  alias: string;
+  actor: FlowNode;
+  count: number;
+  lane: number;
 }
 
 interface FlowLink {
@@ -145,18 +172,29 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     const broker = snapshot.broker ?? [];
     const clusters = snapshot.consumers?.clusters ?? [];
 
-    // ----- geometry: bordered broker region with Queue (top) / Topic (bottom)
-    const bx0 = w * 0.3;
-    const bx1 = w * 0.7;
-    const by0 = 36;
+    // ----- geometry: four stages — Actors | Queue box | Workers | Topic box.
+    // A submitter is both a producer and a completion subscriber, so the flow
+    // is a closed loop: the completion sweeps back over the top (headroom in
+    // by0) from the Topic box to the Actor. Variable names are kept from the
+    // original single-broker layout so the simulation/tick code stays stable;
+    // their meaning is now "Queue box" (bx0..bx1) plus a separate Topic box
+    // (tx0..tx1).
+    const bx0 = w * 0.3; // queue box left
+    const bx1 = w * 0.46; // queue box right (narrower than the old broker)
+    const by0 = 52; // headroom for the over-the-top completion loop
     const by1 = h - 22;
     const bw = bx1 - bx0;
     const bh = by1 - by0;
     const cx = (bx0 + bx1) / 2;
     const cy = (by0 + by1) / 2;
     const mid = (by0 + by1) / 2;
-    const prodX = w * 0.13;
-    const clusX = w * 0.87;
+    const prodX = w * 0.1; // actors
+    const clusX = w * 0.63; // workers (queue consumers)
+    const tx0 = w * 0.8; // topic box left
+    const tx1 = w * 0.96; // topic box right
+    const tcx = (tx0 + tx1) / 2;
+    const tbw = tx1 - tx0;
+    const loopY = 14; // apex of the completion-loop arcs
 
     const svg = select(svgEl);
     svg.selectAll("*").remove();
@@ -164,35 +202,56 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     // focusable job buttons and the producer/cluster titles).
     svg.attr(
       "aria-label",
-      `Service Bus message flow: ${producers.length} producer${
+      `Service Bus message flow: ${producers.length} actor${
         producers.length === 1 ? "" : "s"
       }, ${broker.length} active job${broker.length === 1 ? "" : "s"}, ${
         clusters.length
-      } consumer cluster${clusters.length === 1 ? "" : "s"}`,
+      } worker cluster${clusters.length === 1 ? "" : "s"}`,
     );
 
-    // ---------- static broker boundary + lane labels ----------
+    // Completion-loop arrowhead (points into the actor).
+    svg
+      .append("defs")
+      .append("marker")
+      .attr("id", "mf-loop-arrow")
+      .attr("viewBox", "0 0 8 8")
+      .attr("refX", 7)
+      .attr("refY", 4)
+      .attr("markerWidth", 7)
+      .attr("markerHeight", 7)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M0,1 L6,4 L0,7")
+      .attr("fill", "none")
+      .attr("stroke", "var(--text-muted)")
+      .attr("stroke-width", 1.2);
+
+    // ---------- static Queue + Topic boxes + labels ----------
     // Decorative chrome — hidden from assistive tech so the only exposed nodes
     // are the interactive job buttons (added later with role=button).
     const boundary = svg.append("g").attr("aria-hidden", "true");
+    // Queue box (requests)
     boundary
       .append("rect")
       .attr("x", bx0)
       .attr("y", by0)
       .attr("width", bw)
       .attr("height", bh)
-      .attr("rx", 14)
-      .attr("fill", "rgba(255,255,255,0.01)")
+      .attr("rx", 12)
+      .attr("fill", "rgba(255,255,255,0.012)")
       .attr("stroke", "var(--border-medium)")
       .attr("stroke-width", 1.1);
+    // Topic box (completions + system subscriptions)
     boundary
-      .append("line")
-      .attr("x1", bx0 + 12)
-      .attr("x2", bx1 - 12)
-      .attr("y1", mid)
-      .attr("y2", mid)
-      .attr("stroke", "var(--border-weak)")
-      .attr("stroke-dasharray", "4 6");
+      .append("rect")
+      .attr("x", tx0)
+      .attr("y", by0)
+      .attr("width", tbw)
+      .attr("height", bh)
+      .attr("rx", 12)
+      .attr("fill", "rgba(255,255,255,0.012)")
+      .attr("stroke", "var(--border-medium)")
+      .attr("stroke-width", 1.1);
 
     const diamond = (x: number, y: number, r: number) =>
       `M${x},${y - r} L${x + r},${y} L${x},${y + r} L${x - r},${y} Z`;
@@ -200,23 +259,25 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     // too; clip them so a wide label does not run off the SVG edge.
     const truncate = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
     const labels = svg.append("g").attr("aria-hidden", "true");
+    // Queue box label (diamond glyph)
     labels
       .append("path")
-      .attr("d", diamond(bx0 + 16, by0 + 14, 5))
+      .attr("d", diamond(bx0 + 14, by0 + 14, 5))
       .attr("fill", "var(--bg-tertiary)")
       .attr("stroke", "var(--accent)")
       .attr("stroke-width", 1);
     labels
       .append("text")
-      .attr("x", bx0 + 27)
+      .attr("x", bx0 + 24)
       .attr("y", by0 + 17)
       .attr("font-size", 10)
       .attr("fill", "var(--text-muted)")
-      .text(`Queue · ${snapshot.request_queue || "requests"}`);
+      .text(truncate(snapshot.request_queue || "requests", 16));
+    // Topic box label (square glyph)
     labels
       .append("rect")
-      .attr("x", bx0 + 11)
-      .attr("y", mid + 9)
+      .attr("x", tx0 + 10)
+      .attr("y", by0 + 9)
       .attr("width", 10)
       .attr("height", 10)
       .attr("rx", 2)
@@ -225,57 +286,90 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
       .attr("stroke-width", 1);
     labels
       .append("text")
-      .attr("x", bx0 + 27)
-      .attr("y", mid + 17)
+      .attr("x", tx0 + 24)
+      .attr("y", by0 + 17)
       .attr("font-size", 10)
       .attr("fill", "var(--text-muted)")
-      .text(`Topic · ${snapshot.completion_topic || "completions"}`);
-    subscriptions.forEach((s, i) => {
-      const gx = bx1 - 16;
-      const gy = mid + 28 + i * 18;
-      if (gy > by1 - 6) return;
-      labels
-        .append("circle")
-        .attr("cx", gx)
-        .attr("cy", gy)
-        .attr("r", 3.5)
-        .attr("fill", "var(--teal)")
-        .attr("opacity", 0.8);
+      .text(truncate(snapshot.completion_topic || "completions", 16));
+    // System subscribers (named SB subscriptions) live inside the Topic box,
+    // clearly distinct from the Actors so a submitter is never read as "owns
+    // this subscription".
+    if (subscriptions.length) {
+      const baseY = by1 - 12 - (subscriptions.length - 1) * 16;
       labels
         .append("text")
-        .attr("x", gx - 9)
-        .attr("y", gy + 3)
-        .attr("text-anchor", "end")
-        .attr("font-size", 9)
+        .attr("x", tx0 + 10)
+        .attr("y", baseY - 12)
+        .attr("font-size", 8.5)
+        .attr("font-weight", 600)
+        .attr("letter-spacing", "0.04em")
         .attr("fill", "var(--text-faint)")
-        .text(s);
-    });
+        .text("SYSTEM SUBS");
+      subscriptions.forEach((s, i) => {
+        const gx = tx0 + 14;
+        const gy = by1 - 12 - i * 16;
+        if (gy < by0 + 30) return;
+        labels
+          .append("circle")
+          .attr("cx", gx)
+          .attr("cy", gy)
+          .attr("r", 3.5)
+          .attr("fill", "var(--teal)")
+          .attr("opacity", 0.8);
+        labels
+          .append("text")
+          .attr("x", gx + 9)
+          .attr("y", gy + 3)
+          .attr("text-anchor", "start")
+          .attr("font-size", 9)
+          .attr("fill", "var(--text-faint)")
+          .text(truncate(s, 14));
+      });
+    }
 
-    // column captions
-    [
-      [prodX, "Producers"],
-      [cx, "Broker"],
-      [clusX, "Consumers"],
-    ].forEach(([x, t]) => {
+    // column captions (with sub-labels naming the dual role / collision fix)
+    (
+      [
+        [prodX, "Actors", "produce + subscribe"],
+        [cx, "Queue", "requests"],
+        [clusX, "Workers", "queue consumers"],
+        [tcx, "Topic", "completions"],
+      ] as [number, string, string][]
+    ).forEach(([x, t, sub]) => {
       svg
         .append("text")
         .attr("class", "mf-col-label")
-        .attr("x", x as number)
+        .attr("x", x)
         .attr("y", 18)
         .attr("text-anchor", "middle")
-        .text(t as string);
+        .text(t);
+      svg
+        .append("text")
+        .attr("class", "mf-col-sublabel")
+        .attr("x", x)
+        .attr("y", 31)
+        .attr("text-anchor", "middle")
+        .text(sub);
     });
 
     // ---------- nodes ----------
     const cache = posCacheRef.current;
+    // Per-submitter completed (settling) job count drives the dual-role label
+    // and the completion-loop arc back to that actor.
+    const completedByAlias = new Map<string, number>();
+    broker.forEach((b) => {
+      if (b.lifecycle === "settling")
+        completedByAlias.set(b.alias, (completedByAlias.get(b.alias) ?? 0) + 1);
+    });
     const producerNodes: FlowNode[] = producers.map((p, i) => ({
       id: "p:" + p.alias,
       kind: "producer",
       alias: p.alias,
       pkind: producerKind(p.sources),
       count: p.job_count,
+      completed: completedByAlias.get(p.alias) ?? 0,
       fx: prodX,
-      fy: 44 + ((i + 0.5) / Math.max(1, producers.length)) * (h - 70),
+      fy: by0 + 6 + ((i + 0.5) / Math.max(1, producers.length)) * (by1 - by0 - 12),
     }));
     const clusterNodes: FlowNode[] = clusters.map((c, i) => ({
       id: "c:" + (c.cluster_name || "unassigned"),
@@ -285,10 +379,16 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
       running: c.running,
       queued: c.queued,
       fx: clusX,
-      fy: 44 + ((i + 0.5) / Math.max(1, clusters.length)) * (h - 70),
+      fy: by0 + 6 + ((i + 0.5) / Math.max(1, clusters.length)) * (by1 - by0 - 12),
     }));
     const jobNodes: FlowNode[] = broker.map((b) => {
       const cached = cache.get(b.job_id);
+      // First-frame home column by lifecycle/status: settling → Topic box,
+      // waiting → Queue box, else (running/reducing) → between Workers and Queue.
+      const settling = b.lifecycle === "settling";
+      const waiting = b.status === "queued" || b.status === "pending";
+      const homeX = settling ? tcx : waiting ? cx : clusX - w * 0.06;
+      const span = settling ? tbw : bw;
       return {
         id: b.job_id,
         kind: "job",
@@ -297,8 +397,8 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
         status: b.status,
         born: bornMs(b.created_at),
         r: jobRadius(b.query_size),
-        x: cached?.x ?? cx + spread01(b.job_id) * bw * 0.6,
-        y: cached?.y ?? cy + spread01(b.job_id + "y") * bh * 0.6,
+        x: cached?.x ?? homeX + spread01(b.job_id) * span * 0.5,
+        y: cached?.y ?? cy + spread01(b.job_id + "y") * bh * 0.5,
       };
     });
 
@@ -349,20 +449,29 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
       else membersByAlias.set(j.alias, [j]);
     });
 
+    // ---------- completion-loop arcs (Topic → actor) ----------
+    // One aggregate arc per actor that has completed jobs, sweeping over the
+    // top from the Topic box back to the actor. Always visible (faint) so the
+    // dual producer+subscriber role is STRUCTURAL, not hover-only. Honest: it
+    // maps a real per-actor completion count, NOT a named SB subscription.
+    const loopArcs: LoopArc[] = producerNodes
+      .filter((p) => (p.completed ?? 0) > 0)
+      .map((p, i) => ({
+        id: "loop:" + p.alias,
+        alias: p.alias,
+        actor: p,
+        count: p.completed ?? 0,
+        lane: i,
+      }));
+
     // ---------- layers ----------
-    // Links and session hulls are decorative; only the node layer carries the
-    // focusable job buttons, so hide the rest from assistive tech.
+    // Links, loop arcs and session hulls are decorative; only the node layer
+    // carries the focusable job buttons, so hide the rest from assistive tech.
+    const loopLayer = svg.append("g").attr("fill", "none").attr("aria-hidden", "true");
     const linkLayer = svg
       .append("g")
       .attr("fill", "none")
       .attr("stroke-linecap", "round")
-      .attr("aria-hidden", "true");
-    // Particles ride above the links but below the nodes, so the "energy"
-    // travelling producer → job → cluster reads clearly without obscuring the
-    // interactive job glyphs.
-    const particleLayer = svg
-      .append("g")
-      .attr("class", "mf-particles")
       .attr("aria-hidden", "true");
     const sessionLayer = svg.append("g").attr("aria-hidden", "true");
     const nodeLayer = svg.append("g");
@@ -372,6 +481,15 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
       .data(links, (d) => d.id)
       .join("path")
       .attr("stroke", (d) => aliasTone(d.alias).accent);
+
+    const loopSel = loopLayer
+      .selectAll<SVGPathElement, LoopArc>("path")
+      .data(loopArcs, (d) => d.id)
+      .join("path")
+      .attr("stroke", (d) => aliasTone(d.alias).accent)
+      .attr("stroke-width", 1.3)
+      .attr("stroke-dasharray", "4 5")
+      .attr("marker-end", "url(#mf-loop-arrow)");
 
     // Sessions = jobs sharing a submitter alias. Faint at rest, revealed on hover.
     const sessionAliases = Array.from(new Set(jobNodes.map((j) => j.alias)));
@@ -431,22 +549,41 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
               .attr("stroke", tone.accent)
               .attr("stroke-width", 1.3);
           }
+          const hasCompleted = (d.completed ?? 0) > 0;
           sel
             .append("text")
             .attr("x", -14)
-            .attr("dy", "0.32em")
+            .attr("dy", hasCompleted ? "-0.15em" : "0.32em")
             .attr("text-anchor", "end")
             .attr("font-size", 11)
             .attr("fill", "var(--text-primary)")
             .text(`${truncate(d.alias, 22)}${d.pkind === "api" ? " ·api" : ""} (${d.count})`);
+          // Dual role: a submitter that has completed jobs is BOTH a producer
+          // and a completion subscriber (the loop arc returns to it).
+          if (hasCompleted) {
+            sel
+              .append("text")
+              .attr("x", -14)
+              .attr("dy", "1.05em")
+              .attr("text-anchor", "end")
+              .attr("font-size", 8.5)
+              .attr("fill", "var(--text-faint)")
+              .text("producer + subscriber");
+          }
           sel
             .append("title")
-            .text(`${d.alias} (${d.pkind}) — ${d.count} active job${d.count === 1 ? "" : "s"}`);
+            .text(
+              `${d.alias} (${d.pkind}) — ${d.count} active job${d.count === 1 ? "" : "s"}${
+                hasCompleted ? `, ${d.completed} completed (subscriber)` : ""
+              }`,
+            );
           sel
             .attr("role", "img")
             .attr(
               "aria-label",
-              `${d.pkind} producer ${d.alias}, ${d.count} active job${d.count === 1 ? "" : "s"}`,
+              `${d.pkind} actor ${d.alias}, ${d.count} active job${d.count === 1 ? "" : "s"}${
+                hasCompleted ? `, also subscribes to ${d.completed} completion${d.completed === 1 ? "" : "s"}` : ""
+              }`,
             );
         });
 
@@ -594,6 +731,9 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
         return d.kind === "job" && d.box?.lifecycle === "settling" ? 0.5 : 1;
       });
       linkSel.attr("opacity", (d) => (hv == null ? 1 : d.alias === hv ? 1 : 0.06));
+      loopSel
+        .attr("opacity", (d) => (hv == null ? 0.3 : d.alias === hv ? 0.95 : 0.05))
+        .attr("stroke-width", (d) => (hv === d.alias ? 1.8 : 1.3));
       sessionG.each(function (a) {
         const on = hv != null && a === hv;
         const g = select(this);
@@ -670,82 +810,31 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     nodeSel.filter((d) => d.kind === "job").call(dragBehavior);
 
     // ---------- moving "energy" particles ----------
-    // Glowing dots travel producer → job → cluster along the active links so a
-    // live job reads as energy in motion, not a static dot. Running/reducing
-    // links carry two faster particles; queued/pending links carry one slow
-    // drifting particle. Settling (fading) links carry none. Honours
-    // prefers-reduced-motion: when set, no particles animate (the static
-    // status glyphs already convey state).
-    interface Particle {
-      link: FlowLink;
-      dur: number;
-      offset: number;
-    }
-    const particleData: Particle[] = [];
-    links.forEach((l) => {
-      if (l.lifecycle === "settling") return;
-      if (l.status === "running" || l.status === "reducing") {
-        const dur = l.status === "reducing" ? 2400 : 1600;
-        particleData.push({ link: l, dur, offset: 0 });
-        particleData.push({ link: l, dur, offset: 0.5 });
-      } else {
-        // queued/pending: a single slow particle drifting toward the broker.
-        particleData.push({ link: l, dur: 3000, offset: (spread01(l.id) + 0.5) % 1 });
-      }
-    });
-
-    const particleSel = particleLayer
-      .selectAll<SVGCircleElement, Particle>("circle")
-      .data(particleData)
-      .join("circle")
-      .attr("class", "mf-particle")
-      .attr("r", (p) =>
-        p.link.status === "running" || p.link.status === "reducing" ? 2 : 1.5,
-      )
-      .attr("fill", (p) => jobTone(p.link.status, p.link.alias).accent)
-      // `color` drives the CSS drop-shadow glow (currentColor) so the halo
-      // matches the particle's own tone.
-      .style("color", (p) => jobTone(p.link.status, p.link.alias).accent);
-
-    // Evaluate the link's cubic bezier (same control points as the rendered
-    // path) at parameter t, reading live node positions each frame.
-    const cubicAt = (l: FlowLink, t: number): { x: number; y: number } => {
-      const sx = l.source.x ?? 0;
-      const sy = l.source.y ?? 0;
-      const tx = l.target.x ?? 0;
-      const ty = l.target.y ?? 0;
-      const mx = (sx + tx) / 2;
-      const u = 1 - t;
-      const x = u * u * u * sx + 3 * u * u * t * mx + 3 * u * t * t * mx + t * t * t * tx;
-      const y = u * u * u * sy + 3 * u * u * t * sy + 3 * u * t * t * ty + t * t * t * ty;
-      return { x, y };
-    };
-
-    let particleRaf = 0;
-    const animateParticles = (ts: number) => {
-      const hv = hoveredRef.current;
-      particleSel
-        .attr("transform", (p) => {
-          const t = (ts / p.dur + p.offset) % 1;
-          const pt = cubicAt(p.link, t);
-          return `translate(${pt.x},${pt.y})`;
-        })
-        .attr("opacity", (p) => {
-          const t = (ts / p.dur + p.offset) % 1;
-          const fade = Math.sin(Math.PI * t); // 0 at the ends, 1 at mid-flight
-          const dim = hv && p.link.alias !== hv ? 0.12 : 1;
-          return (0.15 + 0.8 * fade) * dim;
-        });
-      particleRaf = requestAnimationFrame(animateParticles);
-    };
-    if (!reduceMotion && particleData.length) {
-      particleRaf = requestAnimationFrame(animateParticles);
-    }
+    // Removed for the closed-loop (A4) design: the layout is intentionally calm
+    // and static; status is conveyed by the node glyphs (queued ring, running
+    // halo, completed check) and the completion-loop arc, not travelling dots.
 
     function ticked() {
       const now = Date.now();
       jobNodes.forEach((d) => {
-        d.x = Math.max(bx0 + 6, Math.min(bx1 - 6, d.x ?? cx));
+        // Clamp each job into the box/column its lifecycle belongs to: settling
+        // (completed) → Topic box, waiting → Queue box, else (running) between
+        // the Queue box and the Workers column.
+        const settling = d.box?.lifecycle === "settling";
+        const waiting = d.status === "queued" || d.status === "pending";
+        let lo: number;
+        let hi: number;
+        if (settling) {
+          lo = tx0 + 6;
+          hi = tx1 - 6;
+        } else if (waiting) {
+          lo = bx0 + 6;
+          hi = bx1 - 6;
+        } else {
+          lo = bx1 + 10;
+          hi = tx0 - 10;
+        }
+        d.x = Math.max(lo, Math.min(hi, d.x ?? cx));
         d.y = Math.max(by0 + 6, Math.min(by1 - 6, d.y ?? cy));
         cache.set(d.id, { x: d.x, y: d.y });
       });
@@ -773,6 +862,17 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
           const hv = hoveredRef.current;
           return hv && l.alias !== hv ? base * 0.18 : base;
         });
+      // Completion-loop arcs: from the Topic box top, sweep over the top of the
+      // stage, and arrive just above the actor (lanes stagger the apex so
+      // several actors' loops do not collapse onto one line).
+      loopSel.attr("d", (d) => {
+        const sx = tcx;
+        const sy = by0;
+        const ex = prodX;
+        const ey = (d.actor.fy ?? d.actor.y ?? cy) - 12;
+        const apexY = loopY + d.lane * 7;
+        return `M${sx},${sy} C${sx},${apexY} ${ex},${apexY} ${ex},${ey}`;
+      });
       nodeSel.attr("transform", (d) => `translate(${d.x ?? 0},${d.y ?? 0})`);
       sessionG.each(function (a) {
         const members = membersByAlias.get(a) ?? [];
@@ -824,7 +924,6 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
 
     return () => {
       sim.stop();
-      cancelAnimationFrame(particleRaf);
     };
     // `selectedJobId` is intentionally NOT a dependency: it only changes the
     // selection ring, handled by the dedicated effect below. Including it here
