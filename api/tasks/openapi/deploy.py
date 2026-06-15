@@ -220,13 +220,17 @@ def _delete_openapi_service(
 def _resolve_control_plane_url() -> str:
     """Return the dashboard's own public URL for the sibling webhook env, or "".
 
-    Order of precedence:
+    Thin wrapper over
+    :func:`api.services.control_plane_url.resolve_control_plane_url`, whose
+    precedence is:
       1. ``DASHBOARD_PUBLIC_URL`` env (explicit override, used by tests / custom
          hosts / private DNS).
-      2. ``CONTAINER_APP_NAME`` + ``CONTAINER_APP_ENV_DNS_SUFFIX`` — both are
+      2. Operator-configured Settings value — the custom domain bound to the
+         control-plane Container App (e.g. ``https://dashboard.elasticblast.com``).
+      3. ``CONTAINER_APP_NAME`` + ``CONTAINER_APP_ENV_DNS_SUFFIX`` — both are
          auto-injected by the Azure Container Apps runtime on every replica,
-         so this branch is the production path with zero Bicep wiring needed.
-      3. Empty string. The manifest builder will then omit ``CONTROL_PLANE_URL``
+         so this branch is the zero-config production default.
+      4. Empty string. The manifest builder will then omit ``CONTROL_PLANE_URL``
          entirely and the sibling's ``_webhook_notify`` becomes a no-op
          (preserves existing local-dev / azd-less deploy behaviour).
 
@@ -234,14 +238,10 @@ def _resolve_control_plane_url() -> str:
     exempted) so emitting a bare hostname would be rejected at runtime.
     """
 
-    override = (os.environ.get("DASHBOARD_PUBLIC_URL") or "").strip()
-    if override:
-        return override.rstrip("/")
-    name = (os.environ.get("CONTAINER_APP_NAME") or "").strip()
-    suffix = (os.environ.get("CONTAINER_APP_ENV_DNS_SUFFIX") or "").strip()
-    if name and suffix:
-        return f"https://{name}.{suffix}"
-    return ""
+    from api.services.control_plane_url import resolve_control_plane_url
+
+    url, _source = resolve_control_plane_url()
+    return url
 
 
 @shared_task(

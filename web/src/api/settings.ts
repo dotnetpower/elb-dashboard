@@ -495,9 +495,29 @@ function querystring(params: Record<string, string>): string {
   return usp.toString();
 }
 
+/** Source of the resolved control-plane URL the OpenAPI sibling webhooks back to.
+ *  - `env`: a `DASHBOARD_PUBLIC_URL` deploy-time hard pin overrides Settings.
+ *  - `settings`: the operator-configured custom domain is in effect.
+ *  - `container_app`: no custom domain — the auto `*.azurecontainerapps.io` FQDN.
+ *  - `none`: nothing resolvable; the sibling webhook is disabled. */
+export type ControlPlaneUrlSource = "env" | "settings" | "container_app" | "none";
+
+export interface ControlPlaneUrlStatus {
+  /** The operator-saved custom domain, or "" when unset. */
+  configured_url: string;
+  /** The URL the OpenAPI deploy actually injects as `CONTROL_PLANE_URL`. */
+  effective_url: string;
+  source: ControlPlaneUrlSource;
+  /** The auto-generated Container Apps FQDN URL (the `container_app` fallback). */
+  container_app_url: string;
+}
+
+export interface ControlPlaneUrlSavedResponse extends ControlPlaneUrlStatus {
+  status: "saved" | "cleared";
+}
+
 export const settingsApi = {
   getAppInsightsStatus: () => api.get<AppInsightsStatus>("/settings/app-insights"),
-
   lookupAppInsights: (body: AppInsightsLookupRequest) =>
     api.post<{ component: AppInsightsComponent }>(
       "/settings/app-insights/lookup",
@@ -635,4 +655,18 @@ export const settingsApi = {
     api.get<ServiceBusObservedCompletionsResponse>(
       `/settings/service-bus/observed-completions?limit=${limit}`,
     ),
+
+  /** Read the configured control-plane custom domain + the resolved effective
+   *  URL the OpenAPI sibling webhooks back to. Never 404s. */
+  getControlPlaneUrl: () =>
+    api.get<ControlPlaneUrlStatus>("/settings/control-plane"),
+
+  /** Persist the control-plane custom domain (validated server-side: https only
+   *  except localhost, origin with no path/query). */
+  setControlPlaneUrl: (url: string) =>
+    api.put<ControlPlaneUrlSavedResponse>("/settings/control-plane", { url }),
+
+  /** Clear the custom domain — resolution falls back to the Container App FQDN. */
+  clearControlPlaneUrl: () =>
+    api.del<ControlPlaneUrlSavedResponse>("/settings/control-plane"),
 };

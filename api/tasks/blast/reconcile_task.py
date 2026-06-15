@@ -419,6 +419,31 @@ def reconcile_stale_jobs(
                 updated_at = now  # never mark recently-created rows lost
             quiet_seconds = (now - updated_at).total_seconds()
             if quiet_seconds >= stale_threshold_seconds:
+                # Ground-truth completion check BEFORE declaring the job lost.
+                # The cluster-side finalizer writes ``metadata/SUCCESS.txt``
+                # LAST -- only after every result artifact is durably uploaded
+                # to Storage -- and that marker outlives the AKS cluster. A job
+                # whose cluster was stopped/deleted right after it finished
+                # (aggressive auto-stop) leaves the Celery result expired and
+                # the K8s API unreachable, so every probe above misses it; the
+                # row would then be falsely marked ``worker_lost``/``failed``
+                # even though its results are sitting in Storage. That is the
+                # "status API says completed / download works, but Recent
+                # searches shows failed" inconsistency. Trust the durable
+                # marker and finalize as completed instead. ``SUCCESS.txt`` is
+                # written only on success and job ids are unique uuid4s (no
+                # stale-marker reuse), so a present marker is authoritative.
+                storage_account = _blast._storage_account_from_row(row)
+                if _blast._has_blast_success_marker(storage_account, str(row.job_id)):
+                    _blast._update_state(
+                        row.job_id,
+                        "completed",
+                        status="completed",
+                        event="reconcile_results_recovered",
+                        error_code="",
+                    )
+                    summary["completed"] += 1
+                    continue
                 # Mirror the FAILURE/REVOKED branch above: route through
                 # `_update_state` so orphan running step entries get demoted
                 # to `failed` and the UI stops spinning. Refine the opaque

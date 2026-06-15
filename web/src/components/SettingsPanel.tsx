@@ -6,6 +6,7 @@ import {
   ExternalLink,
   Gauge,
   Globe,
+  Globe2,
   HardDrive,
   Loader2,
   Monitor,
@@ -44,6 +45,7 @@ import { PerformanceSection } from "@/components/settings/sections/PerformanceSe
 import { TelemetrySection } from "@/components/settings/sections/TelemetrySection";
 import { AksSection } from "@/components/settings/sections/AksSection";
 import { PublicHttpsSection } from "@/components/settings/sections/PublicHttpsSection";
+import { ControlPlaneDomainSection } from "@/components/settings/sections/ControlPlaneDomainSection";
 import { ServiceBusSection } from "@/components/settings/sections/ServiceBusSection";
 import { VnetPeeringSection } from "@/components/settings/sections/VnetPeeringSection";
 import { DiagnosticsSection } from "@/components/settings/sections/DiagnosticsSection";
@@ -59,6 +61,7 @@ export type SettingsSectionId =
   | "aks"
   | "performance"
   | "public-https"
+  | "control-plane"
   | "vnet-peering"
   | "service-bus"
   | "sizing"
@@ -75,6 +78,7 @@ const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> =
   { id: "aks", label: "AKS Observability", icon: <Monitor size={14} strokeWidth={1.5} /> },
   { id: "performance", label: "Performance", icon: <HardDrive size={14} strokeWidth={1.5} /> },
   { id: "public-https", label: "Public HTTPS", icon: <Globe size={14} strokeWidth={1.5} /> },
+  { id: "control-plane", label: "Control plane domain", icon: <Globe2 size={14} strokeWidth={1.5} /> },
   { id: "vnet-peering", label: "VNet peering", icon: <Network size={14} strokeWidth={1.5} /> },
   { id: "service-bus", label: "Service Bus", icon: <Radio size={14} strokeWidth={1.5} /> },
   { id: "sizing", label: "Sizing", icon: <Gauge size={14} strokeWidth={1.5} /> },
@@ -239,6 +243,7 @@ export function SettingsPanel({ open, onClose, initialSection }: Props) {
             {active === "aks" && <AksSection config={config} />}
             {active === "performance" && <PerformanceSection config={config} />}
             {active === "public-https" && <PublicHttpsSection config={config} />}
+            {active === "control-plane" && <ControlPlaneDomainSection config={config} />}
             {active === "vnet-peering" && <VnetPeeringSection config={config} />}
             {active === "service-bus" && <ServiceBusSection config={config} />}
             {active === "sizing" && <SizingSection />}

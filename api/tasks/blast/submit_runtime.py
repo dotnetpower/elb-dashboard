@@ -263,6 +263,24 @@ def _has_parseable_result_artifact(storage_account: str, job_id: str) -> bool:
         return False
 
 
+def _has_blast_success_marker(storage_account: str, job_id: str) -> bool:
+    """True when the durable elastic-blast ``metadata/SUCCESS.txt`` marker exists.
+
+    Authoritative completion signal that survives AKS cluster teardown and the
+    ephemeral Celery result / Redis runtime cache (see
+    ``api.services.blast.result_analytics.has_blast_success_marker``). Used by
+    the stale-job reconciler as ground truth before declaring an unreachable,
+    quiet job ``worker_lost``. Best-effort: returns ``False`` on any error.
+    """
+    try:
+        from api.services.blast.result_analytics import has_blast_success_marker
+
+        return has_blast_success_marker(storage_account, job_id)
+    except Exception as exc:
+        LOGGER.info("success marker check skipped job_id=%s: %s", job_id, type(exc).__name__)
+        return False
+
+
 def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
     if not storage_account or not job_id:
         return ""
@@ -315,6 +333,7 @@ __all__ = (
     "_ensure_terminal_kubeconfig_context",
     "_exception_detail_snippet",
     "_gate_completed_submit_on_results",
+    "_has_blast_success_marker",
     "_has_parseable_result_artifact",
     "_refresh_submit_terminal_status",
     "_stream_submit_command",

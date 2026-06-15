@@ -549,6 +549,29 @@ def test_publish_transitions_marks_terminal_done(monkeypatch: pytest.MonkeyPatch
     assert rec.last_status == "succeeded"
 
 
+def test_publish_transitions_idle_skips_openapi_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With zero active bridges the tick must NOT resolve OpenAPI client kwargs.
+
+    Resolving them reads the configured cluster's ``elb-openapi`` Service IP
+    from the Kubernetes API; on a stopped / recreated cluster that read raises a
+    ConnectionError the OpenTelemetry instrumentation auto-records as an App
+    Insights dependency exception, flooding telemetry once per 30 s tick. The
+    idle path must touch nothing but the local tracking store.
+    """
+    _enable(monkeypatch)
+    calls: list[int] = []
+    monkeypatch.setattr(
+        sb_tasks, "_openapi_kwargs", lambda cfg: calls.append(1) or {}
+    )
+
+    out = sb_tasks.publish_transitions()
+
+    assert calls == [], "idle tick must not resolve OpenAPI kwargs"
+    assert out == {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
+
+
 def test_publish_transitions_gives_up_on_stuck_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
     monkeypatch.setattr(sb_tasks, "_BRIDGE_MAX_AGE_SECONDS", 0)  # everything is "expired"

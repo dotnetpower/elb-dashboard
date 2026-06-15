@@ -683,12 +683,24 @@ def publish_transitions() -> dict[str, Any]:
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
+    # Fetch the work set BEFORE resolving the OpenAPI client kwargs. With zero
+    # active bridges there is nothing to poll, and `_openapi_kwargs` reads the
+    # configured cluster's `elb-openapi` Service IP from the Kubernetes API on
+    # every tick (30 s). When that cluster is stopped or was recreated with a
+    # new API-server FQDN, the read raises a `requests` ConnectionError that the
+    # OpenTelemetry instrumentation auto-records as an App Insights
+    # dependency-failure exception — flooding the telemetry with thousands of
+    # identical traces for a no-op tick. Resolving lazily makes the idle path
+    # touch nothing but the local tracking store.
+    bridges = list_active_bridges(limit=_PUBLISH_MAX_ROWS)
+    if not bridges:
+        return {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
     published = 0
     finished = 0
     scanned = 0
     errors = 0
     openapi_kwargs = _openapi_kwargs(cfg)
-    for rec in list_active_bridges(limit=_PUBLISH_MAX_ROWS):
+    for rec in bridges:
         scanned += 1
         try:
             p_delta, f_delta = _publish_one_bridge(cfg, rec, openapi_kwargs)

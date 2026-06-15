@@ -477,6 +477,9 @@ def test_resolve_control_plane_url_composes_from_aca_env(monkeypatch) -> None:
     from api.tasks.openapi import deploy as deploy_mod
 
     monkeypatch.delenv("DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(
+        "api.services.control_plane_url.get_control_plane_url", lambda: ""
+    )
     monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
     monkeypatch.setenv("CONTAINER_APP_ENV_DNS_SUFFIX", "env.koreacentral.azurecontainerapps.io")
     assert (
@@ -489,6 +492,9 @@ def test_resolve_control_plane_url_empty_when_aca_env_missing(monkeypatch) -> No
     from api.tasks.openapi import deploy as deploy_mod
 
     monkeypatch.delenv("DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(
+        "api.services.control_plane_url.get_control_plane_url", lambda: ""
+    )
     monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
     monkeypatch.delenv("CONTAINER_APP_ENV_DNS_SUFFIX", raising=False)
     assert deploy_mod._resolve_control_plane_url() == ""

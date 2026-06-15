@@ -211,6 +211,7 @@ from api.tasks.blast.submit_runtime import (  # noqa: E402,F401
     _ensure_terminal_kubeconfig_context,
     _exception_detail_snippet,
     _gate_completed_submit_on_results,
+    _has_blast_success_marker,
     _has_parseable_result_artifact,
     _refresh_submit_terminal_status,
     _stream_submit_command,

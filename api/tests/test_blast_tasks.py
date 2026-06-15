@@ -4033,6 +4033,73 @@ def test_reconcile_marks_old_quiet_row_worker_lost(monkeypatch: pytest.MonkeyPat
     assert repo.updates[0][1]["phase"] == "worker_lost"
 
 
+def test_reconcile_recovers_completed_quiet_row_from_success_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quiet, unreachable row whose Storage SUCCESS marker exists is recovered
+    as ``completed`` instead of being falsely marked ``worker_lost``.
+
+    Reproduces the "status API says completed / results downloadable, but
+    Recent searches shows failed" inconsistency: the job finished and the
+    cluster-side finalizer wrote ``metadata/SUCCESS.txt`` before the AKS
+    cluster auto-stopped, so the Celery result expired and every live probe
+    (k8s, external) misses it. The durable marker is the authoritative ground
+    truth, so the reconciler must finalize the row as completed.
+    """
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j-done",
+                task_id="task-done",
+                updated_at="2025-01-01T00:00:00+00:00",
+                created_at="2025-01-01T00:00:00+00:00",
+                subscription_id="sub-1",
+                resource_group="rg-elb-cluster",
+                cluster_name="elb-cluster-01",
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    # K8s probe is unreachable (cluster auto-stopped after the job finished) so
+    # reconcile falls through to the quiet-row branch.
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("stopped")),
+    )
+    # The durable Storage SUCCESS marker proves the job actually completed.
+    marker_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        blast,
+        "_has_blast_success_marker",
+        lambda storage_account, job_id: marker_calls.append((storage_account, job_id)) or True,
+    )
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=60)
+
+    assert summary["completed"] == 1
+    assert summary["worker_lost"] == 0
+    assert marker_calls and marker_calls[-1][1] == "j-done"
+    update = repo.updates[0][1]
+    assert update["status"] == "completed"
+    assert update["phase"] == "completed"
+    # The stale error_code column is cleared on the recovery write.
+    assert update["error_code"] == ""
+    recovered_history = [
+        payload
+        for _job, event, payload in repo.history
+        if event == "reconcile_results_recovered"
+    ]
+    assert recovered_history, "expected a reconcile_results_recovered history entry"
+
+
 def test_reconcile_does_not_mark_external_origin_row_worker_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

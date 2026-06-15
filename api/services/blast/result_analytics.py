@@ -163,6 +163,44 @@ class InvalidResultBlobName(ValueError):
         self.code = code
 
 
+def has_blast_success_marker(storage_account: str, job_id: str) -> bool:
+    """True when the durable elastic-blast SUCCESS marker exists for a job.
+
+    The cluster-side finalizer (``elb-finalizer-aks.sh``) writes
+    ``.../metadata/SUCCESS.txt`` LAST — only after every result artifact has
+    been durably uploaded to the results container — so its presence is the
+    authoritative "this job completed successfully" signal. Unlike the AKS
+    cluster (which auto-stop / delete can tear down right after a job finishes)
+    and the ephemeral Celery result / per-revision Redis runtime cache, the
+    marker lives in Storage and survives those teardowns. It is therefore the
+    correct ground truth for the stale-job reconciler to consult before
+    declaring a quiet, otherwise-unreachable job ``worker_lost``.
+
+    Best-effort: returns ``False`` on any error (missing account/job id,
+    credential failure, blob list failure) so a transient Storage hiccup never
+    falsely completes a job. ``job_id`` is the results-container prefix — the
+    dashboard job id for Celery-submitted jobs, or the sibling OpenAPI job id
+    for ``/v1/jobs`` submissions (the runner stores results under
+    ``results/<job_id>/...`` in both cases), mirroring
+    ``api.services.blast.runtime_failure.read_blast_runtime_failure``.
+    """
+    if not storage_account or not job_id:
+        return False
+    try:
+        cred = get_credential()
+        blobs = storage_data.list_result_blobs(
+            cred, storage_account, container="results", prefix=f"{job_id}/"
+        )
+    except Exception as exc:
+        LOGGER.info(
+            "success marker check skipped job_id=%s: %s", job_id, type(exc).__name__
+        )
+        return False
+    return any(
+        str(blob.get("name") or "").endswith("/metadata/SUCCESS.txt") for blob in blobs
+    )
+
+
 def list_parseable_result_blobs(storage_account: str, job_id: str) -> list[dict[str, Any]]:
     """Return BLAST result blobs the analytics parser can understand."""
     cred = get_credential()
