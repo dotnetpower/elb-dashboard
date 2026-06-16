@@ -8,7 +8,7 @@ Responsibility: HTTP shaping for the optional Service Bus BLAST integration —
 Edit boundaries: HTTP only — no Service Bus SDK calls inline, no persistence
     logic. Every route enforces ``require_caller``.
 Key entry points: ``get_status``, ``put_config``, ``test``, ``discover``,
-    ``purge``, ``send``.
+    ``purge``, ``send``, ``peek``.
 Risky contracts: The SAS connection string is never returned to the browser
     (only the Key Vault secret name). Runtime counts degrade gracefully when the
     credential lacks ``Manage`` claims. ``purge`` is a hard-to-reverse action;
@@ -401,6 +401,46 @@ def send(
         "external_correlation_id": correlation_id,
         "request_id": request_id,
         "queue": cfg.request_queue,
+    }
+
+
+@router.get("/peek")
+def peek(
+    limit: int = 5,
+    _caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Non-destructive peek of the request queue (Playground content view).
+
+    Reader-accessible, read-only view of the actual messages currently sitting
+    in the request queue. Unlike :func:`_runtime_counts` (which needs a
+    ``Manage`` claim), peek reads via the data-plane receiver and needs only
+    ``Azure Service Bus Data Receiver``, so it can surface message content even
+    when runtime counts degrade to ``no_manage_claim``. Never removes or locks a
+    message. Always 200s, degrading to ``available=false`` with a ``reason`` so
+    the SPA can render a status line instead of an error.
+    """
+    cfg = get_service_bus_config()
+    bounded = max(1, min(int(limit), 50))
+    base: dict[str, Any] = {"queue": cfg.request_queue, "messages": [], "count": 0}
+    if not cfg.namespace_fqdn:
+        return {"available": False, "reason": "not_configured", **base}
+    if not service_bus_enabled():
+        return {"available": False, "reason": "disabled", **base}
+    try:
+        messages = service_bus.peek_request_previews(cfg, max_count=bounded)
+    except service_bus.ServiceBusAuthError:
+        return {"available": False, "reason": "auth_failed", **base}
+    except service_bus.ServiceBusUnavailable:
+        LOGGER.debug("service bus peek unavailable", exc_info=True)
+        return {"available": False, "reason": "unavailable", **base}
+    except Exception:
+        LOGGER.debug("service bus peek failed", exc_info=True)
+        return {"available": False, "reason": "error", **base}
+    return {
+        "available": True,
+        "queue": cfg.request_queue,
+        "messages": messages,
+        "count": len(messages),
     }
 
 

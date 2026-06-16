@@ -11,9 +11,13 @@
  * detail endpoint (`/monitor/jobs/{id}`) to show the real JobState payload.
  */
 import { api } from "@/api/client";
-import type { ServiceBusCounts } from "@/api/settings";
+import type { ServiceBusCounts, ServiceBusPeekMessage } from "@/api/settings";
 
 export type SubmissionSource = "dashboard" | "external_api" | "servicebus";
+
+/** A peeked request-queue message preview shipped with the snapshot. Re-exported
+ *  from the settings client so both surfaces share one shape. */
+export type QueueMessagePreview = ServiceBusPeekMessage;
 
 /**
  * Where a broker job sits in its lifecycle for the constellation:
@@ -79,6 +83,14 @@ export interface MessageFlowSnapshot {
    * honestly instead of implying a real delta.
    */
   dlq_delta?: MessageFlowDlqDelta | null;
+  /**
+   * Bounded, non-destructive preview of the messages currently sitting in the
+   * request queue (peeked under the data-plane Receiver claim). Normally empty
+   * because the queue drains in under a second, but a message that is not being
+   * drained (no consumer running, or one injected directly via the Azure
+   * portal) lingers here so the operator can inspect its count + content.
+   */
+  queue_messages?: QueueMessagePreview[];
   active_total?: number;
   /** Recently-terminal jobs still drawn (fading out), not part of active_total. */
   settling_total?: number;

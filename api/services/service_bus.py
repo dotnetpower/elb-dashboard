@@ -12,8 +12,8 @@ Edit boundaries: Reusable cloud/data-plane logic only. No HTTP shaping, no
     ``service_bus_pref``). Routes/tasks call THIS module; nothing else imports
     ``azure.servicebus``.
 Key entry points: ``send_request``, ``publish_event``, ``peek_requests``,
-    ``drain_requests``, ``entity_counts``, ``purge_dead_letter``,
-    ``test_connection``, ``MessageAction``.
+    ``peek_request_previews``, ``drain_requests``, ``entity_counts``,
+    ``purge_dead_letter``, ``test_connection``, ``MessageAction``.
 Risky contracts: Receivers settle EVERY message they receive (complete /
     abandon / dead-letter) — a leaked lock causes redelivery and duplicate BLAST
     runs. ``drain_requests`` and ``purge_dead_letter`` are BOUNDED by
@@ -48,6 +48,7 @@ from azure.servicebus.exceptions import ServiceBusAuthenticationError, ServiceBu
 from azure.servicebus.management import ServiceBusAdministrationClient
 
 from api.services import get_credential
+from api.services.sanitise import sanitise
 from api.services.service_bus_pref import (
     AUTH_MODE_SAS,
     ServiceBusConfig,
@@ -59,6 +60,10 @@ LOGGER = logging.getLogger(__name__)
 # Bounds. Drain and purge are explicitly capped so one tick cannot run forever.
 _RECEIVE_MAX_WAIT_SECONDS = 5
 _PEEK_DEFAULT = 5
+# Cap the sanitised body preview a peek returns so a large query FASTA cannot
+# bloat the response or the dashboard. A content preview never needs the full
+# payload; the truncation is flagged via ``body_truncated``.
+_PEEK_BODY_MAX_CHARS = 4000
 
 
 class ServiceBusUnavailable(RuntimeError):
@@ -277,6 +282,66 @@ def peek_requests(
         for message in receiver.peek_messages(max_message_count=max(1, min(max_count, 100))):
             out.append(_parse(message))
     return out
+
+
+def _preview_message(parsed: ParsedMessage) -> dict[str, Any]:
+    """Shape a peeked request message into a sanitised, size-bounded preview.
+
+    The request-queue body is the user-supplied BLAST request (query FASTA, db,
+    program, options, correlation/request ids) — not credentials — but it is
+    still run through :func:`api.services.sanitise.sanitise` defensively
+    (charter §12: sanitise UI output) and capped at ``_PEEK_BODY_MAX_CHARS`` so
+    a large query FASTA cannot bloat the response or the dashboard. Returns a
+    JSON-safe dict the SPA renders directly. ``enqueued_time_utc`` reuses the
+    same ISO rendering as the counts telemetry.
+    """
+    body = parsed.body if isinstance(parsed.body, dict) else {}
+
+    def _opt(*candidates: Any) -> str | None:
+        """First non-empty stripped candidate, else None (keeps preview compact)."""
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return None
+
+    program = _opt(body.get("program"))
+    db = _opt(body.get("db"))
+    correlation_id = _opt(body.get("external_correlation_id"), parsed.correlation_id)
+    request_id = _opt(body.get("request_id"), parsed.application_properties.get("request_id"))
+    try:
+        body_json = json.dumps(body, default=str, ensure_ascii=False, indent=2)
+    except Exception:
+        body_json = parsed.raw_body or ""
+    sanitised_body = sanitise(body_json)
+    body_preview = sanitised_body[:_PEEK_BODY_MAX_CHARS]
+    return {
+        "message_id": parsed.message_id,
+        "correlation_id": correlation_id,
+        "request_id": request_id,
+        "subject": parsed.subject,
+        "sequence_number": parsed.sequence_number,
+        "enqueued_time_utc": _iso_or_none(parsed.enqueued_time_utc),
+        "program": program,
+        "db": db,
+        "body_preview": body_preview,
+        "body_truncated": len(sanitised_body) > _PEEK_BODY_MAX_CHARS,
+    }
+
+
+def peek_request_previews(
+    cfg: ServiceBusConfig | None, max_count: int = _PEEK_DEFAULT
+) -> list[dict[str, Any]]:
+    """Non-destructive peek shaped into sanitised previews for the dashboard.
+
+    Thin shaping over :func:`peek_requests` so the Playground and Message Flow
+    surfaces can show the actual messages currently sitting in the request
+    queue. CRITICAL: this reads via the data-plane receiver, which needs only
+    ``Azure Service Bus Data Receiver`` — NOT the ``Manage`` claim that
+    :func:`entity_counts` requires — so it can surface content even when runtime
+    counts degrade to ``no_manage_claim``. Never removes or locks a message.
+    """
+    return [_preview_message(m) for m in peek_requests(cfg, max_count=max_count)]
 
 
 def drain_requests(

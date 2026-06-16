@@ -6,7 +6,9 @@ Responsibility: Build a single read-only snapshot that powers the dashboard
     submitters of currently-active BLAST jobs, the broker boxes are the active
     ``JobState`` rows themselves (sized by query sequence length), and consumers
     are the AKS clusters those jobs target. Service Bus runtime counts ride
-    along as a best-effort badge.
+    along as a best-effort badge, and a bounded ``queue_messages`` preview
+    carries the actual messages currently sitting in the request queue (peeked
+    non-destructively) so an operator can inspect content/count directly.
 Edit boundaries: Pure aggregation/shaping over ``state_repo`` rows and the
     Service Bus config. No HTTP, no FastAPI, no direct ``azure.mgmt.*`` import.
     Before reading the Table it best-effort syncs external OpenAPI ``/v1/jobs``
@@ -15,7 +17,8 @@ Edit boundaries: Pure aggregation/shaping over ``state_repo`` rows and the
     the card; that sync is bounded and never raises into the snapshot. The HTTP
     route in ``api.routes.monitor.message_flow`` wraps this and owns auth +
     graceful degradation.
-Key entry points: ``build_message_flow``, ``_sync_external_jobs_best_effort``.
+Key entry points: ``build_message_flow``, ``_sync_external_jobs_best_effort``,
+    ``_queue_previews``.
 Risky contracts: The broker boxes intentionally reflect ACTIVE ``JobState``
     rows (status ``queued``/``pending``/``running``/``reducing`` — the canonical
     in-flight set shared with ``JobStateRepository.list_active`` and the
@@ -92,6 +95,10 @@ def _settling_window_seconds() -> int:
 # cheap to render while still being bounded.
 _DEFAULT_LIST_LIMIT = 200
 _MAX_BROKER_BOXES = 120
+# How many request-queue messages to peek for the snapshot's content preview.
+# The queue normally drains in under a second so this is usually empty; the cap
+# bounds the response when a message lingers (no consumer, or portal-injected).
+_QUEUE_PREVIEW_LIMIT = 10
 
 
 def _parse_iso_ms(value: Any) -> float | None:
@@ -269,6 +276,39 @@ def _dlq_delta(cfg: Any) -> dict[str, Any] | None:
         "delta": snapshot.delta,
         "elapsed_seconds": round(snapshot.elapsed_seconds, 1),
     }
+
+
+def _queue_previews(cfg: Any, sb_counts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Best-effort sanitised previews of messages in the request queue.
+
+    Surfaces the actual messages currently sitting in the queue so the card can
+    show their count + content — the queue normally drains in under a second so
+    this is usually empty, but a message that is not being drained (no consumer
+    running, or one injected directly via the Azure portal) lingers and is what
+    an operator wants to inspect.
+
+    Peek uses the data-plane receiver (``Data Receiver`` claim), independent of
+    the ``Manage`` claim ``entity_counts`` needs, so it still works when counts
+    degrade to ``no_manage_claim``. To avoid paying a second slow connect when
+    the namespace is genuinely unreachable, this only peeks when counts are
+    available OR failed specifically on the manage claim (i.e. the namespace is
+    reachable). Never raises — a peek hiccup must not break the snapshot.
+    """
+    from api.services import service_bus
+
+    if not getattr(cfg, "namespace_fqdn", ""):
+        return []
+    reason = sb_counts.get("reason") if isinstance(sb_counts, dict) else None
+    # Skip the peek when the namespace is genuinely unreachable (avoids a second
+    # slow connect), but still peek when the ONLY gap is the Manage claim —
+    # peek needs just the Receiver claim, so it works in the no_manage_claim case.
+    if not sb_counts.get("available") and reason != "no_manage_claim":
+        return []
+    try:
+        return service_bus.peek_request_previews(cfg, max_count=_QUEUE_PREVIEW_LIMIT)
+    except Exception:
+        LOGGER.debug("message-flow queue peek failed", exc_info=True)
+        return []
 
 
 def _visible_rows(
@@ -495,6 +535,7 @@ def build_message_flow(
 
     visible_total = len(active) + len(settling)
     sb_counts = _counts(cfg)
+    queue_messages = _queue_previews(cfg, sb_counts)
     return {
         "enabled": True,
         "scope": scope,
@@ -503,6 +544,7 @@ def build_message_flow(
         "completion_topic": getattr(cfg, "completion_topic", ""),
         "sb_counts": sb_counts,
         "dlq_delta": _dlq_delta(cfg) if sb_counts.get("available") else None,
+        "queue_messages": queue_messages,
         "active_total": len(active),
         "settling_total": len(settling),
         "active_shown": len(broker),

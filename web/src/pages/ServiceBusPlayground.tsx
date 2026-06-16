@@ -22,6 +22,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Copy,
+  Eye,
   Loader2,
   Play,
   Radio,
@@ -30,7 +31,12 @@ import {
 } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
-import { settingsApi, type ServiceBusSendRequest } from "@/api/settings";
+import {
+  settingsApi,
+  type ServiceBusPeekMessage,
+  type ServiceBusPeekResponse,
+  type ServiceBusSendRequest,
+} from "@/api/settings";
 import { useToast } from "@/components/Toast";
 
 type CodeTab = "python-send" | "python-consume" | "curl";
@@ -244,6 +250,17 @@ export function ServiceBusPlayground() {
     refetchInterval: 10000,
   });
 
+  // On-demand peek of the actual messages currently in the request queue.
+  // Disabled by default (no auto-poll) so it only runs when the operator clicks
+  // "Peek"; uses the data-plane Receiver claim so it works even when the
+  // Manage-claim runtime counts above are unavailable.
+  const peek = useQuery({
+    queryKey: ["service-bus", "peek"],
+    queryFn: () => settingsApi.peekServiceBus(10),
+    enabled: false,
+    refetchOnWindowFocus: false,
+  });
+
   const effectiveEnabled = status.data?.effective_enabled ?? false;
   const namespaceFqdn = status.data?.config.namespace_fqdn ?? "<namespace>.servicebus.windows.net";
   const requestQueue = status.data?.config.request_queue ?? "elastic-blast-requests";
@@ -330,6 +347,9 @@ export function ServiceBusPlayground() {
       );
       toast("Message enqueued onto the request queue.", "success");
       void queryClient.invalidateQueries({ queryKey: ["service-bus", "status"] });
+      // If the operator has already peeked, refresh it so the just-sent message
+      // shows up in the content list right away.
+      if (peek.data) void peek.refetch();
     },
     onError: (err) => {
       const msg = formatApiError(err, "Send failed");
@@ -347,6 +367,7 @@ export function ServiceBusPlayground() {
       );
       void queryClient.invalidateQueries({ queryKey: ["service-bus", "status"] });
       void observed.refetch();
+      if (peek.data) void peek.refetch();
     },
     onError: (err) => toast(formatApiError(err, "Drain failed"), "error"),
   });
@@ -765,6 +786,25 @@ export function ServiceBusPlayground() {
             />
           </div>
 
+          {/* Non-destructive content view: peek the actual messages in the
+              request queue. Works even when the Manage-claim counts above are
+              unavailable (peek needs only the data-plane Receiver claim). */}
+          <div style={{ display: "grid", gap: 6 }}>
+            <button
+              type="button"
+              className="glass-button"
+              onClick={() => void peek.refetch()}
+              disabled={peek.isFetching || !effectiveEnabled}
+              title={
+                !effectiveEnabled ? "Service Bus integration is not active" : "Peek queue messages"
+              }
+            >
+              {peek.isFetching ? <Loader2 size={14} className="spin" /> : <Eye size={14} />} Peek
+              messages
+            </button>
+            <PeekResults peek={peek} />
+          </div>
+
           <button
             type="button"
             className="glass-button glass-button--primary"
@@ -937,6 +977,144 @@ function CountRow({ label, value }: { label: string; value: number | undefined }
     <div style={{ display: "flex", justifyContent: "space-between" }}>
       <span className="muted">{label}</span>
       <span style={{ fontVariantNumeric: "tabular-nums" }}>{value ?? "—"}</span>
+    </div>
+  );
+}
+
+const PEEK_REASON_LABELS: Record<string, string> = {
+  not_configured: "namespace not configured",
+  disabled: "integration not active",
+  auth_failed: "no Service Bus Data Receiver claim",
+  unavailable: "namespace unreachable",
+  error: "peek failed",
+};
+
+/** Renders the result of a non-destructive queue peek: a status line plus, when
+ *  available, the sanitised content of each message currently in the queue. */
+function PeekResults({
+  peek,
+}: {
+  peek: {
+    data?: ServiceBusPeekResponse;
+    isFetching: boolean;
+    isError: boolean;
+    isFetched: boolean;
+  };
+}) {
+  if (peek.isError) {
+    return (
+      <div className="muted" style={{ fontSize: 12 }}>
+        Peek failed. Try again.
+      </div>
+    );
+  }
+  if (!peek.data) {
+    if (peek.isFetching) {
+      return (
+        <div className="muted" style={{ fontSize: 12 }}>
+          Peeking…
+        </div>
+      );
+    }
+    return (
+      <p className="muted" style={{ margin: 0, fontSize: 11, lineHeight: 1.5 }}>
+        Non-destructively shows the messages currently sitting in the request queue, including
+        their content — without removing or locking them.
+      </p>
+    );
+  }
+  const data = peek.data;
+  if (!data.available) {
+    return (
+      <div className="muted" style={{ fontSize: 12 }}>
+        Content unavailable
+        {data.reason ? ` (${PEEK_REASON_LABELS[data.reason] ?? data.reason})` : ""}.
+      </div>
+    );
+  }
+  if (data.messages.length === 0) {
+    return (
+      <div className="muted" style={{ fontSize: 12 }}>
+        Queue is empty — no messages to peek.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+        {data.count} message{data.count === 1 ? "" : "s"} in <code>{data.queue}</code>
+      </div>
+      {data.messages.map((m, i) => (
+        <PeekMessageItem key={`${m.sequence_number ?? m.message_id ?? "msg"}-${i}`} message={m} />
+      ))}
+    </div>
+  );
+}
+
+function PeekMessageItem({ message }: { message: ServiceBusPeekMessage }) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gap: 4,
+        padding: "8px 10px",
+        borderRadius: 6,
+        background: "var(--bg-tertiary)",
+        border: "1px solid var(--border-subtle)",
+      }}
+    >
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 11 }}>
+        {message.program ? (
+          <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{message.program}</span>
+        ) : null}
+        {message.db ? <span className="muted">db {message.db}</span> : null}
+        {message.correlation_id ? (
+          <span
+            title={`correlation_id: ${message.correlation_id}`}
+            style={{ fontFamily: "var(--font-mono, monospace)", opacity: 0.8 }}
+          >
+            {message.correlation_id.slice(0, 12)}
+            {message.correlation_id.length > 12 ? "…" : ""}
+          </span>
+        ) : null}
+        {message.request_id ? (
+          <span
+            title={`request_id: ${message.request_id}`}
+            style={{
+              fontFamily: "var(--font-mono, monospace)",
+              opacity: 0.7,
+              padding: "1px 5px",
+              borderRadius: 4,
+              background: "var(--bg-secondary)",
+            }}
+          >
+            req {message.request_id.slice(0, 12)}
+            {message.request_id.length > 12 ? "…" : ""}
+          </span>
+        ) : null}
+      </div>
+      <pre
+        style={{
+          margin: 0,
+          padding: 8,
+          borderRadius: 6,
+          background: "var(--bg-code, #0d1117)",
+          color: "var(--text-code, #c9d1d9)",
+          fontSize: 11,
+          lineHeight: 1.5,
+          overflowX: "auto",
+          maxHeight: 200,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+        }}
+      >
+        <code>{message.body_preview}</code>
+      </pre>
+      {message.body_truncated ? (
+        <span className="muted" style={{ fontSize: 10 }}>
+          content truncated
+        </span>
+      ) : null}
     </div>
   );
 }
