@@ -4,7 +4,8 @@ Responsibility: Install ElasticBLAST monkey patches without editing the sibling
 elastic-blast-azure checkout during host-mode development.
 Edit boundaries: Keep this file limited to terminal subprocess startup behavior; permanent
 source patches belong in terminal/patch_elastic_blast.py.
-Key entry points: `_patch_azure_submit_cleanup`, `_patch_azure_blob_io`.
+Key entry points: `_patch_azure_submit_cleanup`, `_patch_azure_blob_io`,
+`_patch_azure_k8s_log_scope`.
 Risky contracts: Only activate when explicit ELB_DASHBOARD_* env flags are set so unrelated
 Python processes are unchanged.
 Validation: `uv run pytest -q api/tests/test_terminal_runtime_overrides.py`.
@@ -15,6 +16,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
@@ -22,6 +24,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 _LOGGER = logging.getLogger("elb_dashboard.elastic_blast_overrides")
 _AZURE_CREDENTIAL: Any | None = None
+_K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _patch_azure_submit_cleanup() -> None:
@@ -54,6 +57,65 @@ def _patch_azure_submit_cleanup() -> None:
 
 def _azure_fast_io_enabled() -> bool:
     return os.environ.get("ELB_DASHBOARD_FAST_AZURE_IO") == "1"
+
+
+def _azure_k8s_log_scope_enabled() -> bool:
+    return os.environ.get("ELB_DASHBOARD_SCOPE_K8S_LOGS") == "1"
+
+
+def _patch_azure_k8s_log_scope() -> None:
+    if not _azure_k8s_log_scope_enabled():
+        return
+    try:
+        from elastic_blast import kubernetes
+        from elastic_blast.constants import (
+            CSP,
+            K8S_JOB_BLAST,
+            K8S_JOB_GET_BLASTDB,
+            K8S_JOB_IMPORT_QUERY_BATCHES,
+            K8S_JOB_RESULTS_EXPORT,
+            K8S_JOB_SUBMIT_JOBS,
+        )
+    except Exception:
+        return
+
+    original = kubernetes.collect_k8s_logs
+    if getattr(original, "_elb_dashboard_scoped_k8s_logs", False):
+        return
+
+    def collect_k8s_logs(cfg: Any) -> None:
+        cloud = getattr(getattr(cfg, "cloud_provider", None), "cloud", None)
+        job_id = str(getattr(getattr(cfg, "azure", None), "elb_job_id", "") or "").strip()
+        if cloud != CSP.AZURE or not job_id:
+            original(cfg)
+            return
+        if not _K8S_LABEL_VALUE_RE.fullmatch(job_id):
+            _LOGGER.warning("Skipping scoped K8s log collection for unsafe elb_job_id=%r", job_id)
+            original(cfg)
+            return
+
+        appstate = getattr(cfg, "appstate", None)
+        k8s_ctx = getattr(appstate, "k8s_ctx", "")
+        if not k8s_ctx:
+            cluster_name = getattr(getattr(cfg, "cluster", None), "name", "")
+            raise RuntimeError(f"kubernetes context is missing for {cluster_name}")
+        dry_run = bool(getattr(getattr(cfg, "cluster", None), "dry_run", False))
+        scoped = f",elb-job-id={job_id}"
+        kubernetes.get_logs(
+            k8s_ctx,
+            f"app=setup{scoped}",
+            [K8S_JOB_GET_BLASTDB, K8S_JOB_IMPORT_QUERY_BATCHES, K8S_JOB_SUBMIT_JOBS],
+            dry_run,
+        )
+        kubernetes.get_logs(
+            k8s_ctx,
+            f"app=blast{scoped}",
+            [K8S_JOB_BLAST, K8S_JOB_RESULTS_EXPORT],
+            dry_run,
+        )
+
+    collect_k8s_logs._elb_dashboard_scoped_k8s_logs = True  # type: ignore[attr-defined]
+    kubernetes.collect_k8s_logs = collect_k8s_logs
 
 
 def _azure_credential() -> Any:
@@ -315,4 +377,5 @@ def _patch_azure_blob_io() -> None:
 
 
 _patch_azure_submit_cleanup()
+_patch_azure_k8s_log_scope()
 _patch_azure_blob_io()

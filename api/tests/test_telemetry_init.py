@@ -125,6 +125,52 @@ def test_init_honors_explicit_live_metrics_disable(
     assert calls and calls[0]["enable_live_metrics"] is False
 
 
+def test_worker_live_metrics_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        "InstrumentationKey=abc;IngestionEndpoint=https://example.local/",
+    )
+    monkeypatch.delenv("AZURE_MONITOR_DISABLE_LIVE_METRICS", raising=False)
+    monkeypatch.delenv("AZURE_MONITOR_ENABLE_LIVE_METRICS", raising=False)
+    calls: list[dict[str, Any]] = []
+
+    def _fake_configure(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    import azure.monitor.opentelemetry as distro
+
+    monkeypatch.setattr(distro, "configure_azure_monitor", _fake_configure)
+    telemetry = _fresh_telemetry_module(monkeypatch)
+    # Prefork worker children must NOT each open a QuickPulse stream — that is
+    # the boot cost that crash-loops the worker on its 0.5 vCPU budget.
+    assert telemetry.init_telemetry("worker") is True
+    assert calls and calls[0]["enable_live_metrics"] is False
+
+
+def test_worker_live_metrics_explicit_enable_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        "InstrumentationKey=abc;IngestionEndpoint=https://example.local/",
+    )
+    monkeypatch.delenv("AZURE_MONITOR_DISABLE_LIVE_METRICS", raising=False)
+    monkeypatch.setenv("AZURE_MONITOR_ENABLE_LIVE_METRICS", "true")
+    calls: list[dict[str, Any]] = []
+
+    def _fake_configure(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    import azure.monitor.opentelemetry as distro
+
+    monkeypatch.setattr(distro, "configure_azure_monitor", _fake_configure)
+    telemetry = _fresh_telemetry_module(monkeypatch)
+    assert telemetry.init_telemetry("worker") is True
+    assert calls and calls[0]["enable_live_metrics"] is True
+
+
 def test_worker_process_init_initializes_worker_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

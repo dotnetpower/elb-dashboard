@@ -82,6 +82,20 @@ _TASK_TIME_LIMIT = int(os.environ.get("CELERY_TASK_TIME_LIMIT", "3600"))
 if _TASK_SOFT_TIME_LIMIT >= _TASK_TIME_LIMIT:
     raise ValueError("CELERY_TASK_SOFT_TIME_LIMIT must be < CELERY_TASK_TIME_LIMIT")
 _RESULT_EXPIRES_SECONDS = int(os.environ.get("CELERY_RESULT_EXPIRES", "3600"))
+# billiard's prefork master forks a child, then waits this many seconds for the
+# child to send its "UP" readiness message before declaring it lost, SIGKILLing
+# it, and forking a replacement. The default (~4s) is too tight for the worker
+# sidecar's 0.5 vCPU budget: per-child boot work (Azure Monitor OpenTelemetry
+# init in worker_process_init) can exceed 4s, so the master SIGKILL'd every
+# child as "Timed out waiting for UP message" and respawned it — a permanent
+# crash loop that killed in-flight BLAST tasks with WorkerLostError. Give child
+# boot real headroom; raising the ceiling only delays detection of a genuinely
+# stuck child, which does not happen in practice.
+_WORKER_PROC_ALIVE_TIMEOUT = float(
+    os.environ.get("CELERY_WORKER_PROC_ALIVE_TIMEOUT", "30.0")
+)
+if _WORKER_PROC_ALIVE_TIMEOUT <= 0:
+    raise ValueError("CELERY_WORKER_PROC_ALIVE_TIMEOUT must be > 0")
 if _RESULT_EXPIRES_SECONDS > 7200:
     raise ValueError("CELERY_RESULT_EXPIRES must be <= 7200 seconds")
 
@@ -102,6 +116,7 @@ celery_app.conf.update(
     worker_max_tasks_per_child=int(
         os.environ.get("CELERY_WORKER_MAX_TASKS_PER_CHILD", "200")
     ),
+    worker_proc_alive_timeout=_WORKER_PROC_ALIVE_TIMEOUT,
     task_soft_time_limit=_TASK_SOFT_TIME_LIMIT,
     task_time_limit=_TASK_TIME_LIMIT,
     result_expires=_RESULT_EXPIRES_SECONDS,

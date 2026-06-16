@@ -462,6 +462,15 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'PLATFORM_AKS_SUBNET_ID', value: platformAksSubnetId }
             { name: 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
+            // Celery prefork worker calls init_telemetry in EVERY forked child
+            // (worker_process_init). Azure Monitor Live Metrics (QuickPulse)
+            // opens one streaming exporter per child, which on the worker's
+            // CPU budget pushed child boot past billiard's proc-alive timeout
+            // and crash-looped the pool (children SIGKILL'd as "Timed out
+            // waiting for UP message"), failing in-flight BLAST tasks with
+            // WorkerLostError. Disable Live Metrics for the worker; per-request
+            // live streaming is only useful on the single-process api sidecar.
+            { name: 'AZURE_MONITOR_DISABLE_LIVE_METRICS', value: 'true' }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
             // Worker calls api.services.terminal_exec which needs the same
@@ -534,6 +543,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'SIDECAR_NAME', value: 'beat' }
             { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
+            // Match the worker: the beat scheduler emits no per-request
+            // traffic, so Live Metrics streaming has no value here and only
+            // adds boot/connection overhead. Keep it api-only.
+            { name: 'AZURE_MONITOR_DISABLE_LIVE_METRICS', value: 'true' }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
             // Platform ACR name. The beat reconciler revision GC

@@ -38,6 +38,23 @@ def _bool_env(name: str) -> bool | None:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_live_metrics_enabled(role: str) -> bool:
+    """Decide whether Azure Monitor Live Metrics (QuickPulse) is enabled.
+
+    Default ON for the single-process ``api`` role, OFF for the Celery prefork
+    ``worker`` / ``beat`` roles (one QuickPulse stream per forked child is the
+    boot cost that crash-loops the worker on a 0.5 vCPU budget). Either default
+    is overridable: ``AZURE_MONITOR_DISABLE_LIVE_METRICS`` forces it off,
+    ``AZURE_MONITOR_ENABLE_LIVE_METRICS`` forces it on. Disable wins if both are
+    set, since the safer state is off.
+    """
+    if _bool_env("AZURE_MONITOR_DISABLE_LIVE_METRICS") is True:
+        return False
+    if _bool_env("AZURE_MONITOR_ENABLE_LIVE_METRICS") is True:
+        return True
+    return role == "api"
+
+
 def _resource_attributes(role: str) -> dict[str, str]:
     attributes = {
         "service.name": f"elb-{role}",
@@ -117,9 +134,23 @@ def init_telemetry(role: str, app: FastAPI | None = None) -> bool:
                 # Live Metrics (QuickPulse) streams per-second request / failure
                 # / dependency counters to the App Insights blade so an
                 # operator can correlate a dashboard click with backend
-                # behaviour in real time. Opt-out via
-                # AZURE_MONITOR_DISABLE_LIVE_METRICS=true.
-                "enable_live_metrics": _bool_env("AZURE_MONITOR_DISABLE_LIVE_METRICS") is not True,
+                # behaviour in real time.
+                #
+                # It is enabled by default ONLY for the ``api`` role. The api
+                # sidecar is a single uvicorn process per replica, so the
+                # dedicated QuickPulse streaming exporter + thread is cheap and
+                # genuinely useful. The ``worker`` / ``beat`` sidecars run a
+                # Celery *prefork* pool and call ``init_telemetry`` inside
+                # EVERY forked child (``worker_process_init``); enabling live
+                # metrics there spins up one QuickPulse stream per child. On the
+                # worker's 0.5 vCPU budget that pushed child boot past
+                # billiard's ``worker_proc_alive_timeout``, so the master
+                # SIGKILL'd each child as "Timed out waiting for UP message" and
+                # respawned it — a permanent crash loop that killed in-flight
+                # BLAST tasks with ``WorkerLostError``. Default off for
+                # worker/beat; either default can be overridden explicitly with
+                # AZURE_MONITOR_DISABLE_LIVE_METRICS / AZURE_MONITOR_ENABLE_LIVE_METRICS.
+                "enable_live_metrics": _resolve_live_metrics_enabled(role),
             }
 
             configure_azure_monitor(**kwargs)

@@ -302,6 +302,7 @@ def _child_env() -> dict[str, str]:
         env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(part for part in merged if part))
     env.setdefault("ELB_DASHBOARD_FAST_JSON_SUBMIT_CLEANUP", "1")
     env.setdefault("ELB_DASHBOARD_FAST_AZURE_IO", "1")
+    env.setdefault("ELB_DASHBOARD_SCOPE_K8S_LOGS", "1")
     # Force unbuffered stdout/stderr in Python children so the streaming NDJSON
     # response sees each printed line in real time. Without this, elastic-blast
     # (a Python CLI) block-buffers stdout into 8 KB chunks when its stdout is a

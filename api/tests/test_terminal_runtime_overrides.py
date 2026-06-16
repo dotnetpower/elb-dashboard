@@ -6,7 +6,8 @@ Key entry points: `_load_sitecustomize`, `_load_sitecustomize_with_fast_azure_io
 `test_fast_json_submit_cleanup_override_clears_success_stack`,
 `test_fast_json_submit_cleanup_override_keeps_failure_stack`,
 `test_fast_azure_io_uses_blob_sdk_for_length_and_upload`,
-`test_fast_azure_io_uses_blob_sdk_for_db_presence`.
+`test_fast_azure_io_uses_blob_sdk_for_db_presence`,
+`test_scoped_k8s_log_collection_adds_elb_job_id_selector`.
 Risky contracts: Do not import or mutate the real sibling elastic-blast-azure checkout.
 Validation: `uv run pytest -q api/tests/test_terminal_runtime_overrides.py`.
 """
@@ -157,6 +158,38 @@ def _load_sitecustomize_with_fast_azure_io(monkeypatch: Any) -> tuple[ModuleType
     return filehelper, util, fake_state
 
 
+def _load_sitecustomize_with_scoped_logs(monkeypatch: Any) -> tuple[ModuleType, list[tuple]]:
+    calls: list[tuple] = []
+    elastic_blast = ModuleType("elastic_blast")
+    kubernetes = ModuleType("elastic_blast.kubernetes")
+    constants = ModuleType("elastic_blast.constants")
+
+    constants.CSP = SimpleNamespace(AZURE="azure", AWS="aws")  # type: ignore[attr-defined]
+    constants.K8S_JOB_BLAST = "blast"  # type: ignore[attr-defined]
+    constants.K8S_JOB_GET_BLASTDB = "get-blastdb"  # type: ignore[attr-defined]
+    constants.K8S_JOB_IMPORT_QUERY_BATCHES = "import-query-batches"  # type: ignore[attr-defined]
+    constants.K8S_JOB_RESULTS_EXPORT = "results-export"  # type: ignore[attr-defined]
+    constants.K8S_JOB_SUBMIT_JOBS = "submit-jobs"  # type: ignore[attr-defined]
+
+    def original_collect_k8s_logs(cfg: Any) -> None:
+        calls.append(("original", cfg))
+
+    def get_logs(k8s_ctx: str, label: str, containers: list[str], dry_run: bool) -> None:
+        calls.append((k8s_ctx, label, containers, dry_run))
+
+    kubernetes.collect_k8s_logs = original_collect_k8s_logs  # type: ignore[attr-defined]
+    kubernetes.get_logs = get_logs  # type: ignore[attr-defined]
+    elastic_blast.kubernetes = kubernetes  # type: ignore[attr-defined]
+    elastic_blast.constants = constants  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "elastic_blast", elastic_blast)
+    monkeypatch.setitem(sys.modules, "elastic_blast.kubernetes", kubernetes)
+    monkeypatch.setitem(sys.modules, "elastic_blast.constants", constants)
+    monkeypatch.setenv("ELB_DASHBOARD_SCOPE_K8S_LOGS", "1")
+
+    _exec_sitecustomize()
+    return kubernetes, calls
+
+
 def test_fast_json_submit_cleanup_override_clears_success_stack(monkeypatch: Any) -> None:
     azure_cli_glue, calls = _load_sitecustomize(monkeypatch, return_code=0)
     stack: list[Callable[..., Any]] = [lambda: None]
@@ -232,3 +265,44 @@ def test_fast_azure_io_raises_when_db_is_missing(monkeypatch: Any) -> None:
         util.check_user_provided_blastdb_exists(  # type: ignore[attr-defined]
             "https://acct.blob.core.windows.net/blastdb/missing", object(), object()
         )
+
+
+def test_scoped_k8s_log_collection_adds_elb_job_id_selector(monkeypatch: Any) -> None:
+    kubernetes, calls = _load_sitecustomize_with_scoped_logs(monkeypatch)
+    cfg = SimpleNamespace(
+        cloud_provider=SimpleNamespace(cloud="azure"),
+        azure=SimpleNamespace(elb_job_id="2ac143e9-d9a8-5bf4-bed7-0e953dde03ca"),
+        appstate=SimpleNamespace(k8s_ctx="aks-context"),
+        cluster=SimpleNamespace(dry_run=False, name="elb-cluster"),
+    )
+
+    kubernetes.collect_k8s_logs(cfg)  # type: ignore[attr-defined]
+
+    assert calls == [
+        (
+            "aks-context",
+            "app=setup,elb-job-id=2ac143e9-d9a8-5bf4-bed7-0e953dde03ca",
+            ["get-blastdb", "import-query-batches", "submit-jobs"],
+            False,
+        ),
+        (
+            "aks-context",
+            "app=blast,elb-job-id=2ac143e9-d9a8-5bf4-bed7-0e953dde03ca",
+            ["blast", "results-export"],
+            False,
+        ),
+    ]
+
+
+def test_scoped_k8s_log_collection_falls_back_for_non_azure(monkeypatch: Any) -> None:
+    kubernetes, calls = _load_sitecustomize_with_scoped_logs(monkeypatch)
+    cfg = SimpleNamespace(
+        cloud_provider=SimpleNamespace(cloud="aws"),
+        azure=SimpleNamespace(elb_job_id="2ac143e9"),
+        appstate=SimpleNamespace(k8s_ctx="ctx"),
+        cluster=SimpleNamespace(dry_run=False, name="cluster"),
+    )
+
+    kubernetes.collect_k8s_logs(cfg)  # type: ignore[attr-defined]
+
+    assert calls == [("original", cfg)]
