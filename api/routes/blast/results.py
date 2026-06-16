@@ -189,6 +189,7 @@ def blast_job_results(
     subscription_id: str = Query(default=""),
     storage_account: str = Query(default=""),
     resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """List result blobs for a BLAST job from storage."""
@@ -232,7 +233,16 @@ def blast_job_results(
     try:
         from api.services import external_blast
 
-        files = _external_result_files(external_blast.get_job(job_id))
+        external_kwargs = {
+            key: value
+            for key, value in {
+                "subscription_id": subscription_id,
+                "resource_group": resource_group,
+                "cluster_name": cluster_name,
+            }.items()
+            if value
+        }
+        files = _external_result_files(external_blast.get_job(job_id, **external_kwargs))
         if files:
             from api.services.blast.result_manifest import build_result_manifest
 
@@ -389,6 +399,7 @@ def blast_job_result_file(
     subscription_id: str = Query(default=""),
     storage_account: str = Query(default=""),
     resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> StreamingResponse:
     """Stream one result file by file_id through the api sidecar.
@@ -451,7 +462,19 @@ def blast_job_result_file(
     try:
         from api.services import external_blast
 
-        downloaded = external_blast.stream_file(job_id, file_id)
+        downloaded = external_blast.stream_file(
+            job_id,
+            file_id,
+            **{
+                key: value
+                for key, value in {
+                    "subscription_id": subscription_id,
+                    "resource_group": resource_group,
+                    "cluster_name": cluster_name,
+                }.items()
+                if value
+            },
+        )
         return StreamingResponse(
             downloaded.chunks,
             media_type=downloaded.media_type,
