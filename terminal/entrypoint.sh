@@ -100,6 +100,19 @@ TXT
 }
 scaffold_blast_cfg || true
 
+# ---------------------------------------------------------------------------
+# Bootstrap Managed Identity login into the interactive shell's Azure CLI cache
+# (/home/azureuser/.azure) so user commands like 'az account show' and
+# 'az group list' work without a manual 'az login' when AZURE_CLIENT_ID is set.
+# The user can still override with 'az login --use-device-code' for personal
+# credentials. Best-effort: a login hiccup must never block shell startup.
+# ---------------------------------------------------------------------------
+if [[ -n "${AZURE_CLIENT_ID:-}" && -d "$HOME/.azure" ]]; then
+  az login --identity --client-id "$AZURE_CLIENT_ID" \
+    --allow-no-subscriptions >/dev/null 2>&1 \
+    || echo "elb-supervisor: interactive az login --identity failed; user can re-run 'az login'" >&2
+fi
+
 cat /etc/motd 2>/dev/null || true
 
 if [[ -z "${EXEC_TOKEN:-}" ]]; then
