@@ -303,6 +303,52 @@ def test_local_to_blast_job_external_failed_row_enriched_with_cluster_detail(mon
     assert "exited with code 2" in out["output"]["steps"]["submitting"]["error"]
 
 
+def test_local_to_blast_job_external_crashloop_recovers_runtime_detail(monkeypatch):
+    # A coarse Kubernetes pod-state error (CrashLoopBackOff) names the symptom
+    # but not the blastn cause. The detail view must still recover the
+    # authoritative cluster-side FAILURE.txt detail instead of leaving the
+    # non-actionable "container blast is CrashLoopBackOff" message. Regression
+    # for the 2026-06-16 live E2E: a 16S search whose DB was not re-warmed on a
+    # fresh node after cluster stop/start failed with a bare CrashLoopBackOff.
+    monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbdashboard3abp67bppe")
+    monkeypatch.setattr(
+        blast_job_state, "_database_metadata_for_response", lambda *_a, **_k: None
+    )
+    import api.services.blast.runtime_failure as runtime_failure
+
+    monkeypatch.setattr(
+        runtime_failure,
+        "read_blast_runtime_failure",
+        lambda account, job_id: "BLAST search exited with code 2: mdb files not found",
+    )
+
+    out = _local_to_blast_job(
+        _state(
+            status="failed",
+            phase="failed",
+            payload={
+                "external": {
+                    "job_id": "ext-crash",
+                    "status": "failed",
+                    "error": (
+                        "pod blastn-batch-16s-job-000-abc container blast "
+                        "is CrashLoopBackOff"
+                    ),
+                    "db": (
+                        "https://stelbdashboard3abp67bppe.blob.core.windows.net/"
+                        "blast-db/16S_ribosomal_RNA/16S_ribosomal_RNA"
+                    ),
+                }
+            },
+        ),
+        include_database_metadata=True,
+    )
+    assert "exited with code 2" in out["error"]
+    assert "exited with code 2" in out["output"]["error"]
+
+
 def test_local_to_blast_job_external_enrichment_skipped_on_list_view(monkeypatch):
     # List rendering (include_database_metadata=False) must not pay for the
     # Storage read; the generic sibling error is left untouched.

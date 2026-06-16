@@ -177,6 +177,24 @@ def clear_singleton(key: str) -> bool:
         return True
 
 
+def _prefix_upper_bound(prefix: str) -> str:
+    """Smallest string strictly greater than every string starting with ``prefix``.
+
+    Increment the last code point of ``prefix`` so an Azure Table
+    ``RowKey lt <upper>`` range covers exactly the rows whose key starts with
+    ``prefix`` — independent of which characters appear in the suffix. A fixed
+    trailing sentinel (e.g. a run of ``~``) is wrong: it silently drops keys
+    whose suffix sorts at/above the sentinel, and RowKeys may legitimately
+    contain characters above ``~`` (the sanitiser only strips ``/ \\ # ?`` and
+    ``\\u0000-\\u001f`` / ``\\u007f-\\u009f``, so e.g. accented letters survive).
+    Deriving the bound from the prefix itself is correct for any suffix charset.
+
+    ``prefix`` is always non-empty here (the caller guards it), so indexing
+    ``prefix[-1]`` is safe.
+    """
+    return prefix[:-1] + chr(ord(prefix[-1]) + 1)
+
+
 def list_singletons_by_prefix(prefix: str) -> list[tuple[str, dict[str, Any]]]:
     """Return every ``(row_key, payload)`` whose row key starts with ``prefix``.
 
@@ -195,10 +213,13 @@ def list_singletons_by_prefix(prefix: str) -> list[tuple[str, dict[str, Any]]]:
     if client is None:
         return []
     sanitised_prefix = _sanitise_row_key(prefix)
-    # Azure Table query: PartitionKey + (RowKey >= prefix AND
-    # RowKey < prefix + sentinel). Using the chr(0x7e+1) trick keeps the
-    # range tight without needing a wildcard.
-    upper = sanitised_prefix + "~~~~~~~~"
+    if not sanitised_prefix:
+        return []
+    # Azure Table range query: PartitionKey + (RowKey >= prefix AND
+    # RowKey < prefix-upper-bound). The upper bound is the prefix with its last
+    # code point incremented so the range covers EVERY key starting with the
+    # prefix regardless of the suffix's characters (see _prefix_upper_bound).
+    upper = _prefix_upper_bound(sanitised_prefix)
     query = (
         f"PartitionKey eq '{_SINGLETON_PARTITION_KEY}' "
         f"and RowKey ge '{sanitised_prefix}' "

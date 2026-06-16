@@ -342,6 +342,44 @@ _EXTERNAL_GENERIC_FAILURE_MESSAGES = frozenset(
     }
 )
 
+# Kubernetes pod/container *state* substrings the sibling sometimes stamps as
+# the job ``error`` (e.g. ``pod <name> container blast is CrashLoopBackOff``).
+# These read as "specific" because they are not in the exact-match generic set
+# above, yet they are NOT actionable: they describe the K8s symptom, not the
+# blastn cause (a DB that is not staged on the node, an out-of-memory kill, an
+# image that cannot be pulled). Treating them as coarse lets the dashboard
+# prefer the authoritative ``FAILURE.txt`` / ``BLAST_RUNTIME`` detail when it
+# can read one — exactly the case a live E2E surfaced (2026-06-16): a 16S search
+# whose DB was not re-warmed on a fresh node after a cluster stop/start failed
+# with a bare ``CrashLoopBackOff`` and no underlying reason.
+_EXTERNAL_COARSE_K8S_FAILURE_SUBSTRINGS = (
+    "crashloopbackoff",
+    "imagepullbackoff",
+    "errimagepull",
+    "oomkilled",
+    "is not ready",
+    "is not running",
+    "backoff limit",
+    "backofflimitexceeded",
+    "container blast is",
+    "pod is not",
+)
+
+
+def _is_coarse_k8s_failure(message: str | None) -> bool:
+    """True when ``message`` is a non-actionable K8s pod/container-state string.
+
+    Such a message (e.g. ``CrashLoopBackOff``) names the Kubernetes symptom but
+    not the blastn root cause, so the dashboard should still prefer the
+    authoritative cluster-side ``FAILURE.txt`` detail. Case-insensitive
+    substring match against ``_EXTERNAL_COARSE_K8S_FAILURE_SUBSTRINGS``.
+    """
+    if not message:
+        return False
+    lowered = message.casefold()
+    return any(token in lowered for token in _EXTERNAL_COARSE_K8S_FAILURE_SUBSTRINGS)
+
+
 
 def _enrich_external_failure_detail(
     *,
@@ -373,6 +411,7 @@ def _enrich_external_failure_detail(
         current_error
         and current_error != _EXTERNAL_FAILED_NO_DETAIL
         and current_error not in _EXTERNAL_GENERIC_FAILURE_MESSAGES
+        and not _is_coarse_k8s_failure(current_error)
     )
     if has_specific:
         return None
