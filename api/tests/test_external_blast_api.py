@@ -16,6 +16,7 @@ Validation: `uv run pytest -q api/tests/test_external_blast_api.py`.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -84,6 +85,54 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
     assert captured["options"]["outfmt"] == 5
     assert captured["batch_len"] == 462
     assert "caller_oid" not in captured
+
+
+def test_external_blast_submit_threads_openapi_scope(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    captured: dict[str, Any] = {}
+
+    def fake_ready(**kwargs: Any) -> dict[str, Any]:
+        captured["ready"] = dict(kwargs)
+        return {"ready": True}
+
+    def fake_submit(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        captured["payload"] = dict(payload)
+        captured["submit"] = dict(kwargs)
+        return {"job_id": "aaaaaaaaaaaa", "status": "queued"}
+
+    monkeypatch.setattr(external_blast, "ready", fake_ready)
+    monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "subscription_id": "sub-a",
+            "resource_group": "rg-a",
+            "cluster_name": "aks-a",
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["ready"] == {
+        "subscription_id": "sub-a",
+        "resource_group": "rg-a",
+        "cluster_name": "aks-a",
+    }
+    assert captured["submit"] == {
+        "subscription_id": "sub-a",
+        "resource_group": "rg-a",
+        "cluster_name": "aks-a",
+    }
+    assert captured["payload"]["subscription_id"] == "sub-a"
+    assert captured["payload"]["resource_group"] == "rg-a"
+    assert captured["payload"]["cluster_name"] == "aks-a"
 
 
 # --------------------------------------------------------------------------- #
@@ -350,6 +399,45 @@ def test_external_blast_events_falls_back_to_current_status(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["events"][0]["phase"] == "running"
+
+
+def test_external_blast_job_routes_thread_scope_query(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_get_job(job_id: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"job_id": job_id, **kwargs})
+        return {"job_id": job_id, "status": "running", "result": {"files": []}}
+
+    monkeypatch.setattr(external_blast, "get_job", fake_get_job)
+    client = TestClient(app)
+    params = {
+        "subscription_id": "sub-a",
+        "resource_group": "rg-a",
+        "cluster_name": "aks-a",
+    }
+
+    assert client.get("/api/v1/elastic-blast/jobs/aaaaaaaaaaaa", params=params).status_code == 200
+    assert (
+        client.get(
+            "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/events",
+            params=params,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get("/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/manifest", params=params).status_code
+        == 200
+    )
+
+    assert len(calls) == 3
+    for call in calls:
+        assert call["subscription_id"] == "sub-a"
+        assert call["resource_group"] == "rg-a"
+        assert call["cluster_name"] == "aks-a"
 
 
 def test_external_blast_manifest_maps_result_files(monkeypatch):
@@ -2691,6 +2779,52 @@ def test_canonical_result_file_streams_external_file_id(monkeypatch):
     assert response.content == b"<BlastOutput />"
     assert response.headers["content-type"].startswith("application/xml")
     assert response.headers["content-disposition"] == 'attachment; filename="batch_001.xml"'
+
+
+def test_canonical_result_fallback_threads_scope_query(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    from api.main import app
+    from api.services import external_blast
+
+    captured: dict[str, Any] = {}
+
+    def fake_get_job(job_id: str, **kwargs: Any) -> dict[str, Any]:
+        captured["get_job"] = {"job_id": job_id, **kwargs}
+        return {
+            "job_id": job_id,
+            "status": "success",
+            "result": {"files": [{"file_id": "result-001", "filename": "batch_001.xml"}]},
+        }
+
+    def fake_stream_file(job_id: str, file_id: str, **kwargs: Any) -> external_blast.StreamedFile:
+        captured["stream_file"] = {"job_id": job_id, "file_id": file_id, **kwargs}
+        return external_blast.StreamedFile(
+            chunks=iter([b"<Blast", b"Output />"]),
+            media_type="application/xml",
+            filename="batch_001.xml",
+        )
+
+    monkeypatch.setattr(external_blast, "get_job", fake_get_job)
+    monkeypatch.setattr(external_blast, "stream_file", fake_stream_file)
+    client = TestClient(app)
+    params = {
+        "subscription_id": "sub-a",
+        "resource_group": "rg-a",
+        "cluster_name": "aks-a",
+    }
+
+    list_response = client.get("/api/blast/jobs/aaaaaaaaaaaa/results", params=params)
+    file_response = client.get("/api/blast/jobs/aaaaaaaaaaaa/results/result-001", params=params)
+
+    assert list_response.status_code == 200
+    assert file_response.status_code == 200
+    assert captured["get_job"]["subscription_id"] == "sub-a"
+    assert captured["get_job"]["resource_group"] == "rg-a"
+    assert captured["get_job"]["cluster_name"] == "aks-a"
+    assert captured["stream_file"]["subscription_id"] == "sub-a"
+    assert captured["stream_file"]["resource_group"] == "rg-a"
+    assert captured["stream_file"]["cluster_name"] == "aks-a"
 
 
 def test_canonical_local_result_file_id_must_match_job_prefix(monkeypatch):

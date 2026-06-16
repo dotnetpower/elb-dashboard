@@ -530,6 +530,9 @@ def blast_job_get(
     job_id: str = Path(...),
     history: int = Query(default=0),
     include_database_metadata: bool = Query(default=True),
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     local_unavailable: Exception | None = None
@@ -571,8 +574,17 @@ def blast_job_get(
     try:
         from api.services import external_blast
 
+        external_kwargs = {
+            key: value
+            for key, value in {
+                "subscription_id": subscription_id,
+                "resource_group": resource_group,
+                "cluster_name": cluster_name,
+            }.items()
+            if value
+        }
         out = _external_to_blast_job(
-            external_blast.get_job(job_id),
+            external_blast.get_job(job_id, **external_kwargs),
             include_database_metadata=True,
         )
         out["meta"] = build_meta(request_id=request_id_from_scope(request))
