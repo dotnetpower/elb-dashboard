@@ -579,11 +579,23 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'redis'
           image: '${acrLoginServer}/library/redis:7-alpine'
           command: [ 'redis-server' ]
+          // This single instance is the Celery BROKER (db0) + result backend
+          // (db1) + ops/durable cache (db2). The eviction policy MUST be
+          // `noeviction`: with any `allkeys-*` / `volatile-*` policy Redis
+          // evicts keys under memory pressure, and for a broker those keys are
+          // the queue lists + unacked-task hashes + the durable OpenAPI runtime
+          // config — so enqueued BLAST/ACR/AKS jobs silently disappear from the
+          // queue (the "queuing doesn't work" symptom). `noeviction` keeps the
+          // `--maxmemory` cap as a guardrail (writes fail loudly instead of
+          // dropping work) while never discarding queued tasks. Memory stays
+          // bounded because the result backend honours CELERY_RESULT_EXPIRES
+          // and the ops caches set per-key TTLs. Guarded by
+          // api/tests/test_redis_broker_eviction_policy.py.
           args: [
             '--save', ''
             '--appendonly', 'no'
             '--maxmemory', '384mb'
-            '--maxmemory-policy', 'allkeys-lru'
+            '--maxmemory-policy', 'noeviction'
             '--bind', '127.0.0.1'
             '--protected-mode', 'no'
           ]
