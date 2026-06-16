@@ -25,8 +25,8 @@ from api.services import external_blast
 from api.services.blast.submit_payload import (
     canonical_submit_metadata,
     canonical_submit_snapshot,
-    resolve_sharding_plan,
     resolve_sharded_db_resource_profile,
+    resolve_sharding_plan,
     submit_contracts,
 )
 from api.services.sanitise import redact_oid, sanitise

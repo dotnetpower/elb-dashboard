@@ -265,8 +265,8 @@ def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[st
     from api.routes.elastic_blast import ExternalBlastSubmitRequest
     from api.services.blast.submit_payload import (
         canonical_submit_metadata,
-        resolve_sharding_plan,
         resolve_sharded_db_resource_profile,
+        resolve_sharding_plan,
     )
 
     body = dict(msg.body or {})

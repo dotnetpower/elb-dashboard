@@ -201,7 +201,10 @@ def test_ui_openapi_and_servicebus_precise_contracts_converge() -> None:
     servicebus_contracts = submit_contracts(servicebus_payload)
 
     expected_searchsp = WEB_BLAST_SEARCHSP_DEFAULTS["core_nt"].value
-    assert canonical_execution_config(ui_payload)["options"]["db_effective_search_space"] == expected_searchsp
+    assert (
+        canonical_execution_config(ui_payload)["options"]["db_effective_search_space"]
+        == expected_searchsp
+    )
     assert openapi_contracts["precision"]["required_options"] == servicebus_contracts["precision"][
         "required_options"
     ]

@@ -1106,8 +1106,8 @@ def test_blast_submit_merges_top_level_precision_metadata(
             "options": {
                 "sharding_mode": "precise",
                 "outfmt": 5,
-                "db_effective_search_space": 123456,
-                "db_total_letters": 123456,
+                "db_effective_search_space": 32_156_241_807_668,
+                "db_total_letters": 1_041_443_571_674,
             },
         },
     )
