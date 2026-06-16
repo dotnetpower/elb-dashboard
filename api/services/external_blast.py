@@ -708,21 +708,30 @@ def _ready_cache_store(
 
 
 def _ready_cache_key(base_url: str | None, api_token: str | None) -> tuple[str, str]:
-    """Cache key = normalised base URL + full hex digest of the token.
+    """Cache key = normalised base URL + full digest of the token.
 
     ``base`` is lower-cased and the trailing slash is stripped so callers that
     happen to pass ``https://x.io`` and ``https://x.io/`` share one cache slot
     (otherwise we silently halve the cache hit rate and double sibling load).
 
-    The token itself is never used as a key; we store its full SHA-256 hex
-    digest (64 chars) so different tokens can never collide — the original
-    ``[:8]`` truncation gave a birthday collision at ~65 k unique tokens.
+    The token itself is never used as a key; we store a full BLAKE2b hex digest
+    (64 chars via a 32-byte digest) so the cache never retains the raw token
+    string. The original ``[:8]`` truncation gave a birthday collision at
+    ~65 k unique tokens.
     """
     import hashlib as _hashlib
 
     base = (base_url or "").strip().rstrip("/").lower()
     token = (api_token or "").strip()
-    digest = _hashlib.sha256(token.encode("utf-8", "ignore")).hexdigest() if token else ""
+    digest = (
+        _hashlib.blake2b(
+            token.encode("utf-8", "ignore"),
+            digest_size=32,
+            person=b"elb-ready-cache",
+        ).hexdigest()
+        if token
+        else ""
+    )
     return base, digest
 
 

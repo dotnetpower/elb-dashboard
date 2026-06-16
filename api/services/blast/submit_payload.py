@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
 
@@ -104,6 +105,18 @@ _SHARDING_RESOURCE_PROFILES = frozenset({"core_nt_precise", "precise", "core_nt_
 # shards core_nt today, so a static map is sufficient and accurate; generalise
 # this in lockstep if the sibling gains sharding for more databases.
 _SHARDED_DB_DEFAULT_PROFILE: dict[str, str] = {"core_nt": "core_nt_safe"}
+
+
+@dataclass(frozen=True)
+class PrecisionPlan:
+    """Resolved sharding/search-space plan shared by every submit surface."""
+
+    options: dict[str, Any]
+    precision: dict[str, Any]
+    compatibility_contract: dict[str, Any]
+    validation_errors: list[str] = field(default_factory=list)
+    downgraded: bool = False
+    downgrade_reason: str | None = None
 
 
 def resolve_sharded_db_resource_profile(
@@ -204,39 +217,153 @@ def canonical_execution_config(body: dict[str, Any]) -> dict[str, Any]:
 
 def submit_contracts(body: dict[str, Any]) -> dict[str, Any]:
     """Return shared precision and compatibility contracts for a submit payload."""
-    from api.services.blast.compatibility import build_compatibility_contract
-    from api.services.sharding_precision import build_precision_report
+    plan = resolve_sharding_plan(
+        program=str(body.get("program") or "blastn").strip(),
+        database=str(body.get("database") or body.get("db") or "").strip(),
+        options=_canonical_options_from_body(
+            body,
+            database=str(body.get("database") or body.get("db") or "").strip(),
+        ),
+        caller_supplied_searchsp=_caller_supplied_searchsp(body),
+        allow_servicebus_downgrade=str(body.get("submission_source") or "") == "servicebus",
+    )
+    precision = dict(plan.precision)
+    compatibility = dict(plan.compatibility_contract)
+    if plan.validation_errors:
+        compatibility["eligible"] = False
+        compatibility["level"] = "blocked"
+        compatibility["blocking_errors"] = [
+            *compatibility.get("blocking_errors", []),
+            *plan.validation_errors,
+        ]
+    if plan.downgraded:
+        compatibility["warnings"] = [
+            *compatibility.get("warnings", []),
+            plan.downgrade_reason or "sharding request was downgraded",
+        ]
+    return {
+        "precision": precision,
+        "compatibility_contract": compatibility,
+    }
 
-    database = str(body.get("database") or body.get("db") or "").strip()
-    options = _canonical_options_from_body(body, database=database)
-    query = _canonical_query_from_body(body)
-    query_count = query.get("query_count")
+
+def resolve_sharding_plan(
+    *,
+    program: str,
+    database: str,
+    options: dict[str, Any] | None,
+    caller_supplied_searchsp: int | None,
+    allow_servicebus_downgrade: bool = False,
+) -> PrecisionPlan:
+    """Resolve one canonical sharding/search-space plan for every submit surface."""
+    from api.services.blast.compatibility import build_compatibility_contract
+    from api.services.sharding_precision import (
+        build_precision_report,
+        merge_format_for_outfmt,
+        normalize_sharding_mode,
+        option_value,
+        positive_int,
+    )
+    from api.services.web_blast_searchsp import default_for_database
+
+    # Reserved for future program-specific calibration rules; keep the shared
+    # interface stable across all submit surfaces even though today's resolution
+    # is database/option driven.
+    _ = program
+    resolved = dict(options or {})
+    validated_errors: list[str] = []
+    downgrade_reason: str | None = None
+    downgraded = False
+    requested_mode = normalize_sharding_mode(resolved)
+    verified_default = default_for_database(database)
+    additional_searchsp = positive_int(
+        option_value(str(resolved.get("additional_options") or ""), "-searchsp")
+    )
+    explicit_searchsp = caller_supplied_searchsp or positive_int(
+        resolved.get("db_effective_search_space")
+    ) or additional_searchsp
+    snapshot_error = _calibration_snapshot_error(verified_default, resolved)
+
+    if verified_default is not None:
+        if explicit_searchsp is None:
+            if (
+                resolved.get("query_effective_search_spaces") in (None, "")
+                and not _SEARCHSP_OPTION_RE.search(str(resolved.get("additional_options") or ""))
+            ):
+                resolved["db_effective_search_space"] = verified_default.value
+        else:
+            if snapshot_error is not None:
+                validated_errors.append(snapshot_error)
+            elif explicit_searchsp != verified_default.value:
+                validated_errors.append(
+                    "caller-supplied db_effective_search_space does not match the "
+                    "calibrated Web BLAST search space"
+                )
+            else:
+                resolved["db_effective_search_space"] = explicit_searchsp
+    elif explicit_searchsp is not None:
+        validated_errors.append(
+            "caller-supplied db_effective_search_space requires a calibrated database snapshot"
+        )
+
+    if validated_errors and allow_servicebus_downgrade:
+        resolved.pop("db_effective_search_space", None)
+        if requested_mode == "precise":
+            merge_family = merge_format_for_outfmt(
+                option_value(str(resolved.get("additional_options") or ""), "-outfmt")
+                if resolved.get("additional_options")
+                else resolved.get("outfmt")
+            )
+            if merge_family is not None:
+                resolved["sharding_mode"] = "approximate"
+                downgraded = True
+                downgrade_reason = validated_errors[0]
+                validated_errors = []
+
+    query_count = positive_int(resolved.get("query_count"))
     report = build_precision_report(
-        options,
-        query_count=query_count if isinstance(query_count, int) else options.get("query_count"),
-        db_stats_available=bool(options.get("db_total_letters")),
-        shard_sets=options.get("shard_sets")
-        if isinstance(options.get("shard_sets"), list)
+        resolved,
+        query_count=query_count if isinstance(query_count, int) else resolved.get("query_count"),
+        db_stats_available=bool(resolved.get("db_total_letters")),
+        shard_sets=resolved.get("shard_sets")
+        if isinstance(resolved.get("shard_sets"), list)
         else None,
     )
     compatibility = build_compatibility_contract(
         database=database,
-        options=options,
+        options=resolved,
         precision_report=report,
     )
-    return {
-        "precision": report.as_dict(),
-        "compatibility_contract": compatibility.as_dict(),
-    }
+    return PrecisionPlan(
+        options={key: resolved[key] for key in sorted(resolved)},
+        precision=report.as_dict(),
+        compatibility_contract=compatibility.as_dict(),
+        validation_errors=validated_errors,
+        downgraded=downgraded,
+        downgrade_reason=downgrade_reason,
+    )
 
 
 def _canonical_options_from_body(body: dict[str, Any], *, database: str) -> dict[str, Any]:
     options = _submit_options_from_body(body)
+    query = _canonical_query_from_body(body)
+    if (
+        options.get("query_count") in (None, "")
+        and isinstance(query.get("query_count"), int)
+        and int(query["query_count"]) > 0
+    ):
+        options["query_count"] = int(query["query_count"])
     if "dust" in options and "low_complexity_filter" not in options:
         options["low_complexity_filter"] = bool(options["dust"])
     options.pop("dust", None)
-    _apply_web_blast_searchsp_default(database, options)
-    return {key: options[key] for key in sorted(options)}
+    plan = resolve_sharding_plan(
+        program=str(body.get("program") or "blastn").strip(),
+        database=database,
+        options=options,
+        caller_supplied_searchsp=_caller_supplied_searchsp(body),
+        allow_servicebus_downgrade=str(body.get("submission_source") or "") == "servicebus",
+    )
+    return plan.options
 
 
 def _canonical_query_from_body(body: dict[str, Any]) -> dict[str, Any]:
@@ -310,6 +437,65 @@ def _apply_web_blast_searchsp_default(database: str, options: dict[str, Any]) ->
         options["db_effective_search_space"] = default.value
 
     options.setdefault("low_complexity_filter", True)
+
+
+def _caller_supplied_searchsp(body: dict[str, Any]) -> int | None:
+    raw_options = body.get("options")
+    if isinstance(raw_options, dict):
+        candidate = raw_options.get("db_effective_search_space")
+        if candidate not in (None, ""):
+            return _positive_int(candidate)
+        candidate = raw_options.get("searchsp")
+        if candidate not in (None, ""):
+            return _positive_int(candidate)
+    for key in ("db_effective_search_space", "searchsp"):
+        candidate = body.get(key)
+        if candidate not in (None, ""):
+            return _positive_int(candidate)
+    return None
+
+
+def _positive_int(value: object | None) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _calibration_snapshot_error(
+    verified_default: Any | None,
+    options: dict[str, Any],
+) -> str | None:
+    if verified_default is None:
+        return None
+    observed_db_len = _positive_int(options.get("db_total_letters"))
+    calibrated_db_len = _positive_int(getattr(verified_default, "calibrated_db_len", None))
+    if (
+        observed_db_len is not None
+        and calibrated_db_len is not None
+        and observed_db_len != calibrated_db_len
+    ):
+        return (
+            "caller-supplied db_effective_search_space does not match the calibrated "
+            "database snapshot"
+        )
+    observed_db_num = _positive_int(
+        options.get("db_total_sequences") or options.get("db_num") or options.get("db_entries")
+    )
+    calibrated_db_num = _positive_int(getattr(verified_default, "calibrated_db_num", None))
+    if (
+        observed_db_num is not None
+        and calibrated_db_num is not None
+        and observed_db_num != calibrated_db_num
+    ):
+        return (
+            "caller-supplied db_effective_search_space does not match the calibrated "
+            "database snapshot"
+        )
+    return None
 
 
 def _upload_inline_query_for_submit(

@@ -20,7 +20,7 @@ from api.routes._blast_shared import (
     _normalise_blast_submit_body,
     _submit_options_from_body,
 )
-from api.services.blast.submit_payload import canonical_execution_config
+from api.services.blast.submit_payload import canonical_execution_config, submit_contracts
 
 
 def test_submit_options_forward_acr_fields() -> None:
@@ -153,6 +153,70 @@ def test_ui_and_openapi_submit_shapes_share_execution_config() -> None:
     }
 
     assert canonical_execution_config(ui_payload) == canonical_execution_config(openapi_payload)
+
+
+def test_ui_openapi_and_servicebus_precise_contracts_converge() -> None:
+    from api.services.service_bus import ParsedMessage
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.services.web_blast_searchsp import WEB_BLAST_SEARCHSP_DEFAULTS
+    from api.tasks.servicebus import tasks as sb_tasks
+
+    query = ">q1\nATGCATGCATGC\n"
+    ui_payload = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": query,
+        "options": {"outfmt": 5, "sharding_mode": "precise"},
+    }
+    openapi_payload = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": query,
+        "options": {"outfmt": 5, "sharding_mode": "precise"},
+    }
+    servicebus_payload = sb_tasks._build_request_payload(
+        ParsedMessage(
+            body={
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": query,
+                "options": {"outfmt": 5, "sharding_mode": "precise"},
+                "external_correlation_id": "corr-converge",
+            },
+            raw_body="",
+            message_id="m1",
+            correlation_id="corr-converge",
+            subject="blast.request",
+            content_type="application/json",
+            enqueued_time_utc=None,
+            sequence_number=1,
+            application_properties={},
+        ),
+        ServiceBusConfig(),
+    )
+
+    ui_contracts = submit_contracts(ui_payload)
+    openapi_contracts = submit_contracts(openapi_payload)
+    assert servicebus_payload is not None
+    servicebus_contracts = submit_contracts(servicebus_payload)
+
+    expected_searchsp = WEB_BLAST_SEARCHSP_DEFAULTS["core_nt"].value
+    assert (
+        canonical_execution_config(ui_payload)["options"]["db_effective_search_space"]
+        == expected_searchsp
+    )
+    assert openapi_contracts["precision"]["required_options"] == servicebus_contracts["precision"][
+        "required_options"
+    ]
+    assert ui_contracts["precision"]["precision_level"] == openapi_contracts["precision"][
+        "precision_level"
+    ] == servicebus_contracts["precision"]["precision_level"]
+    assert ui_contracts["precision"]["merge_strategy"] == openapi_contracts["precision"][
+        "merge_strategy"
+    ] == servicebus_contracts["precision"]["merge_strategy"]
+    assert ui_contracts["compatibility_contract"]["searchsp"] == expected_searchsp
+    assert openapi_contracts["compatibility_contract"]["searchsp"] == expected_searchsp
+    assert servicebus_contracts["compatibility_contract"]["searchsp"] == expected_searchsp
 
 
 def test_web_blast_searchsp_default_applies_for_core_nt() -> None:

@@ -18,11 +18,13 @@ const CORE_NT_BLAST_OPTIONS =
 const CORE_NT_JOB_EXAMPLE = {
   summary: "Mode B - Web BLAST-equivalent core_nt",
   description:
-    "Search core_nt with the same BLAST options used by New Search: blastn -db core_nt -evalue 0.05 -word_size 28 -max_target_seqs 100 -outfmt 5 -dust yes -soft_masking false -searchsp 32156241807668.",
+    "Search core_nt with the same BLAST options used by New Search: blastn -db core_nt -evalue 0.05 -word_size 28 -max_target_seqs 100 -outfmt 5 -dust yes -soft_masking false -searchsp 32156241807668. The request now carries sharding_mode=precise and an override candidate for db_effective_search_space; the backend still re-derives and validates the calibrated value before accepting it.",
   value: {
     program: "blastn",
     db: "core_nt",
     query_fasta: CORE_NT_NC_003310_FASTA,
+    sharding_mode: "precise",
+    db_effective_search_space: 32_156_241_807_668,
     blast_options: {
       evalue: 0.05,
       max_target_seqs: 100,
@@ -75,6 +77,8 @@ const CORE_NT_OUTFMT7_JOB_EXAMPLE = {
     program: "blastn",
     db: "core_nt",
     query_fasta: CORE_NT_NC_003310_FASTA,
+    sharding_mode: "precise",
+    db_effective_search_space: 32_156_241_807_668,
     blast_options: {
       evalue: 0.05,
       max_target_seqs: 100,
@@ -93,6 +97,8 @@ const CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE = {
     program: "blastn",
     db: "core_nt",
     query_fasta: CORE_NT_NC_003310_FASTA,
+    sharding_mode: "precise",
+    db_effective_search_space: 32_156_241_807_668,
     blast_options: {
       evalue: 0.05,
       max_target_seqs: 100,

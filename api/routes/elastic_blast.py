@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -26,9 +26,10 @@ from api.services.blast.submit_payload import (
     canonical_submit_metadata,
     canonical_submit_snapshot,
     resolve_sharded_db_resource_profile,
+    resolve_sharding_plan,
     submit_contracts,
 )
-from api.services.sanitise import redact_oid
+from api.services.sanitise import redact_oid, sanitise
 
 router = APIRouter(prefix="/api/v1/elastic-blast", tags=["external-elastic-blast"])
 LOGGER = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ class ExternalBlastOptions(BaseModel):
     outfmt: Literal[5] = Field(5, description="Fixed to BLAST XML format 5")
     word_size: int = Field(28, ge=1)
     dust: bool = Field(True)
+    sharding_mode: Literal["off", "approximate", "precise"] = Field("off")
+    db_effective_search_space: int | None = Field(None, ge=1)
     evalue: float = Field(
         0.05,
         gt=0,
@@ -240,6 +243,44 @@ _SUCCESS_STATUSES = frozenset({"complete", "completed", "success", "succeeded"})
 _FAILED_STATUSES = frozenset({"canceled", "cancelled", "error", "failed", "failure", "timeout"})
 
 
+def _validated_submit_contracts(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        contracts = submit_contracts(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sharding_precision_invalid",
+                "message": sanitise(str(exc) or repr(exc))[:500],
+            },
+        ) from exc
+
+    precision = contracts["precision"]
+    if not precision.get("eligible"):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sharding_precision_blocked",
+                "message": "; ".join(precision.get("blocking_errors") or []),
+                "precision": precision,
+            },
+        )
+
+    compatibility = contracts["compatibility_contract"]
+    if not compatibility.get("eligible"):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "web_blast_compatibility_blocked",
+                "message": "; ".join(compatibility.get("blocking_errors") or []),
+                "compatibility": compatibility,
+            },
+        )
+    return contracts
+
+
 def _public_status(value: Any, *, default: str = "queued") -> str:
     status = str(value or "").strip().casefold()
     if status in _QUEUED_STATUSES:
@@ -349,6 +390,13 @@ def submit_external_blast_job(
     payload["resource_profile"] = resolve_sharded_db_resource_profile(
         payload.get("db") or "", payload.get("resource_profile")
     )
+    plan = resolve_sharding_plan(
+        program=request.program,
+        database=str(payload.get("db") or ""),
+        options=payload.get("options"),
+        caller_supplied_searchsp=request.options.db_effective_search_space,
+    )
+    payload["options"] = plan.options
     payload.update(
         canonical_submit_metadata(
             payload,
@@ -357,7 +405,7 @@ def submit_external_blast_job(
         )
     )
     payload["canonical_request"] = canonical_submit_snapshot(payload)
-    payload.update(submit_contracts(payload))
+    payload.update(_validated_submit_contracts(payload))
     from api.services.blast.provenance import build_blast_provenance
 
     payload["provenance"] = build_blast_provenance(
