@@ -695,3 +695,55 @@ def test_dlq_cleanup_backs_up_then_purges(monkeypatch: pytest.MonkeyPatch) -> No
     out = sb_tasks.dlq_cleanup()
     assert out["purged"] == 1
     assert backed_up and backed_up[0]["message_id"] == "m1"
+
+
+def test_drain_holds_when_autostart_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When wake-on-request auto-start holds the pass (cluster stopped/starting),
+    the drain does NOT receive messages — they wait safely in the queue — and the
+    task reports the autostart decision so the dashboard can render it."""
+    _enable(monkeypatch)
+    from api.services.blast.cluster_autostart import AutostartDecision
+
+    monkeypatch.setattr(
+        "api.services.blast.cluster_autostart.evaluate_for_drain",
+        lambda _cfg: AutostartDecision(
+            proceed_with_drain=False,
+            started=True,
+            status="stopped",
+            start_task_id="task-1",
+            reason="cluster start enqueued",
+        ),
+    )
+
+    def _should_not_drain(*_a, **_k):  # pragma: no cover - must not be called
+        raise AssertionError("drain_requests must not run while autostart holds")
+
+    monkeypatch.setattr(service_bus, "drain_requests", _should_not_drain)
+
+    out = sb_tasks.drain_and_resubmit()
+    assert out["skipped"] == "autostart_hold"
+    assert out["autostart_status"] == "stopped"
+    assert out["autostart_started"] is True
+    assert out["start_task_id"] == "task-1"
+
+
+def test_drain_includes_autostart_status_when_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the cluster is ready the drain proceeds and tags the result with the
+    autostart status for observability."""
+    _enable(monkeypatch)
+    from api.services.blast.cluster_autostart import AutostartDecision
+    from api.services.service_bus import DrainStats
+
+    monkeypatch.setattr(
+        "api.services.blast.cluster_autostart.evaluate_for_drain",
+        lambda _cfg: AutostartDecision(True, False, "ready"),
+    )
+    monkeypatch.setattr(
+        service_bus, "drain_requests", lambda *a, **k: DrainStats(received=0)
+    )
+
+    out = sb_tasks.drain_and_resubmit()
+    assert out["autostart_status"] == "ready"
+    assert out["received"] == 0

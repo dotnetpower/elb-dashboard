@@ -1,9 +1,10 @@
 """Service Bus integration configuration (single deployment-wide row).
 
 Responsibility: Persist and read the optional Service Bus BLAST integration
-    configuration — enable switch, auth mode (Entra/SAS), namespace + queue +
-    topic names, BLAST routing context, and the dead-letter cleanup policy.
-    There is exactly ONE config row per deployment (PartitionKey
+    configuration — enable switch, auth mode (Entra/SAS), namespace + request
+    queue + result queue (+ optional future topic) names, BLAST routing context,
+    cluster auto-start opt-in, and the dead-letter cleanup policy. There is
+    exactly ONE config row per deployment (PartitionKey
     ``servicebus_config`` / RowKey ``current``); this is not a per-cluster
     preference like ``performance_pref``.
 Edit boundaries: Reusable domain/persistence logic only. HTTP shaping lives in
@@ -46,6 +47,10 @@ AUTH_MODES: tuple[str, ...] = (AUTH_MODE_ENTRA, AUTH_MODE_SAS)
 DEFAULT_AUTH_MODE = AUTH_MODE_ENTRA
 
 DEFAULT_REQUEST_QUEUE = "elastic-blast-requests"
+# Result/completion channel is a QUEUE by default (charter: messaging is unified
+# on queues). The topic below is retained as an OPTIONAL future fan-out channel
+# but is OFF unless an operator both names it and flips ``completion_topic_enabled``.
+DEFAULT_COMPLETION_QUEUE = "elastic-blast-results"
 DEFAULT_COMPLETION_TOPIC = "elastic-blast-completions"
 DEFAULT_DLQ_MAX_AGE_DAYS = 7
 DEFAULT_DLQ_MAX_COUNT = 5000
@@ -53,13 +58,15 @@ DEFAULT_DLQ_CLEANUP_BATCH = 500
 
 # Deployment-level entity-name overrides. When SET (non-empty) they win over the
 # saved Table/file config so an operator can pin the request queue / completion
-# topic via the Container App env without editing the Settings row (charter
+# entities via the Container App env without editing the Settings row (charter
 # §12a Rule 4: unset = existing behaviour preserved, i.e. the saved config value
 # — or its default — is used). An env value that fails the entity-name regex is
 # ignored (logged) so a typo can never silently point the integration at a bad
-# entity. ``SERVICEBUS_RESPONSE_TOPIC`` is the completion topic the dashboard
-# publishes transition events to and external subscribers consume.
+# entity. ``SERVICEBUS_RESPONSE_QUEUE`` is the result queue the dashboard
+# publishes transition events to and external services consume; the legacy
+# ``SERVICEBUS_RESPONSE_TOPIC`` still overrides the optional future fan-out topic.
 _REQUEST_QUEUE_ENV = "SERVICEBUS_REQUEST_QUEUE"
+_RESPONSE_QUEUE_ENV = "SERVICEBUS_RESPONSE_QUEUE"
 _RESPONSE_TOPIC_ENV = "SERVICEBUS_RESPONSE_TOPIC"
 
 # Bounds — keep the cleanup task bounded (charter self-critique: no runaway loop).
@@ -119,7 +126,12 @@ class ServiceBusConfig:
     auth_mode: str = DEFAULT_AUTH_MODE
     namespace_fqdn: str = ""
     request_queue: str = DEFAULT_REQUEST_QUEUE
+    # Result/completion QUEUE — the primary, queue-unified response channel.
+    completion_queue: str = DEFAULT_COMPLETION_QUEUE
+    # Optional future fan-out TOPIC. Retained for forward compatibility but only
+    # used when BOTH a name is set AND ``completion_topic_enabled`` is True.
     completion_topic: str = DEFAULT_COMPLETION_TOPIC
+    completion_topic_enabled: bool = False
     # SAS mode only: the Key Vault secret NAME holding the connection string.
     # The connection string itself is never persisted in this row.
     sas_secret_name: str = ""
@@ -128,6 +140,11 @@ class ServiceBusConfig:
     resource_group: str = ""
     cluster_name: str = ""
     storage_account: str = ""
+    # When True, a request that arrives while the configured AKS cluster is
+    # stopped triggers an idempotent auto-start (the drain waits until the
+    # cluster is running). Default OFF — starting a cluster has a cost, so the
+    # operator opts in (mirrors dlq_cleanup_enabled).
+    autostart_cluster_enabled: bool = False
     # Dead-letter cleanup policy.
     dlq_cleanup_enabled: bool = False
     dlq_max_age_days: int = DEFAULT_DLQ_MAX_AGE_DAYS
@@ -144,12 +161,15 @@ class ServiceBusConfig:
             "auth_mode": self.auth_mode,
             "namespace_fqdn": self.namespace_fqdn,
             "request_queue": self.request_queue,
+            "completion_queue": self.completion_queue,
             "completion_topic": self.completion_topic,
+            "completion_topic_enabled": self.completion_topic_enabled,
             "sas_secret_name": self.sas_secret_name,
             "subscription_id": self.subscription_id,
             "resource_group": self.resource_group,
             "cluster_name": self.cluster_name,
             "storage_account": self.storage_account,
+            "autostart_cluster_enabled": self.autostart_cluster_enabled,
             "dlq_cleanup_enabled": self.dlq_cleanup_enabled,
             "dlq_max_age_days": self.dlq_max_age_days,
             "dlq_max_count": self.dlq_max_count,
@@ -166,12 +186,15 @@ class ServiceBusConfig:
             auth_mode=_clean_auth_mode(value.get("auth_mode")),
             namespace_fqdn=str(value.get("namespace_fqdn") or ""),
             request_queue=str(value.get("request_queue") or DEFAULT_REQUEST_QUEUE),
+            completion_queue=str(value.get("completion_queue") or DEFAULT_COMPLETION_QUEUE),
             completion_topic=str(value.get("completion_topic") or DEFAULT_COMPLETION_TOPIC),
+            completion_topic_enabled=_clean_bool(value.get("completion_topic_enabled")),
             sas_secret_name=str(value.get("sas_secret_name") or ""),
             subscription_id=str(value.get("subscription_id") or ""),
             resource_group=str(value.get("resource_group") or ""),
             cluster_name=str(value.get("cluster_name") or ""),
             storage_account=str(value.get("storage_account") or ""),
+            autostart_cluster_enabled=_clean_bool(value.get("autostart_cluster_enabled")),
             dlq_cleanup_enabled=_clean_bool(value.get("dlq_cleanup_enabled")),
             dlq_max_age_days=_clean_int(
                 value.get("dlq_max_age_days"),
@@ -222,8 +245,12 @@ def normalise_config(
             )
         if not _RE_ENTITY.match(cfg.request_queue):
             raise ValueError("request_queue is not a valid Service Bus entity name")
+        if cfg.completion_queue and not _RE_ENTITY.match(cfg.completion_queue):
+            raise ValueError("completion_queue is not a valid Service Bus entity name")
         if cfg.completion_topic and not _RE_ENTITY.match(cfg.completion_topic):
             raise ValueError("completion_topic is not a valid Service Bus entity name")
+        if cfg.completion_topic_enabled and not cfg.completion_topic:
+            raise ValueError("completion_topic is required when completion_topic_enabled is true")
         if cfg.auth_mode == AUTH_MODE_SAS and not _RE_SECRET_NAME.match(cfg.sas_secret_name):
             raise ValueError("sas_secret_name is required (Key Vault secret name) in SAS mode")
     # Routing context is validated lazily at drain time (a config can be saved
@@ -290,14 +317,16 @@ def get_service_bus_config() -> ServiceBusConfig:
 
 
 def _apply_entity_env_overrides(cfg: ServiceBusConfig) -> ServiceBusConfig:
-    """Overlay ``SERVICEBUS_REQUEST_QUEUE`` / ``SERVICEBUS_RESPONSE_TOPIC``.
+    """Overlay ``SERVICEBUS_REQUEST_QUEUE`` / ``SERVICEBUS_RESPONSE_QUEUE`` /
+    ``SERVICEBUS_RESPONSE_TOPIC``.
 
     A non-empty, well-formed env value wins over the saved entity name so a
-    deployment can pin the request queue / completion topic without editing the
-    Settings row. Unset env keys leave the config untouched (existing behaviour
-    preserved). A malformed env value is ignored (logged) — never silently
-    points the integration at an invalid entity. Mutates and returns ``cfg`` in
-    place; ``cfg`` is a fresh object per call so this never leaks across rows.
+    deployment can pin the request queue / result queue / completion topic
+    without editing the Settings row. Unset env keys leave the config untouched
+    (existing behaviour preserved). A malformed env value is ignored (logged) —
+    never silently points the integration at an invalid entity. Mutates and
+    returns ``cfg`` in place; ``cfg`` is a fresh object per call so this never
+    leaks across rows.
     """
     queue_override = os.environ.get(_REQUEST_QUEUE_ENV, "").strip()
     if queue_override:
@@ -308,6 +337,16 @@ def _apply_entity_env_overrides(cfg: ServiceBusConfig) -> ServiceBusConfig:
                 "%s=%r is not a valid Service Bus entity name; ignoring override",
                 _REQUEST_QUEUE_ENV,
                 queue_override,
+            )
+    result_queue_override = os.environ.get(_RESPONSE_QUEUE_ENV, "").strip()
+    if result_queue_override:
+        if _RE_ENTITY.match(result_queue_override):
+            cfg.completion_queue = result_queue_override
+        else:
+            LOGGER.warning(
+                "%s=%r is not a valid Service Bus entity name; ignoring override",
+                _RESPONSE_QUEUE_ENV,
+                result_queue_override,
             )
     topic_override = os.environ.get(_RESPONSE_TOPIC_ENV, "").strip()
     if topic_override:

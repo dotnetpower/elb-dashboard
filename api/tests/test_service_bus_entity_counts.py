@@ -27,7 +27,11 @@ def _cfg() -> SimpleNamespace:
     return SimpleNamespace(
         namespace_fqdn="sb-example.servicebus.windows.net",
         request_queue="elastic-blast-requests",
+        completion_queue="elastic-blast-results",
         completion_topic="elastic-blast-completions",
+        # Exercise the optional future fan-out topic path so the per-subscription
+        # counters below are read (queue-unified deployments leave this OFF).
+        completion_topic_enabled=True,
         auth_mode="entra",
     )
 
@@ -189,3 +193,78 @@ def test_entity_counts_subscription_transfer_counters(
     assert subs[0]["dead_letter_message_count"] == 1
     assert subs[0]["transfer_message_count"] == 0
     assert subs[0]["transfer_dead_letter_message_count"] == 4
+
+
+def test_entity_counts_includes_result_queue_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The queue-unified result channel surfaces its own counters under
+    ``result_queue`` so the SPA can show the response-queue depth."""
+    q_runtime = SimpleNamespace(
+        active_message_count=5,
+        dead_letter_message_count=0,
+        scheduled_message_count=0,
+        total_message_count=5,
+        size_in_bytes=0,
+        transfer_message_count=0,
+        transfer_dead_letter_message_count=0,
+        created_at_utc=None,
+        updated_at_utc=None,
+        accessed_at_utc=None,
+    )
+    admin = _FakeAdmin(
+        q_runtime=q_runtime,
+        q_props=SimpleNamespace(max_size_in_megabytes=1024, status="Active"),
+    )
+
+    with _patched_admin(monkeypatch, admin):
+        result = service_bus.entity_counts(_cfg())
+
+    rq = result["result_queue"]
+    assert rq["name"] == "elastic-blast-results"
+    assert rq["active_message_count"] == 5
+    assert rq["total_message_count"] == 5
+
+
+def test_entity_counts_omits_subscriptions_when_topic_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the optional fan-out topic OFF, no subscription listing is attempted
+    (queue-unified deployments never read the topic)."""
+    q_runtime = SimpleNamespace(
+        active_message_count=0,
+        dead_letter_message_count=0,
+        scheduled_message_count=0,
+        total_message_count=0,
+        size_in_bytes=0,
+        transfer_message_count=None,
+        transfer_dead_letter_message_count=None,
+        created_at_utc=None,
+        updated_at_utc=None,
+        accessed_at_utc=None,
+    )
+    sub = SimpleNamespace(name="should-not-be-read")
+    sub_runtime = SimpleNamespace(
+        active_message_count=9,
+        dead_letter_message_count=0,
+        transfer_message_count=0,
+        transfer_dead_letter_message_count=0,
+    )
+    admin = _FakeAdmin(
+        q_runtime=q_runtime,
+        q_props=SimpleNamespace(max_size_in_megabytes=1024, status="Active"),
+        subs=[(sub, sub_runtime)],
+    )
+    cfg = SimpleNamespace(
+        namespace_fqdn="sb-example.servicebus.windows.net",
+        request_queue="elastic-blast-requests",
+        completion_queue="elastic-blast-results",
+        completion_topic="elastic-blast-completions",
+        completion_topic_enabled=False,
+        auth_mode="entra",
+    )
+
+    with _patched_admin(monkeypatch, admin):
+        result = service_bus.entity_counts(cfg)
+
+    assert result["subscriptions"] == []

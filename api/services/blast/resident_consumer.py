@@ -82,6 +82,7 @@ def run_resident_consumer(
     raises out of the loop body — a drain error backs off (capped) and retries.
     """
     from api.services import service_bus
+    from api.services.blast.cluster_autostart import evaluate_for_drain
     from api.services.service_bus_pref import get_service_bus_config
     from api.tasks.servicebus.tasks import _drain_handler
 
@@ -95,6 +96,12 @@ def run_resident_consumer(
         totals["iterations"] = iterations
         try:
             cfg = get_service_bus_config()
+            # Wake-on-request gate: if auto-start is enabled and the cluster is
+            # stopped/starting, hold this iteration (the messages wait in the
+            # queue) and let evaluate_for_drain kick an idempotent start_aks.
+            if not evaluate_for_drain(cfg).proceed_with_drain:
+                stop_event.wait(timeout=poll_wait_seconds)
+                continue
             stats = service_bus.drain_requests(
                 cfg,
                 # Bind cfg as a default arg so the closure captures THIS

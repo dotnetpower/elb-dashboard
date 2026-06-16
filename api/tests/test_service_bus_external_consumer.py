@@ -70,6 +70,9 @@ class _FakeClient:
     def get_subscription_receiver(self, **_k: object) -> _FakeReceiver:
         return self._receiver
 
+    def get_queue_receiver(self, *_a: object, **_k: object) -> _FakeReceiver:
+        return self._receiver
+
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, receiver: _FakeReceiver) -> None:
     """Patch ``azure.servicebus.ServiceBusClient`` with a fake supporting both
@@ -164,3 +167,48 @@ def test_run_external_consumer_skips_when_unconfigured(
         lambda: ServiceBusConfig(),  # no namespace/topic
     )
     assert ec.run_external_consumer(threading.Event()) == 0
+
+
+def test_consume_delivers_from_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Queue-unified path: passing ``queue`` drains the result queue with a queue
+    receiver (no topic/subscription required) and completes each message."""
+    msgs = [_FakeMessage({"status": "succeeded", "external_correlation_id": "q1"})]
+    receiver = _FakeReceiver(msgs)
+    _patch_client(monkeypatch, receiver)
+    received: list[dict[str, Any]] = []
+    delivered = ec.consume_completions(
+        namespace_fqdn="ns.servicebus.windows.net",
+        queue="elastic-blast-results",
+        on_event=received.append,
+        connection_string="Endpoint=sb://x/;SharedAccessKeyName=k;SharedAccessKey=v",
+        max_iterations=1,
+    )
+    assert delivered == 1
+    assert received[0]["external_correlation_id"] == "q1"
+    assert receiver.completed == msgs
+
+
+def test_consume_queue_only_needs_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The queue path requires only a namespace — topic/subscription are not
+    needed, so omitting them must not raise."""
+    receiver = _FakeReceiver([])
+    _patch_client(monkeypatch, receiver)
+    delivered = ec.consume_completions(
+        namespace_fqdn="ns.servicebus.windows.net",
+        queue="elastic-blast-results",
+        on_event=lambda _e: None,
+        connection_string="conn",
+        max_iterations=1,
+    )
+    assert delivered == 0
+
+
+def test_consume_queue_requires_namespace() -> None:
+    """Even the queue path needs a namespace FQDN."""
+    with pytest.raises(ValueError):
+        ec.consume_completions(
+            namespace_fqdn="",
+            queue="elastic-blast-results",
+            on_event=lambda _e: None,
+            connection_string="conn",
+        )

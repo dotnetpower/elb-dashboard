@@ -597,10 +597,26 @@ def _persist_drain_row_and_trace(
 
 @shared_task(name="api.tasks.servicebus.drain_and_resubmit")
 def drain_and_resubmit() -> dict[str, Any]:
-    """Drain the request queue → bridge each message to the OpenAPI plane."""
+    """Drain the request queue → bridge each message to the OpenAPI plane.
+
+    When wake-on-request auto-start is enabled and the configured cluster is
+    stopped/starting, the drain is HELD for this pass (the messages wait safely
+    in the queue) and an idempotent ``start_aks`` is enqueued — so a request that
+    arrives against a stopped cluster brings it up instead of dead-lettering.
+    """
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
+    from api.services.blast.cluster_autostart import evaluate_for_drain
+
+    decision = evaluate_for_drain(cfg)
+    if not decision.proceed_with_drain:
+        return {
+            "skipped": "autostart_hold",
+            "autostart_status": decision.status,
+            "autostart_started": decision.started,
+            "start_task_id": decision.start_task_id,
+        }
     stats = service_bus.drain_requests(
         cfg,
         lambda m: _drain_handler(m, cfg),
@@ -611,6 +627,7 @@ def drain_and_resubmit() -> dict[str, Any]:
         "completed": stats.completed,
         "abandoned": stats.abandoned,
         "dead_lettered": stats.dead_lettered,
+        "autostart_status": decision.status,
     }
 
 

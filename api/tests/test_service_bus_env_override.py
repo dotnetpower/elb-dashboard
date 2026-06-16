@@ -21,11 +21,13 @@ def _local_backend(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
     monkeypatch.delenv("SERVICEBUS_REQUEST_QUEUE", raising=False)
+    monkeypatch.delenv("SERVICEBUS_RESPONSE_QUEUE", raising=False)
     monkeypatch.delenv("SERVICEBUS_RESPONSE_TOPIC", raising=False)
 
 
 def test_unset_env_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     from api.services.service_bus_pref import (
+        DEFAULT_COMPLETION_QUEUE,
         DEFAULT_COMPLETION_TOPIC,
         DEFAULT_REQUEST_QUEUE,
         get_service_bus_config,
@@ -33,7 +35,27 @@ def test_unset_env_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
     cfg = get_service_bus_config()
     assert cfg.request_queue == DEFAULT_REQUEST_QUEUE
+    assert cfg.completion_queue == DEFAULT_COMPLETION_QUEUE
     assert cfg.completion_topic == DEFAULT_COMPLETION_TOPIC
+
+
+def test_response_queue_env_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVICEBUS_RESPONSE_QUEUE", "custom-results")
+    from api.services.service_bus_pref import get_service_bus_config
+
+    cfg = get_service_bus_config()
+    assert cfg.completion_queue == "custom-results"
+
+
+def test_malformed_response_queue_env_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVICEBUS_RESPONSE_QUEUE", "bad name!!")
+    from api.services.service_bus_pref import (
+        DEFAULT_COMPLETION_QUEUE,
+        get_service_bus_config,
+    )
+
+    cfg = get_service_bus_config()
+    assert cfg.completion_queue == DEFAULT_COMPLETION_QUEUE
 
 
 def test_env_overrides_win(monkeypatch: pytest.MonkeyPatch) -> None:

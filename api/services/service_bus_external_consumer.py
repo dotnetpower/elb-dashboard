@@ -1,11 +1,14 @@
-"""Optional external-completion consumer — subscribe to the completion topic.
+"""Optional external-completion consumer — drain the result queue.
 
-A long-running loop that subscribes to the Service Bus completion topic
-(``SERVICEBUS_RESPONSE_TOPIC``) on a dedicated subscription and records each
-``blast.transition`` event it receives. It models the *external* subscriber an
-integrating service would run on its own infrastructure: the dashboard publishes
-one transition per job status change to the topic, and any number of
-subscriptions fan that event out to independent consumers.
+A long-running loop that drains the Service Bus result queue
+(``SERVICEBUS_RESPONSE_QUEUE``, default ``elastic-blast-results``) and records
+each ``blast.transition`` event it receives. It models the *external* subscriber
+an integrating service would run on its own infrastructure: the dashboard
+publishes one transition per job status change to the result queue, and the
+external service drains it with a queue receiver (competing consumer — one
+external service per result queue). The optional fan-out topic
+(``SERVICEBUS_RESPONSE_TOPIC`` + a subscription) is retained for forward
+compatibility but is OFF by default.
 
 Two ways to run it:
 
@@ -15,16 +18,17 @@ Two ways to run it:
   (``service_bus_completions``) so the Playground can show them. It uses the
   shared managed identity and is purely observational — it NEVER executes BLAST,
   so it can never double-run a job (the request-queue consumer is the sole
-  executor). This is a demonstration aid, not a third party.
+  executor). It is a competing consumer of the result queue, so enable it for a
+  demo OR run a real external consumer, not both on the same queue.
 * **Standalone reference (external party).** ``python -m
   api.services.service_bus_external_consumer`` runs the same loop printing each
   event, authenticating with ``DefaultAzureCredential``. An external service
   copies this file (only ``azure-servicebus`` + ``azure-identity`` needed) and
-  points it at its own subscription with ``Azure Service Bus Data Receiver``.
+  points it at the result queue with ``Azure Service Bus Data Receiver``.
 
-Responsibility: Own the completion-subscription receive loop lifecycle
-    (bounded, interruptible, backoff) plus the gated worker launcher and the
-    standalone entry point. No request-queue draining, no BLAST execution.
+Responsibility: Own the completion receive loop lifecycle (bounded,
+    interruptible, backoff) plus the gated worker launcher and the standalone
+    entry point. No request-queue draining, no BLAST execution.
 Edit boundaries: Service Bus receive only. Recording observations is delegated
     to ``service_bus_completions``; per-message business logic does not belong
     here. Keep the loop bounded and never raise out of the loop body.
@@ -90,8 +94,9 @@ def external_consumer_enabled() -> bool:
 def consume_completions(
     *,
     namespace_fqdn: str,
-    topic: str,
-    subscription: str,
+    topic: str = "",
+    subscription: str = "",
+    queue: str = "",
     on_event: Callable[[dict[str, Any]], None],
     credential: Any | None = None,
     connection_string: str | None = None,
@@ -100,7 +105,13 @@ def consume_completions(
     receive_batch: int = _RECEIVE_BATCH,
     max_iterations: int | None = None,
 ) -> int:
-    """Receive completion events from a topic subscription until stopped.
+    """Receive completion events from the result queue (or a topic subscription).
+
+    Messaging is unified on QUEUES: pass ``queue`` to drain the result queue with
+    a queue receiver (competing consumer — one external service drains it). The
+    ``topic`` + ``subscription`` pair is retained for the optional future fan-out
+    path (each subscription gets its own copy). Exactly one channel is used:
+    ``queue`` wins when set, else ``topic``/``subscription``.
 
     Calls ``on_event(parsed_json_body)`` for each received message, then
     completes it. Returns the number of events delivered to ``on_event``. The
@@ -114,8 +125,12 @@ def consume_completions(
     from azure.servicebus import ServiceBusClient
     from azure.servicebus.exceptions import ServiceBusError
 
-    if not namespace_fqdn or not topic or not subscription:
-        raise ValueError("namespace_fqdn, topic and subscription are required")
+    use_queue = bool(queue)
+    if use_queue:
+        if not namespace_fqdn:
+            raise ValueError("namespace_fqdn is required")
+    elif not (namespace_fqdn and topic and subscription):
+        raise ValueError("namespace_fqdn plus either queue or topic+subscription are required")
 
     delivered = 0
     backoff = _BACKOFF_START_SECONDS
@@ -131,16 +146,21 @@ def consume_completions(
             cred = get_credential()
         return ServiceBusClient(namespace_fqdn, cred)
 
+    def _receiver(client: ServiceBusClient) -> Any:
+        if use_queue:
+            return client.get_queue_receiver(queue, max_wait_time=max_wait_seconds)
+        return client.get_subscription_receiver(
+            topic_name=topic,
+            subscription_name=subscription,
+            max_wait_time=max_wait_seconds,
+        )
+
     while stop is None or not stop.is_set():
         if max_iterations is not None and iterations >= max_iterations:
             break
         iterations += 1
         try:
-            with _client() as client, client.get_subscription_receiver(
-                topic_name=topic,
-                subscription_name=subscription,
-                max_wait_time=max_wait_seconds,
-            ) as receiver:
+            with _client() as client, _receiver(client) as receiver:
                 batch = receiver.receive_messages(
                     max_message_count=receive_batch,
                     max_wait_time=max_wait_seconds,
@@ -158,8 +178,8 @@ def consume_completions(
             backoff = _BACKOFF_START_SECONDS  # reset after a clean iteration
         except ServiceBusError as exc:
             LOGGER.warning(
-                "external consumer receive failed (sub=%s): %s; backing off %.0fs",
-                subscription,
+                "external consumer receive failed (%s): %s; backing off %.0fs",
+                queue or f"{topic}/{subscription}",
                 type(exc).__name__,
                 backoff,
             )
@@ -245,27 +265,40 @@ def _record_to_observer(event: dict[str, Any]) -> None:
 
 
 def run_external_consumer(stop: threading.Event, **overrides: Any) -> int:
-    """Run the demo consumer loop against the configured completion topic.
+    """Run the demo consumer loop against the configured result queue.
 
-    Resolves namespace/topic/subscription from the saved config + env. Records
-    each event into the observer ring. Returns events delivered. Test seams are
-    passed through ``overrides`` (e.g. ``max_iterations``).
+    Resolves namespace/queue (or the optional future topic) from the saved
+    config + env. Records each event into the observer ring. Returns events
+    delivered. Test seams are passed through ``overrides`` (e.g.
+    ``max_iterations``).
     """
     from api.services.service_bus_pref import get_service_bus_config
 
     cfg = get_service_bus_config()
-    topic = cfg.completion_topic
-    if not cfg.namespace_fqdn or not topic:
-        LOGGER.info("external consumer: namespace/topic not configured; not starting")
+    if not cfg.namespace_fqdn:
+        LOGGER.info("external consumer: namespace not configured; not starting")
         return 0
-    return consume_completions(
-        namespace_fqdn=cfg.namespace_fqdn,
-        topic=topic,
-        subscription=completion_subscription(),
-        on_event=_record_to_observer,
-        stop=stop,
-        **overrides,
-    )
+    # Queue-unified primary path: drain the result queue (competing consumer).
+    if cfg.completion_queue:
+        return consume_completions(
+            namespace_fqdn=cfg.namespace_fqdn,
+            queue=cfg.completion_queue,
+            on_event=_record_to_observer,
+            stop=stop,
+            **overrides,
+        )
+    # Optional future fan-out path — only when explicitly enabled.
+    if cfg.completion_topic_enabled and cfg.completion_topic:
+        return consume_completions(
+            namespace_fqdn=cfg.namespace_fqdn,
+            topic=cfg.completion_topic,
+            subscription=completion_subscription(),
+            on_event=_record_to_observer,
+            stop=stop,
+            **overrides,
+        )
+    LOGGER.info("external consumer: no result queue/topic configured; not starting")
+    return 0
 
 
 def start_external_consumer() -> bool:
@@ -324,14 +357,17 @@ def reset_external_consumer_state_for_test() -> None:
 def _standalone_main() -> int:
     """Standalone entry point for an external subscriber (prints each event).
 
-    Reads ``SERVICEBUS_NAMESPACE_FQDN``, ``SERVICEBUS_RESPONSE_TOPIC`` and
-    ``SERVICEBUS_COMPLETION_SUBSCRIPTION`` from the environment and authenticates
-    with ``DefaultAzureCredential`` (Entra). An external party copies this file
-    and runs ``python service_bus_external_consumer.py``.
+    Reads ``SERVICEBUS_NAMESPACE_FQDN`` and ``SERVICEBUS_RESPONSE_QUEUE`` from the
+    environment and authenticates with ``DefaultAzureCredential`` (Entra),
+    draining the result queue. To consume the optional future fan-out topic
+    instead, set ``SERVICEBUS_RESPONSE_TOPIC`` + ``SERVICEBUS_COMPLETION_SUBSCRIPTION``
+    and leave ``SERVICEBUS_RESPONSE_QUEUE`` empty. An external party copies this
+    file and runs ``python service_bus_external_consumer.py``.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     namespace = os.environ.get("SERVICEBUS_NAMESPACE_FQDN", "").strip()
-    topic = os.environ.get("SERVICEBUS_RESPONSE_TOPIC", "elastic-blast-completions").strip()
+    queue = os.environ.get("SERVICEBUS_RESPONSE_QUEUE", "elastic-blast-results").strip()
+    topic = os.environ.get("SERVICEBUS_RESPONSE_TOPIC", "").strip()
     subscription = os.environ.get(SUBSCRIPTION_ENV, "").strip() or DEFAULT_SUBSCRIPTION
     if not namespace:
         print("SERVICEBUS_NAMESPACE_FQDN is required (e.g. <ns>.servicebus.windows.net)")
@@ -342,11 +378,15 @@ def _standalone_main() -> int:
         print(json.dumps(event, default=str))
 
     stop = threading.Event()
+    # Topic path only when the operator explicitly cleared the queue and named a
+    # topic; otherwise the queue-unified result-queue path is used.
+    use_topic = bool(topic) and not queue
     try:
         consume_completions(
             namespace_fqdn=namespace,
-            topic=topic,
-            subscription=subscription,
+            queue="" if use_topic else queue,
+            topic=topic if use_topic else "",
+            subscription=subscription if use_topic else "",
             on_event=_print,
             credential=DefaultAzureCredential(),
             stop=stop,

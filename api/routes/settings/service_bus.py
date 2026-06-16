@@ -449,11 +449,12 @@ def observed_completions(
     limit: int = 50,
     _caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    """Recent completion-topic events the demo external consumer observed.
+    """Recent completion events the demo external consumer observed.
 
     Read-only (Reader-accessible). Returns the shared Redis observation ring
-    written by the worker-side external consumer (default-OFF). When that
-    consumer is not running the list is simply empty — the route never errors.
+    written by the worker-side external consumer (default-OFF) that drains the
+    result queue. When that consumer is not running the list is simply empty —
+    the route never errors.
     """
     try:
         from api.services.service_bus_completions import list_recent
@@ -468,11 +469,13 @@ def observed_completions(
         external_consumer_enabled,
     )
 
+    cfg = get_service_bus_config()
     return {
         "events": events,
         "consumer_enabled": external_consumer_enabled(),
+        "queue": cfg.completion_queue,
         "subscription": completion_subscription(),
-        "topic": get_service_bus_config().completion_topic,
+        "topic": cfg.completion_topic if cfg.completion_topic_enabled else "",
     }
 
 

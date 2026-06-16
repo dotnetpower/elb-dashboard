@@ -164,6 +164,9 @@ class _FakeTopicClient:
     def __init__(self, sender: _FakeTopicSender) -> None:
         self._sender = sender
 
+    def get_queue_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
+        return self._sender
+
     def get_topic_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
         return self._sender
 
@@ -230,3 +233,80 @@ def test_publish_event_no_request_id_leaves_envelope_clean(
     assert len(sender.sent) == 1
     assert not (sender.sent[0].application_properties or {})
 
+
+
+class _RecordingClient:
+    """Records which sender kinds were requested and the messages sent through
+    each, so a test can assert the queue-first / optional-topic contract."""
+
+    def __init__(self) -> None:
+        self.queue_senders: dict[str, _FakeTopicSender] = {}
+        self.topic_senders: dict[str, _FakeTopicSender] = {}
+
+    def get_queue_sender(self, name: str) -> _FakeTopicSender:
+        sender = self.queue_senders.setdefault(name, _FakeTopicSender())
+        return sender
+
+    def get_topic_sender(self, name: str) -> _FakeTopicSender:
+        sender = self.topic_senders.setdefault(name, _FakeTopicSender())
+        return sender
+
+
+def _patch_recording_client(
+    monkeypatch: pytest.MonkeyPatch, client: _RecordingClient
+) -> None:
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield client
+
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+
+
+def test_publish_event_uses_result_queue_only_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Messaging is unified on queues: the event lands on ``completion_queue``
+    and the optional fan-out topic is NOT touched unless explicitly enabled."""
+    client = _RecordingClient()
+    _patch_recording_client(monkeypatch, client)
+
+    cfg = ServiceBusConfig(
+        enabled=True,
+        auth_mode="entra",
+        namespace_fqdn="x.servicebus.windows.net",
+        completion_queue="elastic-blast-results",
+        completion_topic="elastic-blast-completions",
+        completion_topic_enabled=False,
+    )
+    service_bus.publish_event(cfg, {"event": "blast.transition", "status": "running"})
+
+    assert "elastic-blast-results" in client.queue_senders
+    assert len(client.queue_senders["elastic-blast-results"].sent) == 1
+    assert client.topic_senders == {}
+
+
+def test_publish_event_fans_out_to_topic_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the future fan-out explicitly enabled the same event is published to
+    BOTH the result queue and the topic (two distinct message instances)."""
+    client = _RecordingClient()
+    _patch_recording_client(monkeypatch, client)
+
+    cfg = ServiceBusConfig(
+        enabled=True,
+        auth_mode="entra",
+        namespace_fqdn="x.servicebus.windows.net",
+        completion_queue="elastic-blast-results",
+        completion_topic="elastic-blast-completions",
+        completion_topic_enabled=True,
+    )
+    service_bus.publish_event(cfg, {"event": "blast.transition", "status": "running"})
+
+    q_sent = client.queue_senders["elastic-blast-results"].sent
+    t_sent = client.topic_senders["elastic-blast-completions"].sent
+    assert len(q_sent) == 1
+    assert len(t_sent) == 1
+    # The SDK forbids re-sending one message object through two senders, so the
+    # queue and topic copies must be distinct instances.
+    assert q_sent[0] is not t_sent[0]

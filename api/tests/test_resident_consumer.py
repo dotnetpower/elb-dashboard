@@ -133,3 +133,29 @@ def test_start_and_stop_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert rc.start_resident_consumer() is False
     assert drained.wait(timeout=3.0)
     rc.stop_resident_consumer(timeout=3.0)
+
+
+def test_run_loop_holds_when_autostart_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When wake-on-request auto-start holds the pass, the resident loop must NOT
+    call ``drain_requests`` — the messages wait in the queue until the cluster is
+    ready — while still honouring the iteration bound."""
+    from api.services import service_bus
+    from api.services.blast.cluster_autostart import AutostartDecision
+
+    def _must_not_drain(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("drain_requests must not run while autostart holds")
+
+    monkeypatch.setattr(service_bus, "drain_requests", _must_not_drain)
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.get_service_bus_config", lambda: object()
+    )
+    monkeypatch.setattr(
+        "api.services.blast.cluster_autostart.evaluate_for_drain",
+        lambda _cfg: AutostartDecision(False, True, "stopped"),
+    )
+
+    stop = threading.Event()
+    totals = rc.run_resident_consumer(stop, poll_wait_seconds=0, max_iterations=2)
+    assert totals["iterations"] == 2
+    assert totals["received"] == 0
+    assert totals["completed"] == 0

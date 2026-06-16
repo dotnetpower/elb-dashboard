@@ -241,30 +241,48 @@ def send_request(
 
 
 def publish_event(cfg: ServiceBusConfig | None, event: dict[str, Any]) -> None:
-    """Publish a transition event to the completion topic.
+    """Publish a transition event to the result queue (and optional topic).
 
-    No-op (logged) when no completion topic is configured — the integration can
-    run request-only without a topic.
+    Messaging is unified on QUEUES: the event is sent to ``completion_queue``,
+    which an external service drains with a queue receiver. When the optional
+    fan-out topic is configured AND enabled (``completion_topic_enabled``), the
+    same event is additionally published to ``completion_topic`` for forward
+    compatibility — but that path is OFF by default and is never required for
+    the queue pipeline. No-op (logged) when neither channel is configured.
     """
     cfg = _require_enabled_config(cfg)
-    if not cfg.completion_topic:
-        LOGGER.debug("publish_event skipped: no completion_topic configured")
+    if not cfg.completion_queue and not (cfg.completion_topic_enabled and cfg.completion_topic):
+        LOGGER.debug("publish_event skipped: no completion_queue/topic configured")
         return
     # Echo the caller-supplied pass-through value onto the message envelope (not
-    # just the JSON body) when present, so a topic subscriber can correlate /
-    # filter on it without parsing the payload. Omitted when the producer set
-    # none, keeping the envelope unchanged for the common case.
+    # just the JSON body) when present, so a consumer can correlate / filter on
+    # it without parsing the payload. Omitted when the producer set none, keeping
+    # the envelope unchanged for the common case.
     request_id = str(event.get("request_id") or "").strip()
     application_properties = {"request_id": request_id} if request_id else None
-    message = ServiceBusMessage(
-        json.dumps(event, default=str),
-        content_type="application/json",
-        subject=str(event.get("event") or "blast.transition"),
-        correlation_id=str(event.get("external_correlation_id") or "") or None,
-        application_properties=application_properties,
-    )
-    with _client(cfg) as client, client.get_topic_sender(cfg.completion_topic) as sender:
-        sender.send_messages(message)
+    payload = json.dumps(event, default=str)
+    subject = str(event.get("event") or "blast.transition")
+    correlation_id = str(event.get("external_correlation_id") or "") or None
+
+    def _message() -> ServiceBusMessage:
+        # A fresh ServiceBusMessage per sender — the SDK forbids re-sending one
+        # message object through two different senders.
+        return ServiceBusMessage(
+            payload,
+            content_type="application/json",
+            subject=subject,
+            correlation_id=correlation_id,
+            application_properties=application_properties,
+        )
+
+    with _client(cfg) as client:
+        if cfg.completion_queue:
+            with client.get_queue_sender(cfg.completion_queue) as sender:
+                sender.send_messages(_message())
+        # Optional future fan-out — retained but OFF unless explicitly enabled.
+        if cfg.completion_topic_enabled and cfg.completion_topic:
+            with client.get_topic_sender(cfg.completion_topic) as sender:
+                sender.send_messages(_message())
 
 
 # --------------------------------------------------------------------------- #
@@ -451,7 +469,8 @@ def _iso_or_none(value: Any) -> str | None:
 
 
 def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
-    """Return runtime message counts for the queue (and topic subscriptions).
+    """Return runtime message counts for the request queue, the result queue,
+    and (optionally) topic subscriptions.
 
     Requires ``Manage``/``EntityRead`` claims (Entra ``Azure Service Bus Data
     Owner`` or a Manage SAS rule). When the credential lacks them this raises
@@ -471,7 +490,12 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
     existing counts contract.
     """
     cfg = _require_enabled_config(cfg)
-    result: dict[str, Any] = {"queue": None, "dead_letter": None, "subscriptions": []}
+    result: dict[str, Any] = {
+        "queue": None,
+        "dead_letter": None,
+        "result_queue": None,
+        "subscriptions": [],
+    }
     with _admin_client(cfg) as admin:
         try:
             q = admin.get_queue_runtime_properties(cfg.request_queue)
@@ -522,7 +546,30 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
             result["dead_letter"] = q.dead_letter_message_count
         except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
             raise ServiceBusAuthError(str(exc)) from exc
-        if cfg.completion_topic:
+        # Result/completion QUEUE counters — the queue-unified response channel.
+        # Best-effort: a not-yet-created result queue degrades to None rather
+        # than failing the whole counts read (the request-queue counters above
+        # are the load-bearing ones the SPA has always shown).
+        if cfg.completion_queue:
+            try:
+                rq = admin.get_queue_runtime_properties(cfg.completion_queue)
+                result["result_queue"] = {
+                    "name": cfg.completion_queue,
+                    "active_message_count": rq.active_message_count,
+                    "dead_letter_message_count": rq.dead_letter_message_count,
+                    "scheduled_message_count": rq.scheduled_message_count,
+                    "total_message_count": rq.total_message_count,
+                    "transfer_message_count": getattr(rq, "transfer_message_count", None),
+                    "transfer_dead_letter_message_count": getattr(
+                        rq, "transfer_dead_letter_message_count", None
+                    ),
+                }
+            except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
+                raise ServiceBusAuthError(str(exc)) from exc
+            except ServiceBusError:
+                LOGGER.debug("result queue runtime properties unavailable", exc_info=True)
+        # Optional future fan-out topic — only read when explicitly enabled.
+        if cfg.completion_topic_enabled and cfg.completion_topic:
             try:
                 for sub in admin.list_subscriptions(cfg.completion_topic):
                     srt = admin.get_subscription_runtime_properties(

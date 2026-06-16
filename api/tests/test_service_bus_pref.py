@@ -110,3 +110,71 @@ def test_public_dict_has_no_secret_value() -> None:
     assert pub["sas_secret_name"] == "sb-conn"
     assert "connection_string" not in pub
     assert "sas_connection_string" not in pub
+
+
+def test_round_trip_persists_queue_unification_fields() -> None:
+    """The queue-unification fields (result queue, optional topic toggle, and
+    wake-on-request auto-start) survive a save/load round trip."""
+    from api.services.service_bus_pref import (
+        ServiceBusConfig,
+        get_service_bus_config,
+        save_service_bus_config,
+    )
+
+    save_service_bus_config(
+        ServiceBusConfig(
+            enabled=True,
+            auth_mode="entra",
+            namespace_fqdn="sb-elb-dashboard-krc.servicebus.windows.net",
+            completion_queue="my-results",
+            completion_topic="my-topic",
+            completion_topic_enabled=True,
+            autostart_cluster_enabled=True,
+            subscription_id="sub-1",
+            resource_group="rg-1",
+            cluster_name="aks-1",
+        )
+    )
+    loaded = get_service_bus_config()
+    assert loaded.completion_queue == "my-results"
+    assert loaded.completion_topic_enabled is True
+    assert loaded.autostart_cluster_enabled is True
+    assert loaded.cluster_name == "aks-1"
+
+
+def test_normalise_rejects_bad_completion_queue() -> None:
+    from api.services.service_bus_pref import normalise_config
+
+    with pytest.raises(ValueError, match="completion_queue"):
+        normalise_config(
+            {
+                "enabled": True,
+                "namespace_fqdn": "ext.servicebus.windows.net",
+                "completion_queue": "bad name!!",
+            }
+        )
+
+
+def test_normalise_accepts_topic_enabled_with_default_name() -> None:
+    """Enabling the optional fan-out topic is accepted — the topic name defaults
+    to the well-known completion topic, so the toggle never lands without a name."""
+    from api.services.service_bus_pref import DEFAULT_COMPLETION_TOPIC, normalise_config
+
+    cfg = normalise_config(
+        {
+            "enabled": True,
+            "namespace_fqdn": "ext.servicebus.windows.net",
+            "completion_topic_enabled": True,
+        }
+    )
+    assert cfg.completion_topic_enabled is True
+    assert cfg.completion_topic == DEFAULT_COMPLETION_TOPIC
+
+
+def test_default_completion_queue_present_and_topic_disabled() -> None:
+    from api.services.service_bus_pref import DEFAULT_COMPLETION_QUEUE, ServiceBusConfig
+
+    cfg = ServiceBusConfig()
+    assert cfg.completion_queue == DEFAULT_COMPLETION_QUEUE
+    assert cfg.completion_topic_enabled is False
+    assert cfg.autostart_cluster_enabled is False

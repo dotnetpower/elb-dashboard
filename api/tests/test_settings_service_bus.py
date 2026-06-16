@@ -448,4 +448,8 @@ def test_observed_completions_empty_when_no_consumer(client: TestClient) -> None
     assert body["events"] == []
     assert body["consumer_enabled"] is False
     assert body["subscription"] == "playground-observer"
+    # Queue-unified: the demo observer reports the result queue it drains, and
+    # the optional fan-out topic is empty unless explicitly enabled.
+    assert body["queue"] == "elastic-blast-results"
+    assert body["topic"] == ""
 
