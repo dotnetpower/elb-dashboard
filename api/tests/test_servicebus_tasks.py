@@ -333,9 +333,7 @@ def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
             "priority": 70,
             "idempotency_key": "idem-1",
             "resource_profile": "standard",
-            # Not part of the OpenAPI contract → silently ignored, exactly as a
-            # direct /v1/jobs POST would (local-only precision-sharding option).
-            "searchsp": 123456789,
+            "sharding_mode": "precise",
         }
     )
     payload = sb_tasks._build_request_payload(msg, _enabled_cfg())
@@ -351,14 +349,36 @@ def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
     assert payload["options"]["word_size"] == 11
     assert payload["options"]["evalue"] == 0.001
     assert payload["options"]["outfmt"] == 5
+    assert payload["options"]["sharding_mode"] == "precise"
+    assert payload["options"]["db_effective_search_space"] == 32_156_241_807_668
     # Top-level fields forwarded.
     assert payload["taxid"] == 9606
     assert payload["is_inclusive"] is True
     assert payload["priority"] == 70
     assert payload["idempotency_key"] == "idem-1"
-    # searchsp is NOT part of the OpenAPI model → dropped (not in options).
     assert "searchsp" not in payload
-    assert "searchsp" not in payload.get("options", {})
+
+
+def test_message_payload_downgrades_bad_precise_override() -> None:
+    msg = _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">s\nACGT",
+            "external_correlation_id": "corr-downgrade",
+            "options": {
+                "outfmt": 5,
+                "sharding_mode": "precise",
+                "db_effective_search_space": 42,
+            },
+        }
+    )
+
+    payload = sb_tasks._build_request_payload(msg, _enabled_cfg())
+
+    assert payload is not None
+    assert payload["options"]["sharding_mode"] == "approximate"
+    assert "db_effective_search_space" not in payload["options"]
 
 
 def test_message_flat_options_only() -> None:

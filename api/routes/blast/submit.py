@@ -522,6 +522,10 @@ def blast_job_submit(
 
     from api.routes.elastic_blast import ExternalBlastSubmitRequest, _normalise_external_job_payload
     from api.services import external_blast
+    from api.services.blast.submit_payload import (
+        resolve_sharded_db_resource_profile,
+        resolve_sharding_plan,
+    )
 
     # Bind the parsed model to a distinct name so the FastAPI ``request``
     # parameter remains usable below for ``request_id_from_scope`` — earlier
@@ -538,6 +542,16 @@ def blast_job_submit(
         ) from exc
 
     payload = submit_request.model_dump(exclude_none=True)
+    payload["resource_profile"] = resolve_sharded_db_resource_profile(
+        payload.get("db") or "", payload.get("resource_profile")
+    )
+    plan = resolve_sharding_plan(
+        program=submit_request.program,
+        database=str(payload.get("db") or ""),
+        options=payload.get("options"),
+        caller_supplied_searchsp=submit_request.options.db_effective_search_space,
+    )
+    payload["options"] = plan.options
     payload.update(
         canonical_submit_metadata(
             payload,
@@ -546,7 +560,7 @@ def blast_job_submit(
         )
     )
     payload["canonical_request"] = canonical_submit_snapshot(payload)
-    payload.update(submit_contracts(payload))
+    payload.update(_validate_submit_contracts(payload))
     from api.services.blast.provenance import build_blast_provenance
 
     payload["provenance"] = build_blast_provenance(

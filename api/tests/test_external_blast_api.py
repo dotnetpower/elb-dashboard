@@ -282,6 +282,58 @@ def test_external_blast_options_default_evalue_matches_ncbi(monkeypatch):
     assert captured["provenance"]["query"]["sha256"]
 
 
+def test_external_blast_submit_derives_precise_searchsp(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    captured: dict[str, object] = {}
+
+    def fake_submit(payload):
+        captured.update(payload)
+        return {"job_id": "precise123", "status": "queued"}
+
+    monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    monkeypatch.setattr(external_blast, "ready", lambda **_kw: {"ready": True})
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {"sharding_mode": "precise"},
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["options"]["sharding_mode"] == "precise"
+    assert captured["options"]["db_effective_search_space"] == 32_156_241_807_668
+
+
+def test_external_blast_submit_rejects_bad_searchsp_override(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {
+                "sharding_mode": "precise",
+                "db_effective_search_space": 42,
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "web_blast_compatibility_blocked"
+
+
 def test_external_blast_events_falls_back_to_current_status(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app

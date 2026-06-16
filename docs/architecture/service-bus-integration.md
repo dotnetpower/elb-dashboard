@@ -106,10 +106,14 @@ Field rules (consistent with `/v1/jobs`):
   scope the search to a NCBI taxon.
 - `submission_source` is **server-derived** (`servicebus`) — a producer cannot
   set or spoof it.
-- `searchsp` / `db_effective_search_space` and other precision-sharding options
-  are **NOT** part of the OpenAPI `/v1/jobs` contract (they belong to the local
-  dashboard submit path), so they are ignored here — exactly as a direct
-  `/v1/jobs` POST would ignore them. Any other unknown key is ignored too.
+- `options.sharding_mode` (`off` \| `approximate` \| `precise`, default `off`)
+  and `options.db_effective_search_space` are accepted on the queue contract so
+  it stays aligned with the OpenAPI submit shape. The dashboard still treats the
+  calibrated Web BLAST search space as **server-derived truth**: a caller value
+  is accepted only when it matches the calibrated database snapshot; otherwise
+  the Service Bus drain strips it and downgrades `precise` to
+  `approximate`/`off` instead of trusting it blindly. Any other unknown key is
+  ignored.
 
 ### Transition event — `elastic-blast-completions` topic
 
