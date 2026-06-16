@@ -264,6 +264,7 @@ export function ServiceBusPlayground() {
   const effectiveEnabled = status.data?.effective_enabled ?? false;
   const namespaceFqdn = status.data?.config.namespace_fqdn ?? "<namespace>.servicebus.windows.net";
   const requestQueue = status.data?.config.request_queue ?? "elastic-blast-requests";
+  const completionQueue = status.data?.config.completion_queue ?? "elastic-blast-results";
   const completionTopic = status.data?.config.completion_topic ?? "elastic-blast-completions";
   const observerSubscription = observed.data?.subscription ?? "playground-observer";
 
@@ -377,11 +378,12 @@ export function ServiceBusPlayground() {
       buildSampleCode(codeTab, {
         namespaceFqdn,
         requestQueue,
+        completionQueue,
         completionTopic,
         observerSubscription,
         body: buildBody(false),
       }),
-    [codeTab, namespaceFqdn, requestQueue, completionTopic, observerSubscription, buildBody],
+    [codeTab, namespaceFqdn, requestQueue, completionQueue, completionTopic, observerSubscription, buildBody],
   );
 
   const copyCode = useCallback(() => {
@@ -405,8 +407,8 @@ export function ServiceBusPlayground() {
         </div>
         <p className="muted" style={{ margin: 0, fontSize: 13, lineHeight: 1.5 }}>
           Enqueue a BLAST request onto <code>{requestQueue}</code> and watch the real
-          consumer pick it up and execute it. Completion events fan out to the{" "}
-          <code>{completionTopic}</code> topic for external subscribers.
+          consumer pick it up and execute it. Completion events are published to the{" "}
+          <code>{completionQueue}</code> result queue for an external service to drain.
         </p>
       </header>
 
@@ -1134,6 +1136,7 @@ function StatusDot({ status }: { status: string }) {
 interface CodeContext {
   namespaceFqdn: string;
   requestQueue: string;
+  completionQueue: string;
   completionTopic: string;
   observerSubscription: string;
   body: ServiceBusSendRequest;
@@ -1173,11 +1176,12 @@ function buildSampleCode(tab: CodeTab, ctx: CodeContext): string {
       "from azure.servicebus import ServiceBusClient",
       "",
       `NAMESPACE = "${ctx.namespaceFqdn}"`,
-      `TOPIC = "${ctx.completionTopic}"`,
-      `SUBSCRIPTION = "${ctx.observerSubscription}"  # your own subscription`,
+      `RESULT_QUEUE = "${ctx.completionQueue}"`,
       "",
+      "# Messaging is unified on queues: drain the result queue with a queue",
+      "# receiver (competing consumer — one external service drains it).",
       "with ServiceBusClient(NAMESPACE, DefaultAzureCredential()) as client:",
-      "    receiver = client.get_subscription_receiver(TOPIC, SUBSCRIPTION, max_wait_time=10)",
+      "    receiver = client.get_queue_receiver(RESULT_QUEUE, max_wait_time=10)",
       "    with receiver:",
       "        for msg in receiver:",
       "            event = json.loads(str(msg))",

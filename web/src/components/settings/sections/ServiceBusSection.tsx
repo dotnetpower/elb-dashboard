@@ -291,13 +291,35 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
             onChange={(e) => patch({ request_queue: e.target.value.trim() })}
           />
         </Field>
-        <Field label="Completion topic" hint="Leave blank to run request-only (no completion events).">
+        <Field
+          label="Result queue"
+          hint="Completion events are published here. An external service drains this queue to receive BLAST results."
+        >
           <input
             style={inputStyle}
-            value={cfg.completion_topic}
-            onChange={(e) => patch({ completion_topic: e.target.value.trim() })}
+            value={cfg.completion_queue}
+            onChange={(e) => patch({ completion_queue: e.target.value.trim() })}
           />
         </Field>
+        <Field
+          label="Future fan-out topic (optional)"
+          hint="Off by default — messaging is unified on queues. Enable to ALSO publish completion events to a topic for future fan-out subscribers."
+        >
+          <Toggle
+            checked={cfg.completion_topic_enabled}
+            onChange={(v) => patch({ completion_topic_enabled: v })}
+            label="Also publish to completion topic"
+          />
+        </Field>
+        {cfg.completion_topic_enabled && (
+          <Field label="Completion topic">
+            <input
+              style={inputStyle}
+              value={cfg.completion_topic}
+              onChange={(e) => patch({ completion_topic: e.target.value.trim() })}
+            />
+          </Field>
+        )}
         {cfg.auth_mode === "sas" && (
           <Field
             label="SAS secret name (Key Vault)"
@@ -341,6 +363,28 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
             }
           />
         )}
+        {counts?.available && counts?.result_queue && (
+          <Row
+            label="Result queue messages"
+            control={
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                active {counts.result_queue.active_message_count ?? "—"} · dead-letter{" "}
+                {counts.result_queue.dead_letter_message_count ?? "—"}
+              </span>
+            }
+          />
+        )}
+        <Row
+          label="Auto-start cluster on request"
+          hint="When a BLAST request arrives while the configured AKS cluster is stopped, the control plane auto-starts it before draining. Requires the cluster routing (subscription / resource group / cluster) to be set."
+          control={
+            <Toggle
+              checked={cfg.autostart_cluster_enabled}
+              onChange={(v) => patch({ autostart_cluster_enabled: v })}
+              label="Enable wake-on-request auto-start"
+            />
+          }
+        />
       </Group>
 
       <Group title="Dead-letter cleanup">

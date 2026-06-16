@@ -325,7 +325,15 @@ export interface ServiceBusConfig {
   auth_mode: ServiceBusAuthMode;
   namespace_fqdn: string;
   request_queue: string;
+  completion_queue: string;
   completion_topic: string;
+  /** Optional future fan-out: publish completion events to `completion_topic`
+   *  in ADDITION to the result queue. OFF by default (messaging is unified on
+   *  queues); retained so a topic can be re-enabled without a code change. */
+  completion_topic_enabled: boolean;
+  /** Wake-on-request: when a BLAST request arrives on the request queue while
+   *  the configured AKS cluster is stopped, the control plane auto-starts it. */
+  autostart_cluster_enabled: boolean;
   sas_secret_name: string;
   subscription_id: string;
   resource_group: string;
@@ -369,6 +377,18 @@ export interface ServiceBusCounts {
     } | null;
   } | null;
   dead_letter?: number | null;
+  /** Queue-unified result/completion channel counters. The external service
+   *  drains this queue. Optional — omitted when the result queue does not yet
+   *  exist or the counts read degraded. */
+  result_queue?: {
+    name: string;
+    active_message_count: number;
+    dead_letter_message_count: number;
+    scheduled_message_count: number;
+    total_message_count: number;
+    transfer_message_count?: number | null;
+    transfer_dead_letter_message_count?: number | null;
+  } | null;
   subscriptions?: Array<{
     name: string;
     active_message_count: number;
@@ -485,7 +505,10 @@ export interface ServiceBusObservedCompletion {
 export interface ServiceBusObservedCompletionsResponse {
   events: ServiceBusObservedCompletion[];
   consumer_enabled: boolean;
+  /** The result queue the demo observer drains (queue-unified channel). */
+  queue: string;
   subscription: string;
+  /** Optional future fan-out topic — empty unless `completion_topic_enabled`. */
   topic: string;
 }
 
