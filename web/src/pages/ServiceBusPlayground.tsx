@@ -21,6 +21,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  ArrowUpFromLine,
   Copy,
   Eye,
   Loader2,
@@ -28,11 +29,14 @@ import {
   Radio,
   RefreshCw,
   Send,
+  Trash2,
 } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import {
   settingsApi,
+  type ServiceBusDlqMessage,
+  type ServiceBusDlqPeekResponse,
   type ServiceBusPeekMessage,
   type ServiceBusPeekResponse,
   type ServiceBusSendRequest,
@@ -261,6 +265,15 @@ export function ServiceBusPlayground() {
     refetchOnWindowFocus: false,
   });
 
+  // On-demand peek of the dead-letter queue. Like the request-queue peek it is
+  // off by default and runs only when the operator clicks "Inspect dead-letter".
+  const dlqPeek = useQuery({
+    queryKey: ["service-bus", "dlq-peek"],
+    queryFn: () => settingsApi.peekServiceBusDlq(20),
+    enabled: false,
+    refetchOnWindowFocus: false,
+  });
+
   const effectiveEnabled = status.data?.effective_enabled ?? false;
   const namespaceFqdn = status.data?.config.namespace_fqdn ?? "<namespace>.servicebus.windows.net";
   const requestQueue = status.data?.config.request_queue ?? "elastic-blast-requests";
@@ -370,6 +383,31 @@ export function ServiceBusPlayground() {
       if (peek.data) void peek.refetch();
     },
     onError: (err) => toast(formatApiError(err, "Drain failed"), "error"),
+  });
+
+  const dlqDeleteMutation = useMutation({
+    mutationFn: (sequenceNumbers: number[]) => settingsApi.deleteServiceBusDlq(sequenceNumbers),
+    onSuccess: (res) => {
+      toast(`Deleted ${res.deleted ?? 0} dead-letter message(s).`, "success");
+      void queryClient.invalidateQueries({ queryKey: ["service-bus", "status"] });
+      void dlqPeek.refetch();
+    },
+    onError: (err) => toast(formatApiError(err, "Delete failed"), "error"),
+  });
+
+  const dlqPromoteMutation = useMutation({
+    mutationFn: (sequenceNumbers: number[]) => settingsApi.promoteServiceBusDlq(sequenceNumbers),
+    onSuccess: (res) => {
+      toast(
+        `Promoted ${res.promoted ?? 0} message(s) back onto the request queue.`,
+        "success",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["service-bus", "status"] });
+      void dlqPeek.refetch();
+      // A promoted message is now pending on the main queue; refresh peek too.
+      if (peek.data) void peek.refetch();
+    },
+    onError: (err) => toast(formatApiError(err, "Promote failed"), "error"),
   });
 
   const sampleCode = useMemo(
@@ -786,6 +824,20 @@ export function ServiceBusPlayground() {
             />
           </div>
 
+          {/* Dead-letter queue inspection + management: peek the actual
+              dead-lettered messages, then delete or promote them back onto the
+              main request queue by sequence number. Off by default — runs only
+              when the operator clicks "Inspect dead-letter". */}
+          <DlqPanel
+            dlqPeek={dlqPeek}
+            effectiveEnabled={effectiveEnabled}
+            deadLetterCount={status.data?.counts.queue?.dead_letter_message_count ?? null}
+            onDelete={(seqs) => dlqDeleteMutation.mutate(seqs)}
+            onPromote={(seqs) => dlqPromoteMutation.mutate(seqs)}
+            deletePending={dlqDeleteMutation.isPending}
+            promotePending={dlqPromoteMutation.isPending}
+          />
+
           {/* Non-destructive content view: peek the actual messages in the
               request queue. Works even when the Manage-claim counts above are
               unavailable (peek needs only the data-plane Receiver claim). */}
@@ -988,6 +1040,213 @@ const PEEK_REASON_LABELS: Record<string, string> = {
   unavailable: "namespace unreachable",
   error: "peek failed",
 };
+
+interface DlqPeekState {
+  data?: ServiceBusDlqPeekResponse;
+  isFetching: boolean;
+  isError: boolean;
+  isFetched: boolean;
+  refetch: () => void;
+}
+
+/** Dead-letter queue inspection + management panel.
+ *
+ *  Lets the operator peek the dead-lettered messages (with their dead-letter
+ *  reason), select one or more by ``sequence_number``, then either delete them
+ *  (hard delete) or promote them back onto the main request queue for a retry.
+ *  Selection state is local; the parent owns the delete/promote mutations. */
+function DlqPanel({
+  dlqPeek,
+  effectiveEnabled,
+  deadLetterCount,
+  onDelete,
+  onPromote,
+  deletePending,
+  promotePending,
+}: {
+  dlqPeek: DlqPeekState;
+  effectiveEnabled: boolean;
+  deadLetterCount: number | null;
+  onDelete: (sequenceNumbers: number[]) => void;
+  onPromote: (sequenceNumbers: number[]) => void;
+  deletePending: boolean;
+  promotePending: boolean;
+}) {
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const messages = dlqPeek.data?.available ? dlqPeek.data.messages : [];
+  const selectable = messages.filter((m) => m.sequence_number != null);
+  const busy = deletePending || promotePending;
+
+  const toggle = (seq: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(seq)) next.delete(seq);
+      else next.add(seq);
+      return next;
+    });
+  };
+  const selectedList = Array.from(selected);
+
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <button
+        type="button"
+        className="glass-button"
+        onClick={() => {
+          setSelected(new Set());
+          dlqPeek.refetch();
+        }}
+        disabled={dlqPeek.isFetching || !effectiveEnabled}
+        title={
+          !effectiveEnabled
+            ? "Service Bus integration is not active"
+            : "Inspect dead-letter queue messages"
+        }
+      >
+        {dlqPeek.isFetching ? <Loader2 size={14} className="spin" /> : <AlertTriangle size={14} />}{" "}
+        Inspect dead-letter
+      </button>
+
+      {dlqPeek.isError ? (
+        <div className="muted" style={{ fontSize: 12 }}>
+          Dead-letter peek failed. Try again.
+        </div>
+      ) : !dlqPeek.isFetched ? (
+        <p className="muted" style={{ margin: 0, fontSize: 11, lineHeight: 1.5 }}>
+          {deadLetterCount && deadLetterCount > 0
+            ? `${deadLetterCount} message${deadLetterCount === 1 ? "" : "s"} in the dead-letter queue. Inspect to view, delete, or re-queue them.`
+            : "View dead-lettered messages and their failure reason, then delete or promote them back onto the request queue."}
+        </p>
+      ) : !dlqPeek.data?.available ? (
+        <div className="muted" style={{ fontSize: 12 }}>
+          Dead-letter content unavailable
+          {dlqPeek.data?.reason
+            ? ` (${PEEK_REASON_LABELS[dlqPeek.data.reason] ?? dlqPeek.data.reason})`
+            : ""}
+          .
+        </div>
+      ) : messages.length === 0 ? (
+        <div className="muted" style={{ fontSize: 12 }}>
+          Dead-letter queue is empty.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+            {dlqPeek.data.count} dead-lettered message
+            {dlqPeek.data.count === 1 ? "" : "s"} · {selected.size} selected
+          </div>
+          {messages.map((m, i) => (
+            <DlqMessageItem
+              key={`${m.sequence_number ?? m.message_id ?? "dlq"}-${i}`}
+              message={m}
+              selected={m.sequence_number != null && selected.has(m.sequence_number)}
+              onToggle={m.sequence_number != null ? () => toggle(m.sequence_number!) : undefined}
+            />
+          ))}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="glass-button"
+              onClick={() =>
+                setSelected(
+                  selected.size === selectable.length
+                    ? new Set()
+                    : new Set(selectable.map((m) => m.sequence_number!)),
+                )
+              }
+              disabled={busy || selectable.length === 0}
+            >
+              {selected.size === selectable.length ? "Clear" : "Select all"}
+            </button>
+            <button
+              type="button"
+              className="glass-button glass-button--primary"
+              onClick={() => onPromote(selectedList)}
+              disabled={busy || selectedList.length === 0}
+              title="Re-queue the selected messages onto the main request queue"
+            >
+              {promotePending ? (
+                <Loader2 size={14} className="spin" />
+              ) : (
+                <ArrowUpFromLine size={14} />
+              )}{" "}
+              Promote ({selectedList.length})
+            </button>
+            <button
+              type="button"
+              className="glass-button glass-button--danger"
+              onClick={() => onDelete(selectedList)}
+              disabled={busy || selectedList.length === 0}
+              title="Permanently delete the selected dead-letter messages"
+            >
+              {deletePending ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />} Delete
+              ({selectedList.length})
+            </button>
+          </div>
+          <p className="muted" style={{ margin: 0, fontSize: 11, lineHeight: 1.5 }}>
+            <strong>Promote</strong> re-queues a message for another attempt (the consumer dedupes
+            by correlation id, so no duplicate run). <strong>Delete</strong> is permanent.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DlqMessageItem({
+  message,
+  selected,
+  onToggle,
+}: {
+  message: ServiceBusDlqMessage;
+  selected: boolean;
+  onToggle?: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gap: 4,
+        padding: "8px 10px",
+        borderRadius: 6,
+        background: selected ? "var(--bg-selected, var(--bg-secondary))" : "var(--bg-tertiary)",
+        border: `1px solid ${selected ? "var(--accent, #58a6ff)" : "var(--border-subtle)"}`,
+      }}
+    >
+      <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: onToggle ? "pointer" : "default", fontSize: 11 }}>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          disabled={!onToggle}
+          title={onToggle ? "Select this message" : "No sequence number — cannot target"}
+        />
+        {message.sequence_number != null ? (
+          <span style={{ fontFamily: "var(--font-mono, monospace)", opacity: 0.85 }}>
+            seq {message.sequence_number}
+          </span>
+        ) : null}
+        {message.program ? (
+          <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{message.program}</span>
+        ) : null}
+        {message.db ? <span className="muted">db {message.db}</span> : null}
+        {message.delivery_count != null ? (
+          <span className="muted" title="delivery attempts before dead-lettering">
+            ×{message.delivery_count}
+          </span>
+        ) : null}
+      </label>
+      {message.dead_letter_reason ? (
+        <div style={{ fontSize: 11, color: "var(--text-warning, #d29922)" }}>
+          {message.dead_letter_reason}
+          {message.dead_letter_error_description
+            ? ` — ${message.dead_letter_error_description}`
+            : ""}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 /** Renders the result of a non-destructive queue peek: a status line plus, when
  *  available, the sanitised content of each message currently in the queue. */

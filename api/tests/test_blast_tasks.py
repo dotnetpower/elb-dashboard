@@ -4254,6 +4254,47 @@ def test_reconcile_does_not_mark_external_origin_row_worker_lost(
     assert repo.updates == []
 
 
+def test_reconcile_does_not_mark_servicebus_placeholder_worker_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Service Bus send-time placeholder (payload.placeholder=True, no local
+    task) must NOT be flipped to ``worker_lost`` when quiet. The queued message
+    is the source of truth; a worker that is down for >10 min cannot drain it,
+    so the placeholder is legitimately ``queued`` and the drain path will
+    supersede/fail it once the worker recovers."""
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="corr-placeholder",
+                task_id="",
+                status="queued",
+                phase="queued",
+                updated_at="2025-01-01T00:00:00+00:00",
+                created_at="2025-01-01T00:00:00+00:00",
+                payload={
+                    "placeholder": True,
+                    "submission_source": "servicebus",
+                    "external_correlation_id": "corr-placeholder",
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=60)
+
+    assert summary["worker_lost"] == 0
+    assert summary["untouched"] >= 1
+    assert repo.updates == []
+
+
 def test_reconcile_worker_lost_refines_stopped_cluster(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

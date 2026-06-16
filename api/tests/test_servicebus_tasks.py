@@ -178,6 +178,119 @@ def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) 
     assert enq_payload["stage_ts"].startswith("2026-06-14T00:00:00")
 
 
+def test_drain_supersedes_send_time_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful drain soft-deletes the correlation-id placeholder created at
+    send time, so the real OpenAPI-keyed row is the only one left in the list."""
+    _enable(monkeypatch)
+    superseded: list[str] = []
+    monkeypatch.setattr(
+        "api.services.blast.servicebus_placeholder.supersede_placeholder",
+        lambda cid: superseded.append(cid),
+    )
+    # Keep the row-persist path inert without string-patching the facade helper
+    # (patch its dependencies instead, mirroring test_drain_persists_*).
+    monkeypatch.setattr(
+        "api.services.blast.external_jobs._sync_external_jobs_to_table",
+        lambda rows, **kw: (len(rows), 0, set()),
+    )
+
+    class _FakeRepo:
+        def append_history(self, job_id, event, payload=None):
+            return None
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FakeRepo())
+    monkeypatch.setattr(external_blast, "submit_job", lambda p, **k: {"job_id": "openapi-x"})
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
+
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+        handler(
+            _msg(
+                {
+                    "program": "blastn",
+                    "db": "core_nt",
+                    "query_fasta": ">s\nACGT",
+                    "external_correlation_id": "corr-sup",
+                }
+            )
+        )
+        from api.services.service_bus import DrainStats
+
+        return DrainStats(received=1)
+
+    monkeypatch.setattr(service_bus, "drain_requests", fake_drain)
+
+    sb_tasks.drain_and_resubmit()
+    assert superseded == ["corr-sup"]
+
+
+def test_drain_fails_placeholder_on_permanent_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permanent 4xx submit rejection (dead-letter) terminalises the send-time
+    placeholder so it does not linger as ``queued`` after the message is DLQ'd."""
+    _enable(monkeypatch)
+    from fastapi import HTTPException
+
+    failed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "api.services.blast.servicebus_placeholder.fail_placeholder",
+        lambda cid, *, error_code: failed.append((cid, error_code)),
+    )
+
+    def _reject(payload, **_kw):
+        raise HTTPException(status_code=400, detail="bad option")
+
+    monkeypatch.setattr(external_blast, "submit_job", _reject)
+
+    actions: list = []
+
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+        actions.append(
+            handler(
+                _msg(
+                    {
+                        "program": "blastn",
+                        "db": "core_nt",
+                        "query_fasta": ">s\nACGT",
+                        "external_correlation_id": "corr-rej",
+                    }
+                )
+            )
+        )
+        from api.services.service_bus import DrainStats
+
+        return DrainStats(received=1)
+
+    monkeypatch.setattr(service_bus, "drain_requests", fake_drain)
+
+    sb_tasks.drain_and_resubmit()
+    assert actions == [MessageAction.DEAD_LETTER]
+    assert failed and failed[0][0] == "corr-rej"
+    assert failed[0][1].startswith("servicebus_submit_rejected_400")
+
+
+def test_drain_fails_placeholder_on_malformed_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A message whose payload cannot be built is dead-lettered AND its
+    placeholder is failed (recovered from the raw body's correlation id)."""
+    _enable(monkeypatch)
+    failed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "api.services.blast.servicebus_placeholder.fail_placeholder",
+        lambda cid, *, error_code: failed.append((cid, error_code)),
+    )
+
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+        # No query_fasta / db → _build_request_payload returns None.
+        handler(_msg({"external_correlation_id": "corr-bad"}))
+        from api.services.service_bus import DrainStats
+
+        return DrainStats(received=1)
+
+    monkeypatch.setattr(service_bus, "drain_requests", fake_drain)
+
+    sb_tasks.drain_and_resubmit()
+    assert failed and failed[0][0] == "corr-bad"
+    assert failed[0][1] == "servicebus_malformed_request"
+
+
 def test_publish_transitions_records_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     """A published transition records the status stage + completion_published on
     the job's message trace, keyed by the OpenAPI job id."""

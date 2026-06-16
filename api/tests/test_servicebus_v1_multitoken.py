@@ -167,6 +167,43 @@ def test_build_v1_payload_promotes_core_nt_profile_when_missing() -> None:
     assert payload["resource_profile"] == "core_nt_safe"  # promoted
 
 
+def test_build_v1_payload_accepts_external_queue_body_without_internal_metadata() -> None:
+    """External producers do not need to know dashboard-only submit metadata."""
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    body = {
+        "request_id": "req-64f6f5cd-7f53-4bb7-b8d8-7181198d2089",
+        "type": "blast.request",
+        "query_fasta": _FASTA,
+        "program": "blastn",
+        "db": "core_nt",
+        "blast_options": {
+            "evalue": 0.05,
+            "max_target_seqs": 100,
+            "outfmt": (
+                "7 qseqid sacc staxid ssciname pident length evalue bitscore "
+                "qstart qend sstart send qcovhsp sseq"
+            ),
+            "extra": "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668",
+        },
+        "taxid": 10244,
+        "is_inclusive": True,
+    }
+
+    payload = sb._build_v1_jobs_payload(_msg(body), ServiceBusConfig())
+
+    assert payload is not None
+    assert payload["external_correlation_id"] == "corr-x"
+    assert payload["submission_source"] == "external_api"
+    assert payload["resource_profile"] == "core_nt_safe"
+    assert payload["taxid"] == 10244
+    assert payload["is_inclusive"] is True
+    assert payload["blast_options"] == body["blast_options"]
+    assert "request_id" not in payload
+    assert "type" not in payload
+
+
 def test_build_v1_payload_rejects_incompatible_outfmt() -> None:
     from api.services.service_bus_pref import ServiceBusConfig
     from api.tasks.servicebus import tasks as sb

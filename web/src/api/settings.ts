@@ -520,6 +520,36 @@ export interface ServiceBusPeekResponse {
   count: number;
 }
 
+/** A dead-letter queue message preview — the request-queue preview plus the
+ *  broker-supplied dead-letter metadata so an operator can triage before
+ *  deleting or promoting. `sequence_number` is the stable handle the delete /
+ *  promote actions target. */
+export interface ServiceBusDlqMessage extends ServiceBusPeekMessage {
+  dead_letter_reason: string | null;
+  dead_letter_error_description: string | null;
+  delivery_count: number | null;
+}
+
+export interface ServiceBusDlqPeekResponse {
+  available: boolean;
+  reason?: string;
+  detail?: string;
+  queue: string;
+  messages: ServiceBusDlqMessage[];
+  count: number;
+}
+
+export interface ServiceBusDlqActionResponse {
+  status: "deleted" | "promoted";
+  requested: number;
+  scanned: number;
+  matched: number;
+  deleted?: number;
+  promoted?: number;
+  kept: number;
+  failed: number;
+}
+
 function querystring(params: Record<string, string>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) usp.set(k, v);
@@ -695,6 +725,29 @@ export const settingsApi = {
     api.get<ServiceBusPeekResponse>(
       `/settings/service-bus/peek?limit=${limit}`,
     ),
+
+  /** Non-destructively peek the dead-letter queue. Reader-accessible (data-plane
+   *  Receiver claim only). Each message carries its `sequence_number` (the handle
+   *  for delete/promote), the dead-letter reason, and a body preview. */
+  peekServiceBusDlq: (limit = 20) =>
+    api.get<ServiceBusDlqPeekResponse>(
+      `/settings/service-bus/dlq/peek?limit=${limit}`,
+    ),
+
+  /** Delete specific dead-letter messages by sequence number (operator action,
+   *  hard delete). The SPA owns the confirmation gate. */
+  deleteServiceBusDlq: (sequenceNumbers: number[]) =>
+    api.post<ServiceBusDlqActionResponse>("/settings/service-bus/dlq/delete", {
+      sequence_numbers: sequenceNumbers,
+    }),
+
+  /** Re-queue specific dead-letter messages onto the main request queue by
+   *  sequence number (operator action). The re-send happens before the DLQ
+   *  removal and the drain handler dedupes, so a message is never lost. */
+  promoteServiceBusDlq: (sequenceNumbers: number[]) =>
+    api.post<ServiceBusDlqActionResponse>("/settings/service-bus/dlq/promote", {
+      sequence_numbers: sequenceNumbers,
+    }),
 
   /** Read the configured control-plane custom domain + the resolved effective
    *  URL the OpenAPI sibling webhooks back to. Never 404s. */

@@ -142,4 +142,10 @@ READER_ALLOWLIST: tuple[ReaderAllowedRoute, ...] = (
         function="peek",
         why="Non-destructive read-only peek of request-queue message content (Data Receiver only).",
     ),
+    ReaderAllowedRoute(
+        module="api.routes.settings.service_bus",
+        function="dlq_peek",
+        why="Non-destructive read-only peek of DLQ message content (Data Receiver only). "
+        "Delete/promote stay write-gated (not allowlisted).",
+    ),
 )

@@ -239,6 +239,49 @@ def test_send_allowed_just_under_ceiling(
     assert r.json()["status"] == "queued"
 
 
+def test_send_creates_queued_placeholder(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real send writes a correlation-id ``queued`` placeholder row so the job
+    is visible in Recent searches / Message Flow the instant it is enqueued."""
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    monkeypatch.setattr(service_bus, "send_request", lambda *_a, **_k: "msg-ok")
+    created: list[dict] = []
+    monkeypatch.setattr(
+        "api.services.blast.servicebus_placeholder.create_queued_placeholder",
+        lambda **kw: created.append(kw) or True,
+    )
+
+    r = client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY)
+    assert r.status_code == 200, r.text
+    corr = r.json()["external_correlation_id"]
+    assert created, "send must create a queued placeholder"
+    assert created[0]["correlation_id"] == corr
+    assert created[0]["program"] == _VALID_SEND_BODY["program"]
+
+
+def test_send_dry_run_skips_placeholder(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry-run validates without enqueueing, so it must NOT create a placeholder."""
+    _enable_service_bus(client, monkeypatch)
+    created: list[dict] = []
+    monkeypatch.setattr(
+        "api.services.blast.servicebus_placeholder.create_queued_placeholder",
+        lambda **kw: created.append(kw) or True,
+    )
+
+    r = client.post(
+        "/api/settings/service-bus/send", json={**_VALID_SEND_BODY, "dry_run": True}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "valid"
+    assert created == []
+
+
+
 def test_send_dry_run_validates_without_enqueue(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

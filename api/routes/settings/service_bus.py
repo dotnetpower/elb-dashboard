@@ -8,12 +8,14 @@ Responsibility: HTTP shaping for the optional Service Bus BLAST integration —
 Edit boundaries: HTTP only — no Service Bus SDK calls inline, no persistence
     logic. Every route enforces ``require_caller``.
 Key entry points: ``get_status``, ``put_config``, ``test``, ``discover``,
-    ``purge``, ``send``, ``peek``.
+    ``purge``, ``send``, ``peek``, ``dlq_peek``, ``dlq_delete``, ``dlq_promote``.
 Risky contracts: The SAS connection string is never returned to the browser
     (only the Key Vault secret name). Runtime counts degrade gracefully when the
-    credential lacks ``Manage`` claims. ``purge`` is a hard-to-reverse action;
-    the confirmation gate is the SPA's responsibility, but the route still caps
-    the deletion batch. ``send`` is intentionally callable by a subscription
+    credential lacks ``Manage`` claims. ``purge`` / ``dlq_delete`` are
+    hard-to-reverse actions; the confirmation gate is the SPA's responsibility,
+    but the routes still cap the deletion batch. ``dlq_promote`` re-sends to the
+    main queue before removing from the DLQ (the idempotent drain handler
+    dedupes any duplicate). ``send`` is intentionally callable by a subscription
     Reader (Playground) — the enqueue runs under the shared MI and never returns
     a SAS token; keep its allowlist entry in ``persona_reader_allowlist.py``.
 Validation: ``uv run pytest -q api/tests/test_settings_service_bus.py``.
@@ -388,6 +390,28 @@ def send(
         program=str(payload.get("program") or ""),
         db=str(payload.get("db") or ""),
     )
+    # Make the job visible in Recent searches / the Message Flow card the instant
+    # it lands on the queue (not only after the ~30 s drain tick): write a
+    # correlation-id-keyed ``queued`` placeholder row. Best-effort — a placeholder
+    # failure must never fail an already-enqueued send. The drain path supersedes
+    # this row with the real OpenAPI-keyed row.
+    try:
+        from api.services.blast.servicebus_placeholder import create_queued_placeholder
+
+        create_queued_placeholder(
+            correlation_id=correlation_id,
+            program=str(payload.get("program") or ""),
+            db=str(payload.get("db") or ""),
+            request_id=request_id,
+            owner_oid=caller.object_id or "",
+            tenant_id=caller.tenant_id or "",
+            subscription_id=str(getattr(cfg, "subscription_id", "") or ""),
+            resource_group=str(getattr(cfg, "resource_group", "") or ""),
+            cluster_name=str(getattr(cfg, "cluster_name", "") or ""),
+            storage_account=str(getattr(cfg, "storage_account", "") or ""),
+        )
+    except Exception:
+        LOGGER.debug("servicebus queued placeholder skipped", exc_info=True)
     LOGGER.info(
         "servicebus playground send by oid=%s corr=%s queue=%s msg_id=%s",
         redact_oid(caller.object_id),
@@ -443,6 +467,188 @@ def peek(
         "count": len(messages),
     }
 
+
+# Cap how many DLQ messages a single delete/promote request can target so an
+# operator action stays bounded (mirrors the drain/purge per-pass caps).
+_DLQ_ACTION_MAX = 200
+
+
+def _parse_sequence_numbers(body: dict[str, Any]) -> list[int]:
+    """Extract + validate the ``sequence_numbers`` list from a DLQ action body.
+
+    Accepts a JSON array of integers (the ``sequence_number`` values the peek
+    response exposes). Rejects an empty / non-list / non-integer payload with a
+    structured 400 so the SPA shows a useful message. De-duplicates and caps the
+    list at ``_DLQ_ACTION_MAX`` so one request cannot scan an unbounded backlog.
+    """
+    raw = body.get("sequence_numbers")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "sequence_numbers_required",
+                "message": "sequence_numbers must be a non-empty array of integers.",
+            },
+        )
+    seqs: list[int] = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "invalid_sequence_number",
+                    "message": "Every sequence_numbers entry must be an integer.",
+                },
+            )
+        seqs.append(item)
+    # De-dup preserving order, then cap.
+    deduped = list(dict.fromkeys(seqs))
+    return deduped[:_DLQ_ACTION_MAX]
+
+
+@router.get("/dlq/peek")
+def dlq_peek(
+    limit: int = 20,
+    _caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Non-destructive peek of the request queue's dead-letter sub-queue.
+
+    Reader-accessible, read-only counterpart to ``GET /peek`` for the DLQ. Each
+    message carries its ``sequence_number`` (the handle the delete/promote
+    routes target), the dead-letter reason / error description, and a sanitised,
+    size-bounded body preview. Reads via the data-plane receiver (``Data
+    Receiver`` claim, not ``Manage``). Always 200s, degrading to
+    ``available=false`` with a ``reason`` so the SPA renders a status line.
+    """
+    cfg = get_service_bus_config()
+    bounded = max(1, min(int(limit), 50))
+    base: dict[str, Any] = {"queue": cfg.request_queue, "messages": [], "count": 0}
+    if not cfg.namespace_fqdn:
+        return {"available": False, "reason": "not_configured", **base}
+    if not service_bus_enabled():
+        return {"available": False, "reason": "disabled", **base}
+    try:
+        messages = service_bus.peek_dead_letter_previews(cfg, max_count=bounded)
+    except service_bus.ServiceBusAuthError:
+        return {"available": False, "reason": "auth_failed", **base}
+    except service_bus.ServiceBusUnavailable:
+        LOGGER.debug("service bus dlq peek unavailable", exc_info=True)
+        return {"available": False, "reason": "unavailable", **base}
+    except Exception:
+        LOGGER.debug("service bus dlq peek failed", exc_info=True)
+        return {"available": False, "reason": "error", **base}
+    return {
+        "available": True,
+        "queue": cfg.request_queue,
+        "messages": messages,
+        "count": len(messages),
+    }
+
+
+@router.post("/dlq/delete")
+def dlq_delete(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Delete specific dead-letter messages by sequence number (operator action).
+
+    The SPA passes the ``sequence_number`` values it got from ``GET /dlq/peek``.
+    Each matching DLQ message is hard-deleted; non-matching messages are left in
+    place. The confirmation gate is the SPA's responsibility. 409 when the
+    integration is not active.
+    """
+    if not service_bus_enabled():
+        raise HTTPException(
+            409, detail={"code": "disabled", "message": "Service Bus integration is not active."}
+        )
+    cfg = get_service_bus_config()
+    if not cfg.namespace_fqdn:
+        raise HTTPException(400, detail={"code": "not_configured", "message": "namespace required"})
+    sequence_numbers = _parse_sequence_numbers(body)
+    try:
+        stats = service_bus.delete_dead_letter_messages(
+            cfg, sequence_numbers=sequence_numbers, max_messages=_DLQ_ACTION_MAX
+        )
+    except service_bus.ServiceBusAuthError as exc:
+        raise HTTPException(403, detail={"code": "auth_failed", "message": str(exc)[:200]}) from exc
+    except service_bus.ServiceBusUnavailable as exc:
+        raise HTTPException(503, detail={"code": "unavailable", "message": str(exc)[:200]}) from exc
+    except Exception as exc:
+        LOGGER.warning("service bus dlq delete failed: %s", type(exc).__name__)
+        raise HTTPException(
+            502, detail={"code": "delete_failed", "message": "DLQ delete failed"}
+        ) from exc
+    LOGGER.info(
+        "service bus dlq delete by oid=%s requested=%d deleted=%d matched=%d failed=%d",
+        redact_oid(caller.object_id),
+        len(sequence_numbers),
+        stats.deleted,
+        stats.matched,
+        stats.failed,
+    )
+    return {
+        "status": "deleted",
+        "requested": len(sequence_numbers),
+        "scanned": stats.scanned,
+        "matched": stats.matched,
+        "deleted": stats.deleted,
+        "kept": stats.kept,
+        "failed": stats.failed,
+    }
+
+
+@router.post("/dlq/promote")
+def dlq_promote(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Re-queue specific dead-letter messages onto the main queue (operator action).
+
+    The SPA passes the ``sequence_number`` values from ``GET /dlq/peek``. Each
+    matching DLQ message is re-sent to the main request queue (so the next drain
+    bridges it to BLAST execution) and then removed from the DLQ. The re-send
+    happens BEFORE the DLQ removal, and the drain handler is idempotent on
+    ``external_correlation_id``, so a mid-action crash never loses a message and
+    never causes a duplicate BLAST run. 409 when the integration is not active.
+    """
+    if not service_bus_enabled():
+        raise HTTPException(
+            409, detail={"code": "disabled", "message": "Service Bus integration is not active."}
+        )
+    cfg = get_service_bus_config()
+    if not cfg.namespace_fqdn:
+        raise HTTPException(400, detail={"code": "not_configured", "message": "namespace required"})
+    sequence_numbers = _parse_sequence_numbers(body)
+    try:
+        stats = service_bus.promote_dead_letter_messages(
+            cfg, sequence_numbers=sequence_numbers, max_messages=_DLQ_ACTION_MAX
+        )
+    except service_bus.ServiceBusAuthError as exc:
+        raise HTTPException(403, detail={"code": "auth_failed", "message": str(exc)[:200]}) from exc
+    except service_bus.ServiceBusUnavailable as exc:
+        raise HTTPException(503, detail={"code": "unavailable", "message": str(exc)[:200]}) from exc
+    except Exception as exc:
+        LOGGER.warning("service bus dlq promote failed: %s", type(exc).__name__)
+        raise HTTPException(
+            502, detail={"code": "promote_failed", "message": "DLQ promote failed"}
+        ) from exc
+    LOGGER.info(
+        "service bus dlq promote by oid=%s requested=%d promoted=%d matched=%d failed=%d",
+        redact_oid(caller.object_id),
+        len(sequence_numbers),
+        stats.promoted,
+        stats.matched,
+        stats.failed,
+    )
+    return {
+        "status": "promoted",
+        "requested": len(sequence_numbers),
+        "scanned": stats.scanned,
+        "matched": stats.matched,
+        "promoted": stats.promoted,
+        "kept": stats.kept,
+        "failed": stats.failed,
+    }
 
 @router.get("/observed-completions")
 def observed_completions(

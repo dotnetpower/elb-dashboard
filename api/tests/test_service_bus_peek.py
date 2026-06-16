@@ -179,3 +179,135 @@ def test_peek_route_auth_failure_degrades(
     body = r.json()
     assert body["available"] is False
     assert body["reason"] == "auth_failed"
+
+
+# --------------------------------------------------------------------------- #
+# DLQ peek / delete / promote routes
+# --------------------------------------------------------------------------- #
+
+
+def test_dlq_peek_route_available(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routes.settings import service_bus as route
+
+    cfg = _cfg()
+    monkeypatch.setattr(route, "get_service_bus_config", lambda: cfg)
+    monkeypatch.setattr(route, "service_bus_enabled", lambda: True)
+    monkeypatch.setattr(
+        route.service_bus,
+        "peek_dead_letter_previews",
+        lambda _cfg, max_count=20: [
+            {
+                "message_id": "m1",
+                "sequence_number": 101,
+                "db": "core_nt",
+                "dead_letter_reason": "max_delivery_count_exceeded",
+                "body_preview": "{}",
+            }
+        ],
+    )
+
+    r = client.get("/api/settings/service-bus/dlq/peek?limit=10")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is True
+    assert body["count"] == 1
+    assert body["messages"][0]["sequence_number"] == 101
+    assert body["messages"][0]["dead_letter_reason"] == "max_delivery_count_exceeded"
+
+
+def test_dlq_peek_route_not_configured(client: TestClient) -> None:
+    r = client.get("/api/settings/service-bus/dlq/peek")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is False
+    assert body["reason"] == "not_configured"
+
+
+def test_dlq_delete_route_rejected_when_disabled(client: TestClient) -> None:
+    r = client.post("/api/settings/service-bus/dlq/delete", json={"sequence_numbers": [1]})
+    assert r.status_code == 409
+    assert r.json()["code"] == "disabled"
+
+
+def test_dlq_delete_route_requires_sequence_numbers(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.routes.settings import service_bus as route
+
+    monkeypatch.setattr(route, "get_service_bus_config", lambda: _cfg())
+    monkeypatch.setattr(route, "service_bus_enabled", lambda: True)
+
+    r = client.post("/api/settings/service-bus/dlq/delete", json={})
+    assert r.status_code == 400
+    assert r.json()["code"] == "sequence_numbers_required"
+
+
+def test_dlq_delete_route_rejects_non_integer_sequence(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.routes.settings import service_bus as route
+
+    monkeypatch.setattr(route, "get_service_bus_config", lambda: _cfg())
+    monkeypatch.setattr(route, "service_bus_enabled", lambda: True)
+
+    r = client.post(
+        "/api/settings/service-bus/dlq/delete", json={"sequence_numbers": ["nope"]}
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "invalid_sequence_number"
+
+
+def test_dlq_delete_route_invokes_service(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.routes.settings import service_bus as route
+
+    monkeypatch.setattr(route, "get_service_bus_config", lambda: _cfg())
+    monkeypatch.setattr(route, "service_bus_enabled", lambda: True)
+    seen: dict[str, Any] = {}
+
+    def _delete(_cfg: Any, *, sequence_numbers: list[int], max_messages: int) -> Any:
+        seen["sequence_numbers"] = sequence_numbers
+        return service_bus.DeadLetterActionStats(
+            scanned=2, matched=1, deleted=1, kept=1, failed=0
+        )
+
+    monkeypatch.setattr(route.service_bus, "delete_dead_letter_messages", _delete)
+
+    r = client.post(
+        "/api/settings/service-bus/dlq/delete", json={"sequence_numbers": [101, 101, 102]}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "deleted"
+    assert body["deleted"] == 1
+    # Duplicates de-duped before reaching the service.
+    assert seen["sequence_numbers"] == [101, 102]
+
+
+def test_dlq_promote_route_invokes_service(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.routes.settings import service_bus as route
+
+    monkeypatch.setattr(route, "get_service_bus_config", lambda: _cfg())
+    monkeypatch.setattr(route, "service_bus_enabled", lambda: True)
+
+    def _promote(_cfg: Any, *, sequence_numbers: list[int], max_messages: int) -> Any:
+        return service_bus.DeadLetterActionStats(
+            scanned=1, matched=1, promoted=1, kept=0, failed=0
+        )
+
+    monkeypatch.setattr(route.service_bus, "promote_dead_letter_messages", _promote)
+
+    r = client.post("/api/settings/service-bus/dlq/promote", json={"sequence_numbers": [101]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "promoted"
+    assert body["promoted"] == 1
+
+
+def test_dlq_promote_route_rejected_when_disabled(client: TestClient) -> None:
+    r = client.post("/api/settings/service-bus/dlq/promote", json={"sequence_numbers": [1]})
+    assert r.status_code == 409
+    assert r.json()["code"] == "disabled"

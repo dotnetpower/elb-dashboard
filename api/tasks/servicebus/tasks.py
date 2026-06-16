@@ -381,8 +381,8 @@ def _build_v1_jobs_payload(
     required fields) so the caller dead-letters it instead of retrying forever.
     Mirrors ``_build_request_payload`` but validates against
     ``ExternalBlastV1Request`` (free-form ``outfmt`` + ``extra``) and stamps the
-    same server-derived metadata (``submission_source=servicebus``, sharded-DB
-    ``resource_profile`` promotion, correlation id).
+    server-derived metadata (wire ``submission_source=external_api`` for the
+    sibling, sharded-DB ``resource_profile`` promotion, correlation id).
     """
     from api.routes.elastic_blast import ExternalBlastV1Request
     from api.services.blast.submit_payload import (
@@ -446,6 +446,48 @@ def _build_v1_jobs_payload(
     return payload
 
 
+def _supersede_placeholder(correlation_id: str) -> None:
+    """Soft-delete the send-time placeholder once the real row exists. Best-effort."""
+    try:
+        from api.services.blast.servicebus_placeholder import supersede_placeholder
+
+        supersede_placeholder(correlation_id)
+    except Exception as exc:  # pragma: no cover - best-effort
+        LOGGER.debug(
+            "placeholder supersede skipped corr=%s: %s", correlation_id, type(exc).__name__
+        )
+
+
+def _fail_placeholder(correlation_id: str, *, error_code: str) -> None:
+    """Mark the send-time placeholder failed on a terminal rejection. Best-effort."""
+    try:
+        from api.services.blast.servicebus_placeholder import fail_placeholder
+
+        fail_placeholder(correlation_id, error_code=error_code)
+    except Exception as exc:  # pragma: no cover - best-effort
+        LOGGER.debug("placeholder fail skipped corr=%s: %s", correlation_id, type(exc).__name__)
+
+
+def _correlation_id_from_message(msg: ParsedMessage) -> str:
+    """Recover the correlation id from a raw message the same way the payload
+    builders do (body ``external_correlation_id`` → SB ``correlation_id`` →
+    ``message_id``). Used to fail the placeholder for a malformed message whose
+    payload could not be built."""
+    body = dict(msg.body or {})
+    return (
+        str(body.get("external_correlation_id") or "").strip()
+        or (msg.correlation_id or "").strip()
+        or (msg.message_id or "").strip()
+    )
+
+
+def _fail_placeholder_for_message(msg: ParsedMessage, *, error_code: str) -> None:
+    """Fail the placeholder for a message whose payload could not be built."""
+    correlation_id = _correlation_id_from_message(msg)
+    if correlation_id:
+        _fail_placeholder(correlation_id, error_code=error_code)
+
+
 def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     body = dict(msg.body or {})
     if _is_v1_jobs_message(body):
@@ -458,7 +500,11 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         payload = _build_request_payload(msg, cfg)
         submit = external_blast.submit_job
     if payload is None:
-        # Cannot ever succeed → dead-letter (do not loop forever).
+        # Cannot ever succeed → dead-letter (do not loop forever). Fail the
+        # send-time placeholder (if any) so it does not linger as ``queued``
+        # forever even though the message is in the DLQ. The correlation id is
+        # recovered from the raw body the same way the placeholder used it.
+        _fail_placeholder_for_message(msg, error_code="servicebus_malformed_request")
         return MessageAction.DEAD_LETTER
 
     correlation_id = str(payload["external_correlation_id"])
@@ -490,6 +536,11 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             correlation_id,
             status,
         )
+        if permanent:
+            # Terminal rejection: turn the send-time placeholder into a failed
+            # row instead of leaving it ``queued`` forever (the message is now
+            # dead-lettered). A transient failure keeps the placeholder queued.
+            _fail_placeholder(correlation_id, error_code=f"servicebus_submit_rejected_{status}")
         return MessageAction.DEAD_LETTER if permanent else MessageAction.ABANDON
     except Exception:
         # Unknown/unexpected error — treat as transient (abandon → redelivery)
@@ -523,6 +574,11 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         enqueued_at=msg.enqueued_time_utc,
         received_ts=received_ts,
     )
+    # Supersede the send-time ``queued`` placeholder (keyed by correlation id):
+    # the real OpenAPI-keyed row now carries the job, so soft-delete the
+    # placeholder to avoid a duplicate row in the list. Best-effort — a stale
+    # placeholder is reconciled later and never blocks the drain.
+    _supersede_placeholder(correlation_id)
     # Publish the initial "queued" transition (best-effort; a publish failure
     # is recovered by publish_transitions on the next tick).
     try:

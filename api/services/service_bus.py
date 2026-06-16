@@ -12,16 +12,20 @@ Edit boundaries: Reusable cloud/data-plane logic only. No HTTP shaping, no
     ``service_bus_pref``). Routes/tasks call THIS module; nothing else imports
     ``azure.servicebus``.
 Key entry points: ``send_request``, ``publish_event``, ``peek_requests``,
-    ``peek_request_previews``, ``drain_requests``, ``entity_counts``,
-    ``purge_dead_letter``, ``test_connection``, ``MessageAction``.
+    ``peek_request_previews``, ``peek_dead_letter_previews``, ``drain_requests``,
+    ``entity_counts``, ``purge_dead_letter``, ``delete_dead_letter_messages``,
+    ``promote_dead_letter_messages``, ``test_connection``, ``MessageAction``.
 Risky contracts: Receivers settle EVERY message they receive (complete /
     abandon / dead-letter) — a leaked lock causes redelivery and duplicate BLAST
-    runs. ``drain_requests`` and ``purge_dead_letter`` are BOUNDED by
-    ``max_messages`` so a backlog can never spin a single tick forever. The SAS
-    connection string is read from an env secret or Key Vault and is NEVER
-    logged or returned to a caller. All errors are normalised to
-    ``ServiceBusUnavailable`` / ``ServiceBusAuthError`` so callers degrade
-    instead of leaking SDK internals.
+    runs. ``drain_requests``, ``purge_dead_letter``, ``delete_dead_letter_messages``
+    and ``promote_dead_letter_messages`` are BOUNDED by ``max_messages`` so a
+    backlog can never spin a single tick forever. ``promote_dead_letter_messages``
+    re-sends to the main queue BEFORE removing from the DLQ so a crash never
+    loses a message (the idempotent drain handler dedupes any resulting
+    duplicate on ``external_correlation_id``). The SAS connection string is read
+    from an env secret or Key Vault and is NEVER logged or returned to a caller.
+    All errors are normalised to ``ServiceBusUnavailable`` / ``ServiceBusAuthError``
+    so callers degrade instead of leaking SDK internals.
 Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py``.
 """
 
@@ -96,6 +100,8 @@ class ParsedMessage:
     sequence_number: int | None
     application_properties: dict[str, Any] = field(default_factory=dict)
     dead_letter_reason: str | None = None
+    dead_letter_error_description: str | None = None
+    delivery_count: int | None = None
 
 
 @dataclass
@@ -209,6 +215,8 @@ def _parse(message: Any) -> ParsedMessage:
         sequence_number=getattr(message, "sequence_number", None),
         application_properties=dict(getattr(message, "application_properties", None) or {}),
         dead_letter_reason=getattr(message, "dead_letter_reason", None),
+        dead_letter_error_description=getattr(message, "dead_letter_error_description", None),
+        delivery_count=getattr(message, "delivery_count", None),
     )
 
 
@@ -284,6 +292,29 @@ def peek_requests(
     return out
 
 
+def peek_dead_letter(
+    cfg: ServiceBusConfig | None, max_count: int = _PEEK_DEFAULT
+) -> list[ParsedMessage]:
+    """Non-destructive peek of the request queue's dead-letter sub-queue.
+
+    Mirrors :func:`peek_requests` but reads the DLQ. Like a main-queue peek it
+    does not lock or remove the message, so it is safe to call repeatedly and
+    needs only the ``Azure Service Bus Data Receiver`` claim (NOT ``Manage``).
+    The parsed messages carry ``dead_letter_reason`` (+ the SDK's error
+    description via ``application_properties`` is left untouched) so the caller
+    can surface WHY each message was dead-lettered.
+    """
+    cfg = _require_enabled_config(cfg)
+    out: list[ParsedMessage] = []
+    with _client(cfg) as client, client.get_queue_receiver(
+        cfg.request_queue,
+        sub_queue=ServiceBusSubQueue.DEAD_LETTER,
+    ) as receiver:
+        for message in receiver.peek_messages(max_message_count=max(1, min(max_count, 100))):
+            out.append(_parse(message))
+    return out
+
+
 def _preview_message(parsed: ParsedMessage) -> dict[str, Any]:
     """Shape a peeked request message into a sanitised, size-bounded preview.
 
@@ -329,6 +360,28 @@ def _preview_message(parsed: ParsedMessage) -> dict[str, Any]:
     }
 
 
+def _dead_letter_preview(parsed: ParsedMessage) -> dict[str, Any]:
+    """Shape a peeked DLQ message into a preview with dead-letter metadata.
+
+    Extends :func:`_preview_message` with the broker-supplied
+    ``dead_letter_reason`` / ``dead_letter_error_description`` (sanitised +
+    bounded so a long error body cannot bloat the response) and the
+    ``delivery_count`` so the operator can see WHY the message was
+    dead-lettered before deciding to delete or promote it. ``sequence_number``
+    (already in the base preview) is the stable handle the delete / promote
+    routes target.
+    """
+    preview = _preview_message(parsed)
+    reason = str(parsed.dead_letter_reason or "").strip()
+    description = str(parsed.dead_letter_error_description or "").strip()
+    preview["dead_letter_reason"] = sanitise(reason)[:_PEEK_BODY_MAX_CHARS] if reason else None
+    preview["dead_letter_error_description"] = (
+        sanitise(description)[:_PEEK_BODY_MAX_CHARS] if description else None
+    )
+    preview["delivery_count"] = parsed.delivery_count
+    return preview
+
+
 def peek_request_previews(
     cfg: ServiceBusConfig | None, max_count: int = _PEEK_DEFAULT
 ) -> list[dict[str, Any]]:
@@ -342,6 +395,188 @@ def peek_request_previews(
     counts degrade to ``no_manage_claim``. Never removes or locks a message.
     """
     return [_preview_message(m) for m in peek_requests(cfg, max_count=max_count)]
+
+
+def peek_dead_letter_previews(
+    cfg: ServiceBusConfig | None, max_count: int = _PEEK_DEFAULT
+) -> list[dict[str, Any]]:
+    """Non-destructive DLQ peek shaped into sanitised previews for the dashboard.
+
+    Thin shaping over :func:`peek_dead_letter` (mirrors
+    :func:`peek_request_previews` for the main queue). Each preview adds the
+    dead-letter reason / error description / delivery count so the operator can
+    triage a dead-lettered message before deleting or promoting it. Reads via
+    the data-plane receiver (``Data Receiver`` claim, not ``Manage``). Never
+    removes or locks a message.
+    """
+    return [_dead_letter_preview(m) for m in peek_dead_letter(cfg, max_count=max_count)]
+
+
+@dataclass
+class DeadLetterActionStats:
+    """Outcome of a targeted DLQ delete / promote pass."""
+
+    scanned: int = 0
+    matched: int = 0
+    deleted: int = 0
+    promoted: int = 0
+    kept: int = 0
+    failed: int = 0
+
+
+def delete_dead_letter_messages(
+    cfg: ServiceBusConfig | None,
+    *,
+    sequence_numbers: list[int],
+    max_messages: int = 100,
+) -> DeadLetterActionStats:
+    """Delete specific DLQ messages by sequence number (operator action).
+
+    Receives the DLQ under PEEK_LOCK and completes (hard-deletes) each message
+    whose sequence number is requested; everything else is abandoned (left in
+    place). Unlike :func:`purge_dead_letter` there is no backup step — this is
+    the explicit "delete these messages" the operator chose after peeking, so
+    the SPA owns the confirmation. Bounded (by ``max_messages`` and by stopping
+    once every requested sequence number is matched) and partial-failure
+    isolated.
+    """
+    cfg = _require_enabled_config(cfg)
+    stats = DeadLetterActionStats()
+    if not sequence_numbers:
+        return stats
+    wanted = set(sequence_numbers)
+    budget = max(1, max_messages)
+    seen: set[int] = set()
+    with _client(cfg) as client, client.get_queue_receiver(
+        cfg.request_queue,
+        sub_queue=ServiceBusSubQueue.DEAD_LETTER,
+        receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
+        max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+    ) as receiver:
+        while budget > 0 and wanted:
+            batch = receiver.receive_messages(
+                max_message_count=min(budget, 32),
+                max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+            )
+            if not batch:
+                break
+            wrapped = False
+            for message in batch:
+                parsed = _parse(message)
+                seq = parsed.sequence_number
+                if seq is not None and seq in seen and seq not in wanted:
+                    _safe_abandon(receiver, message)
+                    wrapped = True
+                    break
+                if seq is not None:
+                    seen.add(seq)
+                budget -= 1
+                stats.scanned += 1
+                if seq is None or seq not in wanted:
+                    _safe_abandon(receiver, message)
+                    stats.kept += 1
+                    continue
+                stats.matched += 1
+                wanted.discard(seq)
+                try:
+                    receiver.complete_message(message)
+                    stats.deleted += 1
+                except ServiceBusError:
+                    LOGGER.warning("DLQ delete complete failed (lock lost?) seq=%s", seq)
+                    stats.failed += 1
+            if wrapped:
+                break
+    return stats
+
+
+def promote_dead_letter_messages(
+    cfg: ServiceBusConfig | None,
+    *,
+    sequence_numbers: list[int],
+    max_messages: int = 100,
+) -> DeadLetterActionStats:
+    """Re-queue specific DLQ messages onto the main request queue (operator action).
+
+    For each targeted DLQ message: re-send its body to the main request queue
+    FIRST, and only complete (remove from the DLQ) once the send succeeds.
+    Ordering matters for at-least-once safety — if the send succeeds but the
+    complete fails, the message stays in BOTH queues, but the drain handler is
+    idempotent on ``external_correlation_id`` (a duplicate request completes
+    without a second BLAST submit), so the worst case is one redundant
+    drain-and-dedupe, never a lost message or a duplicate run. Non-targeted
+    messages are abandoned (left in the DLQ). Bounded and partial-failure
+    isolated.
+    """
+    cfg = _require_enabled_config(cfg)
+    stats = DeadLetterActionStats()
+    if not sequence_numbers:
+        return stats
+    wanted = set(sequence_numbers)
+    budget = max(1, max_messages)
+    seen: set[int] = set()
+    with _client(cfg) as client, client.get_queue_receiver(
+        cfg.request_queue,
+        sub_queue=ServiceBusSubQueue.DEAD_LETTER,
+        receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
+        max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+    ) as receiver, client.get_queue_sender(cfg.request_queue) as sender:
+        while budget > 0 and wanted:
+            batch = receiver.receive_messages(
+                max_message_count=min(budget, 32),
+                max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+            )
+            if not batch:
+                break
+            wrapped = False
+            for message in batch:
+                parsed = _parse(message)
+                seq = parsed.sequence_number
+                if seq is not None and seq in seen and seq not in wanted:
+                    _safe_abandon(receiver, message)
+                    wrapped = True
+                    break
+                if seq is not None:
+                    seen.add(seq)
+                budget -= 1
+                stats.scanned += 1
+                if seq is None or seq not in wanted:
+                    _safe_abandon(receiver, message)
+                    stats.kept += 1
+                    continue
+                stats.matched += 1
+                wanted.discard(seq)
+                # Re-send to the main queue FIRST (preserve identity so the
+                # drain handler dedupes on correlation_id), then remove from DLQ.
+                requeued = ServiceBusMessage(
+                    parsed.raw_body or json.dumps(parsed.body, default=str),
+                    content_type=parsed.content_type or "application/json",
+                    subject=parsed.subject or "blast.request",
+                    message_id=parsed.message_id,
+                    correlation_id=parsed.correlation_id,
+                    application_properties=parsed.application_properties or None,
+                )
+                try:
+                    sender.send_messages(requeued)
+                except Exception:
+                    LOGGER.warning("DLQ promote re-send failed seq=%s; keeping in DLQ", seq)
+                    _safe_abandon(receiver, message)
+                    stats.failed += 1
+                    continue
+                try:
+                    receiver.complete_message(message)
+                    stats.promoted += 1
+                except ServiceBusError:
+                    # Sent but not removed — duplicate in DLQ + main queue. The
+                    # idempotent drain handler collapses it; log and count as
+                    # promoted (the message IS back on the main queue).
+                    LOGGER.warning(
+                        "DLQ promote complete failed seq=%s (re-sent; drain will dedupe)", seq
+                    )
+                    stats.promoted += 1
+            if wrapped:
+                break
+    return stats
+
 
 
 def drain_requests(

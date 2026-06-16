@@ -406,9 +406,19 @@ def reconcile_stale_jobs(
             # row has a local task_id (i.e. a dashboard-submitted job whose
             # local worker can plausibly have crashed). For external rows we
             # leave the row untouched and rely on the next external sync.
+            #
+            # Service Bus send-time placeholders (payload.placeholder=True) are
+            # the same class: they have no local Celery task, and their truth is
+            # the queued message — the drain path supersedes (or fails) them. A
+            # worker that is down for >10 min cannot drain, so the message is
+            # still queued and the placeholder is legitimately ``queued``;
+            # marking it worker_lost would show a false "failed" until the
+            # worker recovers and drains. Leave it untouched.
             if not task_id:
                 payload = row.payload or {}
-                if isinstance(payload, dict) and isinstance(payload.get("external"), dict):
+                if isinstance(payload, dict) and (
+                    isinstance(payload.get("external"), dict) or payload.get("placeholder")
+                ):
                     summary["untouched"] += 1
                     continue
             try:
