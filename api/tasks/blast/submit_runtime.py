@@ -15,7 +15,11 @@ Risky contracts: ``_stream_submit_command`` enforces a 600s exec timeout and a 1
 interval (``SUBMIT_LIVE_STATE_UPDATE_INTERVAL_SECONDS``); widening either changes UI latency
 and Container App billing. ``_gate_completed_submit_on_results`` downgrades ``completed`` to
 ``results_pending`` when no parseable result artifact is yet visible — the submit task relies
-on this to avoid premature "completed" reporting.
+on this to avoid premature "completed" reporting. ``_stream_submit_command`` also retries the
+submit once after stripping an OPTIONAL ``[cluster]`` param the terminal ``elastic-blast`` does
+not recognise (``_OPTIONAL_STRIPPABLE_CFG_PARAMS``) so api/worker→terminal version skew cannot
+hard-fail submit; required params are intentionally excluded so a genuinely invalid config still
+fails loudly.
 Validation: ``uv run pytest -q api/tests/test_blast_tasks.py``.
 """
 
@@ -24,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -42,6 +47,54 @@ ERROR_SNIPPET_CHARS = 500
 LIVE_OUTPUT_SNIPPET_CHARS = 8000
 STDOUT_SNIPPET_CHARS = 1000
 SUBMIT_LIVE_STATE_UPDATE_INTERVAL_SECONDS = 15.0
+
+# Optional, dashboard-added experimental ``[cluster]`` params that are pure
+# optimisation hints. Across a deploy the api/worker image can start emitting a
+# new param before the terminal toolchain base (which ships ``elastic-blast``)
+# is rebuilt; the older CLI then rejects the param as
+# ``Unrecognized configuration parameter`` and HARD-FAILS the whole submit even
+# though dropping the hint only forgoes an optimisation. Strip such a param and
+# retry the submit once so an optional hint can never break submit under version
+# skew. Required params (e.g. ``exp-use-local-ssd``, which selects the only
+# productised execution path) are intentionally NOT listed — an unrecognised
+# required param must still fail loudly.
+_OPTIONAL_STRIPPABLE_CFG_PARAMS: frozenset[str] = frozenset({"exp-skip-warmed-ssd-init"})
+
+_UNRECOGNIZED_PARAM_RE = re.compile(
+    r'Unrecognized configuration parameter "([^"]+)"', re.IGNORECASE
+)
+
+
+def _strip_optional_unrecognized_params(
+    config_content: str, output: str
+) -> tuple[str, list[str]]:
+    """Return ``(config_without_optional_unrecognized_params, stripped_names)``.
+
+    Scans ``output`` for elastic-blast "Unrecognized configuration parameter"
+    errors whose parameter name is in ``_OPTIONAL_STRIPPABLE_CFG_PARAMS`` and
+    removes the matching ``name = ...`` lines from ``config_content``. Names not
+    in the strippable set are ignored, so a genuinely invalid config (an unknown
+    required param, a typo) still fails loudly instead of being silently dropped.
+    """
+    names = {
+        match.group(1)
+        for match in _UNRECOGNIZED_PARAM_RE.finditer(output)
+        if match.group(1) in _OPTIONAL_STRIPPABLE_CFG_PARAMS
+    }
+    if not names:
+        return config_content, []
+    kept: list[str] = []
+    stripped: list[str] = []
+    for line in config_content.splitlines():
+        key = line.split("=", 1)[0].strip()
+        if key in names:
+            stripped.append(key)
+            continue
+        kept.append(line)
+    new_content = "\n".join(kept)
+    if config_content.endswith("\n"):
+        new_content += "\n"
+    return new_content, sorted(set(stripped))
 
 
 class TerminalAzureLoginError(RuntimeError):
@@ -129,6 +182,58 @@ def _ensure_terminal_kubeconfig_context(
 
 
 def _stream_submit_command(
+    *,
+    job_id: str,
+    task: Any,
+    config_content: str,
+    progress_phase: str = "submitting",
+) -> dict[str, Any]:
+    """Stream ``elastic-blast submit`` and tolerate optional-param version skew.
+
+    Runs the submit once. If it fails only because the terminal sidecar's
+    ``elastic-blast`` rejects an OPTIONAL dashboard param as
+    ``Unrecognized configuration parameter`` (api/worker emitted a hint the
+    older terminal toolchain does not understand), the offending param is
+    stripped and the submit is retried exactly once. This is safe because that
+    rejection happens during config validation, before any Kubernetes resource
+    is created, so no partial cluster state can leak across the retry.
+    """
+    result = _run_submit_stream_once(
+        job_id=job_id,
+        task=task,
+        config_content=config_content,
+        progress_phase=progress_phase,
+    )
+    if int(result.get("exit_code", 1) or 0) == 0:
+        return result
+
+    combined_output = "\n".join(
+        str(value) for value in (result.get("stdout"), result.get("stderr")) if value
+    )
+    retry_content, stripped = _strip_optional_unrecognized_params(
+        config_content, combined_output
+    )
+    if not stripped:
+        return result
+
+    LOGGER.warning(
+        "submit: terminal elastic-blast rejected optional param(s) %s as "
+        "unrecognized (toolchain version skew); retrying submit without them "
+        "job_id=%s",
+        ",".join(stripped),
+        job_id,
+    )
+    retry_result = _run_submit_stream_once(
+        job_id=job_id,
+        task=task,
+        config_content=retry_content,
+        progress_phase=progress_phase,
+    )
+    retry_result["_stripped_optional_params"] = stripped
+    return retry_result
+
+
+def _run_submit_stream_once(
     *,
     job_id: str,
     task: Any,

@@ -440,6 +440,121 @@ def test_stream_submit_command_defers_log_artifact_writes(monkeypatch) -> None:
     assert state_updates[0][0][:3] == ("job-123", "submitting")
 
 
+def test_strip_optional_unrecognized_params_only_strips_whitelisted() -> None:
+    config = (
+        "[cluster]\n"
+        "name = c1\n"
+        "exp-use-local-ssd = true\n"
+        "exp-skip-warmed-ssd-init = true\n"
+    )
+    # Optional hint is stripped.
+    new_content, stripped = blast._strip_optional_unrecognized_params(
+        config,
+        'ERROR: Unrecognized configuration parameter "exp-skip-warmed-ssd-init" '
+        'in section "cluster".',
+    )
+    assert stripped == ["exp-skip-warmed-ssd-init"]
+    assert "exp-skip-warmed-ssd-init" not in new_content
+    assert "exp-use-local-ssd = true" in new_content
+    assert new_content.endswith("\n")
+
+    # A non-whitelisted (required) param is never silently dropped.
+    unchanged, stripped_required = blast._strip_optional_unrecognized_params(
+        config,
+        'ERROR: Unrecognized configuration parameter "exp-use-local-ssd" '
+        'in section "cluster".',
+    )
+    assert stripped_required == []
+    assert unchanged == config
+
+
+def test_stream_submit_command_retries_without_optional_unrecognized_param(
+    monkeypatch,
+) -> None:
+    seen_configs: list[str] = []
+
+    def fake_stream(**kwargs: object):
+        config = str(kwargs.get("stdin") or "")
+        seen_configs.append(config)
+        if "exp-skip-warmed-ssd-init" in config:
+            yield {
+                "stream": "stderr",
+                "line": (
+                    'ERROR: Unrecognized configuration parameter '
+                    '"exp-skip-warmed-ssd-init" in section "cluster".'
+                ),
+            }
+            yield {"exit_code": 1, "duration_ms": 5, "timed_out": False}
+        else:
+            yield {"stream": "stdout", "line": "submitted"}
+            yield {"exit_code": 0, "duration_ms": 7, "timed_out": False}
+
+    class FakeTask:
+        def update_state(self, *, state: str, meta: dict[str, object]) -> None:
+            pass
+
+    monkeypatch.setattr("api.services.terminal_exec.stream", fake_stream)
+    monkeypatch.setattr(
+        "api.services.job_logs.event_bus.publish_job_log_event",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(blast, "_update_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(blast, "_progress", lambda *args, **kwargs: None)
+
+    config = (
+        "[cluster]\n"
+        "name = c1\n"
+        "exp-use-local-ssd = true\n"
+        "exp-skip-warmed-ssd-init = true\n"
+    )
+    result = blast._stream_submit_command(
+        job_id="job-skew",
+        task=FakeTask(),
+        config_content=config,
+    )
+
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "submitted"
+    assert result.get("_stripped_optional_params") == ["exp-skip-warmed-ssd-init"]
+    # Two attempts: the first with the param, the retry without it.
+    assert len(seen_configs) == 2
+    assert "exp-skip-warmed-ssd-init" in seen_configs[0]
+    assert "exp-skip-warmed-ssd-init" not in seen_configs[1]
+    assert "exp-use-local-ssd = true" in seen_configs[1]
+
+
+def test_stream_submit_command_does_not_retry_on_unrelated_failure(monkeypatch) -> None:
+    attempts: list[str] = []
+
+    def fake_stream(**kwargs: object):
+        attempts.append(str(kwargs.get("stdin") or ""))
+        yield {"stream": "stderr", "line": "ERROR: cluster quota exceeded"}
+        yield {"exit_code": 1, "duration_ms": 5, "timed_out": False}
+
+    class FakeTask:
+        def update_state(self, *, state: str, meta: dict[str, object]) -> None:
+            pass
+
+    monkeypatch.setattr("api.services.terminal_exec.stream", fake_stream)
+    monkeypatch.setattr(
+        "api.services.job_logs.event_bus.publish_job_log_event",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(blast, "_update_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(blast, "_progress", lambda *args, **kwargs: None)
+
+    result = blast._stream_submit_command(
+        job_id="job-noretry",
+        task=FakeTask(),
+        config_content="[cluster]\nexp-skip-warmed-ssd-init = true\n",
+    )
+
+    assert result["exit_code"] == 1
+    assert "_stripped_optional_params" not in result
+    # Only one attempt — an unrelated failure must not trigger the strip retry.
+    assert len(attempts) == 1
+
+
 def test_persist_submit_log_events_chunks_after_stream(monkeypatch) -> None:
     calls: list[tuple[str, str, int, list[dict[str, object]]]] = []
 

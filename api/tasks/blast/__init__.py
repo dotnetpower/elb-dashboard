@@ -215,6 +215,7 @@ from api.tasks.blast.submit_runtime import (  # noqa: E402,F401
     _has_parseable_result_artifact,
     _refresh_submit_terminal_status,
     _stream_submit_command,
+    _strip_optional_unrecognized_params,
 )
 from api.tasks.blast.submit_task import submit  # noqa: E402
 
