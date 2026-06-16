@@ -755,7 +755,14 @@ def _ready_inflight_release(key: tuple[str, str]) -> None:
         event.set()
 
 
-def ready(*, base_url: str | None = None, api_token: str | None = None) -> dict[str, Any]:
+def ready(
+    *,
+    base_url: str | None = None,
+    api_token: str | None = None,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+) -> dict[str, Any]:
     """Pre-flight the sibling's submit path before issuing ``submit_job``.
 
     Returns the sibling's ``/v1/ready`` JSON on success. The sibling enforces
@@ -788,8 +795,19 @@ def ready(*, base_url: str | None = None, api_token: str | None = None) -> dict[
       stale-sibling hit so operators can grep for ``ready_probe_stale_sibling``
       and bump the elb-openapi image to the latest tag (≥ 4.15).
     """
-    resolved_base = _base_url(base_url)
-    cache_key = _ready_cache_key(resolved_base, api_token)
+    resolved_base = _base_url(
+        base_url,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    resolved_api_token = _headers(
+        api_token=api_token,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    ).get("X-ELB-API-Token")
+    cache_key = _ready_cache_key(resolved_base, resolved_api_token)
     cached_entry = _ready_cache_lookup(cache_key)
     if cached_entry is not None:
         cached_value, cached_age = cached_entry
@@ -849,7 +867,7 @@ def ready(*, base_url: str | None = None, api_token: str | None = None) -> dict[
         # we simply do not register a new one).
 
     try:
-        return _ready_probe_upstream(cache_key, resolved_base, api_token=api_token)
+        return _ready_probe_upstream(cache_key, resolved_base, api_token=resolved_api_token)
     finally:
         _ready_inflight_release(cache_key)
 
@@ -1012,9 +1030,24 @@ def download_file(
     *,
     base_url: str | None = None,
     api_token: str | None = None,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
 ) -> DownloadedFile:
     with httpx.Client(
-        base_url=_base_url(base_url), timeout=_STREAM_TIMEOUT, headers=_headers(api_token=api_token)
+        base_url=_base_url(
+            base_url,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
+        timeout=_STREAM_TIMEOUT,
+        headers=_headers(
+            api_token=api_token,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
     ) as client:
         try:
             resp = client.get(
@@ -1048,9 +1081,24 @@ def stream_file(
     *,
     base_url: str | None = None,
     api_token: str | None = None,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
 ) -> StreamedFile:
     client = httpx.Client(
-        base_url=_base_url(base_url), timeout=_STREAM_TIMEOUT, headers=_headers(api_token=api_token)
+        base_url=_base_url(
+            base_url,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
+        timeout=_STREAM_TIMEOUT,
+        headers=_headers(
+            api_token=api_token,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
     )
     try:
         request = client.build_request(

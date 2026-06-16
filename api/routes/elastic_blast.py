@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -102,6 +102,9 @@ class ExternalBlastSubmitRequest(BaseModel):
     resource_profile: str = Field(
         "standard", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$"
     )
+    subscription_id: str | None = Field(None, min_length=1, max_length=64)
+    resource_group: str | None = Field(None, min_length=1, max_length=120)
+    cluster_name: str | None = Field(None, min_length=1, max_length=120)
 
     @model_validator(mode="after")
     def validate_query_and_taxonomy(self) -> ExternalBlastSubmitRequest:
@@ -182,6 +185,9 @@ class ExternalBlastV1Request(BaseModel):
     external_correlation_id: str | None = Field(
         None, min_length=1, max_length=256, pattern=r"^[A-Za-z0-9._:-]+$"
     )
+    subscription_id: str | None = Field(None, min_length=1, max_length=64)
+    resource_group: str | None = Field(None, min_length=1, max_length=120)
+    cluster_name: str | None = Field(None, min_length=1, max_length=120)
 
     @model_validator(mode="after")
     def validate_query_taxonomy_and_outfmt(self) -> ExternalBlastV1Request:
@@ -313,6 +319,22 @@ def _normalise_external_job_payload(
     return out
 
 
+def _openapi_scope_kwargs(
+    *,
+    subscription_id: str = "",
+    resource_group: str = "",
+    cluster_name: str = "",
+) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if subscription_id:
+        out["subscription_id"] = subscription_id
+    if resource_group:
+        out["resource_group"] = resource_group
+    if cluster_name:
+        out["cluster_name"] = cluster_name
+    return out
+
+
 @router.post("/submit", status_code=202)
 def submit_external_blast_job(
     request: ExternalBlastSubmitRequest,
@@ -401,8 +423,13 @@ def submit_external_blast_job(
     # spend the 90 s submit timeout waiting for a request the sibling cannot
     # service. Older sibling images without /v1/ready fail open inside the
     # client so the submit still goes through.
-    external_blast.ready()
-    upstream = external_blast.submit_job(payload)
+    scope_kwargs = _openapi_scope_kwargs(
+        subscription_id=str(payload.get("subscription_id") or "").strip(),
+        resource_group=str(payload.get("resource_group") or "").strip(),
+        cluster_name=str(payload.get("cluster_name") or "").strip(),
+    )
+    external_blast.ready(**scope_kwargs)
+    upstream = external_blast.submit_job(payload, **scope_kwargs)
     normalised = _normalise_external_job_payload(upstream, request_payload=payload)
     # The sibling OpenAPI plane stores no query identity for inline FASTA, so
     # remember a defline-derived label keyed by the upstream job id. The jobs
@@ -425,6 +452,9 @@ def submit_external_blast_job(
 
 @router.get("/jobs")
 def list_external_blast_jobs(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
     """Forward to the external ElasticBLAST OpenAPI `/v1/jobs` listing.
@@ -445,13 +475,22 @@ def list_external_blast_jobs(
 
     LOGGER.info("external BLAST list requested caller_oid=%s", redact_oid(caller.object_id))
     del caller
-    rows = _external_list_jobs_cached({})
+    rows = _external_list_jobs_cached(
+        _openapi_scope_kwargs(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+    )
     return {"jobs": rows, "count": len(rows)}
 
 
 @router.get("/jobs/{job_id}")
 def get_external_blast_job(
     job_id: str = Path(..., min_length=6, max_length=12, pattern=r"^[a-f0-9]+$"),
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
     LOGGER.info(
@@ -460,8 +499,13 @@ def get_external_blast_job(
         job_id,
     )
     del caller
+    scope_kwargs = _openapi_scope_kwargs(
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
     return _normalise_external_job_payload(
-        external_blast.get_job(job_id),
+        external_blast.get_job(job_id, **scope_kwargs),
         default_status="running",
     )
 
@@ -469,6 +513,9 @@ def get_external_blast_job(
 @router.get("/jobs/{job_id}/events")
 def list_external_blast_job_events(
     job_id: str = Path(..., min_length=6, max_length=12, pattern=r"^[a-f0-9]+$"),
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
     LOGGER.info(
@@ -477,6 +524,11 @@ def list_external_blast_job_events(
         job_id,
     )
     del caller
+    scope_kwargs = _openapi_scope_kwargs(
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
     try:
         from api.services.blast.events import canonical_job_events
         from api.services.state_repo import get_state_repo
@@ -486,7 +538,7 @@ def list_external_blast_job_events(
             return {"job_id": job_id, "events": canonical_job_events(rows)}
     except Exception as exc:
         LOGGER.info("external BLAST local events unavailable: %s", type(exc).__name__)
-    detail = external_blast.get_job(job_id)
+    detail = external_blast.get_job(job_id, **scope_kwargs)
     status = str(detail.get("status") or detail.get("phase") or "unknown")
     return {
         "job_id": job_id,
@@ -507,6 +559,9 @@ def list_external_blast_job_events(
 @router.get("/jobs/{job_id}/manifest")
 def get_external_blast_job_manifest(
     job_id: str = Path(..., min_length=6, max_length=12, pattern=r"^[a-f0-9]+$"),
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
     LOGGER.info(
@@ -518,7 +573,14 @@ def get_external_blast_job_manifest(
     from api.routes._blast_shared import _external_result_files
     from api.services.blast.result_manifest import build_result_manifest
 
-    detail = external_blast.get_job(job_id)
+    detail = external_blast.get_job(
+        job_id,
+        **_openapi_scope_kwargs(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
+    )
     files = _external_result_files(detail)
     return build_result_manifest(job_id=job_id, files=files, source="external")
 
@@ -527,6 +589,9 @@ def get_external_blast_job_manifest(
 def download_external_blast_file(
     job_id: str = Path(..., min_length=6, max_length=12, pattern=r"^[a-f0-9]+$"),
     file_id: str = Path(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$"),
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> StreamingResponse:
     LOGGER.info(
@@ -536,7 +601,15 @@ def download_external_blast_file(
         file_id,
     )
     del caller
-    downloaded = external_blast.stream_file(job_id, file_id)
+    downloaded = external_blast.stream_file(
+        job_id,
+        file_id,
+        **_openapi_scope_kwargs(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        ),
+    )
     return StreamingResponse(
         downloaded.chunks,
         media_type=downloaded.media_type,
