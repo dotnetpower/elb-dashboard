@@ -137,4 +137,9 @@ READER_ALLOWLIST: tuple[ReaderAllowedRoute, ...] = (
         function="observed_completions",
         why="Read-only view of completion-topic events observed by the demo consumer.",
     ),
+    ReaderAllowedRoute(
+        module="api.routes.settings.service_bus",
+        function="peek",
+        why="Non-destructive read-only peek of request-queue message content (Data Receiver only).",
+    ),
 )

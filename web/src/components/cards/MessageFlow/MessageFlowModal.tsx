@@ -14,7 +14,7 @@ import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Radio, X } from "lucide-react";
 
-import { messageFlowApi, type MessageFlowBox, type MessageFlowSnapshot } from "@/api/messageFlow";
+import { messageFlowApi, type MessageFlowBox, type MessageFlowSnapshot, type QueueMessagePreview } from "@/api/messageFlow";
 import { useRelativeTime } from "@/hooks/useRelativeTime";
 
 import { aliasTone } from "./colors";
@@ -213,6 +213,100 @@ function JobDetailModal({ box, onClose }: JobDetailModalProps) {
       </div>
     </div>,
     document.body,
+  );
+}
+
+/** Pure presentation of the peeked request-queue messages. Renders nothing when
+ *  the queue is empty (the normal sub-second-drain state) so the modal stays
+ *  calm; when messages linger it shows their count + sanitised content so the
+ *  count/content matches the Azure portal. */
+function QueueMessagesSection({ messages }: { messages: QueueMessagePreview[] }) {
+  if (messages.length === 0) return null;
+  return (
+    <div
+      style={{
+        marginTop: 18,
+        paddingTop: 12,
+        borderTop: "1px solid var(--glass-border)",
+      }}
+      data-testid="queue-messages-section"
+    >
+      <div
+        style={{
+          fontSize: 12,
+          fontWeight: 600,
+          color: "var(--text-primary)",
+          marginBottom: 8,
+        }}
+      >
+        Queued messages ({messages.length})
+        <span
+          style={{ marginLeft: 8, fontWeight: 400, fontSize: 11, color: "var(--text-faint)" }}
+        >
+          waiting in the request queue (peeked, not removed)
+        </span>
+      </div>
+      <div style={{ display: "grid", gap: 8 }}>
+        {messages.map((m, i) => (
+          <div
+            key={`${m.sequence_number ?? m.message_id ?? "msg"}-${i}`}
+            style={{
+              display: "grid",
+              gap: 4,
+              padding: "8px 10px",
+              borderRadius: 8,
+              background: "var(--glass-surface-deep, rgba(0,0,0,0.18))",
+              border: "1px solid var(--glass-border)",
+            }}
+          >
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 11 }}>
+              {m.program ? (
+                <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{m.program}</span>
+              ) : null}
+              {m.db ? <span style={{ color: "var(--text-muted)" }}>db {m.db}</span> : null}
+              {m.correlation_id ? (
+                <span
+                  title={`correlation_id: ${m.correlation_id}`}
+                  style={{ fontFamily: "var(--font-mono, monospace)", color: "var(--text-faint)" }}
+                >
+                  {m.correlation_id.slice(0, 12)}
+                  {m.correlation_id.length > 12 ? "…" : ""}
+                </span>
+              ) : null}
+              {m.request_id ? (
+                <span
+                  title={`request_id: ${m.request_id}`}
+                  style={{ fontFamily: "var(--font-mono, monospace)", color: "var(--text-faint)" }}
+                >
+                  req {m.request_id.slice(0, 12)}
+                  {m.request_id.length > 12 ? "…" : ""}
+                </span>
+              ) : null}
+            </div>
+            <pre
+              style={{
+                margin: 0,
+                maxHeight: 220,
+                overflow: "auto",
+                fontSize: 11,
+                lineHeight: 1.5,
+                color: "var(--text-muted)",
+                background: "var(--bg-code, #0d1117)",
+                borderRadius: 6,
+                padding: 8,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {m.body_preview}
+            </pre>
+            {m.body_truncated ? (
+              <span style={{ fontSize: 10, color: "var(--text-faint)" }}>content truncated</span>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -503,6 +597,14 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
             ) : null}
             </>
           )}
+
+          {/* Raw queue messages currently sitting in the request queue (peeked
+              non-destructively). Distinct from the broker boxes above, which are
+              in-flight BLAST JOBS — this is the actual Service Bus message
+              content/count, surfaced so it matches what the Azure portal shows.
+              Normally empty (sub-second drain); non-empty means messages are not
+              being consumed yet. */}
+          <QueueMessagesSection messages={snapshot.queue_messages ?? []} />
 
           {/* Service Bus telemetry footer (SRP: pure presentation panel). */}
           <ServiceBusTelemetryPanel snapshot={snapshot} />

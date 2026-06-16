@@ -48,6 +48,7 @@ export function MessageFlowCard() {
   const clusters = data.consumers?.clusters ?? [];
   const activeTotal = data.active_total ?? 0;
   const settlingTotal = data.settling_total ?? 0;
+  const queuedCount = data.queue_messages?.length ?? 0;
 
   return (
     <>
@@ -74,7 +75,16 @@ export function MessageFlowCard() {
         </span>
 
         {activeTotal === 0 && settlingTotal === 0 ? (
-          <span style={{ color: "var(--text-faint)" }}>no active messages</span>
+          queuedCount > 0 ? (
+            <span
+              style={{ color: "var(--text-secondary)" }}
+              title="Messages waiting in the request queue (peeked, not yet consumed). Expand to see their content."
+            >
+              {queuedCount} queued message{queuedCount === 1 ? "" : "s"}
+            </span>
+          ) : (
+            <span style={{ color: "var(--text-faint)" }}>no active messages</span>
+          )
         ) : (
           <>
             {/* Producer color dots */}

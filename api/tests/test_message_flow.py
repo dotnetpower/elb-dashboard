@@ -83,7 +83,9 @@ class _FakeRepo:
 def _enable(monkeypatch: pytest.MonkeyPatch):
     """Turn the integration on with a namespaced config and shared visibility."""
 
-    def _apply(rows: list[Any], *, counts: Any = None, shared: bool = True) -> None:
+    def _apply(
+        rows: list[Any], *, counts: Any = None, shared: bool = True, peek: Any = None
+    ) -> None:
         monkeypatch.setattr(
             "api.services.service_bus_pref.service_bus_enabled", lambda: True
         )
@@ -112,6 +114,18 @@ def _enable(monkeypatch: pytest.MonkeyPatch):
             return counts
 
         monkeypatch.setattr(service_bus, "entity_counts", _counts)
+
+        # Stub the non-destructive queue peek so the snapshot never reaches the
+        # live AMQP data plane (slow + flaky). Defaults to an empty queue; a test
+        # that exercises queue content passes ``peek=[...]``.
+        def _peek(_cfg: Any, max_count: int = 10) -> list[dict[str, Any]]:
+            if peek is None:
+                return []
+            if isinstance(peek, Exception):
+                raise peek
+            return list(peek)[:max_count]
+
+        monkeypatch.setattr(service_bus, "peek_request_previews", _peek)
 
     return _apply
 
@@ -640,3 +654,53 @@ def test_snapshot_dlq_delta_is_none_when_counts_unavailable(_enable) -> None:
     snap = message_flow.build_message_flow("oid-x")
     assert snap["dlq_delta"] is None
     assert snap["sb_counts"]["available"] is False
+
+
+def test_snapshot_includes_queue_message_previews(_enable) -> None:
+    """Peeked request-queue messages ride along on the snapshot as content."""
+    rows: list[Any] = []
+    preview = [
+        {
+            "message_id": "m1",
+            "program": "blastn",
+            "db": "core_nt",
+            "body_preview": "{\"db\": \"core_nt\"}",
+            "body_truncated": False,
+        }
+    ]
+    _enable(rows, counts={"queue": {"active_message_count": 1}, "subscriptions": []}, peek=preview)
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["queue_messages"] == preview
+
+
+def test_queue_peek_skipped_when_namespace_unreachable(_enable) -> None:
+    """When counts fail as 'unavailable' (namespace unreachable) the snapshot
+    must NOT pay a second slow peek connect — queue_messages stays empty even if
+    peek would have returned content."""
+    from api.services import service_bus
+
+    sentinel = [{"message_id": "should-not-appear"}]
+    _enable(
+        [],
+        counts=service_bus.ServiceBusUnavailable("namespace unreachable"),
+        peek=sentinel,
+    )
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["queue_messages"] == []
+
+
+def test_queue_peek_runs_when_only_manage_claim_missing(_enable) -> None:
+    """A reachable namespace whose credential lacks the Manage claim still peeks
+    (data-plane Receiver claim is enough), so content surfaces even when counts
+    degrade to no_manage_claim."""
+    from api.services import service_bus
+
+    preview = [{"message_id": "m9", "db": "core_nt"}]
+    _enable([], counts=service_bus.ServiceBusAuthError("no manage"), peek=preview)
+
+    snap = message_flow.build_message_flow("oid-x")
+    assert snap["sb_counts"]["available"] is False
+    assert snap["sb_counts"]["reason"] == "no_manage_claim"
+    assert snap["queue_messages"] == preview

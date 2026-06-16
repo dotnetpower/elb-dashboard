@@ -489,6 +489,37 @@ export interface ServiceBusObservedCompletionsResponse {
   topic: string;
 }
 
+/** A single non-destructively peeked request-queue message (sanitised preview).
+ *
+ * Returned by `GET /settings/service-bus/peek`. The body is the user-supplied
+ * BLAST request (not credentials), run through the backend sanitiser and capped
+ * server-side; `body_truncated` flags when `body_preview` was clipped. Peek uses
+ * the data-plane Receiver claim, so it works even when runtime counts are
+ * unavailable for lack of the Manage claim. */
+export interface ServiceBusPeekMessage {
+  message_id: string | null;
+  correlation_id: string | null;
+  request_id: string | null;
+  subject: string | null;
+  sequence_number: number | null;
+  enqueued_time_utc: string | null;
+  program: string | null;
+  db: string | null;
+  body_preview: string;
+  body_truncated: boolean;
+}
+
+export interface ServiceBusPeekResponse {
+  available: boolean;
+  /** Why content is unavailable: `not_configured` | `disabled` | `auth_failed`
+   *  | `unavailable` | `error`. Omitted when `available` is true. */
+  reason?: string;
+  detail?: string;
+  queue: string;
+  messages: ServiceBusPeekMessage[];
+  count: number;
+}
+
 function querystring(params: Record<string, string>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) usp.set(k, v);
@@ -654,6 +685,15 @@ export const settingsApi = {
   getObservedCompletions: (limit = 50) =>
     api.get<ServiceBusObservedCompletionsResponse>(
       `/settings/service-bus/observed-completions?limit=${limit}`,
+    ),
+
+  /** Playground: non-destructively peek the actual messages currently sitting
+   *  in the request queue (content view). Reader-accessible; needs only the
+   *  data-plane Receiver claim, so it works even when runtime counts are
+   *  unavailable for lack of the Manage claim. Never removes/locks a message. */
+  peekServiceBus: (limit = 5) =>
+    api.get<ServiceBusPeekResponse>(
+      `/settings/service-bus/peek?limit=${limit}`,
     ),
 
   /** Read the configured control-plane custom domain + the resolved effective
