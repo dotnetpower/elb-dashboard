@@ -264,6 +264,7 @@ def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[st
     """
     from api.routes.elastic_blast import ExternalBlastSubmitRequest
     from api.services.blast.submit_payload import (
+        _caller_supplied_searchsp,
         canonical_submit_metadata,
         resolve_sharded_db_resource_profile,
         resolve_sharding_plan,
@@ -345,11 +346,7 @@ def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[st
         program=str(payload.get("program") or "blastn"),
         database=str(payload.get("db") or ""),
         options=payload.get("options"),
-        caller_supplied_searchsp=(
-            request.options.db_effective_search_space
-            if getattr(request, "options", None) is not None
-            else None
-        ),
+        caller_supplied_searchsp=_caller_supplied_searchsp(body),
         allow_servicebus_downgrade=True,
     )
     payload["options"] = plan.options

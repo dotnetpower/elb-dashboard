@@ -266,7 +266,10 @@ def resolve_sharding_plan(
     )
     from api.services.web_blast_searchsp import default_for_database
 
-    del program  # future-proofed hook; current resolver is DB + option driven.
+    # Reserved for future program-specific calibration rules; keep the shared
+    # interface stable across all submit surfaces even though today's resolution
+    # is database/option driven.
+    _ = program
     resolved = dict(options or {})
     validated_errors: list[str] = []
     downgrade_reason: str | None = None
@@ -353,7 +356,6 @@ def _canonical_options_from_body(body: dict[str, Any], *, database: str) -> dict
     if "dust" in options and "low_complexity_filter" not in options:
         options["low_complexity_filter"] = bool(options["dust"])
     options.pop("dust", None)
-    _apply_web_blast_searchsp_default(database, options)
     plan = resolve_sharding_plan(
         program=str(body.get("program") or "blastn").strip(),
         database=database,
