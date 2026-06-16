@@ -429,8 +429,21 @@ def blast_submit(
             updated_at=now,
             payload=normalised_body,
         )
-        repo.create(state)
+        created_state = repo.create(state)
         _reset_jobs_list_cache()
+        if normalised_body.get("idempotency_key") and not getattr(
+            created_state, "_created_by_create", True
+        ):
+            operation_id = created_state.task_id or job_id
+            response.headers["Location"] = f"/api/operations/{operation_id}"
+            response.headers["Retry-After"] = str(_SUBMIT_RETRY_AFTER_SECONDS)
+            return _submit_response(
+                job_id,
+                created_state.task_id,
+                status=created_state.status or "queued",
+                request_id=request_id_from_scope(request),
+                admission_reason="idempotent_create_race_returned_existing_job",
+            )
     except Exception as exc:
         LOGGER.warning("failed to create job state: %s", exc)
 

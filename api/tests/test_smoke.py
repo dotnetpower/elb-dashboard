@@ -1221,6 +1221,56 @@ def test_blast_submit_idempotency_key_reuses_existing_job(
     assert delay_calls == []
 
 
+def test_blast_submit_idempotent_create_race_does_not_double_enqueue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
+    )
+    delay_calls: list[dict[str, object]] = []
+
+    def fake_delay(**kwargs: object) -> object:
+        delay_calls.append(kwargs)
+        return SimpleNamespace(id="new-task")
+
+    class FakeRepository:
+        def get(self, job_id: str) -> object | None:
+            return None
+
+        def create(self, state: object) -> object:
+            raced = SimpleNamespace(
+                job_id=state.job_id,
+                task_id="",
+                status="queued",
+                _created_by_create=False,
+            )
+            return raced
+
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepository)
+    monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
+
+    r = client.post(
+        "/api/blast/submit",
+        json={
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "database": "core_nt",
+            "query_file": "queries/q.fa",
+            "idempotency_key": "req-race",
+            "options": {"sharding_mode": "off"},
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["job_id"]
+    assert delay_calls == []
+
+
 def test_blast_job_events_returns_canonical_history(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

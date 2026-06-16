@@ -227,9 +227,11 @@ class JobStateRepository:
             # rather than raising — sync callers can safely retry idempotently.
             existing = self.get(state.job_id)
             if existing is not None:
+                existing._created_by_create = False
                 return existing
             raise
         created = JobState.from_entity(entity)
+        created._created_by_create = True
         self.append_history(
             created.job_id,
             "created",
