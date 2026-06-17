@@ -9,6 +9,8 @@ import {
   TreePine,
 } from "lucide-react";
 
+import { QUEUED_PHASES } from "@/constants";
+
 const TABS: Array<{
   key: BlastResultsTab;
   label: string;
@@ -99,9 +101,28 @@ export function shouldOpenRunDetailsForFailedJob(
   return effectiveIsFailed && RESULT_ANALYTICS_TABS.has(activeTab);
 }
 
+/**
+ * Label + tone for the in-progress badge on result tabs. A queued-family phase
+ * reads a calm grey "Queued" so it matches the header phase banner and the Job
+ * Details status dot (both already collapse to "queued"); every other active
+ * phase keeps the accent "Running". Pure so it stays unit-testable.
+ */
+export function resultTabBadge(effectivePhase: string): { label: string; color: string } {
+  return QUEUED_PHASES.has(effectivePhase)
+    ? { label: "Queued", color: "var(--text-muted)" }
+    : { label: "Running", color: "var(--accent)" };
+}
+
 export interface BlastResultsTabsProps {
   active: BlastResultsTab;
   resultsPending?: boolean;
+  /**
+   * The job's effective phase, used to label the in-progress tab badge. When
+   * the phase is a queued-family phase the badge reads a calm grey "Queued"
+   * instead of the accent "Running", so it matches the header phase banner and
+   * the Job Details status dot (which both already collapse to "queued").
+   */
+  effectivePhase?: string;
 }
 
 /**
@@ -114,8 +135,16 @@ export interface BlastResultsTabsProps {
  * page reloads and we keep React Router's back/forward behaviour for
  * the in-page navigation.
  */
-export function BlastResultsTabs({ active, resultsPending = false }: BlastResultsTabsProps) {
+export function BlastResultsTabs({
+  active,
+  resultsPending = false,
+  effectivePhase = "",
+}: BlastResultsTabsProps) {
   const [searchParams] = useSearchParams();
+  // A queued job is still "active" (resultsPending), but its badge must read
+  // "Queued" in the calm grey tone rather than the accent "Running" so every
+  // surface on the page tells the same story.
+  const { label: badgeLabel, color: badgeColor } = resultTabBadge(effectivePhase);
 
   return (
     <nav
@@ -167,14 +196,14 @@ export function BlastResultsTabs({ active, resultsPending = false }: BlastResult
                   marginLeft: 2,
                   padding: "1px 5px",
                   borderRadius: 999,
-                  border: "1px solid color-mix(in srgb, var(--accent) 35%, transparent)",
-                  color: "var(--accent)",
+                  border: `1px solid color-mix(in srgb, ${badgeColor} 35%, transparent)`,
+                  color: badgeColor,
                   fontSize: 10,
                   fontWeight: 600,
                   lineHeight: 1.4,
                 }}
               >
-                Running
+                {badgeLabel}
               </span>
             )}
           </Link>

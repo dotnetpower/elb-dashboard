@@ -169,7 +169,7 @@ export function BlastResults() {
         </div>
       )}
 
-      <BlastResultsTabs active={tab} resultsPending={isRunning} />
+      <BlastResultsTabs active={tab} resultsPending={isRunning} effectivePhase={effectivePhase} />
 
       {isResultAnalyticsTab && !isRunning && job && (
         <ResultPassportCard job={job} />
