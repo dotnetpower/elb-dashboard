@@ -166,6 +166,16 @@ def test_readiness_storage_probe_is_cached_within_ttl(
     fix exists to remove.
     """
     monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    # Pin a large OK TTL for the duration of this test. The probe result is
+    # what we assert is cached; the five readiness calls must all land inside
+    # one TTL window. The other readiness components (Redis, terminal-sidecar
+    # healthz) can block up to their own multi-second timeouts on a host with
+    # no sidecar listening, which would otherwise stretch the five sequential
+    # calls past the default 15 s window and re-run the probe — a wall-clock
+    # flake unrelated to the caching behaviour under test.
+    monkeypatch.setattr(
+        "api.routes.health._STORAGE_PROBE_CACHE_TTL_OK_SECONDS", 3600.0
+    )
     call_count = 0
 
     class _CountingPager:
