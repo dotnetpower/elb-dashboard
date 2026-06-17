@@ -25,6 +25,13 @@ import yaml  # type: ignore[import-untyped]
 from azure.core.credentials import TokenCredential
 
 from api.services.azure_clients import aks_client as aks_client
+from api.services.k8s.cluster_breaker import (
+    cluster_breaker_check,
+    cluster_breaker_key,
+    cluster_breaker_record_failure,
+    cluster_breaker_record_success,
+    reset_cluster_breaker,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +73,7 @@ def reset_k8s_credential_cache() -> None:
     """Clear cached AKS kubeconfig material. Test-only."""
     with _K8S_CREDENTIAL_CACHE_LOCK:
         _K8S_CREDENTIAL_CACHE.clear()
+    reset_cluster_breaker()
 
 
 def _k8s_credential_cache_ttl() -> float:
@@ -180,6 +188,38 @@ def _build_k8s_retry() -> Any:
     )
 
 
+def _install_cluster_breaker(session: Any, breaker_key: tuple[str, str, str]) -> None:
+    """Wrap ``session.request`` so the per-cluster breaker sees every call.
+
+    All of ``session.get``/``post``/``delete`` funnel through ``Session.request``
+    (which the OpenTelemetry requests instrumentor has patched at class level).
+    Shadowing the *instance* ``request`` with this guard lets the breaker (a)
+    reject calls without touching the network — and therefore without recording
+    an App Insights exception — while it is open, and (b) trip on a real connect
+    failure and close again on the first successful answer (any HTTP status,
+    since a 4xx/5xx body still proves the API server is reachable).
+    """
+
+    import requests as _requests
+
+    real_request = session.request
+
+    def guarded_request(method: str, url: str, **kwargs: Any) -> Any:
+        cluster_breaker_check(breaker_key)
+        try:
+            response = real_request(method, url, **kwargs)
+        except _requests.exceptions.ConnectionError:
+            # ConnectTimeout subclasses ConnectionError, so this also covers
+            # connect-time timeouts. ReadTimeout (a connected-but-slow answer)
+            # is intentionally NOT counted — the cluster is reachable.
+            cluster_breaker_record_failure(breaker_key)
+            raise
+        cluster_breaker_record_success(breaker_key)
+        return response
+
+    session.request = guarded_request  # type: ignore[method-assign]
+
+
 def _get_k8s_credential_material(
     credential: TokenCredential,
     subscription_id: str,
@@ -195,17 +235,27 @@ def _get_k8s_credential_material(
     if cached is not None and cached.expires_at > now:
         return cached
 
+    breaker_key = cluster_breaker_key(subscription_id, resource_group, cluster_name)
+    cluster_breaker_check(breaker_key)
     client = aks_client(credential, subscription_id)
-    if admin:
-        creds = client.managed_clusters.list_cluster_admin_credentials(
-            resource_group,
-            cluster_name,
-        )
-    else:
-        creds = client.managed_clusters.list_cluster_user_credentials(
-            resource_group,
-            cluster_name,
-        )
+    try:
+        if admin:
+            creds = client.managed_clusters.list_cluster_admin_credentials(
+                resource_group,
+                cluster_name,
+            )
+        else:
+            creds = client.managed_clusters.list_cluster_user_credentials(
+                resource_group,
+                cluster_name,
+            )
+    except Exception:
+        # A deleted / stopped cluster makes the ARM kubeconfig fetch throw on
+        # every call. Record it so the breaker trips and short-circuits the
+        # next poll instead of re-issuing the failing ARM request. Re-raise so
+        # the existing graceful handlers degrade to empty/None unchanged.
+        cluster_breaker_record_failure(breaker_key)
+        raise
     kubeconfig_bytes = creds.kubeconfigs[0].value
     kubeconfig = yaml.safe_load(bytes(kubeconfig_bytes))
 
@@ -253,7 +303,14 @@ def _get_k8s_session(
     import requests as _requests
 
     pool_key = (subscription_id, resource_group, cluster_name, admin)
+    breaker_key = cluster_breaker_key(subscription_id, resource_group, cluster_name)
     now = time.monotonic()
+
+    # Skip the pooled fast path too when the breaker is open: a cluster that
+    # just went down may still have a cached session whose every GET would
+    # connect-fail and record an App Insights exception. Raising here short-
+    # circuits before any network call.
+    cluster_breaker_check(breaker_key)
 
     # Fast path — fresh pooled entry.
     with _K8S_SESSION_POOL_LOCK:
@@ -290,6 +347,7 @@ def _get_k8s_session(
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
+    _install_cluster_breaker(session, breaker_key)
     temp_files: list[str] = []
 
     def write_secret_file(suffix: str, content: bytes) -> str:
@@ -449,6 +507,7 @@ def _retire_entry(entry: _K8sSessionEntry) -> None:
 
 def reset_k8s_session_pool() -> None:
     """Drop all pooled K8s sessions. Test-only — production code never needs this."""
+    reset_cluster_breaker()
     with _K8S_SESSION_POOL_LOCK:
         entries = list(_K8S_SESSION_POOL.values())
         _K8S_SESSION_POOL.clear()
