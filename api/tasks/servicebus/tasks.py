@@ -405,7 +405,7 @@ def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[st
         database=str(payload.get("db") or ""),
         options=payload.get("options"),
         caller_supplied_searchsp=_caller_supplied_searchsp(body),
-        allow_calibration_downgrade=True,
+        allow_servicebus_downgrade=True,
     )
     payload["options"] = plan.options
     payload.update(

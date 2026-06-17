@@ -225,6 +225,7 @@ def submit_contracts(body: dict[str, Any]) -> dict[str, Any]:
             database=str(body.get("database") or body.get("db") or "").strip(),
         ),
         caller_supplied_searchsp=_caller_supplied_searchsp(body),
+        allow_servicebus_downgrade=str(body.get("submission_source") or "") == "servicebus",
     )
     precision = dict(plan.precision)
     compatibility = dict(plan.compatibility_contract)
@@ -252,7 +253,7 @@ def resolve_sharding_plan(
     database: str,
     options: dict[str, Any] | None,
     caller_supplied_searchsp: int | None,
-    allow_calibration_downgrade: bool = True,
+    allow_servicebus_downgrade: bool = False,
 ) -> PrecisionPlan:
     """Resolve one canonical sharding/search-space plan for every submit surface."""
     from api.services.blast.compatibility import build_compatibility_contract
@@ -282,6 +283,12 @@ def resolve_sharding_plan(
         resolved.get("db_effective_search_space")
     ) or additional_searchsp
     snapshot_error = _calibration_snapshot_error(verified_default, resolved)
+    # A snapshot drift (the live DB's stats no longer match the pinned Web BLAST
+    # calibration) is not a caller error — the operator just re-downloaded a
+    # newer DB snapshot. It degrades gracefully on EVERY submit surface (browser
+    # New Search included), unlike an explicit bad override or an uncalibrated
+    # database, which keep blocking unless the Service Bus bridge asked to downgrade.
+    snapshot_drift = False
 
     if verified_default is not None:
         if explicit_searchsp is None:
@@ -293,6 +300,7 @@ def resolve_sharding_plan(
         else:
             if snapshot_error is not None:
                 validated_errors.append(snapshot_error)
+                snapshot_drift = True
             elif explicit_searchsp != verified_default.value:
                 validated_errors.append(
                     "caller-supplied db_effective_search_space does not match the "
@@ -305,15 +313,16 @@ def resolve_sharding_plan(
             "caller-supplied db_effective_search_space requires a calibrated database snapshot"
         )
 
-    if validated_errors and allow_calibration_downgrade:
+    if validated_errors and (allow_servicebus_downgrade or snapshot_drift):
         # The caller's verified Web BLAST search space does not apply to the
         # live database snapshot (the DB drifted from the calibration, or the
         # supplied value/snapshot does not match). Rather than hard-blocking the
         # submit, drop the calibrated search space so BLAST computes its own,
         # fall back from precise sharding (which requires the calibrated value)
         # to approximate when the output format can be merged across shards, and
-        # surface a warning. Every submit surface (browser New Search and the
-        # Service-Bus bridge alike) degrades identically.
+        # surface a warning. A snapshot drift degrades on every surface; an
+        # explicit bad override / uncalibrated DB only degrades for the Service
+        # Bus bridge.
         resolved.pop("db_effective_search_space", None)
         can_downgrade = True
         if requested_mode == "precise":
@@ -330,7 +339,6 @@ def resolve_sharding_plan(
                 # blocking error rather than silently producing a bad run.
                 can_downgrade = False
         if can_downgrade:
-            resolved["sharding_mode"] = resolved.get("sharding_mode", requested_mode)
             downgraded = True
             downgrade_reason = (
                 "verified Web BLAST search-space calibration does not match this "
@@ -380,6 +388,7 @@ def _canonical_options_from_body(body: dict[str, Any], *, database: str) -> dict
         database=database,
         options=options,
         caller_supplied_searchsp=_caller_supplied_searchsp(body),
+        allow_servicebus_downgrade=str(body.get("submission_source") or "") == "servicebus",
     )
     return plan.options
 

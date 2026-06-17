@@ -219,6 +219,49 @@ def test_ui_openapi_and_servicebus_precise_contracts_converge() -> None:
     assert servicebus_contracts["compatibility_contract"]["searchsp"] == expected_searchsp
 
 
+def test_browser_submit_degrades_on_calibration_snapshot_mismatch() -> None:
+    """A browser New Search submit whose live core_nt stats no longer match the
+    pinned Web BLAST calibration must degrade gracefully instead of hard-blocking.
+
+    Regression for the New Search 'caller-supplied db_effective_search_space does
+    not match the calibrated database snapshot' submission failure: the live
+    core_nt DB drifted from the 2026-05-09 calibration snapshot, so the calibrated
+    search space no longer applies. Every submit surface (browser included, not
+    just the Service Bus bridge) now drops the calibrated value, falls back from
+    precise to approximate sharding, and surfaces a warning rather than a 4xx.
+    """
+    body = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": ">q1\nATGCATGCATGC\n",
+        # No submission_source → browser New Search path (not "servicebus").
+        "options": {
+            "outfmt": 5,
+            "sharding_mode": "precise",
+            # The pinned, verified calibrated search space …
+            "db_effective_search_space": 32_156_241_807_668,
+            # … but the live DB drifted from the 2026-05-09 snapshot
+            # (calibrated_db_len = 1_041_443_571_674).
+            "db_total_letters": 1_041_443_571_675,
+        },
+    }
+
+    contracts = submit_contracts(body)
+
+    # Not blocked — the calibration mismatch degrades instead of failing.
+    assert contracts["compatibility_contract"].get("blocking_errors", []) == []
+    assert contracts["precision"].get("blocking_errors", []) == []
+    # Warned about the degrade.
+    warnings = contracts["compatibility_contract"].get("warnings", [])
+    assert any(
+        "calibration" in str(w).lower() or "search space" in str(w).lower() for w in warnings
+    ), warnings
+    # Canonical options dropped the calibrated searchsp and fell back to approximate.
+    opts = canonical_execution_config(body)["options"]
+    assert "db_effective_search_space" not in opts
+    assert opts["sharding_mode"] == "approximate"
+
+
 def test_web_blast_searchsp_default_applies_for_core_nt() -> None:
     options: dict[str, object] = {}
 
