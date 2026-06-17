@@ -20,10 +20,13 @@ Validation: `uv run pytest -q api/tests/test_cluster_breaker.py`.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
+
+LOGGER = logging.getLogger(__name__)
 
 # Trip the breaker after this many consecutive connect/DNS failures (each k8s
 # session GET is already retried once by urllib3, so two failures past that
@@ -136,8 +139,17 @@ def cluster_breaker_record_failure(key: tuple[str, str, str]) -> None:
     with _BREAKER_LOCK:
         state = _BREAKER.setdefault(key, _BreakerState())
         state.fail_count += 1
+        tripped = state.fail_count >= threshold and not state.open_until
         if state.fail_count >= threshold:
             state.open_until = time.monotonic() + _cooldown_seconds()
+    if tripped:
+        # One log per trip (not per poll) so a down cluster is visible without
+        # the flood the breaker exists to prevent.
+        LOGGER.info(
+            "cluster_breaker: opened for cluster %r after %d connect failures",
+            key[2],
+            threshold,
+        )
 
 
 def cluster_breaker_record_success(key: tuple[str, str, str]) -> None:
