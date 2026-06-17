@@ -36,6 +36,37 @@ def test_masks_account_key() -> None:
     assert "<redacted>" in out
 
 
+def test_preserves_dna_fasta_sequence() -> None:
+    # A query FASTA nucleotide line is a long run of pure A-Z letters with no
+    # digits. It is user content, not a secret, and must NOT be collapsed into
+    # ``<base64-redacted>`` (regression: Service Bus playground peek view).
+    seq = (
+        "AAATTGAAGAGTTTGATCATGGCTCAGATTGAACGCTGGCGGCAGGCCTAACACATGCAA"
+        "GTCGAACGGTAACAGGAAGAAGCTTGCTTCTTTGCTGACGAGTGGCGGAC"
+    )
+    out = sanitise(seq, mask_subscription_ids=False)
+    assert out == seq
+    assert "base64-redacted" not in out
+
+
+def test_preserves_protein_fasta_sequence() -> None:
+    # Amino-acid sequences are uppercase letters only (20-symbol alphabet) and
+    # must also survive sanitisation untouched.
+    seq = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKR"
+    out = sanitise(seq, mask_subscription_ids=False)
+    assert out == seq
+    assert "base64-redacted" not in out
+
+
+def test_still_masks_base64_blob_with_digits() -> None:
+    # A genuine base64 blob (random key/token bytes) contains digits, so the
+    # generic backstop must still redact it.
+    blob = "aB3xK9mP2qR7sT4uV6wX8yZ0cD1eF5gH3jL7nO9pQ2rS4tU6vW8xY0zA1bC2dE4"
+    out = sanitise(blob, mask_subscription_ids=False)
+    assert "<base64-redacted>" in out
+    assert blob not in out
+
+
 def test_masks_guids_when_requested() -> None:
     text = "subscription 11111111-2222-3333-4444-555555555555 ok"
     masked = sanitise(text, mask_subscription_ids=True)

@@ -24,8 +24,16 @@ _AZURE_KEY_RE = re.compile(
 _GUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
-# Base64 blobs (≥40 chars, common in Azure keys/tokens)
-_BASE64_BLOB_RE = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])")
+# Base64 blobs (≥40 chars, common in Azure keys/tokens). The lookahead
+# ``(?=[A-Za-z0-9+/]*[0-9+/])`` requires at least one digit or ``+``/``/`` in
+# the run, so long DNA / protein FASTA sequences (pure A-Z letters, no digits)
+# are NOT mistaken for secrets and collapsed into ``<base64-redacted>``.
+# Random base64-encoded keys/tokens essentially always contain digits, so this
+# keeps the secret-masking intent intact while leaving biological sequences
+# (e.g. a query FASTA shown in the Service Bus playground) untouched.
+_BASE64_BLOB_RE = re.compile(
+    r"(?<![A-Za-z0-9+/=])(?=[A-Za-z0-9+/]*[0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"
+)
 # Connection strings (e.g. DefaultEndpointsProtocol=...)
 _CONN_STR_RE = re.compile(r"(?i)DefaultEndpointsProtocol=[^\s;]+(?:;[^\s;]+){2,}")
 # Password / secret values after common keys

@@ -308,14 +308,17 @@ def test_run_truncates_stdout_above_cap(
     # env override applies even though the server thread is already running.
     monkeypatch.setenv("EXEC_RUN_MAX_OUTPUT_BYTES", str(64 * 1024))
 
-    # Build the 64-A line once (single ``tr`` spawn) then echo it 4096 times
-    # with the shell builtin ``printf``. The previous form spawned a
+    # Build the 64-char line once (single ``tr`` spawn) then echo it 4096
+    # times with the shell builtin ``printf``. The previous form spawned a
     # ``printf | tr`` pipeline per iteration (~8192 processes), which made
-    # the child time-sensitive and flaky under the parallel suite.
+    # the child time-sensitive and flaky under the parallel suite. The
+    # trailing ``1`` makes each line look like a base64 blob (digit present)
+    # so the api-side sanitizer still collapses it to ``<base64-redacted>``
+    # — a pure-letter line would be left intact (it is not a secret).
     _install_stub(
         tmp_path,
         "az",
-        '#!/bin/bash\nline=$(printf "%64s" "" | tr " " "A")\n'
+        '#!/bin/bash\nline=$(printf "%63s" "" | tr " " "A")1\n'
         'for i in $(seq 1 4096); do printf "%s\\n" "$line"; done\n',
     )
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
