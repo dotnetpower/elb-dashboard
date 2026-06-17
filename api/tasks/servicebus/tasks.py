@@ -24,7 +24,10 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     topic does not flood. A caller-supplied ``request_id`` pass-through value on
     a request message is captured at drain time and echoed onto every published
     transition event (body + topic envelope) so a topic subscriber correlates on
-    the same value the producer set.
+    the same value the producer set. A succeeded transition event additionally
+    carries ``result_files`` (per-file metadata + a dashboard ``download_url``
+    for the authenticated streaming gateway — pointers only, never a SAS URL or
+    result bytes; charter §9).
 Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py``.
 """
 
@@ -120,6 +123,55 @@ def _result_ref(openapi_job_id: str) -> dict[str, str]:
     }
 
 
+# Cap the number of result-file download links embedded on a single completion
+# event so a job that produced an unexpectedly large file list cannot bloat the
+# topic message past the Service Bus size limit. A subscriber that needs more
+# can still enumerate every file via ``result_ref.api``.
+_MAX_RESULT_FILES = 25
+
+
+def _result_files_for_event(
+    job: dict[str, Any], openapi_job_id: str
+) -> list[dict[str, Any]]:
+    """Build the succeeded event's ``result_files`` with concrete download URLs.
+
+    Each entry carries the file metadata plus a ``download_url`` pointing at the
+    dashboard's authenticated file-streaming gateway
+    (``GET /api/v1/elastic-blast/jobs/{job_id}/files/{file_id}``). The URL is the
+    dashboard's own public base (resolved from the operator setting / Container
+    Apps FQDN), NOT a Storage SAS — a subscriber downloads by calling it with a
+    bearer token and the ``api`` sidecar streams the bytes (charter §9: never
+    hand a SAS / direct Storage URL to a consumer). When the dashboard public
+    URL cannot be resolved the metadata is still emitted but ``download_url`` is
+    omitted so a subscriber can fall back to ``result_ref``.
+    """
+    from api.services.blast.external_job_projection import _external_result_files
+    from api.services.control_plane_url import resolve_control_plane_url
+
+    files = _external_result_files(job)
+    if not files:
+        return []
+    base, _source = resolve_control_plane_url()
+    base = base.rstrip("/")
+    out: list[dict[str, Any]] = []
+    for item in files[:_MAX_RESULT_FILES]:
+        file_id = str(item.get("file_id") or "")
+        if not file_id:
+            continue
+        entry: dict[str, Any] = {
+            "file_id": file_id,
+            "name": item.get("name"),
+            "format": item.get("format"),
+            "size": item.get("size"),
+        }
+        if base:
+            entry["download_url"] = (
+                f"{base}/api/v1/elastic-blast/jobs/{openapi_job_id}/files/{file_id}"
+            )
+        out.append(entry)
+    return out
+
+
 # Bound the pass-through value so a hostile/oversized producer value cannot bloat
 # the topic message envelope (Service Bus caps total application-property size).
 _REQUEST_ID_MAX_LEN = 256
@@ -168,6 +220,7 @@ def _transition_event(
     attempt: int,
     error_code: str | None = None,
     request_id: str = "",
+    result_files: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a completion-topic ``blast.transition`` event with idempotency keys.
 
@@ -179,9 +232,12 @@ def _transition_event(
     ``publish_transitions``); it is kept in the schema for stability and for the
     explicit ``attempt=1`` timeout-failure event. ``result_ref`` points at the
     dashboard result API (pointers only — never result bytes; charter §9).
-    ``request_id`` is the caller-supplied pass-through value from the request
-    queue message; it is echoed onto the event (and the topic envelope) only
-    when the producer set one, so a subscriber correlates on the SAME value.
+    ``result_files`` (succeeded events only) carries the per-file metadata plus a
+    concrete ``download_url`` for the dashboard's authenticated streaming gateway
+    so a subscriber can download results directly — still pointers, never bytes
+    or SAS URLs. ``request_id`` is the caller-supplied pass-through value from the
+    request queue message; it is echoed onto the event (and the topic envelope)
+    only when the producer set one, so a subscriber correlates on the SAME value.
     It is NOT part of the ``event_id`` digest — it is constant per correlation
     id, so including it would not change dedup semantics.
     """
@@ -195,6 +251,8 @@ def _transition_event(
         "ts": _now_iso(),
         "result_ref": _result_ref(openapi_job_id),
     }
+    if result_files is not None:
+        event["result_files"] = result_files
     if request_id:
         event["request_id"] = request_id
     if error_code:
@@ -730,6 +788,20 @@ def _publish_one_bridge(
     if status == _STATUS_FAILED:
         err = job.get("error") if isinstance(job.get("error"), dict) else {}
         error_code = str((err or {}).get("code") or "failed")
+    # On a succeeded transition, attach the result-file download links so a
+    # topic subscriber can pull the results directly (via the dashboard's
+    # authenticated streaming gateway — never a SAS URL). Best-effort: if the
+    # sibling has not listed files yet the list is empty and the subscriber
+    # falls back to ``result_ref``.
+    result_files: list[dict[str, Any]] | None = None
+    if status == _STATUS_SUCCEEDED:
+        try:
+            result_files = _result_files_for_event(job, rec.openapi_job_id)
+        except Exception:
+            LOGGER.debug(
+                "result-file link build failed corr=%s", rec.correlation_id, exc_info=True
+            )
+            result_files = []
     event = _transition_event(
         correlation_id=rec.correlation_id,
         openapi_job_id=rec.openapi_job_id,
@@ -737,6 +809,7 @@ def _publish_one_bridge(
         attempt=attempt,
         error_code=error_code,
         request_id=rec.request_id,
+        result_files=result_files,
     )
     try:
         service_bus.publish_event(cfg, event)

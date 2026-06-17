@@ -585,6 +585,131 @@ def test_transition_event_includes_request_id_when_present() -> None:
     assert ev["event_id"] == sb_tasks._event_id("corr-r", "running")
 
 
+def _job_with_files() -> dict:
+    """A sibling job detail carrying two normalisable result files."""
+    return {
+        "status": "completed",
+        "result": {
+            "files": [
+                {
+                    "file_id": "merged_results.out.gz",
+                    "filename": "merged_results.out.gz",
+                    "format": "blast_tabular",
+                    "size_bytes": 12345,
+                },
+                {
+                    "file_id": "metadata.json",
+                    "filename": "metadata.json",
+                    "format": "unknown",
+                    "size_bytes": 678,
+                },
+            ]
+        },
+    }
+
+
+def test_result_files_for_event_builds_download_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import control_plane_url
+
+    monkeypatch.setattr(
+        control_plane_url,
+        "resolve_control_plane_url",
+        lambda: ("https://ca-elb-dashboard.example.com", "container_app"),
+    )
+    files = sb_tasks._result_files_for_event(_job_with_files(), "op-7")
+    assert len(files) == 2
+    first = files[0]
+    assert first["file_id"] == "merged_results.out.gz"
+    assert first["name"] == "merged_results.out.gz"
+    assert first["format"] == "blast_tabular"
+    assert first["size"] == 12345
+    # download_url targets the dashboard's authenticated streaming gateway, NOT
+    # a Storage SAS URL (charter §9).
+    assert first["download_url"] == (
+        "https://ca-elb-dashboard.example.com"
+        "/api/v1/elastic-blast/jobs/op-7/files/merged_results.out.gz"
+    )
+    assert "blob.core.windows.net" not in first["download_url"]
+    assert "sig=" not in first["download_url"]
+
+
+def test_result_files_for_event_omits_url_when_base_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import control_plane_url
+
+    monkeypatch.setattr(
+        control_plane_url, "resolve_control_plane_url", lambda: ("", "none")
+    )
+    files = sb_tasks._result_files_for_event(_job_with_files(), "op-8")
+    assert len(files) == 2
+    # No public base → metadata still emitted, download_url omitted so the
+    # subscriber falls back to result_ref.
+    assert "download_url" not in files[0]
+    assert files[0]["file_id"] == "merged_results.out.gz"
+
+
+def test_result_files_for_event_empty_when_no_files() -> None:
+    assert sb_tasks._result_files_for_event({"status": "completed"}, "op-9") == []
+
+
+def test_transition_event_includes_result_files_when_supplied() -> None:
+    files = [{"file_id": "f1", "download_url": "https://d/x"}]
+    ev = sb_tasks._transition_event(
+        correlation_id="corr-rf",
+        openapi_job_id="op-rf",
+        status="succeeded",
+        attempt=1,
+        result_files=files,
+    )
+    assert ev["result_files"] == files
+    # result_files must NOT change the dedup digest.
+    assert ev["event_id"] == sb_tasks._event_id("corr-rf", "succeeded")
+
+
+def test_transition_event_omits_result_files_when_none() -> None:
+    ev = sb_tasks._transition_event(
+        correlation_id="corr-x",
+        openapi_job_id="op-x",
+        status="running",
+        attempt=1,
+    )
+    assert "result_files" not in ev
+
+
+def test_publish_transitions_succeeded_attaches_download_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A succeeded transition carries result_files with download URLs."""
+    _enable(monkeypatch)
+    from api.services import control_plane_url
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-dl", openapi_job_id="op-dl", last_status="running"
+        )
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
+    monkeypatch.setattr(external_blast, "get_job", lambda jid, **k: _job_with_files())
+    monkeypatch.setattr(
+        control_plane_url,
+        "resolve_control_plane_url",
+        lambda: ("https://ca-elb-dashboard.example.com", "container_app"),
+    )
+
+    out = sb_tasks.publish_transitions()
+    assert out["finished"] == 1
+    assert events[0]["status"] == "succeeded"
+    files = events[0]["result_files"]
+    assert files[0]["download_url"].endswith(
+        "/api/v1/elastic-blast/jobs/op-dl/files/merged_results.out.gz"
+    )
+
+
 def test_drain_propagates_request_id_to_bridge_and_queued_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
