@@ -1094,27 +1094,51 @@ def stream_file(
     resource_group: str = "",
     cluster_name: str = "",
 ) -> StreamedFile:
-    client = httpx.Client(
-        base_url=_base_url(
-            base_url,
-            subscription_id=subscription_id,
-            resource_group=resource_group,
-            cluster_name=cluster_name,
-        ),
-        timeout=_STREAM_TIMEOUT,
-        headers=_headers(
-            api_token=api_token,
-            subscription_id=subscription_id,
-            resource_group=resource_group,
-            cluster_name=cluster_name,
-        ),
+    resolved_base = _base_url(
+        base_url,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
     )
-    try:
-        request = client.build_request(
-            "GET",
-            f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}/files/{_path_segment(file_id)}",
+    target_path = (
+        f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}/files/{_path_segment(file_id)}"
+    )
+
+    def _open(token_override: str | None) -> tuple[httpx.Client, httpx.Response]:
+        client = httpx.Client(
+            base_url=resolved_base,
+            timeout=_STREAM_TIMEOUT,
+            headers=_headers(
+                api_token=token_override,
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+            ),
         )
-        resp = client.send(request, stream=True)
+        request = client.build_request("GET", target_path)
+        return client, client.send(request, stream=True)
+
+    try:
+        client, resp = _open(api_token)
+        # Self-heal a stale-token 401 exactly once — same failure mode and
+        # recovery as `_request_with_token_resync` (a control-plane redeploy or
+        # cluster restart wipes the dashboard's ephemeral token cache while the
+        # elb-openapi pod keeps its minted token). Without this, the Service-Bus
+        # completion `download_url` and the Results "download" button surface a
+        # spurious 401 after every redeploy/restart. Streaming responses can't be
+        # retried in place, so close and reopen with the recovered token.
+        if resp.status_code == 401:
+            resp.close()
+            client.close()
+            healed = _resync_token_after_401()
+            if healed:
+                LOGGER.warning(
+                    "openapi stream_file returned 401 — token resynced from cluster; retrying once",
+                    extra={"event": "openapi_token_resync_retry"},
+                )
+                client, resp = _open(healed)
+            else:
+                client, resp = _open(api_token)
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
         client.close()

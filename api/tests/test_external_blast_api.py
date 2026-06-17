@@ -215,6 +215,85 @@ def test_request_with_token_resync_passthrough_on_success(monkeypatch):
     assert resynced == []  # resync never attempted on success
 
 
+def test_stream_file_resyncs_token_on_401(monkeypatch):
+    """A stale-token 401 on the file download self-heals: resync + retry once, then stream.
+
+    Reproduces the Service-Bus completion ``download_url`` failure after a
+    control-plane redeploy / cluster restart — ``stream_file`` must recover the
+    same way every other sibling call (``_request_with_token_resync``) does.
+    """
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "_base_url", lambda *a, **k: "http://sibling.invalid")
+    monkeypatch.setattr(
+        external_blast,
+        "_headers",
+        lambda **k: {"X-ELB-API-Token": (k.get("api_token") or "")},
+    )
+    monkeypatch.setattr(external_blast, "_resync_token_after_401", lambda: "healed-token")
+
+    calls = {"n": 0, "tokens": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        calls["tokens"].append(request.headers.get("x-elb-api-token", ""))
+        if calls["n"] == 1:
+            return httpx.Response(401, json={"detail": "missing or invalid X-ELB-API-Token"})
+        return httpx.Response(
+            200,
+            content=b"BLAST-XML-RESULT-BYTES",
+            headers={
+                "content-type": "application/gzip",
+                "content-disposition": 'attachment; filename="r.out.gz"',
+            },
+        )
+
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(external_blast.httpx, "Client", client_factory)
+
+    out = external_blast.stream_file("job123", "result-001", api_token=None)
+    body = b"".join(out.chunks)
+    assert body == b"BLAST-XML-RESULT-BYTES"
+    assert calls["n"] == 2  # original 401 + one retry
+    assert calls["tokens"][1] == "healed-token"  # retry carried the recovered token
+    assert out.filename == "r.out.gz"
+
+
+def test_stream_file_surfaces_401_when_no_token_recovered(monkeypatch):
+    """When no live token can be recovered, the file download surfaces the 401."""
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "_base_url", lambda *a, **k: "http://sibling.invalid")
+    monkeypatch.setattr(external_blast, "_headers", lambda **k: {})
+    monkeypatch.setattr(external_blast, "_resync_token_after_401", lambda: "")
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(401, json={"detail": "missing or invalid X-ELB-API-Token"})
+
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(external_blast.httpx, "Client", client_factory)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.stream_file("job123", "result-001", api_token=None)
+    assert raised.value.status_code == 401
+    # original + one reopen with the original token (no healed token to retry with)
+    assert calls["n"] == 2
+
+
+
 def test_token_resync_coalesces_concurrent_callers(monkeypatch):
     """A burst of 401s must NOT each fire an independent cluster read — the
     coalescing cache serves the just-recovered token to the queued callers."""
