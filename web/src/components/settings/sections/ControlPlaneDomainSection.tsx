@@ -12,8 +12,8 @@
  * the Container App (custom hostname + managed cert + DNS records) is a separate
  * Azure operation — see docs/operate for the `az containerapp hostname` steps.
  */
-import { useCallback, useEffect, useState } from "react";
-import { Globe2, Loader2, RefreshCw, Save, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Copy, Globe2, Loader2, RefreshCw, Save, Trash2 } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import {
@@ -23,6 +23,42 @@ import {
 } from "@/api/settings";
 import { type ResourceConfig } from "@/components/SetupWizard";
 import { Badge, Field, Group, Row, Section, StatusLine } from "@/components/settings/primitives";
+import { azureClientId } from "@/config/runtime";
+import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
+
+const codeBlockStyle: React.CSSProperties = {
+  margin: 0,
+  padding: "10px 12px",
+  borderRadius: 6,
+  border: "1px solid var(--border-weak)",
+  background: "var(--bg-tertiary)",
+  color: "var(--text-secondary)",
+  fontSize: 11,
+  lineHeight: 1.6,
+  whiteSpace: "pre",
+  overflowX: "auto",
+};
+
+/**
+ * Build the one-shot `az` command that appends the bound dashboard domain to
+ * the MSAL app registration's SPA redirect URIs. Without this the interactive
+ * sign-in at the custom domain fails with `AADSTS50011` (redirect URI
+ * mismatch). The command reads the current list and only appends when missing,
+ * so it is safe to re-run.
+ */
+function buildRedirectUriCommand(clientId: string, domain: string): string {
+  const app = clientId || "<APP_CLIENT_ID>";
+  return [
+    `# Add ${domain} to the MSAL app's SPA redirect URIs (fixes AADSTS50011 on login).`,
+    `# Requires the Application Administrator (or Owner) role on the app registration.`,
+    `APP=${app}`,
+    `DOMAIN=${domain}`,
+    `OID=$(az ad app show --id "$APP" --query id -o tsv)`,
+    `CUR=$(az ad app show --id "$APP" --query spa.redirectUris -o json)`,
+    `BODY=$(DOMAIN="$DOMAIN" CUR="$CUR" python3 -c 'import json,os;u=json.loads(os.environ["CUR"]);d=os.environ["DOMAIN"];u=u if d in u else u+[d];print(json.dumps({"spa":{"redirectUris":u}}))')`,
+    `az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$OID" --headers Content-Type=application/json --body "$BODY"`,
+  ].join("\n");
+}
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
@@ -98,6 +134,7 @@ export function ControlPlaneDomainSection({ config }: { config: ResourceConfig |
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const { copied, copyText } = useClipboardFeedback();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -164,6 +201,13 @@ export function ControlPlaneDomainSection({ config }: { config: ResourceConfig |
 
   const busy = saving || clearing;
   const envPinned = status?.source === "env";
+  // The bound custom domain (origin) that browsers actually load. Login must be
+  // registered against this exact origin on the app registration.
+  const boundDomain = (status?.configured_url || "").replace(/\/+$/, "");
+  const redirectCommand = useMemo(
+    () => (boundDomain ? buildRedirectUriCommand(azureClientId(), boundDomain) : ""),
+    [boundDomain],
+  );
 
   return (
     <Section heading="Control plane domain">
@@ -173,7 +217,9 @@ export function ControlPlaneDomainSection({ config }: { config: ResourceConfig |
           control plane. The ElasticBLAST OpenAPI service webhooks back to this URL, so the
           next OpenAPI deploy uses it instead of the auto-generated
           <code> *.azurecontainerapps.io</code> FQDN. Binding the domain to the Container App
-          (hostname + managed certificate + DNS records) is a separate one-time Azure step.
+          (hostname + managed certificate + DNS records) is a separate one-time Azure step,
+          and the domain must also be registered as a SPA redirect URI on the app registration
+          (command below) so interactive sign-in works.
         </StatusLine>
 
         {envPinned && (
@@ -219,14 +265,49 @@ export function ControlPlaneDomainSection({ config }: { config: ResourceConfig |
         />
 
         {status?.container_app_url && status.source !== "container_app" && (
-          <Row
-            label="Fallback (FQDN)"
-            control={
-              <code style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                {status.container_app_url}
-              </code>
-            }
-          />
+          <div style={{ padding: "14px 0", borderBottom: "1px solid var(--border-weak)" }}>
+            <div style={{ fontSize: 13, color: "var(--text-primary)", marginBottom: 4 }}>
+              Fallback (FQDN)
+            </div>
+            <code
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                wordBreak: "break-all",
+                lineHeight: 1.5,
+              }}
+            >
+              {status.container_app_url}
+            </code>
+          </div>
+        )}
+
+        {boundDomain && (
+          <Field
+            label="MSAL redirect URI (required for login)"
+            hint="Binding the domain to the Container App is not enough: the same origin must also be a SPA redirect URI on the app registration, or interactive sign-in fails with AADSTS50011. Run this once — it appends the domain only if missing, so it is safe to re-run."
+          >
+            <div style={{ position: "relative" }}>
+              <pre style={codeBlockStyle}>{redirectCommand}</pre>
+              <button
+                type="button"
+                onClick={() => copyText(redirectCommand, "redirect-cmd")}
+                title="Copy command"
+                aria-label="Copy command"
+                style={{
+                  ...buttonStyle,
+                  position: "absolute",
+                  top: 6,
+                  right: 6,
+                  padding: "4px 8px",
+                  fontSize: 11,
+                }}
+              >
+                {copied === "redirect-cmd" ? <Check size={12} /> : <Copy size={12} />}
+                {copied === "redirect-cmd" ? "Copied" : "Copy"}
+              </button>
+            </div>
+          </Field>
         )}
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", paddingTop: 4 }}>
