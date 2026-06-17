@@ -82,6 +82,13 @@ def resolve_elastic_blast_job_id(payload: dict[str, Any] | None) -> str:
                         candidates.append(k8s.get("job_id"))
     external = payload.get("external")
     if isinstance(external, dict):
+        # The sibling /v1/jobs row (stored under ``payload.external``) now
+        # exposes the elastic-blast job id directly as ``elb_job_id`` once it
+        # has discovered it from the submit output. This is the ONLY way the
+        # dashboard can map an OpenAPI/Service Bus job to its in-cluster BLAST
+        # pods (it never ran ``elastic-blast submit`` itself), so without it
+        # live pod-log streaming for external jobs is impossible.
+        candidates.append(external.get("elb_job_id"))
         k8s = external.get("k8s")
         if isinstance(k8s, dict):
             candidates.append(k8s.get("job_id"))

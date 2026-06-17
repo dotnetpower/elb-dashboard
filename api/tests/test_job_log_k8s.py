@@ -248,6 +248,15 @@ def test_resolve_elastic_blast_job_id_falls_back_to_external_k8s() -> None:
     assert k8s.resolve_elastic_blast_job_id(payload) == "job-eee555"
 
 
+def test_resolve_elastic_blast_job_id_reads_external_elb_job_id() -> None:
+    # The sibling /v1/jobs row exposes the elastic-blast job id directly as
+    # ``external.elb_job_id`` (the dashboard stores the row under
+    # ``payload.external``). This is what enables live pod-log streaming for
+    # external / Service Bus jobs.
+    payload = {"external": {"elb_job_id": "job-fff666", "submission_source": "servicebus"}}
+    assert k8s.resolve_elastic_blast_job_id(payload) == "job-fff666"
+
+
 def test_resolve_elastic_blast_job_id_returns_empty_when_missing() -> None:
     assert k8s.resolve_elastic_blast_job_id(None) == ""
     assert k8s.resolve_elastic_blast_job_id({}) == ""
