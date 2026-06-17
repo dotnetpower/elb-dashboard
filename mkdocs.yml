@@ -129,6 +129,7 @@ nav:
           - Storage Isolation & Proxy: architecture/storage-contract.md
           - Authentication: architecture/authentication.md
           - Service Bus BLAST Integration: architecture/service-bus-integration.md
+          - Service Bus Examples: architecture/service-bus-examples.md
           - Diagnostics (Reliability & Availability): architecture/diagnostics.md
       - Research Notes:
           - BLAST SearchSP Discovery: research/blast-searchsp-discovery.md
