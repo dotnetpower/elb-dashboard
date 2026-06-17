@@ -176,7 +176,7 @@ export function dbChipVisibleStatusMessage(
     return `${db.name}: ${phase} DB cache (${progress}${remaining})${message ? ` - ${message}` : ""}.`;
   }
   if (isStale) {
-    return `${db.name}: warm cache is stale and should be refreshed before sharded throughput runs.`;
+    return `${db.name}: node-local warm cache was cleared by a cluster stop or scale — re-warm to restore the fast sharded path.`;
   }
   if (isFailed && w) {
     return `${db.name}: warmup failed on ${w.nodes_failed}/${w.total_jobs} nodes.`;
@@ -222,8 +222,11 @@ function DbChipNode({
     StageIcon = Loader2;
   } else if (isStale) {
     const count = db.warmSourceVersions.length;
-    stageLabel = count > 1 ? `warm stale · ${count} versions` : "warm stale";
-    stageVariant = "warn";
+    stageLabel = count > 1 ? `re-warm needed · ${count} versions` : "re-warm needed";
+    // Accent (warming-lifecycle) tone, not the orange warn tone: a stale warm
+    // cache is a normal "needs warming again" step after a cluster stop/scale,
+    // not a failure. No spinner — it is queued/needed, not actively running.
+    stageVariant = "loading";
     StageIcon = Flame;
   } else if (isReady) {
     stageLabel = `ready · ${w!.nodes_ready}/${w!.total_jobs}`;

@@ -48,7 +48,7 @@ describe("dbChipVisibleStatusMessage", () => {
     };
 
     expect(dbChipVisibleStatusMessage(db, null)).toBe(
-      "core_nt: warm cache is stale and should be refreshed before sharded throughput runs.",
+      "core_nt: node-local warm cache was cleared by a cluster stop or scale — re-warm to restore the fast sharded path.",
     );
   });
 });
