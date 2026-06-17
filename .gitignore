@@ -249,6 +249,7 @@ coverage/
 .vitest-cache/
 web/playwright-report/
 web/test-results/
+e2e_out/
 .logs/
 
 # OS

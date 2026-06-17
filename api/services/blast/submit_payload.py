@@ -225,7 +225,6 @@ def submit_contracts(body: dict[str, Any]) -> dict[str, Any]:
             database=str(body.get("database") or body.get("db") or "").strip(),
         ),
         caller_supplied_searchsp=_caller_supplied_searchsp(body),
-        allow_servicebus_downgrade=str(body.get("submission_source") or "") == "servicebus",
     )
     precision = dict(plan.precision)
     compatibility = dict(plan.compatibility_contract)
@@ -253,7 +252,7 @@ def resolve_sharding_plan(
     database: str,
     options: dict[str, Any] | None,
     caller_supplied_searchsp: int | None,
-    allow_servicebus_downgrade: bool = False,
+    allow_calibration_downgrade: bool = True,
 ) -> PrecisionPlan:
     """Resolve one canonical sharding/search-space plan for every submit surface."""
     from api.services.blast.compatibility import build_compatibility_contract
@@ -306,8 +305,17 @@ def resolve_sharding_plan(
             "caller-supplied db_effective_search_space requires a calibrated database snapshot"
         )
 
-    if validated_errors and allow_servicebus_downgrade:
+    if validated_errors and allow_calibration_downgrade:
+        # The caller's verified Web BLAST search space does not apply to the
+        # live database snapshot (the DB drifted from the calibration, or the
+        # supplied value/snapshot does not match). Rather than hard-blocking the
+        # submit, drop the calibrated search space so BLAST computes its own,
+        # fall back from precise sharding (which requires the calibrated value)
+        # to approximate when the output format can be merged across shards, and
+        # surface a warning. Every submit surface (browser New Search and the
+        # Service-Bus bridge alike) degrades identically.
         resolved.pop("db_effective_search_space", None)
+        can_downgrade = True
         if requested_mode == "precise":
             merge_family = merge_format_for_outfmt(
                 option_value(str(resolved.get("additional_options") or ""), "-outfmt")
@@ -316,9 +324,20 @@ def resolve_sharding_plan(
             )
             if merge_family is not None:
                 resolved["sharding_mode"] = "approximate"
-                downgraded = True
-                downgrade_reason = validated_errors[0]
-                validated_errors = []
+            else:
+                # The output format cannot be merged across shards, so
+                # approximate sharding is unavailable — keep the original
+                # blocking error rather than silently producing a bad run.
+                can_downgrade = False
+        if can_downgrade:
+            resolved["sharding_mode"] = resolved.get("sharding_mode", requested_mode)
+            downgraded = True
+            downgrade_reason = (
+                "verified Web BLAST search-space calibration does not match this "
+                "database snapshot; using BLAST's own effective search space for "
+                "this run (Web BLAST e-value parity not applied)"
+            )
+            validated_errors = []
 
     query_count = positive_int(resolved.get("query_count"))
     report = build_precision_report(
@@ -361,7 +380,6 @@ def _canonical_options_from_body(body: dict[str, Any], *, database: str) -> dict
         database=database,
         options=options,
         caller_supplied_searchsp=_caller_supplied_searchsp(body),
-        allow_servicebus_downgrade=str(body.get("submission_source") or "") == "servicebus",
     )
     return plan.options
 
