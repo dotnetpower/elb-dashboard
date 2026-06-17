@@ -41,7 +41,17 @@ NAMESPACE_FQDN = os.environ.get(
     "SERVICEBUS_NAMESPACE_FQDN", "sb-elb-dashboard-krc.servicebus.windows.net"
 )
 REQUEST_QUEUE = os.environ.get("SERVICEBUS_REQUEST_QUEUE", "elastic-blast-requests")
-COMPLETION_TOPIC = os.environ.get("SERVICEBUS_COMPLETION_TOPIC", "elastic-blast-completions")
+
+
+def _completion_topic_from_env() -> str:
+    if "SERVICEBUS_RESPONSE_TOPIC" in os.environ:
+        return os.environ["SERVICEBUS_RESPONSE_TOPIC"].strip()
+    if "SERVICEBUS_COMPLETION_TOPIC" in os.environ:
+        return os.environ["SERVICEBUS_COMPLETION_TOPIC"].strip()
+    return "elastic-blast-completions"
+
+
+COMPLETION_TOPIC = _completion_topic_from_env()
 
 # Cap a peeked body preview so a large query FASTA cannot flood the terminal.
 _PEEK_BODY_MAX_CHARS = 4000
@@ -70,11 +80,7 @@ def shape_queue_counts(runtime: Any, static: Any | None) -> dict[str, Any]:
     size_in_bytes = getattr(runtime, "size_in_bytes", None)
     max_size_in_mb = getattr(static, "max_size_in_megabytes", None) if static else None
     size_pct: float | None = None
-    if (
-        isinstance(size_in_bytes, int)
-        and isinstance(max_size_in_mb, int)
-        and max_size_in_mb > 0
-    ):
+    if isinstance(size_in_bytes, int) and isinstance(max_size_in_mb, int) and max_size_in_mb > 0:
         size_pct = round(size_in_bytes / (max_size_in_mb * 1024 * 1024) * 100, 2)
 
     return {
@@ -147,9 +153,7 @@ def read_counts() -> dict[str, Any]:
     from azure.servicebus.management import ServiceBusAdministrationClient
 
     result: dict[str, Any] = {"queue": None, "dead_letter": None, "subscriptions": []}
-    with ServiceBusAdministrationClient(
-        NAMESPACE_FQDN, DefaultAzureCredential()
-    ) as admin:
+    with ServiceBusAdministrationClient(NAMESPACE_FQDN, DefaultAzureCredential()) as admin:
         runtime = admin.get_queue_runtime_properties(REQUEST_QUEUE)
         static = None
         try:
@@ -161,12 +165,8 @@ def read_counts() -> dict[str, Any]:
         if COMPLETION_TOPIC:
             try:
                 for sub in admin.list_subscriptions(COMPLETION_TOPIC):
-                    srt = admin.get_subscription_runtime_properties(
-                        COMPLETION_TOPIC, sub.name
-                    )
-                    result["subscriptions"].append(
-                        shape_subscription_counts(srt, sub.name)
-                    )
+                    srt = admin.get_subscription_runtime_properties(COMPLETION_TOPIC, sub.name)
+                    result["subscriptions"].append(shape_subscription_counts(srt, sub.name))
             except Exception as exc:  # subscription listing is best-effort
                 print(
                     f"subscription counts unavailable: {type(exc).__name__}",
@@ -299,8 +299,7 @@ def main() -> int:
         except Exception as exc:
             snapshot["counts_error"] = f"{type(exc).__name__}: {exc}"
             print(
-                "counts unavailable (needs Azure Service Bus Data Owner): "
-                f"{type(exc).__name__}",
+                f"counts unavailable (needs Azure Service Bus Data Owner): {type(exc).__name__}",
                 file=sys.stderr,
             )
 

@@ -1,6 +1,6 @@
 ---
 title: Service Bus unified ingress — optional submit enqueue, resident consumer, idempotent completion
-description: Tier 2-5 of the Service Bus ingress unification — default-OFF submit-to-SB front door, resident low-latency consumer, idempotent completion events, and the external-consumer result contract.
+description: Tier 2-5 of the Service Bus ingress unification — default-OFF submit-to-SB front door, resident low-latency consumer, optional idempotent completion events, and the external-consumer result contract.
 tags:
   - blast
   - architecture
@@ -18,8 +18,8 @@ Tier 1 made the Service Bus consumer the single writer of job state. Tiers 2-5
 complete the unified-ingress design from
 [#36](https://github.com/dotnetpower/elb-dashboard/issues/36): let the dashboard
 funnel its own submits through Service Bus, drain them with low latency, deliver
-results to external services idempotently, and document the external-consumer
-contract.
+optional push events to external services idempotently, and document the
+external-consumer contract.
 
 ## User-facing change
 
@@ -37,16 +37,18 @@ contract.
   an accelerator, never a single point of failure. The loop is bounded,
   interruptible (stops promptly), and backs off (capped) on a drain error instead
   of hot-looping.
-* **Tier 4 — idempotent completion events.** Every `blast.transition` event now
-  carries `event_id` (stable per `correlation_id`+`status`) and `attempt`
-  (1 on first publish, ≥2 on re-publish), so an external subscriber can dedupe an
-  at-least-once redelivery. `result_ref` continues to carry pointers only (never
-  result bytes; charter §9).
+* **Tier 4 — idempotent optional completion events.** Every `blast.transition`
+  event published to a configured completion topic now carries `event_id`
+  (stable per `correlation_id`+`status`) and `attempt` (1 on first publish, ≥2
+  on re-publish), so an external subscriber can dedupe an at-least-once
+  redelivery. `result_ref` continues to carry pointers only (never result bytes;
+  charter §9).
 * **Tier 5 — external-consumer result contract** documented in
   [architecture/service-bus-integration.md](../../architecture/service-bus-integration.md):
-  push (subscribe the completion topic) vs pull (poll by `external_correlation_id`),
-  dedupe-on-`event_id`, pointers-not-bytes, and the status poll as the safety net
-  so a missed event is never a lost result.
+  pull (poll by `external_correlation_id`) plus optional push (subscribe a
+  configured completion topic), dedupe-on-`event_id`, pointers-not-bytes, and
+  the status poll as the canonical fallback so a missed event is never a lost
+  result.
 
 ## Design notes (self-critique)
 

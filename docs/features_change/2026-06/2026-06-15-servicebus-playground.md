@@ -1,6 +1,6 @@
 ---
 title: Service Bus Playground (preview) — send, drain, and observe BLAST requests
-description: A preview Playground page sends BLAST request messages onto the Service Bus request queue under the managed identity, lets an operator force a real drain pass, and observes completion-topic events via an optional demo external consumer. Adds queue/topic env overrides, a Reader-accessible send route, and a standalone external-subscriber sample.
+description: A preview Playground page sends BLAST request messages onto the Service Bus request queue under the managed identity, lets an operator force a real drain pass, and observes optional completion-topic events via a demo external consumer. Adds request-queue / optional-topic env overrides, a Reader-accessible send route, and a standalone external-subscriber sample.
 tags:
   - blast
   - ui
@@ -13,9 +13,10 @@ tags:
 
 Operators wanted a browser-only way to exercise the Service Bus → BLAST path the
 way an external service uses it: put a request message on the queue, watch the
-real consumer pick it up and run BLAST, and confirm that completion events fan
-out to subscribers. Previously the only producer was an out-of-band script and
-the completion topic had no subscriber to demonstrate delivery.
+real consumer pick it up and run BLAST, and confirm optional completion events
+fan out to subscribers when a completion topic is configured. Previously the
+only producer was an out-of-band script and the optional completion topic had no
+subscriber to demonstrate delivery.
 
 ## User-facing change
 
@@ -24,9 +25,9 @@ the completion topic had no subscriber to demonstrate delivery.
   1. **Request** — compose a BLAST request (query FASTA, db, program, taxid,
      options) and **Send** it onto the request queue, or **Validate** (dry run)
      without enqueueing.
-  2. **Sample code** — read-only Python (send onto the queue / consume the
-     completion topic) and a dashboard-API `curl`, kept in sync with the form,
-     for an external service to copy.
+  2. **Sample code** — read-only Python (send onto the queue / optionally
+     consume an optional completion topic) and a dashboard-API `curl`, kept in
+     sync with the form, for an external service to copy.
   3. **Consumer** — queue depth, a **Run consumer now** button that triggers one
      real `drain_and_resubmit` pass, recent sends, and completion events the
      optional demo consumer observed.
@@ -37,12 +38,14 @@ the completion topic had no subscriber to demonstrate delivery.
   (no SAS token ever reaches the browser) and triggers BLAST execution. The same
   applies to the Playground `drain_now` accelerator and the read-only
   `observed_completions` view.
-* **External subscriber model (topic fan-out).** The dashboard remains the sole
-  consumer of the request **queue** (so every message is tracked end-to-end via
-  `message_trace` + the bridge + jobstate rows). Completion events are published
-  to the completion **topic**; an external service subscribes on its **own**
-  subscription and receives an independent copy — it never competes with the
-  dashboard for messages and can never double-run a job.
+* **External subscriber model (optional topic fan-out).** The dashboard remains
+  the sole consumer of the request **queue** (so every message is tracked
+  end-to-end via `message_trace` + the bridge + jobstate rows). When a
+  completion **topic** is configured, completion events are published there; an
+  external service subscribes on its **own** subscription and receives an
+  independent copy — it never competes with the dashboard for messages and can
+  never double-run a job. Without that optional topic, callers use the status /
+  result APIs by correlation id or job id.
 
 ## API / IaC diff summary
 
@@ -52,7 +55,7 @@ New routes under `/api/settings/service-bus`:
 |-------|------|-----------|
 | `POST /send` | `require_caller` (Reader OK) | Validates against the OpenAPI submit contract, enqueues under the MI, records a producer-side forensic audit row. `dry_run: true` validates without enqueueing (works even when the integration is off). 409 when the integration is off; 429 when the request-queue backlog is at the send ceiling. |
 | `POST /drain` | `require_caller` (Reader OK) | Runs one real `drain_and_resubmit` pass synchronously (bounded). 409 when off. |
-| `GET /observed-completions` | `require_caller` (Reader OK) | Recent completion-topic events the demo consumer observed (empty when the consumer is off). |
+| `GET /observed-completions` | `require_caller` (Reader OK) | Recent optional completion-topic events the demo consumer observed (empty when the consumer or topic is off). |
 
 ### Send backpressure (cost ceiling)
 
@@ -75,14 +78,14 @@ such rather than as "queue full".
 New env / config:
 
 * `SERVICEBUS_REQUEST_QUEUE` / `SERVICEBUS_RESPONSE_TOPIC` — deployment-level
-  overrides for the request queue / completion topic entity names. **Unset =
+  overrides for the request queue / optional completion topic entity names. **Unset =
   existing behaviour preserved** (the saved Settings value or its default wins);
   a malformed value is ignored (logged), never silently repointed (§12a Rule 4).
 * `SERVICEBUS_EXTERNAL_CONSUMER` (default OFF) — when set, the **worker** sidecar
-  starts one daemon loop that subscribes to the completion topic on a dedicated
-  subscription (`SERVICEBUS_COMPLETION_SUBSCRIPTION`, default `playground-observer`)
-  and records observations into shared Redis for the Playground. Purely
-  observational — it never executes BLAST.
+  starts one daemon loop that subscribes to the optional completion topic on a
+  dedicated subscription (`SERVICEBUS_COMPLETION_SUBSCRIPTION`, default
+  `playground-observer`) and records observations into shared Redis for the
+  Playground. Purely observational — it never executes BLAST.
 * `SERVICEBUS_SEND_MAX_QUEUE_DEPTH` (default **2000**) — the Playground send
   ceiling described above.
 
@@ -96,7 +99,7 @@ New modules:
 * `api/services/service_bus_completions.py` — a capped, best-effort Redis ring of
   observed completions shared across the api/worker sidecars.
 
-No Bicep change: the request queue, completion topic, and the new
+No Bicep change: the request queue, optional completion topic, and the new
 `playground-observer` subscription are BYO Service Bus entities (the integration
 is namespace-attached, not deployed by this repo).
 

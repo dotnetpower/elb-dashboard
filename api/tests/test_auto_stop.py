@@ -75,9 +75,7 @@ def test_normalise_preference_clamps_idle_minutes() -> None:
 
 def test_normalise_preference_rejects_missing_scope() -> None:
     with pytest.raises(ValueError):
-        normalise_preference(
-            {"subscription_id": "", "resource_group": "rg", "cluster_name": "c"}
-        )
+        normalise_preference({"subscription_id": "", "resource_group": "rg", "cluster_name": "c"})
 
 
 def test_save_and_get_roundtrip_file_backend(monkeypatch, tmp_path) -> None:
@@ -142,9 +140,7 @@ def test_mark_auto_stop_event_records_stop_and_skip(monkeypatch, tmp_path) -> No
     assert after_skip.last_stop_at == after_stop.last_stop_at
 
 
-def test_mark_auto_stop_event_clears_preflight_stop_on_late_skip(
-    monkeypatch, tmp_path
-) -> None:
+def test_mark_auto_stop_event_clears_preflight_stop_on_late_skip(monkeypatch, tmp_path) -> None:
     """A beat preflight stamp (``enqueued:`` reason) followed by an act-task
     late-skip must blank ``last_stop_at`` so a fake cooldown is not left behind
     (otherwise the SPA shows ``reason=cooldown`` with no countdown while the
@@ -154,9 +150,7 @@ def test_mark_auto_stop_event_clears_preflight_stop_on_late_skip(
     pref = save_auto_stop_preference(_make())
 
     # Beat driver preflight-stamps last_stop_at with the enqueued: marker.
-    preflighted = mark_auto_stop_event(
-        pref, stopped=True, reason="enqueued:idle:240m"
-    )
+    preflighted = mark_auto_stop_event(pref, stopped=True, reason="enqueued:idle:240m")
     assert preflighted.last_stop_at != ""
 
     # Act task late-skips (e.g. provisioning:Starting) → clear the fake stop.
@@ -171,9 +165,7 @@ def test_mark_auto_stop_event_clears_preflight_stop_on_late_skip(
     assert after.last_skip_reason == "late_skip:provisioning:Starting"
 
 
-def test_mark_auto_stop_event_clear_preflight_preserves_real_stop(
-    monkeypatch, tmp_path
-) -> None:
+def test_mark_auto_stop_event_clear_preflight_preserves_real_stop(monkeypatch, tmp_path) -> None:
     """``clear_preflight_stop`` must NOT erase a genuine recent stop — only a
     stamp still carrying the ``enqueued:`` preflight marker is cleared."""
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
@@ -202,9 +194,7 @@ def test_mark_auto_stop_started_stamps_last_started_at(monkeypatch, tmp_path) ->
     pref = save_auto_stop_preference(_make())
     assert pref.last_started_at == ""
 
-    updated = mark_auto_stop_started(
-        pref.subscription_id, pref.resource_group, pref.cluster_name
-    )
+    updated = mark_auto_stop_started(pref.subscription_id, pref.resource_group, pref.cluster_name)
     assert updated is not None
     assert updated.last_started_at != ""
     # Persisted, not just returned.
@@ -290,7 +280,6 @@ def test_mark_auto_stop_live_activity_noop_when_no_pref(monkeypatch, tmp_path) -
     assert result is None
 
 
-
 def test_extend_auto_stop_preference_sets_future_deadline(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
@@ -302,6 +291,34 @@ def test_extend_auto_stop_preference_sets_future_deadline(monkeypatch, tmp_path)
     assert deadline.tzinfo is not None
     # Allow a small tolerance for execution time.
     assert deadline > datetime.now(UTC) + timedelta(minutes=25)
+
+
+def test_extend_auto_stop_preference_adds_to_active_grant(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    active_until = datetime.now(UTC) + timedelta(minutes=20)
+    pref = save_auto_stop_preference(_make(extend_until=active_until.isoformat(timespec="seconds")))
+
+    extended = extend_auto_stop_preference(pref, minutes=30)
+
+    deadline = datetime.fromisoformat(extended.extend_until)
+    assert deadline > datetime.now(UTC) + timedelta(minutes=45)
+    assert deadline < datetime.now(UTC) + timedelta(minutes=55)
+
+
+def test_extend_auto_stop_preference_ignores_expired_grant(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    expired_until = datetime.now(UTC) - timedelta(minutes=20)
+    pref = save_auto_stop_preference(
+        _make(extend_until=expired_until.isoformat(timespec="seconds"))
+    )
+
+    extended = extend_auto_stop_preference(pref, minutes=30)
+
+    deadline = datetime.fromisoformat(extended.extend_until)
+    assert deadline > datetime.now(UTC) + timedelta(minutes=25)
+    assert deadline < datetime.now(UTC) + timedelta(minutes=35)
 
 
 def test_is_extended_true_until_grant_expires() -> None:
@@ -328,9 +345,7 @@ def test_default_idle_minutes_is_60() -> None:
     assert DEFAULT_IDLE_MINUTES in ALLOWED_IDLE_MINUTES
 
 
-def test_mark_auto_stop_event_does_not_clobber_user_toggle(
-    monkeypatch, tmp_path
-) -> None:
+def test_mark_auto_stop_event_does_not_clobber_user_toggle(monkeypatch, tmp_path) -> None:
     """Lost-update guard: if the user toggled ``enabled=False`` between
     the beat task's pref-read and its pref-write, the bookkeeping write
     MUST NOT resurrect ``enabled=True`` from the in-memory snapshot."""

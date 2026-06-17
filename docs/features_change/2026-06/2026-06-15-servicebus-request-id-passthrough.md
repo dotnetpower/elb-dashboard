@@ -1,31 +1,31 @@
 ---
-title: Service Bus request_id pass-through to the completion topic
-description: A caller-supplied request_id on a BLAST request queue message is now preserved end-to-end onto every completion-topic event and its envelope.
+title: Service Bus request_id pass-through to optional completion events
+description: A caller-supplied request_id on a BLAST request queue message is now preserved end-to-end onto every optional completion-topic event and its envelope.
 tags:
   - blast
   - architecture
 ---
 
-# Service Bus `request_id` pass-through to the completion topic
+# Service Bus `request_id` pass-through to optional completion events
 
 ## Motivation
 
 An external producer that enqueues a BLAST request onto the Service Bus request
 queue (`elastic-blast-requests`) often carries its own correlation/tracking value
 — e.g. `request_id`. Until now only the server-derived `external_correlation_id`
-survived to the completion topic (`elastic-blast-completions`); any other
-caller-supplied value the producer set on the request message was dropped at the
-bridge, so a topic subscriber could not correlate completions back to its own
-request id.
+survived to the optional completion topic (`elastic-blast-completions`); any
+other caller-supplied value the producer set on the request message was dropped
+at the bridge, so a topic subscriber could not correlate completions back to its
+own request id.
 
 ## User-facing change
 
 - If a request queue message carries a `request_id` (in the JSON body, or as a
   Service Bus application property of the same name), that value is now:
   - persisted on the bridge row,
-  - echoed onto **every** completion-topic `blast.transition` event body
+  - echoed onto **every** optional completion-topic `blast.transition` event body
     (`queued` → `running` → terminal, plus the `bridge_timeout` failure event),
-  - stamped on the published topic message **envelope**
+  - stamped on the published optional topic message **envelope**
     (`application_properties["request_id"]`) so a subscriber can correlate or
     filter without parsing the payload,
   - preserved in the dashboard's observed-completions store (visible in the

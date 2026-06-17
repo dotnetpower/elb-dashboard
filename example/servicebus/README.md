@@ -7,8 +7,8 @@ file runs on its own and mirrors a real code path in `api/`:
 | File | Mirrors | What it does |
 | --- | --- | --- |
 | [`send_request.py`](send_request.py) | `api.services.service_bus.send_request` | Producer — enqueues a BLAST request message onto the `elastic-blast-requests` queue. |
-| [`monitor.py`](monitor.py) | `api.services.service_bus.entity_counts` + `peek_requests` | Monitoring — reads runtime counts (queue + topic subscriptions) and non-destructively peeks messages. |
-| [`consume.py`](consume.py) | `api.services.service_bus.drain_requests` / completion-topic subscriber | Consumer — receives and settles request-queue messages, or subscribes to the completion topic. |
+| [`monitor.py`](monitor.py) | `api.services.service_bus.entity_counts` + `peek_requests` | Monitoring — reads runtime counts (request queue + optional topic subscriptions) and non-destructively peeks messages. |
+| [`consume.py`](consume.py) | `api.services.service_bus.drain_requests` / optional completion-topic subscriber | Consumer — receives and settles request-queue messages, or subscribes to the optional completion topic. |
 
 ## Message contracts
 
@@ -46,7 +46,7 @@ Free-form body (`/v1/jobs`, multi-token tabular `outfmt`) — carries
 }
 ```
 
-### Completion event (`elastic-blast-completions` topic)
+### Completion event (optional `elastic-blast-completions` topic)
 
 ```json
 {
@@ -89,8 +89,13 @@ at-least-once.
 | --- | --- |
 | `SERVICEBUS_NAMESPACE_FQDN` | `sb-elb-dashboard-krc.servicebus.windows.net` |
 | `SERVICEBUS_REQUEST_QUEUE` | `elastic-blast-requests` |
-| `SERVICEBUS_COMPLETION_TOPIC` | `elastic-blast-completions` |
+| `SERVICEBUS_RESPONSE_TOPIC` | `elastic-blast-completions` |
 | `SERVICEBUS_COMPLETION_SUBSCRIPTION` | `default` |
+
+The completion-topic variables are used only for the optional push/subscribe
+path. `SERVICEBUS_COMPLETION_TOPIC` is still accepted by the standalone
+consumer/monitor scripts as a legacy alias. The required submit path uses
+`SERVICEBUS_REQUEST_QUEUE`.
 
 ## Auth & RBAC
 

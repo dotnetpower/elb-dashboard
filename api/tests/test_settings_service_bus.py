@@ -105,6 +105,23 @@ def test_put_then_get_round_trip(client: TestClient) -> None:
     assert g.json()["config"]["namespace_fqdn"] == payload["namespace_fqdn"]
 
 
+def test_put_allows_request_only_blank_completion_topic(client: TestClient) -> None:
+    payload = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "",
+    }
+    r = client.put("/api/settings/service-bus", json=payload)
+    assert r.status_code == 200, r.text
+    assert r.json()["config"]["completion_topic"] == ""
+
+    g = client.get("/api/settings/service-bus")
+    assert g.status_code == 200, g.text
+    assert g.json()["config"]["completion_topic"] == ""
+
+
 def test_put_rejects_invalid_fqdn(client: TestClient) -> None:
     r = client.put(
         "/api/settings/service-bus",
@@ -183,18 +200,14 @@ def test_send_dry_run_works_when_disabled(
 
     monkeypatch.setattr(service_bus, "send_request", _boom)
     # No _enable_service_bus — integration disabled.
-    r = client.post(
-        "/api/settings/service-bus/send", json={**_VALID_SEND_BODY, "dry_run": True}
-    )
+    r = client.post("/api/settings/service-bus/send", json={**_VALID_SEND_BODY, "dry_run": True})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "valid"
     assert body["dry_run"] is True
 
 
-def test_send_rejected_when_queue_full(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_send_rejected_when_queue_full(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """A backlog at/over the ceiling returns 429 before enqueueing."""
     _enable_service_bus(client, monkeypatch)
     from api.services import service_bus
@@ -202,9 +215,7 @@ def test_send_rejected_when_queue_full(
     monkeypatch.setattr(
         service_bus,
         "entity_counts",
-        lambda _cfg: {
-            "queue": {"active_message_count": 2000, "scheduled_message_count": 0}
-        },
+        lambda _cfg: {"queue": {"active_message_count": 2000, "scheduled_message_count": 0}},
     )
 
     def _must_not_send(*_a: object, **_k: object) -> str:
@@ -229,9 +240,7 @@ def test_send_allowed_just_under_ceiling(
     monkeypatch.setattr(
         service_bus,
         "entity_counts",
-        lambda _cfg: {
-            "queue": {"active_message_count": 1999, "scheduled_message_count": 0}
-        },
+        lambda _cfg: {"queue": {"active_message_count": 1999, "scheduled_message_count": 0}},
     )
     monkeypatch.setattr(service_bus, "send_request", lambda *_a, **_k: "msg-ok")
     r = client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY)
@@ -273,13 +282,10 @@ def test_send_dry_run_skips_placeholder(
         lambda **kw: created.append(kw) or True,
     )
 
-    r = client.post(
-        "/api/settings/service-bus/send", json={**_VALID_SEND_BODY, "dry_run": True}
-    )
+    r = client.post("/api/settings/service-bus/send", json={**_VALID_SEND_BODY, "dry_run": True})
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "valid"
     assert created == []
-
 
 
 def test_send_dry_run_validates_without_enqueue(
@@ -292,9 +298,7 @@ def test_send_dry_run_validates_without_enqueue(
         raise AssertionError("send_request must not be called on dry_run")
 
     monkeypatch.setattr(service_bus, "send_request", _boom)
-    r = client.post(
-        "/api/settings/service-bus/send", json={**_VALID_SEND_BODY, "dry_run": True}
-    )
+    r = client.post("/api/settings/service-bus/send", json={**_VALID_SEND_BODY, "dry_run": True})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "valid"
@@ -302,12 +306,11 @@ def test_send_dry_run_validates_without_enqueue(
     assert body["external_correlation_id"]
 
 
-def test_send_invalid_body_returns_400(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_send_invalid_body_returns_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_service_bus(client, monkeypatch)
     r = client.post(
-        "/api/settings/service-bus/send", json={"db": "core_nt"}  # missing query_fasta
+        "/api/settings/service-bus/send",
+        json={"db": "core_nt"},  # missing query_fasta
     )
     assert r.status_code == 400
     assert r.json()["code"] == "invalid_request"
@@ -447,9 +450,7 @@ def test_send_dry_run_echoes_request_id(
     assert r.json()["request_id"] == "req-dry"
 
 
-def test_send_maps_unavailable_to_503(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_send_maps_unavailable_to_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_service_bus(client, monkeypatch)
     from api.services import service_bus
 
@@ -468,15 +469,11 @@ def test_drain_now_rejected_when_disabled(client: TestClient) -> None:
     assert r.json()["code"] == "disabled"
 
 
-def test_drain_now_invokes_drain_task(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_drain_now_invokes_drain_task(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_service_bus(client, monkeypatch)
     import api.tasks.servicebus.tasks as sb_tasks
 
-    monkeypatch.setattr(
-        sb_tasks, "drain_and_resubmit", lambda: {"received": 1, "completed": 1}
-    )
+    monkeypatch.setattr(sb_tasks, "drain_and_resubmit", lambda: {"received": 1, "completed": 1})
     r = client.post("/api/settings/service-bus/drain")
     assert r.status_code == 200, r.text
     body = r.json()
@@ -491,4 +488,3 @@ def test_observed_completions_empty_when_no_consumer(client: TestClient) -> None
     assert body["events"] == []
     assert body["consumer_enabled"] is False
     assert body["subscription"] == "playground-observer"
-

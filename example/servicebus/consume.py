@@ -55,7 +55,17 @@ NAMESPACE_FQDN = os.environ.get(
     "SERVICEBUS_NAMESPACE_FQDN", "sb-elb-dashboard-krc.servicebus.windows.net"
 )
 REQUEST_QUEUE = os.environ.get("SERVICEBUS_REQUEST_QUEUE", "elastic-blast-requests")
-COMPLETION_TOPIC = os.environ.get("SERVICEBUS_COMPLETION_TOPIC", "elastic-blast-completions")
+
+
+def _completion_topic_from_env() -> str:
+    if "SERVICEBUS_RESPONSE_TOPIC" in os.environ:
+        return os.environ["SERVICEBUS_RESPONSE_TOPIC"].strip()
+    if "SERVICEBUS_COMPLETION_TOPIC" in os.environ:
+        return os.environ["SERVICEBUS_COMPLETION_TOPIC"].strip()
+    return "elastic-blast-completions"
+
+
+COMPLETION_TOPIC = _completion_topic_from_env()
 COMPLETION_SUBSCRIPTION = os.environ.get("SERVICEBUS_COMPLETION_SUBSCRIPTION", "default")
 
 # A receive tick is bounded so one run can never block forever.
@@ -274,9 +284,7 @@ def consume_requests(max_messages: int, settle: str) -> dict[str, Any]:
                             receiver.complete_message(message)
                             stats["completed"] += 1
                         elif action == "dead_letter":
-                            receiver.dead_letter_message(
-                                message, reason="handler_rejected"
-                            )
+                            receiver.dead_letter_message(message, reason="handler_rejected")
                             stats["dead_lettered"] += 1
                         else:
                             receiver.abandon_message(message)

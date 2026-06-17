@@ -5,20 +5,23 @@
 External systems need a way to drive BLAST runs without calling the dashboard
 or the sibling OpenAPI plane directly. A queue-backed ingestion point gives a
 single, auditable, back-pressure-friendly path for every submission (dashboard
-Run, OpenAPI `/v1/jobs`, and external producers), with completion signalled as
-topic events and the actual result fetched from the OpenAPI result endpoint
-(Claim-Check). The feature is **optional and OFF by default**.
+Run, OpenAPI `/v1/jobs`, and external producers), with completion signalled via
+the durable job/result APIs and, when configured, optional topic events. The
+actual result is fetched from the OpenAPI result endpoint (Claim-Check). The
+feature is **optional and OFF by default**.
 
 ## User-facing change
 
 - New **Settings → Service Bus** section: enable toggle, auth mode (Entra RBAC
-  / SAS), namespace + queue + topic configuration (with namespace discovery),
-  a non-destructive connection test, live message counts, a dead-letter
-  cleanup policy editor, and manual purge actions (behind a confirm dialog).
+  / SAS), namespace + request queue + optional completion topic configuration
+  (with namespace discovery), a non-destructive connection test, live message
+  counts, a dead-letter cleanup policy editor, and manual purge actions (behind
+  a confirm dialog).
 - When enabled, request messages on the queue are bridged to the sibling
-  OpenAPI execution plane; each job's status transitions
-  (queued/running/succeeded/failed) are published to the completion topic, one
-  event per change, carrying a pointer to the OpenAPI result endpoint.
+  OpenAPI execution plane. Each job's status is available through the durable
+  status/result APIs; deployments that configure a completion topic also publish
+  one optional transition event per change, carrying a pointer to the OpenAPI
+  result endpoint.
 
 ## API / IaC diff summary
 

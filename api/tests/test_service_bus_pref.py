@@ -1,8 +1,9 @@
 """Tests for the Service Bus integration config row (service_bus_pref).
 
 Responsibility: Verify the disabled default, validation rules (FQDN/entity/SAS
-    secret), bound clamping for the cleanup policy, the env+config AND gate in
-    ``service_bus_enabled``, and the file-backend round trip.
+    secret), request-only blank completion topics, bound clamping for the
+    cleanup policy, the env+config AND gate in ``service_bus_enabled``, and the
+    file-backend round trip.
 Edit boundaries: Persistence + config validation only.
 Key entry points: the ``test_*`` functions.
 Risky contracts: ``enabled`` must default False; ``service_bus_enabled`` must
@@ -49,6 +50,21 @@ def test_round_trip_file_backend() -> None:
     loaded = get_service_bus_config()
     assert loaded.enabled is True
     assert loaded.namespace_fqdn == "sb-elb-dashboard-krc.servicebus.windows.net"
+
+
+def test_explicit_blank_completion_topic_is_preserved() -> None:
+    from api.services.service_bus_pref import normalise_config
+
+    cfg = normalise_config(
+        {
+            "enabled": True,
+            "auth_mode": "entra",
+            "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+            "request_queue": "elastic-blast-requests",
+            "completion_topic": "",
+        }
+    )
+    assert cfg.completion_topic == ""
 
 
 def test_normalise_rejects_bad_fqdn_when_enabled() -> None:

@@ -2,8 +2,9 @@
 title: MessageFlow constellation — force-directed Service Bus flow visualization
 description: >-
   The Service Bus MessageFlow modal renders a d3 force-directed "Bounded Lanes"
-  constellation — producers to a Queue/Topic broker to consumers — positioning
-  live jobs by status and surfacing a submitter's session group on hover.
+  constellation — producers to a request Queue plus optional Topic broker view
+  to consumers — positioning live jobs by status and surfacing a submitter's
+  session group on hover.
 tags:
   - ui
 ---
@@ -21,8 +22,8 @@ same submitter session.
 
 - The MessageFlow modal now renders **`MessageFlowConstellation`**, a d3
   force-directed graph ("Bounded Lanes / A1" design):
-  - **Producers** (left) to a bordered **Broker** region (Queue lane above a
-    Topic lane) to **Consumers** (right).
+  - **Producers** (left) to a bordered **Broker** region (request Queue lane
+    above an optional Topic lane) to **Consumers** (right).
   - Jobs are force-positioned by status: `queued` settle into the Queue lane,
     `running` into the broker centre.
   - Producers are api-dominant (rounded-square glyph) with the occasional human

@@ -5,10 +5,10 @@
 
 ## Motivation
 
-An external consumer of the `elastic-blast-completions` topic could see that a
-job `succeeded` but had to enumerate the result files itself (parse
-`result_ref.api`, call the job detail, read `result.files`, then build each
-file URL) before it could download anything. The request was for the completion
+An external consumer of the optional `elastic-blast-completions` topic could see
+that a job `succeeded` but had to enumerate the result files itself (parse
+`result_ref.api`, call the job detail, read `result.files`, then build each file
+URL) before it could download anything. The request was for the completion
 message to carry a ready-to-use `download_url` per result file so a consumer can
 fetch results directly.
 
@@ -36,8 +36,9 @@ with a bearer token. It is **never** a Storage SAS URL or a direct blob URL
 metadata is still emitted but `download_url` is omitted, so a subscriber can fall
 back to `result_ref`.
 
-The field is present only on `succeeded` events; `queued` / `running` / `failed`
-events are unchanged. The addition does not alter the `event_id` dedup digest.
+The field is present only on `succeeded` events when the optional completion
+topic is configured; `queued` / `running` / `failed` events are unchanged. The
+addition does not alter the `event_id` dedup digest.
 
 ## API / IaC diff summary
 

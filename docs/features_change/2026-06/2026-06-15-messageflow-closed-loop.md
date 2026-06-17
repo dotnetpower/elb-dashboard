@@ -3,9 +3,9 @@ title: MessageFlow closed-loop visualization (Queue / Topic split + completion l
 description: >-
   The Service Bus MessageFlow constellation is reworked from the single
   "Bounded Lanes" broker into a four-stage closed loop — Actors to a Queue box,
-  to Workers (queue consumers), to a Topic box — with the completion looping
-  back over the top to the submitting actor, so a submitter reads as both a
-  producer and a completion subscriber.
+  to Workers (queue consumers), to an optional Topic box — with the completion
+  looping back over the top to the submitting actor when topic telemetry exists,
+  so a submitter reads as both a producer and an optional completion subscriber.
 tags:
   - ui
 ---
@@ -19,8 +19,9 @@ region (a Queue lane stacked above a Topic lane) between Producers and
 Consumers. Two problems surfaced while reviewing the live picture:
 
 1. **Queue and Topic read as one stage.** Stacking the two Service Bus entities
-   inside one box made them look like a single broker step rather than the two
-   distinct entities they are (the request queue vs. the completion topic).
+  inside one box made them look like a single broker step rather than the two
+  distinct entities they are when topic fan-out is configured (the request
+  queue vs. the optional completion topic).
 2. **A submitter's dual role was invisible.** The same submitter (e.g. an
    `svc-batch` API client) both *produces* to the request queue and *receives*
    the completion of its own jobs. The left-to-right layout pinned every
@@ -32,15 +33,16 @@ Consumers. Two problems surfaced while reviewing the live picture:
 The MessageFlow modal now renders the **"Closed Loop (A4)"** constellation:
 
 - **Four stages**: **Actors** (left) → **Queue box** → **Workers** (the queue
-  consumers / AKS clusters) → **Topic box** (right). The single broker box is
-  split into a dedicated Queue box and a dedicated Topic box, each labelled with
-  its Service Bus entity name.
+  consumers / AKS clusters) → **Topic box** (right, when completion-topic
+  telemetry exists). The single broker box is split into a dedicated Queue box
+  and a dedicated optional Topic box, each labelled with its Service Bus entity
+  name.
 - **Closed completion loop**: when a submitter has completed (settling) jobs, a
   faint dashed arc sweeps over the top from the Topic box back to that actor
   (arrow pointing into the actor). This makes the dual role **structural** — a
   submitter is visibly both a producer (arrows out to the Queue) and a
-  completion subscriber (the loop arc returning in). Hovering an actor brightens
-  its own loop.
+  optional completion subscriber (the loop arc returning in). Hovering an actor
+  brightens its own loop.
 - **Dual-role label**: an actor that has completed work is labelled
   `producer + subscriber` (otherwise it carries no sub-label); the column
   captions gain sub-labels (`produce + subscribe`, `requests`,
@@ -72,8 +74,8 @@ None. Pure frontend presentation change over the existing
 `GET /monitor/message-flow` snapshot. Files touched:
 
 - `web/src/components/cards/MessageFlow/MessageFlowConstellation.tsx` — 4-stage
-  geometry, Queue/Topic boxes, completion-loop layer + arrowhead, dual-role
-  label, particle system removed, tick clamp per box.
+  geometry, Queue / optional Topic boxes, completion-loop layer + arrowhead,
+  dual-role label, particle system removed, tick clamp per box.
 - `web/src/components/cards/MessageFlow/MessageFlowModal.tsx` — caption +
   docstring updated to the closed-loop terminology.
 - `web/src/components/cards/MessageFlow/MessageFlowCard.tsx` — docstring.

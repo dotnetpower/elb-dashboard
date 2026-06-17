@@ -28,9 +28,7 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
     # `/api/aks/autostop/status` calls `get_state_repo()` inside the route
     # body; stub at the source module so the route works without a real
     # Table endpoint. Individual tests can override.
-    monkeypatch.setattr(
-        "api.services.state_repo.get_state_repo", lambda: object()
-    )
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: object())
     # The status route probes live K8s ``app=blast`` activity for Running
     # clusters. Stub it to "unavailable" so the route tests stay hermetic
     # (no Azure/K8s call) and deterministic across CI hosts.
@@ -108,9 +106,7 @@ def test_put_autostop_shrinking_window_resets_idle_clock(
 
     from api.services.auto_stop import save_auto_stop_preference
 
-    before.last_started_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat(
-        timespec="seconds"
-    )
+    before.last_started_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat(timespec="seconds")
     save_auto_stop_preference(before)
 
     # Now shrink the window to 1h. Without the reset, deadline =
@@ -159,9 +155,7 @@ def test_put_autostop_raising_window_keeps_idle_clock(client: TestClient) -> Non
     )
     seeded = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
     assert seeded is not None
-    old_anchor = (datetime.now(UTC) - timedelta(minutes=20)).isoformat(
-        timespec="seconds"
-    )
+    old_anchor = (datetime.now(UTC) - timedelta(minutes=20)).isoformat(timespec="seconds")
     seeded.last_started_at = old_anchor
     save_auto_stop_preference(seeded)
 
@@ -236,6 +230,42 @@ def test_extend_pushes_deadline(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["extend_until"] != ""
+
+
+def test_extend_route_adds_to_active_grant(client: TestClient) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from api.services.auto_stop import get_auto_stop_preference, save_auto_stop_preference
+
+    client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 60,
+        },
+    )
+    pref = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
+    assert pref is not None
+    pref.extend_until = (datetime.now(UTC) + timedelta(minutes=20)).isoformat(timespec="seconds")
+    save_auto_stop_preference(pref)
+
+    resp = client.post(
+        "/api/aks/autostop/extend",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "minutes": 30,
+        },
+    )
+
+    assert resp.status_code == 200
+    deadline = datetime.fromisoformat(resp.json()["extend_until"])
+    assert deadline > datetime.now(UTC) + timedelta(minutes=45)
+    assert deadline < datetime.now(UTC) + timedelta(minutes=55)
 
 
 def test_status_disabled_when_no_pref(client: TestClient) -> None:
@@ -387,9 +417,7 @@ def test_status_is_cached_between_polls(
 
     def fake_evaluate(pref, *, repo, power_state="", **_extra) -> IdleDecision:
         call_count["n"] += 1
-        return IdleDecision(
-            verdict="keep", reason="active", cluster_power_state=power_state
-        )
+        return IdleDecision(verdict="keep", reason="active", cluster_power_state=power_state)
 
     monkeypatch.setattr("api.routes.aks.autostop.evaluate_cluster", fake_evaluate)
     monkeypatch.setattr(
@@ -403,9 +431,7 @@ def test_status_is_cached_between_polls(
     assert call_count["n"] == 1
 
 
-def test_put_invalidates_status_cache(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_put_invalidates_status_cache(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """A PUT must invalidate the cached status so the SPA sees the new state immediately."""
     client.put(
         "/api/aks/autostop",
@@ -490,9 +516,7 @@ def test_put_rejects_cross_owner_modification(
     assert resp.status_code == 403
 
 
-def test_get_redacts_foreign_owner_row(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_get_redacts_foreign_owner_row(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """`GET /autostop` returns the empty/default shape (not the foreign
     bookkeeping fields) when the row is owned by a different user.
     Prevents idle-pattern leakage in multi-user deployments."""
@@ -614,9 +638,7 @@ def test_status_singleflight_collapses_concurrent_polls(
     def slow_eval(pref, *, repo, power_state="", **_extra):
         call_count["n"] += 1
         _time.sleep(0.2)  # Make the leader actually take time
-        return IdleDecision(
-            verdict="keep", reason="active", cluster_power_state=power_state
-        )
+        return IdleDecision(verdict="keep", reason="active", cluster_power_state=power_state)
 
     monkeypatch.setattr("api.routes.aks.autostop.evaluate_cluster", slow_eval)
     monkeypatch.setattr(
@@ -671,9 +693,7 @@ def test_status_writes_to_l2_redis_for_cross_worker_sharing(
     pipeline within the L2 TTL window.
     """
     fake = _FakeRedis()
-    monkeypatch.setattr(
-        "api.routes.aks.autostop._status_redis_client", lambda: fake
-    )
+    monkeypatch.setattr("api.routes.aks.autostop._status_redis_client", lambda: fake)
 
     client.put(
         "/api/aks/autostop",
@@ -717,9 +737,7 @@ def test_status_serves_l2_redis_hit_without_running_evaluator(
     the L2 entry expires or is invalidated.
     """
     fake = _FakeRedis()
-    monkeypatch.setattr(
-        "api.routes.aks.autostop._status_redis_client", lambda: fake
-    )
+    monkeypatch.setattr("api.routes.aks.autostop._status_redis_client", lambda: fake)
 
     client.put(
         "/api/aks/autostop",
@@ -772,17 +790,13 @@ def test_status_serves_l2_redis_hit_without_running_evaluator(
     assert eval_calls["n"] == 0
 
 
-def test_put_drops_l2_redis_entry(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_put_drops_l2_redis_entry(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Critique #18: a PUT mutates the underlying preference, so it
     must delete the L2 cache entry too — otherwise a sibling worker
     keeps serving the pre-PUT body for up to ``_STATUS_L2_TTL_SECONDS``.
     """
     fake = _FakeRedis()
-    monkeypatch.setattr(
-        "api.routes.aks.autostop._status_redis_client", lambda: fake
-    )
+    monkeypatch.setattr("api.routes.aks.autostop._status_redis_client", lambda: fake)
 
     client.put(
         "/api/aks/autostop",

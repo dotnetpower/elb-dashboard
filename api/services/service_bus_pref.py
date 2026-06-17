@@ -2,7 +2,7 @@
 
 Responsibility: Persist and read the optional Service Bus BLAST integration
     configuration — enable switch, auth mode (Entra/SAS), namespace + queue +
-    topic names, BLAST routing context, and the dead-letter cleanup policy.
+    optional topic name, BLAST routing context, and the dead-letter cleanup policy.
     There is exactly ONE config row per deployment (PartitionKey
     ``servicebus_config`` / RowKey ``current``); this is not a per-cluster
     preference like ``performance_pref``.
@@ -161,12 +161,13 @@ class ServiceBusConfig:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ServiceBusConfig:
+        completion_topic_value = value.get("completion_topic", DEFAULT_COMPLETION_TOPIC)
         return cls(
             enabled=_clean_bool(value.get("enabled")),
             auth_mode=_clean_auth_mode(value.get("auth_mode")),
             namespace_fqdn=str(value.get("namespace_fqdn") or ""),
             request_queue=str(value.get("request_queue") or DEFAULT_REQUEST_QUEUE),
-            completion_topic=str(value.get("completion_topic") or DEFAULT_COMPLETION_TOPIC),
+            completion_topic="" if completion_topic_value is None else str(completion_topic_value),
             sas_secret_name=str(value.get("sas_secret_name") or ""),
             subscription_id=str(value.get("subscription_id") or ""),
             resource_group=str(value.get("resource_group") or ""),

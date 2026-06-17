@@ -22,6 +22,8 @@ import { computeRemainingSeconds, formatCoarseRemaining, formatCountdown, stabil
 
 const STATUS_POLL_MS = 60_000;
 const PREF_POLL_MS = 5 * 60_000;
+const EXTEND_GRANT_MINUTES = 30;
+const EXTEND_GRANT_LABEL = "+30 min";
 
 const REASON_LABELS: Record<string, string> = {
   active: "Recent activity on this cluster.",
@@ -484,8 +486,8 @@ export function AutoStopPanel({
               type="button"
               className="glass-button"
               disabled={extendMutation.isPending}
-              onClick={() => extendMutation.mutate(30)}
-              title="Push the auto-stop deadline out by 30 minutes"
+              onClick={() => extendMutation.mutate(EXTEND_GRANT_MINUTES)}
+              title="Add 30 minutes to the auto-stop deadline"
               style={{
                 fontSize: 11,
                 padding: "3px 10px",
@@ -495,7 +497,7 @@ export function AutoStopPanel({
               {extendMutation.isPending ? (
                 <Loader2 size={11} className="spin" />
               ) : (
-                "Extend 30 min"
+                EXTEND_GRANT_LABEL
               )}
             </button>
           </PermissionGate>
@@ -597,14 +599,14 @@ export function AutoStopPanel({
                 type="button"
                 className="glass-button"
                 disabled={extendMutation.isPending}
-                onClick={() => extendMutation.mutate(30)}
-                title="Push the auto-stop deadline out by 30 minutes"
+                onClick={() => extendMutation.mutate(EXTEND_GRANT_MINUTES)}
+                title="Add 30 minutes to the auto-stop deadline"
                 style={{ fontSize: 10, padding: "2px 8px", color: "var(--accent)" }}
               >
                 {extendMutation.isPending ? (
                   <Loader2 size={10} className="spin" />
                 ) : (
-                  "Extend 30 min"
+                  EXTEND_GRANT_LABEL
                 )}
               </button>
             </PermissionGate>
@@ -639,14 +641,14 @@ export function AutoStopPanel({
                 type="button"
                 className="glass-button"
                 disabled={extendMutation.isPending}
-                onClick={() => extendMutation.mutate(30)}
+                onClick={() => extendMutation.mutate(EXTEND_GRANT_MINUTES)}
                 title="Pause auto-stop for another 30 minutes"
                 style={{ fontSize: 10, padding: "2px 8px", color: "var(--accent)" }}
               >
                 {extendMutation.isPending ? (
                   <Loader2 size={10} className="spin" />
                 ) : (
-                  "Extend 30 min"
+                  EXTEND_GRANT_LABEL
                 )}
               </button>
             </PermissionGate>

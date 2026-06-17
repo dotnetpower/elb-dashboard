@@ -1,6 +1,6 @@
 ---
 title: Service Bus BLAST Integration
-description: Optional Azure Service Bus integration for ElasticBLAST — queue-backed submit ingestion, transition-event publishing, claim-check result retrieval, and dead-letter cleanup, all OFF by default and configured from Settings.
+description: Optional Azure Service Bus integration for ElasticBLAST — queue-backed submit ingestion, optional completion-event fan-out, claim-check result retrieval, and dead-letter cleanup, all OFF by default and configured from Settings.
 social:
   cards_layout_options:
     title: Service Bus BLAST Integration
@@ -30,7 +30,8 @@ It is **disabled by default**; an operator turns it on from
 
 When enabled, **every** BLAST submission path converges on a single request
 queue: the dashboard "Run" button, the sibling OpenAPI `POST /v1/jobs`, and any
-external producer. A single ingestion point gives uniform admission control,
+external producer. That request queue is the required Service Bus entity for
+the integration. A single ingestion point gives uniform admission control,
 auditing, and back-pressure, and decouples bursty producers from the
 fixed-capacity worker.
 
@@ -40,11 +41,16 @@ flowchart LR
   API[OpenAPI POST /v1/jobs] -->|enqueue| Q
   EXT[External producer] -->|enqueue| Q
   Q -->|beat drain| W[Celery submit pipeline]
-  W -->|transition events| T[(elastic-blast-completions topic)]
-  T --> SUB[external subscribers]
+  W -.->|optional transition fan-out| T[(elastic-blast-completions topic)]
+  T -.-> SUB[external subscribers]
   W -.->|result claim-check| R[OpenAPI GET /v1/result]
   SUB -.->|fetch XML| R
 ```
+
+The completion topic is an optional push channel, not the submit transport. If
+`completion_topic` is blank or the entity is not configured, request-queue drain
+still runs and `publish_event` no-ops; callers can always retrieve status and
+results through the dashboard/OpenAPI endpoints by correlation id or job id.
 
 ## Message contracts
 
@@ -115,7 +121,11 @@ Field rules (consistent with `/v1/jobs`):
   `approximate`/`off` instead of trusting it blindly. Any other unknown key is
   ignored.
 
-### Transition event — `elastic-blast-completions` topic
+### Optional transition event — `elastic-blast-completions` topic
+
+Deployments that want push notifications can configure a completion topic. This
+does not change queue drain semantics; it only adds a fan-out copy of status
+transitions for external subscribers.
 
 Every state change of a Service-Bus-originated job is published as a **new**
 message (Service Bus messages are immutable — you never "update" a queued
@@ -151,20 +161,20 @@ sequenceDiagram
   participant Q as requests queue
   participant B as beat drain task
   participant S as Celery submit pipeline
-  participant T as completions topic
+  participant T as optional completions topic
   P->>Q: send request message
   B->>Q: receive (peek-lock)
   B->>B: dedup on correlation_id
   B->>S: create JobState + enqueue submit
   B->>Q: complete message (immediately)
-  B->>T: publish "queued"
+  B-->>T: optionally publish "queued"
   Note over B,Q: message leaves the queue in < 1s,<br/>NOT held for the whole BLAST run
   S->>S: run BLAST (minutes–hours)
-  B->>T: publish "running" (on first observed transition)
+  B-->>T: optionally publish "running" (on first observed transition)
   alt success
-    S->>T: (via publisher) publish "succeeded" + result_ref
+    S-->>T: optionally publish "succeeded" + result_ref
   else failure
-    S->>T: publish "failed" + error_code
+    S-->>T: optionally publish "failed" + error_code
   end
 ```
 
@@ -176,8 +186,8 @@ minutes to hours. Holding the lock would cause `MessageLockLost`, redelivery,
 and **duplicate job execution**. Instead the task: receives → dedups → creates
 the `JobState` row → enqueues the existing Celery submit task → **completes the
 message right away**. The long-running work proceeds asynchronously; status is
-reported via topic events and the durable `jobstate` table, never by mutating
-the queued message.
+reported via the durable `jobstate` table and, when configured, optional topic
+events. It is never reported by mutating the queued message.
 
 ### Idempotency
 
@@ -219,7 +229,7 @@ Service Bus mechanisms set on the entities:
 
 | Mechanism | Setting | Effect |
 |---|---|---|
-| Time-to-live | `default-message-time-to-live` (24h queue / 1h subscription) | Un-consumed messages expire automatically. |
+| Time-to-live | `default-message-time-to-live` (24h request queue / 1h completion subscription when configured) | Un-consumed messages expire automatically. |
 | Max delivery count | `max-delivery-count` = 10 | A poison message is moved to the **dead-letter queue (DLQ)** instead of blocking the main queue. |
 | Dead-letter on expiration | `dead-lettering-on-message-expiration` = true | Expired messages are preserved in the DLQ for investigation rather than vanishing. |
 
@@ -253,9 +263,10 @@ Manual actions (always behind a confirmation dialog showing the exact count):
 ## Settings surface
 
 - Enable toggle (master OFF switch).
-- Auth mode (Entra / SAS) and namespace/queue/topic/subscription selection. In
-  Entra mode the namespaces, queues, and topics are discovered from the
-  subscription via ARM; in SAS mode the operator supplies names.
+- Auth mode (Entra / SAS), namespace/request-queue selection, and optional
+  completion topic/subscription selection. In Entra mode the namespaces,
+  queues, and topics are discovered from the subscription via ARM; in SAS mode
+  the operator supplies names.
 - "Test connection" button (peeks the queue — non-destructive).
 - Live runtime counts: active / dead-letter message counts per entity.
 - Cleanup policy editor with a dry-run preview.
@@ -292,15 +303,15 @@ so the live contract only changes by explicit opt-in:
   registered as the fallback reconcile, so the resident loop is an accelerator,
   never a single point of failure.
 
-## Result return for external services (push + pull)
+## Result return for external services (pull first, optional push)
 
-An external service that submits via Service Bus gets results two ways — pick the
-one that fits how the service runs:
+An external service that submits via Service Bus can always use the pull path.
+Deployments that configure the optional completion topic also get a push path:
 
 | Model | Mechanism | Suits | Payload |
 |---|---|---|---|
-| **Event subscribe (push)** | create a Subscription on the completion topic and receive `blast.transition` events | long-lived services / workflows | event + `result_ref` (pointers) |
 | **Correlation poll (pull)** | poll the dashboard status/result API by `external_correlation_id` | single-shot scripts / functions | existing status + result endpoints |
+| **Event subscribe (optional push)** | create a Subscription on the completion topic and receive `blast.transition` events | long-lived services / workflows | event + `result_ref` (pointers) |
 
 Every completion event carries idempotency keys so an at-least-once redelivery is
 safe to dedupe:
@@ -329,9 +340,10 @@ Rules a subscriber must follow:
   BLAST result itself (Service Bus message size limits). Fetch the bytes through
   the dashboard API in `result_ref` — results stream through the API proxy and
   the dashboard never issues a SAS token to a caller.
-- **The status poll stays available as a safety net.** If a subscriber misses an
-  event (downtime, network), the correlation poll still returns the terminal
-  status + result, so a missed event is never a lost result.
+- **The status poll is the canonical fallback.** If no completion topic is
+  configured, or if a subscriber misses an event (downtime, network), the
+  correlation poll still returns the terminal status + result, so a missed
+  event is never a lost result.
 
 ## Configuration flags
 
@@ -343,9 +355,10 @@ Rules a subscriber must follow:
 | `CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS` | `30` | beat | Drain + transition-publish cadence. |
 | `CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS` | `3600` | beat | DLQ cleanup cadence. |
 
-The runtime configuration (namespace, queue, topic, cleanup thresholds) lives
-in the `servicebuspref` Azure Table row and is edited from Settings without a
-redeploy. The env flags only gate whether the subsystem runs at all.
+The runtime configuration (namespace, request queue, optional completion topic,
+cleanup thresholds) lives in the `servicebuspref` Azure Table row and is edited
+from Settings without a redeploy. The env flags only gate whether the subsystem
+runs at all.
 
 ## Validation
 

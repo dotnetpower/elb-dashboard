@@ -26,7 +26,7 @@ integration itself, see [Service Bus BLAST Integration](service-bus-integration.
 | --- | --- | --- |
 | `send_request.py` | `api.services.service_bus.send_request` | **Producer** — enqueues a BLAST request onto the `elastic-blast-requests` queue. |
 | `monitor.py` | `api.services.service_bus.entity_counts` + `peek_requests` | **Monitor** — reads runtime counts and non-destructively peeks messages. |
-| `consume.py` | `drain_requests` / completion-topic subscriber | **Consumer** — settles request-queue messages, or subscribes to the completion topic and downloads results. |
+| `consume.py` | `drain_requests` / optional completion-topic subscriber | **Consumer** — settles request-queue messages, or subscribes to the optional completion topic and downloads results. |
 
 ## End-to-end flow
 
@@ -36,7 +36,7 @@ sequenceDiagram
     participant Q as Request queue<br/>elastic-blast-requests
     participant W as Worker<br/>(drain + publish)
     participant K as AKS / elb-openapi
-    participant T as Completion topic<br/>elastic-blast-completions
+    participant T as Optional completion topic<br/>elastic-blast-completions
     participant C as Consumer<br/>(consume.py --download)
     participant G as Dashboard api sidecar<br/>(streaming gateway)
 
@@ -44,7 +44,7 @@ sequenceDiagram
     W->>Q: drain (every ~30s)
     W->>K: POST /v1/jobs (bridge)
     K-->>W: job running → succeeded
-    W->>T: blast.transition (queued / running / succeeded)
+    W-->>T: optional blast.transition (queued / running / succeeded)
     Note over T: succeeded event carries<br/>result_files[].download_url
     C->>T: receive + dedupe on event_id
     C->>G: GET download_url (Bearer token)
@@ -82,8 +82,13 @@ All three scripts read these environment variables (defaults shown):
 | --- | --- |
 | `SERVICEBUS_NAMESPACE_FQDN` | `sb-elb-dashboard-krc.servicebus.windows.net` |
 | `SERVICEBUS_REQUEST_QUEUE` | `elastic-blast-requests` |
-| `SERVICEBUS_COMPLETION_TOPIC` | `elastic-blast-completions` |
+| `SERVICEBUS_RESPONSE_TOPIC` | `elastic-blast-completions` |
 | `SERVICEBUS_COMPLETION_SUBSCRIPTION` | `default` |
+
+The completion-topic variables are used only by the optional push/subscribe
+example path. `SERVICEBUS_COMPLETION_TOPIC` is still accepted by the standalone
+consumer/monitor scripts as a legacy alias. The required submit path uses
+`SERVICEBUS_REQUEST_QUEUE`.
 
 ## Message contracts
 
@@ -122,7 +127,7 @@ A body carrying `blast_options` instead of `options` is routed to the free-form
 }
 ```
 
-### Completion event (completion topic)
+### Completion event (optional completion topic)
 
 ```json
 {
@@ -216,7 +221,7 @@ the **Jobs** list with `submission_source: servicebus`.
 # live queue so the real worker still processes the messages:
 uv run python example/servicebus/consume.py --source requests --settle abandon
 
-# Subscribe to the completion topic and download results on success:
+# Subscribe to the optional completion topic and download results on success:
 ELB_API_CLIENT_ID=<api-client-id> \
   uv run python example/servicebus/consume.py --source completions \
     --download --download-dir ./out --max 40
@@ -228,9 +233,9 @@ On a `succeeded` event the consumer reads `result_files`, calls each
 !!! warning "The default topic subscription is shared"
     `--source completions` reads the `default` subscription and **completes
     (removes)** the events it processes. The dashboard does not consume its own
-    completion topic, so this is safe — but a large backlog from earlier runs is
-    delivered oldest-first, so raise `--max` to reach your event, or point the
-    scripts at a throwaway namespace.
+    completion topic, so this is safe when that optional topic is configured —
+    but a large backlog from earlier runs is delivered oldest-first, so raise
+    `--max` to reach your event, or point the scripts at a throwaway namespace.
 
 ## Verified end-to-end run
 

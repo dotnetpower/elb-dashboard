@@ -229,9 +229,7 @@ def _use_table_backend() -> bool:
     Table RBAC on the platform account; falling back to the file backend
     keeps the worker healthy.
     """
-    return bool(
-        os.environ.get(_TABLE_ENDPOINT_ENV) and os.environ.get("CONTAINER_APP_NAME")
-    )
+    return bool(os.environ.get(_TABLE_ENDPOINT_ENV) and os.environ.get("CONTAINER_APP_NAME"))
 
 
 def save_auto_stop_preference(pref: AutoStopPreference) -> AutoStopPreference:
@@ -306,9 +304,14 @@ def extend_auto_stop_preference(
         # path; in that case the empty etag falls through to an
         # unconditional upsert (legacy behaviour).
         next_pref.etag = base.etag
-        next_pref.extend_until = (
-            datetime.now(UTC) + timedelta(minutes=grant)
-        ).isoformat(timespec="seconds")
+        now = datetime.now(UTC)
+        current_deadline = _parse_iso(next_pref.extend_until)
+        base_deadline = (
+            current_deadline if current_deadline is not None and current_deadline > now else now
+        )
+        next_pref.extend_until = (base_deadline + timedelta(minutes=grant)).isoformat(
+            timespec="seconds"
+        )
         next_pref.updated_at = _now_iso()
         return save_auto_stop_preference(next_pref)
 
@@ -390,9 +393,7 @@ def mark_auto_stop_event(
             # window. Only clear when the persisted reason still carries the
             # ``enqueued:`` marker — a real stop that landed in between is
             # never erased.
-            if clear_preflight_stop and (
-                next_pref.last_stop_reason or ""
-            ).startswith("enqueued:"):
+            if clear_preflight_stop and (next_pref.last_stop_reason or "").startswith("enqueued:"):
                 next_pref.last_stop_at = ""
                 next_pref.last_stop_reason = ""
         next_pref.updated_at = now
@@ -531,9 +532,7 @@ def mark_auto_stop_live_activity(
             return latest
         next_pref = AutoStopPreference.from_dict(latest.to_dict())
         next_pref.etag = latest.etag
-        next_pref.last_live_activity_at = activity_at.astimezone(UTC).isoformat(
-            timespec="seconds"
-        )
+        next_pref.last_live_activity_at = activity_at.astimezone(UTC).isoformat(timespec="seconds")
         next_pref.updated_at = _now_iso()
         fallback = next_pref
         return save_auto_stop_preference(next_pref)

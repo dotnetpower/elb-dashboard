@@ -20,9 +20,10 @@ backing model.
 
 The existing inline footer surfaced only four raw counters
 (`active_message_count`, `scheduled_message_count`, `dead_letter_message_count`,
-plus a "completions topic: …" trailer) and offered no growth-rate hint for DLQ,
-no queue size %, no entity status, and no transfer-path visibility. The header
-had no scope indicator (own jobs vs. all submitters under
+plus a "completions topic: …" trailer when configured) and offered no
+growth-rate hint for DLQ, no queue size %, no entity status, and no
+transfer-path visibility. The header had no scope indicator (own jobs vs. all
+submitters under
 `BLAST_SHARED_VISIBILITY=true`) and no truncation indicator when the broker
 list was capped or the JobState read window was hit — both invisible failure
 modes.
@@ -46,8 +47,8 @@ implemented with a Single-Responsibility split on both sides.
   - queue **size** (B/KB/MB/GB) and **size %** of `max_size_in_mb`, tinted
     warning/danger at 50% / 80% (the same thresholds the Storage card uses).
   - queue **status** dot + label (`active`, `disabled`, `sendDisabled`, …).
-  - **transfer / DLQ-of-transfer** counts summed across the completion topic's
-    subscriptions, surfaced only when non-zero.
+  - **transfer / DLQ-of-transfer** counts summed across the optional completion
+    topic's subscriptions, surfaced only when non-zero.
   - a **DLQ growth** row showing the rolling-window delta:
     `+N in last Ns` (warning), `no growth in last Ns` (muted), or
     `N since first sample` (honest text on the first poll because the in-process
