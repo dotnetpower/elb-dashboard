@@ -323,6 +323,26 @@ def _recover_external_failure_error(
     return message or code or None
 
 
+def _stored_submission_source(state: Any) -> str:
+    """Return the dashboard-recorded submission_source on a stored job row.
+
+    Prefers the nested ``payload.external.submission_source`` (where the drain
+    stamps ``"servicebus"``) and falls back to the payload top level. Returns
+    ``""`` when the row carries no marker. Used to recover the true origin of a
+    queue-drained job, which the sibling cannot report (it only knows the wire
+    value ``"external_api"``).
+    """
+    payload = getattr(state, "payload", None)
+    if not isinstance(payload, dict):
+        return ""
+    external = payload.get("external")
+    if isinstance(external, dict):
+        nested = str(external.get("submission_source") or "").strip()
+        if nested:
+            return nested
+    return str(payload.get("submission_source") or "").strip()
+
+
 def _sync_external_jobs_to_table(
     external_jobs: list[dict[str, Any]],
     *,
@@ -330,7 +350,6 @@ def _sync_external_jobs_to_table(
     tenant_id: str = "",
 ) -> tuple[int, int, set[str]]:
     """Best-effort upsert of external OpenAPI jobs into Azure Table Storage."""
-
     if not external_jobs:
         return (0, 0, set())
     import json
@@ -380,6 +399,20 @@ def _sync_external_jobs_to_table(
         job_id = str(ext.get("job_id") or "")
         if not job_id:
             continue
+        # Recover the dashboard's own submission_source (e.g. "servicebus") that
+        # the sibling cannot report — over the wire a queue-drained job is
+        # submitted as "external_api" (the sibling's enum has no "servicebus"
+        # value), so the /v1/jobs row always reads "external_api". The stored
+        # row preserves the true marker because the update path below never
+        # rewrites the payload, so a queue-originated job stays labelled
+        # "servicebus" in Recent searches / Jobs instead of being downgraded.
+        # Mutating ``ext`` here also relabels the same dict the list route
+        # projects (it is shared by reference with ``result.rows``).
+        _existing_for_source = existing_map.get(job_id)
+        if _existing_for_source is not None:
+            _stored_src = _stored_submission_source(_existing_for_source)
+            if _stored_src and _stored_src != str(ext.get("submission_source") or ""):
+                ext["submission_source"] = _stored_src
         try:
             # Inline-FASTA API submits carry no query identity from the sibling.
             # Inject the defline label remembered at submit time BEFORE projecting

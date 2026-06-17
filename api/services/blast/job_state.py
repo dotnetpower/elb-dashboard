@@ -355,6 +355,26 @@ def _job_error_for_response(state: Any) -> str:
     return error_code
 
 
+def _resolve_local_submission_source(payload: dict[str, Any], is_external_origin: bool) -> str:
+    """Resolve the submission_source for a locally-stored job row.
+
+    Prefers the nested ``payload.external.submission_source`` (queue-drained
+    shared rows stamp ``"servicebus"`` there) then the payload top level (the
+    send-time ``servicebus`` placeholder stamps it there). Falls back to
+    ``"external_api"`` for external-origin rows and ``"dashboard"`` otherwise so
+    the field is always populated and never silently drops a queue origin.
+    """
+    external = payload.get("external") if isinstance(payload, dict) else None
+    if isinstance(external, dict):
+        nested = str(external.get("submission_source") or "").strip()
+        if nested:
+            return nested
+    top = str(payload.get("submission_source") or "").strip() if isinstance(payload, dict) else ""
+    if top:
+        return top
+    return "external_api" if is_external_origin else "dashboard"
+
+
 def _local_to_blast_job(
     state: Any,
     split_children: dict[str, Any] | None = None,
@@ -434,6 +454,7 @@ def _local_to_blast_job(
         "config_snapshot": payload.get("config_snapshot") if isinstance(payload, dict) else None,
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
         "source": "external_api" if is_external_origin else "dashboard",
+        "submission_source": _resolve_local_submission_source(payload, is_external_origin),
         "owner_upn": getattr(state, "owner_upn", None) or None,
     }
     out["target"] = build_target(

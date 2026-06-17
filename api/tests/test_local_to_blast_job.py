@@ -70,6 +70,31 @@ def test_local_to_blast_job_query_label_extracted():
     assert out["db"] == "16S_ribosomal_RNA"
 
 
+def test_local_to_blast_job_surfaces_servicebus_source_from_nested_external():
+    # A queue-drained shared row stamps the true origin under
+    # payload.external.submission_source — Recent searches / Jobs must label it
+    # "servicebus", not the generic dashboard/external_api source.
+    out = _local_to_blast_job(
+        _state(payload={"external": {"submission_source": "servicebus"}})
+    )
+    assert out["submission_source"] == "servicebus"
+    # The coarse origin flag still reads external for an external-origin row.
+    assert out["source"] == "external_api"
+
+
+def test_local_to_blast_job_surfaces_servicebus_source_from_placeholder():
+    # The send-time queued placeholder stamps submission_source at the payload
+    # top level (no nested external snapshot yet).
+    out = _local_to_blast_job(_state(payload={"submission_source": "servicebus"}))
+    assert out["submission_source"] == "servicebus"
+
+
+def test_local_to_blast_job_submission_source_defaults_to_dashboard():
+    out = _local_to_blast_job(_state(payload={}))
+    assert out["submission_source"] == "dashboard"
+
+
+
 def test_local_to_blast_job_can_include_database_metadata(monkeypatch):
     def fake_database_metadata(database: str, storage_account: str):
         assert database == "core_nt"

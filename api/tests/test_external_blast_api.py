@@ -16,7 +16,7 @@ Validation: `uv run pytest -q api/tests/test_external_blast_api.py`.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -1659,6 +1659,107 @@ def test_external_completed_status_maps_to_dashboard_completed(external_status):
     from api.routes import _blast_shared as stubs
 
     assert stubs._external_status_to_dashboard(external_status) == "completed"
+
+
+def test_sync_external_recovers_servicebus_submission_source(monkeypatch):
+    """A queue-drained job keeps its ``servicebus`` origin label.
+
+    Over the wire the sibling only knows ``external_api`` (its enum has no
+    ``servicebus`` value), so a /v1/jobs row always reports ``external_api``.
+    The dashboard's own stored row preserves the true marker under
+    ``payload.external.submission_source``; the sync must recover it so Recent
+    searches / Jobs label the row ``servicebus`` instead of downgrading it.
+    """
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+
+    class FakeExisting:
+        job_id = "sb-1"
+        status = "running"
+        phase = "running"
+        error_code = ""
+        subscription_id = "sub-1"
+        resource_group = "rg-1"
+        cluster_name = "elb-cluster"
+        storage_account = ""
+        program = "blastn"
+        db = "core_nt"
+        job_title = "blastn core_nt"
+        query_label = "q.fa"
+        payload: ClassVar[dict] = {"external": {"submission_source": "servicebus"}}
+
+    class FakeRepo:
+        def get_many(self, _ids):
+            return {"sb-1": FakeExisting()}
+
+        def create(self, state):
+            raise AssertionError("existing row must update, not create")
+
+        def update(self, *_a, **_kw):
+            return None
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", object)
+
+    ext = {
+        "job_id": "sb-1",
+        "status": "running",
+        "submission_source": "external_api",  # sibling wire value
+        "external_correlation_id": "corr-1",
+        "program": "blastn",
+        "db": "core_nt",
+        "cluster_name": "elb-cluster",
+    }
+    shared._sync_external_jobs_to_table([ext], caller_oid="oid-1")
+    # The dashboard's own servicebus marker wins over the sibling's external_api,
+    # mutating the same dict the list route projects (shared by reference).
+    assert ext["submission_source"] == "servicebus"
+
+
+def test_sync_external_does_not_invent_servicebus_for_plain_external(monkeypatch):
+    """A genuine external_api job (no stored servicebus marker) is never
+    relabelled — the recovery only honours a marker the dashboard itself set."""
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+
+    class FakeExisting:
+        job_id = "ext-1"
+        status = "running"
+        phase = "running"
+        error_code = ""
+        subscription_id = "sub-1"
+        resource_group = "rg-1"
+        cluster_name = "elb-cluster"
+        storage_account = ""
+        program = "blastn"
+        db = "core_nt"
+        job_title = "blastn core_nt"
+        query_label = "q.fa"
+        payload: ClassVar[dict] = {"external": {"submission_source": "external_api"}}
+
+    class FakeRepo:
+        def get_many(self, _ids):
+            return {"ext-1": FakeExisting()}
+
+        def create(self, state):
+            raise AssertionError("existing row must update, not create")
+
+        def update(self, *_a, **_kw):
+            return None
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", object)
+
+    ext = {
+        "job_id": "ext-1",
+        "status": "running",
+        "submission_source": "external_api",
+        "program": "blastn",
+        "db": "core_nt",
+        "cluster_name": "elb-cluster",
+    }
+    shared._sync_external_jobs_to_table([ext], caller_oid="oid-1")
+    assert ext["submission_source"] == "external_api"
 
 
 def test_sync_external_jobs_creates_missing_rows(monkeypatch):
