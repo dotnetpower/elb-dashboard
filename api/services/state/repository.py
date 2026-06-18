@@ -9,7 +9,10 @@ Edit boundaries: Azure-Tables SDK lives here. Domain shaping
 pool primitive lives in `table_pool.py`.
 Key entry points: `JobStateRepository`, `get_state_repo`, `reset_state_repo_cache`.
 Risky contracts: Every OData filter MUST flow through `_sanitise_odata_value`.
-Validation: `uv run pytest -q api/tests/test_state_repo.py`.
+The optional time-ordered index (#50) is flag-gated by `time_index_enabled()`
+and writes an IMMUTABLE index row keyed on `owner_oid` + `created_at`; never
+key it on a mutable field.
+Validation: `uv run pytest -q api/tests/test_state_repo.py api/tests/test_jobstate_time_index.py`.
 """
 
 from __future__ import annotations
@@ -37,6 +40,15 @@ from api.services.state.table_pool import (
     _ENSURED_TABLES_LOCK,
     _TABLE_ENDPOINT_ENV,
     _PooledTableClient,
+)
+from api.services.state.time_index import (
+    INDEX_TABLE_NAME,
+    build_index_entity,
+    decode_cursor,
+    encode_cursor,
+    owner_bucket,
+    row_key,
+    time_index_enabled,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -155,6 +167,7 @@ class JobStateRepository:
         # instance so the TLS session and HTTP pipeline are shared per-repo.
         self._state_pool: _PooledTableClient | None = None
         self._history_pool: _PooledTableClient | None = None
+        self._index_pool: _PooledTableClient | None = None
         self._pool_lock = threading.Lock()
 
     def _state_client(self) -> _PooledTableClient:
@@ -189,6 +202,28 @@ class JobStateRepository:
                     self._history_pool = pool
         return pool
 
+    def _index_client(self) -> _PooledTableClient:
+        """Pooled client for the optional time-ordered index table (#50).
+
+        Lazily constructed like the other clients; only ever touched when
+        ``time_index_enabled()`` is true, so a deployment with the feature off
+        never opens a pipeline against ``jobstateindex``.
+        """
+        pool = self._index_pool
+        if pool is None:
+            with self._pool_lock:
+                pool = self._index_pool
+                if pool is None:
+                    pool = _PooledTableClient(
+                        TableClient(
+                            endpoint=self._endpoint,
+                            table_name=INDEX_TABLE_NAME,
+                            credential=self._cred,
+                        )
+                    )
+                    self._index_pool = pool
+        return pool
+
     def _ensure_table(self, table_name: str) -> None:
         key = (self._endpoint, table_name)
         if key in _ENSURED_TABLES:
@@ -210,6 +245,53 @@ class JobStateRepository:
                     except ResourceExistsError:
                         pass
             _ENSURED_TABLES.add(key)
+
+    # --- time-ordered index (#50, flag-gated) ---
+
+    def _index_put(self, state: JobState) -> None:
+        """Best-effort add of a job's immutable index row (on create).
+
+        Never raises: the ``jobstate`` row is the source of truth, so an index
+        write failure must not fail the create. It is logged + counted so a
+        sustained failure is visible, and the backfill script reconciles any
+        rows the index missed. Only called when ``time_index_enabled()``.
+        """
+        entity = build_index_entity(
+            job_id=state.job_id,
+            owner_oid=state.owner_oid,
+            created_at=state.created_at,
+        )
+        try:
+            self._ensure_table(INDEX_TABLE_NAME)
+            with self._index_client() as t:
+                t.upsert_entity(entity)
+        except Exception as exc:
+            LOGGER.warning(
+                "jobstate time-index put failed job_id=%s: %s",
+                state.job_id,
+                type(exc).__name__,
+            )
+
+    def _index_delete(self, *, job_id: str, owner_oid: str | None, created_at: str | None) -> None:
+        """Best-effort removal of a job's index row (on soft-delete).
+
+        Idempotent: deleting an already-absent row is a no-op (the SDK raises
+        ``ResourceNotFoundError`` which we swallow). Never raises. Only called
+        when ``time_index_enabled()``.
+        """
+        partition = owner_bucket(owner_oid)
+        rk = row_key(created_at, job_id)
+        try:
+            with self._index_client() as t:
+                t.delete_entity(partition_key=partition, row_key=rk)
+        except ResourceNotFoundError:
+            return
+        except Exception as exc:
+            LOGGER.warning(
+                "jobstate time-index delete failed job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
 
     # --- jobstate ---
 
@@ -237,6 +319,8 @@ class JobStateRepository:
             "created",
             {"status": created.status, "phase": created.phase, "job_title": created.job_title},
         )
+        if time_index_enabled():
+            self._index_put(created)
         return created
 
     def get(self, job_id: str) -> JobState | None:
@@ -287,8 +371,13 @@ class JobStateRepository:
                 self._ensure_table("jobstate")
         return None
 
-    def get_many(self, job_ids: list[str]) -> dict[str, JobState]:
+    def get_many(
+        self, job_ids: list[str], *, select: list[str] | None = None
+    ) -> dict[str, JobState]:
         """Batch lookup for N job_ids using a single OData query.
+
+        ``select`` optionally projects a subset of columns (e.g.
+        ``_JOBSTATE_SUMMARY_SELECT`` to skip the large ``payload_json``).
 
         Returns a dict mapping job_id -> JobState for rows that exist.
         Missing job_ids are simply absent from the result.
@@ -313,10 +402,13 @@ class JobStateRepository:
             for jid in unique_ids
         ]
         filter_expr = " or ".join(parts)
+        query_kwargs: dict[str, Any] = {"results_per_page": len(unique_ids)}
+        if select is not None:
+            query_kwargs["select"] = select
         result: dict[str, JobState] = {}
         with self._state_client() as t:
             try:
-                for e in t.query_entities(filter_expr, results_per_page=len(unique_ids)):
+                for e in t.query_entities(filter_expr, **query_kwargs):
                     state = JobState.from_entity(dict(e))
                     result[state.job_id] = state
             except ResourceNotFoundError:
@@ -455,6 +547,16 @@ class JobStateRepository:
                 "job_title": updated.job_title,
             },
         )
+        # Soft-delete (status flipped to the 'deleted' tombstone) removes the
+        # job from every listing, so drop its index row too (#50). owner_oid /
+        # created_at are immutable, so the RowKey here matches the one written
+        # at create. Other status transitions never touch the index.
+        if time_index_enabled() and status == "deleted":
+            self._index_delete(
+                job_id=job_id,
+                owner_oid=updated.owner_oid,
+                created_at=updated.created_at,
+            )
         return updated
 
     def _list_recent_sorted(
@@ -524,13 +626,122 @@ class JobStateRepository:
         Ordering: the genuinely most-recent ``limit`` rows are returned even
         when the owner has more than ``limit`` jobs — see
         :meth:`_list_recent_sorted` for why a page-sized read is not enough.
+
+        When ``time_index_enabled()`` the bounded time-ordered index (#50) is
+        used instead of the full scan; an index miss / error falls back to the
+        legacy scan below so the listing is never empty due to an
+        un-backfilled or unavailable index.
         """
+        if time_index_enabled():
+            try:
+                rows, _cursor = self.list_owner_page(
+                    owner_oid, limit=limit, include_payload=include_payload
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "jobstate time-index read failed (owner); using legacy scan: %s",
+                    type(exc).__name__,
+                )
+                rows = []
+            if rows:
+                return rows
+            # Empty index result: could be a genuinely empty owner OR an
+            # un-backfilled index. Fall back to the legacy scan so jobs are
+            # never hidden; the scan returns [] too when the owner truly has
+            # none, so this only costs one extra read in the empty case.
+            LOGGER.info(
+                "jobstate time-index returned no rows (owner); falling back to legacy scan"
+            )
         safe_oid = _sanitise_odata_value(owner_oid)
         return self._list_recent_sorted(
             f"(owner_oid eq '{safe_oid}' or owner_oid eq '') and status ne 'deleted'",
             limit=limit,
             include_payload=include_payload,
         )
+
+    def list_owner_page(
+        self,
+        owner_oid: str,
+        *,
+        limit: int = 50,
+        include_payload: bool = True,
+        cursor: str = "",
+    ) -> tuple[list[JobState], str | None]:
+        """Indexed most-recent page for an owner (#50): ``(rows, next_cursor)``.
+
+        Reads the time-ordered index instead of scanning ``jobstate``. The
+        owner's filter (``owner_oid eq X or owner_oid eq ''``) maps to exactly
+        two index partitions — the owner's own bucket and the shared bucket —
+        each of which is read newest-first for ``limit + 1`` rows (the extra row
+        is the honest ``has_more`` probe). The two streams are merged by RowKey
+        (inverted ticks => newest first), truncated to ``limit``, and the job
+        rows are batch-fetched from ``jobstate`` in that order.
+
+        ``cursor`` is an opaque token from a previous page's ``next_cursor``;
+        an invalid/expired cursor degrades to the first page. ``next_cursor`` is
+        ``None`` when no further rows exist.
+
+        Raises on a hard index/Table error so ``list_for_owner`` can fall back
+        to the legacy scan. Rows whose ``jobstate`` entry is missing or already
+        tombstoned (``status='deleted'``) are skipped defensively (a delete that
+        raced the index read).
+        """
+        page_size = _clamp_page_size(limit + 1)
+        after = decode_cursor(cursor)
+        buckets: list[str] = []
+        for bucket in (owner_bucket(owner_oid), owner_bucket("")):
+            if bucket not in buckets:
+                buckets.append(bucket)
+
+        # (row_key, job_id) newest-first across both buckets.
+        merged: list[tuple[str, str]] = []
+        with self._index_client() as t:
+            for bucket in buckets:
+                clauses = [f"PartitionKey eq '{_sanitise_odata_value(bucket)}'"]
+                if after:
+                    clauses.append(f"RowKey gt '{_sanitise_odata_value(after)}'")
+                filter_expr = " and ".join(clauses)
+                taken = 0
+                try:
+                    for entity in t.query_entities(
+                        filter_expr,
+                        results_per_page=page_size,
+                        select=["RowKey", "job_id"],
+                    ):
+                        rk = str(entity.get("RowKey") or "")
+                        jid = str(entity.get("job_id") or "")
+                        if not rk or not jid:
+                            continue
+                        merged.append((rk, jid))
+                        taken += 1
+                        if taken >= page_size:
+                            break
+                except ResourceNotFoundError:
+                    # Index table not created yet -> treat as empty (caller
+                    # falls back to the legacy scan).
+                    self._ensure_table(INDEX_TABLE_NAME)
+
+        if not merged:
+            return [], None
+
+        merged.sort(key=lambda pair: pair[0])
+        has_more = len(merged) > limit
+        window = merged[:limit]
+        ordered_job_ids = [jid for _rk, jid in window]
+
+        select = None if include_payload else _JOBSTATE_SUMMARY_SELECT
+        states = self.get_many(ordered_job_ids, select=select)
+
+        rows: list[JobState] = []
+        for _rk, jid in window:
+            state = states.get(jid)
+            if state is None or state.status == "deleted":
+                continue
+            rows.append(state)
+
+        next_cursor = encode_cursor(window[-1][0]) if (has_more and window) else None
+        return rows, next_cursor
+
 
     def list_all(
         self,
