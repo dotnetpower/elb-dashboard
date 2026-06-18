@@ -59,15 +59,17 @@ def test_get_defaults_disabled(client: TestClient) -> None:
     assert body["config"]["enabled"] is False
     assert body["effective_enabled"] is False
     assert body["env_gate_enabled"] is False
+    assert body["kill_switch_enabled"] is False
     assert body["counts"]["available"] is False
 
 
-def test_env_gate_reported_independently_of_config(
+def test_env_override_three_state_in_status(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The env gate is surfaced separately so the SPA can explain why an
-    operator-enabled config is still not live (deployment gate OFF)."""
-    # Config enabled with a namespace, but the deployment master switch OFF.
+    """The status payload surfaces the three-state env override so the SPA can
+    explain activation: an unset env defers to the saved config (runtime feature
+    flag), an explicit falsy env is a deployment kill switch, and an explicit
+    truthy env pins the capability on."""
     payload = {
         "enabled": True,
         "auth_mode": "entra",
@@ -77,15 +79,25 @@ def test_env_gate_reported_independently_of_config(
     }
     assert client.put("/api/settings/service-bus", json=payload).status_code == 200
 
+    # Env unset -> defer to config -> live (the runtime feature flag).
+    monkeypatch.delenv("SERVICEBUS_ENABLED", raising=False)
     body = client.get("/api/settings/service-bus").json()
     assert body["config"]["enabled"] is True
-    assert body["env_gate_enabled"] is False  # gate OFF
-    assert body["effective_enabled"] is False  # so the integration is dormant
+    assert body["env_gate_enabled"] is False  # not explicitly pinned on
+    assert body["kill_switch_enabled"] is False
+    assert body["effective_enabled"] is True  # config drives it
 
-    # Flip the deployment master switch ON; now both agree and it is live.
+    # Explicit falsy -> deployment kill switch forces OFF regardless of config.
+    monkeypatch.setenv("SERVICEBUS_ENABLED", "false")
+    body = client.get("/api/settings/service-bus").json()
+    assert body["kill_switch_enabled"] is True
+    assert body["effective_enabled"] is False
+
+    # Explicit truthy -> pinned on; config already opts in -> live.
     monkeypatch.setenv("SERVICEBUS_ENABLED", "true")
     body = client.get("/api/settings/service-bus").json()
     assert body["env_gate_enabled"] is True
+    assert body["kill_switch_enabled"] is False
     assert body["effective_enabled"] is True
 
 

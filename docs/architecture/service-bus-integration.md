@@ -349,7 +349,7 @@ Rules a subscriber must follow:
 
 | Env var | Default | Sidecars | Meaning |
 |---|---|---|---|
-| `SERVICEBUS_ENABLED` | `false` | api, beat | Master switch. When false the drain/publish/cleanup beat tasks no-op and the submit routes do not enqueue. |
+| `SERVICEBUS_ENABLED` | _(empty)_ | api, worker, beat | Three-state deploy-time override of the saved config. **Empty/unset (default)** defers to the Settings config row, so the toggle is a runtime feature flag that survives redeploys. **Truthy** (`true`/`1`/`yes`/`on`) pins the capability on, but activation still requires the config (enabled + namespace). **Falsy** (`false`/`0`/`no`/`off`) is a deployment kill switch that forces the integration OFF regardless of the config. When OFF the drain/publish/cleanup beat tasks no-op and the submit routes do not enqueue. |
 | `ENABLE_SB_SUBMIT_INGRESS` | `false` | api | When true (and Service Bus enabled) the dashboard submit API enqueues to Service Bus instead of calling `/v1/jobs` directly; a publish failure falls back to the direct path. |
 | `SERVICEBUS_RESIDENT_CONSUMER` | `false` | worker | When true (and Service Bus enabled) a resident long-polling consumer drains the queue continuously (~1 s) instead of waiting the 30 s beat; the beat stays as the fallback. |
 | `CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS` | `30` | beat | Drain + transition-publish cadence. |
@@ -357,8 +357,13 @@ Rules a subscriber must follow:
 
 The runtime configuration (namespace, request queue, optional completion topic,
 cleanup thresholds) lives in the `servicebuspref` Azure Table row and is edited
-from Settings without a redeploy. The env flags only gate whether the subsystem
-runs at all.
+from Settings without a redeploy. Enabling the integration there is the
+activation switch: because the config is Table-backed it survives redeploys, and
+all sidecars read the same row, so the toggle takes effect within a gate check
+(~1 minute) without restarting the control plane. `SERVICEBUS_ENABLED` is only a
+deploy-time override on top of that — left empty it defers to the config; set
+falsy it is a kill switch; the integration stays OFF by default until an operator
+opts in (the config defaults disabled).
 
 ## Validation
 

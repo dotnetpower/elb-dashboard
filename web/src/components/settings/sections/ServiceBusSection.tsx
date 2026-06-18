@@ -137,7 +137,7 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
   const [cfg, setCfg] = useState<ServiceBusConfig | null>(null);
   const [counts, setCounts] = useState<ServiceBusCounts | null>(null);
   const [effectiveEnabled, setEffectiveEnabled] = useState(false);
-  const [envGateEnabled, setEnvGateEnabled] = useState(true);
+  const [killSwitchEnabled, setKillSwitchEnabled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -156,7 +156,7 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
       setCfg(res.config);
       setCounts(res.counts);
       setEffectiveEnabled(res.effective_enabled);
-      setEnvGateEnabled(res.env_gate_enabled);
+      setKillSwitchEnabled(res.kill_switch_enabled);
     } catch (err) {
       setError(formatApiError(err));
     } finally {
@@ -282,22 +282,23 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
             <strong style={{ color: "var(--text-primary)" }}>
               Enabled in settings, but not active yet.
             </strong>{" "}
-            {!envGateEnabled ? (
+            {killSwitchEnabled ? (
               <>
-                The deployment master switch <code>SERVICEBUS_ENABLED</code> is
-                OFF, so the integration stays dormant and does not appear on the
-                dashboard. This switch lives on the Container App revision (a
-                deploy-time gate, by design separate from this runtime config —
-                both must be ON), so it cannot be flipped from the dashboard
-                without restarting the control plane. Apply one of the commands
-                below; the integration goes live within ~1 minute.
+                A deployment kill switch is forcing it off:{" "}
+                <code>SERVICEBUS_ENABLED</code> is set to <code>false</code> on
+                the control plane, which overrides this config. Clear the
+                override (unset it, or set it to <code>true</code>) so the
+                Settings toggle controls the integration; it then goes live
+                within ~1 minute. The config you save here lives in storage and
+                survives redeploys — only an explicit <code>false</code> override
+                holds it off.
                 <div style={{ marginTop: 6, marginBottom: 2 }}>
                   <CopyCommand
-                    label="Durable — survives every redeploy (recommended):"
+                    label="Durable — clears the kill switch on every redeploy (recommended):"
                     command="azd env set SERVICEBUS_ENABLED true && azd deploy"
                   />
                   <CopyCommand
-                    label="Fast — no redeploy, sets the gate on the api/worker/beat sidecars now:"
+                    label="Fast — clears it on the api/worker/beat sidecars now:"
                     command={
                       "for c in api worker beat; do az containerapp update " +
                       "-n <control-plane-app> -g <control-plane-rg> " +

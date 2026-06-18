@@ -10,12 +10,19 @@ Edit boundaries: Reusable domain/persistence logic only. HTTP shaping lives in
     ``api.routes.settings.service_bus``; the data-plane client lives in
     ``api.services.service_bus``. No Azure SDK management/data-plane calls here.
 Key entry points: ``ServiceBusConfig``, ``AUTH_MODES``, ``get_service_bus_config``,
-    ``save_service_bus_config``, ``service_bus_enabled``, ``normalise_config``.
+    ``save_service_bus_config``, ``service_bus_enabled``, ``service_bus_env_override``,
+    ``service_bus_kill_switch_on``, ``normalise_config``.
 Risky contracts: ``enabled`` defaults to ``False`` and a missing row reads back
-    as a disabled default — the integration must stay off until an operator
-    opts in (charter §12a Rule 4). The SAS connection string itself is NEVER
-    stored in this row; only the Key Vault secret name is. Table backend is
-    gated by ``AZURE_TABLE_ENDPOINT`` + ``CONTAINER_APP_NAME`` (mirrors
+    as a disabled default — the integration stays off until an operator opts in
+    (charter §12a Rule 4 default-OFF preserved). The deploy-time env
+    ``SERVICEBUS_ENABLED`` is a three-state *override* (truthy = pin capability
+    on but still require config; falsy = kill switch forcing OFF; unset = defer
+    to the config row), NOT a hard AND-gate — see ``service_bus_enabled`` /
+    ``service_bus_env_override``. So the Settings toggle is a runtime feature
+    flag that survives redeploys, while a deployment retains an explicit kill
+    switch. The SAS connection string itself is NEVER stored in this row; only
+    the Key Vault secret name is. Table backend is gated by
+    ``AZURE_TABLE_ENDPOINT`` + ``CONTAINER_APP_NAME`` (mirrors
     ``performance_pref``); local dev falls back to a JSON file.
 Validation: ``uv run pytest -q api/tests/test_service_bus_pref.py``.
 """
@@ -238,33 +245,79 @@ def normalise_config(
     return cfg
 
 
-def service_bus_env_gate_on() -> bool:
-    """True when the deployment master switch ``SERVICEBUS_ENABLED`` is on.
+_ENV_TRUTHY = {"1", "true", "yes", "on"}
+_ENV_FALSY = {"0", "false", "no", "off"}
 
-    This reflects ONLY the env gate (``SERVICEBUS_ENABLED`` in
-    ``control-plane-env.json`` / the Container App env), independent of the
-    saved config row. The Settings UI uses it to explain precisely why an
-    operator-enabled config is still not live: the deployment never opted in,
-    so the integration stays dormant regardless of the runtime toggle.
+
+def service_bus_env_override() -> bool | None:
+    """Three-state deploy-time override for the Service Bus feature flag.
+
+    The env var ``SERVICEBUS_ENABLED`` (set per-sidecar in
+    ``control-plane-env.json`` / the Container App revision) is no longer a hard
+    master switch but a deploy-time *override* of the runtime config:
+
+    * ``True``  — explicitly truthy (``true``/``1``/``yes``/``on``): the
+      deployment pins the capability ON. Activation still requires the saved
+      config (``enabled`` + namespace); the env never bypasses the config.
+    * ``False`` — explicitly falsy (``false``/``0``/``no``/``off``): a
+      deployment-level **kill switch**. The integration stays OFF regardless of
+      the saved config — the operator override of last resort.
+    * ``None``  — unset / empty / unrecognised: **defer to the saved config
+      row**, so the Settings toggle behaves as a runtime feature flag that
+      survives redeploys (the config lives in the Table, not on the revision).
+
+    The repo default in ``control-plane-env.json`` is empty (``None`` → defer),
+    so a fresh deployment stays OFF until an authenticated operator opts in via
+    Settings (the config defaults to ``enabled=False``); default-OFF is
+    preserved (charter §12a Rule 4) while the deployment keeps an explicit
+    kill switch.
     """
-    return str(os.environ.get("SERVICEBUS_ENABLED", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    raw = str(os.environ.get("SERVICEBUS_ENABLED", "")).strip().lower()
+    if raw in _ENV_TRUTHY:
+        return True
+    if raw in _ENV_FALSY:
+        return False
+    return None
+
+
+def service_bus_env_gate_on() -> bool:
+    """True when the deployment explicitly pins ``SERVICEBUS_ENABLED`` truthy.
+
+    NOTE: since the gate became a three-state override
+    (``service_bus_env_override``), an explicit truthy env is no longer
+    *required* to activate — an unset env defers to the saved config. This
+    helper reports only the "explicitly pinned ON" state and is surfaced in the
+    Settings status payload for diagnostics; do not use it as the activation
+    gate (use ``service_bus_enabled``).
+    """
+    return service_bus_env_override() is True
+
+
+def service_bus_kill_switch_on() -> bool:
+    """True when ``SERVICEBUS_ENABLED`` is explicitly falsy.
+
+    The deployment kill switch: forces the integration OFF regardless of the
+    saved config row. Surfaced in the Settings status payload so the SPA can
+    explain the rare "enabled in settings but a deployment override is forcing
+    it off" state, distinct from "no namespace configured yet".
+    """
+    return service_bus_env_override() is False
 
 
 def service_bus_enabled() -> bool:
-    """True only when BOTH the env gate AND the saved config say enabled.
+    """True when the integration is live: not kill-switched AND the saved config
+    opts in (``enabled`` + namespace).
 
-    The env flag ``SERVICEBUS_ENABLED`` is the deployment-level master switch
-    (default off, set per-sidecar in ``control-plane-env.json``); the saved
-    config row is the operator's runtime toggle. Both must agree, so a stale
-    config row can never re-activate the subsystem on a deployment that did not
-    opt in, and vice-versa.
+    ``SERVICEBUS_ENABLED`` is a three-state deploy-time override (see
+    ``service_bus_env_override``): an explicit falsy value forces OFF (kill
+    switch); explicit truthy or unset both defer to the saved config row, which
+    is the runtime feature flag. Because the config lives in the Table (not on
+    the Container App revision), toggling it in Settings takes effect at the
+    next gate check — consistently across all sidecars, which read the same
+    row — and survives redeploys, instead of being reset to a revision-baked
+    env default.
     """
-    if not service_bus_env_gate_on():
+    if service_bus_kill_switch_on():
         return False
     cfg = get_service_bus_config()
     return cfg.enabled and bool(cfg.namespace_fqdn)

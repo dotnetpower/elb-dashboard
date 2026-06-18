@@ -385,12 +385,21 @@ export interface ServiceBusStatusResponse {
   env_enabled: boolean;
   effective_enabled: boolean;
   /**
-   * Raw deployment master switch (`SERVICEBUS_ENABLED`), independent of the
-   * saved config row. When `config.enabled` is true but this is false, the
-   * integration is dormant because the deployment never opted in — the
-   * Settings section surfaces this so the operator knows why it is not live.
+   * Raw deployment override (`SERVICEBUS_ENABLED`) state, independent of the
+   * saved config row. True only when the deployment explicitly pins the env
+   * truthy. Since the gate became a runtime feature flag (the saved config
+   * drives activation, the env merely overrides), an unset env is no longer a
+   * reason to be dormant — use `kill_switch_enabled` for the "deployment is
+   * forcing it off" case. Kept for diagnostics.
    */
   env_gate_enabled: boolean;
+  /**
+   * Deployment kill switch: `SERVICEBUS_ENABLED` is explicitly falsy, forcing
+   * the integration OFF regardless of the saved config. The Settings section
+   * surfaces this so the operator can distinguish "a deployment override is
+   * forcing it off" from "no namespace configured yet".
+   */
+  kill_switch_enabled: boolean;
   counts: ServiceBusCounts;
 }
 

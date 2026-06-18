@@ -8,18 +8,18 @@
     "BLAST_GATE_ENABLED": "false",
     "BLAST_JOBS_SHARED_VISIBILITY": "true",
     "STRICT_BLUEGREEN": "false",
-    "SERVICEBUS_ENABLED": "false",
+    "SERVICEBUS_ENABLED": "",
     "ENABLE_SB_SUBMIT_INGRESS": "false"
   },
   "worker": {
     "BLAST_GATE_ENABLED": "false",
     "STRICT_BLUEGREEN": "false",
-    "SERVICEBUS_ENABLED": "false",
+    "SERVICEBUS_ENABLED": "",
     "SERVICEBUS_RESIDENT_CONSUMER": "false"
   },
   "beat": {
     "BLAST_GATE_ENABLED": "false",
     "STRICT_BLUEGREEN": "false",
-    "SERVICEBUS_ENABLED": "false"
+    "SERVICEBUS_ENABLED": ""
   }
 }

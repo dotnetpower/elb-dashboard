@@ -2,12 +2,14 @@
 
 Responsibility: Verify the disabled default, validation rules (FQDN/entity/SAS
     secret), request-only blank completion topics, bound clamping for the
-    cleanup policy, the env+config AND gate in ``service_bus_enabled``, and the
+    cleanup policy, the three-state env override in ``service_bus_enabled``
+    (unset/truthy defer to config, falsy is a kill switch), and the
     file-backend round trip.
 Edit boundaries: Persistence + config validation only.
 Key entry points: the ``test_*`` functions.
 Risky contracts: ``enabled`` must default False; ``service_bus_enabled`` must
-    require BOTH the env gate and a saved+namespaced config.
+    treat the saved+namespaced config as the source of truth, with the env var
+    only able to force OFF (kill switch) — never to activate without the config.
 Validation: ``uv run pytest -q api/tests/test_service_bus_pref.py``.
 """
 
@@ -99,22 +101,58 @@ def test_cleanup_bounds_are_clamped() -> None:
     assert cfg.dlq_cleanup_batch == 2000  # ceil
 
 
-def test_service_bus_enabled_requires_env_and_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_service_bus_enabled_three_state_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SERVICEBUS_ENABLED is a three-state deploy-time override of the saved
+    config: unset/truthy defer to the config (runtime feature flag), explicit
+    falsy is a kill switch. The config (enabled + namespace) is the source of
+    truth; the env never bypasses it."""
+    from api.services.service_bus_pref import (
+        ServiceBusConfig,
+        save_service_bus_config,
+        service_bus_enabled,
+        service_bus_env_override,
+        service_bus_kill_switch_on,
+    )
+
+    save_service_bus_config(
+        ServiceBusConfig(enabled=True, namespace_fqdn="x.servicebus.windows.net")
+    )
+    # Env unset -> defer to config -> enabled. This is the runtime feature flag:
+    # the config lives in the Table, so it survives redeploys (the gate is no
+    # longer reset to a revision-baked env default).
+    monkeypatch.delenv("SERVICEBUS_ENABLED", raising=False)
+    assert service_bus_env_override() is None
+    assert service_bus_enabled() is True
+    # Explicit truthy -> still defers to config (config required) -> enabled.
+    monkeypatch.setenv("SERVICEBUS_ENABLED", "true")
+    assert service_bus_env_override() is True
+    assert service_bus_enabled() is True
+    # Explicit falsy -> deployment kill switch forces OFF regardless of config.
+    monkeypatch.setenv("SERVICEBUS_ENABLED", "false")
+    assert service_bus_env_override() is False
+    assert service_bus_kill_switch_on() is True
+    assert service_bus_enabled() is False
+
+
+def test_service_bus_enabled_requires_config_even_when_env_truthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default-OFF preserved (charter 12a Rule 4): a truthy/unset env never
+    activates without the saved config opting in (enabled + namespace)."""
     from api.services.service_bus_pref import (
         ServiceBusConfig,
         save_service_bus_config,
         service_bus_enabled,
     )
 
-    save_service_bus_config(
-        ServiceBusConfig(enabled=True, namespace_fqdn="x.servicebus.windows.net")
-    )
-    # Config says enabled, but env gate is off → still disabled.
+    # Enabled but no namespace -> not live even with env truthy.
+    save_service_bus_config(ServiceBusConfig(enabled=True, namespace_fqdn=""))
+    monkeypatch.setenv("SERVICEBUS_ENABLED", "true")
+    assert service_bus_enabled() is False
+    # Config disabled + env unset -> OFF (fresh-deployment default-OFF).
+    save_service_bus_config(ServiceBusConfig(enabled=False, namespace_fqdn=""))
     monkeypatch.delenv("SERVICEBUS_ENABLED", raising=False)
     assert service_bus_enabled() is False
-    # Env on + config on → enabled.
-    monkeypatch.setenv("SERVICEBUS_ENABLED", "true")
-    assert service_bus_enabled() is True
 
 
 def test_public_dict_has_no_secret_value() -> None:

@@ -40,6 +40,7 @@ from api.services.service_bus_pref import (
     save_service_bus_config,
     service_bus_enabled,
     service_bus_env_gate_on,
+    service_bus_kill_switch_on,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -90,6 +91,12 @@ def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, A
         # the SPA distinguish "deployment gate OFF" from "namespace missing"
         # when an operator-enabled config is still not live.
         "env_gate_enabled": service_bus_env_gate_on(),
+        # Deployment kill switch: SERVICEBUS_ENABLED explicitly falsy forces the
+        # integration OFF regardless of the saved config. Distinct from an
+        # unset env (which defers to the config row). The SPA uses this to
+        # explain the rare "enabled in settings but a deployment override is
+        # forcing it off" state, separate from "no namespace configured yet".
+        "kill_switch_enabled": service_bus_kill_switch_on(),
         "counts": counts,
     }
 

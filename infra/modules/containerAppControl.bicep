@@ -56,7 +56,7 @@ param featureLabTools string = 'true'
 @description('Frontend feature flag for the browser terminal. Set to false to hide menu entries, dashboard card, shortcuts, and route access.')
 param featureTerminal string = 'true'
 
-@description('Per-deployment override for the optional Service Bus BLAST integration env gate (SERVICEBUS_ENABLED). Empty (default) keeps the repo default from control-plane-env.json (OFF, charter section 12a Rule 4); a non-empty value (e.g. true from azd env) wins so the toggle survives every redeploy.')
+@description('Per-deployment override for the Service Bus BLAST integration env (SERVICEBUS_ENABLED), a three-state deploy-time override of the runtime config. Empty (default) keeps the repo default from control-plane-env.json (also empty, so activation DEFERS to the saved Settings config row — a runtime feature flag that survives redeploys; default-OFF preserved because the config defaults disabled, charter section 12a Rule 4). A truthy value pins the capability on (config still required); a falsy value is a deployment kill switch forcing it OFF. Set via azd env so the chosen override survives every redeploy.')
 param serviceBusEnabled string = ''
 
 @description('App Insights connection string for telemetry from inside the containers.')
@@ -126,12 +126,17 @@ var platformAcrName = empty(acrLoginServer) ? '' : split(acrLoginServer, '.')[0]
 // below keep their inline documentation; only the VALUES come from the JSON.
 var controlPlaneEnv = loadJsonContent('../control-plane-env.json')
 
-// Per-deployment override for the Service Bus env gate. The repo default in
-// control-plane-env.json stays OFF (charter §12a Rule 4); when a deployment
-// exports SERVICEBUS_ENABLED (via azd env), that non-empty value wins for all
-// three sidecars so the toggle is not reset to the JSON default on the next
-// full `azd provision`. Mirrors the override scripts/dev/quick-deploy.sh
-// applies on its api/worker/beat PATCH path, so both deploy routes converge.
+// Per-deployment override for the Service Bus integration env. SERVICEBUS_ENABLED
+// is a three-state deploy-time override (truthy = pin capability on; falsy =
+// kill switch forcing OFF; empty = defer to the saved Settings config row, the
+// runtime feature flag). The repo default in control-plane-env.json is empty
+// (defer), so a fresh deployment stays OFF until an operator enables it in
+// Settings (config defaults disabled — default-OFF preserved, charter §12a
+// Rule 4) and the toggle then survives redeploys via the Table-backed config.
+// When a deployment exports SERVICEBUS_ENABLED (via azd env), that non-empty
+// value wins for all three sidecars. Mirrors the override scripts/dev/
+// quick-deploy.sh applies on its api/worker/beat PATCH path, so both deploy
+// routes converge.
 var effectiveServiceBusEnabled = empty(serviceBusEnabled)
   ? controlPlaneEnv.api.SERVICEBUS_ENABLED
   : serviceBusEnabled
