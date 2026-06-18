@@ -108,3 +108,47 @@ def is_calibrated_database(database: str) -> bool:
     not assume parity for an unverified database.
     """
     return default_for_database(database) is not None
+
+
+# The verified Web BLAST search space for a calibrated database is just BLAST's
+# effective search space for the fixed calibration query:
+#
+#     eff_searchsp = (query_len - L) * (db_len - db_num * L)
+#
+# where ``L`` is the Karlin-Altschul length adjustment. For core_nt the
+# calibration query is 64 nt and ``L`` was measured at 33 — this reproduces the
+# pinned ``value`` (32,156,241,807,668) EXACTLY from the 2026-05-09 snapshot's
+# ``calibrated_db_len`` / ``calibrated_db_num`` (verified in
+# ``test_compute_web_blast_searchsp_reproduces_pinned_value``). ``L`` is
+# essentially insensitive to modest snapshot drift (it depends on ``log(db_len)``;
+# a 5% core_nt growth leaves it at 33), so a refreshed snapshot's search space is
+# recomputed from the same length adjustment and the new DB stats — no NCBI
+# round-trip and no full-database BLAST run required.
+CALIBRATION_QUERY_LEN = 64
+CALIBRATION_LENGTH_ADJUSTMENT = 33
+
+
+def compute_web_blast_searchsp(
+    db_len: int,
+    db_num: int,
+    *,
+    query_len: int = CALIBRATION_QUERY_LEN,
+    length_adjustment: int = CALIBRATION_LENGTH_ADJUSTMENT,
+) -> int | None:
+    """Recompute the calibrated Web BLAST search space for new DB statistics.
+
+    Returns the effective search space ``(query_len - L) * (db_len - db_num * L)``
+    as a positive integer, or ``None`` when the inputs are non-positive or the
+    length adjustment would drive either effective length to zero (a degenerate
+    DB). Pure / deterministic — the building block a snapshot-drift recalibration
+    uses to refresh a calibrated database's search space from its live
+    ``total_letters`` (db_len) and ``total_sequences`` (db_num).
+    """
+    if db_len <= 0 or db_num <= 0 or query_len <= 0:
+        return None
+    eff_query = query_len - length_adjustment
+    eff_db = db_len - db_num * length_adjustment
+    if eff_query <= 0 or eff_db <= 0:
+        return None
+    return eff_query * eff_db
+
