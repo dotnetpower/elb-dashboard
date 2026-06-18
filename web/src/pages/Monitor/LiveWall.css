@@ -301,6 +301,24 @@
 .live-tile__log-lvl--OK   { color: var(--success); }
 .live-tile__log-lvl--DBG  { color: var(--text-faint); }
 
+/* The log block is a fixed-dark console (#0a0c10) in BOTH themes. Its text
+   colours otherwise come from theme tokens, which flip to dark ink in light
+   mode and render the log dark-on-dark (messages near-invisible, the empty
+   state only 3.67:1). Pin them to the dark-surface palette under light. */
+[data-theme="light"] .live-tile__log,
+[data-theme="light"] .live-tile__log-msg {
+  color: #e4e7ec;
+}
+[data-theme="light"] .live-tile__log-empty,
+[data-theme="light"] .live-tile__log-ts,
+[data-theme="light"] .live-tile__log-lvl--DBG {
+  color: #9aa0aa;
+}
+[data-theme="light"] .live-tile__log-lvl--INFO { color: #6e9fff; }
+[data-theme="light"] .live-tile__log-lvl--WARN { color: #f2994a; }
+[data-theme="light"] .live-tile__log-lvl--ERR  { color: #f2726f; }
+[data-theme="light"] .live-tile__log-lvl--OK   { color: #73bf69; }
+
 /* ----- Footer ----- */
 .live-tile__foot {
   margin-top: 8px;

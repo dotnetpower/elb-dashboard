@@ -97,7 +97,9 @@
 
   /* Accents — VS Code Light Modern (all AA as text on white) */
   --accent: #005fb8;
-  --success: #1a7f37;
+  /* #1a7f37 was 4.44:1 as badge text on the green-tinted pill bg (just
+     under AA); #15732e is ~5.2:1 there and still a clear forest green. */
+  --success: #15732e;
   --warning: #8a5d00;
   --danger: #b5251f;
   --purple: #7a52bc;
@@ -105,7 +107,7 @@
 
   /* Card accents — keep colour identity per card type */
   --card-accent-cluster: #005fb8;
-  --card-accent-storage: #1a7f37;
+  --card-accent-storage: #15732e;
   --card-accent-acr: #7a52bc;
   --card-accent-terminal: #1d6b73;
   --card-accent-jobs: #9a6700;
@@ -339,7 +341,10 @@
 [data-theme="light"] .gb-p:disabled {
   background: #ebebeb;
   border-color: #e0e0e0;
-  color: rgba(31, 31, 31, 0.38);
+  /* Readable disabled label (was rgba(31,31,31,0.38) ≈ 2.26:1, barely
+     legible). #6e6e6e is ~4.3:1 on #ebebeb yet still clearly muted/off,
+     matching the disabled submit button. */
+  color: #6e6e6e;
   box-shadow: none;
 }
 [data-theme="light"] .glass-button--primary:disabled:hover,
