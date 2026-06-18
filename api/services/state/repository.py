@@ -14,9 +14,12 @@ Validation: `uv run pytest -q api/tests/test_state_repo.py`.
 
 from __future__ import annotations
 
+import base64
+import json as _json
 import logging
 import os
 import threading
+from datetime import datetime
 from typing import Any
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
@@ -71,6 +74,122 @@ def _clamp_page_size(limit: int) -> int:
 # proper fix (logged at WARNING when hit). Override with
 # ``JOBSTATE_LIST_SCAN_CAP``.
 _LIST_SCAN_HARD_CAP_DEFAULT = 5000
+
+# ---------------------------------------------------------------------------
+# Secondary index: ``jobstateidx`` table
+# ---------------------------------------------------------------------------
+# Rows use  PartitionKey=owner_oid, RowKey="{inverted_epoch_ms:013d}_{job_id}"
+# so a single results_per_page=N read returns the N newest rows in order
+# (Azure Table Storage returns ascending RowKey; lower inverted epoch = newer
+# job). The index is written on create, refreshed on update, deleted on
+# soft-delete.  list_for_owner_indexed uses it; list_for_owner falls back to
+# _list_recent_sorted when the index read raises.
+_JOBSTATEIDX_TABLE = "jobstateidx"
+_IDX_EPOCH_OFFSET = 10**13  # ms; safe until ~year 2286
+
+# Select list for index reads: all summary fields that can be stored in the
+# index entity, plus the ``job_id`` column that maps back to the main table's
+# PartitionKey.
+_JOBSTATEIDX_SELECT = [
+    f for f in _JOBSTATE_SUMMARY_SELECT if f not in ("PartitionKey", "RowKey")
+] + ["PartitionKey", "RowKey", "job_id"]
+_JOBSTATE_SUMMARY_SELECT_SET = frozenset(_JOBSTATE_SUMMARY_SELECT) - {"PartitionKey", "RowKey"}
+
+
+def _idx_row_key(created_at: str, job_id: str) -> str:
+    """Inverted-time RowKey for newest-first ordering within an index partition.
+
+    Azure Table Storage returns rows in ascending RowKey order within a
+    partition.  By storing ``(_IDX_EPOCH_OFFSET - epoch_ms)`` as the leading
+    segment, the row with the *smallest* inverted value (= most recent job)
+    comes first in a plain ascending scan.  The job_id suffix makes keys unique
+    when two jobs share the same millisecond timestamp.
+    """
+    try:
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        epoch_ms = int(dt.timestamp() * 1000)
+    except (ValueError, AttributeError, TypeError):
+        epoch_ms = 0
+    inverted = max(0, _IDX_EPOCH_OFFSET - epoch_ms)
+    return f"{inverted:013d}_{job_id}"
+
+
+def _parse_idx_cursor(cursor: str | None) -> dict[str, str | None]:
+    """Decode a base64-url JSON cursor returned by a previous indexed read.
+
+    Returns ``{"o": owner_after, "s": shared_after}`` where each value is the
+    last RowKey consumed from its partition (used as ``RowKey gt <value>`` on
+    the next query).  Invalid or empty cursors silently return start-of-page.
+    """
+    if not cursor:
+        return {"o": None, "s": None}
+    try:
+        # Restore stripped padding before decode.
+        raw = base64.urlsafe_b64decode(cursor + "==").decode()
+        parsed = _json.loads(raw)
+        return {"o": parsed.get("o") or None, "s": parsed.get("s") or None}
+    except Exception:
+        LOGGER.warning("jobstateidx: ignoring invalid cursor %r", cursor[:80])
+        return {"o": None, "s": None}
+
+
+def _encode_idx_cursor(*, owner: str | None, shared: str | None) -> str:
+    """Encode per-partition continuation RowKeys into an opaque cursor string."""
+    payload: dict[str, str] = {}
+    if owner:
+        payload["o"] = owner
+    if shared:
+        payload["s"] = shared
+    return base64.urlsafe_b64encode(_json.dumps(payload).encode()).rstrip(b"=").decode()
+
+
+def _idx_entity_to_job_state(e: dict[str, Any]) -> JobState:
+    """Convert an index entity to a JobState.
+
+    Index rows use PartitionKey=owner_oid and RowKey=inverted_time_job_id.
+    The actual job_id is preserved in the ``job_id`` field.  We build a
+    synthetic main-table entity so the canonical ``JobState.from_entity``
+    constructor works without changes.
+    """
+    synthetic = dict(e)
+    synthetic["PartitionKey"] = e.get("job_id", "")
+    synthetic["RowKey"] = "current"
+    return JobState.from_entity(synthetic)
+
+
+def _merge_idx_rows(
+    owner: list[dict[str, Any]],
+    shared: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Merge two RowKey-ascending index entity lists, returning at most *limit* rows.
+
+    Both input lists are already sorted ascending by RowKey (smallest = newest
+    first in inverted-time scheme) by the Azure Table Storage engine.  A
+    standard two-pointer merge preserves that order without a full in-memory
+    sort.
+    """
+    result: list[dict[str, Any]] = []
+    i = j = 0
+    while len(result) < limit:
+        has_owner = i < len(owner)
+        has_shared = j < len(shared)
+        if not has_owner and not has_shared:
+            break
+        if has_owner and has_shared:
+            if owner[i]["RowKey"] <= shared[j]["RowKey"]:
+                result.append(owner[i])
+                i += 1
+            else:
+                result.append(shared[j])
+                j += 1
+        elif has_owner:
+            result.append(owner[i])
+            i += 1
+        else:
+            result.append(shared[j])
+            j += 1
+    return result
 
 
 def _list_scan_hard_cap() -> int:
@@ -155,6 +274,7 @@ class JobStateRepository:
         # instance so the TLS session and HTTP pipeline are shared per-repo.
         self._state_pool: _PooledTableClient | None = None
         self._history_pool: _PooledTableClient | None = None
+        self._idx_pool: _PooledTableClient | None = None
         self._pool_lock = threading.Lock()
 
     def _state_client(self) -> _PooledTableClient:
@@ -188,6 +308,150 @@ class JobStateRepository:
                     )
                     self._history_pool = pool
         return pool
+
+    def _idx_client(self) -> _PooledTableClient:
+        pool = self._idx_pool
+        if pool is None:
+            with self._pool_lock:
+                pool = self._idx_pool
+                if pool is None:
+                    pool = _PooledTableClient(
+                        TableClient(
+                            endpoint=self._endpoint,
+                            table_name=_JOBSTATEIDX_TABLE,
+                            credential=self._cred,
+                        )
+                    )
+                    self._idx_pool = pool
+        return pool
+
+    def _write_idx_entry(self, owner_oid: str, state: JobState) -> None:
+        """Upsert a secondary index entry for *state*.
+
+        Best-effort: a failure logs a warning but does NOT raise.  A backfill
+        script can repair missed entries; the main-table row is the source of
+        truth.  Uses REPLACE (not MERGE) so a re-write on update always reflects
+        the current summary without partial stale fields.
+        """
+        if not state.job_id or not state.created_at:
+            return
+        rk = _idx_row_key(state.created_at, state.job_id)
+        raw = state.to_entity()
+        entity: dict[str, Any] = {k: v for k, v in raw.items() if k in _JOBSTATE_SUMMARY_SELECT_SET}
+        entity["PartitionKey"] = owner_oid
+        entity["RowKey"] = rk
+        entity["job_id"] = state.job_id
+        try:
+            self._ensure_table(_JOBSTATEIDX_TABLE)
+            with self._idx_client() as t:
+                t.upsert_entity(entity, mode=UpdateMode.REPLACE)
+        except Exception as exc:
+            LOGGER.warning(
+                "jobstateidx write failed for job_id=%s owner=%r: %s",
+                state.job_id, owner_oid, exc,
+            )
+
+    def _delete_idx_entry(self, owner_oid: str, job_id: str, created_at: str) -> None:
+        """Delete a secondary index entry on soft-delete.  Best-effort."""
+        if not job_id or not created_at:
+            return
+        rk = _idx_row_key(created_at, job_id)
+        try:
+            with self._idx_client() as t:
+                t.delete_entity(partition_key=owner_oid, row_key=rk)
+        except ResourceNotFoundError:
+            pass  # already absent — idempotent
+        except Exception as exc:
+            LOGGER.warning(
+                "jobstateidx delete failed for job_id=%s owner=%r: %s",
+                job_id, owner_oid, exc,
+            )
+
+    def _query_idx_partition(
+        self,
+        partition_key: str,
+        after_row_key: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return up to *limit* index entities from one PartitionKey, newest-first.
+
+        ``after_row_key`` (when set) acts as a cursor continuation: only rows
+        with ``RowKey > after_row_key`` are returned, which is equivalent to
+        "skip to the next page" in an ascending (newest-first) scan.
+        """
+        safe_pk = _sanitise_odata_value(partition_key)
+        flt = f"PartitionKey eq '{safe_pk}'"
+        if after_row_key:
+            safe_rk = _sanitise_odata_value(after_row_key)
+            flt += f" and RowKey gt '{safe_rk}'"
+        rows: list[dict[str, Any]] = []
+        try:
+            with self._idx_client() as t:
+                for e in t.query_entities(
+                    flt,
+                    results_per_page=_clamp_page_size(limit),
+                    select=_JOBSTATEIDX_SELECT,
+                ):
+                    rows.append(dict(e))
+                    if len(rows) >= limit:
+                        break
+        except ResourceNotFoundError:
+            self._ensure_table(_JOBSTATEIDX_TABLE)
+        return rows
+
+    def list_for_owner_indexed(
+        self,
+        owner_oid: str,
+        limit: int = 50,
+        *,
+        cursor: str | None = None,
+    ) -> tuple[list[JobState], str | None, bool]:
+        """Return ``(rows, next_cursor, has_more)`` from the time-ordered secondary index.
+
+        Reads at most ``limit+1`` rows from the owner partition (PartitionKey =
+        *owner_oid*) and the shared-jobs partition (PartitionKey = ''), merges
+        them newest-first by RowKey, and builds an opaque cursor for the next
+        page.
+
+        Raises any unexpected exception so the caller can fall back to the
+        legacy full-scan path (``_list_recent_sorted``).
+        """
+        parsed = _parse_idx_cursor(cursor)
+        owner_after = parsed["o"]
+        shared_after = parsed["s"]
+        safe_oid = _sanitise_odata_value(owner_oid)
+        fetch_limit = limit + 1
+
+        owner_rows = self._query_idx_partition(safe_oid, owner_after, fetch_limit)
+        shared_rows: list[dict[str, Any]] = []
+        if safe_oid != "":
+            # Only query shared partition separately; if the caller IS the shared
+            # partition (owner_oid == "") we'd double-count the same rows.
+            shared_rows = self._query_idx_partition("", shared_after, fetch_limit)
+
+        merged = _merge_idx_rows(owner_rows, shared_rows, fetch_limit)
+        has_more = len(merged) > limit
+        page = merged[:limit]
+
+        # Compute per-partition continuation cursors from the last row consumed
+        # in this page.  Advance only the partition that supplied rows; keep the
+        # prior cursor for the one that didn't (so the next page resumes from
+        # the correct position in both streams).
+        next_cursor: str | None = None
+        if has_more and page:
+            last_owner_rk: str | None = None
+            last_shared_rk: str | None = None
+            for row in page:
+                if row.get("PartitionKey") == safe_oid:
+                    last_owner_rk = row["RowKey"]
+                else:
+                    last_shared_rk = row["RowKey"]
+            next_cursor = _encode_idx_cursor(
+                owner=last_owner_rk if last_owner_rk is not None else owner_after,
+                shared=last_shared_rk if last_shared_rk is not None else shared_after,
+            )
+
+        return [_idx_entity_to_job_state(e) for e in page], next_cursor, has_more
 
     def _ensure_table(self, table_name: str) -> None:
         key = (self._endpoint, table_name)
@@ -237,6 +501,9 @@ class JobStateRepository:
             "created",
             {"status": created.status, "phase": created.phase, "job_title": created.job_title},
         )
+        # Secondary index: best-effort; a failure does NOT roll back the main write.
+        if created.owner_oid:
+            self._write_idx_entry(created.owner_oid, created)
         return created
 
     def get(self, job_id: str) -> JobState | None:
@@ -455,6 +722,13 @@ class JobStateRepository:
                 "job_title": updated.job_title,
             },
         )
+        # Secondary index sync: best-effort; owner_oid comes from the
+        # read-back entity so no extra caller arg is needed.
+        if updated.owner_oid:
+            if status == "deleted":
+                self._delete_idx_entry(updated.owner_oid, job_id, updated.created_at or "")
+            else:
+                self._write_idx_entry(updated.owner_oid, updated)
         return updated
 
     def _list_recent_sorted(
@@ -522,9 +796,21 @@ class JobStateRepository:
         the row in lists after they have asked to delete it.
 
         Ordering: the genuinely most-recent ``limit`` rows are returned even
-        when the owner has more than ``limit`` jobs — see
-        :meth:`_list_recent_sorted` for why a page-sized read is not enough.
+        when the owner has more than ``limit`` jobs.  When the secondary
+        ``jobstateidx`` table is available the method reads it (O(limit)
+        rather than O(N)) and falls back to the full-scan path only on error.
         """
+        try:
+            rows, _cursor, _has_more = self.list_for_owner_indexed(
+                owner_oid, limit, cursor=None
+            )
+            return rows
+        except Exception as exc:
+            LOGGER.warning(
+                "jobstateidx read failed for owner=%r, falling back to full-scan: %s",
+                owner_oid,
+                exc,
+            )
         safe_oid = _sanitise_odata_value(owner_oid)
         return self._list_recent_sorted(
             f"(owner_oid eq '{safe_oid}' or owner_oid eq '') and status ne 'deleted'",

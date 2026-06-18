@@ -407,8 +407,9 @@ def _make_arm_404() -> Exception:
 
 def _make_requests_http_error(status_code: int) -> Exception:
     """Build a ``requests.exceptions.HTTPError`` with a fake response."""
-    from requests.exceptions import HTTPError
     from unittest.mock import MagicMock
+
+    from requests.exceptions import HTTPError
 
     resp = MagicMock()
     resp.status_code = status_code

@@ -146,7 +146,10 @@ def test_list_for_owner_ensures_missing_jobstate_table(monkeypatch) -> None:
     repo = JobStateRepository()
 
     assert repo.list_for_owner("owner-1") == []
-    assert created_tables == ["jobstate"]
+    # The indexed path (jobstateidx) is now tried first, so it is the first
+    # table the auto-create runs against when missing.  jobstate is NOT
+    # accessed when the indexed path succeeds (even with empty results).
+    assert "jobstateidx" in created_tables
 
 
 def test_list_for_scope_is_owner_agnostic_but_requires_scope(monkeypatch) -> None:
@@ -401,7 +404,14 @@ def test_create_ensures_state_and_history_tables(monkeypatch) -> None:
 
 
 def test_list_for_owner_includes_cluster_shared_rows(monkeypatch) -> None:
-    """``list_for_owner`` MUST include rows with owner_oid=='' (external sync)."""
+    """``list_for_owner`` queries both owner and shared (PartitionKey='') index partitions.
+
+    With the secondary index in place the method reads ``jobstateidx`` via two
+    partition-key queries (owner_oid and '') rather than one combined OData
+    filter on ``jobstate``.  Both partitions MUST be queried so shared cluster
+    rows (external OpenAPI sync, owner_oid='') appear alongside the caller's
+    own jobs.
+    """
     captured_filters: list[str] = []
 
     class RecordingTableClient:
@@ -414,34 +424,35 @@ def test_list_for_owner_includes_cluster_shared_rows(monkeypatch) -> None:
         def __exit__(self, *_args: object) -> None:
             pass
 
-        def query_entities(self, query_filter: str, *, results_per_page: int):
+        def query_entities(self, query_filter: str, **_kwargs: object):
             captured_filters.append(query_filter)
             return []
+
+        def create_table_if_not_exists(self) -> None:
+            pass
 
     monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
     monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
     monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+    state_repo._ENSURED_TABLES.clear()
 
     repo = JobStateRepository()
     repo.list_for_owner("owner-1")
 
-    assert captured_filters == [
-        "(owner_oid eq 'owner-1' or owner_oid eq '') and status ne 'deleted'"
-    ]
+    # The indexed path must query the owner partition and the shared partition.
+    assert any("PartitionKey eq 'owner-1'" in f for f in captured_filters), captured_filters
+    assert any("PartitionKey eq ''" in f for f in captured_filters), captured_filters
 
 
-def test_list_for_owner_returns_newest_beyond_first_page(monkeypatch) -> None:
-    """``list_for_owner`` MUST return the genuinely most-recent ``limit`` rows.
+def test_list_for_owner_falls_back_to_full_scan_when_index_raises(monkeypatch) -> None:
+    """``list_for_owner`` falls back to the full-scan path when the index raises.
 
-    jobstate uses a random-uuid PartitionKey, so Azure returns rows in an
-    order unrelated to ``created_at``. The previous implementation read only
-    the first ``results_per_page=limit`` page and then sorted it, which
-    silently dropped the newest jobs once an owner had more than ``limit`` of
-    them. Here the newest rows are deliberately placed LAST in iteration
-    order: a first-page read would miss them, so asserting they come back
-    proves the full-scan-then-sort fix.
+    The indexed path (``jobstateidx``) is best-effort: if it raises an
+    unexpected exception ``list_for_owner`` must silently fall back to the
+    ``_list_recent_sorted`` path and still return results.  The newest rows
+    are placed LAST in iteration order so they would be missed by a first-page
+    read, proving the full-scan-then-sort logic still runs on the fallback path.
     """
-    # Iteration order = oldest -> newest (newest last).
     rows = [
         JobState(
             job_id=f"job-{i}",
@@ -452,33 +463,98 @@ def test_list_for_owner_returns_newest_beyond_first_page(monkeypatch) -> None:
         ).to_entity()
         for i in range(1, 6)
     ]
+    call_count = [0]
 
-    class RecordingTableClient:
+    class FlakyTableClient:
         def __init__(self, **_kwargs: object) -> None:
             pass
 
-        def __enter__(self) -> RecordingTableClient:
+        def __enter__(self) -> FlakyTableClient:
             return self
 
         def __exit__(self, *_args: object) -> None:
             pass
 
         def query_entities(self, _query_filter: str, **_kwargs: object):
-            # Emulate the SDK paginating iterator: every matching row is
-            # yielded regardless of results_per_page (page size only affects
-            # round-trip batching, not the total set).
+            call_count[0] += 1
+            # First call is from the indexed path — force it to fail so
+            # list_for_owner falls back to _list_recent_sorted.
+            if call_count[0] == 1:
+                raise RuntimeError("simulated index failure")
             return list(rows)
 
+        def create_table_if_not_exists(self) -> None:
+            pass
+
     monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
-    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "TableClient", FlakyTableClient)
     monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+    state_repo._ENSURED_TABLES.clear()
 
     repo = JobStateRepository()
     result = repo.list_for_owner("owner-1", limit=3)
 
+    # Full-scan path: sort descending by created_at, take top-3.
     assert [row.job_id for row in result] == ["job-5", "job-4", "job-3"]
 
 
+def test_list_for_owner_indexed_returns_newest_first(monkeypatch) -> None:
+    """``list_for_owner_indexed`` returns rows newest-first from the secondary index.
+
+    Index rows use PartitionKey=owner_oid, RowKey=inverted_epoch_job_id, and
+    carry a ``job_id`` field mapping back to the main table.  The merge step
+    interleaves owner and shared partitions by ascending RowKey so the result
+    is time-ordered (smallest inverted epoch = newest job).
+    """
+    from api.services.state.repository import _idx_row_key
+
+    owner_oid = "owner-abc"
+    idx_rows = [
+        {
+            "PartitionKey": owner_oid,
+            "RowKey": _idx_row_key(f"2026-06-0{i}T00:00:00Z", f"job-{i}"),
+            "job_id": f"job-{i}",
+            "type": "blast",
+            "status": "completed",
+            "owner_oid": owner_oid,
+            "created_at": f"2026-06-0{i}T00:00:00Z",
+            "updated_at": f"2026-06-0{i}T00:00:00Z",
+        }
+        for i in range(1, 6)
+    ]
+    idx_rows_sorted = sorted(idx_rows, key=lambda r: r["RowKey"])
+
+    class IndexTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> IndexTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, **_kwargs: object):
+            # Only return rows for the owner partition; the shared partition
+            # is empty in this fixture so the merge doesn't produce duplicates.
+            if owner_oid in query_filter:
+                return list(idx_rows_sorted)
+            return []
+
+        def create_table_if_not_exists(self) -> None:
+            pass
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", IndexTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+    state_repo._ENSURED_TABLES.clear()
+
+    repo = JobStateRepository()
+    result, next_cursor, has_more = repo.list_for_owner_indexed(owner_oid, limit=3)
+
+    assert [r.job_id for r in result] == ["job-5", "job-4", "job-3"]
+    assert has_more is True
+    assert next_cursor is not None
 def test_get_many_batches_into_single_query(monkeypatch) -> None:
     """get_many MUST issue a single OData query covering all ids."""
     captured: list[str] = []

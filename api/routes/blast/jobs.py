@@ -278,6 +278,7 @@ def _compute_blast_jobs_response(
     shared_visibility: bool,
     request_id: str,
     skip_enrichment: bool = False,
+    cursor: str = "",
 ) -> dict[str, Any]:
     """Build the BLAST jobs-list response payload (no caching side effects).
 
@@ -300,6 +301,7 @@ def _compute_blast_jobs_response(
     """
     jobs: list[dict[str, Any]] = []
     degraded: dict[str, Any] = {}
+    _cursor_result: tuple[str | None, bool] | None = None
     # Fetch one extra row across every source so ``has_more`` in the pagination
     # envelope is honest without a server-side ordered index: if the merged set
     # exceeds ``limit`` there is at least one more page. The extra row is
@@ -322,6 +324,15 @@ def _compute_blast_jobs_response(
             # Dev-stage owner-agnostic listing: Recent searches shows every
             # submitter's jobs. Gated by BLAST_JOBS_SHARED_VISIBILITY.
             source_rows = repo.list_all(limit=fetch_limit, include_payload=False)
+        elif cursor and hasattr(repo, "list_for_owner_indexed"):
+            # Paginated cursor read: go directly to the secondary index so the
+            # response is O(limit) regardless of total job count.  next_cursor
+            # is threaded into the response envelope so the SPA can request the
+            # next page.
+            source_rows, _next_cursor, _has_more_idx = repo.list_for_owner_indexed(
+                caller_oid, fetch_limit, cursor=cursor
+            )
+            _cursor_result = (_next_cursor, _has_more_idx)
         else:
             source_rows = repo.list_for_owner(
                 caller_oid, limit=fetch_limit, include_payload=False
@@ -482,12 +493,21 @@ def _compute_blast_jobs_response(
     jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
     has_more = len(jobs) > limit
     page_jobs = jobs[:limit]
+    # When a cursor-indexed read was used, the has_more / next_cursor values
+    # from the secondary index are more accurate (they account for both owner
+    # and shared partitions) than the +1 heuristic above.
+    next_cursor: str | None = None
+    if _cursor_result is not None:
+        next_cursor, has_more = _cursor_result
+        if not has_more:
+            next_cursor = None
     response: dict[str, Any] = {
         "jobs": page_jobs,
         "page": build_page(
             limit=limit,
             returned=len(page_jobs),
             has_more=has_more,
+            next_cursor=next_cursor,
         ),
         "meta": build_meta(request_id=request_id),
     }
