@@ -74,6 +74,7 @@ def _install_pipeline_stubs(monkeypatch: pytest.MonkeyPatch) -> _Tracker:
         _blast, "_expand_strict_tie_order_candidate_pool", lambda options: options
     )
     monkeypatch.setattr(_blast, "_validate_blast_database_available", lambda **_k: None)
+    monkeypatch.setattr(_blast, "_validate_blast_database_ready", lambda **_k: None)
     monkeypatch.setattr(_blast, "_ensure_node_warmup_ready_for_submit", lambda **_k: None)
     monkeypatch.setattr(_blast, "_ensure_terminal_azure_cli_login", lambda *_a, **_k: None)
     monkeypatch.setattr(_blast, "_ensure_terminal_kubeconfig_context", lambda *_a, **_k: None)

@@ -105,6 +105,37 @@ def _warmup_max_wait_seconds() -> int:
     return value if value > 0 else 2700
 
 
+def _database_max_wait_seconds() -> int:
+    """Upper bound on how long a submit may wait for the BLAST DB to finish
+    copying / updating.
+
+    The ``waiting_for_database`` re-enqueue loop (transient
+    ``database_not_ready`` / ``database_updating`` states) is otherwise
+    unbounded — a prepare-db copy that never reports ``completed`` would keep
+    re-enqueuing forever. This deadline lets the job fail after a generous wait
+    so the dashboard shows a real terminal state instead of an endless queue.
+    Override with ``BLAST_DATABASE_MAX_WAIT_SECONDS``; default 45 minutes
+    (matches the warmup deadline — a large DB download can take a while).
+    """
+    raw = os.environ.get("BLAST_DATABASE_MAX_WAIT_SECONDS", "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 2700
+    return value if value > 0 else 2700
+
+
+# Transient ``BlastDatabaseAvailabilityError`` codes — the DB exists but the
+# prepare-db pipeline is still writing it (download in progress) or a version
+# update is mid-flight. These are wait-and-retry states, mirroring the
+# ``waiting_for_warmup`` loop: re-enqueue the submit until the copy/update
+# settles rather than failing a job that would succeed minutes later. Every
+# other code (missing DB, invalid reference, persistent Storage error) is
+# permanent and fails fast.
+_DATABASE_TRANSIENT_CODES = frozenset({"database_not_ready", "database_updating"})
+
+
+
 @shared_task(
     name="api.tasks.blast.submit",
     bind=True,
@@ -130,6 +161,7 @@ def submit(
     warmup_wait_deadline_ts: float | None = None,
     submit_slot_wait_deadline_ts: float | None = None,
     capacity_wait_deadline_ts: float | None = None,
+    database_wait_deadline_ts: float | None = None,
 ) -> dict[str, Any]:
     """Submit a BLAST search via the terminal sidecar.
 
@@ -147,6 +179,12 @@ def submit(
     matching internal knobs for the ``BLAST_COORD_BACKEND=k8s`` admission gate:
     a Lease-contended (Gate A) or ceiling-full (Gate B) submit re-enqueues with
     a deadline so neither wait loops forever. External callers never pass them.
+
+    ``database_wait_deadline_ts`` is the matching internal knob for the
+    ``waiting_for_database`` loop: a transient DB state (copy still in
+    progress / version update mid-flight) re-enqueues the submit with a
+    deadline so it waits for the prepare-db pipeline to finish instead of
+    failing a job that would run minutes later. External callers never pass it.
     """
 
     _blast._progress(self, "preparing")
@@ -159,11 +197,80 @@ def submit(
     effective_options = _blast._expand_strict_tie_order_candidate_pool(effective_options)
     db_name_for_warmup = extract_db_name(database)
     try:
-        _blast._validate_blast_database_available(
+        _blast._validate_blast_database_ready(
             storage_account=storage_account,
             database=database,
         )
     except _blast.BlastDatabaseAvailabilityError as exc:
+        # A transient DB state (the prepare-db copy is still running, or a
+        # version update is mid-flight) is wait-and-retry, NOT a failure: the
+        # DB exists and will be ready soon. Re-enqueue the submit on the
+        # ``waiting_for_database`` phase — the same proven pattern the
+        # ``waiting_for_warmup`` loop below uses — instead of failing a job
+        # that would run once the copy settles. This closes the gap where a
+        # submit accepted before the DB finished warming (notably the OpenAPI
+        # path, which has no submit-time readiness gate) would BLAST against
+        # incomplete volumes or fail outright. The waiting row keeps
+        # ``status="running"`` so the reconciler treats it as active (a
+        # ``"queued"`` result would be reconciled to ``completed``). The loop
+        # is bounded by ``database_wait_deadline_ts`` so a copy that never
+        # completes eventually fails instead of looping forever. Permanent
+        # codes (missing DB, invalid reference, persistent Storage error) fall
+        # through to the fail-fast path.
+        if exc.code in _DATABASE_TRANSIENT_CODES:
+            now = time.time()
+            deadline = database_wait_deadline_ts or (now + _database_max_wait_seconds())
+            if now < deadline:
+                _blast._progress(self, "waiting_for_database", database=db_name_for_warmup)
+                _blast._update_state(
+                    job_id,
+                    "waiting_for_database",
+                    status="running",
+                    event="database_not_ready",
+                    error_code=exc.code,
+                    retry_after_seconds=30,
+                    last_output=_blast._snippet(exc),
+                )
+                try:
+                    submit.apply_async(
+                        kwargs={
+                            "job_id": job_id,
+                            "subscription_id": subscription_id,
+                            "resource_group": resource_group,
+                            "cluster_name": cluster_name,
+                            "storage_account": storage_account,
+                            "program": program,
+                            "database": database,
+                            "query_file": query_file,
+                            "options": options,
+                            "caller_oid": caller_oid,
+                            "caller_tenant_id": caller_tenant_id,
+                            "database_wait_deadline_ts": deadline,
+                        },
+                        countdown=30,
+                        queue="blast",
+                    )
+                except Exception as enq_exc:
+                    return _blast._retry_or_fail(
+                        self,
+                        job_id=job_id,
+                        phase="waiting_for_database",
+                        exc=enq_exc,
+                        error_code="blast_submit_requeue_failed",
+                    )
+                return {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": "waiting_for_database",
+                    "requeued": True,
+                    "error_code": exc.code,
+                }
+            LOGGER.warning(
+                "blast_database_wait_deadline_exceeded job_id=%s cluster=%s database=%s",
+                job_id,
+                cluster_name,
+                database,
+            )
         error = _blast._snippet(exc)
         _blast._progress(self, "database_unavailable", database=db_name_for_warmup)
         _blast._update_state(

@@ -109,7 +109,7 @@ def test_submit_fails_before_elastic_blast_when_database_missing(
     )
     monkeypatch.setattr(
         blast,
-        "_validate_blast_database_available",
+        "_validate_blast_database_ready",
         lambda **_kwargs: (_ for _ in ()).throw(
             blast.BlastDatabaseAvailabilityError(
                 "BLAST database '16S_ribosomal_RNA' is not available in Storage.",

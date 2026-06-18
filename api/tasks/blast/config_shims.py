@@ -64,6 +64,15 @@ def _validate_blast_database_available(
     )
 
 
+def _validate_blast_database_ready(
+    *, storage_account: str, database: str
+) -> dict[str, str]:
+    return _blast_task_config.validate_blast_database_ready(
+        storage_account=storage_account,
+        database=database,
+    )
+
+
 def _results_job_url(storage_account: str, job_id: str) -> str:
     return _blast_task_config.results_job_url(storage_account, job_id)
 
@@ -182,4 +191,5 @@ __all__ = (
     "_submit_requires_node_warmup",
     "_suppress_sharding_for_unsharded_database",
     "_validate_blast_database_available",
+    "_validate_blast_database_ready",
 )

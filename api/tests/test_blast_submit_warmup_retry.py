@@ -75,6 +75,7 @@ def _install_warmup_stubs(
         _blast, "_expand_strict_tie_order_candidate_pool", lambda options: options
     )
     monkeypatch.setattr(_blast, "_validate_blast_database_available", lambda **_k: None)
+    monkeypatch.setattr(_blast, "_validate_blast_database_ready", lambda **_k: None)
     monkeypatch.setattr(_blast, "_requires_split_parent_submission", lambda *_a, **_k: False)
     monkeypatch.setattr(_blast, "_ensure_terminal_azure_cli_login", lambda *_a, **_k: None)
     monkeypatch.setattr(_blast, "_snippet", lambda value, *_a, **_k: str(value)[:200])

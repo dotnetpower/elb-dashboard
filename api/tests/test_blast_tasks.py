@@ -256,6 +256,7 @@ def test_submit_task_helpers_are_reexported_on_blast_package() -> None:
         "_suppress_sharding_for_unsharded_database",
         "_expand_strict_tie_order_candidate_pool",
         "_validate_blast_database_available",
+        "_validate_blast_database_ready",
         "BlastDatabaseAvailabilityError",
         "LIVE_OUTPUT_SNIPPET_CHARS",
         "STDOUT_SNIPPET_CHARS",

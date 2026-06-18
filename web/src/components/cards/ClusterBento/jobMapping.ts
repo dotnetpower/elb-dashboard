@@ -42,6 +42,7 @@ const ACTIVE_PENDING = new Set([
   "submitting",
   "preparing",
   "waiting_for_warmup",
+  "waiting_for_database",
 ]);
 
 const ACTIVE_RUNNING = new Set(["Running", "InProgress", "Splitting", "running"]);

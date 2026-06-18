@@ -11,6 +11,7 @@ export const STATUS_COLORS: Record<string, string> = {
   configuring: "var(--accent)",
   warmup_ready: "var(--accent)",
   waiting_for_warmup: "var(--warning)",
+  waiting_for_database: "var(--warning)",
   warming_up: "var(--accent)",
   reading_split_query: "var(--accent)",
   splitting_queries: "var(--accent)",

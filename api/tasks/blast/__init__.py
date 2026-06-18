@@ -157,6 +157,7 @@ from api.tasks.blast.config_shims import (  # noqa: E402,F401
     _submit_requires_node_warmup,
     _suppress_sharding_for_unsharded_database,
     _validate_blast_database_available,
+    _validate_blast_database_ready,
 )
 from api.tasks.blast.poll_tasks import (  # noqa: E402,F401
     _POLL_RUNNING_ELIGIBLE_PHASES,
