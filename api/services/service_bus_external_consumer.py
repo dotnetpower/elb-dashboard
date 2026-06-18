@@ -1,11 +1,21 @@
 """Optional external-completion consumer — subscribe to the completion topic.
 
 A long-running loop that subscribes to the Service Bus completion topic
-(``SERVICEBUS_RESPONSE_TOPIC``) on a dedicated subscription and records each
-``blast.transition`` event it receives. It models the *external* subscriber an
-integrating service would run on its own infrastructure: the dashboard publishes
-one transition per job status change to the topic, and any number of
-subscriptions fan that event out to independent consumers.
+(``SERVICEBUS_RESPONSE_TOPIC``) on one or more subscriptions and records each
+``blast.transition`` event it receives, tagged with the subscription it came
+from. It models the *external* subscriber an integrating service would run on
+its own infrastructure: the dashboard publishes one transition per job status
+change to the topic, and any number of subscriptions fan that event out to
+independent consumers. The in-deployment observer drains the dedicated demo
+subscription AND the shared ``default`` subscription (comma-separated
+``SERVICEBUS_COMPLETION_SUBSCRIPTION`` override) so ``default`` does not pile up
+unread, and each observation is labelled so they can be told apart.
+
+When the completion entity is a **queue** (``SERVICEBUS_COMPLETION_KIND=queue``)
+the model is point-to-point instead: there is no fan-out, so a single consumer
+competes for every message. In that mode the in-deployment demo observer is
+intentionally NOT started (it would steal messages from the real external
+consumer); only the standalone entry point reads the queue.
 
 Two ways to run it:
 
@@ -28,9 +38,9 @@ Responsibility: Own the completion-subscription receive loop lifecycle
 Edit boundaries: Service Bus receive only. Recording observations is delegated
     to ``service_bus_completions``; per-message business logic does not belong
     here. Keep the loop bounded and never raise out of the loop body.
-Key entry points: ``consume_completions``, ``external_consumer_enabled``,
-    ``start_external_consumer``, ``stop_external_consumer``,
-    ``EXTERNAL_CONSUMER_ENV``.
+Key entry points: ``consume_completions``, ``completion_subscriptions``,
+    ``external_consumer_enabled``, ``start_external_consumer``,
+    ``stop_external_consumer``, ``EXTERNAL_CONSUMER_ENV``.
 Risky contracts: ``consume_completions`` MUST exit promptly when the stop event
     is set, MUST back off (capped) after an error instead of hot-looping, and
     MUST settle (complete) each received message. The worker launcher reuses the
@@ -58,6 +68,13 @@ EXTERNAL_CONSUMER_ENV = "SERVICEBUS_EXTERNAL_CONSUMER"
 # subscriber for messages (topic fan-out = one copy per subscription).
 SUBSCRIPTION_ENV = "SERVICEBUS_COMPLETION_SUBSCRIPTION"
 DEFAULT_SUBSCRIPTION = "playground-observer"
+# The completion topic is fan-out: every subscription gets its OWN copy of each
+# event. The in-deployment observer drains MULTIPLE subscriptions so both the
+# dedicated demo subscription AND the shared "default" subscription (which a real
+# external integrator would otherwise own, and which otherwise piles up unread)
+# are consumed. Each observed event is tagged with the subscription it came from
+# so the Playground can tell "default" apart from any other subscription.
+DEFAULT_SUBSCRIPTIONS: tuple[str, ...] = (DEFAULT_SUBSCRIPTION, "default")
 
 _POLL_WAIT_SECONDS = max(1, int(os.environ.get("SERVICEBUS_EXTERNAL_POLL_SECONDS", "5")))
 _RECEIVE_BATCH = max(1, int(os.environ.get("SERVICEBUS_EXTERNAL_BATCH", "16")))
@@ -69,9 +86,35 @@ _stop_event: threading.Event | None = None
 _thread_lock = threading.Lock()
 
 
+def completion_subscriptions() -> list[str]:
+    """The completion-topic subscriptions the observer drains (env override).
+
+    ``SERVICEBUS_COMPLETION_SUBSCRIPTION`` is a comma-separated list; blank
+    entries are dropped and order-preserving de-duplication is applied. Falls
+    back to ``DEFAULT_SUBSCRIPTIONS`` when unset/blank so the shared ``default``
+    subscription is always drained alongside the dedicated demo one.
+    """
+    raw = os.environ.get(SUBSCRIPTION_ENV, "")
+    names = [p.strip() for p in raw.split(",") if p.strip()]
+    if not names:
+        return list(DEFAULT_SUBSCRIPTIONS)
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
 def completion_subscription() -> str:
-    """The dedicated completion-topic subscription name (env override)."""
-    return (os.environ.get(SUBSCRIPTION_ENV, "").strip() or DEFAULT_SUBSCRIPTION)
+    """The primary (first) completion-topic subscription name.
+
+    Kept for backward compatibility with callers/UI that show a single
+    subscription label; the observer itself drains ``completion_subscriptions()``.
+    """
+    subs = completion_subscriptions()
+    return subs[0] if subs else DEFAULT_SUBSCRIPTION
 
 
 def external_consumer_enabled() -> bool:
@@ -91,35 +134,62 @@ def consume_completions(
     *,
     namespace_fqdn: str,
     topic: str,
-    subscription: str,
-    on_event: Callable[[dict[str, Any]], None],
+    on_event: Callable[[dict[str, Any], str], None],
+    subscription: str | None = None,
+    subscriptions: list[str] | None = None,
     credential: Any | None = None,
     connection_string: str | None = None,
     stop: threading.Event | None = None,
     max_wait_seconds: int = _POLL_WAIT_SECONDS,
     receive_batch: int = _RECEIVE_BATCH,
     max_iterations: int | None = None,
+    kind: str = "topic",
 ) -> int:
-    """Receive completion events from a topic subscription until stopped.
+    """Receive completion events from topic subscription(s) (or a queue) until stopped.
 
-    Calls ``on_event(parsed_json_body)`` for each received message, then
-    completes it. Returns the number of events delivered to ``on_event``. The
-    loop is bounded (``max_iterations`` for tests), interruptible (``stop``),
-    and backs off on error instead of hot-looping. Auth: pass ``credential``
-    (Entra) or ``connection_string`` (SAS); exactly one is used.
+    Calls ``on_event(parsed_json_body, subscription_label)`` for each received
+    message, then completes it. The ``subscription_label`` tells the sink which
+    subscription the event came from (the queue name in ``queue`` mode) so a
+    consumer can tell ``default`` apart from any other subscription. Returns the
+    number of events delivered to ``on_event``. The loop is bounded
+    (``max_iterations`` for tests), interruptible (``stop``), and backs off on
+    error instead of hot-looping. Auth: pass ``credential`` (Entra) or
+    ``connection_string`` (SAS); exactly one is used.
+
+    Pass either a single ``subscription`` or a list of ``subscriptions``; the
+    loop round-robins every live subscription each tick (topic fan-out delivers
+    one copy per subscription). A subscription that does not exist raises a
+    permanent ``MessagingEntityNotFoundError`` — it is logged once and dropped
+    for the rest of this process (retrying it every tick would be pointless and
+    spam the log); the other subscriptions keep draining. When every configured
+    subscription is permanently gone the loop exits.
+
+    ``kind`` selects the completion entity model: ``"topic"`` (default) reads the
+    subscription(s) on the topic (fan-out — this consumer gets its own copy);
+    ``"queue"`` reads ``topic`` as a queue name (point-to-point — this consumer
+    COMPETES with any other consumer of the same queue, and the subscription
+    arguments are ignored).
 
     Imported lazily so the module stays cheap to import in the api sidecar (the
     SDK is only needed where the loop actually runs).
     """
     from azure.servicebus import ServiceBusClient
-    from azure.servicebus.exceptions import ServiceBusError
+    from azure.servicebus.exceptions import MessagingEntityNotFoundError, ServiceBusError
 
-    if not namespace_fqdn or not topic or not subscription:
-        raise ValueError("namespace_fqdn, topic and subscription are required")
+    is_queue = str(kind).strip().lower() == "queue"
+    if not namespace_fqdn or not topic:
+        raise ValueError("namespace_fqdn and entity name are required")
+    subs = list(subscriptions) if subscriptions else ([subscription] if subscription else [])
+    if not is_queue and not subs:
+        raise ValueError("at least one subscription is required for topic completion entities")
 
     delivered = 0
     backoff = _BACKOFF_START_SECONDS
     iterations = 0
+    # Subscriptions that returned a permanent "entity not found". Retrying them
+    # every tick is pointless and would spam the log, so drop them for the rest
+    # of this process's lifetime (a redeploy re-reads the config).
+    dead_subscriptions: set[str] = set()
 
     def _client() -> ServiceBusClient:
         if connection_string:
@@ -131,41 +201,91 @@ def consume_completions(
             cred = get_credential()
         return ServiceBusClient(namespace_fqdn, cred)
 
+    def _drain_one(client: ServiceBusClient, sub_name: str | None) -> bool:
+        """Drain one subscription (or the queue). Returns True if it progressed.
+
+        Raises ``MessagingEntityNotFoundError`` for a permanently-missing
+        subscription so the caller can retire it; other ``ServiceBusError`` are
+        re-raised for the tick-level backoff.
+        """
+        nonlocal delivered
+        if is_queue:
+            receiver_cm = client.get_queue_receiver(
+                queue_name=topic, max_wait_time=max_wait_seconds
+            )
+        else:
+            receiver_cm = client.get_subscription_receiver(
+                topic_name=topic,
+                subscription_name=sub_name,
+                max_wait_time=max_wait_seconds,
+            )
+        progressed = False
+        label = sub_name if sub_name is not None else topic
+        with receiver_cm as receiver:
+            batch = receiver.receive_messages(
+                max_message_count=receive_batch, max_wait_time=max_wait_seconds
+            )
+            for message in batch:
+                event = _parse_body(message)
+                try:
+                    on_event(event, label)
+                    delivered += 1
+                    progressed = True
+                except Exception:
+                    LOGGER.exception("external consumer on_event raised; abandoning")
+                    _safe_abandon(receiver, message)
+                    continue
+                _safe_complete(receiver, message)
+        return progressed
+
     while stop is None or not stop.is_set():
         if max_iterations is not None and iterations >= max_iterations:
             break
         iterations += 1
+        progressed = False
+        had_error = False
         try:
-            with _client() as client, client.get_subscription_receiver(
-                topic_name=topic,
-                subscription_name=subscription,
-                max_wait_time=max_wait_seconds,
-            ) as receiver:
-                batch = receiver.receive_messages(
-                    max_message_count=receive_batch,
-                    max_wait_time=max_wait_seconds,
-                )
-                for message in batch:
-                    event = _parse_body(message)
-                    try:
-                        on_event(event)
-                        delivered += 1
-                    except Exception:
-                        LOGGER.exception("external consumer on_event raised; abandoning")
-                        _safe_abandon(receiver, message)
-                        continue
-                    _safe_complete(receiver, message)
-            backoff = _BACKOFF_START_SECONDS  # reset after a clean iteration
-        except ServiceBusError as exc:
-            LOGGER.warning(
-                "external consumer receive failed (sub=%s): %s; backing off %.0fs",
-                subscription,
-                type(exc).__name__,
-                backoff,
+            targets: list[str | None] = (
+                [None] if is_queue else [s for s in subs if s not in dead_subscriptions]
             )
-            if _wait(stop, backoff):
+            with _client() as client:
+                for sub_name in targets:
+                    if stop is not None and stop.is_set():
+                        break
+                    try:
+                        if _drain_one(client, sub_name):
+                            progressed = True
+                    except MessagingEntityNotFoundError:
+                        if not is_queue and sub_name is not None:
+                            dead_subscriptions.add(sub_name)
+                            LOGGER.warning(
+                                "external consumer: completion subscription %r not found on "
+                                "topic %r; skipping it for the rest of this process (create it "
+                                "or fix SERVICEBUS_COMPLETION_SUBSCRIPTION)",
+                                sub_name,
+                                topic,
+                            )
+                        else:
+                            raise
+                    except ServiceBusError as exc:
+                        had_error = True
+                        LOGGER.warning(
+                            "external consumer receive failed (entity=%s): %s",
+                            sub_name if not is_queue else topic,
+                            type(exc).__name__,
+                        )
+            # Every configured subscription is permanently gone — nothing left to do.
+            if not is_queue and subs and all(s in dead_subscriptions for s in subs):
+                LOGGER.warning(
+                    "external consumer: no live completion subscriptions remain; stopping loop"
+                )
                 break
-            backoff = min(backoff * 2, _BACKOFF_MAX_SECONDS)
+            if had_error and not progressed:
+                if _wait(stop, backoff):
+                    break
+                backoff = min(backoff * 2, _BACKOFF_MAX_SECONDS)
+            else:
+                backoff = _BACKOFF_START_SECONDS  # reset after a clean iteration
         except Exception as exc:  # never let the loop die silently
             LOGGER.exception("external consumer loop error: %s", type(exc).__name__)
             if _wait(stop, backoff):
@@ -228,16 +348,18 @@ def _wait(stop: threading.Event | None, seconds: float) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _record_to_observer(event: dict[str, Any]) -> None:
-    """Demo sink: record an observed completion + log it. Best-effort."""
+def _record_to_observer(event: dict[str, Any], subscription: str) -> None:
+    """Demo sink: record an observed completion (tagged with its source
+    subscription) + log it. Best-effort."""
     try:
         from api.services.service_bus_completions import record_completion
 
-        record_completion(event)
+        record_completion(event, subscription=subscription)
     except Exception:  # pragma: no cover - best-effort
         LOGGER.debug("external consumer observer record failed", exc_info=True)
     LOGGER.info(
-        "external consumer observed completion corr=%s status=%s job=%s",
+        "external consumer observed completion sub=%s corr=%s status=%s job=%s",
+        subscription,
         event.get("external_correlation_id"),
         event.get("status"),
         event.get("openapi_job_id"),
@@ -255,13 +377,26 @@ def run_external_consumer(stop: threading.Event, **overrides: Any) -> int:
 
     cfg = get_service_bus_config()
     topic = cfg.completion_topic
+    kind = getattr(cfg, "completion_kind", "topic")
     if not cfg.namespace_fqdn or not topic:
-        LOGGER.info("external consumer: namespace/topic not configured; not starting")
+        LOGGER.info("external consumer: namespace/completion entity not configured; not starting")
+        return 0
+    if str(kind).strip().lower() == "queue":
+        # The completion entity is a point-to-point queue. The in-deployment demo
+        # observer must NOT drain it, or it would steal messages from the real
+        # external consumer (queues have no fan-out). The standalone entry point
+        # (`python -m api.services.service_bus_external_consumer`) is the queue
+        # consumer an external party runs on its own infrastructure.
+        LOGGER.warning(
+            "external consumer: completion entity is a queue (point-to-point); the "
+            "in-deployment demo observer is disabled so it cannot compete with the "
+            "real external consumer for messages"
+        )
         return 0
     return consume_completions(
         namespace_fqdn=cfg.namespace_fqdn,
         topic=topic,
-        subscription=completion_subscription(),
+        subscriptions=completion_subscriptions(),
         on_event=_record_to_observer,
         stop=stop,
         **overrides,
@@ -295,7 +430,9 @@ def start_external_consumer() -> bool:
         _stop_event = stop
         _thread = thread
         thread.start()
-        LOGGER.info("external completion consumer started (sub=%s)", completion_subscription())
+        LOGGER.info(
+            "external completion consumer started (subs=%s)", completion_subscriptions()
+        )
         return True
 
 
@@ -324,32 +461,39 @@ def reset_external_consumer_state_for_test() -> None:
 def _standalone_main() -> int:
     """Standalone entry point for an external subscriber (prints each event).
 
-    Reads ``SERVICEBUS_NAMESPACE_FQDN``, ``SERVICEBUS_RESPONSE_TOPIC`` and
-    ``SERVICEBUS_COMPLETION_SUBSCRIPTION`` from the environment and authenticates
-    with ``DefaultAzureCredential`` (Entra). An external party copies this file
-    and runs ``python service_bus_external_consumer.py``.
+    Reads ``SERVICEBUS_NAMESPACE_FQDN``, ``SERVICEBUS_RESPONSE_TOPIC``,
+    ``SERVICEBUS_COMPLETION_SUBSCRIPTION`` and ``SERVICEBUS_COMPLETION_KIND``
+    from the environment and authenticates with ``DefaultAzureCredential``
+    (Entra). An external party copies this file and runs
+    ``python service_bus_external_consumer.py``. With
+    ``SERVICEBUS_COMPLETION_KIND=queue`` the completion entity is read as a queue
+    (point-to-point) and the subscription env is ignored.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     namespace = os.environ.get("SERVICEBUS_NAMESPACE_FQDN", "").strip()
     topic = os.environ.get("SERVICEBUS_RESPONSE_TOPIC", "elastic-blast-completions").strip()
-    subscription = os.environ.get(SUBSCRIPTION_ENV, "").strip() or DEFAULT_SUBSCRIPTION
+    subscriptions = completion_subscriptions()
+    kind = os.environ.get("SERVICEBUS_COMPLETION_KIND", "").strip().lower() or "topic"
+    if kind not in {"topic", "queue"}:
+        kind = "topic"
     if not namespace:
         print("SERVICEBUS_NAMESPACE_FQDN is required (e.g. <ns>.servicebus.windows.net)")
         return 2
     from azure.identity import DefaultAzureCredential
 
-    def _print(event: dict[str, Any]) -> None:
-        print(json.dumps(event, default=str))
+    def _print(event: dict[str, Any], subscription: str) -> None:
+        print(json.dumps({"_subscription": subscription, **event}, default=str))
 
     stop = threading.Event()
     try:
         consume_completions(
             namespace_fqdn=namespace,
             topic=topic,
-            subscription=subscription,
+            subscriptions=subscriptions,
             on_event=_print,
             credential=DefaultAzureCredential(),
             stop=stop,
+            kind=kind,
         )
     except KeyboardInterrupt:
         stop.set()

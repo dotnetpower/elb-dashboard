@@ -683,6 +683,7 @@ def observed_completions(
         events = []
     from api.services.service_bus_external_consumer import (
         completion_subscription,
+        completion_subscriptions,
         external_consumer_enabled,
     )
 
@@ -690,6 +691,7 @@ def observed_completions(
         "events": events,
         "consumer_enabled": external_consumer_enabled(),
         "subscription": completion_subscription(),
+        "subscriptions": completion_subscriptions(),
         "topic": get_service_bus_config().completion_topic,
     }
 

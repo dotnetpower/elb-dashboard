@@ -153,3 +153,30 @@ def test_entries_without_event_id_kept(fake_redis: _FakeRedis) -> None:
     obs.record_completion({"status": "running"})
     assert len(obs.list_recent(10)) == 2
 
+
+def test_record_tags_subscription(fake_redis: _FakeRedis) -> None:
+    """The source subscription round-trips so the UI can label each event."""
+    from api.services.service_bus_completions import list_recent, record_completion
+
+    record_completion(_event("a"), subscription="default")
+    events = list_recent(10)
+    assert events[0]["subscription"] == "default"
+    # Omitting the subscription stores an empty string (no KeyError downstream).
+    record_completion(_event("b"))
+    assert list_recent(10)[0]["subscription"] == ""
+
+
+def test_same_event_on_different_subscriptions_kept(fake_redis: _FakeRedis) -> None:
+    """The completion topic is fan-out: the SAME event_id arrives on multiple
+    subscriptions. De-dup is keyed on (event_id, subscription) so each source
+    survives and can be told apart — while a same-(event_id, subscription)
+    redelivery is still de-duped."""
+    from api.services.service_bus_completions import list_recent, record_completion
+
+    record_completion(_event("a"), subscription="default")
+    record_completion(_event("a"), subscription="playground-observer")
+    record_completion(_event("a"), subscription="default")  # redelivery → deduped
+    events = list_recent(10)
+    subs = sorted(e["subscription"] for e in events if e["event_id"] == "id-a")
+    assert subs == ["default", "playground-observer"]
+

@@ -51,10 +51,12 @@ def _client() -> Any | None:
         return None
 
 
-def record_completion(event: dict[str, Any]) -> None:
+def record_completion(event: dict[str, Any], *, subscription: str | None = None) -> None:
     """Record one observed completion event (best-effort, newest-first).
 
-    ``event`` is the parsed ``blast.transition`` JSON body. Only a compact,
+    ``event`` is the parsed ``blast.transition`` JSON body. ``subscription`` is
+    the completion-topic subscription it was observed on (e.g. ``default`` vs a
+    dedicated one) so the Playground can tell sources apart. Only a compact,
     non-sensitive projection is stored (the event already carries pointers, not
     result bytes — charter §9). Never raises.
     """
@@ -68,6 +70,7 @@ def record_completion(event: dict[str, Any]) -> None:
         "openapi_job_id": str(event.get("openapi_job_id") or ""),
         "status": str(event.get("status") or ""),
         "ts": str(event.get("ts") or ""),
+        "subscription": str(subscription or ""),
         "observed_at": _now_iso(),
     }
     try:
@@ -96,7 +99,7 @@ def list_recent(limit: int = 50) -> list[dict[str, Any]]:
         LOGGER.debug("completions observer read failed: %s", type(exc).__name__)
         return []
     out: list[dict[str, Any]] = []
-    seen_event_ids: set[str] = set()
+    seen_keys: set[tuple[str, str]] = set()
     for item in raw or []:
         try:
             text = item.decode() if isinstance(item, bytes | bytearray) else str(item)
@@ -106,14 +109,19 @@ def list_recent(limit: int = 50) -> list[dict[str, Any]]:
         except (ValueError, TypeError):
             continue
         # At-least-once delivery means the same completion event can be observed
-        # (and stored) more than once. De-dup by event_id so the UI renders a
-        # stable, unique list (and never collides on a React key). Entries with
-        # no event_id are kept as-is (best-effort — they carry no dedup key).
+        # (and stored) more than once. De-dup by (event_id, subscription) so the
+        # UI renders a stable, unique list (and never collides on a React key).
+        # The subscription is part of the key on purpose: the completion topic is
+        # fan-out, so the SAME event_id legitimately arrives on multiple
+        # subscriptions (e.g. ``default`` and a dedicated one) and each copy must
+        # survive de-dup so the source can be told apart. Entries with no
+        # event_id are kept as-is (best-effort — they carry no dedup key).
         event_id = str(parsed.get("event_id") or "")
         if event_id:
-            if event_id in seen_event_ids:
+            key = (event_id, str(parsed.get("subscription") or ""))
+            if key in seen_keys:
                 continue
-            seen_event_ids.add(event_id)
+            seen_keys.add(key)
         out.append(parsed)
     return out
 

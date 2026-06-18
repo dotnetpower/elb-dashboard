@@ -279,6 +279,10 @@ export function ServiceBusPlayground() {
   const requestQueue = status.data?.config.request_queue ?? "elastic-blast-requests";
   const completionTopic = status.data?.config.completion_topic ?? "elastic-blast-completions";
   const observerSubscription = observed.data?.subscription ?? "playground-observer";
+  const observerSubscriptions =
+    observed.data?.subscriptions && observed.data.subscriptions.length > 0
+      ? observed.data.subscriptions
+      : [observerSubscription];
 
   const buildBody = useCallback(
     (dryRun: boolean): ServiceBusSendRequest => {
@@ -888,7 +892,13 @@ export function ServiceBusPlayground() {
 
           <div style={{ display: "grid", gap: 6 }}>
             <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-              Completions observed on <code>{observerSubscription}</code>
+              Completions observed on{" "}
+              {observerSubscriptions.map((sub, i) => (
+                <span key={sub}>
+                  {i > 0 && ", "}
+                  <code>{sub}</code>
+                </span>
+              ))}
               {observed.data && !observed.data.consumer_enabled && " (demo consumer off)"}
             </div>
             {observed.data && observed.data.events.length === 0 && (
@@ -898,7 +908,7 @@ export function ServiceBusPlayground() {
             )}
             {observed.data?.events.slice(0, 10).map((e) => (
               <div
-                key={e.event_id || `${e.external_correlation_id}-${e.status}`}
+                key={`${e.event_id || `${e.external_correlation_id}-${e.status}`}-${e.subscription || ""}`}
                 style={{
                   display: "flex",
                   gap: 8,
@@ -910,6 +920,20 @@ export function ServiceBusPlayground() {
                 }}
               >
                 <StatusDot status={e.status} />
+                {e.subscription && (
+                  <span
+                    title={`subscription: ${e.subscription}`}
+                    style={{
+                      fontFamily: "var(--font-mono, monospace)",
+                      opacity: 0.85,
+                      padding: "1px 5px",
+                      borderRadius: 4,
+                      background: "var(--bg-secondary)",
+                    }}
+                  >
+                    {e.subscription}
+                  </span>
+                )}
                 <span style={{ fontFamily: "var(--font-mono, monospace)" }}>
                   {e.external_correlation_id.slice(0, 12)}…
                 </span>

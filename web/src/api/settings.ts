@@ -488,13 +488,18 @@ export interface ServiceBusObservedCompletion {
   openapi_job_id: string;
   status: string;
   ts: string;
+  /** Completion-topic subscription this event was observed on (e.g. "default"). */
+  subscription?: string;
   observed_at: string;
 }
 
 export interface ServiceBusObservedCompletionsResponse {
   events: ServiceBusObservedCompletion[];
   consumer_enabled: boolean;
+  /** Primary (first) observer subscription — kept for a single-label display. */
   subscription: string;
+  /** All subscriptions the observer drains (topic fan-out). */
+  subscriptions?: string[];
   topic: string;
 }
 
