@@ -12,7 +12,7 @@
  * SAS connection string lives in a Key Vault secret referenced by name only.
  */
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Loader2, Plug, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, Copy, Loader2, Plug, RefreshCw, Trash2 } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import {
@@ -58,6 +58,80 @@ const buttonStyle: React.CSSProperties = {
 };
 
 type PurgeTarget = "main" | "dlq" | null;
+
+/**
+ * A read-only shell command with a copy-to-clipboard affordance. Used by the
+ * env-gate remediation banner so an operator can apply the exact
+ * `SERVICEBUS_ENABLED=true` command from the browser without hunting through
+ * docs. The deployment master switch lives on the Container App revision (it is
+ * NOT a runtime toggle — setting it from the dashboard would force a control
+ * plane restart and need extra RBAC), so the durable fix stays a deploy-time
+ * command; this just makes that command one click away.
+ */
+function CopyCommand({ label, command }: { label: string; command: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    if (typeof navigator === "undefined" || !navigator.clipboard) return;
+    void navigator.clipboard.writeText(command).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => undefined,
+    );
+  };
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 3 }}>{label}</div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 8,
+          padding: "6px 8px",
+          borderRadius: 6,
+          border: "1px solid var(--border-medium)",
+          background: "var(--bg-tertiary)",
+        }}
+      >
+        <code
+          style={{
+            flex: 1,
+            fontSize: 11.5,
+            lineHeight: 1.5,
+            color: "var(--text-primary)",
+            wordBreak: "break-all",
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {command}
+        </code>
+        <button
+          type="button"
+          onClick={copy}
+          title="Copy command"
+          aria-label={`Copy command: ${label}`}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            flexShrink: 0,
+            padding: "3px 7px",
+            borderRadius: 5,
+            border: "1px solid var(--border-medium)",
+            background: "var(--bg-secondary)",
+            color: copied ? "var(--success, #7fb37f)" : "var(--text-muted)",
+            fontSize: 11,
+            cursor: "pointer",
+          }}
+        >
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function ServiceBusSection({ config }: { config: ResourceConfig | null }) {
   const [cfg, setCfg] = useState<ServiceBusConfig | null>(null);
@@ -212,9 +286,25 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
               <>
                 The deployment master switch <code>SERVICEBUS_ENABLED</code> is
                 OFF, so the integration stays dormant and does not appear on the
-                dashboard. Pin <code>SERVICEBUS_ENABLED=true</code> (azd env or a
-                GitHub repo variable) and redeploy the control plane to activate
-                it. Both the deployment gate and this config must be ON.
+                dashboard. This switch lives on the Container App revision (a
+                deploy-time gate, by design separate from this runtime config —
+                both must be ON), so it cannot be flipped from the dashboard
+                without restarting the control plane. Apply one of the commands
+                below; the integration goes live within ~1 minute.
+                <div style={{ marginTop: 6, marginBottom: 2 }}>
+                  <CopyCommand
+                    label="Durable — survives every redeploy (recommended):"
+                    command="azd env set SERVICEBUS_ENABLED true && azd deploy"
+                  />
+                  <CopyCommand
+                    label="Fast — no redeploy, sets the gate on the api/worker/beat sidecars now:"
+                    command={
+                      "for c in api worker beat; do az containerapp update " +
+                      "-n <control-plane-app> -g <control-plane-rg> " +
+                      "--container-name $c --set-env-vars SERVICEBUS_ENABLED=true; done"
+                    }
+                  />
+                </div>
               </>
             ) : !cfg.namespace_fqdn ? (
               <>
