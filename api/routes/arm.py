@@ -38,6 +38,50 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/arm", tags=["arm"])
 
+
+def _is_expected_authorization_failure(exc: BaseException) -> bool:
+    """True when ``exc`` is an ARM ``AuthorizationFailed`` / 403.
+
+    The dashboard lets a user point at any subscription they type in, but the
+    shared user-assigned MI is not guaranteed to hold a read role on every
+    subscription. An ``AuthorizationFailed`` on a discovery read is therefore an
+    expected, already-handled outcome (the route degrades to an empty list), not
+    a server fault — so it should log a one-line warning rather than a full
+    stack trace that the OpenTelemetry logging exporter records as an App
+    Insights exception row (issue #46).
+    """
+    try:
+        from azure.core.exceptions import HttpResponseError
+    except ImportError:  # pragma: no cover - azure-core is a hard dep
+        return False
+    if not isinstance(exc, HttpResponseError):
+        return False
+    if getattr(exc, "status_code", None) == 403:
+        return True
+    error = getattr(exc, "error", None)
+    code = getattr(error, "code", None)
+    return code == "AuthorizationFailed"
+
+
+def _log_discovery_failure(operation: str, exc: BaseException) -> None:
+    """Log a discovery read failure, suppressing the stack for the expected
+    out-of-scope ``AuthorizationFailed`` case so it stops creating App Insights
+    exception rows while genuine faults keep their full trace."""
+    if _is_expected_authorization_failure(exc):
+        LOGGER.warning(
+            "%s denied (AuthorizationFailed) — shared MI lacks read scope on "
+            "this subscription; returning empty",
+            operation,
+        )
+        return
+    LOGGER.warning(
+        "%s failed: %s: %s",
+        operation,
+        type(exc).__name__,
+        sanitise(str(exc)),
+        exc_info=True,
+    )
+
 ELB_TAG_PREFIX = "elb-"
 # Discovery caching and tag validation now live in focused service modules
 # (`api.services.arm_discovery_cache`, `api.services.arm_tag_rules`); this route
@@ -99,12 +143,7 @@ def list_resource_groups(
         groups.sort(key=lambda x: x["name"])
         return groups
     except Exception as exc:
-        LOGGER.warning(
-            "list_resource_groups failed: %s: %s",
-            type(exc).__name__,
-            sanitise(str(exc)),
-            exc_info=True,
-        )
+        _log_discovery_failure("list_resource_groups", exc)
         return []
 
 
