@@ -6,7 +6,8 @@ Insights when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set.
 Edit boundaries: Initialization only. Add new manual instrumentations via
 `opentelemetry.trace.get_tracer(__name__)` from the caller — do not centralize
 custom spans here.
-Key entry points: `init_telemetry(role, app=None)`.
+Key entry points: `init_telemetry(role, app=None)`, `annotate_error_span`,
+`suppress_dependency_telemetry`.
 Risky contracts: Must never raise. Must be safe to call multiple times in the
 same process. Must remain a no-op when the connection string env var is unset
 or empty so unit tests and `AUTH_DEV_BYPASS=true` local runs are unaffected.
@@ -18,6 +19,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -244,3 +247,35 @@ def annotate_error_span(
     except Exception:
         # Telemetry must never break the request path.
         return
+
+
+@contextmanager
+def suppress_dependency_telemetry() -> Iterator[None]:
+    """Suppress OpenTelemetry auto-instrumentation inside the ``with`` block.
+
+    Why this exists: the ``azure-monitor-opentelemetry`` distro auto-instruments
+    ``requests``/``urllib3``, and that instrumentation records an *exception*
+    event on the client span whenever the underlying call raises — even when the
+    application catches the error and degrades gracefully. For a high-frequency,
+    best-effort, read-only call (the warmup pod-log GET fires up to 12x per
+    monitor poll) a transient ``ConnectionError`` from AKS dropping a pooled
+    keep-alive socket therefore still produces an App Insights exception row on
+    every connection-pool churn, even though the app already falls back to an
+    empty log. Wrapping such a call in this context manager sets the OTel
+    suppression key so no dependency span — and thus no span exception event —
+    is created for it.
+
+    Scope discipline: use this ONLY for genuinely best-effort, failure-tolerant
+    calls whose dependency timing we do not need in telemetry. It must never
+    wrap a mutating or correctness-critical call, because it also hides
+    successful dependency spans for the enclosed block.
+
+    No-op (and never raises) when OpenTelemetry is not installed.
+    """
+    try:
+        from opentelemetry.instrumentation.utils import suppress_instrumentation
+    except Exception:
+        yield
+        return
+    with suppress_instrumentation():
+        yield

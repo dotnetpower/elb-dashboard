@@ -23,6 +23,7 @@ from typing import Any
 
 from azure.core.credentials import TokenCredential
 
+from api.app.telemetry import suppress_dependency_telemetry
 from api.services.k8s.fanout import _k8s_fanout_pool
 from api.services.k8s.nodes import _candidate_warmup_node_names
 from api.services.warmup.jobs import (
@@ -586,13 +587,27 @@ def _warmup_pods_and_logs(session: Any, server: str) -> tuple[list[dict[str, Any
         return pods, {}
 
     def _fetch_log(name: str) -> tuple[str, str | None]:
+        # The pod-log GET is best-effort and read-only: a missing or partial
+        # log only degrades the warmup card, never correctness. AKS routinely
+        # drops pooled keep-alive sockets, surfacing as a transient
+        # ``ConnectionError(RemoteDisconnected)`` after the urllib3 retry budget
+        # is spent. We suppress OTel auto-instrumentation around the call so a
+        # transient abort does not record an App Insights dependency exception
+        # on every monitor poll (the single highest-volume exception observed),
+        # then fall back to an empty log on any failure.
         try:
-            log_response = session.get(
-                f"{server}/api/v1/namespaces/default/pods/{name}/log",
-                params={"container": "warmup", "tailLines": 80},
-                timeout=2,
+            with suppress_dependency_telemetry():
+                log_response = session.get(
+                    f"{server}/api/v1/namespaces/default/pods/{name}/log",
+                    params={"container": "warmup", "tailLines": 80},
+                    timeout=2,
+                )
+        except Exception as exc:
+            LOGGER.warning(
+                "warmup pod-log fetch failed pod=%s error=%s",
+                name,
+                type(exc).__name__,
             )
-        except Exception:
             return name, None
         if log_response.status_code != 200:
             return name, None

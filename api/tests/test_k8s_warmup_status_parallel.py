@@ -445,3 +445,50 @@ def test_warmup_status_daemonset_tags_warmup_source() -> None:
     dbs = {db["name"]: db for db in result["databases"]}
     assert dbs["nt"]["sources"] == ["warmup"]
 
+
+def test_warmup_pod_log_connection_abort_degrades_without_exception() -> None:
+    """A ``ConnectionError(RemoteDisconnected)`` on the best-effort pod-log GET
+    must degrade to an empty log (issue #45) and must run inside
+    ``suppress_dependency_telemetry`` so OTel records no App Insights
+    dependency exception for the transient abort.
+    """
+    import requests
+    from api.services.k8s import warmup_status as ws
+    from urllib3.exceptions import ProtocolError
+
+    pods = [{"metadata": {"name": f"warm-core-nt-{i}"}} for i in range(3)]
+    abort = requests.exceptions.ConnectionError(
+        ProtocolError(
+            "Connection aborted.",
+            requests.exceptions.ConnectionError("Remote end closed connection"),
+        )
+    )
+
+    def handler(url: str, params=None, timeout=10):  # type: ignore[no-untyped-def]
+        if "/log" in url:
+            raise abort
+        if "/api/v1/namespaces/default/pods" in url:
+            return _FakeResponse({"items": pods})
+        return _FakeResponse({}, status_code=404)
+
+    session = _fake_session(handler)
+
+    enter_count = {"n": 0}
+
+    class _CountingCM:
+        def __enter__(self) -> None:
+            enter_count["n"] += 1
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+    with patch.object(ws, "suppress_dependency_telemetry", lambda: _CountingCM()):
+        pods_out, logs = ws._warmup_pods_and_logs(session, "https://k8s")
+
+    # No exception propagated; every pod degraded to "no log".
+    assert pods_out == pods
+    assert logs == {}
+    # The suppression context wrapped every pod-log GET (one per pod).
+    assert enter_count["n"] == len(pods)
+
+
