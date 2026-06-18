@@ -77,7 +77,8 @@
   --bg-tertiary: #f3f3f3;
   --bg-hover: #f0f0f0;
   --border-weak: #e5e5e5;
-  --border-medium: #d4d4d4;
+  /* VS Code Light Modern input/dropdown border. */
+  --border-medium: #cecece;
   --border-focus: rgba(0, 95, 184, 0.5);
 
   /* Text — neutral gray ramp, AA against white */
@@ -320,8 +321,8 @@
 }
 [data-theme="light"] .glass-button--primary:hover,
 [data-theme="light"] .gb-p:hover {
-  background: #0a6cc9;
-  border-color: #0a6cc9;
+  background: #0258a8;
+  border-color: #0258a8;
   box-shadow: 0 2px 6px rgba(0, 95, 184, 0.32);
 }
 [data-theme="light"] .glass-button--primary:disabled,
@@ -333,8 +334,9 @@
 }
 [data-theme="light"] .glass-button--primary:disabled:hover,
 [data-theme="light"] .gb-p:disabled:hover {
-  background: rgba(69, 65, 66, 0.18);
-  border-color: rgba(69, 65, 66, 0.25);
+  /* A disabled CTA must not react to hover — keep the flat disabled fill. */
+  background: #ebebeb;
+  border-color: #e0e0e0;
 }
 
 /* #1 Environment pills (used in some toolbars) — flat white, hairline */
@@ -807,8 +809,8 @@
 }
 [data-theme="light"] .glass-button--primary:hover,
 [data-theme="light"] .gb-p:hover {
-  background: #0a6cc9;
-  border-color: #0a6cc9;
+  background: #0258a8;
+  border-color: #0258a8;
   box-shadow: 0 2px 6px rgba(0, 95, 184, 0.32);
 }
 
