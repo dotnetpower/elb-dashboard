@@ -54,6 +54,17 @@ DEFAULT_AUTH_MODE = AUTH_MODE_ENTRA
 
 DEFAULT_REQUEST_QUEUE = "elastic-blast-requests"
 DEFAULT_COMPLETION_TOPIC = "elastic-blast-completions"
+
+# Completion-entity kind. A topic fans every transition event out to many
+# independent subscriptions (the dashboard observer gets its own copy without
+# competing with an external subscriber); a queue is point-to-point, so a single
+# competing consumer drains it. Default "topic" preserves the historical
+# fan-out behaviour (charter §12a Rule 4: unset = existing behaviour).
+COMPLETION_KIND_TOPIC = "topic"
+COMPLETION_KIND_QUEUE = "queue"
+COMPLETION_KINDS: tuple[str, ...] = (COMPLETION_KIND_TOPIC, COMPLETION_KIND_QUEUE)
+DEFAULT_COMPLETION_KIND = COMPLETION_KIND_TOPIC
+
 DEFAULT_DLQ_MAX_AGE_DAYS = 7
 DEFAULT_DLQ_MAX_COUNT = 5000
 DEFAULT_DLQ_CLEANUP_BATCH = 500
@@ -68,6 +79,11 @@ DEFAULT_DLQ_CLEANUP_BATCH = 500
 # publishes transition events to and external subscribers consume.
 _REQUEST_QUEUE_ENV = "SERVICEBUS_REQUEST_QUEUE"
 _RESPONSE_TOPIC_ENV = "SERVICEBUS_RESPONSE_TOPIC"
+# Deployment-level override for the completion-entity kind (topic|queue). Like
+# the entity-name overrides above, a well-formed env value wins over the saved
+# config so an operator can run queue/queue without editing the Settings row;
+# an unrecognised value is ignored (logged) and the saved/default kind stands.
+_COMPLETION_KIND_ENV = "SERVICEBUS_COMPLETION_KIND"
 
 # Bounds — keep the cleanup task bounded (charter self-critique: no runaway loop).
 _DLQ_MAX_AGE_DAYS_CEIL = 365
@@ -102,6 +118,11 @@ def _clean_auth_mode(value: Any) -> str:
     return mode if mode in AUTH_MODES else DEFAULT_AUTH_MODE
 
 
+def _clean_completion_kind(value: Any) -> str:
+    kind = str(value or "").strip().lower()
+    return kind if kind in COMPLETION_KINDS else DEFAULT_COMPLETION_KIND
+
+
 def _clean_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -127,6 +148,8 @@ class ServiceBusConfig:
     namespace_fqdn: str = ""
     request_queue: str = DEFAULT_REQUEST_QUEUE
     completion_topic: str = DEFAULT_COMPLETION_TOPIC
+    # Completion entity kind: "topic" (fan-out) or "queue" (point-to-point).
+    completion_kind: str = DEFAULT_COMPLETION_KIND
     # SAS mode only: the Key Vault secret NAME holding the connection string.
     # The connection string itself is never persisted in this row.
     sas_secret_name: str = ""
@@ -152,6 +175,7 @@ class ServiceBusConfig:
             "namespace_fqdn": self.namespace_fqdn,
             "request_queue": self.request_queue,
             "completion_topic": self.completion_topic,
+            "completion_kind": self.completion_kind,
             "sas_secret_name": self.sas_secret_name,
             "subscription_id": self.subscription_id,
             "resource_group": self.resource_group,
@@ -175,6 +199,7 @@ class ServiceBusConfig:
             namespace_fqdn=str(value.get("namespace_fqdn") or ""),
             request_queue=str(value.get("request_queue") or DEFAULT_REQUEST_QUEUE),
             completion_topic="" if completion_topic_value is None else str(completion_topic_value),
+            completion_kind=_clean_completion_kind(value.get("completion_kind")),
             sas_secret_name=str(value.get("sas_secret_name") or ""),
             subscription_id=str(value.get("subscription_id") or ""),
             resource_group=str(value.get("resource_group") or ""),
@@ -383,7 +408,28 @@ def _apply_entity_env_overrides(cfg: ServiceBusConfig) -> ServiceBusConfig:
                 _RESPONSE_TOPIC_ENV,
                 topic_override,
             )
+    kind_override = os.environ.get(_COMPLETION_KIND_ENV, "").strip().lower()
+    if kind_override:
+        if kind_override in COMPLETION_KINDS:
+            cfg.completion_kind = kind_override
+        else:
+            LOGGER.warning(
+                "%s=%r is not one of %s; ignoring override",
+                _COMPLETION_KIND_ENV,
+                kind_override,
+                COMPLETION_KINDS,
+            )
     return cfg
+
+
+def completion_is_queue(cfg: ServiceBusConfig) -> bool:
+    """True when the completion entity is a queue (point-to-point), not a topic.
+
+    Tolerant of objects (e.g. test ``SimpleNamespace``) that predate the
+    ``completion_kind`` field — a missing attribute reads as the default topic
+    kind so existing callers keep the historical fan-out behaviour.
+    """
+    return getattr(cfg, "completion_kind", DEFAULT_COMPLETION_KIND) == COMPLETION_KIND_QUEUE
 
 
 def save_service_bus_config(cfg: ServiceBusConfig) -> ServiceBusConfig:

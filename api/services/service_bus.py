@@ -56,6 +56,7 @@ from api.services.sanitise import sanitise
 from api.services.service_bus_pref import (
     AUTH_MODE_SAS,
     ServiceBusConfig,
+    completion_is_queue,
     get_service_bus_config,
 )
 
@@ -249,17 +250,19 @@ def send_request(
 
 
 def publish_event(cfg: ServiceBusConfig | None, event: dict[str, Any]) -> None:
-    """Publish a transition event to the completion topic.
+    """Publish a transition event to the completion entity.
 
-    No-op (logged) when no completion topic is configured — the integration can
-    run request-only without a topic.
+    The completion entity is a topic by default (fan-out to many subscriptions);
+    when ``cfg.completion_kind == "queue"`` it is a queue (point-to-point, a
+    single competing consumer). No-op (logged) when no completion entity is
+    configured — the integration can run request-only without one.
     """
     cfg = _require_enabled_config(cfg)
     if not cfg.completion_topic:
-        LOGGER.debug("publish_event skipped: no completion_topic configured")
+        LOGGER.debug("publish_event skipped: no completion entity configured")
         return
     # Echo the caller-supplied pass-through value onto the message envelope (not
-    # just the JSON body) when present, so a topic subscriber can correlate /
+    # just the JSON body) when present, so a subscriber/consumer can correlate /
     # filter on it without parsing the payload. Omitted when the producer set
     # none, keeping the envelope unchanged for the common case.
     request_id = str(event.get("request_id") or "").strip()
@@ -271,8 +274,13 @@ def publish_event(cfg: ServiceBusConfig | None, event: dict[str, Any]) -> None:
         correlation_id=str(event.get("external_correlation_id") or "") or None,
         application_properties=application_properties,
     )
-    with _client(cfg) as client, client.get_topic_sender(cfg.completion_topic) as sender:
-        sender.send_messages(message)
+    with _client(cfg) as client:
+        if completion_is_queue(cfg):
+            with client.get_queue_sender(cfg.completion_topic) as sender:
+                sender.send_messages(message)
+        else:
+            with client.get_topic_sender(cfg.completion_topic) as sender:
+                sender.send_messages(message)
 
 
 # --------------------------------------------------------------------------- #
@@ -706,7 +714,12 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
     existing counts contract.
     """
     cfg = _require_enabled_config(cfg)
-    result: dict[str, Any] = {"queue": None, "dead_letter": None, "subscriptions": []}
+    result: dict[str, Any] = {
+        "queue": None,
+        "dead_letter": None,
+        "subscriptions": [],
+        "completion_kind": getattr(cfg, "completion_kind", "topic"),
+    }
     with _admin_client(cfg) as admin:
         try:
             q = admin.get_queue_runtime_properties(cfg.request_queue)
@@ -758,30 +771,55 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
         except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
             raise ServiceBusAuthError(str(exc)) from exc
         if cfg.completion_topic:
-            try:
-                for sub in admin.list_subscriptions(cfg.completion_topic):
-                    srt = admin.get_subscription_runtime_properties(
-                        cfg.completion_topic, sub.name
-                    )
+            if completion_is_queue(cfg):
+                # Queue completion entity: read its runtime counters and surface
+                # them as a single pseudo-subscription row named after the queue
+                # so the SPA's subscription-list rendering keeps working. There
+                # is no fan-out / per-subscription split in queue mode.
+                try:
+                    cq = admin.get_queue_runtime_properties(cfg.completion_topic)
                     result["subscriptions"].append(
                         {
-                            "name": sub.name,
-                            "active_message_count": srt.active_message_count,
-                            "dead_letter_message_count": srt.dead_letter_message_count,
-                            # Additive transfer counters per subscription so the
-                            # SPA can flag forwarding failures on a per-sub basis.
+                            "name": cfg.completion_topic,
+                            "active_message_count": cq.active_message_count,
+                            "dead_letter_message_count": cq.dead_letter_message_count,
                             "transfer_message_count": getattr(
-                                srt, "transfer_message_count", None
+                                cq, "transfer_message_count", None
                             ),
                             "transfer_dead_letter_message_count": getattr(
-                                srt, "transfer_dead_letter_message_count", None
+                                cq, "transfer_dead_letter_message_count", None
                             ),
                         }
                     )
-            except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
-                raise ServiceBusAuthError(str(exc)) from exc
-            except ServiceBusError:
-                LOGGER.debug("subscription listing unavailable", exc_info=True)
+                except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
+                    raise ServiceBusAuthError(str(exc)) from exc
+                except ServiceBusError:
+                    LOGGER.debug("completion queue counts unavailable", exc_info=True)
+            else:
+                try:
+                    for sub in admin.list_subscriptions(cfg.completion_topic):
+                        srt = admin.get_subscription_runtime_properties(
+                            cfg.completion_topic, sub.name
+                        )
+                        result["subscriptions"].append(
+                            {
+                                "name": sub.name,
+                                "active_message_count": srt.active_message_count,
+                                "dead_letter_message_count": srt.dead_letter_message_count,
+                                # Additive transfer counters per subscription so the
+                                # SPA can flag forwarding failures on a per-sub basis.
+                                "transfer_message_count": getattr(
+                                    srt, "transfer_message_count", None
+                                ),
+                                "transfer_dead_letter_message_count": getattr(
+                                    srt, "transfer_dead_letter_message_count", None
+                                ),
+                            }
+                        )
+                except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
+                    raise ServiceBusAuthError(str(exc)) from exc
+                except ServiceBusError:
+                    LOGGER.debug("subscription listing unavailable", exc_info=True)
     return result
 
 
