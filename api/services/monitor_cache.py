@@ -85,15 +85,31 @@ def _is_transient_refresh_failure(exc: BaseException) -> bool:
             ConnectTimeout as _RequestsConnectTimeout,
         )
         from requests.exceptions import (
+            HTTPError as _RequestsHTTPError,
+        )
+        from requests.exceptions import (
             ReadTimeout as _RequestsReadTimeout,
         )
     except ImportError:  # pragma: no cover - requests is a transitive dep
         _RequestsConnectionError = ()  # type: ignore[assignment]
         _RequestsConnectTimeout = ()  # type: ignore[assignment]
+        _RequestsHTTPError = ()  # type: ignore[assignment]
         _RequestsReadTimeout = ()  # type: ignore[assignment]
 
     if isinstance(exc, (_RequestsConnectionError, _RequestsConnectTimeout, _RequestsReadTimeout)):
         return True
+
+    # A ``requests`` HTTPError from ``raise_for_status()`` — e.g. the
+    # metrics.k8s.io ``top-nodes`` endpoint returning a transient 5xx while
+    # metrics-server is restarting (issue #48). Classify only the transient /
+    # not-ready status family as transient so a real 401/403 still surfaces as
+    # a full exception row.
+    if _RequestsHTTPError and isinstance(exc, _RequestsHTTPError):
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and status in {404, 408, 429, 500, 502, 503, 504}:
+            return True
+        return False
 
     try:
         from azure.core.exceptions import (

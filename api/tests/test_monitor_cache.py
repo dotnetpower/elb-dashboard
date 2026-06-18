@@ -14,6 +14,8 @@ Validation: `uv run pytest -q api/tests/test_monitor_cache.py`.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from api.services import monitor_cache
 
@@ -405,10 +407,27 @@ def _make_arm_404() -> Exception:
     return ResourceNotFoundError("cluster not found")
 
 
+def _make_requests_http_error(status: int) -> Exception:
+    """Build the `requests.exceptions.HTTPError` that `raise_for_status()`
+    raises — e.g. the metrics.k8s.io top-nodes endpoint returning a transient
+    5xx while metrics-server restarts (issue #48)."""
+    from requests.exceptions import HTTPError
+
+    response = SimpleNamespace(status_code=status)
+    return HTTPError(f"{status} Server Error", response=response)
+
+
 def test_is_transient_refresh_failure_classifies_known_families() -> None:
     assert monitor_cache._is_transient_refresh_failure(_make_requests_connection_error()) is True
     assert monitor_cache._is_transient_refresh_failure(_make_requests_connect_timeout()) is True
     assert monitor_cache._is_transient_refresh_failure(_make_arm_404()) is True
+    # metrics-server / top-nodes transient HTTPError family degrades quietly.
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(503)) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(500)) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(504)) is True
+    # A real client/auth HTTPError must still surface as a full exception row.
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(401)) is False
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(403)) is False
     # Unknown / programmer errors must remain "non-transient" so a real bug
     # still produces a full stack trace + App Insights exception row.
     assert monitor_cache._is_transient_refresh_failure(RuntimeError("boom")) is False
