@@ -30,13 +30,23 @@ from typing import Any
 # ``JOBS_LIST_CACHE_STALE_TTL_SECONDS`` while a single background revalidation
 # rebuilds it (stale-while-revalidate). This hides the cold-build latency — the
 # subscription-wide listing fans out to external OpenAPI discovery + per-cluster
-# ``/v1/jobs`` fetches that can take several seconds — from the polling caller.
-# The stale ceiling is aligned with the external jobs cache TTL (70 s) so a
-# stale external row is never older than it would have been served directly,
-# and a local row's status is at worst ~70 s behind (an idle tab; an active
-# job polls every ~5 s and almost always lands inside the fresh window).
+# ``/v1/jobs`` fetches plus per-job K8s status refresh that, on a cold key, were
+# measured at p90 ~250 s / max ~20 min against a busy fleet — from the polling
+# caller.
+#
+# The stale ceiling MUST comfortably exceed a worst-case cold rebuild. When it
+# did not (the original 70 s, aligned only with the external jobs cache TTL), a
+# rebuild slower than 70 s let the entry expire to *cold* before the background
+# task finished, so the next poll fell down the synchronous build path and
+# blocked for minutes — the dashboard "JOBS loading…" spinner that never
+# resolved. 600 s covers the observed p90 and keeps idle dashboards responsive;
+# effective staleness is still ~one rebuild cadence because every stale poll
+# triggers a rebuild that resets the window with fresh data. As a belt-and-
+# braces guard, ``jobs_list_cache_get_swr`` additionally refuses to drop an
+# entry while a revalidation is actively in flight (see below), so a rebuild
+# that overruns the ceiling still never sends a caller down the cold path.
 JOBS_LIST_CACHE_TTL_SECONDS = 10.0
-JOBS_LIST_CACHE_STALE_TTL_SECONDS = 70.0
+JOBS_LIST_CACHE_STALE_TTL_SECONDS = 600.0
 JOBS_LIST_CACHE_MAX_ENTRIES = 128
 
 # Store the serialized JSON bytes so cache get/set never deepcopies. JSON
@@ -56,8 +66,18 @@ _JOBS_LIST_CACHE_LOCK = threading.Lock()
 # that never calls ``end_jobs_list_revalidate`` (crash) cannot wedge future
 # revalidations forever — the next ``begin_jobs_list_revalidate`` past the TTL
 # re-elects.
+#
+# This TTL is intentionally generous because it doubles as the crash-safety
+# upper bound on the "entry retention" window in ``jobs_list_cache_get_swr`` (an
+# in-flight rebuild keeps the stale entry alive past the hard ceiling). Normal
+# completion releases the slot immediately via ``end_jobs_list_revalidate`` in
+# the rebuild's ``finally``, so this TTL only bounds a *truly hung* rebuild
+# (Azure SDK calls carry their own timeouts, so that should not happen). It must
+# exceed a worst-case cold rebuild (observed p90 ~250 s, max ~20 min) so that an
+# entry claimed for revalidation at any point in its stale window stays retained
+# until the rebuild lands, instead of dropping to cold and blocking the poll.
 _JOBS_LIST_REVALIDATE_INFLIGHT: dict[str, float] = {}
-_JOBS_LIST_REVALIDATE_TTL_SECONDS = 60.0
+_JOBS_LIST_REVALIDATE_TTL_SECONDS = 1800.0
 
 
 def jobs_list_cache_key(
@@ -102,6 +122,13 @@ def jobs_list_cache_get_swr(key: str) -> tuple[dict[str, Any] | None, bool]:
     - fresh entry  → ``(payload, False)``
     - stale entry  → ``(payload, True)``  (caller should trigger a background rebuild)
     - cold / past the stale ceiling → ``(None, False)``
+
+    Retention exception: an entry past the stale ceiling is still returned as
+    ``(payload, True)`` — not dropped — while a background revalidation is
+    actively in flight for the key. This guarantees a poll never falls down the
+    cold synchronous build path while a rebuild it (or a peer) already triggered
+    is still running, so a rebuild slower than the ceiling cannot resurrect the
+    "JOBS loading…" spinner.
     """
     now = time.monotonic()
     with _JOBS_LIST_CACHE_LOCK:
@@ -110,11 +137,28 @@ def jobs_list_cache_get_swr(key: str) -> tuple[dict[str, Any] | None, bool]:
             return None, False
         fresh_until, hard_until, payload_bytes = entry
         if hard_until <= now:
-            _JOBS_LIST_CACHE.pop(key, None)
-            return None, False
-        # Touch for LRU semantics so frequently-read entries stay warm.
-        _JOBS_LIST_CACHE.move_to_end(key)
-        is_stale = fresh_until <= now
+            # Past the stale ceiling. Normally drop the entry so the next caller
+            # pays a fresh synchronous build. BUT if a background revalidation
+            # is already rebuilding this key, dropping it would push that caller
+            # down the cold synchronous path — a multi-second/minute build that
+            # blocks the poll — even though a rebuild is already in flight.
+            # Retain the (very) stale payload and keep serving it until the
+            # in-flight rebuild lands a fresh entry, so a rebuild that overruns
+            # the ceiling never causes the "JOBS loading…" spinner to reappear.
+            started_at = _JOBS_LIST_REVALIDATE_INFLIGHT.get(key)
+            revalidating = (
+                started_at is not None
+                and now - started_at < _JOBS_LIST_REVALIDATE_TTL_SECONDS
+            )
+            if not revalidating:
+                _JOBS_LIST_CACHE.pop(key, None)
+                return None, False
+            _JOBS_LIST_CACHE.move_to_end(key)
+            is_stale = True
+        else:
+            # Touch for LRU semantics so frequently-read entries stay warm.
+            _JOBS_LIST_CACHE.move_to_end(key)
+            is_stale = fresh_until <= now
     # json.loads outside the lock — deserialization is the only per-call
     # cost and we don't want it blocking other readers.
     decoded = json.loads(payload_bytes)

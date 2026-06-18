@@ -172,6 +172,48 @@ def blast_jobs_list(
             )
         return cached
 
+    # Cold cache (no entry, or past the stale ceiling with no in-flight
+    # rebuild). The full enriched build fans out to per-active-job K8s status
+    # refresh + external OpenAPI `/v1/jobs` discovery + Table sync, which on a
+    # busy fleet was measured at p90 ~250 s (max ~20 min) — long enough that the
+    # SPA's first poll showed the never-resolving "JOBS loading…" spinner.
+    #
+    # Serve a FAST local-Table-only payload first so first paint is instant,
+    # then rebuild the enriched version in the background (stale-while-
+    # revalidate, applied to the cold case). Guard: only short-circuit when the
+    # fast build actually has local rows to show. With an empty local result the
+    # enriched build is the ONLY source of jobs (external-OpenAPI-only
+    # deployments, or a degraded local Table whose jobs live in the sibling), so
+    # fall through to the full synchronous build instead of flashing an empty
+    # list and hiding those jobs for a poll cycle.
+    fast_response = _compute_blast_jobs_response(
+        caller_oid=caller.object_id,
+        tenant_id=getattr(caller, "tenant_id", ""),
+        limit=limit,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        shared_visibility=shared_visibility,
+        request_id=request_id,
+        skip_enrichment=True,
+    )
+    if fast_response.get("jobs"):
+        jobs_list_cache_set(cache_key, fast_response)
+        if begin_jobs_list_revalidate(cache_key):
+            background_tasks.add_task(
+                _revalidate_blast_jobs_list,
+                cache_key=cache_key,
+                caller_oid=caller.object_id,
+                tenant_id=getattr(caller, "tenant_id", ""),
+                limit=limit,
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+                shared_visibility=shared_visibility,
+                request_id=request_id,
+            )
+        return fast_response
+
     response = _compute_blast_jobs_response(
         caller_oid=caller.object_id,
         tenant_id=getattr(caller, "tenant_id", ""),
@@ -235,6 +277,7 @@ def _compute_blast_jobs_response(
     cluster_name: str,
     shared_visibility: bool,
     request_id: str,
+    skip_enrichment: bool = False,
 ) -> dict[str, Any]:
     """Build the BLAST jobs-list response payload (no caching side effects).
 
@@ -242,6 +285,18 @@ def _compute_blast_jobs_response(
     background task without a live ``Request``. The caller identity is reduced
     to ``caller_oid`` / ``tenant_id`` and the request id is passed in for the
     response ``meta``.
+
+    ``skip_enrichment`` produces a FAST local-Table-only payload: it skips the
+    per-active-job K8s status refresh AND the external OpenAPI ``/v1/jobs``
+    discovery + Table sync, which are the bulk of the cold-build latency. The
+    cheap per-cluster ARM health gate still runs, so a frozen running row is
+    still tagged ``stale`` ("cluster stopped"). The route uses it on a cold
+    cache so the first poll returns last-known local rows instantly instead of
+    blocking on the minutes-long enrichment fan-out; a full (enriched) rebuild
+    then replaces the entry in the background. Statuses are at worst one
+    background-rebuild cadence behind, and external rows appear on the next
+    poll — the same eventual-consistency the stale-while-revalidate path
+    already relies on.
     """
     jobs: list[dict[str, Any]] = []
     degraded: dict[str, Any] = {}
@@ -291,24 +346,35 @@ def _compute_blast_jobs_response(
         # First gate the active rows against ARM cluster health: a stopped or
         # deleted cluster can't be refreshed via the K8s API, so we skip that
         # refresh (avoids a ~10 s timeout per job) and tag the row as stale
-        # below so the SPA shows "status frozen — cluster stopped".
+        # below so the SPA shows "status frozen — cluster stopped". This ARM
+        # health probe is per-distinct-cluster (cached) and cheap, so it runs
+        # even on the cold fast-paint path — it is what produces the honest
+        # "stale" badge on a frozen running row.
         blocked_refresh = _blocked_refresh_reasons(rows)
-        for idx, row in enumerate(rows):
-            if str(row.job_id) in blocked_refresh:
-                continue
-            if str(getattr(row, "phase", "") or "").strip().casefold() not in _K8S_REFRESH_PHASES:
-                continue
-            try:
-                refreshed = _refresh_running_blast_state(repo, row)
-            except Exception as exc:
-                LOGGER.debug(
-                    "blast_jobs_list refresh skipped job_id=%s: %s",
-                    row.job_id,
-                    type(exc).__name__,
-                )
-                continue
-            if refreshed is not row:
-                rows[idx] = refreshed
+        # ``skip_enrichment`` (cold-cache fast paint) bypasses only the
+        # expensive per-active-job K8s status refresh below — the bulk of the
+        # cold build latency — and serves last-known local status. The
+        # background rebuild does the full refresh.
+        if not skip_enrichment:
+            for idx, row in enumerate(rows):
+                if str(row.job_id) in blocked_refresh:
+                    continue
+                if (
+                    str(getattr(row, "phase", "") or "").strip().casefold()
+                    not in _K8S_REFRESH_PHASES
+                ):
+                    continue
+                try:
+                    refreshed = _refresh_running_blast_state(repo, row)
+                except Exception as exc:
+                    LOGGER.debug(
+                        "blast_jobs_list refresh skipped job_id=%s: %s",
+                        row.job_id,
+                        type(exc).__name__,
+                    )
+                    continue
+                if refreshed is not row:
+                    rows[idx] = refreshed
         parent_ids = [row.job_id for row in rows if _local_list_row_may_have_split_children(row)]
         if shared_visibility:
             # Child rows carry the parent's owner_oid, so group the parents by
@@ -365,52 +431,53 @@ def _compute_blast_jobs_response(
             }
 
     external_degraded: dict[str, Any] = {}
-    try:
-        # Discover external `/v1/jobs` for this scope and upsert them into the
-        # Table (cluster-shared, owner_oid=""), then merge the discovered rows
-        # into the response. The shared service owns target resolution + detail
-        # enrichment + the Table sync; the route keeps the tombstone filter +
-        # response shaping + degraded-badge policy. The sync survives AKS
-        # restarts and is the same path the Message Flow card relies on, so the
-        # two views can never drift on how `/v1/jobs` jobs reach the Table.
-        sync = collect_and_sync_external_jobs(
-            subscription_id=subscription_id,
-            resource_group=resource_group,
-            cluster_name=cluster_name,
-            tenant_id=tenant_id,
-            seen_job_ids={str(job.get("job_id")) for job in jobs},
-            detail_enrich_budget=min(
-                _EXTERNAL_DETAIL_ENRICH_LIMIT, max(0, fetch_limit - len(jobs))
-            ),
-        )
+    if not skip_enrichment:
+        try:
+            # Discover external `/v1/jobs` for this scope and upsert them into the
+            # Table (cluster-shared, owner_oid=""), then merge the discovered rows
+            # into the response. The shared service owns target resolution + detail
+            # enrichment + the Table sync; the route keeps the tombstone filter +
+            # response shaping + degraded-badge policy. The sync survives AKS
+            # restarts and is the same path the Message Flow card relies on, so the
+            # two views can never drift on how `/v1/jobs` jobs reach the Table.
+            sync = collect_and_sync_external_jobs(
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+                tenant_id=tenant_id,
+                seen_job_ids={str(job.get("job_id")) for job in jobs},
+                detail_enrich_budget=min(
+                    _EXTERNAL_DETAIL_ENRICH_LIMIT, max(0, fetch_limit - len(jobs))
+                ),
+            )
 
-        for ext_row in sync.rows:
-            job_id = str(ext_row.get("job_id") or "")
-            if job_id in sync.tombstoned_ids:
-                # Soft-deleted in our Table; suppress from the list view
-                # so the row stays gone after the user's delete click.
-                continue
-            jobs.append(_external_to_blast_job(ext_row))
+            for ext_row in sync.rows:
+                job_id = str(ext_row.get("job_id") or "")
+                if job_id in sync.tombstoned_ids:
+                    # Soft-deleted in our Table; suppress from the list view
+                    # so the row stays gone after the user's delete click.
+                    continue
+                jobs.append(_external_to_blast_job(ext_row))
 
-        # Surface external_degraded only when EVERY target failed (none
-        # reachable). A partial success — at least one cluster answered —
-        # keeps the list usable and is not flagged, since the history view's
-        # whole point is "show whatever jobs we can find across clusters".
-        if not sync.any_target_ok and sync.target_failures:
-            raise sync.target_failures[0]
-    except Exception as exc:
-        LOGGER.info("external blast job list unavailable: %s", _exception_reason(exc))
-        reason = _exception_reason(exc)
-        # `openapi_not_configured` / `openapi_not_enabled` mean the optional
-        # external OpenAPI plane simply isn't deployed yet — that's a normal
-        # state, not a degradation. Skip surfacing it as `external_degraded`
-        # so the request inspector doesn't show a perpetual red badge.
-        if reason not in _EXTERNAL_NOT_ENABLED_REASONS:
-            external_degraded = {
-                "external_degraded": True,
-                "external_degraded_reason": reason,
-                "external_degraded_message": _external_degraded_message(exc, reason),
-            }
+            # Surface external_degraded only when EVERY target failed (none
+            # reachable). A partial success — at least one cluster answered —
+            # keeps the list usable and is not flagged, since the history view's
+            # whole point is "show whatever jobs we can find across clusters".
+            if not sync.any_target_ok and sync.target_failures:
+                raise sync.target_failures[0]
+        except Exception as exc:
+            LOGGER.info("external blast job list unavailable: %s", _exception_reason(exc))
+            reason = _exception_reason(exc)
+            # `openapi_not_configured` / `openapi_not_enabled` mean the optional
+            # external OpenAPI plane simply isn't deployed yet — that's a normal
+            # state, not a degradation. Skip surfacing it as `external_degraded`
+            # so the request inspector doesn't show a perpetual red badge.
+            if reason not in _EXTERNAL_NOT_ENABLED_REASONS:
+                external_degraded = {
+                    "external_degraded": True,
+                    "external_degraded_reason": reason,
+                    "external_degraded_message": _external_degraded_message(exc, reason),
+                }
 
     jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
     has_more = len(jobs) > limit

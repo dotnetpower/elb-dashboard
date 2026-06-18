@@ -338,6 +338,17 @@ def save_openapi_api_token(
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     serialised = json.dumps(payload, separators=(",", ":"))
+    # Durable mirror of the GLOBAL token (best-effort) so a Container App
+    # revision restart — which wipes the in-revision ops Redis — does not lose
+    # the webhook shared-secret. Without this, POST /api/blast/register-external-job
+    # 503'd ("webhook_not_configured") for every sibling webhook until an
+    # explicit redeploy re-seeded Redis (issue #49). The durable copy lives in
+    # the same private-endpoint-only ``dashboardsingletons`` Storage Table as
+    # the base-url, RBAC-gated by the shared MI — i.e. the same trust boundary
+    # the token already crosses in Redis and the AKS pod env. ``get_openapi_api_token``
+    # rehydrates Redis from this copy on a cold read. The durable write never
+    # fails the call (mirrors ``save_openapi_base_url``).
+    _durable_save_safe(_TOKEN_KEY, payload)
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     ok = True
     try:

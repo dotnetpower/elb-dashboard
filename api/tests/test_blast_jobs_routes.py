@@ -143,9 +143,10 @@ def test_job_detail_recovers_external_failed_error_and_persists(monkeypatch) -> 
 
 
 def test_jobs_list_swr_serves_stale_and_revalidates(monkeypatch) -> None:
-    """The jobs list is served stale-while-revalidate: fresh → cache hit,
-    stale → immediate stale payload + one background rebuild, then the rebuilt
-    payload once it lands."""
+    """The jobs list is served stale-while-revalidate. On a COLD cache the route
+    serves a FAST local-only build immediately (``skip_enrichment``) and rebuilds
+    the enriched payload in the background; thereafter fresh → cache hit, stale →
+    immediate stale payload + one background rebuild, then the rebuilt payload."""
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
 
     import api.services.blast.jobs_list_cache as cache_mod
@@ -158,9 +159,10 @@ def test_jobs_list_swr_serves_stale_and_revalidates(monkeypatch) -> None:
 
     calls = {"n": 0}
 
-    def fake_compute(**_kwargs):
+    def fake_compute(**kwargs):
         calls["n"] += 1
-        return {"jobs": [{"job_id": f"build-{calls['n']}"}], "meta": {}}
+        kind = "fast" if kwargs.get("skip_enrichment") else "full"
+        return {"jobs": [{"job_id": f"{kind}-{calls['n']}"}], "meta": {}}
 
     monkeypatch.setattr(jobs_mod, "_compute_blast_jobs_response", fake_compute)
 
@@ -168,29 +170,62 @@ def test_jobs_list_swr_serves_stale_and_revalidates(monkeypatch) -> None:
 
     client = TestClient(app)
 
-    # Cold → synchronous build #1, cached.
+    # Cold → FAST build #1 served immediately, then a background full rebuild #2
+    # caches the enriched payload (TestClient runs background tasks after the
+    # response).
     r1 = client.get("/api/blast/jobs")
     assert r1.status_code == 200
-    assert r1.json()["jobs"][0]["job_id"] == "build-1"
-    assert calls["n"] == 1
+    assert r1.json()["jobs"][0]["job_id"] == "fast-1"  # fast paint, not blocked
+    assert calls["n"] == 2  # fast build + background full rebuild
 
-    # Within the fresh window → cache hit, no rebuild.
+    # Within the fresh window → cache hit on the enriched payload, no rebuild.
     r2 = client.get("/api/blast/jobs")
-    assert r2.json()["jobs"][0]["job_id"] == "build-1"
-    assert calls["n"] == 1
+    assert r2.json()["jobs"][0]["job_id"] == "full-2"
+    assert calls["n"] == 2
 
     # Into the stale window → stale payload served immediately AND a background
-    # rebuild (#2) runs (TestClient executes background tasks after the response).
+    # full rebuild (#3) runs.
     clock["now"] += cache_mod.JOBS_LIST_CACHE_TTL_SECONDS + 0.01
     r3 = client.get("/api/blast/jobs")
-    assert r3.json()["jobs"][0]["job_id"] == "build-1"  # stale served, not blocked
-    assert calls["n"] == 2  # background revalidate ran
+    assert r3.json()["jobs"][0]["job_id"] == "full-2"  # stale served, not blocked
+    assert calls["n"] == 3  # background revalidate ran
 
     # The rebuilt payload is now fresh and served on the next poll.
     r4 = client.get("/api/blast/jobs")
-    assert r4.json()["jobs"][0]["job_id"] == "build-2"
-    assert calls["n"] == 2
+    assert r4.json()["jobs"][0]["job_id"] == "full-3"
+    assert calls["n"] == 3
 
+
+def test_jobs_list_cold_empty_local_falls_through_to_full_build(monkeypatch) -> None:
+    """When the fast local-only build yields no rows the route must NOT serve an
+    empty list — it falls through to the full synchronous build so external /
+    sibling-only jobs are not hidden for a poll cycle."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    import api.services.blast.jobs_list_cache as cache_mod
+    from api.routes.blast import jobs as jobs_mod
+
+    cache_mod.reset_jobs_list_cache()
+
+    calls: list[bool] = []
+
+    def fake_compute(**kwargs):
+        skip = bool(kwargs.get("skip_enrichment"))
+        calls.append(skip)
+        if skip:
+            return {"jobs": [], "meta": {}}  # no local rows on the fast path
+        return {"jobs": [{"job_id": "external-only"}], "meta": {}}
+
+    monkeypatch.setattr(jobs_mod, "_compute_blast_jobs_response", fake_compute)
+
+    from api.main import app
+
+    client = TestClient(app)
+    r = client.get("/api/blast/jobs")
+    assert r.status_code == 200
+    assert r.json()["jobs"][0]["job_id"] == "external-only"
+    # Fast (skip) build attempted first, then the full build because it was empty.
+    assert calls == [True, False]
 
 
 def _pagination_route_setup(monkeypatch, *, row_count: int):

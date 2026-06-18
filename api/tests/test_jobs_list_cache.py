@@ -135,6 +135,55 @@ def test_revalidate_slot_reelects_after_ttl(monkeypatch) -> None:
     end_jobs_list_revalidate(key)
 
 
+def test_swr_retains_entry_while_revalidation_inflight(monkeypatch) -> None:
+    """Past the stale ceiling, an entry is RETAINED (served stale) while a
+    revalidation is in flight, instead of dropping to cold and forcing the next
+    poll down the blocking synchronous build path."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock["now"])
+    key = _key("swr-inflight")
+    jobs_list_cache_set(key, {"v": 1})
+
+    # A rebuild claims the single-flight slot.
+    assert begin_jobs_list_revalidate(key) is True
+
+    # Jump well past the stale ceiling. Because a revalidation is in flight the
+    # entry is retained and served as stale (not dropped to cold).
+    clock["now"] += cache_mod.JOBS_LIST_CACHE_STALE_TTL_SECONDS + 5.0
+    payload, is_stale = jobs_list_cache_get_swr(key)
+    assert payload == {"v": 1} and is_stale is True
+    # The entry is still present.
+    assert key in cache_mod._JOBS_LIST_CACHE
+
+    # Once the rebuild releases the slot, a past-ceiling read drops to cold.
+    end_jobs_list_revalidate(key)
+    payload, is_stale = jobs_list_cache_get_swr(key)
+    assert payload is None and is_stale is False
+    assert key not in cache_mod._JOBS_LIST_CACHE
+
+
+def test_swr_inflight_retention_expires_with_slot_ttl(monkeypatch) -> None:
+    """Retention is bounded by the revalidate TTL: a leader that crashed without
+    releasing the slot stops retaining the entry once the slot TTL lapses, so a
+    genuinely wedged rebuild cannot pin a stale entry forever."""
+    clock = {"now": 2000.0}
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock["now"])
+    key = _key("swr-inflight-ttl")
+    jobs_list_cache_set(key, {"v": 1})
+    assert begin_jobs_list_revalidate(key) is True
+
+    # Past the stale ceiling but the slot is still within its TTL → retained.
+    clock["now"] += cache_mod.JOBS_LIST_CACHE_STALE_TTL_SECONDS + 1.0
+    payload, is_stale = jobs_list_cache_get_swr(key)
+    assert payload == {"v": 1} and is_stale is True
+
+    # Advance beyond the revalidate TTL (the crashed-leader window) → no longer
+    # retained, entry drops to cold.
+    clock["now"] += cache_mod._JOBS_LIST_REVALIDATE_TTL_SECONDS
+    payload, is_stale = jobs_list_cache_get_swr(key)
+    assert payload is None and is_stale is False
+
+
 def test_concurrent_set_get_no_crash() -> None:
     errors: list[BaseException] = []
 

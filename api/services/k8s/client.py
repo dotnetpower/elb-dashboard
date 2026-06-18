@@ -134,9 +134,20 @@ def _k8s_session_http_pool_size() -> int:
 # few hundred ms during overlay refresh; without this retry each hiccup
 # bubbled up as a `requests.exceptions.ConnectionError(NameResolutionError)`
 # and recorded an App Insights exception even though the very next poll
-# succeeded. Read errors and HTTP status codes are NOT retried — a
-# successful TCP connect that returns 5xx is the API server's answer, not
-# a transport blip.
+# succeeded. The same single retry now also covers connection-level read
+# aborts (`RemoteDisconnected`/`ProtocolError`) on a reused keepalive
+# socket — the AKS API server silently drops idle pooled connections, and
+# the next GET on that dead socket raised
+# `requests.exceptions.ConnectionError(ProtocolError('Connection aborted.',
+# RemoteDisconnected(...)))`, the single noisiest App Insights exception
+# (warmup pod-log fan-out). urllib3 classifies a `RemoteDisconnected` as a
+# READ error, so `read=0` made it terminal; retrying it once transparently
+# re-establishes the socket and the GET succeeds. This is safe because the
+# retry is gated to idempotent methods only (`allowed_methods` =
+# GET/HEAD/OPTIONS), so a POST/DELETE k8s mutation is still never replayed.
+# HTTP STATUS codes remain NOT retried — a successful TCP connect that
+# returns 5xx is the API server's authoritative answer, not a transport
+# blip (`status=0`, `status_forcelist=()`).
 _K8S_SESSION_RETRY_TOTAL = 1
 _K8S_SESSION_RETRY_BACKOFF = 0.5
 
@@ -173,14 +184,18 @@ def _build_k8s_retry() -> Any:
     return Retry(
         total=_k8s_session_retry_total(),
         connect=_k8s_session_retry_total(),
-        read=0,
+        # Retry a connection-level read abort (RemoteDisconnected / dropped
+        # keepalive socket) once. `total` still bounds the overall retry
+        # budget, and `allowed_methods` below restricts replay to idempotent
+        # GET/HEAD/OPTIONS, so this never re-sends a mutating request.
+        read=_k8s_session_retry_total(),
         status=0,
         redirect=0,
         other=0,
         backoff_factor=_k8s_session_retry_backoff(),
-        # Only retry connect-time failures (DNS / TCP reset) — never a
-        # successful response with a 4xx/5xx body, because those are
-        # the API server's authoritative answer.
+        # Only retry transport-level failures (DNS / TCP reset / dropped
+        # keepalive) — never a successful response with a 4xx/5xx body,
+        # because those are the API server's authoritative answer.
         status_forcelist=(),
         allowed_methods=frozenset(["GET", "HEAD", "OPTIONS"]),
         raise_on_status=False,
