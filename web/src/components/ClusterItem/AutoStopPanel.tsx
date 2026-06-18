@@ -50,6 +50,10 @@ function reasonText(reason: string, activeJobs: number): string {
   if (reason.startsWith("idle:")) {
     return `Idle for ${reason.slice("idle:".length)}.`;
   }
+  if (reason.startsWith("sb_queue_pending:")) {
+    const pending = reason.slice("sb_queue_pending:".length);
+    return `${pending} request${pending === "1" ? "" : "s"} queued in Service Bus — staying running.`;
+  }
   return REASON_LABELS[reason] || reason || "—";
 }
 

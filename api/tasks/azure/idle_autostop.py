@@ -21,7 +21,6 @@ Validation: `uv run pytest -q api/tests/test_auto_stop_task.py`.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from celery import shared_task
@@ -94,29 +93,16 @@ def _sb_pending_signal(power_state: str) -> int | None:
     while work waits). Gated by ``AKS_AUTOSTOP_RESPECT_SB_QUEUE`` (default
     on) so the behaviour can be disabled without a redeploy. Never raises --
     any failure degrades to ``None``.
+
+    Delegates to the shared :mod:`api.services.auto_stop_sb_signal` gate with
+    ``ttl_seconds=0`` (cache bypassed): the beat tick is a low-frequency
+    caller and the act-path stop decision must read the live queue, so the
+    short status-poll cache (used by the status route) is intentionally not
+    applied here.
     """
-    if power_state != "Running":
-        return None
-    if os.environ.get("AKS_AUTOSTOP_RESPECT_SB_QUEUE", "true").strip().lower() in {
-        "0",
-        "false",
-        "no",
-    }:
-        return None
-    try:
-        from api.services.service_bus_pref import (
-            get_service_bus_config,
-            service_bus_enabled,
-        )
+    from api.services.auto_stop_sb_signal import pending_queue_signal
 
-        if not service_bus_enabled():
-            return None
-        from api.services import service_bus
-
-        return service_bus.pending_request_count(get_service_bus_config())
-    except Exception as exc:  # best-effort additive signal -- never fail the tick
-        LOGGER.debug("sb pending signal failed cluster=%s: %s", power_state, exc)
-        return None
+    return pending_queue_signal(power_state, ttl_seconds=0.0)
 
 
 def _power_state(pref: AutoStopPreference) -> str:

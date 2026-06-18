@@ -122,6 +122,26 @@ def _status_cache_key(subscription_id: str, resource_group: str, cluster_name: s
     return f"{subscription_id}|{resource_group}|{cluster_name}"
 
 
+def _status_pending_queue_depth(power_state: str) -> int | None:
+    """Cached Service Bus request-queue keep-alive depth for the status route.
+
+    Mirrors the auto-stop beat driver's queue signal so the SPA countdown
+    agrees with the beat decision (a Running cluster shows ``keep`` /
+    ``sb_queue_pending:N`` instead of an idle countdown while queued work
+    waits). Uses the shared :mod:`api.services.auto_stop_sb_signal` gate with
+    its default short TTL so a 60s-per-cluster status poll fan-in collapses to
+    at most one Service Bus admin call per window across every cluster and
+    browser. Never raises — degrades to ``None`` (additive only).
+    """
+    try:
+        from api.services.auto_stop_sb_signal import pending_queue_signal
+
+        return pending_queue_signal(power_state)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.debug("autostop status sb queue signal unavailable: %s", type(exc).__name__)
+        return None
+
+
 def _status_redis_key(cache_key: str) -> str:
     return f"{_STATUS_REDIS_KEY_PREFIX}{cache_key}"
 
@@ -817,6 +837,7 @@ def _compute_status(
             power_state=power_state,
             live_active_jobs=live_active_jobs,
             live_latest_activity=live_latest_activity,
+            pending_queue_depth=_status_pending_queue_depth(power_state),
         )
     except Exception as exc:
         LOGGER.warning("autostop_status evaluator failed cluster=%s: %s", cluster_name, exc)

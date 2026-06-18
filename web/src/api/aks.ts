@@ -688,8 +688,8 @@ export interface AutoStopStatusResponse {
    *  "disabled" → preference exists but `enabled=false` (no banner). */
   verdict: "stop" | "warn" | "keep" | "disabled";
   /** Free-form code (e.g. ``idle:60m``, ``active_jobs:2``,
-   *  ``cooldown``, ``extended``, ``power_state:Stopped``). Surfaced in
-   *  the banner tooltip. */
+   *  ``sb_queue_pending:3``, ``cooldown``, ``extended``,
+   *  ``power_state:Stopped``). Surfaced in the banner tooltip. */
   reason: string;
   /** ISO 8601 (UTC) of the *projected* next stop, or "" when no
    *  stop is on the horizon (verdict ∈ {keep, disabled}). */
