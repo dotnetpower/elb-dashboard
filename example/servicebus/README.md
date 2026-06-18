@@ -83,6 +83,20 @@ bytes). It is **never** a Storage SAS URL or a direct blob URL (charter §9).
 Subscribers dedupe on the stable `event_id` because Service Bus delivery is
 at-least-once.
 
+### Completion entity: topic (default) vs queue
+
+The completion entity can be a **topic** or a **queue**, selected with
+`SERVICEBUS_COMPLETION_KIND` (default `topic`):
+
+| Kind | Model | Trade-off |
+| --- | --- | --- |
+| `topic` (default) | Fan-out: every subscription gets its own copy of each event. | Multiple independent subscribers (the dashboard playground observer + external parties) each receive every completion. |
+| `queue` | Point-to-point: a single competing consumer drains the entity. | Simpler queue/queue topology, but only **one** consumer receives each event — the in-deployment demo observer is disabled in this mode so it cannot steal messages from the real external consumer. |
+
+In `queue` mode the `--subscription` flag is ignored (queues have no
+subscriptions) and `consume.py --source completions --completion-kind queue`
+reads the completion **queue** directly.
+
 ## Configuration (environment variables)
 
 | Variable | Default |
@@ -90,6 +104,7 @@ at-least-once.
 | `SERVICEBUS_NAMESPACE_FQDN` | `sb-elb-dashboard-krc.servicebus.windows.net` |
 | `SERVICEBUS_REQUEST_QUEUE` | `elastic-blast-requests` |
 | `SERVICEBUS_RESPONSE_TOPIC` | `elastic-blast-completions` |
+| `SERVICEBUS_COMPLETION_KIND` | `topic` (set to `queue` for a queue/queue topology) |
 | `SERVICEBUS_COMPLETION_SUBSCRIPTION` | `default` |
 
 The completion-topic variables are used only for the optional push/subscribe
@@ -122,6 +137,10 @@ python send_request.py --db core_nt --program blastn
 python monitor.py --peek 5
 python consume.py --source requests --settle abandon   # peek-and-return, safe
 python consume.py --source completions --subscription default --max 10
+
+# Queue/queue topology: read the completion entity as a queue (point-to-point).
+SERVICEBUS_COMPLETION_KIND=queue \
+  python consume.py --source completions --completion-kind queue --max 10
 
 # End-to-end: receive completion events and download result files via download_url.
 # Provide a bearer token for the dashboard (ELB_BEARER_TOKEN), or let the script

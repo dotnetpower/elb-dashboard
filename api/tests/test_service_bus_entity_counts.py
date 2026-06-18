@@ -189,3 +189,47 @@ def test_entity_counts_subscription_transfer_counters(
     assert subs[0]["dead_letter_message_count"] == 1
     assert subs[0]["transfer_message_count"] == 0
     assert subs[0]["transfer_dead_letter_message_count"] == 4
+
+
+def test_entity_counts_queue_completion_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A queue completion entity surfaces its runtime counts as a single
+    pseudo-subscription row (no fan-out / no list_subscriptions call)."""
+    q_runtime = SimpleNamespace(
+        active_message_count=5,
+        dead_letter_message_count=2,
+        scheduled_message_count=0,
+        total_message_count=7,
+        size_in_bytes=0,
+        transfer_message_count=1,
+        transfer_dead_letter_message_count=0,
+        created_at_utc=None,
+        updated_at_utc=None,
+        accessed_at_utc=None,
+    )
+
+    class _NoSubsAdmin(_FakeAdmin):
+        def list_subscriptions(self, _topic: str):  # pragma: no cover - must not run
+            raise AssertionError("queue completion entity must not list subscriptions")
+
+    admin = _NoSubsAdmin(
+        q_runtime=q_runtime,
+        q_props=SimpleNamespace(max_size_in_megabytes=1024, status="Active"),
+    )
+    cfg = SimpleNamespace(
+        namespace_fqdn="sb-example.servicebus.windows.net",
+        request_queue="elastic-blast-requests",
+        completion_topic="elastic-blast-completions",
+        completion_kind="queue",
+        auth_mode="entra",
+    )
+
+    with _patched_admin(monkeypatch, admin):
+        result = service_bus.entity_counts(cfg)
+
+    assert result["completion_kind"] == "queue"
+    subs = result["subscriptions"]
+    assert len(subs) == 1
+    assert subs[0]["name"] == "elastic-blast-completions"
+    assert subs[0]["active_message_count"] == 5
+    assert subs[0]["dead_letter_message_count"] == 2
+    assert subs[0]["transfer_message_count"] == 1

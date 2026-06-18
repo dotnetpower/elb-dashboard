@@ -22,6 +22,7 @@ def _local_backend(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
     monkeypatch.delenv("SERVICEBUS_REQUEST_QUEUE", raising=False)
     monkeypatch.delenv("SERVICEBUS_RESPONSE_TOPIC", raising=False)
+    monkeypatch.delenv("SERVICEBUS_COMPLETION_KIND", raising=False)
 
 
 def test_unset_env_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,3 +74,32 @@ def test_malformed_env_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
 
     cfg = get_service_bus_config()
     assert cfg.request_queue == DEFAULT_REQUEST_QUEUE  # malformed ignored
+
+
+def test_completion_kind_defaults_to_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.services.service_bus_pref import (
+        DEFAULT_COMPLETION_KIND,
+        completion_is_queue,
+        get_service_bus_config,
+    )
+
+    cfg = get_service_bus_config()
+    assert cfg.completion_kind == DEFAULT_COMPLETION_KIND == "topic"
+    assert completion_is_queue(cfg) is False
+
+
+def test_completion_kind_env_override_to_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVICEBUS_COMPLETION_KIND", "QUEUE")  # case-insensitive
+    from api.services.service_bus_pref import completion_is_queue, get_service_bus_config
+
+    cfg = get_service_bus_config()
+    assert cfg.completion_kind == "queue"
+    assert completion_is_queue(cfg) is True
+
+
+def test_completion_kind_malformed_env_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVICEBUS_COMPLETION_KIND", "pubsub")
+    from api.services.service_bus_pref import get_service_bus_config
+
+    cfg = get_service_bus_config()
+    assert cfg.completion_kind == "topic"  # unrecognised value ignored

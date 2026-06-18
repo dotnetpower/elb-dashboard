@@ -53,6 +53,15 @@ def _completion_topic_from_env() -> str:
 
 COMPLETION_TOPIC = _completion_topic_from_env()
 
+
+def _completion_kind_from_env() -> str:
+    """Completion entity kind: ``topic`` (fan-out) or ``queue`` (point-to-point)."""
+    kind = os.environ.get("SERVICEBUS_COMPLETION_KIND", "").strip().lower()
+    return kind if kind in {"topic", "queue"} else "topic"
+
+
+COMPLETION_KIND = _completion_kind_from_env()
+
 # Cap a peeked body preview so a large query FASTA cannot flood the terminal.
 _PEEK_BODY_MAX_CHARS = 4000
 
@@ -163,15 +172,29 @@ def read_counts() -> dict[str, Any]:
         result["queue"] = shape_queue_counts(runtime, static)
         result["dead_letter"] = getattr(runtime, "dead_letter_message_count", None)
         if COMPLETION_TOPIC:
-            try:
-                for sub in admin.list_subscriptions(COMPLETION_TOPIC):
-                    srt = admin.get_subscription_runtime_properties(COMPLETION_TOPIC, sub.name)
-                    result["subscriptions"].append(shape_subscription_counts(srt, sub.name))
-            except Exception as exc:  # subscription listing is best-effort
-                print(
-                    f"subscription counts unavailable: {type(exc).__name__}",
-                    file=sys.stderr,
-                )
+            if COMPLETION_KIND == "queue":
+                # Point-to-point completion queue: surface its runtime counters
+                # as a single pseudo-subscription row (no fan-out / per-sub split).
+                try:
+                    cq = admin.get_queue_runtime_properties(COMPLETION_TOPIC)
+                    result["subscriptions"].append(
+                        shape_subscription_counts(cq, COMPLETION_TOPIC)
+                    )
+                except Exception as exc:  # completion queue counts are best-effort
+                    print(
+                        f"completion queue counts unavailable: {type(exc).__name__}",
+                        file=sys.stderr,
+                    )
+            else:
+                try:
+                    for sub in admin.list_subscriptions(COMPLETION_TOPIC):
+                        srt = admin.get_subscription_runtime_properties(COMPLETION_TOPIC, sub.name)
+                        result["subscriptions"].append(shape_subscription_counts(srt, sub.name))
+                except Exception as exc:  # subscription listing is best-effort
+                    print(
+                        f"subscription counts unavailable: {type(exc).__name__}",
+                        file=sys.stderr,
+                    )
     return result
 
 
@@ -291,6 +314,7 @@ def main() -> int:
         "namespace": NAMESPACE_FQDN,
         "request_queue": REQUEST_QUEUE,
         "completion_topic": COMPLETION_TOPIC,
+        "completion_kind": COMPLETION_KIND,
     }
 
     if not args.peek_only:

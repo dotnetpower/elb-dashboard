@@ -68,6 +68,15 @@ def _completion_topic_from_env() -> str:
 COMPLETION_TOPIC = _completion_topic_from_env()
 COMPLETION_SUBSCRIPTION = os.environ.get("SERVICEBUS_COMPLETION_SUBSCRIPTION", "default")
 
+
+def _completion_kind_from_env() -> str:
+    """Completion entity kind: ``topic`` (fan-out) or ``queue`` (point-to-point)."""
+    kind = os.environ.get("SERVICEBUS_COMPLETION_KIND", "").strip().lower()
+    return kind if kind in {"topic", "queue"} else "topic"
+
+
+COMPLETION_KIND = _completion_kind_from_env()
+
 # A receive tick is bounded so one run can never block forever.
 _RECEIVE_MAX_WAIT_SECONDS = 5
 
@@ -300,8 +309,16 @@ def consume_requests(max_messages: int, settle: str) -> dict[str, Any]:
     return stats
 
 
-def consume_completions(subscription: str, max_messages: int) -> dict[str, Any]:
-    """Subscribe to the completion topic, dedupe on event_id, settle each."""
+def consume_completions(
+    subscription: str, max_messages: int, kind: str = COMPLETION_KIND
+) -> dict[str, Any]:
+    """Consume completion events, dedupe on event_id, settle each.
+
+    ``kind="topic"`` reads a dedicated ``subscription`` on the completion topic
+    (fan-out — this consumer gets its own copy); ``kind="queue"`` reads the
+    completion entity as a queue (point-to-point — a single competing consumer,
+    ``subscription`` ignored).
+    """
     from azure.identity import DefaultAzureCredential
     from azure.servicebus import ServiceBusClient
 
@@ -309,9 +326,15 @@ def consume_completions(subscription: str, max_messages: int) -> dict[str, Any]:
     seen: set[str] = set()
     budget = max(1, max_messages)
     with ServiceBusClient(NAMESPACE_FQDN, DefaultAzureCredential()) as client:
-        with client.get_subscription_receiver(
-            COMPLETION_TOPIC, subscription, max_wait_time=_RECEIVE_MAX_WAIT_SECONDS
-        ) as receiver:
+        if kind == "queue":
+            receiver_cm = client.get_queue_receiver(
+                COMPLETION_TOPIC, max_wait_time=_RECEIVE_MAX_WAIT_SECONDS
+            )
+        else:
+            receiver_cm = client.get_subscription_receiver(
+                COMPLETION_TOPIC, subscription, max_wait_time=_RECEIVE_MAX_WAIT_SECONDS
+            )
+        with receiver_cm as receiver:
             while budget > 0:
                 batch = receiver.receive_messages(
                     max_message_count=min(budget, 32),
@@ -342,7 +365,7 @@ def consume_completions(subscription: str, max_messages: int) -> dict[str, Any]:
 
 
 def consume_completions_and_download(
-    subscription: str, max_messages: int, download_dir: str
+    subscription: str, max_messages: int, download_dir: str, kind: str = COMPLETION_KIND
 ) -> dict[str, Any]:
     """Subscribe to the completion topic and download results on success.
 
@@ -366,9 +389,15 @@ def consume_completions_and_download(
     seen: set[str] = set()
     budget = max(1, max_messages)
     with ServiceBusClient(NAMESPACE_FQDN, DefaultAzureCredential()) as client:
-        with client.get_subscription_receiver(
-            COMPLETION_TOPIC, subscription, max_wait_time=_RECEIVE_MAX_WAIT_SECONDS
-        ) as receiver:
+        if kind == "queue":
+            receiver_cm = client.get_queue_receiver(
+                COMPLETION_TOPIC, max_wait_time=_RECEIVE_MAX_WAIT_SECONDS
+            )
+        else:
+            receiver_cm = client.get_subscription_receiver(
+                COMPLETION_TOPIC, subscription, max_wait_time=_RECEIVE_MAX_WAIT_SECONDS
+            )
+        with receiver_cm as receiver:
             while budget > 0:
                 batch = receiver.receive_messages(
                     max_message_count=min(budget, 32),
@@ -530,6 +559,17 @@ def main() -> int:
         help="completions source only: the topic subscription name to read.",
     )
     parser.add_argument(
+        "--completion-kind",
+        dest="completion_kind",
+        choices=("topic", "queue"),
+        default=COMPLETION_KIND,
+        help=(
+            "completions source only: read the completion entity as a topic "
+            "subscription (fan-out) or a queue (point-to-point). Defaults to "
+            "SERVICEBUS_COMPLETION_KIND or 'topic'."
+        ),
+    )
+    parser.add_argument(
         "--download",
         action="store_true",
         help=(
@@ -559,14 +599,17 @@ def main() -> int:
             print(f"queue     : {REQUEST_QUEUE}")
             stats = consume_requests(args.max, args.settle)
         else:
-            print(f"topic     : {COMPLETION_TOPIC} / {args.subscription}")
+            if args.completion_kind == "queue":
+                print(f"queue     : {COMPLETION_TOPIC} (completion, point-to-point)")
+            else:
+                print(f"topic     : {COMPLETION_TOPIC} / {args.subscription}")
             if args.download:
                 print(f"download  : {args.download_dir}")
                 stats = consume_completions_and_download(
-                    args.subscription, args.max, args.download_dir
+                    args.subscription, args.max, args.download_dir, args.completion_kind
                 )
             else:
-                stats = consume_completions(args.subscription, args.max)
+                stats = consume_completions(args.subscription, args.max, args.completion_kind)
     except Exception as exc:
         print(f"\nreceive failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

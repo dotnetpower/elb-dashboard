@@ -35,6 +35,32 @@ def test_default_is_disabled() -> None:
     assert cfg.completion_topic == "elastic-blast-completions"
 
 
+def test_completion_kind_defaults_and_round_trips() -> None:
+    from api.services.service_bus_pref import (
+        ServiceBusConfig,
+        get_service_bus_config,
+        save_service_bus_config,
+    )
+
+    assert get_service_bus_config().completion_kind == "topic"
+
+    save_service_bus_config(
+        ServiceBusConfig(
+            enabled=True,
+            namespace_fqdn="sb-elb-dashboard-krc.servicebus.windows.net",
+            completion_kind="queue",
+        )
+    )
+    assert get_service_bus_config().completion_kind == "queue"
+
+
+def test_completion_kind_invalid_coerces_to_topic() -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+
+    cfg = ServiceBusConfig.from_dict({"completion_kind": "pubsub"})
+    assert cfg.completion_kind == "topic"
+
+
 def test_round_trip_file_backend() -> None:
     from api.services.service_bus_pref import (
         ServiceBusConfig,

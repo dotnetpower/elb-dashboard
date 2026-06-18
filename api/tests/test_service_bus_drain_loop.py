@@ -230,3 +230,46 @@ def test_publish_event_no_request_id_leaves_envelope_clean(
     assert len(sender.sent) == 1
     assert not (sender.sent[0].application_properties or {})
 
+
+class _FakeQueueClient:
+    def __init__(self, sender: _FakeTopicSender) -> None:
+        self._sender = sender
+
+    def get_queue_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
+        return self._sender
+
+    def get_topic_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
+        raise AssertionError("queue completion entity must use get_queue_sender")
+
+
+def test_publish_event_queue_kind_uses_queue_sender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``completion_kind=queue`` the event is sent to a queue (point-to-point)
+    via ``get_queue_sender``, never a topic sender."""
+    sender = _FakeTopicSender()
+
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield _FakeQueueClient(sender)
+
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+
+    cfg = ServiceBusConfig(
+        enabled=True,
+        auth_mode="entra",
+        namespace_fqdn="x.servicebus.windows.net",
+        completion_topic="elastic-blast-completions",
+        completion_kind="queue",
+    )
+    service_bus.publish_event(
+        cfg,
+        {
+            "event": "blast.transition",
+            "external_correlation_id": "corr-q",
+            "status": "succeeded",
+        },
+    )
+    assert len(sender.sent) == 1
+    assert sender.sent[0].correlation_id == "corr-q"
+
