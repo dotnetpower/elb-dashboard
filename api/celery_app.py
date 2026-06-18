@@ -214,12 +214,12 @@ celery_app.conf.update(
         # scheduled on every deployment is free (one cheap guard check per tick).
         "servicebus-drain-and-resubmit": {
             "task": "api.tasks.servicebus.drain_and_resubmit",
-            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS", "30")),
+            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS", "10")),
             "options": {"queue": "reconcile"},
         },
         "servicebus-publish-transitions": {
             "task": "api.tasks.servicebus.publish_transitions",
-            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_SECONDS", "30")),
+            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_SECONDS", "10")),
             "options": {"queue": "reconcile"},
         },
         "servicebus-dlq-cleanup": {
