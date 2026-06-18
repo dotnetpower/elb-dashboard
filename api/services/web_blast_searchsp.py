@@ -4,7 +4,8 @@ Responsibility: Verified Web BLAST-compatible search-space defaults
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `WebBlastSearchSpaceDefault`, `database_name_from_path`,
-`default_for_database`, `is_calibrated_database`
+`default_for_database`, `is_calibrated_database`, `compute_web_blast_searchsp`,
+`calibrated_searchsp_for_stats`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests`.
@@ -151,4 +152,26 @@ def compute_web_blast_searchsp(
     if eff_query <= 0 or eff_db <= 0:
         return None
     return eff_query * eff_db
+
+
+def calibrated_searchsp_for_stats(
+    verified_default: WebBlastSearchSpaceDefault,
+    db_len: int | None,
+    db_num: int | None,
+) -> int:
+    """Resolve the verified Web BLAST search space for the LIVE database stats.
+
+    When both live stats are present and the calibration formula yields a
+    positive value, the search space is recomputed from them so it auto-adapts
+    to snapshot drift (a re-downloaded, slightly larger/smaller core_nt). When
+    either stat is missing or the formula degenerates, the pinned calibration
+    ``value`` is returned unchanged. This is the single source of truth shared
+    by the submit gate and the compatibility contract so both agree on the
+    canonical value for any given live snapshot.
+    """
+    if db_len is not None and db_num is not None:
+        recomputed = compute_web_blast_searchsp(db_len, db_num)
+        if recomputed is not None:
+            return recomputed
+    return verified_default.value
 

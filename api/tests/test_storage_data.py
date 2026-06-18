@@ -483,6 +483,40 @@ def test_list_databases_only_marks_verified_defaults_as_web_blast_searchsp(
     assert "web_blast_searchsp" not in databases["labdb"]
 
 
+def test_list_databases_recomputes_web_blast_searchsp_from_live_stats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the live DB stats are present in metadata, web_blast_searchsp is
+    recomputed from them (auto-adapting to snapshot drift) rather than pinned."""
+    from api.services.web_blast_searchsp import compute_web_blast_searchsp
+
+    drift_len = 1_041_443_571_674 + 5_000_000_000
+    drift_num = 125_619_662 + 600_000
+    expected = compute_web_blast_searchsp(drift_len, drift_num)
+    assert expected is not None and expected != 32_156_241_807_668
+
+    blobs = [_blob("core_nt.nsq"), _blob("core_nt-metadata.json")]
+    payloads = {
+        "core_nt-metadata.json": json.dumps(
+            {"total_letters": drift_len, "total_sequences": drift_num}
+        ),
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    databases = {
+        item["name"]: item for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+    }
+
+    assert databases["core_nt"]["web_blast_searchsp"] == expected
+    assert databases["core_nt"]["web_blast_searchsp_source"] == "recomputed_live_snapshot"
+
+
+
 def test_list_databases_reads_blastdb_json_display_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

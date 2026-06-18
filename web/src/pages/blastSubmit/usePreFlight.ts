@@ -48,6 +48,7 @@ export interface UsePreFlightArgs {
     db_effective_search_space?: number;
     db_total_bytes?: number;
     db_total_letters?: number;
+    db_total_sequences?: number;
     disable_sharding?: boolean;
     enable_warmup?: boolean;
     evalue?: number;

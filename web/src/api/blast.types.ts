@@ -64,6 +64,7 @@ export interface BlastSubmitRequest {
   db_effective_search_space?: number;
   db_total_bytes?: number;
   db_total_letters?: number;
+  db_total_sequences?: number;
   query_effective_search_spaces?: number[];
   query_count?: number;
   shard_sets?: number[];

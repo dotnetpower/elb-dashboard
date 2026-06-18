@@ -200,7 +200,10 @@ def list_databases(
     # Enrich with metadata (source_version, downloaded_at, sharding info)
     import json as _json
 
-    from api.services.web_blast_searchsp import WEB_BLAST_SEARCHSP_DEFAULTS
+    from api.services.web_blast_searchsp import (
+        WEB_BLAST_SEARCHSP_DEFAULTS,
+        compute_web_blast_searchsp,
+    )
 
     for db_name, info in db_info.items():
         # Default sharding fields so the frontend can rely on their presence.
@@ -367,7 +370,26 @@ def list_databases(
                 LOGGER.debug("oracle status blob parse skipped for %s: %s", db_name, exc)
         default_searchsp = WEB_BLAST_SEARCHSP_DEFAULTS.get(db_name)
         if default_searchsp is not None:
-            info.setdefault("web_blast_searchsp", default_searchsp.value)
+            # Recompute the verified Web BLAST search space from the LIVE
+            # snapshot statistics so it auto-adapts to drift (a re-downloaded
+            # core_nt with slightly different db-len/db-num). The submit gate
+            # and compatibility contract recompute the same value from the
+            # forwarded db_total_letters/db_total_sequences, so a precise run
+            # stays Web BLAST-compatible without a manual recalibration. Falls
+            # back to the pinned value when the live stats are unavailable.
+            live_len = info.get("total_letters")
+            live_num = info.get("total_sequences")
+            recomputed = (
+                compute_web_blast_searchsp(int(live_len), int(live_num))
+                if isinstance(live_len, int) and isinstance(live_num, int)
+                else None
+            )
+            if recomputed is not None:
+                info.setdefault("web_blast_searchsp", recomputed)
+                info.setdefault("web_blast_searchsp_source", "recomputed_live_snapshot")
+            else:
+                info.setdefault("web_blast_searchsp", default_searchsp.value)
+                info.setdefault("web_blast_searchsp_source", "pinned_calibration")
             info.setdefault("web_blast_searchsp_scope", default_searchsp.scope)
             info.setdefault("web_blast_searchsp_evidence", default_searchsp.evidence)
         # Derived readiness fields — let SPA / preflight read one boolean

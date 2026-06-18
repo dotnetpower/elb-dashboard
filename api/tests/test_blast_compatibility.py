@@ -167,3 +167,41 @@ def test_unsharded_unknown_db_runs_but_is_not_precise() -> None:
     assert contract.eligible is True
     assert contract.level == "unverified_full_database"
     assert contract.blocking_errors == []
+
+
+def test_drifted_snapshot_recomputed_searchsp_is_web_blast_compatible() -> None:
+    """When the live (drifted) DB stats are forwarded, the contract recomputes the
+    verified search space from them, so a matching db_effective_search_space is
+    accepted as Web BLAST-compatible precise instead of a nondefault override."""
+    from api.services.web_blast_searchsp import (
+        WEB_BLAST_SEARCHSP_DEFAULTS,
+        compute_web_blast_searchsp,
+    )
+
+    core_nt = WEB_BLAST_SEARCHSP_DEFAULTS["core_nt"]
+    drift_len = core_nt.calibrated_db_len + 5_000_000_000
+    drift_num = core_nt.calibrated_db_num + 600_000
+    drift_searchsp = compute_web_blast_searchsp(drift_len, drift_num)
+    assert drift_searchsp is not None and drift_searchsp != core_nt.value
+
+    options = {
+        "sharding_mode": "precise",
+        "outfmt": 5,
+        "query_count": 1,
+        "db_effective_search_space": drift_searchsp,
+        "db_total_letters": drift_len,
+        "db_total_sequences": drift_num,
+    }
+    precision = build_precision_report(options, query_count=1, db_stats_available=True)
+
+    contract = build_compatibility_contract(
+        database="core_nt",
+        options=options,
+        precision_report=precision,
+    )
+
+    assert contract.mode == "precise"
+    assert contract.eligible is True
+    assert contract.level == "web_blast_compatible_sharded"
+    assert contract.search_space_source == "verified_default"
+

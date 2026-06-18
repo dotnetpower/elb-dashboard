@@ -152,6 +152,7 @@ export interface BuildSubmitRequestArgs {
   region: string;
   dbTotalLetters?: number;
   dbTotalBytes?: number;
+  dbTotalSequences?: number;
   dbEffectiveSearchSpace?: number;
   dbShardSets?: number[];
 }
@@ -172,6 +173,7 @@ export function buildSubmitRequest({
   region,
   dbTotalLetters,
   dbTotalBytes,
+  dbTotalSequences,
   dbEffectiveSearchSpace,
   dbShardSets,
 }: BuildSubmitRequestArgs): BlastSubmitRequest {
@@ -266,6 +268,7 @@ export function buildSubmitRequest({
     use_db_order_oracle: effectiveShardingMode === "precise" || undefined,
     db_effective_search_space: dbEffectiveSearchSpace,
     db_total_letters: dbTotalLetters,
+    db_total_sequences: dbTotalSequences,
     db_total_bytes: dbTotalBytes,
     shard_sets: useSharding ? dbShardSets : undefined,
     allow_approximate_sharding: effectiveShardingMode === "approximate" || undefined,

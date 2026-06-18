@@ -39,6 +39,7 @@ _BLAST_SUBMIT_OPTION_KEYS = frozenset(
         "db_sharded",
         "db_total_bytes",
         "db_total_letters",
+        "db_total_sequences",
         "disable_sharding",
         "enable_warmup",
         "evalue",
@@ -264,7 +265,10 @@ def resolve_sharding_plan(
         option_value,
         positive_int,
     )
-    from api.services.web_blast_searchsp import default_for_database
+    from api.services.web_blast_searchsp import (
+        compute_web_blast_searchsp,
+        default_for_database,
+    )
 
     # Reserved for future program-specific calibration rules; keep the shared
     # interface stable across all submit surfaces even though today's resolution
@@ -282,32 +286,68 @@ def resolve_sharding_plan(
     explicit_searchsp = caller_supplied_searchsp or positive_int(
         resolved.get("db_effective_search_space")
     ) or additional_searchsp
-    snapshot_error = _calibration_snapshot_error(verified_default, resolved)
-    # A snapshot drift (the live DB's stats no longer match the pinned Web BLAST
-    # calibration) is not a caller error — the operator just re-downloaded a
-    # newer DB snapshot. It degrades gracefully on EVERY submit surface (browser
-    # New Search included), unlike an explicit bad override or an uncalibrated
-    # database, which keep blocking unless the Service Bus bridge asked to downgrade.
+    # A snapshot drift (a non-frontend caller replays the pinned Web BLAST
+    # calibration value while the live DB stats have moved on) is not a caller
+    # error — it degrades gracefully on EVERY submit surface, unlike an explicit
+    # bad override or an uncalibrated database, which keep blocking unless the
+    # Service Bus bridge asked to downgrade.
     snapshot_drift = False
 
     if verified_default is not None:
+        # Recompute the verified search space from the live DB stats the caller
+        # forwarded (db_total_letters / db_total_sequences). The dashboard's
+        # database list computes the SAME value, so the browser's New Search
+        # sends a matching db_effective_search_space and stays precise even
+        # after the snapshot drifts — no manual recalibration required.
+        live_db_len = positive_int(resolved.get("db_total_letters"))
+        live_db_num = positive_int(
+            resolved.get("db_total_sequences")
+            or resolved.get("db_num")
+            or resolved.get("db_entries")
+        )
+        recomputed = (
+            compute_web_blast_searchsp(live_db_len, live_db_num)
+            if live_db_len is not None and live_db_num is not None
+            else None
+        )
+        calibrated_value = recomputed if recomputed is not None else verified_default.value
+        # Drift is detectable from EITHER stat. When the live stats differ from
+        # the calibration but we cannot recompute (db_num missing), the pinned
+        # value is stale and we must not claim precise parity.
+        stats_indicate_drift = (
+            live_db_len is not None
+            and verified_default.calibrated_db_len is not None
+            and live_db_len != verified_default.calibrated_db_len
+        ) or (
+            live_db_num is not None
+            and verified_default.calibrated_db_num is not None
+            and live_db_num != verified_default.calibrated_db_num
+        )
         if explicit_searchsp is None:
             if (
                 resolved.get("query_effective_search_spaces") in (None, "")
                 and not _SEARCHSP_OPTION_RE.search(str(resolved.get("additional_options") or ""))
             ):
-                resolved["db_effective_search_space"] = verified_default.value
+                resolved["db_effective_search_space"] = calibrated_value
+        elif explicit_searchsp == calibrated_value and (
+            recomputed is not None or not stats_indicate_drift
+        ):
+            resolved["db_effective_search_space"] = explicit_searchsp
+        elif explicit_searchsp == verified_default.value:
+            # The caller sent the pinned calibration value but the live DB has
+            # drifted (recomputed value differs, or drift is visible but the
+            # search space cannot be recomputed without db_num). Degrade
+            # gracefully on every surface rather than block.
+            validated_errors.append(
+                "caller-supplied db_effective_search_space does not match the "
+                "calibrated database snapshot"
+            )
+            snapshot_drift = True
         else:
-            if snapshot_error is not None:
-                validated_errors.append(snapshot_error)
-                snapshot_drift = True
-            elif explicit_searchsp != verified_default.value:
-                validated_errors.append(
-                    "caller-supplied db_effective_search_space does not match the "
-                    "calibrated Web BLAST search space"
-                )
-            else:
-                resolved["db_effective_search_space"] = explicit_searchsp
+            validated_errors.append(
+                "caller-supplied db_effective_search_space does not match the "
+                "calibrated Web BLAST search space"
+            )
     elif explicit_searchsp is not None:
         validated_errors.append(
             "caller-supplied db_effective_search_space requires a calibrated database snapshot"
@@ -490,39 +530,6 @@ def _positive_int(value: object | None) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
-
-
-def _calibration_snapshot_error(
-    verified_default: Any | None,
-    options: dict[str, Any],
-) -> str | None:
-    if verified_default is None:
-        return None
-    observed_db_len = _positive_int(options.get("db_total_letters"))
-    calibrated_db_len = _positive_int(getattr(verified_default, "calibrated_db_len", None))
-    if (
-        observed_db_len is not None
-        and calibrated_db_len is not None
-        and observed_db_len != calibrated_db_len
-    ):
-        return (
-            "caller-supplied db_effective_search_space does not match the calibrated "
-            "database snapshot"
-        )
-    observed_db_num = _positive_int(
-        options.get("db_total_sequences") or options.get("db_num") or options.get("db_entries")
-    )
-    calibrated_db_num = _positive_int(getattr(verified_default, "calibrated_db_num", None))
-    if (
-        observed_db_num is not None
-        and calibrated_db_num is not None
-        and observed_db_num != calibrated_db_num
-    ):
-        return (
-            "caller-supplied db_effective_search_space does not match the calibrated "
-            "database snapshot"
-        )
-    return None
 
 
 def _upload_inline_query_for_submit(
