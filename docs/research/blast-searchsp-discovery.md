@@ -135,6 +135,84 @@ Use `32156241807668` as the shard-wide `-searchsp` value only for the matching
 `core_nt` snapshot, query, BLAST+ version, and options. Recalibrate when any of
 those inputs change.
 
+### Deterministic Search-Space Recomputation (Drift Auto-Recalibration)
+
+Date: 2026-06-18
+
+The one-off VM calibration above pins `searchsp` to one database snapshot. When
+the live `core_nt` is re-downloaded and its statistics drift, that pinned value
+becomes stale and the submit gate would otherwise block or degrade. Repeating the
+full-database VM run for every drift is expensive, so we verified that the
+calibrated `searchsp` can be **recomputed deterministically** from the live
+database statistics — no NCBI round-trip and no full-database BLAST run.
+
+BLAST's effective search space for a single query is the Karlin–Altschul product:
+
+```text
+searchsp = (query_len - L) * (db_len - db_num * L)
+```
+
+where `query_len` is the calibration query length (64 nt for `core_nt`),
+`db_len` is `Statistics_db-len` (total bases), `db_num` is `Statistics_db-num`
+(sequence count), and `L` is the Karlin–Altschul **length adjustment**.
+
+For the 2026-05-09 `core_nt` snapshot, `L = 33` reproduces the pinned value
+EXACTLY:
+
+```text
+(64 - 33) * (1,041,443,571,674 - 125,619,662 * 33)
+  = 31 * 1,037,298,122,828
+  = 32,156,241,807,668          # == pinned Statistics_eff-space
+```
+
+The length adjustment depends on `log(db_len)`, so it is essentially
+**insensitive to modest snapshot drift**: a ±5% change in `core_nt` size leaves
+`L = 33`. The calibrated search space for a refreshed snapshot is therefore the
+same formula evaluated against the new `db_len` / `db_num`.
+
+| Snapshot drift | Recomputed `searchsp` (L = 33) |
+| --- | ---: |
+| pinned 2026-05-09 | `32,156,241,807,668` |
+| +0.5% db size | `32,317,023,017,012` |
+| +1% db size | `32,477,804,226,356` |
+| +5% db size | `33,764,053,898,132` |
+
+#### How the control plane applies it
+
+The recomputation is **inline and per-request** — there is no background task,
+no stored calibration record, and no cluster dependency:
+
+- `api/services/web_blast_searchsp.py` exposes `compute_web_blast_searchsp(db_len,
+  db_num)` (the pure formula with `L = 33`) and `calibrated_searchsp_for_stats()`
+  (recompute when both live stats are present, else fall back to the pinned
+  value).
+- `/api/blast/databases` recomputes `web_blast_searchsp` from the live
+  `total_letters` / `total_sequences` it already reads, tagging the row with
+  `web_blast_searchsp_source = recomputed_live_snapshot` (or `pinned_calibration`
+  when the live stats are unavailable).
+- The submit UI forwards both `db_total_letters` and `db_total_sequences`. The
+  submit gate (`resolve_sharding_plan`) recomputes the same value and accepts a
+  matching `db_effective_search_space` as Web BLAST-compatible precise — so a
+  drifted snapshot stays precise without a manual recalibration.
+- A caller that replays the stale pinned value against drifted stats, or that
+  sends `db_total_letters` without `db_total_sequences` (so the value cannot be
+  recomputed), still degrades gracefully to approximate sharding with a warning.
+  A value matching neither the recomputed nor the pinned search space is rejected
+  as a bad override.
+
+#### Scope and limits
+
+- This recomputation matches a **full-database BLAST+ run of the dashboard's live
+  `core_nt` snapshot**, which is the precise-sharding guarantee. It is not a claim
+  of byte-for-byte NCBI Web BLAST parity — the NCBI default itself drifts with the
+  database (see the conclusion above).
+- `L = 33` is validated for `core_nt`-scale databases and the 64 nt calibration
+  query. A very different database or query class needs its own length adjustment;
+  the recompute is only applied to calibrated databases (today, `core_nt`).
+- The relationship is locked by
+  `api/tests/test_web_blast_searchsp.py::test_compute_web_blast_searchsp_reproduces_pinned_value`;
+  the gate behaviour is covered by `api/tests/test_searchsp_recalibration.py`.
+
 ### AKS E16 Shard Comparison
 
 Date: 2026-05-16
