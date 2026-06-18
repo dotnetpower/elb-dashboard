@@ -39,6 +39,7 @@ from api.services.service_bus_pref import (
     normalise_config,
     save_service_bus_config,
     service_bus_enabled,
+    service_bus_enabled_for,
     service_bus_env_gate_on,
     service_bus_kill_switch_on,
 )
@@ -78,6 +79,10 @@ def _runtime_counts(cfg: ServiceBusConfig) -> dict[str, Any]:
 def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
     """Return the saved config (no secrets), env gate, and best-effort counts."""
     cfg = get_service_bus_config()
+    # Compute the gate from the config we already read: one Table read per
+    # request and one consistent snapshot, instead of calling service_bus_enabled()
+    # (which re-reads the Table) twice below.
+    effective = service_bus_enabled_for(cfg)
     counts = (
         _runtime_counts(cfg)
         if cfg.enabled
@@ -85,8 +90,8 @@ def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, A
     )
     return {
         "config": cfg.public_dict(),
-        "env_enabled": service_bus_enabled() or cfg.enabled,
-        "effective_enabled": service_bus_enabled(),
+        "env_enabled": effective or cfg.enabled,
+        "effective_enabled": effective,
         # Raw deployment master switch, independent of the saved config. Lets
         # the SPA distinguish "deployment gate OFF" from "namespace missing"
         # when an operator-enabled config is still not live.

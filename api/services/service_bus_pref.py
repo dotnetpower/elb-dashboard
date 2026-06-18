@@ -10,8 +10,8 @@ Edit boundaries: Reusable domain/persistence logic only. HTTP shaping lives in
     ``api.routes.settings.service_bus``; the data-plane client lives in
     ``api.services.service_bus``. No Azure SDK management/data-plane calls here.
 Key entry points: ``ServiceBusConfig``, ``AUTH_MODES``, ``get_service_bus_config``,
-    ``save_service_bus_config``, ``service_bus_enabled``, ``service_bus_env_override``,
-    ``service_bus_kill_switch_on``, ``normalise_config``.
+    ``save_service_bus_config``, ``service_bus_enabled``, ``service_bus_enabled_for``,
+    ``service_bus_env_override``, ``service_bus_kill_switch_on``, ``normalise_config``.
 Risky contracts: ``enabled`` defaults to ``False`` and a missing row reads back
     as a disabled default — the integration stays off until an operator opts in
     (charter §12a Rule 4 default-OFF preserved). The deploy-time env
@@ -304,6 +304,19 @@ def service_bus_kill_switch_on() -> bool:
     return service_bus_env_override() is False
 
 
+def service_bus_enabled_for(cfg: ServiceBusConfig) -> bool:
+    """Gate result for an ALREADY-READ config snapshot.
+
+    Identical rule to ``service_bus_enabled`` but the caller supplies the config
+    (avoids a redundant Table read, and keeps a single request reasoning over one
+    consistent snapshot). ``service_bus_enabled`` is the convenience wrapper that
+    reads the current config first.
+    """
+    if service_bus_kill_switch_on():
+        return False
+    return cfg.enabled and bool(cfg.namespace_fqdn)
+
+
 def service_bus_enabled() -> bool:
     """True when the integration is live: not kill-switched AND the saved config
     opts in (``enabled`` + namespace).
@@ -317,10 +330,7 @@ def service_bus_enabled() -> bool:
     row — and survives redeploys, instead of being reset to a revision-baked
     env default.
     """
-    if service_bus_kill_switch_on():
-        return False
-    cfg = get_service_bus_config()
-    return cfg.enabled and bool(cfg.namespace_fqdn)
+    return service_bus_enabled_for(get_service_bus_config())
 
 
 # --------------------------------------------------------------------------- #
