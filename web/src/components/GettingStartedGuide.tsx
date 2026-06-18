@@ -5,6 +5,8 @@ import {
   CheckCircle2, ArrowRight, X, ChevronRight, Sparkles,
 } from "lucide-react";
 
+import { useFocusTrap } from "@/hooks/useFocusTrap";
+
 interface Props {
   hasCluster: boolean;
   hasImages: boolean;
@@ -29,6 +31,7 @@ export function GettingStartedGuide({
   hasCluster, hasImages, hasTerminal, terminalEnabled, clusterRunning, acrName, onDismiss,
 }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  const dialogRef = useFocusTrap<HTMLDivElement>(true, onDismiss);
 
   const steps: Step[] = [
     {
@@ -93,7 +96,12 @@ export function GettingStartedGuide({
       }}
       onClick={(e) => { if (e.target === e.currentTarget) onDismiss(); }}
     >
-      <div style={{
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="getting-started-title"
+        style={{
         background: "var(--bg-primary)", border: "1px solid var(--border-medium)",
         borderRadius: 16, boxShadow: "0 12px 48px rgba(0,0,0,0.5)",
         width: 560, maxHeight: "85vh", overflow: "hidden",
@@ -116,7 +124,7 @@ export function GettingStartedGuide({
                 <Rocket size={22} style={{ color: "#fff" }} />
               </div>
               <div>
-                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em" }}>
+                <h2 id="getting-started-title" style={{ margin: 0, fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em" }}>
                   Getting Started
                 </h2>
                 <p style={{ margin: "2px 0 0", fontSize: 12, color: "var(--text-muted)" }}>
@@ -125,7 +133,9 @@ export function GettingStartedGuide({
               </div>
             </div>
             <button
+              type="button"
               onClick={onDismiss}
+              aria-label="Dismiss getting started guide"
               style={{
                 width: 32, height: 32, borderRadius: 8, display: "grid", placeItems: "center",
                 background: "none", border: "none", color: "var(--text-faint)", cursor: "pointer",

@@ -23,6 +23,7 @@ import {
   type LogLine,
   type SidecarContainer,
 } from "@/api/sidecarLogs";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 const BACKFILL_TAIL = 500;
 
@@ -49,6 +50,7 @@ export function SidecarLogModal({ container, role, liveLines, initialLevel = "AL
   const [level, setLevel] = useState<LevelFilter>(initialLevel);
   const [text, setText] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const dialogRef = useFocusTrap<HTMLDivElement>(true);
 
   // One-shot backfill of older history. The live buffer only holds the last
   // ~60 lines, so this is what surfaces errors that already scrolled off.
@@ -148,6 +150,7 @@ export function SidecarLogModal({ container, role, liveLines, initialLevel = "AL
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={`${container} logs`}

@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
 import { Loader2, RefreshCw, Terminal, X } from "lucide-react";
 
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { LogHighlighter } from "./LogHighlighter";
 
 /**
@@ -27,6 +28,7 @@ export function PodLogsDialog({
   onRefresh,
   onClose,
 }: PodLogsDialogProps) {
+  const dialogRef = useFocusTrap<HTMLDivElement>(true, onClose);
   return createPortal(
     <div
       className="glass-dialog-backdrop pod-logs-backdrop"
@@ -38,6 +40,7 @@ export function PodLogsDialog({
       aria-label={`Logs: ${target.name}`}
     >
       <div
+        ref={dialogRef}
         className="glass-card glass-card--strong glass-dialog pod-logs-dialog"
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -102,6 +105,7 @@ export function PodLogsDialog({
             <button
               className="glass-button"
               onClick={onClose}
+              aria-label="Close logs"
               style={{ padding: "5px 8px", border: "none" }}
             >
               <X size={16} />

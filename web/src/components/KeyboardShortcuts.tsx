@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 type Shortcut = { key: string; label: string; action: string };
 
@@ -91,6 +92,7 @@ export function useKeyboardShortcuts() {
 
 export function ShortcutOverlay({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<"shortcuts" | "about" | "links">("shortcuts");
+  const dialogRef = useFocusTrap<HTMLDivElement>(true);
 
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
@@ -109,6 +111,10 @@ export function ShortcutOverlay({ onClose }: { onClose: () => void }) {
   return (
     <div className="shortcut-overlay" onClick={onClose}>
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shortcut-dialog-title"
         className="shortcut-dialog-card"
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -134,7 +140,7 @@ export function ShortcutOverlay({ onClose }: { onClose: () => void }) {
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <HelpCircle size={18} style={{ color: "var(--accent)" }} />
-            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
+            <h3 id="shortcut-dialog-title" style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
               Help & Information
             </h3>
           </div>

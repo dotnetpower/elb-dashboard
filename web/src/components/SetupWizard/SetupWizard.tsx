@@ -5,6 +5,7 @@ import { armProxyApi, resourceApi } from "@/api/endpoints";
 import { listSubscriptions as armListSubs } from "@/api/arm";
 import { isAksManagedResourceGroup } from "@/lib/aksManagedRg";
 import { listWithMiFallback } from "@/lib/armWithMiFallback";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 import { saveConfig } from "./configStorage";
 import { Step1Subscription } from "./steps/Step1Subscription";
@@ -52,6 +53,7 @@ export function SetupWizard({ onComplete, onClose }: Props) {
   const [config, setConfig] = useState<ResourceConfig>(DEFAULTS);
   const [errors, setErrors] = useState<ValidationErrors>({});
   const [attempted, setAttempted] = useState(false);
+  const dialogRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   // ── Step 1: Subscriptions (direct ARM or backend MI proxy) ──
   const subsQuery = useQuery({
@@ -256,6 +258,10 @@ export function SetupWizard({ onComplete, onClose }: Props) {
       }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="setup-wizard-title"
         style={{
           background: "var(--bg-primary)",
           border: "1px solid var(--border-medium)",
@@ -287,7 +293,7 @@ export function SetupWizard({ onComplete, onClose }: Props) {
             }}
           />
           <div style={{ flex: 1 }}>
-            <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>
+            <h1 id="setup-wizard-title" style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>
               Set up your BLAST workspace
             </h1>
             <div
@@ -302,7 +308,9 @@ export function SetupWizard({ onComplete, onClose }: Props) {
           </div>
           {onClose && (
             <button
+              type="button"
               onClick={onClose}
+              aria-label="Close wizard"
               style={{
                 width: 32,
                 height: 32,

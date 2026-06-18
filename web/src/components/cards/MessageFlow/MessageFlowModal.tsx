@@ -16,6 +16,7 @@ import { Radio, RefreshCw, X } from "lucide-react";
 
 import { messageFlowApi, type MessageFlowBox, type MessageFlowSnapshot, type QueueMessagePreview } from "@/api/messageFlow";
 import { useRelativeTime } from "@/hooks/useRelativeTime";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 import { aliasTone } from "./colors";
 import { MessageFlowConstellation } from "./MessageFlowConstellation";
@@ -339,6 +340,9 @@ function QueueMessagesSection({ messages }: { messages: QueueMessagePreview[] })
 export function MessageFlowModal({ snapshot, onClose, updatedAt, onRefresh, refreshing }: MessageFlowModalProps) {
   const [selectedBox, setSelectedBox] = useState<MessageFlowBox | null>(null);
   const updatedAgo = useRelativeTime(updatedAt);
+  // Tab focus trap + scroll lock + return-focus. Escape stays manual below
+  // because it must defer to the nested JobDetailModal.
+  const dialogRef = useFocusTrap<HTMLDivElement>(true);
   // Mirrors `selectedBox` for the parent Escape handler so it can defer to the
   // detail modal (whose own capture-phase handler closes itself first).
   const detailOpenRef = useRef(false);
@@ -351,11 +355,8 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt, onRefresh, refr
       if (e.key === "Escape" && !detailOpenRef.current) onClose();
     };
     window.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     return () => {
       window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prev;
     };
   }, [onClose]);
 
@@ -388,6 +389,7 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt, onRefresh, refr
       aria-label="Service Bus message flow"
     >
       <div
+        ref={dialogRef}
         className="glass-card glass-card--strong glass-dialog"
         onClick={(e) => e.stopPropagation()}
         style={{

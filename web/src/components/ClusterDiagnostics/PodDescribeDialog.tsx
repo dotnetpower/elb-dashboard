@@ -1,6 +1,8 @@
 import { createPortal } from "react-dom";
 import { FileText, Loader2, RefreshCw, X } from "lucide-react";
 
+import { useFocusTrap } from "@/hooks/useFocusTrap";
+
 /**
  * Modal that displays the `kubectl describe`-style text returned by the
  * describe routes. Used for pods, Deployments, and Jobs. Sibling to
@@ -28,6 +30,7 @@ export function PodDescribeDialog({
   onRefresh,
   onClose,
 }: PodDescribeDialogProps) {
+  const dialogRef = useFocusTrap<HTMLDivElement>(true, onClose);
   return createPortal(
     <div
       className="glass-dialog-backdrop pod-describe-backdrop"
@@ -39,6 +42,7 @@ export function PodDescribeDialog({
       aria-label={`Describe: ${target.name}`}
     >
       <div
+        ref={dialogRef}
         className="glass-card glass-card--strong glass-dialog pod-describe-dialog"
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -103,6 +107,7 @@ export function PodDescribeDialog({
             <button
               className="glass-button"
               onClick={onClose}
+              aria-label="Close describe"
               style={{ padding: "5px 8px", border: "none" }}
             >
               <X size={16} />
