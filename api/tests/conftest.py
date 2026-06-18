@@ -27,6 +27,10 @@ os.environ.setdefault("SIDECAR_REPORTER_DISABLED", "true")
 # connection. Individual tests that exercise the invalidation channel can
 # monkeypatch this env back to false.
 os.environ.setdefault("BLAST_DB_METADATA_INVALIDATE_DISABLED", "true")
+# Same rationale for the jobs / message-flow cache invalidation pub/sub: the
+# subscriber spawns a daemon thread and publishes hit a real Redis connection.
+# Tests that exercise the channel monkeypatch this back to false.
+os.environ.setdefault("JOBS_CACHE_INVALIDATE_DISABLED", "true")
 # Disable submit retry sleeps in tests. The retry path is exercised by a
 # dedicated retry test that re-imports the module with the env unset.
 # Without this, every test that mocks ``submit_job`` to raise a transport

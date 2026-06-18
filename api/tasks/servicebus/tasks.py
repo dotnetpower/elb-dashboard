@@ -546,6 +546,25 @@ def _fail_placeholder_for_message(msg: ParsedMessage, *, error_code: str) -> Non
         _fail_placeholder(correlation_id, error_code=error_code)
 
 
+def _publish_jobs_cache_invalidate(reason: str) -> None:
+    """Drop the api sidecar's jobs / message-flow caches cross-process.
+
+    The drain runs in the worker sidecar and writes the durable jobstate row
+    there, so it cannot reach the api process's in-process jobs-list /
+    message-flow / external-jobs caches. Publishing the invalidation signal lets
+    the api subscriber drop them so a queue-ingested job (or a placeholder
+    status change) surfaces on the next poll instead of waiting out the cache
+    TTL. Best-effort — never raises into the drain handler.
+    """
+    try:
+        from api.services.blast.jobs_cache_signal import publish_jobs_cache_invalidate
+
+        publish_jobs_cache_invalidate(reason)
+    except Exception as exc:  # pragma: no cover - best-effort
+        LOGGER.debug("jobs cache invalidate publish skipped: %s", type(exc).__name__)
+
+
+
 def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     body = dict(msg.body or {})
     if _is_v1_jobs_message(body):
@@ -563,6 +582,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         # forever even though the message is in the DLQ. The correlation id is
         # recovered from the raw body the same way the placeholder used it.
         _fail_placeholder_for_message(msg, error_code="servicebus_malformed_request")
+        _publish_jobs_cache_invalidate("servicebus_drain_malformed")
         return MessageAction.DEAD_LETTER
 
     correlation_id = str(payload["external_correlation_id"])
@@ -599,6 +619,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             # row instead of leaving it ``queued`` forever (the message is now
             # dead-lettered). A transient failure keeps the placeholder queued.
             _fail_placeholder(correlation_id, error_code=f"servicebus_submit_rejected_{status}")
+            _publish_jobs_cache_invalidate("servicebus_drain_rejected")
         return MessageAction.DEAD_LETTER if permanent else MessageAction.ABANDON
     except Exception:
         # Unknown/unexpected error — treat as transient (abandon → redelivery)
@@ -637,6 +658,10 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     # placeholder to avoid a duplicate row in the list. Best-effort — a stale
     # placeholder is reconciled later and never blocks the drain.
     _supersede_placeholder(correlation_id)
+    # The durable row was just created in THIS (worker) process; drop the api
+    # sidecar's jobs / message-flow caches cross-process so the job surfaces on
+    # the next poll instead of waiting out the cache TTL.
+    _publish_jobs_cache_invalidate("servicebus_drain_submitted")
     # Publish the initial "queued" transition (best-effort; a publish failure
     # is recovered by publish_transitions on the next tick).
     try:

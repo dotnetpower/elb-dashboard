@@ -424,6 +424,17 @@ def send(
         )
     except Exception:
         LOGGER.debug("servicebus queued placeholder skipped", exc_info=True)
+    # Drop the api-process read caches so the just-written placeholder row shows
+    # in Recent searches / the Dashboard jobs card / the Message Flow card on the
+    # next poll instead of waiting out the 10-30 s cache TTL. This runs in the
+    # api process, so the local invalidate takes effect immediately; the publish
+    # is a forward-safe no-op on the single-replica topology. Best-effort.
+    try:
+        from api.services.blast.jobs_cache_signal import notify_jobs_cache_changed
+
+        notify_jobs_cache_changed("servicebus_playground_send")
+    except Exception:
+        LOGGER.debug("servicebus jobs cache invalidate skipped", exc_info=True)
     LOGGER.info(
         "servicebus playground send by oid=%s corr=%s queue=%s msg_id=%s",
         redact_oid(caller.object_id),

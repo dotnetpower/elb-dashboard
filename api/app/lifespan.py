@@ -163,6 +163,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             type(exc).__name__,
         )
         stop_invalidate_subscriber = None  # type: ignore[assignment]
+    # Cross-sidecar jobs / message-flow cache invalidation. The Service Bus
+    # request-queue drain runs in the worker sidecar and materialises a durable
+    # jobstate row there; this subscriber lets the worker's publish drop the api
+    # process's in-process jobs-list / message-flow / external-jobs caches so a
+    # queue-ingested job surfaces on the next poll instead of waiting out the
+    # cache TTL. Best-effort: a start failure leaves the caches TTL-bounded.
+    try:
+        from api.services.blast.jobs_cache_signal import (
+            start_jobs_cache_subscriber,
+            stop_jobs_cache_subscriber,
+        )
+
+        start_jobs_cache_subscriber()
+    except Exception as exc:
+        LOGGER.warning(
+            "jobs cache invalidate subscriber start failed: %s",
+            type(exc).__name__,
+        )
+        stop_jobs_cache_subscriber = None  # type: ignore[assignment]
     # Keep the BLAST DB catalogue cache hot in THIS (api) process so the first
     # `GET /api/blast/databases` after the cache TTL expires does not make the
     # user wait on the ~4 s cold enumeration. The cache is process-local, so a
@@ -209,6 +228,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             except Exception as exc:
                 LOGGER.debug(
                     "blast db metadata invalidate subscriber stop failed: %s",
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+        if stop_jobs_cache_subscriber is not None:
+            try:
+                stop_jobs_cache_subscriber()
+            except Exception as exc:
+                LOGGER.debug(
+                    "jobs cache invalidate subscriber stop failed: %s",
                     type(exc).__name__,
                     exc_info=True,
                 )
