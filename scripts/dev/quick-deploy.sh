@@ -116,6 +116,53 @@ for k, v in section.items():
 PY
 }
 
+# ---------------------------------------------------------------------------
+# Service Bus master-switch deploy notice (one-time, informational only).
+#
+# The optional Service Bus integration — and therefore the dashboard "Message
+# Flow" card — is gated by TWO things: the deploy-time master switch
+# SERVICEBUS_ENABLED (api/worker/beat sidecars) AND a saved namespace config in
+# Settings (service_bus_enabled() requires BOTH; api/services/service_bus_pref.py).
+# The repo default for the env gate is OFF per charter §12a Rule 4, so this
+# script deliberately does NOT flip it. The recurring operator confusion is the
+# Message Flow card silently staying hidden after a deploy with no hint why.
+#
+# This helper surfaces that ONCE per deploy when the resolved SERVICEBUS_ENABLED
+# is not pinned truthy (i.e. the card will be hidden), printing the exact pin
+# command. It mirrors control_plane_env_pairs override precedence: a SET
+# process/azd env value wins over the JSON default; unset falls back to the JSON
+# ("" = defer to the Settings config row). It never flips a gate and never
+# fails the deploy — purely a discoverability nudge.
+# ---------------------------------------------------------------------------
+_SB_GATE_NOTICE_DONE=false
+servicebus_gate_notice() {
+  $_SB_GATE_NOTICE_DONE && return 0
+  _SB_GATE_NOTICE_DONE=true
+  local resolved=""
+  if [[ -n "${SERVICEBUS_ENABLED+x}" ]]; then
+    # Explicit process/azd env override (set, even to "") wins.
+    resolved="$SERVICEBUS_ENABLED"
+  elif [[ -f "$CONTROL_PLANE_ENV_FILE" ]]; then
+    resolved="$(python3 - "$CONTROL_PLANE_ENV_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print((json.load(open(sys.argv[1])).get("api") or {}).get("SERVICEBUS_ENABLED", ""))
+except Exception:
+    print("")
+PY
+)"
+  fi
+  case "$(printf '%s' "$resolved" | tr '[:upper:]' '[:lower:]')" in
+    true | 1 | yes | on)
+      # Pinned ON — the card can render (given a namespace); no nudge needed.
+      return 0
+      ;;
+  esac
+  ts "    i Service Bus master switch SERVICEBUS_ENABLED is not pinned ON — the Message Flow card stays hidden."
+  ts "      Enable it for this deployment (survives redeploys): azd env set SERVICEBUS_ENABLED true  (then rerun this deploy)"
+  ts "      Message Flow also needs a Service Bus namespace saved in Settings -> Service Bus integration."
+}
+
 
 release_build_number() {
   local latest_tag=""
@@ -770,6 +817,7 @@ fi
       # `azd provision`. The frontend's baked VITE_* values stay authoritative;
       # all other runtime env from the last full deploy / Bicep is preserved.
       mapfile -t _cp_pairs < <(control_plane_env_pairs "$tgt")
+      case "$tgt" in api | worker | beat) servicebus_gate_notice ;; esac
       if [[ ${#_cp_pairs[@]} -gt 0 ]]; then
         ts "    + applying ${#_cp_pairs[@]} control-plane guard env var(s) for '$tgt'"
         az containerapp update \
@@ -989,6 +1037,7 @@ for tgt in "${TARGETS[@]}"; do
     # This keeps a fast single-sidecar deploy in sync with a Bicep guard
     # default instead of silently leaving the live env stale.
     mapfile -t _cp_pairs < <(control_plane_env_pairs "$tgt")
+    case "$tgt" in api | worker | beat) servicebus_gate_notice ;; esac
     if [[ ${#_cp_pairs[@]} -gt 0 ]]; then
       ts "    + applying ${#_cp_pairs[@]} control-plane guard env var(s) for '$tgt'"
       az containerapp update \
