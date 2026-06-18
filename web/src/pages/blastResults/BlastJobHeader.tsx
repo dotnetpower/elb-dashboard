@@ -362,7 +362,7 @@ export function BlastJobHeader({
           className="glass-button"
           onClick={handleCopyCitation}
           disabled={copyingCitation}
-          title="Copy a reproducible Methods citation (program, version, database snapshot) to the clipboard."
+          title="Copy a reproducible Methods citation (program, version, database snapshot) to the clipboard. Reproducible only while this job's audit row is retained — deleting the job removes the provenance the citation is built from."
           style={{
             display: "inline-flex",
             alignItems: "center",

@@ -21,6 +21,9 @@
   --text-primary: #e4e7ec;
   --text-muted: #9da5b4;
   --text-faint: #8a8f9e;
+  /* Ink for filled step/number badges. Dark theme fills are bright
+     accents, so dark ink reads; the light override flips to white. */
+  --step-badge-ink: #0b132b;
 
   /* Accents — Grafana palette */
   --accent: #6e9fff;
@@ -88,11 +91,14 @@
   --text-primary: #1f1f1f;
   --text-muted: #525252;
   --text-faint: #6b6b6b;
+  /* Light theme's step-badge fills are saturated (accent/success/grey),
+     so the badge number/check must be white to pass AA. */
+  --step-badge-ink: #ffffff;
 
   /* Accents — VS Code Light Modern (all AA as text on white) */
   --accent: #005fb8;
   --success: #1a7f37;
-  --warning: #9a6700;
+  --warning: #8a5d00;
   --danger: #b5251f;
   --purple: #7a52bc;
   --teal: #1d6b73;

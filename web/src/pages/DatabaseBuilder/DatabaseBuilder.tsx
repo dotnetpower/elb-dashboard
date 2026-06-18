@@ -73,7 +73,7 @@ function WizardStepper({ steps }: { steps: WizardStep[] }) {
                 height: 22,
                 borderRadius: 999,
                 background: color,
-                color: "#0b132b",
+                color: "var(--step-badge-ink)",
                 fontSize: 11,
                 fontWeight: 700,
                 display: "grid",
