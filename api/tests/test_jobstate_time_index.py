@@ -427,3 +427,74 @@ def test_list_for_owner_falls_back_when_index_empty(
     monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
     rows = repo.list_for_owner("owner-a", limit=10)
     assert [s.job_id for s in rows] == ["job-legacy"]
+
+
+# ---------------------------------------------------------------------------
+# Backfill migration (scripts/dev/backfill_jobstate_time_index.py)
+# ---------------------------------------------------------------------------
+
+
+def _load_backfill_module() -> Any:
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "dev"
+        / "backfill_jobstate_time_index.py"
+    )
+    spec = importlib.util.spec_from_file_location("backfill_jobstate_time_index", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_backfill_dry_run_writes_nothing_then_real_run_is_idempotent(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The backfill scans non-deleted jobstate rows and upserts one index row
+    each (skipping tombstones); --dry-run writes nothing; a second real run is
+    idempotent (same RowKey per job -> no duplicates)."""
+    # Seed jobstate with the flag OFF so create writes NO index rows (simulating
+    # pre-existing rows that predate the feature).
+    monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
+    repo.create(_job("job-0", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    repo.create(_job("job-1", owner="owner-a", created_at="2026-06-18T10:00:01+00:00"))
+    repo.create(_job("job-2", owner="", created_at="2026-06-18T10:00:02+00:00"))  # shared
+    repo.create(_job("job-del", owner="owner-a", created_at="2026-06-18T10:00:03+00:00"))
+    repo.update("job-del", status="deleted", phase="deleted")  # tombstone -> excluded
+
+    # The backfill resolves its repo via get_state_repo(); reset the cache so it
+    # builds a fresh repo wired to the SAME patched fakes.
+    state_repo.reset_state_repo_cache()
+    backfill = _load_backfill_module()
+
+    # --- dry run: scans, writes nothing ---
+    rc = backfill.backfill(dry_run=True)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DRY-RUN done scanned=3 backfilled=3" in out
+    # No index table touched in dry-run.
+    assert time_index.INDEX_TABLE_NAME not in repo._test_tables  # type: ignore[attr-defined]
+
+    # --- real run: upserts one index row per non-deleted job ---
+    rc = backfill.backfill(dry_run=False)
+    assert rc == 0
+    index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
+    keys = set(index.rows.keys())
+    assert ("owner-a", time_index.row_key("2026-06-18T10:00:00+00:00", "job-0")) in keys
+    assert ("owner-a", time_index.row_key("2026-06-18T10:00:01+00:00", "job-1")) in keys
+    shared_rk = time_index.row_key("2026-06-18T10:00:02+00:00", "job-2")
+    assert (time_index.SHARED_BUCKET, shared_rk) in keys
+    # The deleted job is NOT indexed.
+    assert all("job-del" not in rk for _pk, rk in keys)
+    assert len(keys) == 3
+
+    # --- idempotent: a second run upserts the same RowKeys, no duplicates ---
+    backfill.backfill(dry_run=False)
+    index_again = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
+    assert set(index_again.rows.keys()) == keys
+    assert len(index_again.rows) == 3
+

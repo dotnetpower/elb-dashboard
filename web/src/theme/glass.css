@@ -81,23 +81,26 @@
   --border-medium: #cecece;
   --border-focus: rgba(0, 95, 184, 0.5);
 
-  /* Text — neutral gray ramp, AA against white */
+  /* Text — neutral gray ramp, all AA (>=4.5:1) against white and the
+     #f8f8f8 canvas. --text-faint was #8a8a8a (~3.25:1, failed AA on
+     captions/eyebrows/metadata); #6b6b6b is ~5.1:1 and stays clearly
+     secondary against #1f1f1f primary. */
   --text-primary: #1f1f1f;
   --text-muted: #525252;
-  --text-faint: #8a8a8a;
+  --text-faint: #6b6b6b;
 
-  /* Accents — VS Code Light Modern */
+  /* Accents — VS Code Light Modern (all AA as text on white) */
   --accent: #005fb8;
   --success: #1a7f37;
   --warning: #9a6700;
   --danger: #b5251f;
-  --purple: #8661c5;
+  --purple: #7a52bc;
   --teal: #1d6b73;
 
   /* Card accents — keep colour identity per card type */
   --card-accent-cluster: #005fb8;
   --card-accent-storage: #1a7f37;
-  --card-accent-acr: #8661c5;
+  --card-accent-acr: #7a52bc;
   --card-accent-terminal: #1d6b73;
   --card-accent-jobs: #9a6700;
 
@@ -181,9 +184,10 @@
    Dark mode is unaffected — every rule lives under [data-theme="light"].
    ────────────────────────────────────────────────────────────────── */
 
-/* #1 App bar — flat solid white with a hairline base border */
+/* #1 App bar — VS Code Light Modern titleBar tone (#f8f8f8) with a
+   hairline base border, so the chrome reads above the white panels. */
 [data-theme="light"] .layout__topbar {
-  background: #ffffff;
+  background: #f8f8f8;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   border-bottom: 1px solid var(--border-weak);
@@ -516,9 +520,9 @@
    aurora canvas. All overrides scoped to [data-theme="light"].
    ────────────────────────────────────────────────────────────────── */
 
-/* App bar — flat solid white with a hairline base border. */
+/* App bar — VS Code Light Modern titleBar tone with a hairline base border. */
 [data-theme="light"] .layout__topbar {
-  background: #ffffff;
+  background: #f8f8f8;
   border-bottom: 1px solid var(--border-weak);
   box-shadow: none;
 }
@@ -750,9 +754,9 @@
   color: var(--card-accent-jobs);
 }
 
-/* Topbar — flat solid white with a hairline underline */
+/* Topbar — VS Code Light Modern titleBar tone with a hairline underline */
 [data-theme="light"] .layout__topbar {
-  background: #ffffff;
+  background: #f8f8f8;
   border-bottom: 1px solid var(--border-weak);
   box-shadow: none;
 }

@@ -797,9 +797,12 @@
     0 4px 14px rgba(0, 120, 212, 0.3);
 }
 [data-theme="light"] .bsl-grid .blast-submit-btn:disabled {
-  background: #b1b3b3;
-  border-color: #b1b3b3;
-  color: #ffffff;
+  /* Clear, intentional disabled state (was #b1b3b3 + white text, a
+     2.1:1 near-illegible look that read as broken rather than off).
+     Matches the sibling preflight button's disabled style. */
+  background: #f2f2f2;
+  border-color: #d7d7d7;
+  color: #6b6f73;
   box-shadow: none;
 }
 [data-theme="light"] .bsl-grid .bsl-rail__preflight-btn:disabled {
