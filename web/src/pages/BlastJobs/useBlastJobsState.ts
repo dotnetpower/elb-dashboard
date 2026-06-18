@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 
@@ -110,6 +110,15 @@ export function useBlastJobsState() {
     [setSearchParams],
   );
   const cluster = useClusterReadiness();
+  // Grows as the user scrolls / clicks "Load more". The backend returns the
+  // genuinely most-recent `limit` rows plus a `page.has_more` flag, so bumping
+  // the limit brings older jobs back into the list (interim until cursor
+  // pagination lands — see issue #50). Resets when the cluster pin changes so a
+  // scoped view starts from the first page again.
+  const [limit, setLimit] = useState(RECENT_SEARCHES_PAGE_SIZE);
+  useEffect(() => {
+    setLimit(RECENT_SEARCHES_PAGE_SIZE);
+  }, [clusterFilter]);
   const { jobsQuery, clusterName } = useScopedBlastJobs({
     clusterName: clusterFilter,
     // Recent searches is a history view: list the caller's jobs across every
@@ -117,11 +126,11 @@ export function useBlastJobsState() {
     // discovered cluster hid the user's recent jobs whenever the fleet was
     // all-Stopped and the alphabetically-first cluster was the stale one.
     autoSelectCluster: false,
-    // Initial load only needs the most-recent searches. Cap the page so a
-    // workspace with a long job history doesn't pull a large list on every
-    // poll; the backend still returns the genuinely most-recent N and a
-    // `page.has_more` flag for when paging UI lands.
-    limit: RECENT_SEARCHES_PAGE_SIZE,
+    // Initial load only needs the most-recent searches; "Load more" / infinite
+    // scroll grows this so a long job history is reachable without pulling the
+    // whole list up front. The backend still returns the genuinely most-recent
+    // N and a `page.has_more` flag.
+    limit,
     // Poll fast while any job is queued/running so status transitions surface
     // within a few seconds; fall back to a calm cadence once all are terminal.
     refetchInterval: blastJobsRefetchInterval({ activeMs: 5_000, idleMs: 20_000 }),
@@ -260,6 +269,19 @@ export function useBlastJobsState() {
 
   const handleDelete = useCallback((id: string) => setDeleteTarget(id), []);
 
+  // Server-reported pagination: `has_more` is true when the backend has rows
+  // beyond the currently-loaded `limit`. `isFetchingMore` uses
+  // `isPlaceholderData` (true only while a *different* — larger — page loads and
+  // the previous rows are kept on screen), so routine same-limit polls don't
+  // flash the "loading more" indicator.
+  const page = jobsQuery.data?.page;
+  const hasMore = page?.has_more ?? false;
+  const isFetchingMore = jobsQuery.isPlaceholderData;
+  const loadMore = useCallback(() => {
+    if (!hasMore || jobsQuery.isFetching) return;
+    setLimit((current) => current + RECENT_SEARCHES_PAGE_SIZE);
+  }, [hasMore, jobsQuery.isFetching]);
+
   return {
     deleteTarget,
     setDeleteTarget,
@@ -281,6 +303,9 @@ export function useBlastJobsState() {
     counts,
     sourceCounts,
     handleDelete,
+    hasMore,
+    isFetchingMore,
+    loadMore,
   } as const;
 }
 

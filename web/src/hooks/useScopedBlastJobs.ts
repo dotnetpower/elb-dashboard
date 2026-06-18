@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 import { blastApi, monitoringApi, type BlastJobSummary } from "@/api/endpoints";
 import { isDashboardJobActive } from "@/components/cards/ClusterBento/jobMapping";
@@ -145,6 +145,10 @@ export function useScopedBlastJobs(options: ScopedBlastJobsOptions = {}) {
       }),
     enabled: enabled && clusterScopeReady,
     refetchInterval: options.refetchInterval,
+    // Keep the current rows on screen while a larger `limit` page loads, so the
+    // "load more" / infinite-scroll path grows the list instead of blanking it
+    // back to the loading skeleton on every page bump.
+    placeholderData: keepPreviousData,
   });
 
   return {

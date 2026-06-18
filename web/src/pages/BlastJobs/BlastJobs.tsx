@@ -8,6 +8,7 @@ import { DateGroupSection } from "./DateGroupSection";
 import { JobsFilterBar } from "./JobsFilterBar";
 import { JobsHeader } from "./JobsHeader";
 import { JobsLoadingSkeleton } from "./JobsLoadingSkeleton";
+import { JobsLoadMore } from "./JobsLoadMore";
 import { NoFilteredEmpty, NoJobsEmpty } from "./JobsEmptyState";
 import { ServiceBusInboundStrip } from "./ServiceBusInboundStrip";
 import { useBlastJobsState } from "./useBlastJobsState";
@@ -34,6 +35,9 @@ export function BlastJobs() {
     counts,
     sourceCounts,
     handleDelete,
+    hasMore,
+    isFetchingMore,
+    loadMore,
   } = state;
 
   return (
@@ -103,6 +107,14 @@ export function BlastJobs() {
           deleting={deleteMutation.isPending}
         />
       ))}
+
+      {allJobs.length > 0 && (
+        <JobsLoadMore
+          hasMore={hasMore}
+          isFetchingMore={isFetchingMore}
+          onLoadMore={loadMore}
+        />
+      )}
 
       <ConfirmDialog
         open={deleteTarget !== null}
