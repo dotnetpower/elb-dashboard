@@ -76,6 +76,12 @@ def _is_transient_refresh_failure(exc: BaseException) -> bool:
     Returns True for the well-known "the cluster is stopped / DNS just
     hiccuped / ARM returned 5xx" family — those routinely degrade to the
     stale cache fallback and do not warrant a per-poll exception row.
+
+    Also classifies ``requests.exceptions.HTTPError`` with a 5xx status code
+    as transient so that metrics-server unavailability (which ``k8s_top_nodes``
+    surfaces as ``response.raise_for_status()`` on a 503 from
+    ``/api/v1/nodes`` or ``/apis/metrics.k8s.io/v1beta1/nodes``) does not
+    create a fresh App Insights exception row on every poll tick (issue #48).
     """
     try:
         from requests.exceptions import (
@@ -85,15 +91,32 @@ def _is_transient_refresh_failure(exc: BaseException) -> bool:
             ConnectTimeout as _RequestsConnectTimeout,
         )
         from requests.exceptions import (
+            HTTPError as _RequestsHTTPError,
+        )
+        from requests.exceptions import (
             ReadTimeout as _RequestsReadTimeout,
         )
     except ImportError:  # pragma: no cover - requests is a transitive dep
         _RequestsConnectionError = ()  # type: ignore[assignment]
         _RequestsConnectTimeout = ()  # type: ignore[assignment]
+        _RequestsHTTPError = ()  # type: ignore[assignment]
         _RequestsReadTimeout = ()  # type: ignore[assignment]
 
     if isinstance(exc, (_RequestsConnectionError, _RequestsConnectTimeout, _RequestsReadTimeout)):
         return True
+
+    # requests.exceptions.HTTPError wraps HTTP error responses (non-2xx) from
+    # the Kubernetes API — e.g. 503 when metrics-server is not yet ready, or
+    # 5xx from a degraded API server.  Only 5xx codes are transient; 4xx codes
+    # (apart from 429 / 408) indicate configuration errors and should surface.
+    if isinstance(exc, _RequestsHTTPError):
+        response = getattr(exc, "response", None)
+        if response is not None:
+            http_status = getattr(response, "status_code", None)
+            if isinstance(http_status, int) and (
+                http_status in {408, 429} or 500 <= http_status < 600
+            ):
+                return True
 
     try:
         from azure.core.exceptions import (

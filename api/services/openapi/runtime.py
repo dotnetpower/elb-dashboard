@@ -385,6 +385,12 @@ def get_openapi_api_token(
     key when no per-cluster entry exists yet (e.g. a token minted before
     this keying landed). Context-less callers keep reading the global key
     unchanged.
+
+    Cold-path (Redis miss after a Container App revision restart that wiped
+    the ephemeral Redis): rehydrates the global token from the durable
+    ``dashboardsingletons`` Storage Table that ``save_openapi_api_token``
+    mirrored it into. This prevents the 503 ``webhook_not_configured`` window
+    that otherwise lasted until an explicit redeploy re-seeded Redis (issue #49).
     """
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     cluster_key = _token_cluster_key(
@@ -398,7 +404,53 @@ def get_openapi_api_token(
         token = _read_token_key(redis_client, cluster_key)
         if token:
             return token
-    return _read_token_key(redis_client, _TOKEN_KEY)
+    token = _read_token_key(redis_client, _TOKEN_KEY)
+    if token:
+        return token
+    # Cold path: Redis is empty (e.g. revision restart wiped the ephemeral sidecar).
+    # Rehydrate from the durable Storage Table copy that save_openapi_api_token
+    # mirrored into so the webhook receiver can validate the shared secret
+    # immediately without waiting for the next beat-reconciler redeploy tick.
+    return _rehydrate_runtime_token_from_durable(redis_client)
+
+
+def _rehydrate_runtime_token_from_durable(redis_client: Any) -> str:
+    """Cold-read the durable API token, rehydrate Redis.
+
+    Returns the token when a durable row exists, else ``""``. Never raises —
+    a durable-read failure or missing table degrades to ``""`` (the pre-durable
+    behaviour). The freshness guard mirrors ``_rehydrate_runtime_base_url_from_durable``
+    using the same ``OPENAPI_RUNTIME_ENDPOINT_MAX_AGE_SECONDS`` env so operators
+    can disable cold-reads for both the endpoint and the token simultaneously by
+    setting the max-age to zero.
+    """
+    max_age = _runtime_endpoint_max_age()
+    if max_age <= 0:
+        return ""
+    try:
+        from api.services.state.singletons import load_singleton
+
+        durable = load_singleton(_TOKEN_KEY) or {}
+    except Exception as exc:
+        LOGGER.debug("openapi runtime token durable read failed: %s", type(exc).__name__)
+        return ""
+    if not isinstance(durable, dict):
+        return ""
+    token = str(durable.get("token") or "").strip()
+    if not token:
+        return ""
+    age = _payload_age_seconds(durable)
+    if age is None or age > max_age:
+        # Undatable or stale: do not serve a possibly-revoked token.
+        return ""
+    # Re-populate Redis so subsequent reads are hot again (mirrors base-url behaviour).
+    try:
+        redis_client.set(_TOKEN_KEY, json.dumps(durable, separators=(",", ":")))
+    except Exception as exc:
+        LOGGER.debug(
+            "openapi runtime token cache re-populate failed: %s", type(exc).__name__
+        )
+    return token
 
 
 def _read_token_key(redis_client: Any, key: str) -> str:

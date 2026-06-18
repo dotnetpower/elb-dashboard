@@ -15,6 +15,7 @@ import atexit
 import base64
 import logging
 import os
+import ssl
 import tempfile
 import threading
 import time
@@ -203,6 +204,56 @@ def _build_k8s_retry() -> Any:
     )
 
 
+class _InMemoryCaAdapter:
+    """``requests.adapters.HTTPAdapter`` subclass that verifies TLS against an
+    in-memory CA bundle instead of a temp file.
+
+    The k8s session pool evicts entries at TTL expiry and calls
+    ``_evict_temp_files`` which unlinks the on-disk CA cert.  An in-flight
+    request that still holds the evicted session then sees::
+
+        OSError: Could not find a suitable TLS CA certificate bundle,
+                 invalid path: /tmp/elb-k8s-.crt
+
+    By loading the CA cert into an in-memory ``ssl.SSLContext`` (no file path
+    in ``session.verify``) there is nothing to unlink, so eviction can never
+    race with a concurrent GET (issue #47).
+
+    ``ssl.create_default_context()`` pre-loads the system CA bundle so the
+    SSLContext can also verify public TLS endpoints (important for the rare
+    case where the k8s server URL resolves to a public domain, and for
+    cluster-internal calls to services that use a public CA).  The k8s
+    cluster CA is then *added* on top via ``load_verify_locations(cadata=...)``.
+
+    The ``send`` override intercepts ``verify`` before it reaches urllib3 so
+    requests cannot redirect the SSL library to a filesystem path (which would
+    shadow our in-memory context).  ``verify=True`` is passed through so
+    urllib3 enforces ``CERT_REQUIRED`` via the ``ssl_context``'s own
+    verify_mode.
+    """
+
+    def __new__(cls, ca_data: bytes, **kwargs: Any) -> Any:
+        """Return a real ``HTTPAdapter`` subclass built at import time."""
+        import requests as _requests
+
+        ctx = ssl.create_default_context()
+        ctx.load_verify_locations(cadata=ca_data.decode("ascii"))
+        _ctx = ctx
+
+        class _Adapter(_requests.adapters.HTTPAdapter):
+            def init_poolmanager(self, *args: Any, **kw: Any) -> None:
+                kw.setdefault("ssl_context", _ctx)
+                super().init_poolmanager(*args, **kw)
+
+            def send(self, request: Any, **kw: Any) -> Any:
+                # Prevent requests from passing a filesystem CA path to urllib3
+                # which would shadow our in-memory ssl_context.
+                kw["verify"] = True
+                return super().send(request, **kw)
+
+        return _Adapter(**kwargs)
+
+
 def _install_cluster_breaker(session: Any, breaker_key: tuple[str, str, str]) -> None:
     """Wrap ``session.request`` so the per-cluster breaker sees every call.
 
@@ -354,15 +405,37 @@ def _get_k8s_session(
     # so a brief burst does not stall behind the pool — at the cost of
     # extra short-lived sockets which urllib3 then closes.
     _k8s_pool_size = _k8s_session_http_pool_size()
-    adapter = _requests.adapters.HTTPAdapter(
-        pool_connections=_k8s_pool_size,
-        pool_maxsize=_k8s_pool_size,
-        pool_block=False,
-        max_retries=_build_k8s_retry(),
-    )
+
+    # When the cluster provides a CA cert, load it in-memory via an
+    # _InMemoryCaAdapter so there is no on-disk file that a concurrent pool
+    # eviction could unlink while an in-flight request still reads it (issue
+    # #47).  The adapter stores the ssl.SSLContext as an attribute; it is
+    # GC'd naturally when the session is retired, with no filesystem race.
+    # When no CA is provided, fall back to the plain HTTPAdapter (trusts the
+    # system CA bundle via ``session.verify=True``).
+    if material.ca_data:
+        adapter: Any = _InMemoryCaAdapter(
+            material.ca_data,
+            pool_connections=_k8s_pool_size,
+            pool_maxsize=_k8s_pool_size,
+            pool_block=False,
+            max_retries=_build_k8s_retry(),
+        )
+        # No session.verify assignment — the adapter's ssl_context handles CA.
+    else:
+        adapter = _requests.adapters.HTTPAdapter(
+            pool_connections=_k8s_pool_size,
+            pool_maxsize=_k8s_pool_size,
+            pool_block=False,
+            max_retries=_build_k8s_retry(),
+        )
+        session.verify = True
+
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     _install_cluster_breaker(session, breaker_key)
+    # temp_files is now ONLY for client cert/key (admin credential path).
+    # The CA cert is no longer written to disk (see _InMemoryCaAdapter above).
     temp_files: list[str] = []
 
     def write_secret_file(suffix: str, content: bytes) -> str:
@@ -387,11 +460,6 @@ def _get_k8s_session(
     # credential cache already noticed.
     entry_expires_at = min(entry_expires_at, material.expires_at)
     try:
-        if material.ca_data:
-            session.verify = write_secret_file(".crt", material.ca_data)
-        else:
-            session.verify = True
-
         if material.client_cert and material.client_key:
             cert_path = write_secret_file(".crt", material.client_cert)
             key_path = write_secret_file(".key", material.client_key)

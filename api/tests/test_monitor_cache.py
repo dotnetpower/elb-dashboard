@@ -405,6 +405,18 @@ def _make_arm_404() -> Exception:
     return ResourceNotFoundError("cluster not found")
 
 
+def _make_requests_http_error(status_code: int) -> Exception:
+    """Build a ``requests.exceptions.HTTPError`` with a fake response."""
+    from requests.exceptions import HTTPError
+    from unittest.mock import MagicMock
+
+    resp = MagicMock()
+    resp.status_code = status_code
+    exc = HTTPError(f"HTTP {status_code}", response=resp)
+    exc.response = resp
+    return exc
+
+
 def test_is_transient_refresh_failure_classifies_known_families() -> None:
     assert monitor_cache._is_transient_refresh_failure(_make_requests_connection_error()) is True
     assert monitor_cache._is_transient_refresh_failure(_make_requests_connect_timeout()) is True
@@ -413,6 +425,29 @@ def test_is_transient_refresh_failure_classifies_known_families() -> None:
     # still produces a full stack trace + App Insights exception row.
     assert monitor_cache._is_transient_refresh_failure(RuntimeError("boom")) is False
     assert monitor_cache._is_transient_refresh_failure(ValueError("bad")) is False
+
+
+def test_is_transient_refresh_failure_classifies_requests_http_error() -> None:
+    """HTTPError with 5xx / 408 / 429 status codes are transient (issue #48).
+
+    ``k8s_top_nodes`` calls ``response.raise_for_status()`` on the metrics.k8s.io
+    response; when metrics-server is not ready or the API server is degraded that
+    raises ``requests.exceptions.HTTPError`` with a 5xx code.  Without this
+    classification the first failure creates an App Insights exception row every
+    poll tick.
+    """
+    # Transient 5xx codes
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(500)) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(502)) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(503)) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(504)) is True
+    # Transient retryable 4xx codes
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(408)) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(429)) is True
+    # Non-transient 4xx codes must NOT be suppressed — they indicate config errors.
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(400)) is False
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(401)) is False
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(403)) is False
 
 
 def test_transient_refresh_with_stale_entry_logs_one_line_after_first(
