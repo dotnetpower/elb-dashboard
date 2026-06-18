@@ -708,3 +708,50 @@ def test_stale_live_latest_activity_does_not_block_stop() -> None:
     assert decision.verdict == "stop"
     assert decision.reason.startswith("idle:")
 
+
+def test_sb_queue_pending_keeps_idle_cluster() -> None:
+    """An otherwise-idle Running cluster is kept alive while the Service Bus
+    request queue still holds undrained work, so the drain never hits a
+    Stopped cluster (ConnectTimeout + DLQ risk)."""
+    decision = evaluate_cluster(
+        _pref(created_at=(_NOW - timedelta(hours=4)).isoformat(timespec="seconds")),
+        repo=_FakeRepo([]),
+        now=_NOW,
+        power_state="Running",
+        ignore_cooldown=True,
+        pending_queue_depth=3,
+    )
+    assert decision.verdict == "keep"
+    assert decision.reason == "sb_queue_pending:3"
+    assert decision.active_job_count == 3
+
+
+def test_sb_queue_zero_or_none_allows_stop() -> None:
+    """Zero / None queue depth is ignored — the idle cluster still stops."""
+    for depth in (0, None):
+        decision = evaluate_cluster(
+            _pref(created_at=(_NOW - timedelta(hours=4)).isoformat(timespec="seconds")),
+            repo=_FakeRepo([]),
+            now=_NOW,
+            power_state="Running",
+            ignore_cooldown=True,
+            pending_queue_depth=depth,
+        )
+        assert decision.verdict == "stop", f"depth={depth!r} should not block stop"
+        assert decision.reason.startswith("idle:")
+
+
+def test_active_jobs_take_precedence_over_sb_queue() -> None:
+    """A live ``app=blast`` run reports ``active_jobs:`` (not
+    ``sb_queue_pending:``) even when the queue also has pending work."""
+    decision = evaluate_cluster(
+        _pref(),
+        repo=_FakeRepo([]),
+        now=_NOW,
+        power_state="Running",
+        live_active_jobs=2,
+        pending_queue_depth=5,
+    )
+    assert decision.verdict == "keep"
+    assert decision.reason == "active_jobs:2"
+

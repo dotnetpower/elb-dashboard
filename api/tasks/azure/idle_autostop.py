@@ -21,6 +21,7 @@ Validation: `uv run pytest -q api/tests/test_auto_stop_task.py`.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from celery import shared_task
@@ -81,6 +82,41 @@ def _live_blast_signal(
             )
     return live_active_jobs, live_latest_activity
 
+
+def _sb_pending_signal(power_state: str) -> int | None:
+    """Best-effort Service Bus request-queue depth for the evaluator.
+
+    Returns the active (deliverable) message count, or ``None`` when the
+    signal is unavailable/disabled so the evaluator degrades to the
+    job-count decision. Only meaningful for a ``Running`` cluster (a stopped
+    cluster is already kept by the power-state gate, and auto-START on queue
+    arrival is intentionally out of scope here -- this only prevents a stop
+    while work waits). Gated by ``AKS_AUTOSTOP_RESPECT_SB_QUEUE`` (default
+    on) so the behaviour can be disabled without a redeploy. Never raises --
+    any failure degrades to ``None``.
+    """
+    if power_state != "Running":
+        return None
+    if os.environ.get("AKS_AUTOSTOP_RESPECT_SB_QUEUE", "true").strip().lower() in {
+        "0",
+        "false",
+        "no",
+    }:
+        return None
+    try:
+        from api.services.service_bus_pref import (
+            get_service_bus_config,
+            service_bus_enabled,
+        )
+
+        if not service_bus_enabled():
+            return None
+        from api.services import service_bus
+
+        return service_bus.pending_request_count(get_service_bus_config())
+    except Exception as exc:  # best-effort additive signal -- never fail the tick
+        LOGGER.debug("sb pending signal failed cluster=%s: %s", power_state, exc)
+        return None
 
 
 def _power_state(pref: AutoStopPreference) -> str:
@@ -280,6 +316,10 @@ def auto_stop_aks(
         # same way the state_repo re-read does for dashboard jobs.
         live_active_jobs=live_active_jobs,
         live_latest_activity=live_latest_activity,
+        # Keep the cluster alive while the Service Bus request queue still
+        # holds undrained work, closing the same decide-vs-act race for
+        # queued-but-not-yet-bridged submissions.
+        pending_queue_depth=_sb_pending_signal(power_state),
     )
     if decision.verdict != "stop":
         LOGGER.info(
@@ -400,6 +440,7 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
                 power_state=cluster_power_state,
                 live_active_jobs=live_active_jobs,
                 live_latest_activity=live_latest_activity,
+                pending_queue_depth=_sb_pending_signal(cluster_power_state),
             )
         except Exception as exc:
             LOGGER.warning(
@@ -501,4 +542,10 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     return summary
 
 
-__all__ = ["_batch_power_states", "_live_blast_signal", "auto_stop_aks", "evaluate_idle_clusters"]
+__all__ = [
+    "_batch_power_states",
+    "_live_blast_signal",
+    "_sb_pending_signal",
+    "auto_stop_aks",
+    "evaluate_idle_clusters",
+]

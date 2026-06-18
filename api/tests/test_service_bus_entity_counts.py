@@ -233,3 +233,34 @@ def test_entity_counts_queue_completion_kind(monkeypatch: pytest.MonkeyPatch) ->
     assert subs[0]["active_message_count"] == 5
     assert subs[0]["dead_letter_message_count"] == 2
     assert subs[0]["transfer_message_count"] == 1
+
+
+def test_pending_request_count_returns_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``pending_request_count`` returns the queue's active message count
+    (the auto-stop "work in flight" signal)."""
+    admin = _FakeAdmin(q_runtime=SimpleNamespace(active_message_count=7), q_props=None)
+    with _patched_admin(monkeypatch, admin):
+        assert service_bus.pending_request_count(_cfg()) == 7
+
+
+def test_pending_request_count_none_on_admin_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any admin/runtime failure degrades to ``None`` so an unreadable queue
+    never strands a cluster running forever."""
+
+    class _Boom:
+        def get_queue_runtime_properties(self, _queue: str) -> Any:
+            raise RuntimeError("boom")
+
+    with _patched_admin(monkeypatch, _Boom()):
+        assert service_bus.pending_request_count(_cfg()) is None
+
+
+def test_pending_request_count_none_when_unconfigured() -> None:
+    """A config without a namespace yields ``None`` (no admin call)."""
+    cfg = SimpleNamespace(
+        namespace_fqdn="",
+        request_queue="elastic-blast-requests",
+        completion_topic="elastic-blast-completions",
+        auth_mode="entra",
+    )
+    assert service_bus.pending_request_count(cfg) is None

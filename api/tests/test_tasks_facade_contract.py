@@ -38,6 +38,7 @@ _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.azure.enable_aks_container_insights",  # .delay
     "api.tasks.azure.idle_autostop._batch_power_states",
     "api.tasks.azure.idle_autostop._live_blast_signal",
+    "api.tasks.azure.idle_autostop._sb_pending_signal",
     "api.tasks.azure.peering.delete_vnet_peering_on_cluster",
     "api.tasks.azure.peering.ensure_vnet_peering_with_cluster",
     "api.tasks.azure.peering.ensure_vnet_peering_with_target",

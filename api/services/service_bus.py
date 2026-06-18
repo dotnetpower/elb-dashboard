@@ -693,6 +693,36 @@ def _iso_or_none(value: Any) -> str | None:
         return None
 
 
+def pending_request_count(cfg: ServiceBusConfig | None) -> int | None:
+    """Active (deliverable) request-queue message count, or ``None``.
+
+    A lightweight, best-effort read of the request queue's
+    ``active_message_count`` for the AKS auto-stop evaluator: a Running
+    cluster with pending requests still has work in flight even when no
+    ``app=blast`` Job exists on the cluster yet (the drain has not bridged
+    them to the execution plane). Returns ``None`` -- never raises -- when
+    Service Bus is disabled, the credential lacks ``Manage`` / ``EntityRead``
+    claims, or the runtime-properties call fails, so the caller degrades to
+    the existing state_repo + live-K8s signals (an unreadable queue must
+    never strand a cluster running forever). ``scheduled_message_count`` is
+    intentionally excluded -- a future-dated message is not immediate work --
+    and dead-lettered messages are already excluded by
+    ``active_message_count``, so a poison message that exhausts its delivery
+    count drops out of this signal and the cluster can idle-stop normally.
+    """
+    try:
+        cfg = _require_enabled_config(cfg)
+    except Exception:
+        return None
+    try:
+        with _admin_client(cfg) as admin:
+            q = admin.get_queue_runtime_properties(cfg.request_queue)
+            return max(0, int(getattr(q, "active_message_count", 0) or 0))
+    except Exception:
+        LOGGER.debug("pending_request_count unavailable", exc_info=True)
+        return None
+
+
 def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
     """Return runtime message counts for the queue (and topic subscriptions).
 

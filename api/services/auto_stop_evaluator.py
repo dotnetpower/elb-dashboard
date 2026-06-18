@@ -269,6 +269,7 @@ def evaluate_cluster(
     ignore_cooldown: bool = False,
     live_active_jobs: int | None = None,
     live_latest_activity: datetime | None = None,
+    pending_queue_depth: int | None = None,
 ) -> IdleDecision:
     """Decide whether an AKS cluster should be auto-stopped.
 
@@ -315,6 +316,19 @@ def evaluate_cluster(
             the full ``idle_minutes`` grace before a stop. Never advances the
             deadline beyond a real observed activity time, so it cannot push
             the stop indefinitely.
+        pending_queue_depth: Active (deliverable) message count in the
+            Service Bus request queue, or ``None`` when unavailable/disabled.
+            Pending requests are work the cluster must stay up for even
+            before the drain bridges them to ``app=blast`` Jobs, so a
+            non-zero value keeps the cluster alive (``reason``
+            ``sb_queue_pending:{N}``). Without this a Running cluster can be
+            stopped in the gap between drained jobs while messages still
+            wait, after which the drain hits ``ConnectTimeout`` and the
+            backlog strands (DLQ risk). ``None`` is ignored (additive
+            protection only); dead-lettered/scheduled messages are excluded
+            upstream so a poison backlog cannot keep the cluster up forever.
+            Auto-START of an already-Stopped cluster on queue arrival is
+            intentionally out of scope -- this only prevents a stop.
 
     Returns:
         `IdleDecision` describing the outcome.
@@ -408,6 +422,20 @@ def evaluate_cluster(
             verdict="keep",
             reason=f"active_jobs:{total_active}",
             active_job_count=total_active,
+            cluster_power_state=power_state,
+        )
+    # Service Bus request queue carries work the cluster must stay up for,
+    # even when nothing has bridged to an ``app=blast`` Job yet. Without this
+    # a Running cluster can be stopped in the gap between drained jobs while
+    # messages still wait in the queue -> the drain then hits ConnectTimeout
+    # and the backlog strands (DLQ risk). ``None`` / non-positive = signal
+    # unavailable -> ignore and fall through to the idle-anchor decision.
+    pending = pending_queue_depth if (pending_queue_depth and pending_queue_depth > 0) else 0
+    if pending > 0:
+        return IdleDecision(
+            verdict="keep",
+            reason=f"sb_queue_pending:{pending}",
+            active_job_count=pending,
             cluster_power_state=power_state,
         )
     if truncated:
