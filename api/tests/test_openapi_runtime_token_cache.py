@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests/test_openapi_runtime_token_cache.py`.
 
 from __future__ import annotations
 
+import pytest
 from api.services.openapi import runtime
 
 
@@ -101,3 +102,83 @@ def test_read_token_key_handles_plain_string_payload() -> None:
     client = FakeRedis()
     client.store[runtime._TOKEN_KEY] = "raw-token-no-json"
     assert runtime.get_openapi_api_token(client=client) == "raw-token-no-json"
+
+
+def test_save_mirrors_global_token_to_durable_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The webhook shared-secret must survive a Redis flush (#49).
+
+    ``save_openapi_api_token`` mirrors the GLOBAL token payload into the
+    durable singleton store so a revision restart does not blackhole the
+    inbound webhook.
+    """
+    saved: dict[str, dict] = {}
+
+    def fake_save(key: str, payload: dict) -> bool:
+        saved[key] = payload
+        return True
+
+    monkeypatch.setattr(
+        "api.services.state.singletons.save_singleton", fake_save, raising=True
+    )
+
+    client = FakeRedis()
+    runtime.save_openapi_api_token("tok-a", metadata=_CLUSTER_A, client=client)
+
+    assert runtime._TOKEN_KEY in saved
+    assert saved[runtime._TOKEN_KEY]["token"] == "tok-a"
+
+
+def test_get_rehydrates_token_from_durable_on_cold_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a revision restart Redis is empty; the global token is cold-read
+    from the durable store and re-populated into Redis (#49)."""
+
+    def fake_load(key: str) -> dict | None:
+        if key == runtime._TOKEN_KEY:
+            return {"token": "durable-tok", "metadata": {}, "updated_at": "x"}
+        return None
+
+    monkeypatch.setattr(
+        "api.services.state.singletons.load_singleton", fake_load, raising=True
+    )
+
+    client = FakeRedis()  # cold: nothing in Redis
+    assert runtime.get_openapi_api_token(client=client) == "durable-tok"
+    # Redis was re-populated so the next read is hot (no durable round-trip).
+    assert runtime._TOKEN_KEY in client.store
+
+
+def test_get_returns_empty_when_durable_also_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Genuinely-unconfigured stays fail-closed: empty Redis + empty durable
+    yields ``""`` so the webhook still 503s (correct fail-closed)."""
+    monkeypatch.setattr(
+        "api.services.state.singletons.load_singleton",
+        lambda _key: None,
+        raising=True,
+    )
+    client = FakeRedis()
+    assert runtime.get_openapi_api_token(client=client) == ""
+
+
+def test_durable_rehydration_skipped_when_redis_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Redis hit must NOT touch the durable store (hot path stays cheap)."""
+    calls: list[str] = []
+
+    def fake_load(key: str) -> dict | None:
+        calls.append(key)
+        return None
+
+    monkeypatch.setattr(
+        "api.services.state.singletons.load_singleton", fake_load, raising=True
+    )
+    client = FakeRedis()
+    runtime.save_openapi_api_token("hot-tok", metadata={}, client=client)
+    assert runtime.get_openapi_api_token(client=client) == "hot-tok"
+    assert calls == []  # durable never consulted on a hot read

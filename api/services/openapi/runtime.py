@@ -34,6 +34,16 @@ its ``metadata`` carries ``subscription_id`` / ``resource_group`` /
 <sha256[:16]>``. ``get_openapi_api_token`` reads the per-cluster key first
 when given cluster context (deploy path) and falls back to the global key
 for context-less readers that pair with the global base-url.
+The GLOBAL token is ALSO mirrored into the durable ``dashboardsingletons``
+Storage Table (same store as the base-url) so a Container App revision
+restart — which wipes the ephemeral Redis — does not blackhole the inbound
+``register-external-job`` webhook with ``503 webhook_not_configured``.
+``get_openapi_api_token`` rehydrates Redis from the durable copy on a cold
+read (no freshness gate: the durable copy is refreshed on every token write
+and any genuine drift is caught by the 401 self-heal path). The token is a
+rotatable webhook shared-secret living in a private-endpoint-only,
+RBAC-gated table — the same trust boundary it already crosses in Redis and
+the AKS pod env.
 ``save_openapi_public_base_url`` returns False when the durable Storage
 Table write fails so the caller can mark the task partially-degraded
 even if the hot Redis write succeeded.
@@ -398,7 +408,47 @@ def get_openapi_api_token(
         token = _read_token_key(redis_client, cluster_key)
         if token:
             return token
-    return _read_token_key(redis_client, _TOKEN_KEY)
+    token = _read_token_key(redis_client, _TOKEN_KEY)
+    if token:
+        return token
+    # Cold path: Redis missed both keys (e.g. immediately after a revision
+    # restart wiped the ephemeral cache). Rehydrate the GLOBAL token from the
+    # durable Storage Table so the inbound webhook stops 503'ing without
+    # waiting for an explicit redeploy (issue #49). Context-less webhook reads
+    # pair with the global key, so rehydrating the global key is sufficient.
+    return _rehydrate_token_from_durable(redis_client)
+
+
+def _rehydrate_token_from_durable(redis_client: Any) -> str:
+    """Cold-read the durable global OpenAPI token, rehydrate Redis, return it.
+
+    Returns the token when a durable row exists, else ``""``. Never raises —
+    a durable-read failure or missing table degrades to ``""`` (the
+    pre-durable behaviour: the caller fails closed). Unlike the base-url
+    rehydration there is no freshness gate: ``save_openapi_api_token`` mirrors
+    the durable copy on every write/rotation, so it is never staler than the
+    Redis copy was, and a real token drift is still caught by the 401
+    self-heal path (``token.resync_openapi_api_token_from_cluster``).
+    """
+    try:
+        from api.services.state.singletons import load_singleton
+
+        durable = load_singleton(_TOKEN_KEY) or {}
+    except Exception as exc:
+        LOGGER.debug("openapi runtime token durable read failed: %s", type(exc).__name__)
+        return ""
+    if not isinstance(durable, dict):
+        return ""
+    token = str(durable.get("token") or "").strip()
+    if not token:
+        return ""
+    try:
+        redis_client.set(_TOKEN_KEY, json.dumps(durable, separators=(",", ":")))
+    except Exception as exc:
+        LOGGER.debug(
+            "openapi runtime token cache re-populate failed: %s", type(exc).__name__
+        )
+    return token
 
 
 def _read_token_key(redis_client: Any, key: str) -> str:
