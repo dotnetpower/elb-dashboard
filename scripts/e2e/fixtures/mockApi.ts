@@ -613,6 +613,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
             ...completedJob,
         },
       ],
+      page: { limit: 20, returned: 1, has_more: false },
     }),
   );
   await page.route("**/api/blast/jobs/job-e2e/execution-steps", (route) =>

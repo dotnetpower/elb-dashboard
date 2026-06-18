@@ -36,6 +36,35 @@ def build_meta(
     return meta
 
 
+def build_page(
+    *,
+    limit: int,
+    returned: int,
+    has_more: bool,
+    next_cursor: str | None = None,
+) -> dict[str, Any]:
+    """Build an OpenAPI-standard pagination envelope for a list response.
+
+    Additive metadata that sits alongside the legacy top-level ``jobs`` array so
+    existing clients keep working. ``limit`` is the page size the caller asked
+    for, ``returned`` is how many items this page actually carries, and
+    ``has_more`` signals whether at least one more item exists beyond this page
+    (the list route derives it with a fetch-one-extra probe so it stays honest
+    without a server-side ordered index). ``next_cursor`` is reserved for true
+    cursor pagination once a time-ordered secondary index lands; it is omitted
+    while None so the shape stays clean until then.
+    """
+
+    page: dict[str, Any] = {
+        "limit": limit,
+        "returned": returned,
+        "has_more": has_more,
+    }
+    if next_cursor is not None:
+        page["next_cursor"] = next_cursor
+    return page
+
+
 def build_target(
     *,
     resource_type: str,

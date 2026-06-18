@@ -18,6 +18,14 @@ import { jobSubmissionSource, type JobSource } from "./jobSource";
 
 export type FilterKind = "all" | "queued" | "running" | "completed" | "failed";
 
+/**
+ * Page size requested for the Recent searches history view. The initial load
+ * only surfaces the most-recent searches; the backend still returns the
+ * genuinely most-recent N (and a `page.has_more` flag) so a future "load more"
+ * affordance can page back through older jobs.
+ */
+const RECENT_SEARCHES_PAGE_SIZE = 20;
+
 /** Submission-source filter for Recent searches. ``all`` keeps every job. */
 export type SourceKind = "all" | JobSource;
 
@@ -109,6 +117,11 @@ export function useBlastJobsState() {
     // discovered cluster hid the user's recent jobs whenever the fleet was
     // all-Stopped and the alphabetically-first cluster was the stale one.
     autoSelectCluster: false,
+    // Initial load only needs the most-recent searches. Cap the page so a
+    // workspace with a long job history doesn't pull a large list on every
+    // poll; the backend still returns the genuinely most-recent N and a
+    // `page.has_more` flag for when paging UI lands.
+    limit: RECENT_SEARCHES_PAGE_SIZE,
     // Poll fast while any job is queued/running so status transitions surface
     // within a few seconds; fall back to a calm cadence once all are terminal.
     refetchInterval: blastJobsRefetchInterval({ activeMs: 5_000, idleMs: 20_000 }),

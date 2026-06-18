@@ -15,6 +15,7 @@ import type {
   BlastHit,
   BlastJobEvent,
   BlastJobSummary,
+  BlastJobsListResponse,
   BlastPrecisionReport,
   BlastRecommendGoal,
   BlastResultFile,
@@ -147,13 +148,15 @@ export const blastApi = {
     subscriptionId?: string;
     resourceGroup?: string;
     clusterName?: string;
+    limit?: number;
   }) => {
     const params = new URLSearchParams();
     if (context?.subscriptionId) params.set("subscription_id", context.subscriptionId);
     if (context?.resourceGroup) params.set("resource_group", context.resourceGroup);
     if (context?.clusterName) params.set("cluster_name", context.clusterName);
+    if (context?.limit != null) params.set("limit", String(context.limit));
     const qs = params.toString();
-    return api.get<{ jobs: BlastJobSummary[] }>(`/blast/jobs${qs ? `?${qs}` : ""}`);
+    return api.get<BlastJobsListResponse>(`/blast/jobs${qs ? `?${qs}` : ""}`);
   },
 
   getJob: (

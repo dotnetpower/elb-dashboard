@@ -184,6 +184,7 @@ export async function installNewSearchApiMocks(page: Page): Promise<MockSubmitCa
           updated_at: new Date().toISOString(),
         },
       ],
+      page: { limit: 20, returned: 1, has_more: false },
     }),
   );
   await page.route("**/api/blast/jobs/job-e2e**", (route) =>

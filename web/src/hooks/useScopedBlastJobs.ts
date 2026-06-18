@@ -45,6 +45,13 @@ export interface ScopedBlastJobsOptions {
   enabled?: boolean;
   refetchInterval?: number | false | ((query: JobsListQueryLike) => number);
   /**
+   * Page size to request from `/api/blast/jobs`. When omitted the backend
+   * default applies. History views (Recent searches) pass a small value so the
+   * initial load only fetches the most-recent N rows instead of the default
+   * page; the backend still returns the genuinely most-recent N.
+   */
+  limit?: number;
+  /**
    * When true (default) and no explicit `clusterName` is given, discover the
    * fleet and pin the jobs query to a single preferred cluster. Per-cluster
    * cards want this so each tile shows only its own cluster's jobs.
@@ -120,6 +127,7 @@ export function useScopedBlastJobs(options: ScopedBlastJobsOptions = {}) {
       subscriptionId,
       queryResourceGroup ?? "",
       selectedClusterName,
+      options.limit ?? null,
     ],
     queryFn: () =>
       blastApi.listJobs({
@@ -133,6 +141,7 @@ export function useScopedBlastJobs(options: ScopedBlastJobsOptions = {}) {
         // pre-discovery refetch can still see in-flight rows.
         resourceGroup: queryResourceGroup,
         clusterName: selectedClusterName,
+        limit: options.limit,
       }),
     enabled: enabled && clusterScopeReady,
     refetchInterval: options.refetchInterval,

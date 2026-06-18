@@ -359,6 +359,7 @@ function jobsPayload() {
       baseJob(dashboardJobId, "completed"),
       baseJob(failedJobId, "failed"),
     ],
+    page: { limit: 20, returned: 3, has_more: false },
   };
 }
 

@@ -117,6 +117,34 @@ export interface ApiResponseMeta {
   warnings?: Array<Record<string, unknown>>;
 }
 
+/**
+ * OpenAPI-standard pagination envelope returned alongside list payloads.
+ *
+ * Additive metadata: list responses keep their legacy top-level array, and
+ * `page` describes the slice. `limit` is the requested page size, `returned`
+ * is how many items this page carries, and `has_more` signals at least one
+ * more item exists beyond this page. `next_cursor` is reserved for true cursor
+ * pagination once the backend ships a time-ordered index; it is absent until
+ * then.
+ */
+export interface ApiPage {
+  limit: number;
+  returned: number;
+  has_more: boolean;
+  next_cursor?: string;
+}
+
+export interface BlastJobsListResponse {
+  jobs: BlastJobSummary[];
+  page?: ApiPage;
+  meta?: ApiResponseMeta;
+  degraded?: boolean;
+  degraded_reason?: string;
+  external_degraded?: boolean;
+  external_degraded_reason?: string;
+  external_degraded_message?: string;
+}
+
 export interface ApiOperation {
   operation_id: string;
   operation_type: string;

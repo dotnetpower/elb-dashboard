@@ -193,6 +193,101 @@ def test_jobs_list_swr_serves_stale_and_revalidates(monkeypatch) -> None:
 
 
 
+def _pagination_route_setup(monkeypatch, *, row_count: int):
+    """Wire a fake state repo + isolated compute helpers for the jobs list route.
+
+    Returns ``(client, seen)`` where ``seen`` records the ``limit`` the repo's
+    ``list_for_owner`` was called with, so a test can assert the fetch-one-extra
+    probe (the route requests ``limit + 1`` to compute ``has_more`` honestly).
+    Only the pagination plumbing is exercised; row→JSON mapping and external
+    sync are stubbed so the test stays focused on slice + ``has_more`` logic.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    import api.services.blast.jobs_list_cache as cache_mod
+    import api.services.state_repo as state_repo_mod
+    from api.routes.blast import jobs as jobs_mod
+
+    cache_mod.reset_jobs_list_cache()
+
+    rows = [
+        SimpleNamespace(
+            job_id=f"job-{i}",
+            type="blast",
+            status="completed",
+            phase="completed",
+            owner_oid="00000000-0000-0000-0000-000000000000",
+            created_at=f"2026-06-{(row_count - i):02d}T00:00:00Z",
+        )
+        for i in range(row_count)
+    ]
+    seen: dict[str, int] = {}
+
+    class Repo:
+        def list_for_owner(self, owner_oid, limit=50, *, include_payload=True):
+            seen["limit"] = limit
+            # Mimic the real repo: return at most ``limit`` genuinely-newest rows.
+            return rows[:limit]
+
+    monkeypatch.setattr(state_repo_mod, "get_state_repo", lambda: Repo())
+    monkeypatch.setattr(
+        jobs_mod,
+        "_local_to_blast_job",
+        lambda row, **_kwargs: {
+            "job_id": row.job_id,
+            "status": row.status,
+            "created_at": row.created_at,
+        },
+    )
+    monkeypatch.setattr(jobs_mod, "_local_state_matches_job_scope", lambda *a, **k: True)
+    monkeypatch.setattr(
+        jobs_mod, "_local_list_row_may_have_split_children", lambda _row: False
+    )
+    monkeypatch.setattr(jobs_mod, "_blocked_refresh_reasons", lambda _rows: {})
+    monkeypatch.setattr(
+        jobs_mod,
+        "collect_and_sync_external_jobs",
+        lambda **_kwargs: SimpleNamespace(
+            rows=[], tombstoned_ids=set(), any_target_ok=True, target_failures=[]
+        ),
+    )
+
+    from api.main import app
+
+    return TestClient(app), seen
+
+
+def test_jobs_list_page_envelope_has_more_when_more_rows_exist(monkeypatch) -> None:
+    """A full page reports ``has_more=True`` and the route over-fetches by one
+    (``limit + 1``) so the flag is honest without a server-side ordered index."""
+    client, seen = _pagination_route_setup(monkeypatch, row_count=3)
+
+    response = client.get("/api/blast/jobs", params={"limit": 2})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["jobs"]) == 2
+    assert body["page"] == {"limit": 2, "returned": 2, "has_more": True}
+    # Fetch-one-extra probe: the repo was asked for limit + 1.
+    assert seen["limit"] == 3
+    # The extra probe row never reaches the client.
+    assert "next_cursor" not in body["page"]
+
+
+def test_jobs_list_page_envelope_has_more_false_on_last_page(monkeypatch) -> None:
+    """When the matching set fits within ``limit`` the envelope reports
+    ``has_more=False`` and returns every row."""
+    client, seen = _pagination_route_setup(monkeypatch, row_count=3)
+
+    response = client.get("/api/blast/jobs", params={"limit": 5})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["jobs"]) == 3
+    assert body["page"] == {"limit": 5, "returned": 3, "has_more": False}
+    assert seen["limit"] == 6
+
+
 def _query_route_repo(payload: dict, *, storage_account: str = "elbstg01"):
     """Build a fake repo whose ``get`` returns a single owned state row."""
     owner_oid = "00000000-0000-0000-0000-000000000000"

@@ -52,7 +52,11 @@ from api.services.blast.jobs_list_cache import (
     jobs_list_cache_set,
     reset_jobs_list_cache,
 )
-from api.services.response_contracts import build_meta, request_id_from_scope
+from api.services.response_contracts import (
+    build_meta,
+    build_page,
+    request_id_from_scope,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -241,6 +245,11 @@ def _compute_blast_jobs_response(
     """
     jobs: list[dict[str, Any]] = []
     degraded: dict[str, Any] = {}
+    # Fetch one extra row across every source so ``has_more`` in the pagination
+    # envelope is honest without a server-side ordered index: if the merged set
+    # exceeds ``limit`` there is at least one more page. The extra row is
+    # dropped by the final ``jobs[:limit]`` slice and never reaches the client.
+    fetch_limit = limit + 1
     try:
         from api.services.state_repo import get_state_repo
 
@@ -251,16 +260,16 @@ def _compute_blast_jobs_response(
                 subscription_id=subscription_id,
                 resource_group=resource_group,
                 cluster_name=cluster_name,
-                limit=limit,
+                limit=fetch_limit,
                 include_payload=False,
             )
         elif shared_visibility and hasattr(repo, "list_all"):
             # Dev-stage owner-agnostic listing: Recent searches shows every
             # submitter's jobs. Gated by BLAST_JOBS_SHARED_VISIBILITY.
-            source_rows = repo.list_all(limit=limit, include_payload=False)
+            source_rows = repo.list_all(limit=fetch_limit, include_payload=False)
         else:
             source_rows = repo.list_for_owner(
-                caller_oid, limit=limit, include_payload=False
+                caller_oid, limit=fetch_limit, include_payload=False
             )
         rows = [
             row
@@ -371,7 +380,7 @@ def _compute_blast_jobs_response(
             tenant_id=tenant_id,
             seen_job_ids={str(job.get("job_id")) for job in jobs},
             detail_enrich_budget=min(
-                _EXTERNAL_DETAIL_ENRICH_LIMIT, max(0, limit - len(jobs))
+                _EXTERNAL_DETAIL_ENRICH_LIMIT, max(0, fetch_limit - len(jobs))
             ),
         )
 
@@ -404,8 +413,15 @@ def _compute_blast_jobs_response(
             }
 
     jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+    has_more = len(jobs) > limit
+    page_jobs = jobs[:limit]
     response: dict[str, Any] = {
-        "jobs": jobs[:limit],
+        "jobs": page_jobs,
+        "page": build_page(
+            limit=limit,
+            returned=len(page_jobs),
+            has_more=has_more,
+        ),
         "meta": build_meta(request_id=request_id),
     }
     if degraded and not jobs:
