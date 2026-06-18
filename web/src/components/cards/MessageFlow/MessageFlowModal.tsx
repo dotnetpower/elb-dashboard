@@ -12,7 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Radio, X } from "lucide-react";
+import { Radio, RefreshCw, X } from "lucide-react";
 
 import { messageFlowApi, type MessageFlowBox, type MessageFlowSnapshot, type QueueMessagePreview } from "@/api/messageFlow";
 import { useRelativeTime } from "@/hooks/useRelativeTime";
@@ -27,6 +27,11 @@ interface MessageFlowModalProps {
   onClose: () => void;
   /** Epoch ms of the last successful snapshot fetch (for the live "updated" badge). */
   updatedAt?: number;
+  /** Force a cache-bypassing re-fetch (the manual refresh control). Omitted when
+   *  the host does not support manual refresh. */
+  onRefresh?: () => void | Promise<void>;
+  /** True while a manual refresh is in flight (spins the icon, disables click). */
+  refreshing?: boolean;
 }
 
 // Raw caller-identity GUIDs carry no diagnostic value and are PII the rest of
@@ -225,6 +230,10 @@ function QueueMessagesSection({ messages }: { messages: QueueMessagePreview[] })
   return (
     <div
       style={{
+        // `.glass-dialog` sets `text-align: center`, which this section would
+        // otherwise inherit and centre the JSON body. Pin it back to the left so
+        // the message content reads like the log/code that it is.
+        textAlign: "left",
         marginTop: 18,
         paddingTop: 12,
         borderTop: "1px solid var(--glass-border)",
@@ -236,7 +245,7 @@ function QueueMessagesSection({ messages }: { messages: QueueMessagePreview[] })
           fontSize: 12,
           fontWeight: 600,
           color: "var(--text-primary)",
-          marginBottom: 8,
+          marginBottom: 4,
         }}
       >
         Queued messages ({messages.length})
@@ -246,6 +255,23 @@ function QueueMessagesSection({ messages }: { messages: QueueMessagePreview[] })
           waiting in the request queue (peeked, not removed)
         </span>
       </div>
+      <p
+        style={{
+          margin: "0 0 10px",
+          fontSize: 11,
+          lineHeight: 1.5,
+          color: "var(--text-faint)",
+          maxWidth: 720,
+        }}
+      >
+        These are the raw Service Bus messages still sitting in the{" "}
+        <strong style={{ color: "var(--text-muted)", fontWeight: 600 }}>request queue</strong> — each
+        one is a BLAST search waiting to be picked up by a cluster worker. They are read
+        non-destructively (peeked), so showing them here does not consume or remove them. The queue
+        normally drains in under a second, so this list is usually empty; messages lingering here
+        mean no worker has consumed them yet (cluster scaling up, paused, or at capacity). The block
+        below is the message payload (query FASTA, target database, and BLAST options).
+      </p>
       <div style={{ display: "grid", gap: 8 }}>
         {messages.map((m, i) => (
           <div
@@ -310,7 +336,7 @@ function QueueMessagesSection({ messages }: { messages: QueueMessagePreview[] })
   );
 }
 
-export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowModalProps) {
+export function MessageFlowModal({ snapshot, onClose, updatedAt, onRefresh, refreshing }: MessageFlowModalProps) {
   const [selectedBox, setSelectedBox] = useState<MessageFlowBox | null>(null);
   const updatedAgo = useRelativeTime(updatedAt);
   // Mirrors `selectedBox` for the parent Escape handler so it can defer to the
@@ -465,6 +491,24 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt }: MessageFlowMo
               <span style={{ color: "var(--text-faint)" }}>· updated {updatedAgo}</span>
             ) : null}
           </span>
+          {onRefresh ? (
+            <button
+              type="button"
+              className="glass-button"
+              onClick={() => {
+                if (!refreshing) void onRefresh();
+              }}
+              disabled={refreshing}
+              aria-label="Refresh message flow"
+              title="Refresh now (bypass the ~30s cache)"
+              style={{ padding: 6 }}
+            >
+              <RefreshCw
+                size={14}
+                className={refreshing ? "spin" : undefined}
+              />
+            </button>
+          ) : null}
           <button
             type="button"
             className="glass-button"

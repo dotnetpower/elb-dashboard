@@ -125,7 +125,12 @@ export interface MonitorJobDetail {
 }
 
 export const messageFlowApi = {
-  get: () => api.get<MessageFlowSnapshot>("/monitor/message-flow"),
+  /** Fetch the snapshot. Pass `refresh: true` to bypass the ~30s server cache
+   *  (used by the modal's manual refresh control). */
+  get: (opts?: { refresh?: boolean }) =>
+    api.get<MessageFlowSnapshot>(
+      `/monitor/message-flow${opts?.refresh ? "?refresh=true" : ""}`,
+    ),
   getJobDetail: (jobId: string) =>
     api.get<MonitorJobDetail>(`/monitor/jobs/${encodeURIComponent(jobId)}`),
 };

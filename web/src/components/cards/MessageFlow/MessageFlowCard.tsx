@@ -11,7 +11,7 @@
  * messages" line rather than an empty diagram.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Maximize2, Radio } from "lucide-react";
 
 import { messageFlowApi } from "@/api/messageFlow";
@@ -21,6 +21,8 @@ import { MessageFlowModal } from "./MessageFlowModal";
 
 export function MessageFlowCard() {
   const [open, setOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["message-flow"],
     queryFn: () => messageFlowApi.get(),
@@ -43,6 +45,19 @@ export function MessageFlowCard() {
   const data = query.data;
   // Hide entirely unless the integration is live (mirrors ServiceBusInboundStrip).
   if (!data || !data.enabled) return null;
+
+  // Forced refresh used by the modal's manual control: bypass the ~30s server
+  // cache and write the authoritative reading straight into the shared query
+  // cache so both the card and the open modal re-render with it at once.
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const fresh = await messageFlowApi.get({ refresh: true });
+      queryClient.setQueryData(["message-flow"], fresh);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const producers = data.producers ?? [];
   const clusters = data.consumers?.clusters ?? [];
@@ -136,6 +151,8 @@ export function MessageFlowCard() {
           snapshot={data}
           onClose={() => setOpen(false)}
           updatedAt={query.dataUpdatedAt}
+          onRefresh={handleRefresh}
+          refreshing={refreshing}
         />
       ) : null}
     </>

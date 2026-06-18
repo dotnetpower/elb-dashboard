@@ -31,6 +31,14 @@ _DISABLED: dict[str, Any] = {"enabled": False}
 @router.get("/message-flow")
 def message_flow(
     limit: int = Query(default=200, ge=1, le=200),
+    refresh: bool = Query(
+        default=False,
+        description=(
+            "Bypass the ~30s snapshot cache and re-query the Table + Service Bus "
+            "immediately. Used by the modal's manual refresh control so an operator "
+            "can catch a lingering queue message without waiting out the cache TTL."
+        ),
+    ),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Return the Service Bus message-flow snapshot (read-only).
@@ -44,7 +52,9 @@ def message_flow(
     window regardless of how many browser tabs are open. The cache key is
     isolated per caller (or a single ``shared`` bucket when the dev
     shared-visibility flag is on) so one caller's private active-job list is
-    never served to another from a shared cache entry.
+    never served to another from a shared cache entry. ``refresh=true`` forces a
+    synchronous re-query (still stored for subsequent normal reads) so the modal
+    refresh control returns an authoritative reading instead of the cached one.
     """
     try:
         from api.services.blast.job_state import blast_shared_visibility_enabled
@@ -66,6 +76,7 @@ def message_flow(
                 list_limit=limit,
                 tenant_id=getattr(caller, "tenant_id", "") or "",
             ),
+            force=refresh,
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("message_flow", exc, empty=dict(_DISABLED)))
