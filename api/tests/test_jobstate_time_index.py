@@ -174,6 +174,7 @@ class _FakeTable:
         self.name = name
         self.rows = store
         self.fail_upsert = False
+        self.closed = False
 
     def __enter__(self) -> _FakeTable:
         return self
@@ -182,15 +183,24 @@ class _FakeTable:
         return None
 
     def close(self) -> None:
-        return None
+        # A real Table client closes its HTTP transport here; track it so a
+        # caller that wrongly closes the POOLED (shared) client is caught when
+        # the next operation runs (regression guard for the backfill footgun).
+        self.closed = True
+
+    def _check_open(self) -> None:
+        if self.closed:
+            raise RuntimeError("operation on a closed Table client")
 
     def create_entity(self, entity: dict[str, Any]) -> None:
+        self._check_open()
         key = (entity["PartitionKey"], entity["RowKey"])
         if key in self.rows:
             raise ResourceExistsError(message="exists")
         self.rows[key] = dict(entity)
 
     def upsert_entity(self, entity: dict[str, Any], **_kw: object) -> None:
+        self._check_open()
         if self.fail_upsert:
             raise RuntimeError("simulated index write failure")
         self.rows[(entity["PartitionKey"], entity["RowKey"])] = dict(entity)

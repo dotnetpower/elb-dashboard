@@ -60,26 +60,28 @@ def backfill(*, dry_run: bool = False, batch_log_every: int = 500) -> int:
             print("jobstate table does not exist yet; nothing to backfill")
             return EXIT_OK
 
+        # The index client is POOLED and owned by the repository — do NOT close
+        # it here. Closing the shared pooled client would tear down the
+        # underlying HTTP transport, so a second invocation of ``backfill()`` in
+        # the same process (e.g. a future periodic reconcile task that re-runs
+        # the upserts) would then operate on a closed client and fail. The pool
+        # is reclaimed on process exit / ``reset_state_repo_cache()``.
         index_t = None if dry_run else repo._index_client()
-        try:
-            for entity in entities:
-                scanned += 1
-                job_id = str(entity.get("PartitionKey") or "")
-                if not job_id:
-                    continue
-                index_entity = build_index_entity(
-                    job_id=job_id,
-                    owner_oid=entity.get("owner_oid"),
-                    created_at=entity.get("created_at"),
-                )
-                if not dry_run and index_t is not None:
-                    index_t.upsert_entity(index_entity)
-                written += 1
-                if written % batch_log_every == 0:
-                    print(f"... progress scanned={scanned} backfilled={written}")
-        finally:
-            if index_t is not None:
-                index_t.close()
+        for entity in entities:
+            scanned += 1
+            job_id = str(entity.get("PartitionKey") or "")
+            if not job_id:
+                continue
+            index_entity = build_index_entity(
+                job_id=job_id,
+                owner_oid=entity.get("owner_oid"),
+                created_at=entity.get("created_at"),
+            )
+            if not dry_run and index_t is not None:
+                index_t.upsert_entity(index_entity)
+            written += 1
+            if written % batch_log_every == 0:
+                print(f"... progress scanned={scanned} backfilled={written}")
 
     mode = "DRY-RUN " if dry_run else ""
     print(f"{mode}done scanned={scanned} backfilled={written}")
