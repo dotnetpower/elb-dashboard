@@ -7,7 +7,8 @@ Edit boundaries: Keep assertions focused on pool behaviour — networking is
 fully mocked.
 Key entry points: `test_pool_reuses_session`, `test_pool_ttl_clamped_to_material_expiry`,
 `test_pool_ttl_clamped_to_token_expiry`, `test_pool_max_entries_evicts_soonest_expiring`,
-`test_throwaway_path_unlinks_temp_files`
+`test_throwaway_path_unlinks_temp_files`,
+`test_ca_in_memory_survives_pool_eviction_during_inflight_get`
 Risky contracts: Do not require network access or real Azure credentials.
 Validation: `uv run pytest -q api/tests/test_k8s_session_pool.py`.
 """
@@ -24,20 +25,64 @@ import pytest
 from api.services.k8s import client as k8s_client_mod
 
 
+def _make_test_ca_pem() -> bytes:
+    """A real self-signed CA PEM so the in-memory SSLContext built by
+    `_build_k8s_https_adapter` (issue #47) can actually load it. `ssl`
+    rejects non-PEM bytes, so the old `b"ca-bytes"` placeholder no longer
+    works now that the CA is parsed instead of just written to a file."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "elb-test-ca")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(Encoding.PEM)
+
+
+_TEST_CA_PEM = _make_test_ca_pem()
+
+
 @pytest.fixture(autouse=True)
 def _reset_pool() -> None:
     k8s_client_mod.reset_k8s_credential_cache()
     k8s_client_mod.reset_k8s_session_pool()
 
 
-def _material(server: str = "https://aks.example", expires_in: float = 600.0) -> Any:
-    """Build a fake `_K8sCredentialMaterial` with the token-auth path active
-    (no client_cert) so `_get_k8s_session` exercises `credential.get_token`."""
+def _material(
+    server: str = "https://aks.example",
+    expires_in: float = 600.0,
+    *,
+    client_cert: bytes | None = None,
+    client_key: bytes | None = None,
+) -> Any:
+    """Build a fake `_K8sCredentialMaterial`.
+
+    Default (no client_cert) exercises the Bearer token path so
+    `_get_k8s_session` calls `credential.get_token`. Passing client_cert /
+    client_key exercises the admin mTLS path, which is the only path that
+    still writes temp files (the CA is now loaded into an in-memory
+    SSLContext, see issue #47)."""
     return SimpleNamespace(
         server=server,
-        ca_data=b"ca-bytes",
-        client_cert=None,
-        client_key=None,
+        ca_data=_TEST_CA_PEM,
+        client_cert=client_cert,
+        client_key=client_key,
         expires_at=time.monotonic() + expires_in,
     )
 
@@ -105,21 +150,32 @@ def test_pool_ttl_clamped_to_token_expiry() -> None:
 
 def test_throwaway_path_unlinks_temp_files() -> None:
     """When the effective TTL collapses to <= 0 we must hand out a non-pooled
-    session whose close() actually deletes the on-disk credential files."""
-    # Token expires in 1s, safety margin 60s -> negative remaining -> throwaway.
-    material = _material(expires_in=600.0)
-    cred = _credential(token_expires_in_seconds=1.0)
+    session whose close() actually deletes the on-disk credential files.
+
+    The CA no longer lands on disk (issue #47 — it is loaded into an in-memory
+    SSLContext), so this exercises the admin mTLS path whose client cert / key
+    are the only remaining temp files."""
+    # Material already expired -> entry_expires_at <= now -> throwaway path.
+    material = _material(
+        expires_in=-1.0,
+        client_cert=b"client-cert-bytes",
+        client_key=b"client-key-bytes",
+    )
+    cred = _credential()
     with patch.object(k8s_client_mod, "_get_k8s_credential_material", return_value=material):
         session, _ = k8s_client_mod._get_k8s_session(cred, "s", "rg", "aks")
     # Throwaway sessions are NOT pooled.
     with k8s_client_mod._K8S_SESSION_POOL_LOCK:
         assert ("s", "rg", "aks", False) not in k8s_client_mod._K8S_SESSION_POOL
-    # The CA file written by write_secret_file must exist before close()
-    # and be unlinked after close().
-    ca_path = session.verify
-    assert isinstance(ca_path, str) and os.path.exists(ca_path)
+    # The CA is in-memory now; verify is a bool, not a path.
+    assert session.verify is True
+    # The client cert / key files written by write_secret_file must exist
+    # before close() and be unlinked after close().
+    cert_path, key_path = session.cert
+    assert os.path.exists(cert_path) and os.path.exists(key_path)
     session.close()
-    assert not os.path.exists(ca_path)
+    assert not os.path.exists(cert_path)
+    assert not os.path.exists(key_path)
 
 
 def test_pool_max_entries_evicts_soonest_expiring(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,14 +250,73 @@ def test_pool_lock_released_during_retire_io(monkeypatch: pytest.MonkeyPatch) ->
 def test_throwaway_close_is_idempotent() -> None:
     """A double `session.close()` on a throwaway session must not crash —
     the second unlink finds the file already gone."""
-    material = _material(expires_in=600.0)
-    cred = _credential(token_expires_in_seconds=1.0)
+    material = _material(
+        expires_in=-1.0,
+        client_cert=b"client-cert-bytes",
+        client_key=b"client-key-bytes",
+    )
+    cred = _credential()
     with patch.object(k8s_client_mod, "_get_k8s_credential_material", return_value=material):
         session, _ = k8s_client_mod._get_k8s_session(cred, "s", "rg", "aks")
-    # First close unlinks the CA file; second close must be a no-op error path.
+    cert_path, key_path = session.cert
+    # First close unlinks the client cert/key files; second close must be a
+    # no-op error path.
     session.close()
     session.close()
-    assert not os.path.exists(session.verify)
+    assert not os.path.exists(cert_path)
+    assert not os.path.exists(key_path)
+
+
+def test_ca_in_memory_survives_pool_eviction_during_inflight_get() -> None:
+    """Issue #47: the CA must be in-memory so pool eviction cannot delete a
+    bundle a borrowed session still references.
+
+    The Bearer path writes NO temp file at all (CA -> SSLContext), so eviction
+    has nothing to unlink out from under an in-flight GET. We verify the
+    invariant and then drive a GET on the borrowed session AFTER the pool has
+    been drained — it must succeed with ``verify=True`` (never a deleted path).
+    """
+    import ssl
+
+    import requests
+
+    material = _material()  # Bearer path, ca_data = real PEM, no client cert.
+    cred = _credential()
+    with patch.object(k8s_client_mod, "_get_k8s_credential_material", return_value=material):
+        session, _ = k8s_client_mod._get_k8s_session(cred, "s", "rg", "aks")
+
+    with k8s_client_mod._K8S_SESSION_POOL_LOCK:
+        entry = k8s_client_mod._K8S_SESSION_POOL[("s", "rg", "aks", False)]
+    # No CA bundle on disk -> eviction cannot delete a borrowed CA file.
+    assert entry.temp_files == []
+    assert session.verify is True
+    # The https adapter carries the cluster CA in an in-memory SSLContext.
+    https_adapter = session.get_adapter("https://aks.example")
+    ctx = https_adapter.poolmanager.connection_pool_kw.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext)
+
+    # A borrower still holds `session`. Drain the pool (this is the eviction /
+    # atexit path that previously unlinked the CA temp file).
+    borrowed = session
+    k8s_client_mod.reset_k8s_session_pool()
+
+    # In-flight GET after eviction: stub the transport so the test is
+    # deterministic, and assert `verify` reaching the adapter is the truthy
+    # in-memory marker, never a now-deleted filesystem path (the old OSError).
+    captured: dict[str, Any] = {}
+
+    def fake_send(self: Any, request: Any, **kwargs: Any) -> Any:
+        captured["verify"] = kwargs.get("verify")
+        response = requests.models.Response()
+        response.status_code = 200
+        response.url = request.url
+        return response
+
+    with patch.object(requests.adapters.HTTPAdapter, "send", fake_send):
+        result = borrowed.get("https://aks.example/healthz", timeout=1)
+
+    assert result.status_code == 200
+    assert captured["verify"] is True
 
 
 def test_max_entries_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

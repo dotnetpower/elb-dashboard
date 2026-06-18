@@ -6,7 +6,10 @@ instead of duplicating SDK code.
 Key entry points: `_K8sCredentialMaterial`, `reset_k8s_credential_cache`,
 `_k8s_credential_cache_ttl`, `reset_k8s_session_pool`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
-Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
+The cluster CA is trusted via an in-memory SSLContext (`_build_k8s_https_adapter`),
+never a temp file, so pool eviction cannot delete a CA bundle a borrowed session
+still references.
+Validation: `uv run pytest -q api/tests/test_k8s_list_events.py api/tests/test_k8s_session_pool.py`.
 """
 
 from __future__ import annotations
@@ -203,9 +206,53 @@ def _build_k8s_retry() -> Any:
     )
 
 
+def _build_k8s_https_adapter(ca_data: bytes, pool_size: int) -> Any:
+    """Build an HTTPS adapter that trusts the AKS cluster CA in-memory.
+
+    Why this exists: the previous implementation wrote ``ca_data`` to a
+    ``NamedTemporaryFile`` and set ``session.verify`` to that path. Pooled
+    sessions outlive a single request, and pool eviction / atexit cleanup
+    unlinks those temp files at TTL expiry — so a request still holding a
+    borrowed session could read a ``session.verify`` path that had already
+    been deleted, raising ``OSError: Could not find a suitable TLS CA
+    certificate bundle`` (issue #47). Loading the CA into an in-memory
+    ``ssl.SSLContext`` removes the on-disk CA bundle entirely, so there is no
+    file for eviction to delete out from under an in-flight GET.
+
+    The context still performs full verification (hostname check + required
+    cert) against the cluster CA; system roots remain available so client-cert
+    (admin) sessions and any future proxy paths keep working.
+    """
+    import ssl
+
+    import requests as _requests
+
+    context = ssl.create_default_context()
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.load_verify_locations(cadata=ca_data.decode("utf-8"))
+
+    class _CADataAdapter(_requests.adapters.HTTPAdapter):
+        """HTTPAdapter that injects the in-memory CA SSLContext into the pool."""
+
+        def init_poolmanager(self, *args: Any, **kwargs: Any) -> Any:
+            kwargs["ssl_context"] = context
+            return super().init_poolmanager(*args, **kwargs)
+
+        def proxy_manager_for(self, *args: Any, **kwargs: Any) -> Any:
+            kwargs["ssl_context"] = context
+            return super().proxy_manager_for(*args, **kwargs)
+
+    return _CADataAdapter(
+        pool_connections=pool_size,
+        pool_maxsize=pool_size,
+        pool_block=False,
+        max_retries=_build_k8s_retry(),
+    )
+
+
 def _install_cluster_breaker(session: Any, breaker_key: tuple[str, str, str]) -> None:
     """Wrap ``session.request`` so the per-cluster breaker sees every call.
-
     All of ``session.get``/``post``/``delete`` funnel through ``Session.request``
     (which the OpenTelemetry requests instrumentor has patched at class level).
     Shadowing the *instance* ``request`` with this guard lets the breaker (a)
@@ -354,15 +401,6 @@ def _get_k8s_session(
     # so a brief burst does not stall behind the pool — at the cost of
     # extra short-lived sockets which urllib3 then closes.
     _k8s_pool_size = _k8s_session_http_pool_size()
-    adapter = _requests.adapters.HTTPAdapter(
-        pool_connections=_k8s_pool_size,
-        pool_maxsize=_k8s_pool_size,
-        pool_block=False,
-        max_retries=_build_k8s_retry(),
-    )
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    _install_cluster_breaker(session, breaker_key)
     temp_files: list[str] = []
 
     def write_secret_file(suffix: str, content: bytes) -> str:
@@ -387,10 +425,30 @@ def _get_k8s_session(
     # credential cache already noticed.
     entry_expires_at = min(entry_expires_at, material.expires_at)
     try:
+        # Trust the cluster CA via an in-memory SSLContext (issue #47) rather
+        # than a temp file on disk. Pooled sessions outlive a single request,
+        # so a CA file unlinked by pool eviction could be read by an in-flight
+        # GET -> OSError. The HTTPS adapter below carries the CA in memory, so
+        # ``session.verify`` stays True and there is no file to evict.
         if material.ca_data:
-            session.verify = write_secret_file(".crt", material.ca_data)
+            https_adapter = _build_k8s_https_adapter(material.ca_data, _k8s_pool_size)
         else:
-            session.verify = True
+            https_adapter = _requests.adapters.HTTPAdapter(
+                pool_connections=_k8s_pool_size,
+                pool_maxsize=_k8s_pool_size,
+                pool_block=False,
+                max_retries=_build_k8s_retry(),
+            )
+        http_adapter = _requests.adapters.HTTPAdapter(
+            pool_connections=_k8s_pool_size,
+            pool_maxsize=_k8s_pool_size,
+            pool_block=False,
+            max_retries=_build_k8s_retry(),
+        )
+        session.mount("https://", https_adapter)
+        session.mount("http://", http_adapter)
+        session.verify = True
+        _install_cluster_breaker(session, breaker_key)
 
         if material.client_cert and material.client_key:
             cert_path = write_secret_file(".crt", material.client_cert)
