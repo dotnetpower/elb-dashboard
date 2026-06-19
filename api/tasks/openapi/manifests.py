@@ -64,7 +64,7 @@ def build_manifests(
     acr_name: str,
     acr_resource_group: str,
     num_nodes: int = 10,
-    max_active_submissions: int = 2,
+    max_active_submissions: int = 3,
     api_token: str = "",
     control_plane_url: str = "",
     pls: PlsConfig | None = None,
@@ -114,22 +114,33 @@ def build_manifests(
         {"name": "ELB_ACR_RESOURCE_GROUP", "value": acr_resource_group},
         {"name": "ELB_NUM_NODES", "value": str(max(1, num_nodes))},
         {"name": "ELB_CORE_NT_SHARDS", "value": str(max(1, num_nodes))},
-        # Server-side cap on concurrently-running BLAST jobs. The hard
-        # ceiling is NOT CPU utilisation but the Kubernetes scheduler's
-        # CPU-*request* reservation: each shard pod requests cpu=6 and a
-        # Standard_E16s_v5 node exposes ~15.74 allocatable CPU, so
-        # floor(15.74/6)=2 shard pods fit per node. Because every job
-        # spreads exactly one shard pod per node (shards == nodes), the
-        # per-node pod ceiling equals the concurrent-job ceiling = 2.
-        # A 3rd job's pods request 18 CPU/node > 15.74 and stay Pending
-        # even while CPU sits idle. Empirically confirmed 2026-06-03
-        # (burst-6 -> peak running_jobs=2, 20 pods, 0 Pending). Default 2
-        # is throughput-optimal for this 10x E16 pool; raising it only
-        # helps if per-shard CPU request drops or nodes are added.
+        # Server-side cap on concurrently-running BLAST jobs (the OpenAPI
+        # dispatcher admit cap). To actually RUN N jobs in parallel two things
+        # must both hold: (1) this admit cap >= N, and (2) N shard pods fit per
+        # node under the Kubernetes CPU-*request* reservation. Each job spreads
+        # exactly one shard pod per node (shards == nodes), and elastic-blast
+        # derives the shard pod CPU request = num-cpus - 2. On a
+        # Standard_E16s_v5 node (~15.74 allocatable CPU): num-cpus=8 -> request 6
+        # -> floor(15.74/6)=2 jobs/node; num-cpus=7 -> request 5 ->
+        # floor(15.74/5)=3 jobs/node. We target 3 concurrent (matching the
+        # sibling OpenAPI's BLAST_MAX_RUN_CONCURRENCY default of 3), so the admit
+        # cap defaults to 3 AND ELB_OPENAPI_NUM_CPUS=7 (below) pins num-cpus so
+        # the 3rd job's pods schedule instead of staying Pending. With the old
+        # default 2 the admit cap silently bottlenecked the sibling's intended 3
+        # down to <=2 (observed peak 1-2 under core_nt). Validated live
+        # 2026-06-19: burst -> 3 distinct running jobs, request=5, 0 Pending.
+        # On a different node SKU, retune num-cpus so
+        # floor(allocatable/(num-cpus-2)) == the desired concurrency.
         {
             "name": "ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS",
             "value": str(max(1, max_active_submissions)),
         },
+        # Pin elastic-blast [cluster] num-cpus so 3 shard pods co-schedule per
+        # E16 node (request = num-cpus - 2 = 5; 3 x 5 = 15 < 15.74 allocatable).
+        # Lowering per-pod CPU 8->7 trades a little single-job speed for 3-way
+        # parallelism. The sibling submit path reads this env to set the
+        # elastic-blast [cluster] num-cpus.
+        {"name": "ELB_OPENAPI_NUM_CPUS", "value": "7"},
         {
             "name": "PATH",
             "value": ("/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),

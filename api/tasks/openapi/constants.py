@@ -62,7 +62,12 @@ FED_CRED_NAME = "fc-elb-openapi"
 #       more forgiving liveness probe (timeout 5s -> 10s, failureThreshold
 #       3 -> 6) so a transient load spike no longer triggers a restart loop on
 #       the single-replica submit/dispatch path.
-OPENAPI_MANIFEST_REVISION = 3
+#   4 — run-concurrency 2 -> 3: admit cap default 2 -> 3 + ELB_OPENAPI_NUM_CPUS=7
+#       (shard request 6 -> 5) so 3 jobs co-schedule per E16 node. The old
+#       admit cap of 2 bottlenecked the sibling's intended 3-way concurrency
+#       (BLAST_MAX_RUN_CONCURRENCY) down to <=2; validated live 2026-06-19
+#       (3 distinct running jobs, 0 Pending).
+OPENAPI_MANIFEST_REVISION = 4
 OPENAPI_MANIFEST_REVISION_ANNOTATION = "elb-dashboard/manifest-revision"
 
 
