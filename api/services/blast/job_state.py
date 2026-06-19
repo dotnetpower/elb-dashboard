@@ -133,6 +133,77 @@ def _job_query_blob_path(job_id: str, caller: CallerIdentity) -> str:
     return blob_path
 
 
+def derive_external_query_label(job_id: str, caller: CallerIdentity) -> str:
+    """Durable Query ID fallback for an external job with no remembered label.
+
+    The inline-FASTA defline label is remembered in OPS Redis (ephemeral, wiped
+    on every Container App revision restart), so an external job viewed after a
+    restart shows ``Query ID: —``. This reads the first FASTA defline from the
+    DURABLE query blob (``queries/<openapi_id>.fa`` — the same blob the
+    prepare-step preview reads) and derives a short label, so the header
+    recovers the identity from Storage instead of the lost cache.
+
+    Detail-view only (one small Storage read, capped to 512 bytes) — never use
+    on the jobs LIST path (it would be one read per row). Returns ``""`` for a
+    non-external job, an unresolvable/unreadable blob, or a header-less FASTA;
+    never raises except the ownership 403 (mirrors ``_job_query_blob_path``).
+    """
+    blob_path = _job_query_blob_path(job_id, caller)
+    if not blob_path:
+        return ""
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        state = JobStateRepository().get(job_id)
+    except Exception:
+        return ""
+    if state is None:
+        return ""
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    external_payload = (
+        payload.get("external") if isinstance(payload.get("external"), dict) else None
+    )
+    if external_payload is None:
+        # Dashboard jobs already carry a query_label from their payload; the
+        # durable-blob fallback exists only for external (OpenAPI) jobs.
+        return ""
+    storage_account = getattr(state, "storage_account", "") or str(
+        _payload_value(payload, "storage_account") or ""
+    )
+    if not storage_account:
+        from api.services.blast.db_metadata import extract_trusted_storage_account
+
+        storage_account = extract_trusted_storage_account(
+            str(getattr(state, "db", "") or "")
+        ) or extract_trusted_storage_account(str(external_payload.get("db") or ""))
+    if not storage_account:
+        return ""
+    try:
+        from api.services import get_credential
+        from api.services.storage.data import read_blob_text
+
+        text = read_blob_text(
+            get_credential(),
+            storage_account,
+            container="queries",
+            blob_path=blob_path,
+            max_bytes=512,
+        )
+    except Exception as exc:
+        LOGGER.debug(
+            "derive_external_query_label read failed job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+        return ""
+    from api.services.blast.external_query_labels import derive_inline_query_label
+
+    try:
+        return derive_inline_query_label(text)
+    except Exception:
+        return ""
+
+
 def _blob_not_found(exc: BaseException) -> bool:
     from azure.core.exceptions import ResourceNotFoundError
 

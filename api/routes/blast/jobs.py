@@ -636,6 +636,41 @@ def blast_job_get(
                 split_children=split_children,
                 include_database_metadata=include_database_metadata,
             )
+            if not str(out.get("query_label") or "").strip():
+                # External (OpenAPI / Service Bus) jobs remember their inline
+                # FASTA defline label only in ephemeral OPS Redis, which is
+                # wiped on every Container App revision restart — after which
+                # the Run details header shows "Query ID: —". Recover the
+                # identity durably from the query blob (detail view only; one
+                # capped Storage read) and re-remember it so the next jobs-list
+                # sync persists it back to the Table row.
+                try:
+                    from api.services.blast.job_state import derive_external_query_label
+
+                    recovered_label = derive_external_query_label(job_id, caller)
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    LOGGER.debug(
+                        "query label recovery skipped job_id=%s: %s",
+                        job_id,
+                        type(exc).__name__,
+                    )
+                    recovered_label = ""
+                if recovered_label:
+                    out["query_label"] = recovered_label
+                    try:
+                        from api.services.blast.external_query_labels import (
+                            remember_query_label,
+                        )
+
+                        remember_query_label(job_id, recovered_label)
+                    except Exception as exc:
+                        LOGGER.debug(
+                            "query label re-remember skipped job_id=%s: %s",
+                            job_id,
+                            type(exc).__name__,
+                        )
             if history:
                 hist = repo.get_history(job_id, limit=200)
                 out["history"] = hist

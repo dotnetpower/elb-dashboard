@@ -17,6 +17,59 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+def test_job_detail_recovers_query_label_for_external_job(monkeypatch) -> None:
+    """An external job whose ephemeral Redis defline label was evicted recovers
+    the Query ID durably from the query blob on the detail view."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    owner_oid = "00000000-0000-0000-0000-000000000000"
+
+    class Repo:
+        def get(self, job_id: str):
+            return SimpleNamespace(
+                job_id="job-ext",
+                task_id="task-1",
+                type="blast",
+                owner_oid=owner_oid,
+                status="completed",
+                phase="completed",
+                created_at="2026-06-19T00:00:00Z",
+                updated_at="2026-06-19T00:01:00Z",
+                error_code=None,
+                parent_job_id=None,
+                storage_account="elbstg01",
+                db="https://elbstg01.blob.core.windows.net/blast-db/core_nt",
+                # External (OpenAPI) job: no top-level query_file; the sibling
+                # uploaded the inline FASTA to queries/<openapi_id>.fa.
+                payload={"db": "core_nt", "external": {"job_id": "openapi-xyz"}},
+            )
+
+    reads: list[tuple[str, str]] = []
+
+    def fake_read_blob_text(_cred, _account, container, blob_path, *, max_bytes) -> str:
+        reads.append((container, blob_path))
+        return ">myquery some description\nACGTACGT\n"
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job-ext",
+        params={"include_database_metadata": "false"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # The durable query blob (queries/openapi-xyz.fa) was read and its first
+    # defline derived into the Query ID.
+    assert reads == [("queries", "openapi-xyz.fa")]
+    assert body["query_label"] == "myquery"
+
+
 def test_job_detail_skips_split_child_lookup_for_non_split_job(monkeypatch) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
 
