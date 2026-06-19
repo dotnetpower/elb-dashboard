@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSubrange,
+  errorMessage,
   previewFastaHeader,
 } from "@/pages/blastSubmit/SequenceBuilderDialog";
 
@@ -83,5 +84,26 @@ describe("previewFastaHeader", () => {
     expect(previewFastaHeader("NC_063383.1", "100", "600", "plus")).toBe(
       ">NC_063383.1:100-600",
     );
+  });
+});
+
+describe("errorMessage", () => {
+  it("surfaces the backend message from the api error body", () => {
+    const err = Object.assign(new Error("HTTP 422"), {
+      status: 422,
+      body: {
+        code: "ncbi_features_too_many",
+        message: "This record has too many features to list. Enter a sub-range.",
+      },
+    });
+    expect(errorMessage(err)).toContain("too many features");
+  });
+
+  it("falls back to the Error message when no body message", () => {
+    expect(errorMessage(new Error("boom"))).toBe("boom");
+  });
+
+  it("has a safe default for unknown errors", () => {
+    expect(errorMessage(null)).toBe("NCBI request failed. Please try again.");
   });
 });

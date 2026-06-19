@@ -453,11 +453,28 @@ def get_nuccore_features(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Return the gene/CDS features (name + 1-based coordinates) of a record."""
+    from api.services.ncbi import NcbiResponseTooLarge
     from api.services.ncbi.search import fetch_feature_table
 
     bucket_key = _check_caller_quota(caller)
     try:
         return fetch_feature_table(accession, limit=limit)
+    except NcbiResponseTooLarge as exc:
+        # A chromosome-scale record has more features than we will stream into
+        # memory. This is not a hard error for the modal — the researcher can
+        # still enter a sub-range by hand — so return a friendly, actionable
+        # 422 instead of the generic "response too large".
+        _refund_caller_quota(bucket_key)
+        raise HTTPException(
+            422,
+            detail={
+                "code": "ncbi_features_too_many",
+                "message": (
+                    "This record has too many features to list. Enter a "
+                    "sub-range (From / To) manually instead."
+                ),
+            },
+        ) from exc
     except Exception as exc:
         _raise_ncbi_http_error(exc, bucket_key)
         raise  # unreachable — _raise_ncbi_http_error always raises

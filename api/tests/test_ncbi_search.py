@@ -236,3 +236,24 @@ def test_route_features_rejects_bad_accession(monkeypatch: pytest.MonkeyPatch) -
     _reset_caller_quota_for_tests()
     response = TestClient(app).get("/api/ncbi/nuccore/not-an-accession/features")
     assert response.status_code == 422
+
+
+def test_route_features_too_many_is_friendly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chromosome-scale record (feature table over the cap) must return a
+    friendly, actionable 422 rather than the generic 'response too large'."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.routes.ncbi import _reset_caller_quota_for_tests
+    from api.services.ncbi import NcbiResponseTooLarge
+    from api.services.ncbi import search as search_mod
+
+    _reset_caller_quota_for_tests()
+
+    def boom(accession: str, limit: int = 1000) -> dict:
+        raise NcbiResponseTooLarge("NCBI response exceeded 6291456 byte limit")
+
+    monkeypatch.setattr(search_mod, "fetch_feature_table", boom)
+    response = TestClient(app).get("/api/ncbi/nuccore/AP019314.1/features")
+    assert response.status_code == 422
+    assert response.json()["code"] == "ncbi_features_too_many"
+    assert "sub-range" in response.json()["message"]

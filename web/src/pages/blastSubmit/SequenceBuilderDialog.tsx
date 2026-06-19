@@ -21,7 +21,19 @@ import {
 
 type Strand = "plus" | "minus";
 
-function errorMessage(err: unknown): string {
+export function errorMessage(err: unknown): string {
+  // The api error carries the backend JSON body on `.body` (see api/client.ts).
+  // Prefer its `message` (e.g. "This record has too many features…") over the
+  // generic "HTTP 422" the client falls back to when no `error` field exists.
+  if (err && typeof err === "object" && "body" in err) {
+    const body = (err as { body?: unknown }).body;
+    if (body && typeof body === "object") {
+      const msg =
+        (body as { message?: unknown }).message ??
+        (body as { detail?: { message?: unknown } }).detail?.message;
+      if (typeof msg === "string" && msg.trim()) return msg;
+    }
+  }
   if (err instanceof Error && err.message) return err.message;
   return "NCBI request failed. Please try again.";
 }

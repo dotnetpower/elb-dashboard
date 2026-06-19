@@ -41,9 +41,11 @@ MAX_TERM_CHARS = 200
 # narrows the term rather than paging hundreds of hits.
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 25
-# Feature table can be ~70 KB for a poxvirus genome; cap at 1 MiB so a large
-# assembly record is rejected rather than streamed into memory.
-MAX_FEATURE_TABLE_BYTES = 1 * 1024 * 1024
+# Feature table can be ~2 MB for a bacterial genome (~5k genes); cap at 6 MiB so
+# the common bacterial/viral/organelle records parse, while a chromosome-scale
+# assembly (tens of MB of features) is still rejected rather than streamed into
+# memory. The caller then falls back to a manual sub-range.
+MAX_FEATURE_TABLE_BYTES = 6 * 1024 * 1024
 # A poxvirus genome carries ~200 genes; 1000 is a generous ceiling that still
 # bounds the response the SPA has to render.
 MAX_FEATURES_RETURNED = 1000
