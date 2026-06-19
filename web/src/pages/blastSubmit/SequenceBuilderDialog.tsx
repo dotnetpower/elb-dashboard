@@ -295,14 +295,19 @@ export function SequenceBuilderDialog({
                 key={r.accession_version}
                 type="button"
                 className="glass-card"
+                aria-pressed={accession.trim() === r.accession_version}
                 onClick={() => selectAccession(r.accession_version)}
                 style={{
                   textAlign: "left",
                   padding: "8px 10px",
                   background:
                     accession.trim() === r.accession_version
-                      ? "rgba(120,170,255,0.12)"
-                      : "rgba(255,255,255,0.04)",
+                      ? "color-mix(in srgb, var(--accent) 16%, var(--bg-tertiary))"
+                      : "var(--bg-tertiary)",
+                  borderColor:
+                    accession.trim() === r.accession_version
+                      ? "var(--border-focus)"
+                      : undefined,
                   cursor: "pointer",
                 }}
               >
@@ -381,7 +386,7 @@ export function SequenceBuilderDialog({
                   style={{
                     textAlign: "left",
                     padding: "6px 9px",
-                    background: "rgba(255,255,255,0.04)",
+                    background: "var(--bg-tertiary)",
                     cursor: "pointer",
                     display: "flex",
                     justifyContent: "space-between",
@@ -427,20 +432,27 @@ export function SequenceBuilderDialog({
             min={1}
           />
           <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
-            {(["plus", "minus"] as const).map((s) => (
-              <button
-                key={s}
-                type="button"
-                className="glass-button"
-                onClick={() => setStrand(s)}
-                style={{
-                  opacity: strand === s ? 1 : 0.5,
-                  fontSize: 11,
-                }}
-              >
-                {s === "plus" ? "Plus" : "Minus"}
-              </button>
-            ))}
+            {((["plus", "minus"] as const).map((s) => {
+              const selected = strand === s;
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  className="glass-button"
+                  aria-pressed={selected}
+                  onClick={() => setStrand(s)}
+                  style={{
+                    fontSize: 11,
+                    fontWeight: selected ? 600 : 400,
+                    color: selected ? "var(--text-primary)" : "var(--text-muted)",
+                    background: selected ? "var(--bg-hover)" : undefined,
+                    borderColor: selected ? "var(--border-focus)" : undefined,
+                  }}
+                >
+                  {s === "plus" ? "Plus" : "Minus"}
+                </button>
+              );
+            }))}
           </div>
         </div>
 
