@@ -143,8 +143,7 @@ export function StepLogSection({
       (state === "done" || state === "active") &&
       jobId &&
       subscriptionId &&
-      storageAccount &&
-      uploadBlobName
+      storageAccount
     ) {
       return (
         <FilePreview
@@ -247,12 +246,17 @@ function resolveUploadQueryBlobName(
   job: Record<string, unknown>,
 ): string | undefined {
   const payload = isRecord(job.payload) ? job.payload : null;
-  const jobId = stringValue(job.job_id);
   const candidate =
     stringValue(uploadStep?.blob_path) ||
     stringValue(payload?.query_file) ||
     stringValue(payload?.query_blob_url);
-  return candidate || (jobId ? `queries/${jobId}/input.fa` : undefined);
+  // Only return an AUTHORITATIVE path. Do NOT guess ``queries/<jobId>/input.fa``:
+  // external (OpenAPI / Service Bus) jobs store the query at
+  // ``queries/<openapi_id>.fa``, so the guess 404s and the preview renders
+  // "Could not load input.fa". When unknown, return undefined so ``readJobFile``
+  // sends ``name=input.fa`` and the backend resolves the real blob (it tries
+  // ``<jobId>/input.fa`` plus the external ``<openapi_id>.fa`` reconstruction).
+  return candidate || undefined;
 }
 
 function resolveConfigBlobName(

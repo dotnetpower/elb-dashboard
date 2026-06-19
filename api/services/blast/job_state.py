@@ -111,7 +111,26 @@ def _job_query_blob_path(job_id: str, caller: CallerIdentity) -> str:
     if getattr(state, "owner_oid", None) and state.owner_oid != caller.object_id:
         raise HTTPException(403, "not owner")
     payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
-    return _queries_blob_path(_payload_value(payload, "query_file", "query_blob_url"))
+    blob_path = _queries_blob_path(_payload_value(payload, "query_file", "query_blob_url"))
+    if not blob_path:
+        # External (OpenAPI / Service Bus) jobs carry no top-level query field
+        # on the job row: the sibling elastic-blast-azure plane uploads the
+        # inline FASTA to ``queries/<openapi_id>.fa`` and records nothing back.
+        # Without this fallback the prepare-step query preview (and any other
+        # ``input.fa`` reader) resolves to ``<job_id>/input.fa`` — a path that
+        # never exists for these jobs — so the Run details panel renders
+        # "Could not load input.fa" even though the query is in Storage. Mirror
+        # the reconstruction ``blast_job_query`` (Edit search) already does so
+        # both surfaces agree. The OpenAPI id from the external payload is
+        # authoritative; the route ``job_id`` matches it for synced rows.
+        external_payload = (
+            payload.get("external") if isinstance(payload.get("external"), dict) else None
+        )
+        if external_payload is not None:
+            openapi_id = str(external_payload.get("job_id") or job_id).strip()
+            if openapi_id and "/" not in openapi_id and ".." not in openapi_id:
+                blob_path = f"{openapi_id}.fa"
+    return blob_path
 
 
 def _blob_not_found(exc: BaseException) -> bool:

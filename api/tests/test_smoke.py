@@ -1373,6 +1373,57 @@ def test_blast_job_file_reads_uploaded_query_from_queries_container(
     assert reads == [("queries", "uploads/job-123/query.fa")]
 
 
+def test_blast_job_file_reads_external_openapi_query(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """External (OpenAPI / Service Bus) jobs carry no top-level query_file.
+
+    The sibling plane uploads the inline FASTA to ``queries/<openapi_id>.fa``;
+    without the external reconstruction the prepare-step preview resolves to
+    ``<job_id>/input.fa`` (which never exists) and the Run details panel renders
+    "Could not load input.fa". This pins that the file route reconstructs the
+    ``<openapi_id>.fa`` blob from ``payload.external.job_id``.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    class FakeRepo:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(
+                job_id=job_id,
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                payload={"external": {"job_id": "openapi-abc123"}},
+            )
+
+    reads: list[tuple[str, str]] = []
+
+    def fake_read_blob_text(
+        _credential: object,
+        _account_name: str,
+        container: str,
+        blob_path: str,
+        *,
+        max_bytes: int,
+    ) -> str:
+        reads.append((container, blob_path))
+        if blob_path == "openapi-abc123.fa":
+            return ">q1\nACGT\n"
+        raise RuntimeError("BlobNotFound")
+
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
+
+    r = client.get(
+        "/api/blast/jobs/job-123/file"
+        "?name=input.fa&subscription_id=sub-1&storage_account=elbstg01&max_bytes=1000"
+    )
+
+    assert r.status_code == 200
+    assert r.json()["content"] == ">q1\nACGT\n"
+    # The external <openapi_id>.fa reconstruction is tried first and wins.
+    assert reads[0] == ("queries", "openapi-abc123.fa")
+
+
 def test_blast_job_file_rejects_query_blob_outside_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
