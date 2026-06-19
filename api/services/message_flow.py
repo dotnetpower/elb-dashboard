@@ -11,14 +11,21 @@ Responsibility: Build a single read-only snapshot that powers the dashboard
     non-destructively) so an operator can inspect content/count directly.
 Edit boundaries: Pure aggregation/shaping over ``state_repo`` rows and the
     Service Bus config. No HTTP, no FastAPI, no direct ``azure.mgmt.*`` import.
-    Before reading the Table it best-effort syncs external OpenAPI ``/v1/jobs``
-    rows in via ``collect_and_sync_external_jobs`` (the same shared orchestration
-    the Recent-searches list route uses) so directly-submitted jobs surface on
-    the card; that sync is bounded and never raises into the snapshot. The HTTP
-    route in ``api.routes.monitor.message_flow`` wraps this and owns auth +
-    graceful degradation.
-Key entry points: ``build_message_flow``, ``_sync_external_jobs_best_effort``,
-    ``_queue_previews``.
+    Before reading the Table it spawns a background, single-in-flight sync of
+    external OpenAPI ``/v1/jobs`` rows via ``collect_and_sync_external_jobs`` (the
+    same shared orchestration the Recent-searches list route uses) so
+    directly-submitted jobs surface on the card. The sync runs OFF the request
+    path because it pays cluster discovery + a per-cluster ~10 s-timeout K8s
+    service-IP probe, which used to make the FIRST (cold) snapshot — and hence
+    the card's first paint — block for many seconds. The current snapshot is
+    built from whatever is already in the Table; when the background sync
+    actually changes the Table it drops the message-flow snapshot cache so the
+    next poll (~8-10 s) reflects the newly-discovered external jobs. The sync is
+    bounded and never raises into the snapshot. The HTTP route in
+    ``api.routes.monitor.message_flow`` wraps this and owns auth + graceful
+    degradation.
+Key entry points: ``build_message_flow``, ``_spawn_external_sync``,
+    ``_sync_external_jobs_best_effort``, ``_queue_previews``.
 Risky contracts: The broker boxes intentionally reflect ACTIVE ``JobState``
     rows (status ``queued``/``pending``/``running``/``reducing`` — the canonical
     in-flight set shared with ``JobStateRepository.list_active`` and the
@@ -47,12 +54,21 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
 from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger(__name__)
+
+# Single-in-flight guard for the background external-jobs sync. The sync pays
+# cluster discovery + a per-cluster ~10 s-timeout K8s probe, so it runs OFF the
+# request path; this guard makes sure overlapping polls (multiple browser tabs,
+# fast cadence) never spawn more than one worker at a time. The flag is reset in
+# the worker's ``finally`` so a sync failure can never wedge it permanently.
+_SYNC_LOCK = threading.Lock()
+_sync_in_flight = False
 
 # Statuses that mean a job is in flight and therefore worth drawing in the
 # broker lane as a live message. This is the canonical active set shared with
@@ -354,6 +370,22 @@ def _visible_rows(
     return active, settling, scope, len(rows)
 
 
+def _invalidate_snapshot_cache() -> None:
+    """Drop the message-flow snapshot cache so a freshly-synced external job
+    surfaces on the next poll instead of waiting out the ~30 s monitor TTL.
+
+    Only the snapshot cache is dropped — NOT the 70 s external ``/v1/jobs`` list
+    cache, which the background sync just populated; resetting that would force
+    the next sync to re-pay full cluster discovery. Best-effort.
+    """
+    try:
+        from api.services.monitor_cache import invalidate_monitor_snapshot_prefix
+
+        invalidate_monitor_snapshot_prefix("monitor:message-flow")
+    except Exception:
+        LOGGER.debug("message-flow snapshot cache invalidate skipped", exc_info=True)
+
+
 def _sync_external_jobs_best_effort(*, tenant_id: str = "") -> None:
     """Upsert external OpenAPI ``/v1/jobs`` rows for the platform subscription.
 
@@ -363,6 +395,13 @@ def _sync_external_jobs_best_effort(*, tenant_id: str = "") -> None:
     orchestration is itself best-effort, but this wrapper also swallows any
     unexpected error so a transient discovery/sync failure can never break the
     Message Flow snapshot. A missing subscription is a no-op.
+
+    When the sync actually changed the Table (created/updated/tombstoned rows)
+    it drops the message-flow snapshot cache so the next poll reflects the new
+    rows. A steady state (no new external jobs) leaves the cache intact, so the
+    snapshot is NOT rebuilt — and the background sync is NOT re-spawned — on
+    every poll. This runs on a background thread (see ``_spawn_external_sync``);
+    it is also called inline by tests.
     """
     subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID", "").strip()
     if not subscription_id:
@@ -370,13 +409,63 @@ def _sync_external_jobs_best_effort(*, tenant_id: str = "") -> None:
     try:
         from api.services.blast.external_jobs import collect_and_sync_external_jobs
 
-        collect_and_sync_external_jobs(
+        result = collect_and_sync_external_jobs(
             subscription_id=subscription_id,
             tenant_id=tenant_id,
             detail_enrich_budget=0,
         )
     except Exception:
         LOGGER.debug("message-flow external jobs sync failed", exc_info=True)
+        return
+
+    changed = bool(result.created or result.updated or result.tombstoned_ids)
+    if changed:
+        LOGGER.debug(
+            "message-flow external sync changed table (created=%d updated=%d "
+            "tombstoned=%d); invalidating snapshot cache",
+            result.created,
+            result.updated,
+            len(result.tombstoned_ids),
+        )
+        _invalidate_snapshot_cache()
+
+
+def _spawn_external_sync(*, tenant_id: str = "") -> None:
+    """Run :func:`_sync_external_jobs_best_effort` on a background daemon thread.
+
+    Fire-and-forget so the snapshot returns immediately from the current Table
+    state instead of blocking on cluster discovery + the per-cluster ~10 s K8s
+    probe (the cause of the card's slow first paint). A module-level single
+    in-flight guard ensures overlapping polls spawn at most one worker; the flag
+    is cleared in the worker's ``finally`` AND on a spawn failure so it can never
+    wedge permanently. A missing subscription is a no-op — no thread is spawned.
+    """
+    global _sync_in_flight
+    if not os.environ.get("AZURE_SUBSCRIPTION_ID", "").strip():
+        return
+    with _SYNC_LOCK:
+        if _sync_in_flight:
+            return
+        _sync_in_flight = True
+
+    def _worker() -> None:
+        global _sync_in_flight
+        try:
+            _sync_external_jobs_best_effort(tenant_id=tenant_id)
+        finally:
+            with _SYNC_LOCK:
+                _sync_in_flight = False
+
+    try:
+        threading.Thread(target=_worker, name="msgflow-extsync", daemon=True).start()
+    except Exception:
+        # Thread creation can fail under resource exhaustion (RuntimeError:
+        # "can't start new thread"). The worker never runs, so its finally
+        # cannot clear the guard — reset it here, otherwise the flag wedges True
+        # forever and external-jobs sync stops permanently. A later poll retries.
+        with _SYNC_LOCK:
+            _sync_in_flight = False
+        LOGGER.debug("message-flow external sync thread spawn failed", exc_info=True)
 
 
 def build_message_flow(
@@ -393,10 +482,14 @@ def build_message_flow(
     always returns a full (possibly empty) snapshot; the route layer adds
     graceful degradation around unexpected failures.
 
-    Before reading the Table it best-effort syncs external OpenAPI ``/v1/jobs``
-    submissions in (they never create a dashboard Table row on their own), so a
-    job submitted directly through the sibling plane appears on the card without
-    the operator first opening Recent searches.
+    Before reading the Table it spawns a background (single-in-flight) sync of
+    external OpenAPI ``/v1/jobs`` submissions (they never create a dashboard
+    Table row on their own), so a job submitted directly through the sibling
+    plane appears on the card without the operator first opening Recent
+    searches. The sync runs OFF the request path so the card's first paint is
+    not blocked by cluster discovery + the per-cluster ~10 s K8s probe; a
+    directly-submitted external job therefore surfaces on the next poll rather
+    than the first one.
 
     The broker lane is active jobs (``lifecycle="active"``) followed by
     recently-terminal jobs (``lifecycle="settling"``) so a finished/failed job
@@ -409,11 +502,13 @@ def build_message_flow(
     if not service_bus_enabled():
         return {"enabled": False}
 
-    # Pull external OpenAPI `/v1/jobs` rows into the Table before reading it.
-    # Best-effort and bounded (70 s caches, detail enrichment skipped, a
-    # stopped/unreachable cluster degrades to a no-op), so the card surfaces
-    # directly-submitted jobs without depending on Recent searches being opened.
-    _sync_external_jobs_best_effort(tenant_id=tenant_id)
+    # Spawn the external OpenAPI `/v1/jobs` sync on a background thread instead
+    # of paying it on the request path. The cold sync runs cluster discovery +
+    # a per-cluster ~10 s-timeout K8s probe, which used to make the card's first
+    # paint block for many seconds. The snapshot below is built from whatever is
+    # already in the Table; the background sync drops this snapshot's cache when
+    # it actually finds new external rows, so they surface on the next poll.
+    _spawn_external_sync(tenant_id=tenant_id)
 
     cfg = get_service_bus_config()
     active, settling, scope, total_read = _visible_rows(caller_oid, list_limit=list_limit)

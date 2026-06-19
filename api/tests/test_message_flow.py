@@ -15,6 +15,7 @@ Validation: ``uv run pytest -q api/tests/test_message_flow.py``.
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -102,6 +103,15 @@ def _enable(monkeypatch: pytest.MonkeyPatch):
         )
         monkeypatch.setattr(
             "api.services.state_repo.get_state_repo", lambda: _FakeRepo(rows)
+        )
+
+        # The external-jobs sync now runs on a background thread; pin it to a
+        # synchronous inline call so build_message_flow assertions stay
+        # deterministic (the test would otherwise race the worker thread).
+        monkeypatch.setattr(
+            message_flow,
+            "_spawn_external_sync",
+            lambda **kw: message_flow._sync_external_jobs_best_effort(**kw),
         )
 
         from api.services import service_bus
@@ -704,3 +714,143 @@ def test_queue_peek_runs_when_only_manage_claim_missing(_enable) -> None:
     assert snap["sb_counts"]["available"] is False
     assert snap["sb_counts"]["reason"] == "no_manage_claim"
     assert snap["queue_messages"] == preview
+
+
+# --- background external-jobs sync (slow-first-paint fix) -------------------
+
+
+def _join_extsync_threads(timeout: float = 2.0) -> None:
+    """Join any in-flight ``msgflow-extsync`` worker so an assertion on the
+    in-flight flag / side effects is not racing the background thread."""
+    for t in threading.enumerate():
+        if t.name == "msgflow-extsync":
+            t.join(timeout)
+
+
+def test_spawn_external_sync_runs_off_request_path(monkeypatch) -> None:
+    """``_spawn_external_sync`` runs the sync on a background thread (not the
+    caller's), forwards the tenant id, and clears the in-flight flag."""
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "plat-sub")
+    seen: dict[str, Any] = {"tenant": None, "thread": None}
+    done = threading.Event()
+
+    def _spy(*, tenant_id: str = "") -> None:
+        seen["tenant"] = tenant_id
+        seen["thread"] = threading.current_thread().name
+        done.set()
+
+    monkeypatch.setattr(message_flow, "_sync_external_jobs_best_effort", _spy)
+
+    message_flow._spawn_external_sync(tenant_id="tid-x")
+    assert done.wait(timeout=2.0)
+    _join_extsync_threads()
+
+    assert seen["tenant"] == "tid-x"
+    assert seen["thread"] == "msgflow-extsync"
+    assert message_flow._sync_in_flight is False
+
+
+def test_spawn_external_sync_skips_without_subscription(monkeypatch) -> None:
+    """No ``AZURE_SUBSCRIPTION_ID`` → no worker thread is spawned at all."""
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    called = {"n": 0}
+    monkeypatch.setattr(
+        message_flow,
+        "_sync_external_jobs_best_effort",
+        lambda **_kw: called.__setitem__("n", called["n"] + 1),
+    )
+
+    message_flow._spawn_external_sync(tenant_id="x")
+    _join_extsync_threads()
+
+    assert called["n"] == 0
+    assert message_flow._sync_in_flight is False
+
+
+def test_spawn_external_sync_resets_flag_when_thread_start_fails(monkeypatch) -> None:
+    """If ``Thread.start()`` fails (resource exhaustion), the in-flight guard
+    must be reset — otherwise it wedges True forever and the sync stops."""
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "plat-sub")
+
+    class _BoomThread:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(message_flow.threading, "Thread", _BoomThread)
+
+    # Must not raise, and must leave the guard clear so a later poll retries.
+    message_flow._spawn_external_sync(tenant_id="x")
+    assert message_flow._sync_in_flight is False
+
+
+def test_spawn_external_sync_single_in_flight(monkeypatch) -> None:
+    """A second spawn while a worker is still running is a no-op — the sync pays
+    cluster discovery + a per-cluster ~10 s probe, so overlapping polls must not
+    pile up workers."""
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "plat-sub")
+    calls = {"n": 0}
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking(*, tenant_id: str = "") -> None:
+        calls["n"] += 1
+        started.set()
+        release.wait(timeout=2.0)
+
+    monkeypatch.setattr(message_flow, "_sync_external_jobs_best_effort", _blocking)
+
+    message_flow._spawn_external_sync()  # worker 1 starts and blocks
+    assert started.wait(timeout=2.0)
+    message_flow._spawn_external_sync()  # in-flight → skipped
+    release.set()
+    _join_extsync_threads()
+
+    assert calls["n"] == 1
+    assert message_flow._sync_in_flight is False
+
+
+def test_sync_invalidates_snapshot_cache_when_table_changed(monkeypatch) -> None:
+    """The background sync drops the message-flow snapshot cache only when it
+    actually changed the Table, so the next poll surfaces new external jobs."""
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "plat-sub")
+    from api.services.blast import external_jobs
+
+    monkeypatch.setattr(
+        external_jobs,
+        "collect_and_sync_external_jobs",
+        lambda **_kw: SimpleNamespace(created=1, updated=0, tombstoned_ids=set()),
+    )
+    invalidated = {"n": 0}
+    monkeypatch.setattr(
+        message_flow,
+        "_invalidate_snapshot_cache",
+        lambda: invalidated.__setitem__("n", invalidated["n"] + 1),
+    )
+
+    message_flow._sync_external_jobs_best_effort()
+    assert invalidated["n"] == 1
+
+
+def test_sync_keeps_snapshot_cache_when_unchanged(monkeypatch) -> None:
+    """A steady state (no created/updated/tombstoned rows) must NOT invalidate
+    the snapshot cache — otherwise every poll would rebuild + re-spawn."""
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "plat-sub")
+    from api.services.blast import external_jobs
+
+    monkeypatch.setattr(
+        external_jobs,
+        "collect_and_sync_external_jobs",
+        lambda **_kw: SimpleNamespace(created=0, updated=0, tombstoned_ids=set()),
+    )
+    invalidated = {"n": 0}
+    monkeypatch.setattr(
+        message_flow,
+        "_invalidate_snapshot_cache",
+        lambda: invalidated.__setitem__("n", invalidated["n"] + 1),
+    )
+
+    message_flow._sync_external_jobs_best_effort()
+    assert invalidated["n"] == 0
