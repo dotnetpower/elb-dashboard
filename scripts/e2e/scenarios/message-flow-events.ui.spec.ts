@@ -163,10 +163,13 @@ test("MessageFlow card expands to the constellation and opens a redacted job det
   await uiPage.goto("/");
   await expect(uiPage.getByText("ElasticBLAST Dashboard")).toBeVisible();
 
-  // Card summary renders the active-job count and submitters.
+  // Card summary renders the active-job count and submitters. Match the
+  // "<N> active jobs" count specifically — the card also renders a static
+  // "active jobs" eyebrow label, so a bare /active jobs/ would resolve to two
+  // elements and trip Playwright strict mode.
   const card = uiPage.locator(".glass-card", { hasText: "Message Flow" }).first();
   await expect(card).toBeVisible();
-  await expect(card.getByText(/active jobs/)).toBeVisible();
+  await expect(card.getByText(/\d+ active jobs/)).toBeVisible();
   await expect(card.getByText(/submitter/)).toBeVisible();
 
   // Expand into the full modal.

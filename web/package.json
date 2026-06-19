@@ -20,6 +20,12 @@
     "e2e:api-blast": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/api-blast-submit-smoke.spec.ts",
     "e2e:azure-core-nt-lifecycle": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/azure-core-nt-lifecycle.spec.ts",
     "e2e:new-search": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/new-search-options-matrix.spec.ts",
+    "e2e:platform": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/platform-flows.api.spec.ts",
+    "e2e:platform-aks": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/platform-flows.api.spec.ts --grep scenario:aks-lifecycle",
+    "e2e:platform-sb": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/platform-flows.api.spec.ts --grep scenario:service-bus",
+    "e2e:platform-blast": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/platform-flows.api.spec.ts --grep scenario:api-blast",
+    "e2e:platform-queue": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/platform-flows.api.spec.ts --grep scenario:queue-parallel",
+    "e2e:platform-perms": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts ../scripts/e2e/scenarios/platform-flows.api.spec.ts --grep scenario:permissions",
     "e2e:all": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts",
     "e2e:install-browsers": "playwright install chromium"
   },
