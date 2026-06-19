@@ -783,7 +783,7 @@ def test_list_completed_filters_to_completed_state(monkeypatch) -> None:
         def __exit__(self, *_args: object) -> None:
             pass
 
-        def query_entities(self, query_filter: str, *, results_per_page: int):
+        def query_entities(self, query_filter: str, *, results_per_page: int, **_kw):
             captured.append(query_filter)
             return []
 
@@ -795,6 +795,63 @@ def test_list_completed_filters_to_completed_state(monkeypatch) -> None:
     repo.list_completed(job_type="blast")
 
     assert captured == ["type eq 'blast' and status eq 'completed'"]
+
+
+def test_list_completed_returns_newest_first_no_starvation(monkeypatch) -> None:
+    """Regression: jobstate uses a random-uuid PartitionKey, so a single capped
+    page returns an arbitrary fixed subset and completed jobs outside it were
+    silently starved (never backfilled). ``list_completed`` must scan the full
+    filtered set, sort by completion recency (``updated_at`` desc), and return
+    the genuinely-newest ``limit`` rows with full payload re-fetched."""
+
+    # 5 completed rows whose PartitionKey (uuid) order is DELIBERATELY the
+    # reverse of their completion order, so a naive lexical-first page would
+    # return the oldest-completed rows.
+    summaries = [
+        {
+            "PartitionKey": f"{idx:08d}-uuid",
+            "RowKey": "current",
+            "type": "blast",
+            "status": "completed",
+            "updated_at": f"2026-06-1{idx}T00:00:00+00:00",
+            "created_at": "2026-06-01T00:00:00+00:00",
+        }
+        # idx 1..5: larger idx == newer updated_at but larger PartitionKey.
+        for idx in range(1, 6)
+    ]
+    full_by_pk = {
+        s["PartitionKey"]: {**s, "payload_json": f'{{"job_id": "{s["PartitionKey"]}"}}'}
+        for s in summaries
+    }
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, *, results_per_page: int, **_kw):
+            # Azure returns rows in (PartitionKey, RowKey) order — emulate that.
+            return list(summaries)
+
+        def get_entity(self, *, partition_key: str, row_key: str, **_kw):
+            return dict(full_by_pk[partition_key])
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    rows = repo.list_completed(job_type="blast", limit=3)
+
+    # Newest 3 by updated_at, NOT the lexical-first 3 by PartitionKey.
+    assert [r.job_id for r in rows] == ["00000005-uuid", "00000004-uuid", "00000003-uuid"]
+    # Full payload was re-fetched for each returned row.
+    assert all(r.payload for r in rows)
 
 
 def test_list_methods_clamp_page_size_to_azure_tables_max(monkeypatch) -> None:

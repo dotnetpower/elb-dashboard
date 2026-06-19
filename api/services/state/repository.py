@@ -874,22 +874,57 @@ class JobStateRepository:
         job_type: str = "blast",
         limit: int = 100,
     ) -> list[JobState]:
-        """Return recently stored completed jobs for background backfill tasks."""
+        """Return the genuinely most-recently-completed jobs for backfill tasks.
+
+        Ordering is load-bearing here. jobstate rows use a random-uuid
+        PartitionKey, so a single capped page (``results_per_page=limit``)
+        returns an arbitrary, FIXED lexical subset. The backfill task skips
+        rows that already carry runtime metrics, so once that fixed window is
+        fully backfilled every later tick re-scans the same rows and makes zero
+        progress — any completed job outside the window is silently starved
+        forever (same bug class as the auto-stop ``history_scan_truncated``
+        regression).
+
+        This reads the full filtered set as lightweight summaries (bounded by
+        the same hard cap as :meth:`_list_recent_sorted`), sorts by
+        ``updated_at`` (completion recency) descending, then re-fetches the full
+        payload only for the top ``limit`` rows the caller will actually
+        process. ``updated_at`` — not ``created_at`` — is the correct key: a
+        long-running BLAST job can be created hours before it completes, and
+        only recently-completed jobs still have a live K8s Job to read container
+        timestamps from (old ones are garbage-collected, so backfilling them is
+        a no-op). The caller needs ``payload`` (scope + existing metrics), so
+        the summaries are not returned directly.
+        """
         safe_type = _sanitise_odata_value(job_type)
         filter_expr = f"type eq '{safe_type}' and status eq 'completed'"
-        rows: list[JobState] = []
+        scan_cap = _list_scan_hard_cap()
+        summaries: list[JobState] = []
         with self._state_client() as t:
             try:
                 entities = t.query_entities(
-                    filter_expr, results_per_page=_clamp_page_size(limit)
+                    filter_expr,
+                    results_per_page=_clamp_page_size(scan_cap),
+                    select=_JOBSTATE_SUMMARY_SELECT,
                 )
                 for e in entities:
-                    rows.append(JobState.from_entity(dict(e)))
-                    if len(rows) >= limit:
+                    summaries.append(JobState.from_entity(dict(e)))
+                    if len(summaries) >= scan_cap:
+                        LOGGER.warning(
+                            "list_completed scan hit hard cap=%d (type=%r); "
+                            "backfill ordering is best-effort beyond the cap",
+                            scan_cap,
+                            job_type,
+                        )
                         break
             except ResourceNotFoundError:
                 self._ensure_table("jobstate")
-        rows.sort(key=lambda r: r.updated_at or r.created_at or "", reverse=True)
+        summaries.sort(key=lambda r: r.updated_at or r.created_at or "", reverse=True)
+        rows: list[JobState] = []
+        for summary in summaries[: max(0, limit)]:
+            full = self.get(summary.job_id)
+            if full is not None:
+                rows.append(full)
         return rows
 
     def list_children_for_owner(
