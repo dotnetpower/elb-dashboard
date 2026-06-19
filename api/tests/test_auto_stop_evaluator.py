@@ -395,22 +395,23 @@ def test_no_jobs_observed_anchors_on_updated_at() -> None:
     assert decision.verdict == "stop"
 
 
-def test_truncated_scan_refuses_to_stop() -> None:
-    """When the cluster's history exceeds the scan window, ``latest`` may
-    be stale (Azure Tables is not timestamp-ordered). Refusing to stop
-    in that corner case avoids killing a busy cluster whose recent
-    activity row sorts beyond our scan window."""
-    # Fill the scan window with terminal rows from long ago; the latest
-    # of those is far enough in the past that the deadline has passed,
-    # which would normally trigger `stop`. The truncation guard must
-    # downgrade that to `keep`.
+def test_large_history_does_not_block_stop() -> None:
+    """A cluster with a large job history must still auto-stop when idle.
+
+    ``repo.list_for_scope`` returns the genuinely most-recent rows
+    (``_list_recent_sorted`` sorts by ``created_at`` descending), so a full
+    scan window no longer means ``latest`` is stale. The old
+    ``history_scan_truncated`` guard treated any cluster with >= the scan
+    limit of historical rows as "never stop", which permanently disabled
+    auto-stop for every busy cluster. All terminal rows are old enough that
+    the idle deadline has passed, so the verdict must be ``stop``."""
     jobs = [
         _FakeJob(
             type="blast",
             status="completed",
             updated_at=(_NOW - timedelta(hours=12)).isoformat(timespec="seconds"),
         )
-        for _ in range(200)  # matches default scan limit
+        for _ in range(200)  # >= the default scan limit
     ]
     decision = evaluate_cluster(
         _pref(idle_minutes=60),
@@ -418,8 +419,7 @@ def test_truncated_scan_refuses_to_stop() -> None:
         now=_NOW,
         power_state="Running",
     )
-    assert decision.verdict == "keep"
-    assert decision.reason == "history_scan_truncated"
+    assert decision.verdict == "stop"
 
 
 def test_recent_start_resets_idle_clock() -> None:

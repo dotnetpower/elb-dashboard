@@ -166,16 +166,21 @@ def _scan_cluster_jobs(
     limit: int = 200,
     now: datetime | None = None,
     stale_after_seconds: int | None = None,
-) -> tuple[int, datetime | None, bool, bool]:
-    """Single Table query → (active_count, latest_activity_ts, ok, truncated).
+) -> tuple[int, datetime | None, bool]:
+    """Single Table query → (active_count, latest_activity_ts, ok).
 
-    NOTE on truncation: Azure Tables returns rows in PartitionKey then
-    RowKey order, NOT timestamp order. ``limit`` here is the in-process
-    cap on rows we examine to compute both counters. When we hit the
-    cap we DO NOT know whether the row carrying the true latest
-    timestamp lies beyond the window — refusing to stop in that case
-    is the safe default. The active counter is still safe (active jobs
-    are by definition recent and rarely number > 200).
+    Ordering guarantee: ``repo.list_for_scope`` routes through
+    ``StateRepository._list_recent_sorted``, which reads the full filtered
+    set (up to the repo hard cap) and returns the genuinely most-recent
+    ``limit`` rows sorted by ``created_at`` descending. So even when the
+    cluster has more than ``limit`` historical rows, the rows we examine
+    here ARE the newest ones and ``latest_activity_ts`` is a reliable idle
+    anchor — there is no "true latest timestamp beyond the window" hazard
+    that would require refusing to stop. (Historically this helper also
+    returned a ``truncated`` flag and the evaluator kept the cluster alive
+    whenever the scan was full; that guard predated the sorted read and
+    permanently disabled auto-stop for any busy cluster — see the dropped
+    ``history_scan_truncated`` verdict.)
 
     Zombie age-out: a row in an active status whose most-recent timestamp
     is older than ``stale_after_seconds`` (default `_ACTIVE_ROW_STALE_SECONDS`)
@@ -192,8 +197,6 @@ def _scan_cluster_jobs(
             ALL non-deleted rows in scope (terminal jobs included — they
             seed the idle clock).
         ok: False when the Table query raised — caller must fail safe.
-        truncated: True when the scan hit ``limit`` — the latest
-            timestamp may be stale. Upstream uses this to refuse stop.
     """
     current = now or datetime.now(UTC)
     cap = (
@@ -212,7 +215,7 @@ def _scan_cluster_jobs(
             )
         )
     except Exception:
-        return 0, None, False, False
+        return 0, None, False
 
     active = 0
     latest: datetime | None = None
@@ -238,7 +241,7 @@ def _scan_cluster_jobs(
             # keep the cluster alive forever.
             if row_latest is None or (current - row_latest).total_seconds() <= cap:
                 active += 1
-    return active, latest, True, len(rows) >= limit
+    return active, latest, True
 
 
 def _format_iso(value: datetime) -> str:
@@ -403,7 +406,7 @@ def evaluate_cluster(
             cluster_power_state=power_state,
         )
 
-    active_count, latest, ok, truncated = _scan_cluster_jobs(repo, pref, now=current)
+    active_count, latest, ok = _scan_cluster_jobs(repo, pref, now=current)
     if not ok:
         # Table unreachable — fail safe (never stop without a quorum read).
         return IdleDecision(
@@ -436,17 +439,6 @@ def evaluate_cluster(
             verdict="keep",
             reason=f"sb_queue_pending:{pending}",
             active_job_count=pending,
-            cluster_power_state=power_state,
-        )
-    if truncated:
-        # Cluster has > scan window of history rows; the latest activity
-        # timestamp we computed may be stale (Azure Tables does not
-        # return rows in timestamp order). Refusing to stop in this
-        # corner case avoids killing a busy cluster whose recent activity
-        # row sorts beyond our scan window.
-        return IdleDecision(
-            verdict="keep",
-            reason="history_scan_truncated",
             cluster_power_state=power_state,
         )
 
