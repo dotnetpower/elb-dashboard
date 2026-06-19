@@ -67,6 +67,15 @@ export function ServiceBusTelemetryPanel({ snapshot }: ServiceBusTelemetryPanelP
     (acc, s) => acc + (s.transfer_dead_letter_message_count ?? 0),
     0,
   );
+  // Backlog sitting in the completion topic's subscriptions: `active` = completion
+  // messages not yet consumed, `dlq` = completions that dead-lettered. These are
+  // the real "is the completion path healthy?" signal — the topic name alone
+  // tells an operator nothing about whether results are draining.
+  const subActive = subs.reduce((acc, s) => acc + (s.active_message_count ?? 0), 0);
+  const subDlq = subs.reduce(
+    (acc, s) => acc + (s.dead_letter_message_count ?? 0),
+    0,
+  );
 
   return (
     <div style={ROW_STYLE} data-testid="sb-telemetry-panel">
@@ -157,8 +166,19 @@ export function ServiceBusTelemetryPanel({ snapshot }: ServiceBusTelemetryPanelP
           </span>
         )}
         {snapshot.completion_topic ? (
-          <span style={{ marginLeft: "auto" }}>
+          <span style={{ marginLeft: "auto" }} title="Completion topic and the backlog across its subscriptions: pending = completions not yet consumed, DLQ = completions that dead-lettered.">
             completions topic: {snapshot.completion_topic}
+            {counts?.available ? (
+              <>
+                {" · "}
+                <strong style={STRONG_STYLE}>{subActive}</strong> pending
+                {subDlq > 0 ? (
+                  <span style={{ color: "var(--warning)", marginLeft: 4 }}>
+                    · DLQ {subDlq}
+                  </span>
+                ) : null}
+              </>
+            ) : null}
           </span>
         ) : null}
       </div>

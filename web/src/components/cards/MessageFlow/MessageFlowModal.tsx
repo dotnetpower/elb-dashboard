@@ -21,6 +21,7 @@ import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { aliasTone } from "./colors";
 import { MessageFlowConstellation } from "./MessageFlowConstellation";
 import { querySizeLabel } from "./layout";
+import { redactJobJson } from "./redactJobJson";
 import { ServiceBusTelemetryPanel } from "./ServiceBusTelemetryPanel";
 
 interface MessageFlowModalProps {
@@ -33,25 +34,6 @@ interface MessageFlowModalProps {
   onRefresh?: () => void | Promise<void>;
   /** True while a manual refresh is in flight (spins the icon, disables click). */
   refreshing?: boolean;
-}
-
-// Raw caller-identity GUIDs carry no diagnostic value and are PII the rest of
-// the app deliberately redacts (see api.services.sanitise.redact_oid). Strip
-// them before rendering the job JSON so the message-flow inspector never echoes
-// a raw owner/tenant GUID (charter §12 — sanitise UI output). The job-detail
-// endpoint returns the raw `payload` dict (which nests `metadata` and other
-// sub-objects), so the redaction MUST recurse — a shallow top-level filter would
-// leak a nested `payload.metadata.owner_oid`.
-const REDACTED_JSON_KEYS = new Set(["owner_oid", "tenant_id"]);
-
-function redactState(state: unknown): unknown {
-  if (Array.isArray(state)) return state.map(redactState);
-  if (!state || typeof state !== "object") return state;
-  return Object.fromEntries(
-    Object.entries(state as Record<string, unknown>)
-      .filter(([key]) => !REDACTED_JSON_KEYS.has(key))
-      .map(([key, value]) => [key, redactState(value)]),
-  );
 }
 
 /** A small read-only key/value row used in the detail modal summary. */
@@ -179,7 +161,12 @@ function JobDetailModal({ box, onClose }: JobDetailModalProps) {
             }}
           >
             {summaryItem("Status", `${box.status}${box.phase ? ` · ${box.phase}` : ""}`)}
-            {summaryItem("Query size", querySizeLabel(box.query_size))}
+            {summaryItem(
+              "Query size",
+              <span title="Total query sequence length (letters). This is the input size only — not a measure of job runtime or cost, which for a core_nt search is dominated by the database, not the query length.">
+                {querySizeLabel(box.query_size)}
+              </span>,
+            )}
             {summaryItem("Database", box.db ?? "—")}
             {summaryItem("Submitter", box.alias)}
             {summaryItem("Cluster", box.cluster_name || "unassigned")}
@@ -212,7 +199,7 @@ function JobDetailModal({ box, onClose }: JobDetailModalProps) {
                 padding: 12,
               }}
             >
-              {JSON.stringify(redactState(detailQuery.data?.state ?? detailQuery.data), null, 2)}
+              {JSON.stringify(redactJobJson(detailQuery.data?.state ?? detailQuery.data), null, 2)}
             </pre>
           )}
         </div>

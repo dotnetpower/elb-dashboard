@@ -356,8 +356,11 @@ export interface ServiceBusCounts {
     telemetry?: {
       size_in_bytes: number | null;
       max_size_in_mb: number | null;
-      /** Pre-computed 0..1 fraction of `max_size_in_mb` consumed. `null`
-       *  when either input is missing or `max_size_in_mb` is 0. */
+      /** Pre-computed percent of `max_size_in_mb` consumed on the **0..100**
+       *  scale (e.g. `50.0` = 50 %, `0.05` = 0.05 %), matching the backend
+       *  `size_in_bytes / (max_size_in_mb * 1024 * 1024) * 100` formula in
+       *  `api/services/service_bus.py`. `null` when either input is missing or
+       *  `max_size_in_mb` is 0. */
       size_pct: number | null;
       transfer_message_count: number | null;
       transfer_dead_letter_message_count: number | null;
