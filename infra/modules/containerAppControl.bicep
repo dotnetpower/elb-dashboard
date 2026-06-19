@@ -478,6 +478,16 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_MONITOR_DISABLE_LIVE_METRICS', value: 'true' }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
+            // Recycle a prefork child once its resident set exceeds this many
+            // KiB (run_celery_workers.py forwards it as --max-memory-per-child).
+            // Backstop against a slow leak OOM-killing the shared worker cgroup:
+            // the two parents spawn 6 prefork children that share the 2.0Gi
+            // limit, so cap each child at ~244 MiB (250000 KiB) to keep the
+            // worst-case child RSS sum (~1.4 GiB) under the limit with headroom
+            // for the two MainProcess parents. Without this the children grew
+            // unbounded and the kernel SIGKILL'd them at the 1.0Gi limit
+            // (signal 9 WorkerLostError, ~250/24h before the 2.0Gi bump).
+            { name: 'CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB', value: '250000' }
             // Worker calls api.services.terminal_exec which needs the same
             // shared secret as the api sidecar.
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }

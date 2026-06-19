@@ -117,6 +117,53 @@ PY
 }
 
 # ---------------------------------------------------------------------------
+# Per-sidecar resource (cpu/memory) reconciliation.
+#
+# Why: this script PATCHes a container's image with `az containerapp update
+# --container-name X --image …`, a read-modify-write that PRESERVES the live
+# container's cpu/memory. So a sizing change committed to the Bicep template
+# (e.g. worker 0.5 vCPU/1.0Gi → 1.0 vCPU/2.0Gi) NEVER reaches the running app
+# through a fast or GitHub-Actions deploy — it only lands on a full `azd
+# provision`. The worker silently ran under-provisioned for weeks and its
+# Celery prefork pool OOM-looped (signal 9 WorkerLostError) as a direct result.
+#
+# Fix: read the DESIRED cpu/memory for each sidecar straight from the Bicep
+# template (the single source of truth) and pass --cpu/--memory on every image
+# PATCH so the running container converges to the committed sizing. Container
+# Apps requires the per-replica total to stay a valid combo (sum memory GiB ==
+# 2 × sum CPU cores, ≤ 4 vCPU / 8 GiB); every sidecar's Bicep value is
+# individually 1 vCPU : 2 GiB, so moving any single container to its Bicep
+# value keeps the running total valid.
+#
+# Best-effort: on any parse failure (template moved / reformatted) the helper
+# yields nothing and the PATCH stays image-only (live resources preserved) with
+# a warning — a sizing reconcile must never block a code deploy.
+# ---------------------------------------------------------------------------
+CONTROL_PLANE_BICEP_FILE="$REPO_ROOT/infra/modules/containerAppControl.bicep"
+
+# Echo "CPU MEMORY" (e.g. "1.0 2.0Gi") for the given sidecar parsed from the
+# Bicep six-sidecar template, or nothing when it cannot be resolved. Anchors on
+# the container declaration `name: '<sidecar>'`; env entries are `name: 'KEY'`
+# in UPPER_SNAKE so they never collide, and the bootstrap container is named
+# 'bootstrap' and is never queried.
+container_desired_resources() {
+  local sidecar="$1"
+  [[ -f "$CONTROL_PLANE_BICEP_FILE" ]] || return 0
+  python3 - "$CONTROL_PLANE_BICEP_FILE" "$sidecar" <<'PY'
+import re, sys
+path, name = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+m = re.search(
+    r"name:\s*'" + re.escape(name) + r"'"
+    r".*?resources:\s*\{\s*cpu:\s*json\('([0-9.]+)'\)\s*memory:\s*'([^']+)'",
+    text, re.DOTALL,
+)
+if m:
+    print(m.group(1), m.group(2))
+PY
+}
+
+# ---------------------------------------------------------------------------
 # Service Bus master-switch deploy notice (one-time, informational only).
 #
 # The optional Service Bus integration — and therefore the dashboard "Message
@@ -787,6 +834,17 @@ fi
     tgt="${spec%%:*}"
     img="${spec#*:}"
     ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $img"
+    # Reconcile cpu/memory to the Bicep template so a committed sizing change
+    # lands on a fast deploy instead of being silently preserved at the live
+    # (possibly under-provisioned) value. Empty when unparseable → image-only.
+    _res_flags=()
+    _res="$(container_desired_resources "$tgt")"
+    if [[ -n "$_res" ]]; then
+      _res_flags=(--cpu "${_res%% *}" --memory "${_res##* }")
+      ts "    + reconciling '$tgt' resources from Bicep → cpu=${_res%% *} memory=${_res##* }"
+    elif [[ -f "$CONTROL_PLANE_BICEP_FILE" ]]; then
+      ts "    ! could not parse '$tgt' resources from Bicep — PATCH keeps live cpu/memory"
+    fi
     if [[ "$tgt" == "frontend" && "$NO_BUILD" != "true" ]]; then
       # Full deploy resolved VITE_* / API_CLIENT_ID on the host; mirror them
       # to the frontend runtime env so runtime-config.js stays in sync with
@@ -796,6 +854,7 @@ fi
         --resource-group "$AZURE_RESOURCE_GROUP" \
         --container-name "$tgt" \
         --image "$img" \
+        ${_res_flags[@]+"${_res_flags[@]}"} \
         --set-env-vars \
           "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL" \
           "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL" \
@@ -825,6 +884,7 @@ fi
           --resource-group "$AZURE_RESOURCE_GROUP" \
           --container-name "$tgt" \
           --image "$img" \
+          ${_res_flags[@]+"${_res_flags[@]}"} \
           --set-env-vars "${_cp_pairs[@]}" \
           -o none
       else
@@ -842,6 +902,7 @@ fi
           --resource-group "$AZURE_RESOURCE_GROUP" \
           --container-name "$tgt" \
           --image "$img" \
+          ${_res_flags[@]+"${_res_flags[@]}"} \
           -o none
       fi
     fi
@@ -1013,12 +1074,24 @@ NEW_IMAGE="$(resolve_image_digest "$NEW_IMAGE")"
 
 for tgt in "${TARGETS[@]}"; do
   ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $NEW_IMAGE"
+  # Reconcile cpu/memory to the Bicep template (single source of truth) so a
+  # committed sizing change lands on a fast deploy instead of being preserved
+  # at the live value. Empty when unparseable → image-only PATCH.
+  _res_flags=()
+  _res="$(container_desired_resources "$tgt")"
+  if [[ -n "$_res" ]]; then
+    _res_flags=(--cpu "${_res%% *}" --memory "${_res##* }")
+    ts "    + reconciling '$tgt' resources from Bicep → cpu=${_res%% *} memory=${_res##* }"
+  elif [[ -f "$CONTROL_PLANE_BICEP_FILE" ]]; then
+    ts "    ! could not parse '$tgt' resources from Bicep — PATCH keeps live cpu/memory"
+  fi
   if [[ "$tgt" == "frontend" && "$NO_BUILD" != "true" ]]; then
     az containerapp update \
       --name "$CONTAINER_APP_NAME" \
       --resource-group "$AZURE_RESOURCE_GROUP" \
       --container-name "$tgt" \
       --image "$NEW_IMAGE" \
+      ${_res_flags[@]+"${_res_flags[@]}"} \
       --set-env-vars \
         "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL" \
         "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL" \
@@ -1045,6 +1118,7 @@ for tgt in "${TARGETS[@]}"; do
         --resource-group "$AZURE_RESOURCE_GROUP" \
         --container-name "$tgt" \
         --image "$NEW_IMAGE" \
+        ${_res_flags[@]+"${_res_flags[@]}"} \
         --set-env-vars "${_cp_pairs[@]}" \
         -o none
     else
@@ -1061,6 +1135,7 @@ for tgt in "${TARGETS[@]}"; do
         --resource-group "$AZURE_RESOURCE_GROUP" \
         --container-name "$tgt" \
         --image "$NEW_IMAGE" \
+        ${_res_flags[@]+"${_res_flags[@]}"} \
         -o none
     fi
   fi
