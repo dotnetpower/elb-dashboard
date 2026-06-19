@@ -192,23 +192,25 @@
    Dark mode is unaffected — every rule lives under [data-theme="light"].
    ────────────────────────────────────────────────────────────────── */
 
-/* #1 App bar — VS Code Light Modern titleBar tone (#f8f8f8) with a
-   hairline base border, so the chrome reads above the white panels. */
+/* #1 App bar — neutral titleBar tone (Azure-portal style): the chrome
+   surface stays a neutral grey and only a faint blue hairline at the
+   base carries the brand accent, matching the neutral card surfaces. */
 [data-theme="light"] .layout__topbar {
-  background: #f8f8f8;
+  background: #f3f3f3;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  border-bottom: 1px solid var(--border-weak);
+  border-bottom: 1px solid rgba(0, 95, 184, 0.16);
   box-shadow: none;
 }
 
 /* Logo gradient is intentionally theme-locked to the dark palette
    (see Layout.css .layout__logo-icon). Do not add a light-theme override. */
 
-/* #1 Nav active pill — soft VS Code blue wash + hairline ring */
+/* #1 Nav active pill — reads against the tinted bar via a deeper wash
+   + a stronger ring so the active item stays obvious. */
 [data-theme="light"] .layout__nav-item.active {
-  background: #e8f1fb;
-  box-shadow: inset 0 0 0 1px rgba(0, 95, 184, 0.22);
+  background: #cfe2f9;
+  box-shadow: inset 0 0 0 1px rgba(0, 95, 184, 0.34);
 }
 
 /* #1 Live indicator — match the deep emerald success color */
@@ -414,25 +416,34 @@
   --modal-thead-bg: rgba(69, 65, 66, 0.1);
 }
 
-/* Inner cluster card (ClusterPulse) — paint a cluster-accent frost band
-   over the first ~58px (the PulseRowSummary header) so the nested card
-   inside the AKS panel inherits the same cobalt/violet identity as its
-   parent. The PulseRowSummary button is `background: transparent`, so
-   the gradient on the wrapper shows through cleanly. Below 58px the
-   expanded body's own `--pulse-body-bg` overlays the transparent zone. */
+/* Inner cluster card (ClusterPulse) — flat white surface with a faint
+   cobalt border + a 2px cobalt underline under the summary row. The
+   frost gradient was removed 2026-06-19 so the nested AKS card no longer
+   paints a blue band that competes with the tinted top bar. */
+/* AKS cluster row — flattened into the panel body (2026-06-19). Earlier
+   passes boxed it (frost band → coloured underline → full-bleed square),
+   but a bordered card nested inside the white panel read as a box-in-a-box,
+   and once it went full-width its text no longer lined up with the other
+   cards' 14px inset. So: no background, no border, no negative margin —
+   the cluster row is just panel content, inset like every other card. The
+   health dot + coloured status text carry the cluster identity. */
 [data-theme="light"] .cluster-pulse-card {
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--card-accent-cluster) 14%, rgba(255, 255, 255, 0.7)) 0%,
-      color-mix(in srgb, var(--card-accent-cluster) 5%, rgba(255, 255, 255, 0.45)) 58px,
-      transparent 58px
-    ),
-    var(--glass-bg);
-  border-color: color-mix(in srgb, var(--card-accent-cluster) 28%, var(--border-weak));
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  margin: 0;
+  border-radius: 0 !important;
 }
 [data-theme="light"] .cluster-pulse-card > button:first-child {
-  border-bottom: 1px solid color-mix(in srgb, var(--card-accent-cluster) 22%, transparent);
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  border-bottom: none;
+}
+/* Cluster name is a clickable affordance — link blue (set inline via
+   --accent, theme-shared) + an underline on row hover, matching how the
+   Azure portal renders clickable resource names. */
+.cluster-pulse-card > button:first-child:hover .pulse-cluster-name {
+  text-decoration: underline;
 }
 
 /* #5 Card header rhythm — light's white-on-glass needs slightly tighter
@@ -531,10 +542,11 @@
    aurora canvas. All overrides scoped to [data-theme="light"].
    ────────────────────────────────────────────────────────────────── */
 
-/* App bar — VS Code Light Modern titleBar tone with a hairline base border. */
+/* App bar — neutral titleBar tone (see #1 above) with a faint blue
+   hairline base border. */
 [data-theme="light"] .layout__topbar {
-  background: #f8f8f8;
-  border-bottom: 1px solid var(--border-weak);
+  background: #f3f3f3;
+  border-bottom: 1px solid rgba(0, 95, 184, 0.16);
   box-shadow: none;
 }
 
@@ -703,52 +715,54 @@
    AKS cards doesn't get a permanent identity bar.
    ────────────────────────────────────────────────────────────────── */
 
-/* Tinted frost band per accent — color-mix() gives a stronger accent
-   wash on top of the white glass (vividness pass: 12/4 → 22/10).
-   Falls back gracefully on older browsers (frost stays white-only). */
-[data-theme="light"] .panel--accent-cluster > .panel-hd {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--card-accent-cluster) 22%, rgba(255, 255, 255, 0.85)) 0%,
-    color-mix(in srgb, var(--card-accent-cluster) 10%, rgba(255, 255, 255, 0.65)) 100%
-  );
-  border-bottom-color: color-mix(in srgb, var(--card-accent-cluster) 38%, transparent);
-}
-[data-theme="light"] .panel--accent-storage > .panel-hd {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--card-accent-storage) 22%, rgba(255, 255, 255, 0.85)) 0%,
-    color-mix(in srgb, var(--card-accent-storage) 10%, rgba(255, 255, 255, 0.65)) 100%
-  );
-  border-bottom-color: color-mix(in srgb, var(--card-accent-storage) 38%, transparent);
-}
-[data-theme="light"] .panel--accent-acr > .panel-hd {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--card-accent-acr) 22%, rgba(255, 255, 255, 0.85)) 0%,
-    color-mix(in srgb, var(--card-accent-acr) 10%, rgba(255, 255, 255, 0.65)) 100%
-  );
-  border-bottom-color: color-mix(in srgb, var(--card-accent-acr) 38%, transparent);
-}
-[data-theme="light"] .panel--accent-terminal > .panel-hd {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--card-accent-terminal) 22%, rgba(255, 255, 255, 0.85)) 0%,
-    color-mix(in srgb, var(--card-accent-terminal) 10%, rgba(255, 255, 255, 0.65)) 100%
-  );
-  border-bottom-color: color-mix(in srgb, var(--card-accent-terminal) 38%, transparent);
-}
+/* Per-card identity (Fluent 2 pass, 2026-06-19) — surfaces stay neutral
+   (white header + hairline). The card type is signalled by a small
+   coloured dot before the title, not a tinted band/underline: Fluent
+   reserves colour for status + actions, not decoration, so the accent
+   now lives only in that dot. */
+[data-theme="light"] .panel--accent-cluster > .panel-hd,
+[data-theme="light"] .panel--accent-storage > .panel-hd,
+[data-theme="light"] .panel--accent-acr > .panel-hd,
+[data-theme="light"] .panel--accent-terminal > .panel-hd,
 [data-theme="light"] .panel--accent-jobs > .panel-hd {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--card-accent-jobs) 22%, rgba(255, 255, 255, 0.85)) 0%,
-    color-mix(in srgb, var(--card-accent-jobs) 10%, rgba(255, 255, 255, 0.65)) 100%
-  );
-  border-bottom-color: color-mix(in srgb, var(--card-accent-jobs) 38%, transparent);
+  background: none;
+  border-bottom: 1px solid var(--border-weak);
+}
+[data-theme="light"] .panel--accent-cluster > .panel-hd .title::before,
+[data-theme="light"] .panel--accent-storage > .panel-hd .title::before,
+[data-theme="light"] .panel--accent-acr > .panel-hd .title::before,
+[data-theme="light"] .panel--accent-terminal > .panel-hd .title::before,
+[data-theme="light"] .panel--accent-jobs > .panel-hd .title::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 8px;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+}
+[data-theme="light"] .panel--accent-cluster > .panel-hd .title::before {
+  background: var(--card-accent-cluster);
+}
+[data-theme="light"] .panel--accent-storage > .panel-hd .title::before {
+  background: var(--card-accent-storage);
+}
+[data-theme="light"] .panel--accent-acr > .panel-hd .title::before {
+  background: var(--card-accent-acr);
+}
+[data-theme="light"] .panel--accent-terminal > .panel-hd .title::before {
+  background: var(--card-accent-terminal);
+}
+[data-theme="light"] .panel--accent-jobs > .panel-hd .title::before {
+  background: var(--card-accent-jobs);
 }
 
-/* Title coloured to match accent — keeps weight 700 from Pass 3.
-   Subtitle stays text-muted so the title pops. */
+/* Title carries the accent colour + a heavier weight so each card is
+   scannable at a glance (a neutral-only title dropped visibility too
+   far). The coloured dot stays as the Azure-portal-style type marker;
+   the surface itself stays neutral white + hairline. */
 [data-theme="light"] .panel--accent-cluster > .panel-hd .title {
   color: var(--card-accent-cluster);
 }
@@ -764,21 +778,29 @@
 [data-theme="light"] .panel--accent-jobs > .panel-hd .title {
   color: var(--card-accent-jobs);
 }
+[data-theme="light"] .panel--accent-cluster > .panel-hd .title,
+[data-theme="light"] .panel--accent-storage > .panel-hd .title,
+[data-theme="light"] .panel--accent-acr > .panel-hd .title,
+[data-theme="light"] .panel--accent-terminal > .panel-hd .title,
+[data-theme="light"] .panel--accent-jobs > .panel-hd .title {
+  font-weight: 700;
+}
 
-/* Topbar — VS Code Light Modern titleBar tone with a hairline underline */
+/* Topbar — neutral titleBar tone (see #1 above) with a faint blue
+   hairline underline. */
 [data-theme="light"] .layout__topbar {
-  background: #f8f8f8;
-  border-bottom: 1px solid var(--border-weak);
+  background: #f3f3f3;
+  border-bottom: 1px solid rgba(0, 95, 184, 0.16);
   box-shadow: none;
 }
 
 /* Logo gradient is intentionally theme-locked to the dark palette
    (see Layout.css .layout__logo-icon). Do not add a light-theme override. */
 
-/* Nav active pill */
+/* Nav active pill — deeper wash + stronger ring so it reads on the tint */
 [data-theme="light"] .layout__nav-item.active {
-  background: #e8f1fb;
-  box-shadow: inset 0 0 0 1px rgba(0, 95, 184, 0.22);
+  background: #cfe2f9;
+  box-shadow: inset 0 0 0 1px rgba(0, 95, 184, 0.34);
 }
 
 /* Live indicator */
@@ -873,17 +895,13 @@
   color: var(--text-muted);
 }
 
-/* ClusterPulse inner card */
+/* ClusterPulse inner card — flattened into the panel body (2026-06-19).
+   This second definition previously re-applied a blue frost band that
+   overrode the flatten block above (cascade order). Keep it transparent
+   so the cluster row stays flush with the white panel. */
 [data-theme="light"] .cluster-pulse-card {
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--card-accent-cluster) 14%, rgba(255, 255, 255, 0.9)) 0%,
-      color-mix(in srgb, var(--card-accent-cluster) 5%, rgba(255, 255, 255, 0.78)) 58px,
-      transparent 58px
-    ),
-    var(--glass-bg);
-  border-color: color-mix(in srgb, var(--card-accent-cluster) 30%, var(--border-weak));
+  background: transparent;
+  border-color: transparent;
 }
 
 /* Table row hover — blue wash */

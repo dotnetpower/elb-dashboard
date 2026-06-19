@@ -106,11 +106,13 @@ export function PulseRowSummary({
           }}
         >
           <span
+            className="pulse-cluster-name"
             style={{
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
               minWidth: 0,
+              color: "var(--accent)",
             }}
           >
             {clusterName}
