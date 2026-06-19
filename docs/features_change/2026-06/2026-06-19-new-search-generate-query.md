@@ -98,3 +98,19 @@ Per the request to "wire it so a key saved in Settings later is used":
 - Live NCBI cross-check (manual, during design): re-fetching
   `NC_063383.1` `seq_start=46022 seq_stop=46483 strand=2` reproduced the
   checked-in `MPXV_F3L.fa` byte-for-byte.
+
+## Follow-up fix — large feature tables (same day)
+
+First live use surfaced a `HTTP 422` when "Load genes" was run against a
+bacterial genome: the feature-table byte cap was 1 MiB but a ~5k-gene genome's
+table is ~2 MB (e.g. `AP019314.1` = 2.08 MB). Fixes:
+
+- Raised `MAX_FEATURE_TABLE_BYTES` 1 → 6 MiB (covers bacterial/viral/organelle
+  records); a chromosome-scale record that still exceeds it returns a friendly
+  `ncbi_features_too_many` 422 ("Enter a sub-range manually instead.") rather
+  than the raw "response too large".
+- The modal now surfaces the backend error `message` (api/client.ts only fills
+  `.body`, not `.error`, so the toast had shown the generic "HTTP 422").
+- Live re-verified: Load genes on `AP019314.1` now renders the gene list
+  (product + strand + coordinates) with zero error toasts.
+
