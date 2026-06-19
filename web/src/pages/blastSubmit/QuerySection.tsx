@@ -7,6 +7,7 @@ import {
   Dna,
   FileText,
   RefreshCw,
+  Search,
   Upload,
   X,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import {
   queryExamplesForDatabase,
   type QueryExampleTemplate,
 } from "@/pages/blastSubmit/queryExamples";
+import { SequenceBuilderDialog } from "@/pages/blastSubmit/SequenceBuilderDialog";
 import { getDbBaseName } from "@/pages/blastSubmit/helpers";
 import { buildGeneratedJobTitle } from "@/pages/blastSubmitModel";
 import type { QuerySectionProps } from "@/pages/blastSubmit/types";
@@ -41,6 +43,7 @@ export function QuerySection({
   charCount,
 }: QuerySectionProps) {
   const [exampleModalOpen, setExampleModalOpen] = useState(false);
+  const [sequenceBuilderOpen, setSequenceBuilderOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
 
   // Remembers the last title we auto-generated from an example so switching
@@ -162,6 +165,24 @@ export function QuerySection({
       lastAutoTitleRef.current = nextTitle;
     }
     setExampleModalOpen(false);
+  };
+
+  // Insert a FASTA fetched from NCBI via the "Generate query" modal. Mirrors
+  // `loadExample`'s title refresh: a label is derived from the FASTA header so
+  // an untouched auto title stays in sync, while a hand-edited title is kept.
+  const handleGeneratedInsert = (fasta: string) => {
+    set("query_data", fasta);
+    set("program", "blastn");
+    set("query_from", "");
+    set("query_to", "");
+    const current = form.job_title.trim();
+    if (!current || current === lastAutoTitleRef.current) {
+      const header = (fasta.split("\n")[0] || "").replace(/^>/, "").trim();
+      const label = (header.split(",")[0] || "NCBI query").slice(0, 60);
+      const nextTitle = buildGeneratedJobTitle(label);
+      set("job_title", nextTitle);
+      lastAutoTitleRef.current = nextTitle;
+    }
   };
 
   // Step 2 (Search set) must precede step 3 (Query). When no database is
@@ -369,6 +390,19 @@ export function QuerySection({
         >
           <Dna size={13} /> Load example
         </button>
+        <button
+          className="glass-button blast-action-btn blast-action-btn--example"
+          onClick={() => setSequenceBuilderOpen(true)}
+          type="button"
+          disabled={!dbSelected}
+          title={
+            dbSelected
+              ? "Search NCBI by organism/gene/accession and fetch a query sequence."
+              : "Select a database in Step 2 first."
+          }
+        >
+          <Search size={13} strokeWidth={1.5} /> Generate query
+        </button>
         {form.query_data && isNucleotideProgram && (
           <button
             className="glass-button blast-action-btn blast-action-btn--transform"
@@ -452,6 +486,13 @@ export function QuerySection({
           selectedDbName={selectedDbName}
           onClose={() => setExampleModalOpen(false)}
           onSelect={loadExample}
+        />
+      )}
+      {sequenceBuilderOpen && (
+        <SequenceBuilderDialog
+          onClose={() => setSequenceBuilderOpen(false)}
+          onInsert={handleGeneratedInsert}
+          toast={toast}
         />
       )}
     </section>

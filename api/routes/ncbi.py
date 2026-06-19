@@ -351,3 +351,113 @@ def get_nuccore_fasta(
         media_type="text/x-fasta",
         headers={"Cache-Control": "private, max-age=900"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Discovery — back the New Search "Generate query" modal (organism/keyword
+# search → candidate accessions, then a chosen accession → gene/CDS features).
+# ---------------------------------------------------------------------------
+_SEARCH_QUERY = Query(
+    ...,
+    min_length=1,
+    max_length=200,
+    description="Free-text organism/keyword/accession Entrez query for db=nuccore.",
+)
+_SEARCH_LIMIT = Query(
+    default=10,
+    ge=1,
+    le=25,
+    description="Maximum candidate records to return.",
+)
+_FEATURES_LIMIT = Query(
+    default=1000,
+    ge=1,
+    le=1000,
+    description="Maximum gene features to return.",
+)
+
+
+def _raise_ncbi_http_error(exc: Exception, bucket_key: str) -> None:
+    """Map an NCBI service exception to the stable HTTP error the SPA expects.
+
+    Shared by the discovery routes (search / features). Mirrors the per-route
+    mapping used by the nuccore fetch routes above: validation → 422, our own
+    rate limiter → 429 (with a refund, the request never reached NCBI),
+    over-cap → 422, upstream outage → 503.
+    """
+    from api.services.ncbi import (
+        NcbiRateLimited,
+        NcbiResponseTooLarge,
+        NcbiServiceUnavailable,
+    )
+
+    if isinstance(exc, ValueError):
+        _refund_caller_quota(bucket_key)
+        raise HTTPException(
+            422, detail={"code": "ncbi_query_invalid", "message": str(exc)}
+        ) from exc
+    if isinstance(exc, NcbiResponseTooLarge):
+        _refund_caller_quota(bucket_key)
+        raise HTTPException(
+            422,
+            detail={
+                "code": "ncbi_query_too_large",
+                "message": f"{exc!s}. Try a smaller record.",
+            },
+        ) from exc
+    if isinstance(exc, NcbiRateLimited):
+        _refund_caller_quota(bucket_key)
+        raise HTTPException(
+            429,
+            detail={
+                "code": "ncbi_rate_limited",
+                "message": str(exc),
+                "retryable": True,
+                "retry_after_seconds": 1,
+            },
+        ) from exc
+    if isinstance(exc, NcbiServiceUnavailable):
+        raise HTTPException(
+            503,
+            detail={
+                "code": "ncbi_lookup_unavailable",
+                "message": str(exc),
+                "retryable": True,
+                "retry_after_seconds": 30,
+            },
+        ) from exc
+    raise exc
+
+
+@router.get("/search", responses=NCBI_LOOKUP_RESPONSES)
+def search_nuccore_route(
+    q: str = _SEARCH_QUERY,
+    limit: int = _SEARCH_LIMIT,
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Search ``db=nuccore`` by organism/keyword/accession and return candidates."""
+    from api.services.ncbi.search import search_nuccore
+
+    bucket_key = _check_caller_quota(caller)
+    try:
+        return search_nuccore(q, limit=limit)
+    except Exception as exc:
+        _raise_ncbi_http_error(exc, bucket_key)
+        raise  # unreachable — _raise_ncbi_http_error always raises
+
+
+@router.get("/nuccore/{accession}/features", responses=NCBI_LOOKUP_RESPONSES)
+def get_nuccore_features(
+    accession: str = _ACCESSION_PATH,
+    limit: int = _FEATURES_LIMIT,
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the gene/CDS features (name + 1-based coordinates) of a record."""
+    from api.services.ncbi.search import fetch_feature_table
+
+    bucket_key = _check_caller_quota(caller)
+    try:
+        return fetch_feature_table(accession, limit=limit)
+    except Exception as exc:
+        _raise_ncbi_http_error(exc, bucket_key)
+        raise  # unreachable — _raise_ncbi_http_error always raises

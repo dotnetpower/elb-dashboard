@@ -776,4 +776,23 @@ export const settingsApi = {
   /** Clear the custom domain — resolution falls back to the Container App FQDN. */
   clearControlPlaneUrl: () =>
     api.del<ControlPlaneUrlSavedResponse>("/settings/control-plane"),
+
+  /** Read the masked NCBI API key status (never the plaintext key). */
+  getNcbiKey: () => api.get<{ config: NcbiKeyStatus }>("/settings/ncbi"),
+
+  /** Persist (non-empty) or clear (empty string) the NCBI API key. Lifts the
+   *  shared NCBI rate tier from 3 → 10 req/s. Ignored when the deployment sets
+   *  `NCBI_API_KEY` in env (`env_locked` true). */
+  putNcbiKey: (apiKey: string) =>
+    api.put<{ config: NcbiKeyStatus }>("/settings/ncbi", { api_key: apiKey }),
 };
+
+/** Masked NCBI API key status from `/api/settings/ncbi` (no plaintext key). */
+export interface NcbiKeyStatus {
+  has_key: boolean;
+  last4: string | null;
+  source: "env" | "settings" | "none";
+  /** True when the deployment env pins the key; the Settings input is disabled. */
+  env_locked: boolean;
+  updated_at: string | null;
+}

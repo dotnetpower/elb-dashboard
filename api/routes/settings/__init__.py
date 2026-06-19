@@ -17,6 +17,7 @@ from fastapi import APIRouter
 from api.routes.settings import aks_observability as _aks_observability_routes
 from api.routes.settings import app_insights as _app_insights_routes
 from api.routes.settings import control_plane as _control_plane_routes
+from api.routes.settings import ncbi as _ncbi_routes
 from api.routes.settings import performance as _performance_routes
 from api.routes.settings import service_bus as _service_bus_routes
 from api.routes.settings import vnet_peering as _vnet_peering_routes
@@ -27,6 +28,7 @@ settings_router.include_router(
     _aks_observability_routes.router, prefix="/aks-observability"
 )
 settings_router.include_router(_control_plane_routes.router, prefix="/control-plane")
+settings_router.include_router(_ncbi_routes.router, prefix="/ncbi")
 settings_router.include_router(_performance_routes.router, prefix="/performance")
 settings_router.include_router(_service_bus_routes.router, prefix="/service-bus")
 settings_router.include_router(_vnet_peering_routes.router)

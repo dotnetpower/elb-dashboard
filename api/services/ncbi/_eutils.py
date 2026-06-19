@@ -125,11 +125,15 @@ _RATE_RATE: float = 0.0
 def _rate_capacity() -> tuple[float, float]:
     """Return (capacity, refill_per_sec) honouring NCBI policy.
 
-    Without an API key: 3 req/s sustained, burst 3. With ``NCBI_API_KEY``: 10
-    req/s sustained, burst 10. Both can be overridden via
-    ``NCBI_EUTILS_RATE_PER_SEC`` for tests / dev.
+    Without an API key: 3 req/s sustained, burst 3. With a key (env
+    ``NCBI_API_KEY`` OR one saved in the Settings store): 10 req/s sustained,
+    burst 10. Both can be overridden via ``NCBI_EUTILS_RATE_PER_SEC`` for
+    tests / dev. The key lookup goes through ``_resolve_api_key`` so a key
+    pasted in Settings actually lifts the effective rate, not just the
+    ``api_key`` URL param (the store read is TTL-cached, so calling this per
+    token consume stays cheap).
     """
-    if os.environ.get("NCBI_API_KEY", "").strip():
+    if _resolve_api_key():
         default_rate = 10.0
     else:
         default_rate = 3.0
@@ -464,17 +468,47 @@ def reset_rate_limiter() -> None:
         _REDIS_BUCKET_LAST_FAILURE = 0.0
 
 
+def _resolve_api_key() -> str:
+    """Resolve the NCBI API key from env first, then the Settings store.
+
+    Precedence: the deploy-time ``NCBI_API_KEY`` env (Container App secret /
+    Key Vault reference) always wins. When it is unset we fall back to the
+    runtime Settings store so an operator can paste a key in the dashboard
+    later without a redeploy (charter §12a Rule 4: unset env = existing
+    behaviour preserved, the store simply adds an opt-in override). The store
+    lookup is lazy-imported and best-effort — any error (module missing,
+    Table/credential unavailable) degrades silently to "no key", i.e. the
+    3 req/s no-key NCBI policy, never a hard failure of the NCBI call.
+    """
+    env_key = os.environ.get("NCBI_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    try:
+        from api.services.ncbi_pref import get_ncbi_api_key
+
+        return (get_ncbi_api_key() or "").strip()
+    except Exception:  # pragma: no cover - store is best-effort
+        return ""
+
+
 def ncbi_identity_params() -> dict[str, str]:
-    """Return the standard NCBI identity query params from env."""
+    """Return the standard NCBI identity query params.
+
+    ``tool`` / ``email`` come from env only; ``api_key`` is resolved via
+    ``_resolve_api_key`` so a key saved in the Settings store is honoured even
+    when the env var is unset.
+    """
     params: dict[str, str] = {}
     for env_name, param_name in (
         ("NCBI_TOOL", "tool"),
         ("NCBI_EMAIL", "email"),
-        ("NCBI_API_KEY", "api_key"),
     ):
         value = os.environ.get(env_name, "").strip()
         if value:
             params[param_name] = value
+    api_key = _resolve_api_key()
+    if api_key:
+        params["api_key"] = api_key
     return params
 
 

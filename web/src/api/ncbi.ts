@@ -153,3 +153,63 @@ export async function getNuccoreFasta(
   const result = await api.getText(getNuccoreFastaPath(accession, options));
   return result.text;
 }
+
+// ---------------------------------------------------------------------------
+// Discovery — back the New Search "Generate query" modal.
+// ---------------------------------------------------------------------------
+
+/** A single candidate record from an organism/keyword nuccore search. */
+export interface NuccoreSearchResult {
+  accession: string;
+  accession_version: string;
+  title: string;
+  organism: string;
+  taxid: number | null;
+  length: number | null;
+  moltype: string | null;
+  biomol: string | null;
+  is_refseq: boolean;
+  source_db: string | null;
+  status: string | null;
+}
+
+export interface NuccoreSearchResponse {
+  query: string;
+  count: number;
+  source: string;
+  results: NuccoreSearchResult[];
+}
+
+/** A gene feature (with merged CDS product) from a record's feature table. */
+export interface NuccoreGeneFeature {
+  type: "gene";
+  name: string | null;
+  product: string | null;
+  locus_tag: string | null;
+  /** 1-based inclusive low coordinate. */
+  start: number;
+  /** 1-based inclusive high coordinate. */
+  stop: number;
+  strand: "plus" | "minus";
+  length: number;
+}
+
+export interface NuccoreFeatureTable {
+  accession: string;
+  accession_version: string;
+  count: number;
+  source: string;
+  features: NuccoreGeneFeature[];
+}
+
+export function searchNuccore(term: string, limit = 10) {
+  const params = new URLSearchParams({ q: term, limit: String(limit) });
+  return api.get<NuccoreSearchResponse>(`/ncbi/search?${params.toString()}`);
+}
+
+export function getNuccoreFeatures(accession: string, limit = 1000) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return api.get<NuccoreFeatureTable>(
+    `/ncbi/nuccore/${encodeURIComponent(accession)}/features?${params.toString()}`,
+  );
+}
