@@ -23,7 +23,12 @@ Risky contracts: The blast-pool toleration and `nodeSelector workload=blast` are
     from its ConfigMaps on startup. The PodDisruptionBudget is `maxUnavailable: 1`
     (NOT `minAvailable: 1`, which on a single replica would block every voluntary node
     drain / AKS upgrade forever). Readiness/liveness probes on `/healthz` restart a
-    wedged pod. Single-node blast pools still work because
+    wedged pod, but liveness is deliberately slack (timeout 10s, failureThreshold 6 =
+    ~3 min of sustained unresponsiveness) so a transient load spike does not restart a
+    merely-busy pod — see issue #54, where a 50-concurrent submit burst OOMKilled the
+    pod and the strict liveness turned that into a restart loop. The container memory
+    limit is 2Gi (was 512Mi) and cpu 1 for the same burst-resilience reason. Single-node
+    blast pools still work because
     `topologySpreadConstraints.whenUnsatisfiable` is `ScheduleAnyway`. The pod's
     own kubectl (used by the service's `/v1/ready` -> `kubectl get --raw /readyz`
     probe) does NOT auto-load in-cluster config, so an `elb-openapi-kubeconfig`
@@ -265,9 +270,19 @@ def build_manifests(
                                 # from WORKLOAD to MSI if the AKS webhook has
                                 # not injected a federated token.
                             ],
+                            # Raised from cpu:500m/memory:512Mi after a ~50-
+                            # concurrent core_nt submit burst OOMKilled the pod
+                            # (exitCode 137) and tipped it into a liveness death
+                            # loop (issue #54). The submit/dispatch path is a
+                            # single point of failure (one authoritative queue
+                            # owner — see the replicas:1 invariant above), so it
+                            # must absorb a burst without dying. memory 2Gi gives
+                            # headroom over the observed OOM ceiling; cpu 1 keeps
+                            # /healthz responsive under the burst so the liveness
+                            # probe does not time out while the pod is merely busy.
                             "resources": {
-                                "requests": {"cpu": "100m", "memory": "256Mi"},
-                                "limits": {"cpu": "500m", "memory": "512Mi"},
+                                "requests": {"cpu": "250m", "memory": "512Mi"},
+                                "limits": {"cpu": "1", "memory": "2Gi"},
                             },
                             # Without probes the Service routes traffic to a
                             # crashlooping pod and the dashboard sees only
@@ -282,12 +297,23 @@ def build_manifests(
                                 "timeoutSeconds": 3,
                                 "failureThreshold": 3,
                             },
+                            # Liveness is deliberately MORE forgiving than
+                            # readiness: a momentary load spike (the 50-submit
+                            # burst in issue #54) made /healthz miss its 5s
+                            # deadline 3 times in a row and Kubernetes restarted
+                            # an otherwise-healthy pod, turning a transient
+                            # slowdown into a multi-restart outage of the submit
+                            # path. With timeout 10s + failureThreshold 6 the pod
+                            # is only killed after ~3 minutes of sustained
+                            # unresponsiveness (a genuine wedge), while readiness
+                            # still pulls it out of the Service rotation quickly
+                            # during a transient spike.
                             "livenessProbe": {
                                 "httpGet": {"path": "/healthz", "port": 8000},
                                 "initialDelaySeconds": 30,
                                 "periodSeconds": 30,
-                                "timeoutSeconds": 5,
-                                "failureThreshold": 3,
+                                "timeoutSeconds": 10,
+                                "failureThreshold": 6,
                             },
                             # Drain in-flight submit requests before SIGTERM
                             # to avoid orphan jobs on rollout.

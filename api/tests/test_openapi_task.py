@@ -195,6 +195,19 @@ def test_build_manifests_single_queue_owner() -> None:
     assert container["readinessProbe"]["httpGet"]["port"] == 8000
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
 
+    # Burst resilience (issue #54): the single-replica submit/dispatch path was
+    # OOMKilled under a ~50-concurrent core_nt submit burst, then driven into a
+    # liveness restart loop. Lock in the hardened resources + slack liveness so a
+    # later edit cannot silently regress them.
+    assert container["resources"]["limits"]["memory"] == "2Gi"
+    assert container["resources"]["limits"]["cpu"] == "1"
+    liveness = container["livenessProbe"]
+    assert liveness["timeoutSeconds"] == 10
+    assert liveness["failureThreshold"] == 6
+    # Readiness stays strict so a transient spike still pulls the pod out of the
+    # Service rotation quickly while liveness refrains from restarting it.
+    assert container["readinessProbe"]["failureThreshold"] == 3
+
     # Rollout must never run two queue owners at once: the old pod terminates
     # before the new one starts (maxUnavailable:1, maxSurge:0).
     assert spec["strategy"]["rollingUpdate"]["maxUnavailable"] == 1

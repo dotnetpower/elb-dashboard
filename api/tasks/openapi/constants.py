@@ -57,7 +57,12 @@ FED_CRED_NAME = "fc-elb-openapi"
 #   1 — implicit baseline (two replicas; pre-annotation deployments report None).
 #   2 — single queue owner (replicas 1 + maxUnavailable rollout + PDB
 #       maxUnavailable:1) so ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS is authoritative.
-OPENAPI_MANIFEST_REVISION = 2
+#   3 — burst resilience (issue #54): memory limit 512Mi -> 2Gi (was OOMKilled
+#       under a ~50-concurrent core_nt submit burst), cpu limit 500m -> 1, and a
+#       more forgiving liveness probe (timeout 5s -> 10s, failureThreshold
+#       3 -> 6) so a transient load spike no longer triggers a restart loop on
+#       the single-replica submit/dispatch path.
+OPENAPI_MANIFEST_REVISION = 3
 OPENAPI_MANIFEST_REVISION_ANNOTATION = "elb-dashboard/manifest-revision"
 
 
