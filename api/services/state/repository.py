@@ -293,6 +293,87 @@ class JobStateRepository:
                 type(exc).__name__,
             )
 
+    def reconcile_time_index(
+        self, *, dry_run: bool = False, batch_log_every: int = 500
+    ) -> tuple[int, int]:
+        """Idempotently (re)build the time-ordered index from ``jobstate`` rows.
+
+        Returns ``(scanned, written)``. Read-only against ``jobstate``,
+        upsert-only against ``jobstateindex`` — never deletes or mutates a
+        ``jobstate`` row. Streams the source table so memory stays bounded
+        regardless of history size.
+
+        Shared by the one-shot backfill script
+        (``scripts/dev/backfill_jobstate_time_index.py``) and the periodic
+        reconcile task (``api.tasks.blast.reconcile_time_index``). Both rely on
+        the same property: the index RowKey is derived only from the immutable
+        ``owner_oid`` + ``created_at``, so re-running upserts the SAME RowKey per
+        job — a partial run is safely resumable and a steady-state reconcile is a
+        no-op write-for-write.
+
+        Heals the only gap the best-effort write path can open: an ``_index_put``
+        that failed after the ``jobstate`` row was written silently OMITS that
+        job from the indexed listing until a reconcile re-adds it. The mirror
+        case — an ``_index_delete`` that failed, leaving a stale index row for a
+        soft-deleted job — needs no cleanup here because ``list_owner_page``
+        already skips ``status='deleted'`` (and missing) rows at read time; this
+        pass simply does not re-add tombstones (the ``status ne 'deleted'``
+        filter below).
+
+        ``dry_run`` counts what WOULD be written and touches no index table (it
+        does not even create ``jobstateindex``), so it is safe to run before a
+        flip to size the backfill.
+        """
+        written = 0
+        scanned = 0
+
+        if not dry_run:
+            self._ensure_table(INDEX_TABLE_NAME)
+
+        # Read only the columns needed to build the index key; skip the large
+        # payload. ``status ne 'deleted'`` mirrors the listing filter so
+        # tombstones are not indexed.
+        select = ["PartitionKey", "RowKey", "owner_oid", "created_at", "status"]
+        with self._state_client() as state_t:
+            try:
+                entities = state_t.query_entities(
+                    "RowKey eq 'current' and status ne 'deleted'",
+                    results_per_page=1000,
+                    select=select,
+                )
+            except ResourceNotFoundError:
+                # jobstate table not created yet -> nothing to reconcile.
+                return 0, 0
+
+            # The index client is POOLED and owned by this repository — do NOT
+            # close it here. Closing the shared pooled client would tear down the
+            # underlying HTTP transport, so the next caller in the same process
+            # (the periodic reconcile task re-runs this every tick) would then
+            # operate on a closed client and fail. The pool is reclaimed on
+            # process exit / ``reset_state_repo_cache()``.
+            index_t = None if dry_run else self._index_client()
+            for entity in entities:
+                scanned += 1
+                job_id = str(entity.get("PartitionKey") or "")
+                if not job_id:
+                    continue
+                index_entity = build_index_entity(
+                    job_id=job_id,
+                    owner_oid=entity.get("owner_oid"),
+                    created_at=entity.get("created_at"),
+                )
+                if not dry_run and index_t is not None:
+                    index_t.upsert_entity(index_entity)
+                written += 1
+                if batch_log_every and written % batch_log_every == 0:
+                    LOGGER.info(
+                        "jobstate time-index reconcile progress scanned=%d written=%d",
+                        scanned,
+                        written,
+                    )
+
+        return scanned, written
+
     # --- jobstate ---
 
     def create(self, state: JobState) -> JobState:

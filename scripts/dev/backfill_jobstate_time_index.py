@@ -30,58 +30,17 @@ EXIT_BAD_ENV = 2
 def backfill(*, dry_run: bool = False, batch_log_every: int = 500) -> int:
     """Upsert an index row for every non-deleted ``jobstate`` row.
 
-    Returns the number of index rows written (or that WOULD be written in
-    ``--dry-run``). Streams the table so memory stays bounded regardless of
-    history size.
+    Thin CLI wrapper around ``JobStateRepository.reconcile_time_index`` — the
+    same idempotent scan-and-upsert the periodic reconcile task runs, so the
+    one-shot backfill and the steady-state reconcile can never drift. Prints a
+    ``{mode}done scanned=<n> backfilled=<n>`` summary and returns ``EXIT_OK``.
     """
     from api.services.state.repository import get_state_repo
-    from api.services.state.time_index import INDEX_TABLE_NAME, build_index_entity
-    from azure.core.exceptions import ResourceNotFoundError
 
     repo = get_state_repo()
-    written = 0
-    scanned = 0
-
-    if not dry_run:
-        repo._ensure_table(INDEX_TABLE_NAME)
-
-    # Read only the columns needed to build the index key; skip the large
-    # payload. ``status ne 'deleted'`` mirrors the listing filter so tombstones
-    # are not indexed.
-    select = ["PartitionKey", "RowKey", "owner_oid", "created_at", "status"]
-    with repo._state_client() as state_t:
-        try:
-            entities = state_t.query_entities(
-                "RowKey eq 'current' and status ne 'deleted'",
-                results_per_page=1000,
-                select=select,
-            )
-        except ResourceNotFoundError:
-            print("jobstate table does not exist yet; nothing to backfill")
-            return EXIT_OK
-
-        # The index client is POOLED and owned by the repository — do NOT close
-        # it here. Closing the shared pooled client would tear down the
-        # underlying HTTP transport, so a second invocation of ``backfill()`` in
-        # the same process (e.g. a future periodic reconcile task that re-runs
-        # the upserts) would then operate on a closed client and fail. The pool
-        # is reclaimed on process exit / ``reset_state_repo_cache()``.
-        index_t = None if dry_run else repo._index_client()
-        for entity in entities:
-            scanned += 1
-            job_id = str(entity.get("PartitionKey") or "")
-            if not job_id:
-                continue
-            index_entity = build_index_entity(
-                job_id=job_id,
-                owner_oid=entity.get("owner_oid"),
-                created_at=entity.get("created_at"),
-            )
-            if not dry_run and index_t is not None:
-                index_t.upsert_entity(index_entity)
-            written += 1
-            if written % batch_log_every == 0:
-                print(f"... progress scanned={scanned} backfilled={written}")
+    scanned, written = repo.reconcile_time_index(
+        dry_run=dry_run, batch_log_every=batch_log_every
+    )
 
     mode = "DRY-RUN " if dry_run else ""
     print(f"{mode}done scanned={scanned} backfilled={written}")

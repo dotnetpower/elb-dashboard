@@ -219,5 +219,8 @@ from api.tasks.blast.submit_runtime import (  # noqa: E402,F401
     _strip_optional_unrecognized_params,
 )
 from api.tasks.blast.submit_task import submit  # noqa: E402
+from api.tasks.blast.time_index_reconcile_task import (  # noqa: E402,F401
+    reconcile_time_index,
+)
 
 

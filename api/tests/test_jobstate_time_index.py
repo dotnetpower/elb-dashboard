@@ -508,3 +508,74 @@ def test_backfill_dry_run_writes_nothing_then_real_run_is_idempotent(
     assert set(index_again.rows.keys()) == keys
     assert len(index_again.rows) == 3
 
+
+# ---------------------------------------------------------------------------
+# Periodic reconcile task (api.tasks.blast.reconcile_time_index, #50)
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_time_index_method_dry_run_touches_no_table(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repo method's dry-run counts rows but never creates the index table."""
+    monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
+    repo.create(_job("job-0", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    repo.create(_job("job-1", owner="owner-a", created_at="2026-06-18T10:00:01+00:00"))
+
+    scanned, written = repo.reconcile_time_index(dry_run=True)
+    assert (scanned, written) == (2, 2)
+    assert time_index.INDEX_TABLE_NAME not in repo._test_tables  # type: ignore[attr-defined]
+
+
+def test_reconcile_time_index_task_noop_when_flag_off(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag OFF: the task returns early, creates no index table, writes nothing."""
+    monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
+    repo.create(_job("job-0", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+
+    from api.tasks.blast import reconcile_time_index
+
+    result = reconcile_time_index.run()
+    assert result == {"skipped": "flag_off", "scanned": 0, "written": 0}
+    assert time_index.INDEX_TABLE_NAME not in repo._test_tables  # type: ignore[attr-defined]
+
+
+def test_reconcile_time_index_task_heals_missing_rows_when_flag_on(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag ON but rows were created un-indexed (best-effort ``_index_put``
+    missed them): the reconcile task re-adds one index row per non-deleted job,
+    skips tombstones, and is idempotent on a second pass."""
+    # Seed with the flag OFF so create writes NO index rows (the un-indexed gap a
+    # transient _index_put failure would leave).
+    monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
+    repo.create(_job("job-0", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    repo.create(_job("job-1", owner="", created_at="2026-06-18T10:00:01+00:00"))  # shared
+    repo.create(_job("job-del", owner="owner-a", created_at="2026-06-18T10:00:02+00:00"))
+    repo.update("job-del", status="deleted", phase="deleted")  # tombstone -> excluded
+
+    # The task resolves its repo via get_state_repo(); reset so it builds a fresh
+    # repo wired to the SAME patched fakes.
+    state_repo.reset_state_repo_cache()
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+
+    from api.tasks.blast import reconcile_time_index
+
+    result = reconcile_time_index.run()
+    assert result == {"scanned": 2, "written": 2}
+
+    index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
+    keys = set(index.rows.keys())
+    assert ("owner-a", time_index.row_key("2026-06-18T10:00:00+00:00", "job-0")) in keys
+    shared_rk = time_index.row_key("2026-06-18T10:00:01+00:00", "job-1")
+    assert (time_index.SHARED_BUCKET, shared_rk) in keys
+    assert all("job-del" not in rk for _pk, rk in keys)
+    assert len(keys) == 2
+
+    # Idempotent: a second pass writes the same RowKeys, no duplicates.
+    result2 = reconcile_time_index.run()
+    assert result2 == {"scanned": 2, "written": 2}
+    assert set(repo._test_tables[time_index.INDEX_TABLE_NAME].rows.keys()) == keys  # type: ignore[attr-defined]
+
+

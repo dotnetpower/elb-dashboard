@@ -174,6 +174,19 @@ celery_app.conf.update(
             "schedule": 300.0,
             "options": {"queue": "reconcile"},
         },
+        # Heal the jobstate time-ordered index (#50): re-run the idempotent
+        # backfill upserts so a job whose in-line best-effort _index_put failed
+        # is re-added and stops being omitted from the indexed /api/blast/jobs
+        # listing. No-op unless JOBSTATE_TIME_INDEX_ENABLED is set (the task
+        # returns early before touching Storage), so leaving it scheduled on
+        # every deployment is free — one cheap env check per tick.
+        "blast-reconcile-time-index": {
+            "task": "api.tasks.blast.reconcile_time_index",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_TIME_INDEX_RECONCILE_SECONDS", "3600")
+            ),
+            "options": {"queue": "reconcile"},
+        },
         "upgrade-check-latest": {
             "task": "api.tasks.upgrade.check_latest",
             "schedule": 1800.0,
