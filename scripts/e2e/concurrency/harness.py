@@ -77,6 +77,18 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _api_base(fqdn: str) -> str:
+    """Base URL for the elb-openapi service.
+
+    ``fqdn`` may carry an explicit scheme (e.g. ``http://127.0.0.1:8000`` when
+    tunnelling to the internal-only LoadBalancer via ``kubectl port-forward``);
+    otherwise default to ``https://`` for a public HTTPS endpoint.
+    """
+    if fqdn.startswith(("http://", "https://")):
+        return fqdn.rstrip("/")
+    return f"https://{fqdn}"
+
+
 def classify_state(payload: dict) -> str:
     """Collapse an opaque status payload into running/succeeded/failed/unknown."""
 
@@ -179,7 +191,7 @@ def resolve_db_target(
     if db.startswith(("http://", "https://")):
         return db, profile, resolved_opts
     resp = httpx.get(
-        f"https://{fqdn}/v1/config",
+        f"{_api_base(fqdn)}/v1/config",
         headers={"X-ELB-API-Token": token},
         timeout=30.0,
     )
@@ -207,6 +219,7 @@ async def submit_job(
     t0: float,
     resource_profile: str | None = None,
     blast_options: dict | None = None,
+    submit_timeout: float = 60.0,
 ) -> None:
     """POST one Mode-B job and stamp submit latency + job id onto the record."""
 
@@ -226,10 +239,10 @@ async def submit_job(
     started = time.monotonic()
     try:
         resp = await client.post(
-            f"https://{fqdn}/v1/jobs",
+            f"{_api_base(fqdn)}/v1/jobs",
             json=body,
             headers={"X-ELB-API-Token": token},
-            timeout=60.0,
+            timeout=submit_timeout,
         )
         record.submit_latency_s = round(time.monotonic() - started, 3)
         record.submit_status = resp.status_code
@@ -260,7 +273,7 @@ async def poll_once(
     elapsed = round(time.monotonic() - t0, 3)
     try:
         resp = await client.get(
-            f"https://{fqdn}/v1/jobs/{record.job_id}/status",
+            f"{_api_base(fqdn)}/v1/jobs/{record.job_id}/status",
             headers={"X-ELB-API-Token": token},
             timeout=30.0,
         )
@@ -303,6 +316,8 @@ async def run_burst(
     outdir: Path,
     resource_profile: str | None = None,
     blast_options: dict | None = None,
+    submit_concurrency: int = 0,
+    submit_timeout: float = 60.0,
 ) -> dict:
     """Submit ``n`` jobs ~simultaneously, poll all until terminal/timeout."""
 
@@ -334,16 +349,36 @@ async def run_burst(
     }
     (outdir / "run_meta.json").write_text(json.dumps(meta, indent=2))
     print(
-        f"[{_now_iso()}] run {run_id}: bursting {n} submits to https://{fqdn}/v1/jobs", flush=True
+        f"[{_now_iso()}] run {run_id}: bursting {n} submits to {_api_base(fqdn)}/v1/jobs",
+        flush=True,
     )
 
     t0 = time.monotonic()
     limits = httpx.Limits(max_connections=max(n, 10), max_keepalive_connections=max(n, 10))
     async with httpx.AsyncClient(limits=limits, http2=False) as client:
-        # Fire all submits concurrently.
-        await asyncio.gather(
-            *(
-                submit_job(
+        # Fire submits, optionally capped by a semaphore so a rate-limited
+        # openapi (or a single kubectl port-forward tunnel) is not flooded with
+        # all N at once — each submit still lands within a short window, which
+        # is what populates the server-side queue we are measuring.
+        sem = asyncio.Semaphore(submit_concurrency) if submit_concurrency > 0 else None
+
+        async def _submit_one(t: QueryTemplate, r: JobRecord) -> None:
+            if sem is not None:
+                async with sem:
+                    await submit_job(
+                        client,
+                        fqdn=fqdn,
+                        token=token,
+                        db=db,
+                        template=t,
+                        record=r,
+                        t0=t0,
+                        resource_profile=resource_profile,
+                        blast_options=blast_options,
+                        submit_timeout=submit_timeout,
+                    )
+            else:
+                await submit_job(
                     client,
                     fqdn=fqdn,
                     token=token,
@@ -353,9 +388,11 @@ async def run_burst(
                     t0=t0,
                     resource_profile=resource_profile,
                     blast_options=blast_options,
+                    submit_timeout=submit_timeout,
                 )
-                for t, r in zip(selected, records, strict=True)
-            )
+
+        await asyncio.gather(
+            *(_submit_one(t, r) for t, r in zip(selected, records, strict=True))
         )
         submits_path = outdir / "submits.ndjson"
         with submits_path.open("w") as fh:
@@ -378,7 +415,7 @@ async def run_burst(
         ok = [r for r in records if r.job_id]
         print(
             f"[{_now_iso()}] submitted ok={len(ok)}/{n} "
-            f"statuses={sorted({r.submit_status for r in records})}",
+            f"statuses={sorted({r.submit_status for r in records}, key=lambda s: (s is None, s))}",
             flush=True,
         )
 
@@ -478,6 +515,19 @@ def main() -> int:
     )
     ap.add_argument("--poll", type=float, default=10.0, help="poll cadence seconds")
     ap.add_argument("--wall-timeout", type=float, default=2400.0, help="max wall seconds")
+    ap.add_argument(
+        "--submit-concurrency",
+        type=int,
+        default=0,
+        help="max in-flight submits (0 = all at once); use a small value (e.g. 5) "
+        "when tunnelling through a single kubectl port-forward to a rate-limited openapi",
+    )
+    ap.add_argument(
+        "--submit-timeout",
+        type=float,
+        default=60.0,
+        help="per-submit HTTP timeout seconds (raise when each submit is slow, e.g. core_nt)",
+    )
     ap.add_argument("--include-heavy", action="store_true", help="include orf1ab (21kb) query")
     ap.add_argument("--outdir", default="", help="output dir (default .logs/e2e/concurrency/<ts>)")
     args = ap.parse_args()
@@ -532,6 +582,8 @@ def main() -> int:
             outdir=outdir,
             resource_profile=resource_profile,
             blast_options=blast_options,
+            submit_concurrency=args.submit_concurrency,
+            submit_timeout=args.submit_timeout,
         )
     )
     print(
