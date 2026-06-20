@@ -51,7 +51,9 @@ from __future__ import annotations
 # docs/features_change/2026-06/2026-06-14-openapi-external-payload-hardening.md.
 # 4.25 stages the BLAST v5 seqid->taxid filter index ``.nos``/``.not`` in the
 # shard download pattern so sharded core_nt searches with a taxonomy
-# include/exclude filter stop failing with blastn exit 255. See
+# include/exclude filter stop failing with blastn exit 255. 4.26 adds the
+# self-heal that invalidates a pre-fix ``.download-complete`` warm cache missing
+# that index so already-warmed clusters re-stage it on the next warmup. See
 # docs/features_change/2026-06/2026-06-20-sharded-negative-taxids-not-nos-fix.md.
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
@@ -72,7 +74,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.25",
+    "elb-openapi": "4.26",
 }
 
 # GitHub source repo for ACR Build Tasks.
