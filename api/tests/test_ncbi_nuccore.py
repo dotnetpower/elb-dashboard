@@ -168,6 +168,13 @@ def _disable_durable_cache(monkeypatch: pytest.MonkeyPatch) -> None:
         ("AB123456.1", "AB123456.1"),
         ("XR_001234567.2", "XR_001234567.2"),
         ("NC_012920", "NC_012920"),
+        # PDB structure-chain accessions (digit-led 4-char PDB ID + chain).
+        # The db=nuccore search returns these for short ssDNA/ssRNA chains, so
+        # the fetch path must accept them (regression: live 8WGZ_T rejection).
+        ("8WGZ_T", "8WGZ_T"),
+        ("8wgz_t", "8WGZ_T"),
+        (" 8WGZ_T ", "8WGZ_T"),
+        ("1ABC_AB", "1ABC_AB"),
     ],
 )
 def test_normalise_accession_accepts_known_shapes(raw: str, expected: str) -> None:

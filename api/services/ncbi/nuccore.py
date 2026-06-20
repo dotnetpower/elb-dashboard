@@ -62,7 +62,24 @@ MAX_DESCRIPTION_CHARS = 2000
 # prefixes + digits, and an optional ``.version`` suffix. Anything else is
 # rejected so we never forward arbitrary strings to NCBI.
 _ACCESSION_RE = re.compile(r"^[A-Z]{1,4}_?[0-9]+(?:\.[0-9]{1,3})?$")
+# PDB-derived accession (a structure chain), e.g. ``8WGZ_T`` / ``1ABC_AB``: a
+# 4-character, digit-led PDB ID plus an underscore-separated chain identifier.
+# The db=nuccore search legitimately returns these for short ssDNA/ssRNA chains
+# embedded in a deposited structure (and NCBI efetch resolves them), so the
+# fetch path MUST accept them — otherwise a researcher can pick a search result
+# the fetch then rejects with "not a recognisable NCBI identifier".
+_PDB_ACCESSION_RE = re.compile(r"^[0-9][A-Z0-9]{3}_[A-Z0-9]{1,4}$")
 _MAX_ACCESSION_LENGTH = 32
+
+
+def _is_recognised_accession(value: str) -> bool:
+    """True when ``value`` (already upper-cased) is a fetchable accession.
+
+    Accepts the conservative GenBank/RefSeq shape OR the PDB structure-chain
+    shape. Kept as one predicate so the pipe-extraction loop and the final
+    validation in ``normalise_accession`` stay in lock-step.
+    """
+    return bool(_ACCESSION_RE.match(value) or _PDB_ACCESSION_RE.match(value))
 
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _MAX_CACHE_ENTRIES = 512
@@ -100,7 +117,7 @@ def normalise_accession(accession: str) -> str:
         parts = [p for p in raw.split("|") if p]
         for candidate in reversed(parts):
             normalised = candidate.strip()
-            if _ACCESSION_RE.match(normalised.upper()):
+            if _is_recognised_accession(normalised.upper()):
                 raw = normalised
                 break
         else:
@@ -108,7 +125,7 @@ def normalise_accession(accession: str) -> str:
     if len(raw) > _MAX_ACCESSION_LENGTH:
         raise ValueError(f"accession exceeds {_MAX_ACCESSION_LENGTH} characters")
     upper = raw.upper()
-    if not _ACCESSION_RE.match(upper):
+    if not _is_recognised_accession(upper):
         raise ValueError("accession is not a recognisable NCBI identifier")
     return upper
 
