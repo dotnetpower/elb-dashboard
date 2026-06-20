@@ -33,6 +33,16 @@
   --purple: #b877d9;
   --teal: #5ccab4;
 
+  /* Code/file preview surface + nucleotide base colours (FASTA / INI
+     previews). Dark theme = bright inks on a dark inset; the light override
+     darkens both the surface and the inks so they stay AA-legible. */
+  --code-surface: rgba(0, 0, 0, 0.25);
+  --seq-a: #6ad6a3;
+  --seq-t: #e07b8a;
+  --seq-g: #f0c674;
+  --seq-c: #7aa7ff;
+  --seq-u: #e07b8a;
+
   /* Spacing scale */
   --space-1: 4px;
   --space-2: 8px;
@@ -104,6 +114,16 @@
   --danger: #b5251f;
   --purple: #7a52bc;
   --teal: #1d6b73;
+
+  /* Code/file preview surface + bases — darkened for AA on the light inset
+     (the previous dark-theme inks washed out on the light box; see
+     BlastFilePreview HighlightedINI/HighlightedFASTA). */
+  --code-surface: rgba(0, 0, 0, 0.05);
+  --seq-a: #127a52;
+  --seq-t: #b03a4e;
+  --seq-g: #8a5d00;
+  --seq-c: #1565c0;
+  --seq-u: #b03a4e;
 
   /* Card accents — keep colour identity per card type */
   --card-accent-cluster: #005fb8;

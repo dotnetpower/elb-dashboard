@@ -47,7 +47,7 @@ export function HighlightedINI({ text }: { text: string }) {
         margin: 0,
         padding: "8px 10px",
         borderRadius: 4,
-        background: "rgba(0,0,0,0.25)",
+        background: "var(--code-surface)",
         fontSize: 11,
         lineHeight: 1.6,
         whiteSpace: "pre-wrap",
@@ -65,7 +65,7 @@ export function HighlightedINI({ text }: { text: string }) {
         if (eq > 0 && !line.startsWith("#")) {
           return (
             <div key={i}>
-              <span style={{ color: "#9aa3b8" }}>{line.slice(0, eq)}</span>
+              <span style={{ color: "var(--text-muted)" }}>{line.slice(0, eq)}</span>
               <span style={{ color: "var(--text-faint)" }}>=</span>
               <span style={{ color: "var(--text-primary)" }}>{line.slice(eq + 1)}</span>
             </div>
@@ -83,11 +83,11 @@ export function HighlightedINI({ text }: { text: string }) {
 
 export function HighlightedFASTA({ text }: { text: string }) {
   const colorMap: Record<string, string> = {
-    A: "#6ad6a3",
-    T: "#e07b8a",
-    G: "#f0c674",
-    C: "#7aa7ff",
-    U: "#e07b8a",
+    A: "var(--seq-a)",
+    T: "var(--seq-t)",
+    G: "var(--seq-g)",
+    C: "var(--seq-c)",
+    U: "var(--seq-u)",
   };
   return (
     <pre
@@ -95,7 +95,7 @@ export function HighlightedFASTA({ text }: { text: string }) {
         margin: 0,
         padding: "8px 10px",
         borderRadius: 4,
-        background: "rgba(0,0,0,0.25)",
+        background: "var(--code-surface)",
         fontSize: 11,
         lineHeight: 1.6,
         whiteSpace: "pre-wrap",
