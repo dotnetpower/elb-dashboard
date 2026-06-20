@@ -17,7 +17,7 @@
  * deployment Service Bus integration being active (a disabled integration shows
  * a clear banner and the send is rejected server-side).
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -341,8 +341,50 @@ export function ServiceBusPlayground() {
     ],
   );
 
+  // Editable request body (JSON). The form (Pane 1) is the friendly builder;
+  // this editor is the executable artifact that Validate / Send actually
+  // submit. It mirrors the form until the operator edits it by hand (then
+  // `bodyDirty` latches so a later form change does not clobber their edit;
+  // "Reset to form" re-syncs). Auto-validation = a live JSON.parse below.
+  const formBodyJson = useMemo(
+    () => JSON.stringify(stripDryRun(buildBody(false)), null, 2),
+    [buildBody],
+  );
+  const [bodyDraft, setBodyDraft] = useState(formBodyJson);
+  const [bodyDirty, setBodyDirty] = useState(false);
+  useEffect(() => {
+    if (!bodyDirty) setBodyDraft(formBodyJson);
+  }, [formBodyJson, bodyDirty]);
+  const { bodyValue, bodyError } = useMemo<{
+    bodyValue: ServiceBusSendRequest | null;
+    bodyError: string | null;
+  }>(() => {
+    const text = bodyDraft.trim();
+    if (!text) return { bodyValue: null, bodyError: "Request body is empty." };
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { bodyValue: null, bodyError: "Request body must be a JSON object." };
+      }
+      return { bodyValue: parsed as ServiceBusSendRequest, bodyError: null };
+    } catch (err) {
+      return {
+        bodyValue: null,
+        bodyError: err instanceof Error ? err.message : "Invalid JSON.",
+      };
+    }
+  }, [bodyDraft]);
+
   const sendMutation = useMutation({
-    mutationFn: (dryRun: boolean) => settingsApi.sendServiceBus(buildBody(dryRun)),
+    mutationFn: (dryRun: boolean) => {
+      // Send the EDITED body (falls back to the form-derived body only when
+      // the editor is somehow empty — the buttons are disabled while invalid).
+      const base = (bodyValue ?? buildBody(false)) as ServiceBusSendRequest;
+      const payload: ServiceBusSendRequest = { ...base };
+      if (dryRun) payload.dry_run = true;
+      else delete payload.dry_run;
+      return settingsApi.sendServiceBus(payload);
+    },
     onSuccess: (res) => {
       if (res.status === "valid") {
         setLastResult(`Validated (no message sent) · corr ${res.external_correlation_id}`);
@@ -421,9 +463,9 @@ export function ServiceBusPlayground() {
         requestQueue,
         completionTopic,
         observerSubscription,
-        body: buildBody(false),
+        body: bodyValue ?? buildBody(false),
       }),
-    [codeTab, namespaceFqdn, requestQueue, completionTopic, observerSubscription, buildBody],
+    [codeTab, namespaceFqdn, requestQueue, completionTopic, observerSubscription, bodyValue, buildBody],
   );
 
   const copyCode = useCallback(() => {
@@ -713,44 +755,10 @@ export function ServiceBusPlayground() {
               style={inputStyle}
             />
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              type="button"
-              className="glass-button"
-              onClick={() => sendMutation.mutate(true)}
-              disabled={sendMutation.isPending}
-            >
-              Validate
-            </button>
-            <button
-              type="button"
-              className="glass-button glass-button--primary"
-              onClick={() => sendMutation.mutate(false)}
-              disabled={sendMutation.isPending || !effectiveEnabled}
-              title={!effectiveEnabled ? "Service Bus integration is not active" : undefined}
-            >
-              {sendMutation.isPending ? (
-                <Loader2 size={14} className="spin" />
-              ) : (
-                <Send size={14} />
-              )}{" "}
-              Send
-            </button>
-          </div>
-          {lastResult && (
-            <div
-              style={{
-                fontSize: 12,
-                padding: "8px 10px",
-                borderRadius: 6,
-                background: "var(--bg-tertiary)",
-                border: "1px solid var(--border-subtle)",
-                wordBreak: "break-all",
-              }}
-            >
-              {lastResult}
-            </div>
-          )}
+          <p className="muted" style={{ margin: 0, fontSize: 11, lineHeight: 1.5 }}>
+            The form builds the request body shown in ② Sample code. Edit it there and
+            press Validate / Send to submit the exact JSON you see.
+          </p>
         </section>
 
         {/* Pane 2 — Sample code */}
@@ -758,10 +766,62 @@ export function ServiceBusPlayground() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <h2 style={{ margin: 0, fontSize: 14 }}>② Sample code</h2>
             <span style={{ flex: 1 }} />
+            {bodyDirty && (
+              <button
+                type="button"
+                className="glass-button"
+                onClick={() => {
+                  setBodyDirty(false);
+                  setBodyDraft(formBodyJson);
+                }}
+                title="Discard manual edits and re-sync the body from the form"
+              >
+                <RefreshCw size={13} /> Reset to form
+              </button>
+            )}
             <button type="button" className="glass-button" onClick={copyCode}>
               <Copy size={13} /> Copy
             </button>
           </div>
+
+          {/* Editable request body — the executable artifact. Validate / Send
+              below submit exactly this JSON. */}
+          <div style={{ display: "grid", gap: 4 }}>
+            <label style={labelStyle} htmlFor="pg-body-editor">
+              Request body <span className="muted">(editable JSON)</span>
+            </label>
+            <textarea
+              id="pg-body-editor"
+              value={bodyDraft}
+              onChange={(e) => {
+                setBodyDirty(true);
+                setBodyDraft(e.target.value);
+              }}
+              spellCheck={false}
+              rows={14}
+              style={{
+                ...inputStyle,
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+                lineHeight: 1.5,
+                resize: "vertical",
+                whiteSpace: "pre",
+                overflowWrap: "normal",
+                borderColor: bodyError ? "var(--danger)" : undefined,
+              }}
+            />
+            <div
+              role="status"
+              style={{
+                fontSize: 11,
+                color: bodyError ? "var(--danger)" : "var(--success)",
+                wordBreak: "break-word",
+              }}
+            >
+              {bodyError ? `Invalid JSON — ${bodyError}` : "Valid JSON · ready to send"}
+            </div>
+          </div>
+
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             <CodeTabButton active={codeTab === "python-send"} onClick={() => setCodeTab("python-send")}>
               Python · send
@@ -799,6 +859,53 @@ export function ServiceBusPlayground() {
               subscription its own copy, so a subscriber never competes with the
               dashboard for messages.
             </p>
+          )}
+
+          {/* Validate / Send — operate on the edited Request body above. */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="glass-button"
+              onClick={() => sendMutation.mutate(true)}
+              disabled={sendMutation.isPending || Boolean(bodyError)}
+              title={bodyError ? "Fix the request body JSON first" : "Server-side validate (dry run)"}
+            >
+              Validate
+            </button>
+            <button
+              type="button"
+              className="glass-button glass-button--primary"
+              onClick={() => sendMutation.mutate(false)}
+              disabled={sendMutation.isPending || !effectiveEnabled || Boolean(bodyError)}
+              title={
+                !effectiveEnabled
+                  ? "Service Bus integration is not active"
+                  : bodyError
+                    ? "Fix the request body JSON first"
+                    : undefined
+              }
+            >
+              {sendMutation.isPending ? (
+                <Loader2 size={14} className="spin" />
+              ) : (
+                <Send size={14} />
+              )}{" "}
+              Send
+            </button>
+          </div>
+          {lastResult && (
+            <div
+              style={{
+                fontSize: 12,
+                padding: "8px 10px",
+                borderRadius: 6,
+                background: "var(--bg-tertiary)",
+                border: "1px solid var(--border-subtle)",
+                wordBreak: "break-all",
+              }}
+            >
+              {lastResult}
+            </div>
           )}
         </section>
 
