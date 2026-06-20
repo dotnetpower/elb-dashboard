@@ -39,6 +39,7 @@ from api import celery_app as _celery_app  # noqa: F401
 from api.app.global_exception_logging import install_global_exception_hooks
 from api.app.inspector import _inspector_should_capture  # noqa: F401  - back-compat re-export
 from api.app.lifespan import _lifespan
+from api.app.logging_config import configure_logging
 from api.app.middleware import RequestIdMiddleware
 from api.app.security_headers import SecurityHeadersMiddleware
 from api.routes import (
@@ -66,28 +67,9 @@ from api.routes import (
     warmup,
 )
 
+configure_logging()
+
 LOGGER = logging.getLogger(__name__)
-
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
-    format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
-)
-
-# Silence verbose third-party loggers regardless of LOG_LEVEL — at DEBUG these
-# dump full HTTP request/response headers on every Azure SDK call and were the
-# single biggest CPU + log-volume drain during local dev. Override with
-# AZURE_LOG_LEVEL=DEBUG when you genuinely need wire-level traces.
-_azure_log_level = os.environ.get("AZURE_LOG_LEVEL", "WARNING").upper()
-for _name in (
-    "azure.core.pipeline.policies.http_logging_policy",
-    "azure.identity",
-    "azure.identity._internal.decorators",
-    "azure.identity._credentials.default",
-    "urllib3.connectionpool",
-    "httpx",
-    "watchfiles",
-):
-    logging.getLogger(_name).setLevel(_azure_log_level)
 
 
 def _error_detail_text(detail: Any) -> str | None:
