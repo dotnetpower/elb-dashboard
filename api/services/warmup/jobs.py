@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from api.services.db.sharding import DEFAULT_CONTAINER, MAX_SHARDS, partition_prefix_for
+from api.services.env import env_int
 from api.services.warmup.scripts import (
     BLAST_VMTOUCH_AKS_SCRIPT as _BLAST_VMTOUCH_AKS_SCRIPT,
 )
@@ -707,6 +708,16 @@ def _build_job(
         },
         "spec": {
             "backoffLimit": 1,
+            # Hang backstop: a real warmup azcopy finishes in ~1-15 min (16S
+            # ~1-2 min, core_nt ~8 min); without a deadline a hung azcopy
+            # (network stall) would leave the pod Running forever. 1 h sits far
+            # above any real warmup so it never truncates legitimate work — a
+            # Job that exceeds it is marked Failed and the existing
+            # force-release path recreates it on the next reconcile. Override
+            # with BLAST_WARMUP_JOB_DEADLINE_SECONDS.
+            "activeDeadlineSeconds": env_int(
+                "BLAST_WARMUP_JOB_DEADLINE_SECONDS", 3600, minimum=300
+            ),
             "template": {
                 "metadata": {
                     "labels": {

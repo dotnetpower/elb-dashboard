@@ -193,6 +193,37 @@ def test_single_shard_db_is_broadcast_to_every_node() -> None:
         assert env["ELB_SHARD_IDX"] == "00"
 
 
+def test_warmup_jobs_carry_hang_backstop_deadline() -> None:
+    # Every warmup Job must set activeDeadlineSeconds so a hung azcopy cannot
+    # leave the pod Running forever (default 1 h, far above any real warmup).
+    plan = build_warmup_job_plan(
+        db_name="core_nt",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=10,
+        nodes=_nodes(10),
+        image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+    )
+    for job in plan.jobs:
+        assert job["spec"]["activeDeadlineSeconds"] == 3600
+        assert job["spec"]["backoffLimit"] == 1
+
+
+def test_warmup_job_deadline_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("BLAST_WARMUP_JOB_DEADLINE_SECONDS", "1800")
+    plan = build_warmup_job_plan(
+        db_name="16S_ribosomal_RNA",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=1,
+        nodes=_nodes(1),
+        image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+    )
+    assert plan.jobs
+    for job in plan.jobs:
+        assert job["spec"]["activeDeadlineSeconds"] == 1800
+
+
 def test_single_shard_single_node_keeps_one_job() -> None:
     # A 1-node cluster keeps the original single-Job placement.
     plan = build_warmup_job_plan(
