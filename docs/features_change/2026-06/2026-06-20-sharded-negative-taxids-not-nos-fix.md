@@ -39,13 +39,26 @@ to completion instead of failing with an unexplained exit 255.
   the shard download `PATTERN` in `_HARDENED_INIT_DB_SHARD_AKS_SCRIPT` (the
   source of truth that `patch_init_shard_script` writes wholesale into the
   elb-openapi / terminal images). Added an explanatory comment.
+* `terminal/patch_elastic_blast.py` — **self-heal for warm caches staged before
+  this fix.** A node-local shard cache carries a `.download-complete` marker and
+  is reused verbatim, so simply adding `.nos`/`.not` to the pattern would not
+  reach clusters that were already warmed with the old image (their cache keeps
+  the marker, lacks `.nos`/`.not`, and the next sharded taxon-filtered search
+  still aborts). The script now invalidates `.download-complete` when the OUTPUT
+  taxonomy file `${ORIG_DB}.ntf` is present locally but the FILTER index
+  `${ORIG_DB}.not`/`.nos` is not — i.e. the cache predates the fix — so the next
+  warmup re-stages them. Non-taxonomy DBs (no local `.ntf`) are left untouched.
 * `api/tests/test_terminal_patch_elastic_blast.py` — regression guard asserting
-  `${ORIG_DB}.nos` and `${ORIG_DB}.not` are present in the download pattern.
+  `${ORIG_DB}.nos`/`.not` are in the download pattern and the self-heal
+  `CACHE_INCOMPLETE missing taxonomy filter index` branch is present.
+* `scripts/dev/patch-openapi-build-context.py` — force `ARG ELB_REF` to the
+  known-good `7a471297` via regex (the sibling Dockerfile default drifted to
+  `5b7ea2b`, which dropped `bin/elastic-blast` and broke the image build).
 * Sibling `dotnetpower/elastic-blast-azure` (authorised by the maintainer):
-  `src/elastic_blast/templates/scripts/init-db-shard-aks.sh` and
-  `docker-job-submit/templates/scripts/init-db-shard-aks.sh` — same `.nos`/`.not`
-  addition for upstream consistency (the dashboard patch overwrites the former at
-  image-build time, so this is hygiene rather than the deploy path).
+  `src/elastic_blast/templates/scripts/init-db-shard-aks.sh` — same `.nos`/`.not`
+  addition and self-heal block for upstream consistency (the dashboard patch
+  overwrites it at image-build time, so this is hygiene rather than the deploy
+  path).
 
 ## Validation evidence
 * `uv run pytest -q api/tests/test_terminal_patch_elastic_blast.py` → 21 passed.

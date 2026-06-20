@@ -65,6 +65,11 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     download_pattern = text.split('echo "Downloading with pattern: ${PATTERN}"', 1)[0]
     assert "${ORIG_DB}.nos" in download_pattern
     assert "${ORIG_DB}.not" in download_pattern
+    # Self-heal guard: a cache staged before the .nos/.not fix (taxonomy OUTPUT
+    # files present, FILTER index absent) must invalidate .download-complete so
+    # the corrected pattern re-stages them on the next warmup.
+    assert "CACHE_INCOMPLETE missing taxonomy filter index" in text
+    assert '[ -s "${ORIG_DB}.ntf" ]' in text
 
 
 _ELB_CONFIG_OUTFMT_GATE = (
