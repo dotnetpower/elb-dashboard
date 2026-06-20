@@ -2,12 +2,12 @@ import type { CSSProperties, ReactNode } from "react";
 
 export function JsonHighlight({ text }: { text: string }) {
   const styles: Record<string, CSSProperties> = {
-    key: { color: "#8cb4ff" },
-    str: { color: "#a8d4a2" },
-    num: { color: "#d4b88c" },
-    bool: { color: "#c9a0dc" },
-    nil: { color: "#9da5b4", fontStyle: "italic" },
-    brace: { color: "#7a8194" },
+    key: { color: "var(--json-key)" },
+    str: { color: "var(--json-str)" },
+    num: { color: "var(--json-num)" },
+    bool: { color: "var(--json-bool)" },
+    nil: { color: "var(--json-nil)", fontStyle: "italic" },
+    brace: { color: "var(--json-brace)" },
   };
 
   const parts: ReactNode[] = [];

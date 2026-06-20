@@ -62,7 +62,7 @@ export function ClusterHeaderBand({
         cursor: "pointer",
         flexWrap: "wrap",
         borderBottom: collapsed ? "none" : "1px solid var(--border-weak)",
-        background: "rgba(255, 255, 255, 0.02)",
+        background: "var(--bg-tertiary)",
       }}
       onClick={onToggleCollapse}
     >

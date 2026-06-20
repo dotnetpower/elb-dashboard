@@ -301,7 +301,7 @@ export function Layout({ children }: PropsWithChildren) {
             <Search size={14} strokeWidth={1.5} /> New Search
           </NavLink>
           <NavLink to="/blast/jobs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
-            <List size={14} strokeWidth={1.5} /> Recent searches
+            <List size={14} strokeWidth={1.5} /> BLAST Jobs
           </NavLink>
           {customDbEnabled && (
             <NavLink to="/blast/databases/build" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>

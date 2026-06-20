@@ -32,6 +32,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.auth import CallerIdentity, require_caller
 from api.services import service_bus
+from api.services.blast.request_subject import build_request_subject
 from api.services.sanitise import redact_oid
 from api.services.service_bus_pref import (
     ServiceBusConfig,
@@ -378,7 +379,7 @@ def send(
             cfg,
             payload,
             correlation_id=correlation_id,
-            subject="blast.request",
+            subject=build_request_subject(payload),
         )
     except service_bus.ServiceBusUnavailable as exc:
         raise HTTPException(

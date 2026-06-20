@@ -219,7 +219,7 @@ export function StepRow({
                 fontSize: 10,
                 color: "var(--text-faint)",
                 padding: "1px 6px",
-                background: "rgba(255,255,255,0.04)",
+                background: "var(--bg-tertiary)",
                 borderRadius: 3,
               }}
             >

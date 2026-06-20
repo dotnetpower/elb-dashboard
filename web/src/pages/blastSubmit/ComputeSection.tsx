@@ -481,7 +481,7 @@ function ClusterLoadingSkeleton() {
         gap: 8,
         padding: "10px 12px",
         borderRadius: 8,
-        background: "rgba(255,255,255,0.035)",
+        background: "var(--bg-tertiary)",
         border: "1px solid var(--glass-border)",
       }}
     >
@@ -537,7 +537,7 @@ function ExecutionProfileSkeleton() {
           gap: 10,
           padding: "7px 9px",
           borderRadius: 6,
-          background: "rgba(255,255,255,0.04)",
+          background: "var(--bg-tertiary)",
           border: "1px solid var(--glass-border)",
         }}
       >

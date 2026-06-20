@@ -187,7 +187,7 @@ export function SequenceBlocks({
                 style={{
                   textDecoration: "underline dotted",
                   textUnderlineOffset: "2px",
-                  color: "#f0a868",
+                  color: "var(--warning)",
                   fontWeight: 600,
                 }}
               >

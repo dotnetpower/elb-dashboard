@@ -273,7 +273,7 @@ export function BlastJobHeader({
             fontSize: 13,
           }}
         >
-          <ArrowLeft size={14} strokeWidth={1.5} /> Recent searches
+          <ArrowLeft size={14} strokeWidth={1.5} /> BLAST Jobs
         </Link>
         <BlastHelpMenu program={program} />
       </div>

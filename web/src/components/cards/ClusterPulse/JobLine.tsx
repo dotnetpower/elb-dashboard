@@ -109,8 +109,7 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
           color: "var(--accent)",
           fontWeight: 600,
           fontSize: 11.5,
-          fontFamily:
-            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          fontFamily: "var(--font-mono)",
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -158,8 +157,7 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
           color: "var(--text-primary)",
           fontWeight: 500,
           fontSize: 11.5,
-          fontFamily:
-            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          fontFamily: "var(--font-mono)",
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",

@@ -764,7 +764,7 @@ function WarmupDbRow({
         alignItems: "center",
         padding: "10px 12px",
         borderRadius: 8,
-        background: "rgba(255,255,255,0.035)",
+        background: "var(--bg-tertiary)",
         border: "1px solid var(--border-weak)",
       }}
     >
@@ -866,7 +866,7 @@ function WarmupRowsSkeleton() {
             alignItems: "center",
             padding: "10px 12px",
             borderRadius: 8,
-            background: "rgba(255,255,255,0.035)",
+            background: "var(--bg-tertiary)",
             border: "1px solid var(--border-weak)",
           }}
         >
@@ -924,7 +924,7 @@ function WarmupNotice({
         padding: "8px 10px",
         borderRadius: 8,
         fontSize: 11,
-        background: "rgba(255,255,255,0.04)",
+        background: "var(--bg-tertiary)",
         border: `1px solid color-mix(in srgb, ${tone} 35%, transparent)`,
         color: "var(--text-primary)",
         display: "flex",
@@ -987,7 +987,7 @@ function WarmupProgressBar({ warm }: { warm: WarmupDbInfo }) {
         {...(indeterminate ? {} : { "aria-valuenow": Math.round(pct) })}
         style={{
           height: 4,
-          background: "rgba(255,255,255,0.08)",
+          background: "var(--bg-tertiary)",
           borderRadius: 999,
           overflow: "hidden",
         }}
@@ -1062,9 +1062,9 @@ function StatusPill({
         minHeight: 20,
         padding: "2px 7px",
         borderRadius: 999,
-        border: "1px solid rgba(255,255,255,0.12)",
+        border: "1px solid var(--border-medium)",
         color,
-        background: "rgba(255,255,255,0.035)",
+        background: "var(--bg-tertiary)",
         whiteSpace: "nowrap",
       }}
     >

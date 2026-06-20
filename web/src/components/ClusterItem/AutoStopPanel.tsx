@@ -413,7 +413,7 @@ export function AutoStopPanel({
           gap: 8,
           padding: "6px 10px",
           borderRadius: 8,
-          background: "rgba(255, 255, 255, 0.02)",
+          background: "var(--bg-tertiary)",
           border: "1px solid var(--border-weak)",
           fontSize: 11,
           color: "var(--text-muted)",
@@ -434,7 +434,7 @@ export function AutoStopPanel({
         gap: 6,
         padding: "8px 10px",
         borderRadius: 8,
-        background: "rgba(255, 255, 255, 0.025)",
+        background: "var(--bg-tertiary)",
         border: "1px solid var(--border-weak)",
       }}
     >

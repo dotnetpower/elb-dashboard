@@ -8,8 +8,8 @@
  * All NCBI traffic is proxied through the api sidecar (see api/routes/ncbi.py);
  * the browser never talks to NCBI directly.
  */
-import { useState } from "react";
-import { ArrowRight, Dna, Loader2, Search, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowRight, Check, Dna, Loader2, Search, X } from "lucide-react";
 
 import {
   getNuccoreFasta,
@@ -118,6 +118,20 @@ export function SequenceBuilderDialog({
   const [strand, setStrand] = useState<Strand>("plus");
   const [inserting, setInserting] = useState(false);
 
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Focus the first field on open and wire Escape-to-close so the dialog is
+  // fully keyboard-operable (matches native dialog expectations; backdrop click
+  // and Cancel remain).
+  useEffect(() => {
+    searchInputRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const runSearch = async () => {
     const q = term.trim();
     if (!q) return;
@@ -211,30 +225,28 @@ export function SequenceBuilderDialog({
     );
   });
 
+  const accSelected = accession.trim().length > 0;
+  const headerText = previewHeader();
+
   return (
     <div className="glass-dialog-backdrop" onClick={onClose}>
       <div
-        className="glass-card glass-card--strong glass-dialog"
+        className="glass-card glass-card--strong seqbuilder-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="sequence-builder-title"
-        style={{ maxWidth: 640, width: "92%" }}
         onClick={(event) => event.stopPropagation()}
       >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            marginBottom: 12,
-          }}
-        >
+        {/* Pinned header */}
+        <div className="seqbuilder-dialog__header">
           <div>
-            <div className="glass-badge">NCBI</div>
-            <h3 id="sequence-builder-title" style={{ margin: "4px 0 0" }}>
+            <span className="seqbuilder-badge">
+              <Dna size={11} strokeWidth={1.5} /> NCBI
+            </span>
+            <h3 id="sequence-builder-title" className="seqbuilder-dialog__title">
               Generate query from NCBI
             </h3>
-            <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>
+            <div className="seqbuilder-dialog__subtitle">
               Search by organism/keyword or enter an accession, then pick a gene
               or sub-range — the same accession-first flow as NCBI BLAST.
             </div>
@@ -249,231 +261,273 @@ export function SequenceBuilderDialog({
           </button>
         </div>
 
-        {/* Step 1 — search */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-          <input
-            className="glass-input"
-            value={term}
-            onChange={(e) => setTerm(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void runSearch();
-              }
-            }}
-            placeholder='Search NCBI nucleotide (e.g. "monkeypox virus complete genome")'
-            style={{ flex: 1 }}
-          />
-          <button
-            className="glass-button"
-            type="button"
-            onClick={() => void runSearch()}
-            disabled={searching || !term.trim()}
-          >
-            {searching ? (
-              <Loader2 size={13} strokeWidth={1.5} className="spin" />
-            ) : (
-              <Search size={13} strokeWidth={1.5} />
-            )}{" "}
-            Search
-          </button>
-        </div>
-
-        {results && results.length > 0 && (
-          <div
-            style={{
-              maxHeight: 180,
-              overflowY: "auto",
-              display: "flex",
-              flexDirection: "column",
-              gap: 6,
-              marginBottom: 12,
-            }}
-          >
-            {results.map((r) => (
-              <button
-                key={r.accession_version}
-                type="button"
-                className="glass-card"
-                aria-pressed={accession.trim() === r.accession_version}
-                onClick={() => selectAccession(r.accession_version)}
-                style={{
-                  textAlign: "left",
-                  padding: "8px 10px",
-                  background:
-                    accession.trim() === r.accession_version
-                      ? "color-mix(in srgb, var(--accent) 16%, var(--bg-tertiary))"
-                      : "var(--bg-tertiary)",
-                  borderColor:
-                    accession.trim() === r.accession_version
-                      ? "var(--border-focus)"
-                      : undefined,
-                  cursor: "pointer",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 8,
-                    fontSize: 12,
-                  }}
-                >
-                  <span style={{ fontFamily: "monospace" }}>{r.accession_version}</span>
-                  <span style={{ color: "var(--text-muted)" }}>
-                    {r.length != null ? `${r.length.toLocaleString()} bp` : ""}
-                    {r.is_refseq ? " · RefSeq" : ""}
-                  </span>
-                </div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                  {r.title || r.organism}
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Step 2 — accession + features */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
-          <input
-            className="glass-input"
-            value={accession}
-            onChange={(e) => setAccession(e.target.value)}
-            placeholder="Accession (e.g. NC_063383.1)"
-            style={{ flex: 1, fontFamily: "monospace" }}
-          />
-          <button
-            className="glass-button"
-            type="button"
-            onClick={() => void loadFeatures()}
-            disabled={featuresLoading || !accession.trim()}
-            title="List gene/CDS features so you can pick a sub-range"
-          >
-            {featuresLoading ? (
-              <Loader2 size={13} strokeWidth={1.5} className="spin" />
-            ) : (
-              <Dna size={13} strokeWidth={1.5} />
-            )}{" "}
-            Load genes
-          </button>
-        </div>
-
-        {features && features.length > 0 && (
-          <>
-            <input
-              className="glass-input"
-              value={featureFilter}
-              onChange={(e) => setFeatureFilter(e.target.value)}
-              placeholder="Filter genes (name / product / locus_tag)"
-              style={{ marginBottom: 6 }}
-            />
-            <div
-              style={{
-                maxHeight: 150,
-                overflowY: "auto",
-                display: "flex",
-                flexDirection: "column",
-                gap: 4,
-                marginBottom: 12,
-              }}
-            >
-              {visibleFeatures.map((f, idx) => (
-                <button
-                  key={`${f.name ?? "feat"}-${f.start}-${idx}`}
-                  type="button"
-                  className="glass-card"
-                  onClick={() => pickFeature(f)}
-                  style={{
-                    textAlign: "left",
-                    padding: "6px 9px",
-                    background: "var(--bg-tertiary)",
-                    cursor: "pointer",
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 8,
-                    fontSize: 11,
-                  }}
-                >
-                  <span>
-                    <span style={{ fontFamily: "monospace" }}>{f.name || f.locus_tag || "—"}</span>
-                    {f.product ? (
-                      <span style={{ color: "var(--text-muted)" }}> · {f.product}</span>
-                    ) : null}
-                  </span>
-                  <span style={{ color: "var(--text-muted)", whiteSpace: "nowrap" }}>
-                    {f.length.toLocaleString()} bp · {f.strand === "minus" ? "−" : "+"}
-                  </span>
-                </button>
-              ))}
+        {/* Scrollable body */}
+        <div className="seqbuilder-dialog__body">
+          {/* Step 1 — search */}
+          <div className="seqbuilder-step">
+            <div className="seqbuilder-step__head">
+              <span className="seqbuilder-step__num">1</span>
+              <span className="seqbuilder-step__label">Find a record</span>
             </div>
-          </>
-        )}
+            <div className="seqbuilder-row">
+              <input
+                ref={searchInputRef}
+                className="glass-input"
+                value={term}
+                onChange={(e) => setTerm(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void runSearch();
+                  }
+                }}
+                aria-label="Search NCBI nucleotide database"
+                placeholder='Search NCBI nucleotide (e.g. "monkeypox virus complete genome")'
+                style={{ flex: 1 }}
+              />
+              <button
+                className="glass-button"
+                type="button"
+                onClick={() => void runSearch()}
+                disabled={searching || !term.trim()}
+              >
+                {searching ? (
+                  <Loader2 size={13} strokeWidth={1.5} className="spin" />
+                ) : (
+                  <Search size={13} strokeWidth={1.5} />
+                )}{" "}
+                Search
+              </button>
+            </div>
 
-        {/* Step 3 — sub-range + strand */}
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
-          <span style={{ fontSize: 11, color: "var(--text-muted)", minWidth: 70 }}>
-            Sub-range
-          </span>
-          <input
-            className="glass-input blast-small-input"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-            placeholder="From"
-            type="number"
-            min={1}
-          />
-          <ArrowRight size={12} style={{ color: "var(--text-faint)" }} />
-          <input
-            className="glass-input blast-small-input"
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
-            placeholder="To"
-            type="number"
-            min={1}
-          />
-          <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
-            {((["plus", "minus"] as const).map((s) => {
-              const selected = strand === s;
-              return (
-                <button
-                  key={s}
-                  type="button"
-                  className="glass-button"
-                  aria-pressed={selected}
-                  onClick={() => setStrand(s)}
-                  style={{
-                    fontSize: 11,
-                    fontWeight: selected ? 600 : 400,
-                    color: selected ? "var(--text-primary)" : "var(--text-muted)",
-                    background: selected ? "var(--bg-hover)" : undefined,
-                    borderColor: selected ? "var(--border-focus)" : undefined,
-                  }}
-                >
-                  {s === "plus" ? "Plus" : "Minus"}
-                </button>
-              );
-            }))}
+            {(searching || results) && (
+              <div
+                className="seqbuilder-list"
+                role="listbox"
+                aria-label="NCBI search results"
+              >
+                {searching ? (
+                  <div className="seqbuilder-hint">Searching NCBI…</div>
+                ) : results && results.length > 0 ? (
+                  results.map((r) => {
+                    const selected = accession.trim() === r.accession_version;
+                    return (
+                      <button
+                        key={r.accession_version}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={
+                          "seqbuilder-item" +
+                          (selected ? " seqbuilder-item--selected" : "")
+                        }
+                        onClick={() => selectAccession(r.accession_version)}
+                      >
+                        <div className="seqbuilder-item__top">
+                          <span className="seqbuilder-item__acc">
+                            {selected && (
+                              <Check
+                                className="seqbuilder-item__check"
+                                size={13}
+                                strokeWidth={2}
+                              />
+                            )}
+                            {r.accession_version}
+                          </span>
+                          <span className="seqbuilder-item__meta">
+                            {r.length != null ? `${r.length.toLocaleString()} bp` : ""}
+                            {r.is_refseq ? " · RefSeq" : ""}
+                          </span>
+                        </div>
+                        <div className="seqbuilder-item__sub">
+                          {r.title || r.organism}
+                        </div>
+                      </button>
+                    );
+                  })
+                ) : (
+                  <div className="seqbuilder-hint">
+                    No NCBI records matched that search.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="seqbuilder-divider" />
+
+          {/* Step 2 — accession + features */}
+          <div className="seqbuilder-step">
+            <div className="seqbuilder-step__head">
+              <span className="seqbuilder-step__num">2</span>
+              <span className="seqbuilder-step__label">Accession &amp; genes</span>
+            </div>
+            <div className="seqbuilder-row">
+              <input
+                className="glass-input"
+                value={accession}
+                onChange={(e) => setAccession(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void loadFeatures();
+                  }
+                }}
+                aria-label="NCBI accession"
+                placeholder="Accession (e.g. NC_063383.1)"
+                style={{ flex: 1, fontFamily: "var(--font-mono)" }}
+              />
+              <button
+                className="glass-button"
+                type="button"
+                onClick={() => void loadFeatures()}
+                disabled={featuresLoading || !accession.trim()}
+                title="List gene/CDS features so you can pick a sub-range"
+              >
+                {featuresLoading ? (
+                  <Loader2 size={13} strokeWidth={1.5} className="spin" />
+                ) : (
+                  <Dna size={13} strokeWidth={1.5} />
+                )}{" "}
+                Load genes
+              </button>
+            </div>
+
+            {accSelected && (
+              <span className="seqbuilder-selected-chip">
+                <Check size={12} strokeWidth={2} /> {accession.trim()} selected
+              </span>
+            )}
+
+            {(featuresLoading || features) && (
+              <>
+                {features && features.length > 0 && (
+                  <div className="seqbuilder-row">
+                    <input
+                      className="glass-input"
+                      value={featureFilter}
+                      onChange={(e) => setFeatureFilter(e.target.value)}
+                      aria-label="Filter gene features"
+                      placeholder="Filter genes (name / product / locus_tag)"
+                      style={{ flex: 1 }}
+                    />
+                    <span className="seqbuilder-caption">
+                      {visibleFeatures.length}/{features.length}
+                    </span>
+                  </div>
+                )}
+                <div className="seqbuilder-list" aria-label="Gene features">
+                  {featuresLoading ? (
+                    <div className="seqbuilder-hint">Loading gene features…</div>
+                  ) : features && features.length > 0 ? (
+                    visibleFeatures.length > 0 ? (
+                      visibleFeatures.map((f, idx) => (
+                        <button
+                          key={`${f.name ?? "feat"}-${f.start}-${idx}`}
+                          type="button"
+                          className="seqbuilder-item seqbuilder-feature"
+                          onClick={() => pickFeature(f)}
+                        >
+                          <span className="seqbuilder-feature__name">
+                            {f.name || f.locus_tag || "—"}
+                            {f.product ? (
+                              <span
+                                style={{
+                                  color: "var(--text-muted)",
+                                  fontFamily: "var(--font-sans)",
+                                }}
+                              >
+                                {" "}
+                                · {f.product}
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="seqbuilder-item__meta">
+                            {f.length.toLocaleString()} bp ·{" "}
+                            {f.strand === "minus" ? "−" : "+"}
+                          </span>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="seqbuilder-hint">
+                        No genes match that filter.
+                      </div>
+                    )
+                  ) : (
+                    <div className="seqbuilder-hint">
+                      No gene features found for this record.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="seqbuilder-divider" />
+
+          {/* Step 3 — sub-range + strand */}
+          <div className="seqbuilder-step">
+            <div className="seqbuilder-step__head">
+              <span className="seqbuilder-step__num">3</span>
+              <span className="seqbuilder-step__label">Sub-range &amp; strand</span>
+            </div>
+            <div className="seqbuilder-row">
+              <input
+                className="glass-input blast-small-input"
+                value={from}
+                onChange={(e) => setFrom(e.target.value)}
+                aria-label="Sub-range start"
+                placeholder="From"
+                type="number"
+                min={1}
+              />
+              <ArrowRight
+                size={12}
+                style={{ color: "var(--text-faint)", flex: "none" }}
+              />
+              <input
+                className="glass-input blast-small-input"
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+                aria-label="Sub-range end"
+                placeholder="To"
+                type="number"
+                min={1}
+              />
+              <div className="seqbuilder-strand" role="group" aria-label="Strand">
+                {(["plus", "minus"] as const).map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className="seqbuilder-strand__btn"
+                    aria-pressed={strand === s}
+                    onClick={() => setStrand(s)}
+                  >
+                    {s === "plus" ? "Plus" : "Minus"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div
+              className={
+                "seqbuilder-preview" +
+                (headerText ? "" : " seqbuilder-preview--placeholder")
+              }
+              aria-live="polite"
+            >
+              {headerText || "Pick a record to preview the FASTA header"}
+            </div>
           </div>
         </div>
 
-        <div
-          style={{
-            fontFamily: "monospace",
-            fontSize: 11,
-            color: "var(--text-muted)",
-            marginBottom: 12,
-            wordBreak: "break-all",
-          }}
-        >
-          {previewHeader() || "Pick a record to preview the FASTA header"}
-        </div>
-
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        {/* Pinned footer */}
+        <div className="seqbuilder-dialog__footer">
           <button className="glass-button" type="button" onClick={onClose}>
             Cancel
           </button>
           <button
-            className="glass-button blast-action-btn--example"
+            className="glass-button glass-button--primary"
             type="button"
             onClick={() => void doInsert()}
             disabled={inserting || !accession.trim()}

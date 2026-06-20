@@ -85,7 +85,7 @@ export function EndpointResponsesDoc({
                 style={{
                   borderTop: `1px solid ${responseBorder(code)}`,
                   padding: "9px 10px 10px",
-                  background: "rgba(7, 12, 22, 0.22)",
+                  background: "var(--code-surface)",
                 }}
               >
                 {info.nextAction && (
@@ -117,7 +117,7 @@ export function EndpointResponsesDoc({
                           padding: "7px 8px",
                           borderRadius: 6,
                           border: "1px solid var(--border-weak)",
-                          background: "rgba(255,255,255,0.03)",
+                          background: "var(--bg-tertiary)",
                         }}
                       >
                         <div

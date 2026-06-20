@@ -15,7 +15,9 @@ export function ResponseViewer({
 }) {
   const [copied, flashCopied] = useTransientState(false);
   const isOk = response.status >= 200 && response.status < 300;
-  const borderColor = isOk ? "rgba(115,191,105,0.25)" : "rgba(242,114,111,0.25)";
+  const borderColor = isOk
+    ? "color-mix(in srgb, var(--success) 30%, transparent)"
+    : "color-mix(in srgb, var(--danger) 30%, transparent)";
 
   const doCopy = () => {
     onCopy();
@@ -37,7 +39,9 @@ export function ResponseViewer({
           alignItems: "center",
           justifyContent: "space-between",
           padding: "8px 14px",
-          background: isOk ? "rgba(115,191,105,0.04)" : "rgba(242,114,111,0.04)",
+          background: isOk
+            ? "color-mix(in srgb, var(--success) 8%, transparent)"
+            : "color-mix(in srgb, var(--danger) 8%, transparent)",
           borderBottom: `1px solid ${borderColor}`,
         }}
       >

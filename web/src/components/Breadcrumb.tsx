@@ -6,7 +6,7 @@ const ROUTE_LABELS: Record<string, string> = {
   terminal: "Terminal",
   blast: "BLAST",
   submit: "New Search",
-  jobs: "Recent searches",
+  jobs: "BLAST Jobs",
   docs: "API Reference",
   databases: "Databases",
   build: "Custom DB",

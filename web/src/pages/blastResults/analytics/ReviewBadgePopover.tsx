@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -6,6 +7,7 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 import type { BlastHit } from "@/api/endpoints";
 
@@ -37,8 +39,37 @@ export function ReviewBadgePopover({ hit }: Props) {
 
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<"bottom" | "top">("bottom");
+  // The popover is rendered in a portal to <body> with fixed positioning so it
+  // escapes the results table's `overflow:hidden` card + `overflow-x:auto`
+  // scroller (which previously clipped it) and the sticky table header (which
+  // painted over it). `coords` is the viewport-relative anchor.
+  const [coords, setCoords] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const wrapRef = useRef<HTMLSpanElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<number | undefined>(undefined);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimer.current !== undefined) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = undefined;
+    }
+  }, []);
+
+  // Hover bridge: the portaled popover is not a DOM child of the badge, so
+  // moving the pointer from the badge onto the popover would otherwise fire the
+  // badge's mouseleave and close it. A short close delay that either side can
+  // cancel keeps it open while the pointer travels the gap.
+  const scheduleClose = useCallback(() => {
+    cancelClose();
+    closeTimer.current = window.setTimeout(() => setOpen(false), 120);
+  }, [cancelClose]);
+
+  const openNow = useCallback(() => {
+    cancelClose();
+    setOpen(true);
+  }, [cancelClose]);
+
+  useEffect(() => cancelClose, [cancelClose]);
 
   // Close on outside click. Hover open/close is handled by JSX events;
   // this only protects against click-opened popovers that the user
@@ -49,29 +80,46 @@ export function ReviewBadgePopover({ hit }: Props) {
       const target = event.target as Node | null;
       if (!target) return;
       if (wrapRef.current?.contains(target)) return;
+      if (popRef.current?.contains(target)) return;
       setOpen(false);
     };
     document.addEventListener("mousedown", onDocMouseDown);
     return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, [open]);
 
-  // Flip above the cell if the popover would overflow the viewport
-  // (rows near the bottom of the table on short screens).
+  // Compute the popover's fixed viewport position from the trigger rect, and
+  // flip above the badge when there is not enough room below (rows near the
+  // bottom of the viewport). Recomputed on scroll/resize while open so the
+  // portaled popover tracks the badge.
+  const reposition = useCallback(() => {
+    const wrapEl = wrapRef.current;
+    const popEl = popRef.current;
+    if (!wrapEl || !popEl) return;
+    const rect = wrapEl.getBoundingClientRect();
+    const popHeight = popEl.offsetHeight;
+    const popWidth = popEl.offsetWidth || 380;
+    const margin = 12;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const place: "bottom" | "top" =
+      spaceBelow < popHeight + margin && rect.top > popHeight + margin ? "top" : "bottom";
+    const top = place === "top" ? rect.top - popHeight - 8 : rect.bottom + 8;
+    let left = rect.left;
+    left = Math.min(left, window.innerWidth - popWidth - margin);
+    left = Math.max(margin, left);
+    setPlacement(place);
+    setCoords({ top, left });
+  }, []);
+
   useLayoutEffect(() => {
     if (!open) return;
-    const popEl = popRef.current;
-    const wrapEl = wrapRef.current;
-    if (!popEl || !wrapEl) return;
-    const wrapRect = wrapEl.getBoundingClientRect();
-    const popHeight = popEl.offsetHeight;
-    const margin = 12;
-    const spaceBelow = window.innerHeight - wrapRect.bottom;
-    if (spaceBelow < popHeight + margin && wrapRect.top > popHeight + margin) {
-      setPlacement("top");
-    } else {
-      setPlacement("bottom");
-    }
-  }, [open]);
+    reposition();
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
+  }, [open, reposition]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "Escape" && open) {
@@ -87,8 +135,8 @@ export function ReviewBadgePopover({ hit }: Props) {
     <span
       ref={wrapRef}
       className="review-badge-wrap"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      onMouseEnter={openNow}
+      onMouseLeave={scheduleClose}
     >
       <button
         type="button"
@@ -101,7 +149,7 @@ export function ReviewBadgePopover({ hit }: Props) {
         aria-expanded={open}
         aria-describedby={open ? popoverId : undefined}
         title={tier.reason}
-        onFocus={() => setOpen(true)}
+        onFocus={openNow}
         onBlur={(event) => {
           // Keep open if focus moved into the popover content; close
           // otherwise. relatedTarget is null on programmatic blurs.
@@ -114,13 +162,23 @@ export function ReviewBadgePopover({ hit }: Props) {
       >
         {tier.label}
       </button>
-      {open && (
+      {open &&
+        createPortal(
         <div
           ref={popRef}
           id={popoverId}
           role="dialog"
           aria-label={`${tier.label} hit classification details`}
           className={`review-popover review-popover--${placement}`}
+          style={{
+            position: "fixed",
+            top: coords.top,
+            left: coords.left,
+            right: "auto",
+            bottom: "auto",
+          }}
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
         >
           <div className="review-popover__header">
             <span className="review-popover__badge" style={{ color: tier.color, borderColor: tier.color }}>
@@ -183,7 +241,8 @@ export function ReviewBadgePopover({ hit }: Props) {
             First tier whose conditions are all met wins. Thresholds mirror the
             backend classifier in <code>annotate_result_hit()</code>.
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </span>
   );

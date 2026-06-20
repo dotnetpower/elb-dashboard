@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -512,6 +512,16 @@ function QueryExampleDialog({
 }) {
   const visible = queryExamplesForDatabase(examples, selectedDbName);
 
+  // Escape-to-close, matching the app's other dialogs (backdrop click already
+  // closes; this adds keyboard parity).
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
     <div className="glass-dialog-backdrop" onClick={onClose}>
       <div
@@ -523,7 +533,7 @@ function QueryExampleDialog({
       >
         <div className="query-example-dialog__header">
           <div>
-            <div className="glass-badge">FASTA templates</div>
+            <div className="glass-badge glass-badge--accent">FASTA templates</div>
             <h3 id="query-example-dialog-title">Load Query Example</h3>
             <div
               style={{

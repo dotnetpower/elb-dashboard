@@ -28,7 +28,7 @@ export function JobsHeader({
       }}
     >
       <div className="page-header" style={{ marginBottom: 0 }}>
-        <div className="page-header__title">Recent BLAST searches</div>
+        <div className="page-header__title">BLAST Jobs</div>
         <div className="page-header__desc">
           {allJobsLength} total · {counts.queued} queued · {counts.running}{" "}
           running · {counts.completed} completed · {counts.failed} failed

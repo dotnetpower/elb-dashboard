@@ -142,7 +142,7 @@ export function K8sJobsPanel({
               <tr
                 key={`${j.namespace}/${j.name}`}
                 style={{
-                  background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.012)",
+                  background: i % 2 === 0 ? "transparent" : "var(--bg-tertiary)",
                   borderTop: "1px solid var(--border-weak)",
                 }}
               >

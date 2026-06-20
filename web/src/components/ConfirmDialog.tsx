@@ -114,9 +114,8 @@ export function ConfirmDialog({
                 boxSizing: "border-box",
                 padding: "6px 10px",
                 fontSize: 13,
-                fontFamily:
-                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                background: "var(--surface-2, rgba(255,255,255,0.06))",
+                fontFamily: "var(--font-mono)",
+                background: "var(--bg-tertiary)",
                 color: "var(--text-primary)",
                 border: "1px solid var(--border-medium)",
                 borderRadius: 6,

@@ -21,6 +21,20 @@
   --text-primary: #e4e7ec;
   --text-muted: #9da5b4;
   --text-faint: #8a8f9e;
+  /* Secondary text — a real 3rd hierarchy level between primary and muted.
+     Previously undefined, so `var(--text-secondary)` fell back to `inherit`
+     (rendered as primary) at ~25 call sites, flattening hierarchy. */
+  --text-secondary: #c2c8d2;
+  /* Inline code / monospace value text. */
+  --text-code: #c9d1d9;
+  /* Aliases that resolve per-theme because they reference theme-aware tokens —
+     so they only need defining once. Several call sites used these names with
+     dark-only hex/rgba fallbacks that washed out in light mode. */
+  --text-warning: var(--warning);
+  --surface-2: var(--bg-tertiary);
+  /* `--text` was used at ~20 call sites with no fallback, so it resolved to
+     `inherit` (worked by accident). Alias it to the real primary token. */
+  --text: var(--text-primary);
   /* Ink for filled step/number badges. Dark theme fills are bright
      accents, so dark ink reads; the light override flips to white. */
   --step-badge-ink: #0b132b;
@@ -42,6 +56,15 @@
   --seq-g: #f0c674;
   --seq-c: #7aa7ff;
   --seq-u: #e07b8a;
+
+  /* JSON syntax highlight (API reference viewer). Dark inks on the dark code
+     inset; the light override darkens them for AA on the near-white inset. */
+  --json-key: #8cb4ff;
+  --json-str: #a8d4a2;
+  --json-num: #d4b88c;
+  --json-bool: #c9a0dc;
+  --json-nil: #9da5b4;
+  --json-brace: #7a8194;
 
   /* Spacing scale */
   --space-1: 4px;
@@ -101,6 +124,10 @@
   --text-primary: #1f1f1f;
   --text-muted: #525252;
   --text-faint: #6b6b6b;
+  /* Secondary/code text overrides — distinct AA-legible values on the light
+     canvas (the dark-theme #c2c8d2 / #c9d1d9 would wash out on white). */
+  --text-secondary: #3b3b3b;
+  --text-code: #24292f;
   /* Light theme's step-badge fills are saturated (accent/success/grey),
      so the badge number/check must be white to pass AA. */
   --step-badge-ink: #ffffff;
@@ -124,6 +151,14 @@
   --seq-g: #8a5d00;
   --seq-c: #1565c0;
   --seq-u: #b03a4e;
+
+  /* JSON syntax highlight — darkened for AA on the light code inset. */
+  --json-key: #0550ae;
+  --json-str: #15732e;
+  --json-num: #8a5d00;
+  --json-bool: #7a52bc;
+  --json-nil: #6b6b6b;
+  --json-brace: #525252;
 
   /* Card accents — keep colour identity per card type */
   --card-accent-cluster: #005fb8;
@@ -1954,6 +1989,20 @@ textarea.form-input {
   letter-spacing: 0.06em;
 }
 
+/* Accent-tinted badge variant. The plain `.glass-badge` uses `--glass-bg`,
+   which is white in light mode (near-invisible on a white panel). This variant
+   carries an accent tint + accent border + accent text so it reads in BOTH
+   themes. Use it for eyebrow/section badges that need to stand out. */
+.glass-badge--accent {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
 /* Confirm dialog (replaces native confirm()) */
 .glass-dialog-backdrop {
   position: fixed;
@@ -3605,6 +3654,271 @@ button.blast-db-table__row:focus-visible {
   font-size: 11px;
   line-height: 1.45;
 }
+
+/* ──────────────────────────────────────────────────────────────────
+   Sequence builder — the "Generate query from NCBI" modal.
+   A three-step, accession-first flow. Styled with design tokens only so it
+   tracks both the dark Grafana palette and the light VS Code palette without
+   per-theme overrides. The body scrolls inside a fixed-height shell while the
+   header and footer stay pinned, so a long result/feature list never pushes
+   the primary action off-screen.
+   ────────────────────────────────────────────────────────────────── */
+.seqbuilder-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  text-align: left;
+  overflow: hidden;
+}
+.seqbuilder-dialog__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  border-bottom: 1px solid var(--border-weak);
+}
+.seqbuilder-dialog__title {
+  margin: var(--space-2) 0 0;
+  font-size: 17px;
+  letter-spacing: 0;
+}
+.seqbuilder-dialog__subtitle {
+  margin-top: var(--space-1);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-width: 48ch;
+}
+.seqbuilder-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.seqbuilder-dialog__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.seqbuilder-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--border-weak);
+  background: var(--bg-primary);
+}
+
+/* Step block: a numbered marker + a label, then the controls. */
+.seqbuilder-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.seqbuilder-step__head {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.seqbuilder-step__num {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--step-badge-ink);
+  background: var(--accent);
+}
+.seqbuilder-step__label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.seqbuilder-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* Scrollable result / feature list region — a contained inset surface. */
+.seqbuilder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 190px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius);
+  background: var(--bg-tertiary);
+}
+.seqbuilder-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: var(--space-3) var(--space-2);
+  text-align: center;
+}
+
+/* Result / feature item buttons. */
+.seqbuilder-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast),
+    background var(--motion-fast);
+}
+.seqbuilder-item:hover {
+  border-color: var(--border-focus);
+  background: var(--bg-hover);
+}
+.seqbuilder-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.seqbuilder-item--selected {
+  border-color: var(--border-focus);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-secondary));
+}
+.seqbuilder-item__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+}
+.seqbuilder-item__acc {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+}
+.seqbuilder-item__meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.seqbuilder-item__sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.seqbuilder-item__check {
+  color: var(--accent);
+  flex: none;
+}
+
+/* Feature row variant — single line, name left, length/strand right. */
+.seqbuilder-feature {
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  padding: 6px 9px;
+}
+.seqbuilder-feature__name {
+  font-family: var(--font-mono);
+}
+
+/* Segmented strand control — connected pills with a clear selected state in
+   both themes. */
+.seqbuilder-strand {
+  display: inline-flex;
+  margin-left: auto;
+  border: 1px solid var(--border-medium);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.seqbuilder-strand__btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 13px;
+  cursor: pointer;
+  transition:
+    background var(--motion-fast),
+    color var(--motion-fast);
+}
+.seqbuilder-strand__btn + .seqbuilder-strand__btn {
+  border-left: 1px solid var(--border-medium);
+}
+.seqbuilder-strand__btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.seqbuilder-strand__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.seqbuilder-strand__btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* FASTA header preview. */
+.seqbuilder-preview {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  background: var(--code-surface);
+  border: 1px solid var(--border-weak);
+  word-break: break-all;
+  color: var(--text-primary);
+}
+.seqbuilder-preview--placeholder {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* Confirmation chip when an accession is locked in. */
+.seqbuilder-selected-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--success);
+}
+.seqbuilder-caption {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.seqbuilder-divider {
+  height: 1px;
+  background: var(--border-weak);
+}
+
 .blast-subrange-row {
   display: flex;
   gap: 8px;

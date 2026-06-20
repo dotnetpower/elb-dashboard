@@ -91,7 +91,11 @@ def enqueue_submit_request(payload: dict[str, Any], correlation_id: str) -> str:
         if value is not None:
             body[key] = value
 
-    message_id = service_bus.send_request(cfg, body, correlation_id=correlation_id)
+    from api.services.blast.request_subject import build_request_subject
+
+    message_id = service_bus.send_request(
+        cfg, body, correlation_id=correlation_id, subject=build_request_subject(body)
+    )
 
     # The job has no OpenAPI id yet (the consumer assigns it at drain time), so
     # the lifecycle trace is keyed by the dashboard correlation id here. The
