@@ -29,6 +29,7 @@ import logging
 import os
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Query, Response
 
@@ -41,6 +42,28 @@ router = APIRouter()
 
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 _DEFAULT_CONTAINER = "blast-db"
+# Storage account names are 3-24 lowercase alphanumerics.
+_ACCOUNT_RE = re.compile(r"^[a-z0-9]{3,24}$")
+
+
+def _account_from_endpoint(endpoint: str) -> str:
+    """Derive the Storage account name from a blob/table endpoint URL.
+
+    Fallback for deployments whose api revision predates the explicit
+    ``STORAGE_ACCOUNT_NAME`` env var but still carries ``AZURE_BLOB_ENDPOINT`` /
+    ``AZURE_TABLE_ENDPOINT`` (e.g. ``https://acct.blob.core.windows.net/`` ->
+    ``acct``). Returns "" when the endpoint is empty or the leading host label
+    is not a valid Storage account name.
+    """
+    endpoint = (endpoint or "").strip()
+    if not endpoint:
+        return ""
+    try:
+        host = urlsplit(endpoint).hostname or ""
+    except ValueError:
+        return ""
+    label = host.split(".", 1)[0].strip().lower()
+    return label if _ACCOUNT_RE.match(label) else ""
 
 
 def _resolve_storage_scope(
@@ -53,10 +76,18 @@ def _resolve_storage_scope(
     The Container App always sets ``STORAGE_ACCOUNT_NAME`` /
     ``AZURE_RESOURCE_GROUP`` / ``AZURE_SUBSCRIPTION_ID`` to the single workload
     account, so the Core "Try it" experience stays one-click even when the
-    caller omits the params.
+    caller omits the params. As a resilience fallback for older revisions that
+    predate the ``STORAGE_ACCOUNT_NAME`` env var, the account name is also
+    derived from ``AZURE_BLOB_ENDPOINT`` / ``AZURE_TABLE_ENDPOINT`` (always
+    present), so the route never 400s on a deployment that can clearly reach
+    its own Storage.
     """
     sub = (subscription_id or os.environ.get("AZURE_SUBSCRIPTION_ID", "")).strip()
     account = (storage_account or os.environ.get("STORAGE_ACCOUNT_NAME", "")).strip()
+    if not account:
+        account = _account_from_endpoint(
+            os.environ.get("AZURE_BLOB_ENDPOINT", "")
+        ) or _account_from_endpoint(os.environ.get("AZURE_TABLE_ENDPOINT", ""))
     rg = (resource_group or os.environ.get("AZURE_RESOURCE_GROUP", "")).strip()
     return sub, account, rg
 

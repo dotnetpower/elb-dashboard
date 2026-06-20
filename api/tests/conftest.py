@@ -54,6 +54,12 @@ def _env_baseline(
 ) -> None:
     """Force clean per-test environment state."""
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    # The openapi databases route derives the Storage account name from
+    # AZURE_BLOB_ENDPOINT / AZURE_TABLE_ENDPOINT when STORAGE_ACCOUNT_NAME is
+    # unset (api/routes/aks/openapi_databases.py `_account_from_endpoint`).
+    # Drop any ambient azd-env value so the "no resolvable account" 400 tests
+    # stay deterministic.
+    monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
     # Tests that need dev auth bypass opt in explicitly; ambient CI/local env must not leak.
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
     # The AKS runtime-RBAC helper defaults the workload-Storage target to

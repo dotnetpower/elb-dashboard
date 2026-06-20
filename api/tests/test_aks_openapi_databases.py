@@ -214,6 +214,24 @@ def test_resolve_molecule_nucl_and_prot() -> None:
     assert db_svc._resolve_molecule("prot") == ("protein", "protein")
 
 
+def test_account_from_endpoint_parsing() -> None:
+    from api.routes.aks.openapi_databases import _account_from_endpoint
+
+    assert (
+        _account_from_endpoint("https://stelbacct01.blob.core.windows.net/")
+        == "stelbacct01"
+    )
+    # Host label is lower-cased to match Storage account naming.
+    assert (
+        _account_from_endpoint("https://STELBACCT01.table.core.windows.net")
+        == "stelbacct01"
+    )
+    # Empty / unparseable / non-account-shaped hosts yield "".
+    assert _account_from_endpoint("") == ""
+    assert _account_from_endpoint("not a url") == ""
+    assert _account_from_endpoint("https://a.b.c/") == ""
+
+
 def test_raw_int_rejects_bool_and_non_int() -> None:
     assert db_svc._raw_int(True) is None
     assert db_svc._raw_int(0) == 0
@@ -273,6 +291,58 @@ def test_list_route_missing_account_returns_400(
     resp = client.get("/api/aks/openapi/databases")
     assert resp.status_code == 400
     assert resp.json()["code"] == "missing_parameters"
+
+
+def test_list_route_derives_account_from_blob_endpoint(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Older api revisions ship AZURE_BLOB_ENDPOINT but not STORAGE_ACCOUNT_NAME.
+
+    The route must derive the account from the endpoint host so the catalogue
+    read still works on a deployment that can clearly reach its own Storage,
+    instead of 400ing with missing_parameters.
+    """
+    monkeypatch.delenv("STORAGE_ACCOUNT_NAME", raising=False)
+    monkeypatch.setenv(
+        "AZURE_BLOB_ENDPOINT", "https://stelbderived01.blob.core.windows.net/"
+    )
+    captured: dict[str, Any] = {}
+
+    def _fake_list(cred: Any, account: str, container: str = "blast-db") -> list[dict[str, Any]]:
+        captured["account"] = account
+        return [{"name": "nr"}]
+
+    monkeypatch.setattr(
+        "api.services.storage.database_catalog_cache.list_databases_cached",
+        _fake_list,
+    )
+    resp = client.get("/api/aks/openapi/databases")
+    assert resp.status_code == 200
+    assert captured["account"] == "stelbderived01"
+    assert resp.json()["count"] == 1
+
+
+def test_list_route_explicit_storage_account_overrides_endpoint(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit STORAGE_ACCOUNT_NAME wins over the endpoint-derived fallback."""
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stgenv")
+    monkeypatch.setenv(
+        "AZURE_BLOB_ENDPOINT", "https://stelbderived01.blob.core.windows.net/"
+    )
+    captured: dict[str, Any] = {}
+
+    def _fake_list(cred: Any, account: str, container: str = "blast-db") -> list[dict[str, Any]]:
+        captured["account"] = account
+        return []
+
+    monkeypatch.setattr(
+        "api.services.storage.database_catalog_cache.list_databases_cached",
+        _fake_list,
+    )
+    resp = client.get("/api/aks/openapi/databases")
+    assert resp.status_code == 200
+    assert captured["account"] == "stgenv"
 
 
 def test_list_route_storage_failure_degrades_503(
