@@ -29,7 +29,6 @@ Validation: ``uv run pytest -q api/tests/test_blast_capacity_signals.py``.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,26 +36,12 @@ from azure.core.credentials import TokenCredential
 
 from api.services.blast.capacity_gate import GATE_DEFAULT_POOL_NAME
 from api.services.cluster_health import cached_snapshot_with_cluster_gate
+from api.services.env import env_int as _env_int
 
 LOGGER = logging.getLogger(__name__)
 
 GATE_DEFAULT_SIGNAL_CACHE_S = 30
 GATE_DEFAULT_SIGNAL_STALE_S = 120
-
-
-def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    if value < minimum:
-        return minimum
-    if maximum is not None and value > maximum:
-        return maximum
-    return value
 
 
 def signal_cache_ttl_s() -> int:

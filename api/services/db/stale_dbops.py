@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from api.services.env import env_int as _env_int
+
 LOGGER = logging.getLogger(__name__)
 
 # Active statuses a row can be stuck in. Mirrors
@@ -50,13 +52,6 @@ _ACTIVE_STATUSES = frozenset({"queued", "pending", "running", "reducing"})
 # Celery task states that are terminal and authoritative.
 _CELERY_SUCCESS = "SUCCESS"
 _CELERY_TERMINAL_FAILED = frozenset({"FAILURE", "REVOKED"})
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
 
 
 # Quiet threshold for warmup rows. The warmup orchestrator is bound by the

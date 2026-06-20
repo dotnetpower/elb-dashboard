@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from api.services.env import env_int as _env_int
 
 LOGGER = logging.getLogger(__name__)
 
@@ -157,21 +158,6 @@ class GateDecision:
 # ---------------------------------------------------------------------------
 # Config — pulled from env on every call so tests can flip without reloading
 # ---------------------------------------------------------------------------
-
-
-def _env_int(name: str, default: int, *, minimum: int = 0, maximum: int | None = None) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    if value < minimum:
-        return minimum
-    if maximum is not None and value > maximum:
-        return maximum
-    return value
 
 
 def max_slots_per_cluster() -> int:

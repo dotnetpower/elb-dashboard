@@ -29,13 +29,13 @@ Validation: `uv run pytest -q api/tests/test_upgrade_task.py
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from celery import shared_task
 
 import api as _api
+from api.services.env import env_int as _env_int
 from api.services.upgrade import aca_template, history, revisions, rollout_watcher, state
 from api.tasks.upgrade.pipeline import _fail_pre, _fail_rollout
 
@@ -102,23 +102,6 @@ CONFIRM_WINDOW_SECONDS = 5 * 60
 # grace beyond the deadline, the row is escalated to `rollback_failed`
 # rather than spinning in `confirming` forever (bounded-loop guarantee).
 CONFIRM_CUTOVER_CONVERGE_GRACE_SECONDS = 5 * 60
-
-
-def _env_int(name: str, default: int, *, minimum: int) -> int:
-    """Read a positive int from the environment, clamped to ``minimum``.
-
-    Returns ``default`` when unset or unparseable so a typo never silently
-    disables a timeout. These knobs are read at call time (not import) so a
-    revision can be reconfigured without a code change.
-    """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(minimum, value)
 
 
 def validating_timeout_seconds() -> int:
