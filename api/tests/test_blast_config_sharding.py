@@ -66,6 +66,20 @@ def test_warmup_skip_option_is_opt_in() -> None:
     assert cfg.get("cluster", "exp-skip-warmed-ssd-init") == "true"
 
 
+def test_blast_k8s_job_timeout_defaults_to_24h() -> None:
+    # Per-batch-job activeDeadlineSeconds backstop is 24 h (1440 min), shortened
+    # from the upstream 7-day (10080) default so a stuck/unschedulable batch
+    # cannot pin an expensive blastpool node for a week.
+    cfg = _parse(generate_config(_base_params()))
+    assert cfg.get("timeouts", "blast-k8s-job") == "1440"
+
+
+def test_blast_k8s_job_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BLAST_K8S_JOB_TIMEOUT_MINUTES", "4320")
+    cfg = _parse(generate_config(_base_params()))
+    assert cfg.get("timeouts", "blast-k8s-job") == "4320"
+
+
 def test_generate_config_rejects_storage_account_mismatch() -> None:
     params = _base_params()
     params["db"] = "https://stgelb.blob.core.windows.net/blast-db/core_nt/core_nt"

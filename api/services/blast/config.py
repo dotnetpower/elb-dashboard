@@ -22,6 +22,7 @@ from api.services.aks_skus import (
 from api.services.aks_skus import (
     DEFAULT_SKU,
 )
+from api.services.env import env_int
 from api.services.sharding_precision import (
     build_precision_report,
     normalize_sharding_mode,
@@ -404,7 +405,20 @@ def generate_config(params: dict[str, Any]) -> str:
     # [timeouts]
     cfg.add_section("timeouts")
     cfg.set("timeouts", "init-pv", "45")
-    cfg.set("timeouts", "blast-k8s-job", "10080")
+    # Per-batch-job activeDeadlineSeconds backstop (MINUTES). This bounds ONE
+    # query-batch Job (one query chunk vs the DB), NOT the whole search. The
+    # upstream default is 10080 (7 days) which is effectively infinite — a hung
+    # or unschedulable batch then pins an expensive blastpool node for a week.
+    # 1440 (24 h) sits far above any real batch (even nt / core_nt batches
+    # finish in minutes-to-hours) so it never truncates legitimate work, while
+    # turning a genuinely stuck batch into a Failed Job (retried up to the
+    # Job's backoffLimit) instead of a week-long zombie. Operators can raise it
+    # for exceptional very-large batches via BLAST_K8S_JOB_TIMEOUT_MINUTES.
+    cfg.set(
+        "timeouts",
+        "blast-k8s-job",
+        str(env_int("BLAST_K8S_JOB_TIMEOUT_MINUTES", 1440, minimum=60)),
+    )
 
     buf = io.StringIO()
     cfg.write(buf)
