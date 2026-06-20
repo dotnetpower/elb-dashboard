@@ -6,6 +6,8 @@ import {
   CANONICAL_ORDER,
   STAGE_LABELS,
   fmtTraceMs,
+  stageDisplayState,
+  traceTerminallyFailed,
   visibleTraceStages,
 } from "./messageTraceModel";
 
@@ -75,5 +77,56 @@ describe("stage constants", () => {
   });
   it("canonical order has no duplicates", () => {
     expect(new Set(CANONICAL_ORDER).size).toBe(CANONICAL_ORDER.length);
+  });
+});
+
+describe("stageDisplayState (terminal-failure handling)", () => {
+  const succeededReached = new Set([
+    "enqueued",
+    "received",
+    "submitted",
+    "succeeded",
+    "completion_published",
+  ]);
+  const failedReached = new Set([
+    "enqueued",
+    "received",
+    "submitted",
+    "failed",
+    "completion_published",
+  ]);
+
+  it("traceTerminallyFailed detects failed / dead_letter", () => {
+    expect(traceTerminallyFailed(succeededReached)).toBe(false);
+    expect(traceTerminallyFailed(failedReached)).toBe(true);
+    expect(traceTerminallyFailed(new Set(["dead_letter"]))).toBe(true);
+  });
+
+  it("succeeded job: reached stages are done, delivery is done", () => {
+    expect(stageDisplayState("submitted", succeededReached, false)).toBe("done");
+    expect(stageDisplayState("succeeded", succeededReached, false)).toBe("done");
+    expect(stageDisplayState("completion_published", succeededReached, false)).toBe(
+      "done",
+    );
+  });
+
+  it("failed job: terminal stage is failed; result-delivered is canceled (not done)", () => {
+    expect(stageDisplayState("failed", failedReached, true)).toBe("failed");
+    // The completion event was published for a failure → no result delivered.
+    expect(stageDisplayState("completion_published", failedReached, true)).toBe(
+      "canceled",
+    );
+  });
+
+  it("failed job: skipped success-path stages are canceled, not pending", () => {
+    // running / succeeded never happened on a fail-at-submit job.
+    expect(stageDisplayState("running", failedReached, true)).toBe("canceled");
+    expect(stageDisplayState("succeeded", failedReached, true)).toBe("canceled");
+  });
+
+  it("non-failed job: unreached future stages stay pending", () => {
+    const inFlight = new Set(["enqueued", "received", "submitted"]);
+    expect(stageDisplayState("running", inFlight, false)).toBe("pending");
+    expect(stageDisplayState("succeeded", inFlight, false)).toBe("pending");
   });
 });

@@ -31,6 +31,52 @@ export const CANONICAL_ORDER = [
   "dead_letter",
 ];
 
+/** Visual state of a single lifecycle row. */
+export type StageDisplay = "done" | "failed" | "canceled" | "pending";
+
+/** Stages that only make sense on the success branch (running → succeeded →
+ *  result delivered). When the job terminally fails these are either skipped
+ *  (never reached) or — for ``completion_published`` — published as a FAILURE
+ *  completion, so none of them represent a delivered result. */
+const SUCCESS_PATH_STAGES = new Set([
+  "running",
+  "succeeded",
+  "completion_published",
+]);
+
+/** True when the trace reached a terminal failure (``failed`` / ``dead_letter``). */
+export function traceTerminallyFailed(reached: ReadonlySet<string>): boolean {
+  return reached.has("failed") || reached.has("dead_letter");
+}
+
+/**
+ * Resolve how a single stage row should render.
+ *
+ * - The terminal-failure stages (``failed`` / ``dead_letter``) render as
+ *   ``failed`` when reached.
+ * - On a terminally-failed job the success-branch stages render as
+ *   ``canceled`` (grey) rather than a green success or an in-progress
+ *   ``pending`` — including ``completion_published`` ("Result delivered"),
+ *   which was published for a failure and so did NOT deliver a result.
+ * - Otherwise a reached stage is ``done`` and an unreached one is ``pending``.
+ */
+export function stageDisplayState(
+  stage: string,
+  reached: ReadonlySet<string>,
+  terminalFailed: boolean,
+): StageDisplay {
+  const isReached = reached.has(stage);
+  if ((stage === "failed" || stage === "dead_letter") && isReached) {
+    return "failed";
+  }
+  if (terminalFailed && stage === "completion_published") {
+    return "canceled";
+  }
+  if (isReached) return "done";
+  if (terminalFailed && SUCCESS_PATH_STAGES.has(stage)) return "canceled";
+  return "pending";
+}
+
 /** Human-friendly milliseconds: `—` for null, `ms` / `s` / `m s` otherwise. */
 export function fmtTraceMs(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return "—";

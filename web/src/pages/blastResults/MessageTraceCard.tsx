@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, Circle, Clock, GitBranch } from "lucide-react";
+import { Ban, CheckCircle2, Circle, Clock, GitBranch } from "lucide-react";
 
 import { blastApi } from "@/api/blast";
 import type { BlastMessageTrace } from "@/api/blast.types";
@@ -7,6 +7,8 @@ import type { BlastMessageTrace } from "@/api/blast.types";
 import {
   STAGE_LABELS,
   fmtTraceMs,
+  stageDisplayState,
+  traceTerminallyFailed,
   visibleTraceStages,
 } from "./messageTraceModel";
 
@@ -67,6 +69,7 @@ export function MessageTraceCard({ jobId, isActive }: { jobId: string; isActive:
   const reached = new Set(trace.stages.map((s) => s.stage));
   const tsByStage = new Map(trace.stages.map((s) => [s.stage, s.ts]));
   const visible = visibleTraceStages(trace);
+  const terminalFailed = traceTerminallyFailed(reached);
 
   return (
     <section className="glass-card" style={{ padding: "14px 16px" }}>
@@ -90,9 +93,17 @@ export function MessageTraceCard({ jobId, isActive }: { jobId: string; isActive:
 
       <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
         {visible.map((stage) => {
-          const done = reached.has(stage);
           const ts = tsByStage.get(stage);
-          const isTerminalFail = stage === "failed" || stage === "dead_letter";
+          const display = stageDisplayState(stage, reached, terminalFailed);
+          // done = blue check + timestamp; failed = red dot + timestamp;
+          // canceled = grey ban + "canceled" (a success-path stage mooted by a
+          // terminal failure, incl. "Result delivered"); pending = grey clock.
+          const rowOpacity =
+            display === "done" || display === "failed"
+              ? 1
+              : display === "canceled"
+                ? 0.6
+                : 0.45;
           return (
             <li
               key={stage}
@@ -101,15 +112,15 @@ export function MessageTraceCard({ jobId, isActive }: { jobId: string; isActive:
                 alignItems: "center",
                 gap: 10,
                 fontSize: 13,
-                opacity: done ? 1 : 0.45,
+                opacity: rowOpacity,
               }}
             >
-              {done ? (
-                isTerminalFail ? (
-                  <Circle size={14} strokeWidth={1.5} color="var(--danger, #d9777a)" />
-                ) : (
-                  <CheckCircle2 size={14} strokeWidth={1.5} color="var(--accent)" />
-                )
+              {display === "failed" ? (
+                <Circle size={14} strokeWidth={1.5} color="var(--danger, #d9777a)" />
+              ) : display === "done" ? (
+                <CheckCircle2 size={14} strokeWidth={1.5} color="var(--accent)" />
+              ) : display === "canceled" ? (
+                <Ban size={14} strokeWidth={1.5} className="muted" />
               ) : (
                 <Clock size={14} strokeWidth={1.5} className="muted" />
               )}
@@ -118,7 +129,11 @@ export function MessageTraceCard({ jobId, isActive }: { jobId: string; isActive:
                 className="muted"
                 style={{ fontVariantNumeric: "tabular-nums", fontSize: 12 }}
               >
-                {done && ts ? fmtClock(ts) : "pending"}
+                {display === "canceled"
+                  ? "canceled"
+                  : (display === "done" || display === "failed") && ts
+                    ? fmtClock(ts)
+                    : "pending"}
               </span>
             </li>
           );
