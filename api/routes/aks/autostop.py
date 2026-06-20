@@ -88,6 +88,10 @@ _STATUS_L2_TTL_SECONDS = 5
 _STATUS_TTL_SECONDS = _STATUS_L1_TTL_SECONDS  # kept for tests that still import this name
 _STATUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _STATUS_CACHE_LOCK = threading.Lock()
+# Belt-and-braces cap on the L1 status cache. Key space is (sub, rg, cluster)
+# so this stays tiny in practice; the cap bounds growth on a long-lived api
+# sidecar that never recycles.
+_STATUS_CACHE_MAX_ENTRIES = 64
 _STATUS_REDIS_KEY_PREFIX = "autostop:status:"
 # Per-key in-flight gate. Without this, cache-miss thunderstorms (M
 # browsers polling the same cluster simultaneously) all run
@@ -120,6 +124,18 @@ _NON_CACHEABLE_REASONS = frozenset(
 
 def _status_cache_key(subscription_id: str, resource_group: str, cluster_name: str) -> str:
     return f"{subscription_id}|{resource_group}|{cluster_name}"
+
+
+def _status_cache_put(key: str, body: dict[str, Any]) -> None:
+    """Insert into the L1 status cache, evicting the soonest-to-expire entry
+    when above ``_STATUS_CACHE_MAX_ENTRIES``. Caller must NOT already hold
+    ``_STATUS_CACHE_LOCK``.
+    """
+    with _STATUS_CACHE_LOCK:
+        _STATUS_CACHE[key] = (time.monotonic(), body)
+        if len(_STATUS_CACHE) > _STATUS_CACHE_MAX_ENTRIES:
+            oldest = min(_STATUS_CACHE.items(), key=lambda kv: kv[1][0])[0]
+            _STATUS_CACHE.pop(oldest, None)
 
 
 def _status_pending_queue_depth(power_state: str) -> int | None:
@@ -643,8 +659,7 @@ async def autostop_status(
     # rapid repeat polls on the same worker stop hitting Redis.
     redis_body = await asyncio.to_thread(_status_redis_get, key)
     if redis_body is not None:
-        with _STATUS_CACHE_LOCK:
-            _STATUS_CACHE[key] = (time.monotonic(), redis_body)
+        _status_cache_put(key, redis_body)
         return redis_body
 
     # Singleflight: at most one compute per key at a time. The gate is
@@ -677,8 +692,7 @@ async def autostop_status(
         # Leader may have populated L2 even if our L1 was cleared.
         redis_body = await asyncio.to_thread(_status_redis_get, key)
         if redis_body is not None:
-            with _STATUS_CACHE_LOCK:
-                _STATUS_CACHE[key] = (time.monotonic(), redis_body)
+            _status_cache_put(key, redis_body)
             return redis_body
         # Fall through to compute (leader produced a non-cacheable
         # degraded result, or timed out).
@@ -697,8 +711,7 @@ async def autostop_status(
         # "state_repo_unreachable" would freeze the SPA banner on a
         # stale "we don't know" for the full TTL.
         if reason not in _NON_CACHEABLE_REASONS:
-            with _STATUS_CACHE_LOCK:
-                _STATUS_CACHE[key] = (time.monotonic(), body)
+            _status_cache_put(key, body)
             # Write-through to Redis so sibling workers see the same
             # body on their next poll. Fire-and-forget on Redis errors.
             await asyncio.to_thread(_status_redis_set, key, body)

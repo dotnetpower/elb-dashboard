@@ -179,6 +179,11 @@ def _discover_subscription_clusters(subscription_id: str) -> list[tuple[str, str
             _time.monotonic() + _SUBSCRIPTION_CLUSTERS_CACHE_TTL_SECONDS,
             list(pairs),
         )
+        if len(_SUBSCRIPTION_CLUSTERS_CACHE) > 32:
+            oldest = min(
+                _SUBSCRIPTION_CLUSTERS_CACHE.items(), key=lambda kv: kv[1][0]
+            )[0]
+            _SUBSCRIPTION_CLUSTERS_CACHE.pop(oldest, None)
     return pairs
 
 
@@ -1012,6 +1017,11 @@ def _openapi_client_kwargs_from_cluster(
                 _time.monotonic() + _OPENAPI_CLIENT_KWARGS_CACHE_TTL_SECONDS,
                 dict(kwargs),
             )
+            if len(_OPENAPI_CLIENT_KWARGS_CACHE) > 64:
+                oldest = min(
+                    _OPENAPI_CLIENT_KWARGS_CACHE.items(), key=lambda kv: kv[1][0]
+                )[0]
+                _OPENAPI_CLIENT_KWARGS_CACHE.pop(oldest, None)
         return kwargs
     except Exception as exc:
         LOGGER.info("openapi cluster context unavailable: %s", type(exc).__name__)
