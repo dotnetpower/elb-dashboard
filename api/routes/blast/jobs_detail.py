@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import (
@@ -170,6 +170,69 @@ def blast_job_citation(
             {
                 "code": "citation_unavailable",
                 "message": f"Could not build citation: {type(exc).__name__}",
+            },
+        ) from exc
+
+
+@router.get("/jobs/{job_id}/export")
+def blast_job_export(
+    job_id: str = Path(...),
+    format: str = Query(default="nextflow", pattern="^(nextflow|snakemake|cwl|wdl)$"),
+    caller: CallerIdentity = Depends(require_caller),
+) -> Response:
+    """Download a workflow-manager module that re-submits this job's parameters.
+
+    Returns a self-contained Nextflow / Snakemake / CWL / WDL file pinning the
+    source job's program / database / options (the query FASTA is a runtime
+    input). Read-only and owner-scoped. No storage URL or bearer token is
+    embedded: the module reads ``ELB_BASE_URL`` / ``ELB_TOKEN`` from the
+    environment at run time.
+    """
+    try:
+        from api.services.blast.submit_payload import canonical_submit_snapshot
+        from api.services.blast.workflow_export import (
+            MissingDatabaseError,
+            render_workflow_export,
+        )
+        from api.services.state_repo import get_state_repo
+
+        repo = get_state_repo()
+        state = repo.get(job_id)
+        if state is None:
+            raise HTTPException(404, "job not found")
+        _assert_job_owner(state.owner_oid, caller)
+
+        raw_payload = getattr(state, "payload", None)
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        snapshot = payload.get("canonical_request")
+        if not isinstance(snapshot, dict):
+            snapshot = canonical_submit_snapshot(payload)
+
+        try:
+            export = render_workflow_export(job_id=job_id, snapshot=snapshot, fmt=format)
+        except MissingDatabaseError as exc:
+            raise HTTPException(
+                422,
+                {"code": "export_unavailable", "message": str(exc)},
+            ) from exc
+
+        return Response(
+            content=export.content,
+            media_type=export.media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{export.filename}"',
+                "X-Elb-Export-Format": export.format,
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("blast_job_export failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            {
+                "code": "export_unavailable",
+                "message": f"Could not build workflow export: {type(exc).__name__}",
             },
         ) from exc
 
