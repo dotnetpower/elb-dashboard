@@ -16,6 +16,23 @@ import sys
 from pathlib import Path
 
 
+def _force_elb_ref(path: Path, ref: str) -> None:
+    """Pin ``ARG ELB_REF=<ref>`` regardless of the current value.
+
+    The sibling Dockerfile's ``ARG ELB_REF`` default drifts with upstream WIP,
+    so an exact-string replace breaks every time it advances. Match the line by
+    shape and rewrite it to the dashboard's known-good ref (idempotent).
+    """
+    import re
+
+    text = path.read_text()
+    pattern = re.compile(r"^ARG ELB_REF=.*$", re.MULTILINE)
+    count = len(pattern.findall(text))
+    if count != 1:
+        raise RuntimeError(f"expected one ARG ELB_REF line in {path}, found {count}")
+    path.write_text(pattern.sub(f"ARG ELB_REF={ref}", text, count=1))
+
+
 def _replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text()
     if new in text:
@@ -72,7 +89,14 @@ def _copy_app_overlay(root: Path) -> None:
 def patch_dockerfile(root: Path) -> None:
     _copy_support_files(root)
     path = root / "Dockerfile"
-    _replace_once(path, "ARG ELB_REF=dad3943\n", "ARG ELB_REF=7a471297\n")
+    # Force the elastic-blast source ref the OpenAPI image installs to a
+    # known-good commit. ``7a471297`` is the ref the dashboard build is designed
+    # around: it has ``bin/elastic-blast`` (the Dockerfile ``install``s it) and
+    # already includes the taxonomy4blast.sqlite3 staging commit. The sibling
+    # Dockerfile's ``ARG ELB_REF`` default drifts with upstream WIP (e.g.
+    # ``5b7ea2b`` dropped ``bin/elastic-blast`` and breaks the build), so pin it
+    # here regardless of the current value rather than matching one exact string.
+    _force_elb_ref(path, "7a471297")
     _insert_once(
         path,
         "COPY ./app /app\n",

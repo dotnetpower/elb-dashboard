@@ -49,6 +49,10 @@ from __future__ import annotations
 # without waiting for the next sync cycle (fixes #16/#17). Cancel/stuck path
 # is unchanged — ``_cancel_job`` already notifies, so no double-notify. See
 # docs/features_change/2026-06/2026-06-14-openapi-external-payload-hardening.md.
+# 4.25 stages the BLAST v5 seqid->taxid filter index ``.nos``/``.not`` in the
+# shard download pattern so sharded core_nt searches with a taxonomy
+# include/exclude filter stop failing with blastn exit 255. See
+# docs/features_change/2026-06/2026-06-20-sharded-negative-taxids-not-nos-fix.md.
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
@@ -68,7 +72,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.24",
+    "elb-openapi": "4.25",
 }
 
 # GitHub source repo for ACR Build Tasks.
