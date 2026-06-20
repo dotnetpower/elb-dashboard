@@ -170,13 +170,47 @@ function JobDetailModal({ box, onClose }: JobDetailModalProps) {
             {summaryItem("Database", box.db ?? "—")}
             {summaryItem("Submitter", box.alias)}
             {summaryItem("Cluster", box.cluster_name || "unassigned")}
-            {box.error_code
-              ? summaryItem(
-                  "Error",
-                  <span style={{ color: "var(--danger)" }}>{box.error_code}</span>,
-                )
-              : null}
           </div>
+
+          {box.error_code ? (
+            <div
+              style={{
+                // `.glass-dialog` sets text-align:center; pin left so the error
+                // reads like the command/log output it is.
+                textAlign: "left",
+                marginBottom: 16,
+                padding: "10px 12px",
+                borderRadius: 8,
+                background: "rgba(242, 114, 111, 0.08)",
+                border: "1px solid var(--danger, #f2726f)",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 10,
+                  color: "var(--text-faint)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  marginBottom: 4,
+                }}
+              >
+                Error
+              </div>
+              <div
+                style={{
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  color: "var(--danger)",
+                  fontFamily: "var(--font-mono)",
+                  whiteSpace: "pre-wrap",
+                  overflowWrap: "anywhere",
+                  wordBreak: "break-word",
+                }}
+              >
+                {box.error_code}
+              </div>
+            </div>
+          ) : null}
 
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 8 }}>
             Job JSON
