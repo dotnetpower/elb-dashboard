@@ -141,6 +141,20 @@ def build_manifests(
         # parallelism. The sibling submit path reads this env to set the
         # elastic-blast [cluster] num-cpus.
         {"name": "ELB_OPENAPI_NUM_CPUS", "value": "7"},
+        # Force the historical init-ssd staging path instead of emitting the
+        # newer ``[cluster] exp-skip-warmed-ssd-init`` config key. The published
+        # ``elb-openapi`` image is split-versioned: its server writes that key,
+        # but the elastic-blast CLI bundled in the SAME image predates the
+        # ``CFG_CLUSTER_EXP_SKIP_WARMED_SSD_INIT`` constant, so configparser
+        # rejects the generated INI with
+        # ``Unrecognized configuration parameter "exp-skip-warmed-ssd-init"``
+        # and every `elastic-blast submit` exits 1 (phase=submit_failed).
+        # Baking the documented escape hatch (=0) into the manifest makes the
+        # workaround survive cluster restarts / redeploys — a one-off
+        # ``kubectl set env`` is wiped whenever the pod is recreated. Drop this
+        # once the sibling image bundles an elastic-blast that knows the key
+        # (then bump IMAGE_TAGS["elb-openapi"]).
+        {"name": "ELB_OPENAPI_SKIP_WARMED_SSD_INIT", "value": "0"},
         {
             "name": "PATH",
             "value": ("/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),

@@ -47,6 +47,11 @@ def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
     # (request=num-cpus-2=5) fit per E16 node (floor(15.74/5)=3, 0 Pending).
     assert env["ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS"] == "3"
     assert env["ELB_OPENAPI_NUM_CPUS"] == "7"
+    # Escape hatch baked into the manifest so it survives cluster restarts /
+    # redeploys: the split-versioned elb-openapi image emits a config key its
+    # bundled elastic-blast CLI does not understand, so =0 forces the
+    # historical init-ssd path and keeps `elastic-blast submit` from exiting 1.
+    assert env["ELB_OPENAPI_SKIP_WARMED_SSD_INIT"] == "0"
     # Token entry is now mandatory — build_manifests refuses to emit a
     # deployment without it (see test_build_manifests_rejects_empty_token).
     assert env["ELB_OPENAPI_API_TOKEN"] == "dummy-token-for-env-test"
