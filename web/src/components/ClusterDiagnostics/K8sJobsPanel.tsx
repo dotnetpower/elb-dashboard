@@ -6,8 +6,10 @@ import type { K8sJob } from "@/api/endpoints";
 
 import { formatAge, formatDuration } from "./k8sFormat";
 import { NamespaceFilter } from "./NamespaceFilter";
+import { useAgeSortedInfinite } from "./useAgeSortedInfinite";
 import { useNamespaceFilter } from "./useNamespaceFilter";
 import { useWorkloadActions } from "./useWorkloadActions";
+import { WorkloadScroll } from "./WorkloadScroll";
 
 /**
  * Jobs tab of the cluster Workloads card. Table mirroring the Azure portal
@@ -50,6 +52,10 @@ export function K8sJobsPanel({
 }) {
   const all = query.data?.jobs ?? [];
   const { effectiveNs, setNsFilter, namespaces, filtered } = useNamespaceFilter(all);
+  // Newest-first, rendered 20 rows at a time with infinite scroll so a
+  // 1000+ job roster does not paint every row up front.
+  const { visible, hasMore, total, scrollRef, sentinelRef } =
+    useAgeSortedInfinite(filtered);
 
   const actions = useWorkloadActions(
     "Job",
@@ -89,14 +95,21 @@ export function K8sJobsPanel({
         namespaces={namespaces}
         value={effectiveNs}
         onChange={setNsFilter}
-        shown={filtered.length}
+        shown={total}
       />
       {!query.isLoading && !query.isError && all.length === 0 && (
         <div style={{ padding: 12, fontSize: 11 }} className="muted">
           No jobs found.
         </div>
       )}
-      {filtered.length > 0 && (
+      {total > 0 && (
+        <WorkloadScroll
+          scrollRef={scrollRef}
+          sentinelRef={sentinelRef}
+          shown={visible.length}
+          total={total}
+          hasMore={hasMore}
+        >
         <table
           style={{
             width: "100%",
@@ -125,7 +138,7 @@ export function K8sJobsPanel({
             </tr>
           </thead>
           <tbody>
-            {filtered.map((j, i) => (
+            {visible.map((j, i) => (
               <tr
                 key={`${j.namespace}/${j.name}`}
                 style={{
@@ -182,6 +195,7 @@ export function K8sJobsPanel({
             ))}
           </tbody>
         </table>
+        </WorkloadScroll>
       )}
       {actions.dialogs}
     </div>

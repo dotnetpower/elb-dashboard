@@ -6,8 +6,10 @@ import type { K8sPod } from "@/api/endpoints";
 
 import { formatAge } from "./k8sFormat";
 import { NamespaceFilter } from "./NamespaceFilter";
+import { useAgeSortedInfinite } from "./useAgeSortedInfinite";
 import { useNamespaceFilter } from "./useNamespaceFilter";
 import { useWorkloadActions } from "./useWorkloadActions";
+import { WorkloadScroll } from "./WorkloadScroll";
 
 /**
  * Pods tab of the cluster Workloads card. Lists pods of every phase
@@ -43,6 +45,10 @@ export function K8sPodsPanel({
   const allPods = query.data?.pods ?? [];
   const { effectiveNs, setNsFilter, namespaces, filtered: pods } =
     useNamespaceFilter(allPods);
+  // Newest-first, rendered 20 rows at a time with infinite scroll so a
+  // 500+ pod roster does not paint every row up front.
+  const { visible, hasMore, total, scrollRef, sentinelRef } =
+    useAgeSortedInfinite(pods);
 
   const actions = useWorkloadActions(
     "Pod",
@@ -94,14 +100,21 @@ export function K8sPodsPanel({
         namespaces={namespaces}
         value={effectiveNs}
         onChange={setNsFilter}
-        shown={pods.length}
+        shown={total}
       />
       {!query.isLoading && !query.isError && allPods.length === 0 && (
         <div style={{ padding: 12, fontSize: 11 }} className="muted">
           No pods found.
         </div>
       )}
-      {pods.length > 0 && (
+      {total > 0 && (
+        <WorkloadScroll
+          scrollRef={scrollRef}
+          sentinelRef={sentinelRef}
+          shown={visible.length}
+          total={total}
+          hasMore={hasMore}
+        >
         <table
           style={{
             width: "100%",
@@ -132,7 +145,7 @@ export function K8sPodsPanel({
             </tr>
           </thead>
           <tbody>
-            {pods.map((p, i) => (
+            {visible.map((p, i) => (
               <tr
                 key={`${p.namespace}/${p.name}`}
                 style={{
@@ -205,6 +218,7 @@ export function K8sPodsPanel({
             ))}
           </tbody>
         </table>
+        </WorkloadScroll>
       )}
       {actions.dialogs}
     </div>
