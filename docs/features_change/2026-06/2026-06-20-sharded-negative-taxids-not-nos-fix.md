@@ -65,7 +65,28 @@ to completion instead of failing with an unexplained exit 255.
 * `uv run ruff check terminal/patch_elastic_blast.py api/tests/...` → clean.
 * Live diagnostic pod reproduction: RUN A exit 255 (`.not` missing) → RUN B
   exit 0 / 19 hits / top hit Cowpox virus after adding `.nos`/`.not`.
+* Self-heal bash logic validated for the three scenarios (incomplete cache →
+  invalidate; complete cache → keep; non-taxonomy DB → keep).
+* **End-to-end live verification on the dev cluster (elb-openapi 4.26).** A
+  sharded `core_nt` New Search with the F3L MPXV query and Taxonomy Filter =
+  Exclude `Orthopoxvirus monkeypox` (3431483) — the exact config that previously
+  failed — was submitted twice:
+  * Before the node-local warm cache carried `.nos`/`.not`: all 10 shard pods
+    `CrashLoopBackOff` within ~7 s (the `.not` mmap error), job failed, no
+    `FAILURE.txt`/`SUCCESS.txt`.
+  * After the `.nos`/`.not` index was present on every node: all 10 shard pods
+    `Completed` in ~23 s, the finalizer wrote `metadata/SUCCESS.txt` and
+    `merged_results.out.gz` (100 hits). Top hits are all **Cowpox virus**
+    isolates and **zero Monkeypox** hits — i.e. the taxon-exclusion filter works
+    and the result matches the NCBI Web BLAST reference for F3L with MPXV
+    excluded.
 
 ## Deploy note
 Takes effect on the live cluster only after an **elb-openapi (+ terminal) image
-rebuild and redeploy** — the shard-staging script ships inside those images.
+rebuild and redeploy** — the shard-staging script ships inside those images
+(shipped as elb-openapi `4.26`). On a cluster that was already warmed with a
+pre-fix image, the node-local cache keeps its `.download-complete` marker; the
+self-heal re-stages `.nos`/`.not` on the **next warmup**, so trigger a re-warm
+(or release + re-warm) after upgrading for the fix to take effect on already-warm
+nodes. A stuck-warm cache can also be completed in place by staging
+`core_nt.nos`/`core_nt.not` into each node's `/workspace/blast` directory.
