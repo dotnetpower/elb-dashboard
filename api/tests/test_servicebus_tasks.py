@@ -65,6 +65,66 @@ def test_tasks_skip_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sb_tasks.dlq_cleanup()["skipped"] == "disabled"
 
 
+def test_drain_skips_tick_on_transient_infra_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A transient Table/Service Bus DNS blip must skip the tick, not crash with
+    # an exception Celery cannot pickle (UnpickleableExceptionWrapper).
+    from azure.core.exceptions import ServiceRequestError
+
+    _enable(monkeypatch)
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise ServiceRequestError(
+            "Failed to resolve 'x.table.core.windows.net' "
+            "([Errno -3] Temporary failure in name resolution)"
+        )
+
+    monkeypatch.setattr(sb_tasks.service_bus, "drain_requests", _boom)
+    out = sb_tasks.drain_and_resubmit()
+    assert out["skipped"] == "transient"
+    assert out["error_class"] == "ServiceRequestError"
+
+
+def test_publish_skips_tick_on_transient_infra_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from azure.core.exceptions import ServiceResponseError
+
+    _enable(monkeypatch)
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise ServiceResponseError("Connection aborted; remote end closed")
+
+    monkeypatch.setattr(sb_tasks, "list_active_bridges", _boom)
+    out = sb_tasks.publish_transitions()
+    assert out["skipped"] == "transient"
+    assert out["error_class"] == "ServiceResponseError"
+
+
+def test_dlq_cleanup_skips_tick_on_transient_infra_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from azure.core.exceptions import ServiceRequestError
+
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(cfg, "dlq_cleanup_enabled", True)
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise ServiceRequestError("Temporary failure in name resolution")
+
+    monkeypatch.setattr(sb_tasks.service_bus, "purge_dead_letter", _boom)
+    out = sb_tasks.dlq_cleanup()
+    assert out["skipped"] == "transient"
+
+
+def test_non_transient_error_still_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The transient guard must not swallow genuine bugs.
+    _enable(monkeypatch)
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise ValueError("genuine bug")
+
+    monkeypatch.setattr(sb_tasks.service_bus, "drain_requests", _boom)
+    with pytest.raises(ValueError, match="genuine bug"):
+        sb_tasks.drain_and_resubmit()
+
+
+
 def test_drain_bridges_valid_message(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
     events: list[dict] = []

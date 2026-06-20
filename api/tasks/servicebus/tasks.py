@@ -15,7 +15,11 @@ Edit boundaries: Long-running side effects only. Service Bus data-plane calls go
 Key entry points: ``drain_and_resubmit``, ``publish_transitions``,
     ``dlq_cleanup`` (registered as ``api.tasks.servicebus.*``).
 Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — the
-    env gate plus the saved config must both opt in. The drain handler is
+    env gate plus the saved config must both opt in. All three beat tasks also
+    skip the current tick (returning ``{"skipped": "transient"}``) on a
+    transient connectivity/DNS error from a top-level Table / Service Bus read,
+    so a brief platform blip self-heals on the next tick instead of crashing
+    with an exception Celery cannot pickle. The drain handler is
     idempotent on ``external_correlation_id`` (Service Bus is at-least-once);
     a duplicate completes the message without a second submit. All three tasks
     are BOUNDED per tick (drain/publish/cleanup caps) so a backlog drains over
@@ -57,6 +61,7 @@ from api.services.service_bus_tracking import (
     upsert_bridge,
 )
 from api.tasks.servicebus.dlq_backup import backup_dead_letter_message
+from api.tasks.transient import skip_tick_on_transient_infra
 
 LOGGER = logging.getLogger(__name__)
 
@@ -735,6 +740,7 @@ def _persist_drain_row_and_trace(
 
 
 @shared_task(name="api.tasks.servicebus.drain_and_resubmit")
+@skip_tick_on_transient_infra
 def drain_and_resubmit() -> dict[str, Any]:
     """Drain the request queue → bridge each message to the OpenAPI plane."""
     if not service_bus_enabled():
@@ -850,6 +856,7 @@ def _publish_one_bridge(
 
 
 @shared_task(name="api.tasks.servicebus.publish_transitions")
+@skip_tick_on_transient_infra
 def publish_transitions() -> dict[str, Any]:
     """Poll sibling status for active bridges and emit one event per change."""
     if not service_bus_enabled():
@@ -918,6 +925,7 @@ def _dlq_predicate(cfg: ServiceBusConfig, total_dlq: int) -> Any:
 
 
 @shared_task(name="api.tasks.servicebus.dlq_cleanup")
+@skip_tick_on_transient_infra
 def dlq_cleanup() -> dict[str, Any]:
     """Enforce the dead-letter retention policy (backup-then-delete)."""
     if not service_bus_enabled():

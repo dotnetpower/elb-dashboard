@@ -12,7 +12,10 @@ Key entry points: `reconcile_orphaned_prepare_db` (Celery task
     `api.tasks.storage.reconcile_orphaned_prepare_db`).
 Risky contracts: Task name must stay `api.tasks.storage.reconcile_orphaned_prepare_db`
     because the beat schedule references it by string. Honours the
-    `PREPARE_DB_ORPHAN_RECONCILE_ENABLED` kill-switch via the service.
+    `PREPARE_DB_ORPHAN_RECONCILE_ENABLED` kill-switch via the service. Stacked
+    under `@shared_task` with `skip_tick_on_transient_infra`, so a transient
+    Storage DNS/connection blip skips the tick (next beat retries) instead of
+    crashing with an exception Celery cannot pickle.
 Validation: `uv run pytest -q api/tests/test_orphan_prepare_db_reconcile.py`.
 """
 
@@ -23,9 +26,11 @@ from typing import Any
 from celery import shared_task
 
 import api.tasks.storage as _facade
+from api.tasks.transient import skip_tick_on_transient_infra
 
 
 @shared_task(name="api.tasks.storage.reconcile_orphaned_prepare_db", bind=True)
+@skip_tick_on_transient_infra
 def reconcile_orphaned_prepare_db(
     self: Any,
     *,
