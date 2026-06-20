@@ -596,7 +596,13 @@ for VOL in $VOLUMES; do
     [ -n "$PATTERN" ] && PATTERN="${PATTERN};"
     PATTERN="${PATTERN}${VOL}.*"
 done
-PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto"
+# DB-prefix taxonomy index files. `.ndb;.ntf;.nto` cover the `staxids`/`sscinames`
+# OUTPUT lookup, but the `-taxids`/`-negative_taxids` taxonomy FILTER additionally
+# memory-maps `${ORIG_DB}.nos` and `${ORIG_DB}.not` (the seqid->taxid index). Omitting
+# them makes blastn abort with exit 255 ("the file must exist: '<db>.not'") on any
+# sharded run that carries a taxon include/exclude filter, while non-filtered and
+# OUTPUT-only (outfmt 7 staxids) runs still succeed. Keep all five in the pattern.
+PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto;${ORIG_DB}.nos;${ORIG_DB}.not"
 echo "Downloading with pattern: ${PATTERN}"
 
 retry_azcopy cp "${DB_URL}*" . \

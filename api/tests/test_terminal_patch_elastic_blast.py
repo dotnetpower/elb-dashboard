@@ -58,6 +58,13 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     assert "if [ -s .download-complete ]" not in text
     assert "touch .download-complete" not in text
     assert "taxonomy4blast.sqlite3" not in skip_prefix
+    # Regression guard: the `-taxids`/`-negative_taxids` taxonomy FILTER memory-maps the
+    # DB-prefix seqid->taxid index `${ORIG_DB}.nos` and `${ORIG_DB}.not`. Omitting them
+    # made sharded core_nt runs with a taxon include/exclude abort with blastn exit 255
+    # ("the file must exist: '<db>.not'"). They must be part of the download pattern.
+    download_pattern = text.split('echo "Downloading with pattern: ${PATTERN}"', 1)[0]
+    assert "${ORIG_DB}.nos" in download_pattern
+    assert "${ORIG_DB}.not" in download_pattern
 
 
 _ELB_CONFIG_OUTFMT_GATE = (
