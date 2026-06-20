@@ -355,9 +355,14 @@ def annotate_result_hit(hit: dict[str, Any], source_blob: str | None = None) -> 
     subject_cover = coverage_percent(
         annotated.get("sstart"), annotated.get("send"), annotated.get("slen"), align_len
     )
-    if query_cover is not None:
+    # Prefer a qcovs value the run reported directly (BLAST's
+    # "% query coverage per subject" column = NCBI Web BLAST's Query Cover):
+    # only fall back to the per-HSP coordinate-derived estimate when the
+    # tabular / XML output did not carry qcovs, so a real reported value is
+    # never clobbered by the weaker computed one.
+    if numeric_result_value(annotated.get("qcovs")) is None and query_cover is not None:
         annotated["qcovs"] = query_cover
-    if subject_cover is not None:
+    if numeric_result_value(annotated.get("scovs")) is None and subject_cover is not None:
         annotated["scovs"] = subject_cover
 
     identity = numeric_result_value(annotated.get("pident"))

@@ -112,6 +112,37 @@ def test_parse_outfmt7_uses_field_header() -> None:
     assert isinstance(first["evalue"], float)
 
 
+def test_parse_outfmt7_maps_taxonomy_and_coverage_columns() -> None:
+    # Real blastn 2.17.0 `# Fields:` header for the dashboard's
+    # `-outfmt 7 std staxids sscinames stitle qcovs` taxonomy + description
+    # toggle. Without the qcovs label alias the parser would name the column
+    # `%_query_coverage_per_subject` and the UI's HSP Cover (hit.qcovs) would
+    # render blank even though the value is present.
+    content = (
+        "# BLASTN 2.17.0+\n"
+        "# Query: NC_003310.1:c48509-48048 Monkeypox virus, complete genome\n"
+        "# Database: core_nt_shard_01\n"
+        "# Fields: query acc.ver, subject acc.ver, % identity, alignment length, "
+        "mismatches, gap opens, q. start, q. end, s. start, s. end, evalue, "
+        "bit score, subject tax ids, subject sci names, subject title, "
+        "% query coverage per subject\n"
+        "# 1 hits found\n"
+        "NC_003310.1:c48509-48048\tPQ305795.1\t100.000\t462\t0\t0\t1\t462\t"
+        "47222\t46761\t0.0\t854\t10244\tMonkeypox virus\t"
+        "Monkeypox virus isolate 45_DRC, complete genome\t97\n"
+    )
+    hits = parse_blast_tabular(content)
+    assert len(hits) == 1
+    hit = hits[0]
+    assert hit["staxids"] == "10244"
+    assert hit["sscinames"] == "Monkeypox virus"
+    # stitle keeps its embedded comma/spaces (tab-delimited, one field).
+    assert hit["stitle"] == "Monkeypox virus isolate 45_DRC, complete genome"
+    # qcovs is mapped from "% query coverage per subject" and coerced to float.
+    assert hit["qcovs"] == 97.0
+    assert isinstance(hit["qcovs"], float)
+
+
 def test_parse_outfmt5_xml_to_canonical_hit_rows() -> None:
     hits = parse_blast_xml(_OUTFMT_5_XML)
     assert len(hits) == 1

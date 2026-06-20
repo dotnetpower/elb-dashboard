@@ -49,14 +49,17 @@ export function buildEffectiveAdditionalOptions(form: FormState): string | undef
   if (form.species_repeat_filter && form.repeat_filter_taxid.trim()) {
     opts = appendOption(opts, "-window_masker_taxid", form.repeat_filter_taxid.trim());
   }
-  // Taxonomy columns: emit the verified canonical UNQUOTED multi-token
-  // specifier `-outfmt 7 std staxids sscinames`. `std` leads so the qseqid
-  // column stays first (the shard merge groups by qseqid). The submit
-  // suppresses the integer `outfmt` field when this is on, so the options
-  // string carries exactly one `-outfmt` flag for the merge to parse. A
-  // user-supplied `-outfmt` in additional_options wins (hasCliFlag dedupe).
+  // Taxonomy + description columns: emit the verified canonical UNQUOTED
+  // multi-token specifier `-outfmt 7 std staxids sscinames stitle qcovs`.
+  // `std` leads so the qseqid column stays first (the shard merge groups by
+  // qseqid). `staxids`/`sscinames` populate Taxid + Scientific Name, `stitle`
+  // populates Description, and `qcovs` (BLAST's "% query coverage per subject"
+  // = NCBI Web BLAST Query Cover) populates HSP Cover. The submit suppresses
+  // the integer `outfmt` field when this is on, so the options string carries
+  // exactly one `-outfmt` flag for the merge to parse. A user-supplied
+  // `-outfmt` in additional_options wins (hasCliFlag dedupe).
   if (form.outfmt_taxonomy_columns) {
-    opts = appendOption(opts, "-outfmt", "7 std staxids sscinames");
+    opts = appendOption(opts, "-outfmt", "7 std staxids sscinames stitle qcovs");
   }
   return opts.trim() || undefined;
 }
@@ -245,9 +248,10 @@ export function buildSubmitRequest({
     evalue: form.evalue,
     max_target_seqs: form.max_target_seqs,
     // Suppress the integer outfmt field when taxonomy columns are requested so
-    // the multi-token `-outfmt 7 std staxids sscinames` in additional_options is
-    // the single source of the format specifier (a double `-outfmt` would make
-    // the shard merge's parser grab only the first, dropping staxids). See #29.
+    // the multi-token `-outfmt 7 std staxids sscinames stitle qcovs` in
+    // additional_options is the single source of the format specifier (a double
+    // `-outfmt` would make the shard merge's parser grab only the first,
+    // dropping the extended columns). See #29.
     outfmt: form.outfmt_taxonomy_columns ? undefined : form.outfmt,
     word_size: parseOptionalInt(form.word_size),
     gap_open: parseOptionalInt(form.gap_open),

@@ -74,6 +74,16 @@ _FIELD_LABEL_TO_COLUMN: dict[str, str] = {
     # though the merged tabular output carries it.
     "subject tax ids": "staxids",
     "subject tax id": "staxids",
+    # Query-coverage columns. blastn (BLAST+ 2.17.0) writes the qcovs header
+    # as "% query coverage per subject" (NCBI Web BLAST's "Query Cover"),
+    # qcovhsp as "% query coverage per hsp", and qcovus as
+    # "% query coverage per uniq subject". Without these aliases the parser
+    # falls back to a snake_case column name, so the UI's `hit.qcovs` lookup
+    # misses and the HSP Cover column renders blank even though the merged
+    # tabular output carries the value.
+    "% query coverage per subject": "qcovs",
+    "% query coverage per hsp": "qcovhsp",
+    "% query coverage per uniq subject": "qcovus",
     # Reading-frame labels used by translated BLAST programs (blastx /
     # tblastn / tblastx). Web BLAST surfaces these as the "Frame" column;
     # without this mapping the tabular parser would silently drop them.
@@ -83,7 +93,21 @@ _FIELD_LABEL_TO_COLUMN: dict[str, str] = {
 }
 
 # Columns that should be coerced to float, int, or left as string.
-_FLOAT_COLUMNS = frozenset({"pident", "evalue", "bitscore", "ppos"})
+_FLOAT_COLUMNS = frozenset(
+    {
+        "pident",
+        "evalue",
+        "bitscore",
+        "ppos",
+        # Query-coverage percentages. BLAST writes them as integers, but the
+        # coordinate-derived fallback in result_analytics rounds to one
+        # decimal, so coerce the parsed column to float for a single numeric
+        # convention across both code paths.
+        "qcovs",
+        "qcovhsp",
+        "qcovus",
+    }
+)
 _INT_COLUMNS = frozenset(
     {
         "length",

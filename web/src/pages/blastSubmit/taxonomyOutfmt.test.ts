@@ -14,7 +14,7 @@ describe("buildEffectiveAdditionalOptions taxonomy columns (#29)", () => {
       ...INITIAL,
       outfmt_taxonomy_columns: true,
     });
-    expect(opts).toContain("-outfmt 7 std staxids sscinames");
+    expect(opts).toContain("-outfmt 7 std staxids sscinames stitle qcovs");
     // Never quote the specifier — quotes break the generated Job YAML.
     expect(opts).not.toContain('"7 std staxids');
   });

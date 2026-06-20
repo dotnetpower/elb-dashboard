@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 from api.services import taxonomy as taxonomy_service
 from api.services.blast.result_analytics import (
+    annotate_result_hit,
     enrich_taxonomy_with_lineage,
     extract_organism_from_stitle,
     rollup_taxonomy,
@@ -255,4 +256,41 @@ def test_enrich_taxonomy_skips_unresolvable_organism(
     assert enriched[0]["taxid"] == ""
     assert "lineage" not in enriched[0]
     assert detail_called == []
+
+
+def test_annotate_preserves_reported_qcovs_over_computed() -> None:
+    # A run that carries BLAST's real "% query coverage per subject" column
+    # (parsed into qcovs) plus qlen must keep the reported value — the weaker
+    # per-HSP coordinate estimate (here 50.0 from qstart=1/qend=50/qlen=100)
+    # must not clobber it.
+    hit = {
+        "qseqid": "q1",
+        "sseqid": "S1",
+        "pident": 100.0,
+        "length": 50,
+        "qstart": 1,
+        "qend": 50,
+        "qlen": 100,
+        "evalue": 1e-80,
+        "qcovs": 88.0,
+    }
+    annotated = annotate_result_hit(hit)
+    assert annotated["qcovs"] == 88.0
+
+
+def test_annotate_computes_qcovs_when_absent() -> None:
+    # When the run did not report qcovs, fall back to the coordinate-derived
+    # per-HSP coverage so HSP Cover still renders.
+    hit = {
+        "qseqid": "q1",
+        "sseqid": "S1",
+        "pident": 100.0,
+        "length": 50,
+        "qstart": 1,
+        "qend": 50,
+        "qlen": 100,
+        "evalue": 1e-80,
+    }
+    annotated = annotate_result_hit(hit)
+    assert annotated["qcovs"] == 50.0
 

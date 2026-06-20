@@ -203,8 +203,8 @@ export function AlgorithmParametersSection({
                     }}
                   />
                   <span>
-                    Include taxonomy columns (taxid + scientific name){" "}
-                    <Tip text="Adds the subject tax id and scientific name columns to a tabular result via -outfmt 7 std staxids sscinames. Works with sharding (the merge keeps the extended # Fields header). Requires a database that ships taxonomy data, e.g. core_nt." />
+                    Include taxonomy &amp; description columns (taxid, scientific name, title, coverage){" "}
+                    <Tip text="Adds the subject tax id, scientific name, title (Description), and query coverage (HSP Cover) columns to a tabular result via -outfmt 7 std staxids sscinames stitle qcovs. Works with sharding (the merge keeps the extended # Fields header). Requires a database that ships taxonomy data, e.g. core_nt." />
                   </span>
                 </label>
                 {webBlastSearchsp && (

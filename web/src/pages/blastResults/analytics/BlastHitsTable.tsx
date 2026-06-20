@@ -85,11 +85,12 @@ export function BlastHitsTable({
   const selectedRows = hits.filter((hit) => selectedHits.has(hitKey(hit)));
 
   // Detect columns that are blank for the WHOLE result set because the run's
-  // outfmt omitted the source field (issue #32). `7 std staxids sscinames`
-  // carries no `stitle` (Description) and no `qlen` (so `qcovs` / HSP Cover
-  // cannot be derived), so those columns render as silent blanks. Surface a
-  // one-line reason banner instead of leaving the user guessing. outfmt 5
-  // (XML) always carries both, so the banner never shows for XML runs.
+  // outfmt omitted the source field (issue #32). Plain `7 std staxids sscinames`
+  // carries no `stitle` (Description) and no `qcovs` (HSP Cover), so those
+  // columns render as silent blanks. Surface a one-line reason banner instead
+  // of leaving the user guessing. The "Include taxonomy & description columns"
+  // toggle now emits `stitle qcovs`, and outfmt 5 (XML) always carries both, so
+  // the banner never shows for those runs.
   const descriptionColumnEmpty =
     hits.length > 0 && hits.every((hit) => !hit.stitle);
   const coverColumnEmpty =
@@ -171,10 +172,11 @@ export function BlastHitsTable({
             </strong>{" "}
             This search used a tabular output format (e.g.{" "}
             <code>7 std staxids sscinames</code>) that does not include{" "}
-            <code>stitle</code> (Description) or <code>qlen</code> (needed for HSP
-            Cover). Re-run with <code>stitle qlen</code> appended to the outfmt
-            specifier, or use <code>outfmt 5</code> (XML), to populate these
-            columns.
+            <code>stitle</code> (Description) or <code>qcovs</code> (HSP Cover).
+            Enable <strong>Include taxonomy &amp; description columns</strong> on
+            New Search (it emits <code>stitle qcovs</code>), append{" "}
+            <code>stitle qcovs</code> to the outfmt specifier, or use{" "}
+            <code>outfmt 5</code> (XML), to populate these columns.
           </div>
         )}
         <table className="table" style={{ width: "100%", minWidth: 1320, fontSize: 13 }}>
@@ -223,17 +225,18 @@ export function BlastHitsTable({
                 onSort={handleHeaderSort}
                 hint={
                   <>
-                    <strong>HSP query coverage</strong>
+                    <strong>Query coverage</strong>
                     <div style={{ marginTop: 6 }}>
-                      Percent of the query covered by{" "}
-                      <em>this single HSP</em> only — computed from{" "}
-                      <code>qstart / qend / qlen</code>.
+                      Percent of the query covered — from the run's{" "}
+                      <code>qcovs</code> column when present (BLAST's{" "}
+                      <em>% query coverage per subject</em>, the same value as
+                      NCBI Web BLAST's <em>Query Cover</em>), otherwise derived
+                      per-HSP from <code>qstart / qend / qlen</code>.
                     </div>
                     <div className="tt-note">
-                      Not the same as NCBI Web BLAST's{" "}
-                      <em>Query Cover</em> column, which is the union of all
-                      HSPs per subject. Use the Alignments tab for the
-                      per-subject view.
+                      The per-subject column unions all HSPs for a subject; the
+                      per-HSP fallback reflects a single HSP. Use the Alignments
+                      tab for the full per-subject breakdown.
                     </div>
                   </>
                 }
