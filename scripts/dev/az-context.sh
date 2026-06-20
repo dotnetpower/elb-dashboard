@@ -296,6 +296,13 @@ _az_context_discover_workload_env() {
 # -----------------------------------------------------------------------
 prepare_deploy_env_from_az_login() {
   local current_sub
+  # Capture an operator-supplied ACR_NAME override BEFORE discovery clears +
+  # re-derives it from the active subscription. Naming a specific ACR pins the
+  # intended subscription (ACR names are globally unique), so a mismatch with
+  # the active sub's ACR after discovery means the deploy would target the
+  # wrong environment — the cross-sub ACR guard at the end of this function
+  # turns that silent retarget into a loud refusal.
+  local _entry_acr_override="${ACR_NAME:-}"
   if ! current_sub=$(az account show --query id -o tsv 2>/dev/null); then
     printf '\033[31mERROR:\033[0m Not logged in to Azure CLI. Run: az login\n' >&2
     exit 1
@@ -398,6 +405,32 @@ prepare_deploy_env_from_az_login() {
     _az_context_warn "discovery did not produce: ${missing[*]} — the deploy script may abort on env validation"
   else
     _az_context_log "active subscription: $current_sub  rg=$AZURE_RESOURCE_GROUP  acr=$ACR_NAME  app=$CONTAINER_APP_NAME"
+  fi
+
+  # Cross-sub ACR override guard (a DIFFERENT axis than the azd-vs-login guard
+  # above — ELB_ALLOW_SUB_MISMATCH does NOT bypass it). An operator who passes
+  # ACR_NAME=<X> is naming a specific registry, which pins the subscription
+  # they intend to deploy to. Discovery just overwrote ACR_NAME with the ACTIVE
+  # subscription's registry; if that differs from <X>, the active sub is not the
+  # one that owns <X>, so `az acr build` would push to <X> while
+  # `az containerapp update` PATCHES the active sub's Container App — a
+  # wrong-environment deploy (observed 2026-06-20: active sub silently flipped,
+  # an ACR_NAME override pointed at the customer registry, the patch nearly hit
+  # the teammate sub's identically-named app). Refuse unless the operator truly
+  # means to build cross-sub.
+  if [[ -n "$_entry_acr_override" && -n "${ACR_NAME:-}" \
+        && "$_entry_acr_override" != "$ACR_NAME" ]]; then
+    if [[ "${ELB_ALLOW_ACR_OVERRIDE_MISMATCH:-0}" != "1" ]]; then
+      printf '\033[31mERROR:\033[0m ACR_NAME override (%s) does NOT match the active subscription'\''s ACR (%s).\n' \
+        "$_entry_acr_override" "$ACR_NAME" >&2
+      printf '       The active sub (%s) does not own %s, so this deploy would PATCH the WRONG\n' \
+        "$current_sub" "$_entry_acr_override" >&2
+      printf '       environment'\''s Container App. Align the active sub to the one that owns the ACR:\n' >&2
+      printf '         az account set --subscription <sub-that-owns-%s>\n' "$_entry_acr_override" >&2
+      printf '       then re-run. To force a cross-sub build anyway: ELB_ALLOW_ACR_OVERRIDE_MISMATCH=1\n' >&2
+      exit 3
+    fi
+    _az_context_warn "ACR override mismatch acknowledged via ELB_ALLOW_ACR_OVERRIDE_MISMATCH=1 (override=$_entry_acr_override active-sub-acr=$ACR_NAME)"
   fi
 }
 
