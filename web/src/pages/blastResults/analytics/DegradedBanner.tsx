@@ -2,7 +2,7 @@ import { AlertTriangle } from "lucide-react";
 
 const DEGRADED_REASON_LABEL: Record<string, string> = {
   all_reads_failed:
-    "Every result file failed to download. RBAC, network outage, or the storage account is unreachable.",
+    "The result files were downloaded but could not be parsed — the output may be corrupted or in an unexpected format.",
   aggregation_failed:
     "Hits were retrieved but the analytics aggregation crashed. Try refreshing; if it persists, the data shape may be unexpected.",
   no_result_files:

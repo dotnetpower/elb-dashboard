@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from xml.etree.ElementTree import ParseError as XMLParseError
 
 from defusedxml import ElementTree as ET
 
@@ -162,7 +163,29 @@ def parse_blast_xml(content: str) -> list[dict[str, Any]]:
 
     parser = ET.iterparse(io.StringIO(content), events=("start", "end"))
     root: ET.Element | None = None
-    for event, elem in parser:
+    parse_iter = iter(parser)
+    while True:
+        try:
+            event, elem = next(parse_iter)
+        except StopIteration:
+            break
+        except XMLParseError:
+            # An oversized BLAST XML result read through the analytics byte
+            # caps (RESULTS_AGGREGATE_MAX_BYTES / RESULTS_ALIGNMENTS_MAX_BYTES)
+            # is cut mid-element, so streaming iterparse raises ParseError at
+            # the truncated EOF. Every complete <Hit> before the cut is already
+            # in `hits`, so return those instead of discarding the whole result
+            # (which surfaced as a false "results degraded / all reads failed"
+            # banner with zero hits for a search that actually succeeded). When
+            # nothing parsed the content is genuinely unparseable, so re-raise
+            # and let the caller record a real read failure.
+            if not hits:
+                raise
+            LOGGER.warning(
+                "BLAST XML truncated after %d hits; returning partial result",
+                len(hits),
+            )
+            break
         tag = _local_name(elem.tag)
         if event == "start":
             if root is None:

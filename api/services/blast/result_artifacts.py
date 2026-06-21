@@ -266,6 +266,7 @@ def _read_hits(
     parsed_files = 0
     read_failures = 0
     hit_limit_reached = False
+    content_truncated = False
     blob_names: list[str] = []
     for blob_info in result_blobs[:RESULTS_MAX_FILES]:
         if max_hits is not None and len(all_hits) >= max_hits:
@@ -282,6 +283,11 @@ def _read_hits(
                 blob_path,
                 max_bytes=max_bytes,
             )
+            if len(content) >= max_bytes - 4:
+                # The read filled the byte budget, so the BLAST output is
+                # larger than the cap and the parse below sees a truncated
+                # tail. Flag the result partial so the UI says so honestly.
+                content_truncated = True
             parsed_hits = parse_blast_result_content(content)
             if max_hits is None:
                 selected = parsed_hits
@@ -309,7 +315,11 @@ def _read_hits(
         "files_parsed": parsed_files,
         "total_files": len(result_blobs),
         "read_failures": read_failures,
-        "truncated": len(result_blobs) > RESULTS_MAX_FILES or hit_limit_reached,
+        "truncated": (
+            len(result_blobs) > RESULTS_MAX_FILES
+            or hit_limit_reached
+            or content_truncated
+        ),
         "hit_limit_reached": hit_limit_reached,
     }
 
@@ -319,6 +329,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
     aggregate = _StreamingAggregate()
     parsed_files = 0
     read_failures = 0
+    content_truncated = False
     reads = read_result_blob_texts_parallel(
         storage_account,
         result_blobs[:RESULTS_MAX_FILES],
@@ -330,6 +341,8 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
         try:
             if read_exc is not None:
                 raise read_exc
+            if content is not None and len(content) >= RESULTS_AGGREGATE_MAX_BYTES - 4:
+                content_truncated = True
             for hit in parse_blast_result_content(content):
                 aggregate.add(hit)
             parsed_files += 1
@@ -359,7 +372,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
         "files_parsed": parsed_files,
         "total_files": len(result_blobs),
         "read_failures": read_failures,
-        "truncated": len(result_blobs) > RESULTS_MAX_FILES,
+        "truncated": len(result_blobs) > RESULTS_MAX_FILES or content_truncated,
     }
 
 

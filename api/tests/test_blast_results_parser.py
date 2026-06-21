@@ -17,6 +17,9 @@ Validation: `uv run pytest -q api/tests/test_blast_results_parser.py`.
 
 from __future__ import annotations
 
+from xml.etree.ElementTree import ParseError as XMLParseError
+
+import pytest
 from api.services.blast.results_parser import (
     EXPORT_DEFAULT_COLUMNS,
     aggregate_blast_hits,
@@ -417,3 +420,55 @@ def test_parse_outfmt7_with_spaced_taxid_header_maps_staxids_and_sscinames() -> 
     assert hit["staxids"] == "10244"
     assert hit["sscinames"] == "Monkeypox virus"
     assert "subject_tax_ids" not in hit
+
+
+def _xml_with_n_hits(n: int) -> str:
+    """Build a valid multi-hit BLAST XML document for truncation tests."""
+    hits_xml = "".join(
+        f"""
+                <Hit>
+                    <Hit_accession>ACC{i:04d}</Hit_accession>
+                    <Hit_def>Subject {i}</Hit_def>
+                    <Hit_len>1200</Hit_len>
+                    <Hit_hsps><Hsp>
+                        <Hsp_identity>460</Hsp_identity>
+                        <Hsp_align-len>462</Hsp_align-len><Hsp_gaps>1</Hsp_gaps>
+                        <Hsp_query-from>1</Hsp_query-from><Hsp_query-to>462</Hsp_query-to>
+                        <Hsp_hit-from>10</Hsp_hit-from><Hsp_hit-to>471</Hsp_hit-to>
+                        <Hsp_evalue>1e-100</Hsp_evalue><Hsp_bit-score>828.4</Hsp_bit-score>
+                    </Hsp></Hit_hsps>
+                </Hit>"""
+        for i in range(n)
+    )
+    return (
+        "<?xml version='1.0'?>\n<BlastOutput>\n  <BlastOutput_iterations>\n"
+        "    <Iteration>\n      <Iteration_query-ID>q1</Iteration_query-ID>\n"
+        "      <Iteration_query-len>462</Iteration_query-len>\n"
+        f"      <Iteration_hits>{hits_xml}\n      </Iteration_hits>\n"
+        "    </Iteration>\n  </BlastOutput_iterations>\n</BlastOutput>\n"
+    )
+
+
+def test_parse_xml_truncated_at_byte_cap_returns_partial_hits() -> None:
+    # An oversized BLAST XML read through the analytics byte cap is cut
+    # mid-element, so streaming iterparse raises ParseError at the truncated
+    # EOF. The parser must return the complete <Hit> rows seen before the cut
+    # instead of discarding the whole result (which surfaced as a false
+    # "results degraded / all reads failed" banner with zero hits for a search
+    # that actually succeeded with hundreds of hits).
+    full = _xml_with_n_hits(5)
+    assert len(parse_blast_xml(full)) == 5
+    # Cut inside the 4th hit: the first 3 are complete and recoverable.
+    cut = full.index("ACC0003")
+    truncated = full[:cut]
+    hits = parse_blast_xml(truncated)
+    assert len(hits) == 3
+    assert [h["sseqid"] for h in hits] == ["ACC0000", "ACC0001", "ACC0002"]
+
+
+def test_parse_xml_unparseable_from_start_still_raises() -> None:
+    # A genuinely corrupt document with no recoverable hit must keep raising so
+    # the caller records a real read failure rather than silently reporting
+    # "no hits" for an unreadable file.
+    with pytest.raises(XMLParseError):
+        parse_blast_xml("<?xml version='1.0'?><BlastOutput><broken")
