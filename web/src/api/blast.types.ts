@@ -232,6 +232,20 @@ export interface BlastJobSummary {
   /** Display-only label for the query (filename or first sequence id). */
   query_label?: string;
   owner_upn?: string;
+  /**
+   * Server-derived submission origin: "dashboard" | "external_api" |
+   * "servicebus". Populated as a durable column so the list view (which omits
+   * the payload) still shows the true origin of a queue-drained job.
+   */
+  submission_source?: string;
+  /** Legacy two-value origin: "dashboard" | "external_api". */
+  source?: string;
+  /**
+   * Service Bus / external request correlation id for a queue-drained job, so
+   * an operator can trace a Jobs row back to its Service Bus request message.
+   * Null / absent for dashboard-native jobs.
+   */
+  external_correlation_id?: string | null;
   error_code?: string;
   error?: string;
   /**

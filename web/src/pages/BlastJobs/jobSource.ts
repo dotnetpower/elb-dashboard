@@ -14,10 +14,13 @@ export type JobSource = "ui" | "api" | "servicebus";
 
 /** Resolve the submission source of a job for display + filtering. */
 export function jobSubmissionSource(job: BlastJobSummary): JobSource {
+  // Prefer the durable top-level field (populated for column-only list rows
+  // where `payload` is omitted), then the legacy `payload.submission_source`.
   const raw =
-    typeof job.payload?.submission_source === "string"
+    (typeof job.submission_source === "string" && job.submission_source) ||
+    (typeof job.payload?.submission_source === "string"
       ? (job.payload.submission_source as string)
-      : null;
+      : null);
   if (raw === "servicebus") return "servicebus";
   // Legacy rows pre-dating owner_upn capture carry the source on the payload;
   // `owner_upn === "api"` is the older external-submit marker.

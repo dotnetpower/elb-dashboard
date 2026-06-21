@@ -53,6 +53,50 @@ def test_local_to_blast_job_minimum_shape():
     assert "splits_done" not in out  # no split children supplied
 
 
+def test_local_to_blast_job_surfaces_servicebus_origin_from_column():
+    # The Recent searches / Jobs list reads JobState columns only
+    # (include_payload=False), so a queue-drained row must surface its origin and
+    # correlation id from the durable columns -- not only from payload.external --
+    # otherwise the list mislabels a Service Bus job as "dashboard" with no
+    # correlation id and an operator cannot trace it back to the queue message.
+    out = _local_to_blast_job(
+        _state(
+            submission_source="servicebus",
+            external_correlation_id="corr-queue-1",
+            payload={},  # list view does not load the payload
+        )
+    )
+    assert out["submission_source"] == "servicebus"
+    assert out["source"] == "external_api"
+    assert out["external_correlation_id"] == "corr-queue-1"
+
+
+def test_local_to_blast_job_surfaces_correlation_from_payload():
+    # The detail view loads the payload; the correlation id and origin must
+    # resolve from payload.external even on a legacy row written before the
+    # durable columns existed.
+    out = _local_to_blast_job(
+        _state(
+            payload={
+                "external": {
+                    "submission_source": "servicebus",
+                    "external_correlation_id": "corr-legacy-2",
+                }
+            }
+        )
+    )
+    assert out["submission_source"] == "servicebus"
+    assert out["external_correlation_id"] == "corr-legacy-2"
+
+
+def test_local_to_blast_job_native_row_has_no_correlation():
+    # A dashboard-native row keeps source=dashboard and a null correlation id.
+    out = _local_to_blast_job(_state())
+    assert out["submission_source"] == "dashboard"
+    assert out["source"] == "dashboard"
+    assert out["external_correlation_id"] is None
+
+
 def test_local_to_blast_job_surfaces_owner_upn():
     # Recent searches User column relies on this contract — the JobState row
     # carries owner_upn alongside owner_oid so the UI can render a readable

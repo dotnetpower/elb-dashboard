@@ -61,6 +61,53 @@ def test_job_state_round_trips_owner_upn() -> None:
     assert legacy_restored.owner_upn is None
 
 
+def test_job_state_round_trips_servicebus_correlation_columns() -> None:
+    # A queue-drained row stamps submission_source / external_correlation_id only
+    # inside payload.external. to_entity must backfill the durable columns from
+    # the payload so the column-only list view (include_payload=False) can show
+    # the queue origin and trace the request back to the Service Bus message.
+    state = JobState(
+        job_id="openapi-job-1",
+        type="blast",
+        status="queued",
+        payload={
+            "external": {
+                "job_id": "openapi-job-1",
+                "submission_source": "servicebus",
+                "external_correlation_id": "corr-abc-123",
+            }
+        },
+    )
+
+    entity = state.to_entity()
+    restored = JobState.from_entity(entity)
+
+    assert entity["submission_source"] == "servicebus"
+    assert entity["external_correlation_id"] == "corr-abc-123"
+    assert restored.submission_source == "servicebus"
+    assert restored.external_correlation_id == "corr-abc-123"
+
+    # An explicit field wins over the payload (placeholder rows pass it directly).
+    explicit = JobState(
+        job_id="corr-xyz",
+        type="blast",
+        status="queued",
+        submission_source="servicebus",
+        external_correlation_id="corr-xyz",
+        payload={"placeholder": True},
+    )
+    explicit_entity = explicit.to_entity()
+    assert explicit_entity["submission_source"] == "servicebus"
+    assert explicit_entity["external_correlation_id"] == "corr-xyz"
+
+    # A dashboard-native row leaves the columns empty (resolver defaults apply).
+    native = JobState(job_id="job-native", type="blast", status="queued", payload={})
+    native_entity = native.to_entity()
+    assert native_entity["submission_source"] == ""
+    assert native_entity["external_correlation_id"] == ""
+    assert JobState.from_entity(native_entity).external_correlation_id is None
+
+
 def test_job_state_writes_canonical_v2_job_metadata() -> None:
     state = JobState(
         job_id="job-1",

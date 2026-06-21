@@ -19,6 +19,13 @@ describe("jobSubmissionSource", () => {
     );
   });
 
+  it("prefers the top-level submission_source column (list rows omit payload)", () => {
+    // The Jobs list reads columns only (include_payload=false), so a queue
+    // job's origin lives on the top-level field, not in payload.
+    expect(jobSubmissionSource(job({ submission_source: "servicebus" }))).toBe("servicebus");
+    expect(jobSubmissionSource(job({ submission_source: "external_api" }))).toBe("api");
+  });
+
   it("maps external_api payload source to api", () => {
     expect(jobSubmissionSource(job({ payload: { submission_source: "external_api" } }))).toBe(
       "api",

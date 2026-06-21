@@ -46,6 +46,8 @@ _JOBSTATE_SUMMARY_SELECT = [
     "resource_group",
     "cluster_name",
     "storage_account",
+    "external_correlation_id",
+    "submission_source",
 ]
 
 
@@ -57,6 +59,35 @@ def _payload_value(payload: dict[str, Any] | None, *keys: str) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def _resolve_external_correlation_id(payload: dict[str, Any] | None) -> str:
+    """Extract the Service Bus / external correlation id from a job payload.
+
+    Prefers the nested ``payload.external.external_correlation_id`` (queue-drained
+    rows stamp it there) then the payload top level (the send-time placeholder).
+    Returns ``""`` when absent so the caller can fall back to a stored column.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    external = payload.get("external")
+    if isinstance(external, dict):
+        nested = str(external.get("external_correlation_id") or "").strip()
+        if nested:
+            return nested
+    return str(payload.get("external_correlation_id") or "").strip()
+
+
+def _resolve_payload_submission_source(payload: dict[str, Any] | None) -> str:
+    """Extract submission_source from a job payload (nested external first)."""
+    if not isinstance(payload, dict):
+        return ""
+    external = payload.get("external")
+    if isinstance(external, dict):
+        nested = str(external.get("submission_source") or "").strip()
+        if nested:
+            return nested
+    return str(payload.get("submission_source") or "").strip()
 
 
 def _basename(value: Any) -> str:
@@ -132,6 +163,13 @@ class JobState:
     resource_group: str | None = None
     cluster_name: str | None = None
     storage_account: str | None = None
+    # The originating Service Bus / external request correlation id and the
+    # server-derived submission_source are persisted as durable columns (not
+    # only inside ``payload``) so the Recent searches / Jobs list -- which reads
+    # columns with ``include_payload=False`` -- can show the true queue origin
+    # and let an operator trace a request from the Service Bus queue to its job.
+    external_correlation_id: str | None = None
+    submission_source: str | None = None
 
     def to_entity(self) -> dict[str, Any]:
         canonical = canonical_job_metadata(
@@ -162,6 +200,14 @@ class JobState:
             "resource_group": self.resource_group or canonical["resource_group"],
             "cluster_name": self.cluster_name or canonical["cluster_name"],
             "storage_account": self.storage_account or canonical["storage_account"],
+            # Resolve from the explicit field first, then from the payload
+            # (queue-drained rows stamp these only inside ``payload.external``),
+            # so the durable column is backfilled even when the caller built the
+            # row with just a payload.
+            "external_correlation_id": self.external_correlation_id
+            or _resolve_external_correlation_id(self.payload),
+            "submission_source": self.submission_source
+            or _resolve_payload_submission_source(self.payload),
         }
         if self.payload is not None:
             import json
@@ -207,6 +253,8 @@ class JobState:
             resource_group=e.get("resource_group") or canonical["resource_group"],
             cluster_name=e.get("cluster_name") or canonical["cluster_name"],
             storage_account=e.get("storage_account") or canonical["storage_account"],
+            external_correlation_id=e.get("external_correlation_id") or None,
+            submission_source=e.get("submission_source") or None,
         )
 
 
