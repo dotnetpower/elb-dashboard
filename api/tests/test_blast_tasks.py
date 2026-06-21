@@ -135,6 +135,77 @@ def test_build_config_content_rejects_mismatched_storage_blob_urls() -> None:
         )
 
 
+def test_config_preview_resolves_external_job_identity(monkeypatch) -> None:
+    """Externally-submitted jobs (OpenAPI / Service Bus -> Table sync) carry the
+    run identity under ``canonical_request`` + ``external``, not the top-level
+    ``db`` / ``query_file`` / ``resource_group`` / ``cluster_name`` keys. The
+    Configure preview must resolve those so the rendered elastic-blast.ini does
+    not show blank ``db =`` / ``queries =`` / ``azure-resource-group =`` lines
+    (the live c8492da4 regression)."""
+    from api.services.blast.job_state import _config_preview_from_payload
+
+    captured: dict[str, object] = {}
+
+    def _fake_build(**kwargs: object) -> str:
+        captured.clear()
+        captured.update(kwargs)
+        return "INI"
+
+    monkeypatch.setattr(blast, "_build_config_content", _fake_build)
+
+    payload = {
+        "canonical_request": {
+            "database": "https://stelbx.blob.core.windows.net/blast-db/core_nt/core_nt",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+            "program": "blastn",
+        },
+        "external": {"job_id": "openapi-abc123", "db": "core_nt"},
+        "storage_account": "stelbx",
+    }
+    _config_preview_from_payload(job_id="c8492da4fea6", storage_account="stelbx", payload=payload)
+
+    assert captured["resource_group"] == "rg-elb-cluster"
+    assert captured["cluster_name"] == "elb-cluster-01"
+    assert (
+        captured["database"]
+        == "https://stelbx.blob.core.windows.net/blast-db/core_nt/core_nt"
+    )
+    # Reconstructed from external.job_id -> queries/<openapi_id>.fa
+    assert captured["query_file"] == "openapi-abc123.fa"
+
+
+def test_config_preview_prefers_top_level_dashboard_keys(monkeypatch) -> None:
+    """A dashboard-submitted job keeps resolving its top-level keys unchanged."""
+    from api.services.blast.job_state import _config_preview_from_payload
+
+    captured: dict[str, object] = {}
+
+    def _fake_build(**kwargs: object) -> str:
+        captured.clear()
+        captured.update(kwargs)
+        return "INI"
+
+    monkeypatch.setattr(blast, "_build_config_content", _fake_build)
+
+    payload = {
+        "resource_group": "rg-dash",
+        "aks_cluster_name": "aks-dash",
+        "db": "https://stelbx.blob.core.windows.net/blast-db/nt/nt",
+        "query_blob_url": "https://stelbx.blob.core.windows.net/queries/job-1.fa",
+        "storage_account": "stelbx",
+    }
+    _config_preview_from_payload(job_id="job-1", storage_account="stelbx", payload=payload)
+
+    assert captured["resource_group"] == "rg-dash"
+    assert captured["cluster_name"] == "aks-dash"
+    assert captured["database"] == "https://stelbx.blob.core.windows.net/blast-db/nt/nt"
+    assert (
+        captured["query_file"]
+        == "https://stelbx.blob.core.windows.net/queries/job-1.fa"
+    )
+
+
 @pytest.mark.parametrize(
     ("database", "query_file", "match"),
     [

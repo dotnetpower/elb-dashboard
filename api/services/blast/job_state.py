@@ -252,20 +252,76 @@ def _config_preview_from_payload(
 ) -> str:
     from api.tasks.blast import _build_config_content
 
+    # Externally-submitted jobs (sibling OpenAPI / Service Bus -> Table sync)
+    # do not carry top-level ``db`` / ``query_file`` / ``resource_group`` /
+    # ``cluster_name`` keys: the run identity lives under
+    # ``payload["canonical_request"]`` (the canonical submit snapshot) and
+    # ``payload["external"]`` instead. Reading only the top-level keys made the
+    # Configure preview render ``db =`` / ``queries =`` / ``azure-resource-group =``
+    # blank for those jobs. Resolve every field through the same fallback chain
+    # the provenance + query-preview projections already use so the preview
+    # matches what actually ran.
+    snapshot = payload.get("canonical_request")
+    if not isinstance(snapshot, dict):
+        from api.services.blast.submit_payload import canonical_submit_snapshot
+
+        snapshot = canonical_submit_snapshot(payload)
+    external = payload.get("external")
+    external = external if isinstance(external, dict) else {}
+
     raw_options = payload.get("options")
     options = dict(raw_options) if isinstance(raw_options, dict) else {}
     for key in ("acr_resource_group", "acr_name"):
         value = payload.get(key)
         if value not in (None, ""):
             options.setdefault(key, value)
+
+    def _first(*values: Any) -> str:
+        for value in values:
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
+    database = _first(
+        snapshot.get("database"),
+        _payload_value(payload, "database", "db"),
+        external.get("db_name"),
+        external.get("db"),
+    )
+    resource_group = _first(
+        snapshot.get("resource_group"),
+        _payload_value(payload, "resource_group"),
+        external.get("resource_group"),
+    )
+    cluster_name = _first(
+        snapshot.get("cluster_name"),
+        snapshot.get("aks_cluster_name"),
+        _payload_value(payload, "cluster_name", "aks_cluster_name"),
+        external.get("cluster_name"),
+        external.get("cluster"),
+    )
+    query_file = _first(
+        _payload_value(payload, "query_file", "query_blob_url"),
+        external.get("query_url"),
+        external.get("query_file"),
+    )
+    if not query_file:
+        # External jobs upload the inline FASTA to ``queries/<openapi_id>.fa``
+        # and record nothing on the top-level row; reconstruct that path (the
+        # same one ``_job_query_blob_path`` resolves) so ``queries =`` is
+        # populated rather than blank.
+        openapi_id = str(external.get("job_id") or "").strip()
+        if openapi_id and "/" not in openapi_id and ".." not in openapi_id:
+            query_file = f"{openapi_id}.fa"
+
     return _build_config_content(
         job_id=job_id,
-        resource_group=str(_payload_value(payload, "resource_group") or ""),
-        cluster_name=str(_payload_value(payload, "cluster_name", "aks_cluster_name") or ""),
-        storage_account=str(_payload_value(payload, "storage_account") or storage_account),
-        program=str(_payload_value(payload, "program") or "blastn"),
-        database=str(_payload_value(payload, "database", "db") or ""),
-        query_file=str(_payload_value(payload, "query_file", "query_blob_url") or ""),
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        storage_account=_first(_payload_value(payload, "storage_account"), storage_account),
+        program=_first(snapshot.get("program"), _payload_value(payload, "program")) or "blastn",
+        database=database,
+        query_file=query_file,
         options=options,
     )
 
