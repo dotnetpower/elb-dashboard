@@ -16,6 +16,11 @@ interface ToastCtx {
 
 const Ctx = createContext<ToastCtx>({ toast: () => {} });
 
+// Cap how many toasts stack at once so a rapid-fire burst (e.g. a failing
+// poll retrying) can't bury the screen — keep only the most recent N and drop
+// the oldest overflow immediately.
+const MAX_TOASTS = 4;
+
 export function useToast() {
   return useContext(Ctx);
 }
@@ -31,7 +36,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const toast = useCallback((message: string, type: ToastType = "info") => {
     const id = ++idRef.current;
-    setToasts((prev) => [...prev, { id, message, type }]);
+    setToasts((prev) => {
+      const next = [...prev, { id, message, type }];
+      return next.length > MAX_TOASTS ? next.slice(next.length - MAX_TOASTS) : next;
+    });
     setTimeout(() => dismiss(id), 5000);
   }, [dismiss]);
 

@@ -8614,6 +8614,12 @@ select.terminal-cockpit__cfg-input {
   min-width: 0;
 }
 
+/* Tabular figures utility — the shared convention for any column of numbers
+   (counts, sizes, durations) so digits line up vertically. */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Submit button keyboard-shortcut hint badge (Ctrl/⌘ + Enter). Sits on the
    accent-filled Run BLAST button, so it uses translucent white chrome. */
 .blast-submit-kbd {
