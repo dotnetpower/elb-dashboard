@@ -2,6 +2,7 @@ import { msalInstance, apiLoginRequest } from "@/auth/msal";
 import { clearAuthSessionIssue, notifyAuthSessionIssue } from "@/auth/sessionEvents";
 import { fetchWithRetry, makeRequestId } from "@/api/resilience";
 import { apiBaseUrl, isDevBypassEnabled } from "@/config/runtime";
+import { InteractionRequiredAuthError } from "@azure/msal-browser";
 import type { AccountInfo } from "@azure/msal-browser";
 
 const API_BASE = apiBaseUrl();
@@ -93,14 +94,26 @@ async function getAccessToken(options: FetchApiOptions = {}): Promise<string | n
   const accountKey = accountCacheKey(account);
   const cached = usableCachedToken(accountKey);
   if (cached) return cached;
-  // #20: Exponential backoff retry (up to 3 attempts)
+  // A silent refresh either succeeds quickly (the refresh token is still
+  // valid) or fails because the session needs interactive re-auth — retrying
+  // acquireTokenSilent does NOT change the refresh-token state, so an auth
+  // failure must surface immediately. Only a transient *network* blip warrants
+  // a single short retry. The old loop ran 3 attempts with 1s+2s exponential
+  // backoff on EVERY error class, so an expired session that did not throw the
+  // exact `InteractionRequiredAuthError` name spun ~10 s before redirecting.
+  // Cap it: classify InteractionRequired robustly (instanceof, not a name
+  // string) and fail fast; otherwise one 500ms retry, then raise the session
+  // issue. This does not weaken auth — the backend still validates every token.
   let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
       return await acquireFreshApiToken(account);
     } catch (err) {
       lastError = err;
-      if (err instanceof Error && err.name === "InteractionRequiredAuthError") {
+      const needsInteraction =
+        err instanceof InteractionRequiredAuthError ||
+        (err instanceof Error && err.name === "InteractionRequiredAuthError");
+      if (needsInteraction) {
         notifyAuthSessionIssue("interaction_required");
         if (!redirectOnUnauthorized) {
           throw err;
@@ -109,12 +122,10 @@ async function getAccessToken(options: FetchApiOptions = {}): Promise<string | n
         await msalInstance.acquireTokenRedirect({ ...apiLoginRequest, account });
         throw err;
       }
-      // Exponential backoff: 1s, 2s, 4s; capped so future retry-count changes
-      // cannot strand the UI behind a many-minute silent token refresh wait.
-      if (attempt < 2) {
-        await new Promise((r) =>
-          setTimeout(r, Math.min(1000 * Math.pow(2, attempt), 30_000)),
-        );
+      // Non-interaction error: one short retry absorbs a transient network
+      // blip, then give up fast (fixed 500ms, not exponential).
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 500));
       }
     }
   }

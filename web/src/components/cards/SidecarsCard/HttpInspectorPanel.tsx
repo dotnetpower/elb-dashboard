@@ -28,7 +28,7 @@ import {
 } from "@/components/cards/SidecarsCard/sidecarRequestInspector";
 
 const REFRESH_INTERVAL_MS = 5_000;
-const REQUEST_LIMIT = 200;
+const REQUEST_LIMIT = 500;
 
 function headersToRecord(
   headers: { name: string; value: string }[] | undefined,
@@ -242,7 +242,13 @@ export function HttpInspectorPanel() {
           }}
         >
           <AlertTriangle size={12} />
-          <span>Failed to load captured requests: {error}</span>
+          <span>
+            {data.length > 0
+              ? `Refresh failed (${error}) — showing the last successful snapshot; retrying every ${
+                  REFRESH_INTERVAL_MS / 1000
+                }s.`
+              : `Failed to load captured requests: ${error}`}
+          </span>
         </div>
       )}
 
@@ -263,7 +269,10 @@ export function HttpInspectorPanel() {
         </div>
       )}
 
-      {!error && data.length > 0 && <VariantA data={data} />}
+      {/* Keep the table mounted even when the most recent refresh failed: a
+          transient api-sidecar timeout should degrade to a stale snapshot with
+          a banner, not blank the whole inspector. */}
+      {data.length > 0 && <VariantA data={data} />}
 
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>

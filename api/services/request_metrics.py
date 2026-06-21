@@ -34,7 +34,11 @@ MAX_PATH_LEN = 256
 # for the most recent N requests so the SPA can render the per-request HTTP
 # inspector ("View HTTP requests" button on the SidecarsCard). Kept small
 # because each sample is ~10-30 KiB versus ~80 B for an aggregate sample.
-DETAIL_CAPACITY_DEFAULT = 256
+# 512 (was 256) keeps the inspector table closer to the latency scatter's
+# window so operators do not see requests in the scatter that have already
+# aged out of the detail table. ~512 × 30 KiB worst case ≈ 15 MiB; most polling
+# samples are metadata-only (no body) and far smaller.
+DETAIL_CAPACITY_DEFAULT = 512
 # 4 KiB per body — covers most JSON request/response payloads. Anything
 # larger is replaced with a "<truncated …>" sentinel.
 DETAIL_BODY_CAP_BYTES = 4 * 1024

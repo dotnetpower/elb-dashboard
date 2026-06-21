@@ -6,6 +6,12 @@
   --bg-secondary: #1e2228;
   --bg-tertiary: #242830;
   --bg-hover: #282d36;
+  /* Loading-skeleton shimmer. The base/highlight need a perceptible (but still
+     muted) lightness delta — the old gradient reused --bg-tertiary/--bg-hover
+     (#242830 vs #282d36, ~2% lightness apart), so the shimmer animation ran but
+     was invisible and read as a static block. */
+  --skeleton-base: #242830;
+  --skeleton-highlight: #353c4a;
   --border-weak: rgba(255, 255, 255, 0.06);
   --border-medium: rgba(255, 255, 255, 0.1);
   --border-focus: color-mix(in srgb, var(--accent) 45%, transparent);
@@ -112,6 +118,8 @@
   --bg-secondary: #ffffff;
   --bg-tertiary: #f3f3f3;
   --bg-hover: #f0f0f0;
+  --skeleton-base: #e9e9e9;
+  --skeleton-highlight: #f7f7f7;
   --border-weak: #e5e5e5;
   /* VS Code Light Modern input/dropdown border. */
   --border-medium: #cecece;
@@ -2521,9 +2529,9 @@ textarea.form-input {
 .skeleton {
   background: linear-gradient(
     90deg,
-    var(--bg-tertiary) 25%,
-    var(--bg-hover) 50%,
-    var(--bg-tertiary) 75%
+    var(--skeleton-base) 25%,
+    var(--skeleton-highlight) 50%,
+    var(--skeleton-base) 75%
   );
   background-size: 200% 100%;
   animation: skeleton-shimmer 1.5s ease-in-out infinite;
