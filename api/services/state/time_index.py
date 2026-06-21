@@ -37,6 +37,21 @@ INDEX_TABLE_NAME = "jobstateindex"
 # contain ``_`` runs like this and are 36 chars).
 SHARED_BUCKET = "__shared__"
 
+# Global owner-agnostic bucket holding EVERY non-deleted job, newest-first, so
+# ``list_all`` (the ``BLAST_JOBS_SHARED_VISIBILITY=true`` dev-stage listing) is a
+# bounded single-partition page read instead of the full ``jobstate`` scan
+# (#50). A job is indexed into BOTH its owner bucket (for ``list_for_owner``) and
+# this global bucket (for ``list_all``); the RowKey is identical in both, so the
+# add-on-create / remove-on-delete invariant holds per bucket. This is a single
+# hot partition, but job-creation throughput is far below Azure Table's
+# ~2000 ops/sec/partition ceiling and the feature is flag-gated + dev-stage.
+# Note: ``list_for_scope`` (filter by the MUTABLE ``cluster_name``) is
+# intentionally NOT indexed — a scope key derived from a field ``update()`` can
+# rewrite would have to MOVE the index row, breaking the immutable-key invariant
+# this whole module is built on; it stays on the bounded legacy scan.
+ALL_BUCKET = "__all__"
+
+
 # Width of the inverted-ticks prefix. The base below is 10^14 (covers epoch-ms
 # timestamps comfortably past the year 2286), so 14 digits is the exact width
 # needed for fixed-width zero-padding -> lexical order matches numeric order.
@@ -108,13 +123,43 @@ def row_key(created_at: str | None, job_id: str) -> str:
 def build_index_entity(
     *, job_id: str, owner_oid: str | None, created_at: str | None
 ) -> dict[str, Any]:
-    """Return the Azure Table entity dict for a job's index row."""
+    """Return the Azure Table entity dict for a job's OWNER-bucket index row."""
     return {
         "PartitionKey": owner_bucket(owner_oid),
         "RowKey": row_key(created_at, job_id),
         "job_id": job_id,
         "created_at": (created_at or "").strip(),
     }
+
+
+def index_buckets(owner_oid: str | None) -> list[str]:
+    """Return every index PartitionKey a job belongs to: owner bucket + global.
+
+    A job is indexed into its owner bucket (for ``list_for_owner``) AND the
+    global :data:`ALL_BUCKET` (for ``list_all``). The owner bucket can never be
+    ``__all__`` (it is a GUID or ``__shared__``), but de-dupe defensively so a
+    future bucket rename cannot double-write.
+    """
+    owner_pk = owner_bucket(owner_oid)
+    return [owner_pk] if owner_pk == ALL_BUCKET else [owner_pk, ALL_BUCKET]
+
+
+def index_entities(
+    *, job_id: str, owner_oid: str | None, created_at: str | None
+) -> list[dict[str, Any]]:
+    """Return BOTH index rows for a job (owner bucket + global ``__all__``).
+
+    Both rows carry the identical RowKey (derived only from the immutable
+    ``created_at`` + ``job_id``), so each bucket independently preserves the
+    add-on-create / remove-on-delete invariant.
+    """
+    rk = row_key(created_at, job_id)
+    ca = (created_at or "").strip()
+    return [
+        {"PartitionKey": bucket, "RowKey": rk, "job_id": job_id, "created_at": ca}
+        for bucket in index_buckets(owner_oid)
+    ]
+
 
 
 def encode_cursor(last_row_key: str) -> str:

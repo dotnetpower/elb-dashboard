@@ -21,6 +21,7 @@ Validation: ``uv run pytest -q api/tests/test_jobstate_time_index.py``.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -175,6 +176,9 @@ class _FakeTable:
         self.rows = store
         self.fail_upsert = False
         self.closed = False
+        # Counts rows YIELDED from query_entities so a test can assert the
+        # indexed read path consumes at most ~limit rows (bounded scan).
+        self.query_count = 0
 
     def __enter__(self) -> _FakeTable:
         return self
@@ -225,13 +229,17 @@ class _FakeTable:
             raise ResourceNotFoundError(message="missing")
         return dict(self.rows[key])
 
-    def query_entities(self, query_filter: str, **_kw: object) -> list[dict[str, Any]]:
+    def query_entities(self, query_filter: str, **_kw: object) -> Iterator[dict[str, Any]]:
         # Azure Table Storage returns entities sorted by (PartitionKey, RowKey)
         # ascending; the indexed read path relies on that ordering, so the fake
-        # must emulate it rather than returning dict-insertion order.
+        # must emulate it rather than returning dict-insertion order. Yields
+        # lazily + counts so a caller that breaks at limit+1 only consumes that
+        # many rows (the bounded-scan guarantee).
         matched = [dict(r) for r in self.rows.values() if _match(r, query_filter)]
         matched.sort(key=lambda e: (str(e.get("PartitionKey")), str(e.get("RowKey"))))
-        return matched
+        for row in matched:
+            self.query_count += 1
+            yield row
 
 
 class _FakeService:
@@ -440,6 +448,108 @@ def test_list_for_owner_falls_back_when_index_empty(
 
 
 # ---------------------------------------------------------------------------
+# Global __all__ bucket: list_all indexed page (#50)
+# ---------------------------------------------------------------------------
+
+
+def test_create_writes_all_bucket_row_when_enabled(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Create fans the index row into BOTH the owner bucket and __all__."""
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    repo.create(_job("job-1", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    rk = time_index.row_key("2026-06-18T10:00:00+00:00", "job-1")
+    index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
+    assert ("owner-a", rk) in index.rows
+    assert (time_index.ALL_BUCKET, rk) in index.rows
+
+
+def test_list_all_page_paginates_without_overlap(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """list_all_page reads the single __all__ bucket newest-first across owners
+    with a round-trippable cursor and no overlap/gaps."""
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    # Mixed owners — list_all is owner-agnostic.
+    repo.create(_job("job-0", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    repo.create(_job("job-1", owner="", created_at="2026-06-18T10:00:01+00:00"))
+    repo.create(_job("job-2", owner="owner-b", created_at="2026-06-18T10:00:02+00:00"))
+    repo.create(_job("job-3", owner="owner-a", created_at="2026-06-18T10:00:03+00:00"))
+    repo.create(_job("job-4", owner="owner-c", created_at="2026-06-18T10:00:04+00:00"))
+
+    page1, cursor1 = repo.list_all_page(limit=2)
+    assert [s.job_id for s in page1] == ["job-4", "job-3"]  # newest first, any owner
+    assert cursor1 is not None
+
+    page2, cursor2 = repo.list_all_page(limit=2, cursor=cursor1)
+    assert [s.job_id for s in page2] == ["job-2", "job-1"]
+    assert cursor2 is not None
+
+    page3, cursor3 = repo.list_all_page(limit=2, cursor=cursor2)
+    assert [s.job_id for s in page3] == ["job-0"]
+    assert cursor3 is None  # exhausted
+
+    seen = [s.job_id for s in page1 + page2 + page3]
+    assert seen == ["job-4", "job-3", "job-2", "job-1", "job-0"]
+
+
+def test_list_all_page_bounded_scan(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """list_all_page reads at most ~limit rows from the index, never the full set
+    (the AC1 'scan size is bounded' guarantee for list_all)."""
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    for i in range(8):
+        repo.create(
+            _job(f"job-{i}", owner="owner-a", created_at=f"2026-06-18T10:00:0{i}+00:00")
+        )
+    index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
+    index.query_count = 0  # type: ignore[attr-defined]
+    rows, _cursor = repo.list_all_page(limit=2)
+    assert [s.job_id for s in rows] == ["job-7", "job-6"]
+    # The index query stopped at limit+1 rows, NOT all 8.
+    assert index.query_count <= 3  # type: ignore[attr-defined]
+
+
+def test_list_all_uses_index_when_enabled(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    repo.create(_job("job-0", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    repo.create(_job("job-1", owner="owner-b", created_at="2026-06-18T10:00:01+00:00"))
+    rows = repo.list_all(limit=10)
+    assert [s.job_id for s in rows] == ["job-1", "job-0"]
+
+
+def test_list_all_falls_back_when_index_empty(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag ON but jobs predate the index (un-backfilled): list_all falls back to
+    the legacy scan rather than hiding jobs."""
+    monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
+    repo.create(_job("job-legacy", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    rows = repo.list_all(limit=10)
+    assert [s.job_id for s in rows] == ["job-legacy"]
+
+
+def test_list_for_scope_stays_on_scan_with_flag_on(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """list_for_scope is intentionally NOT indexed (mutable cluster_name) and
+    must keep working via the legacy scan even with the index flag ON."""
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    repo.create(
+        _job("scoped", owner="owner-a", created_at="2026-06-18T10:00:00+00:00")
+    )
+    # cluster_name is backfilled AFTER create (mutable) — exactly why a scope
+    # index can't use the immutable key.
+    repo.update("scoped", cluster_name="elb-cluster-01")
+    rows = repo.list_for_scope(cluster_name="elb-cluster-01", limit=10)
+    assert [s.job_id for s in rows] == ["scoped"]
+
+
+# ---------------------------------------------------------------------------
 # Backfill migration (scripts/dev/backfill_jobstate_time_index.py)
 # ---------------------------------------------------------------------------
 
@@ -494,19 +604,26 @@ def test_backfill_dry_run_writes_nothing_then_real_run_is_idempotent(
     assert rc == 0
     index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     keys = set(index.rows.keys())
-    assert ("owner-a", time_index.row_key("2026-06-18T10:00:00+00:00", "job-0")) in keys
-    assert ("owner-a", time_index.row_key("2026-06-18T10:00:01+00:00", "job-1")) in keys
+    rk0 = time_index.row_key("2026-06-18T10:00:00+00:00", "job-0")
+    rk1 = time_index.row_key("2026-06-18T10:00:01+00:00", "job-1")
     shared_rk = time_index.row_key("2026-06-18T10:00:02+00:00", "job-2")
+    assert ("owner-a", rk0) in keys
+    assert ("owner-a", rk1) in keys
     assert (time_index.SHARED_BUCKET, shared_rk) in keys
-    # The deleted job is NOT indexed.
+    # Each non-deleted job is ALSO indexed into the global __all__ bucket (#50)
+    # so list_all is a bounded single-partition read.
+    assert (time_index.ALL_BUCKET, rk0) in keys
+    assert (time_index.ALL_BUCKET, rk1) in keys
+    assert (time_index.ALL_BUCKET, shared_rk) in keys
+    # The deleted job is NOT indexed (in any bucket).
     assert all("job-del" not in rk for _pk, rk in keys)
-    assert len(keys) == 3
+    assert len(keys) == 6  # 3 non-deleted jobs x (owner/shared + __all__)
 
     # --- idempotent: a second run upserts the same RowKeys, no duplicates ---
     backfill.backfill(dry_run=False)
     index_again = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     assert set(index_again.rows.keys()) == keys
-    assert len(index_again.rows) == 3
+    assert len(index_again.rows) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -567,11 +684,15 @@ def test_reconcile_time_index_task_heals_missing_rows_when_flag_on(
 
     index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     keys = set(index.rows.keys())
-    assert ("owner-a", time_index.row_key("2026-06-18T10:00:00+00:00", "job-0")) in keys
+    rk0 = time_index.row_key("2026-06-18T10:00:00+00:00", "job-0")
     shared_rk = time_index.row_key("2026-06-18T10:00:01+00:00", "job-1")
+    assert ("owner-a", rk0) in keys
     assert (time_index.SHARED_BUCKET, shared_rk) in keys
+    # Both jobs are ALSO healed into the global __all__ bucket (#50).
+    assert (time_index.ALL_BUCKET, rk0) in keys
+    assert (time_index.ALL_BUCKET, shared_rk) in keys
     assert all("job-del" not in rk for _pk, rk in keys)
-    assert len(keys) == 2
+    assert len(keys) == 4  # 2 non-deleted jobs x (owner/shared + __all__)
 
     # Idempotent: a second pass writes the same RowKeys, no duplicates.
     result2 = reconcile_time_index.run()

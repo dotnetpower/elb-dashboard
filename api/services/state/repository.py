@@ -42,10 +42,12 @@ from api.services.state.table_pool import (
     _PooledTableClient,
 )
 from api.services.state.time_index import (
+    ALL_BUCKET,
     INDEX_TABLE_NAME,
-    build_index_entity,
     decode_cursor,
     encode_cursor,
+    index_buckets,
+    index_entities,
     owner_bucket,
     row_key,
     time_index_enabled,
@@ -271,7 +273,7 @@ class JobStateRepository:
         sustained failure is visible, and the backfill script reconciles any
         rows the index missed. Only called when ``time_index_enabled()``.
         """
-        entity = build_index_entity(
+        entities = index_entities(
             job_id=state.job_id,
             owner_oid=state.owner_oid,
             created_at=state.created_at,
@@ -279,7 +281,8 @@ class JobStateRepository:
         try:
             self._ensure_table(INDEX_TABLE_NAME)
             with self._index_client() as t:
-                t.upsert_entity(entity)
+                for entity in entities:
+                    t.upsert_entity(entity)
         except Exception as exc:
             LOGGER.warning(
                 "jobstate time-index put failed job_id=%s: %s",
@@ -294,13 +297,14 @@ class JobStateRepository:
         ``ResourceNotFoundError`` which we swallow). Never raises. Only called
         when ``time_index_enabled()``.
         """
-        partition = owner_bucket(owner_oid)
         rk = row_key(created_at, job_id)
         try:
             with self._index_client() as t:
-                t.delete_entity(partition_key=partition, row_key=rk)
-        except ResourceNotFoundError:
-            return
+                for partition in index_buckets(owner_oid):
+                    try:
+                        t.delete_entity(partition_key=partition, row_key=rk)
+                    except ResourceNotFoundError:
+                        continue
         except Exception as exc:
             LOGGER.warning(
                 "jobstate time-index delete failed job_id=%s: %s",
@@ -372,13 +376,13 @@ class JobStateRepository:
                 job_id = str(entity.get("PartitionKey") or "")
                 if not job_id:
                     continue
-                index_entity = build_index_entity(
+                for index_entity in index_entities(
                     job_id=job_id,
                     owner_oid=entity.get("owner_oid"),
                     created_at=entity.get("created_at"),
-                )
-                if not dry_run and index_t is not None:
-                    index_t.upsert_entity(index_entity)
+                ):
+                    if not dry_run and index_t is not None:
+                        index_t.upsert_entity(index_entity)
                 written += 1
                 if batch_log_every and written % batch_log_every == 0:
                     LOGGER.info(
@@ -853,6 +857,79 @@ class JobStateRepository:
         return rows, next_cursor
 
 
+    def list_all_page(
+        self,
+        *,
+        limit: int = 50,
+        include_payload: bool = True,
+        cursor: str = "",
+    ) -> tuple[list[JobState], str | None]:
+        """Indexed most-recent page across ALL owners (#50): ``(rows, next_cursor)``.
+
+        Reads the single global :data:`ALL_BUCKET` index partition newest-first
+        for ``limit + 1`` rows (the extra row is the honest ``has_more`` probe)
+        instead of scanning ``jobstate``. Within one partition Azure returns
+        rows in RowKey order, so no cross-bucket merge is needed (unlike
+        :meth:`list_owner_page`). ``cursor`` is an opaque token from a previous
+        page's ``next_cursor``; an invalid/expired cursor degrades to the first
+        page.
+
+        Raises on a hard index/Table error so :meth:`list_all` can fall back to
+        the legacy scan. Rows whose ``jobstate`` entry is missing or tombstoned
+        (``status='deleted'``) are skipped defensively (a delete that raced the
+        index read).
+        """
+        page_size = _clamp_page_size(limit + 1)
+        after = decode_cursor(cursor)
+        clauses = [f"PartitionKey eq '{_sanitise_odata_value(ALL_BUCKET)}'"]
+        if after:
+            clauses.append(f"RowKey gt '{_sanitise_odata_value(after)}'")
+        filter_expr = " and ".join(clauses)
+
+        index_rows: list[tuple[str, str]] = []
+        with self._index_client() as t:
+            try:
+                taken = 0
+                for entity in t.query_entities(
+                    filter_expr,
+                    results_per_page=page_size,
+                    select=["RowKey", "job_id"],
+                ):
+                    rk = str(entity.get("RowKey") or "")
+                    jid = str(entity.get("job_id") or "")
+                    if not rk or not jid:
+                        continue
+                    index_rows.append((rk, jid))
+                    taken += 1
+                    if taken >= page_size:
+                        break
+            except ResourceNotFoundError:
+                # Index table not created yet -> empty (caller falls back).
+                self._ensure_table(INDEX_TABLE_NAME)
+
+        if not index_rows:
+            return [], None
+
+        # Single partition is already RowKey-ordered, but sort defensively so the
+        # contract holds even if the SDK ever returns unordered pages.
+        index_rows.sort(key=lambda pair: pair[0])
+        has_more = len(index_rows) > limit
+        window = index_rows[:limit]
+        ordered_job_ids = [jid for _rk, jid in window]
+
+        select = None if include_payload else _JOBSTATE_SUMMARY_SELECT
+        states = self.get_many(ordered_job_ids, select=select)
+
+        rows: list[JobState] = []
+        for _rk, jid in window:
+            state = states.get(jid)
+            if state is None or state.status == "deleted":
+                continue
+            rows.append(state)
+
+        next_cursor = encode_cursor(window[-1][0]) if (has_more and window) else None
+        return rows, next_cursor
+
     def list_all(
         self,
         *,
@@ -867,9 +944,28 @@ class JobStateRepository:
         layer still enforces ``require_caller``. Production (flag off) keeps
         using :meth:`list_for_owner` so dashboard-submitted jobs stay private.
 
-        Ordering follows :meth:`_list_recent_sorted`: the true most-recent
-        ``limit`` rows, not an arbitrary first page.
+        Ordering: the genuinely most-recent ``limit`` rows, not an arbitrary
+        first page. When ``time_index_enabled()`` the bounded global
+        :data:`ALL_BUCKET` index (#50) is used; an index miss / error falls back
+        to the legacy scan so the listing is never empty due to an un-backfilled
+        or unavailable index (mirrors :meth:`list_for_owner`).
         """
+        if time_index_enabled():
+            try:
+                rows, _cursor = self.list_all_page(
+                    limit=limit, include_payload=include_payload
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "jobstate time-index read failed (all); using legacy scan: %s",
+                    type(exc).__name__,
+                )
+                rows = []
+            if rows:
+                return rows
+            LOGGER.info(
+                "jobstate time-index returned no rows (all); falling back to legacy scan"
+            )
         return self._list_recent_sorted(
             "status ne 'deleted'",
             limit=limit,
@@ -922,6 +1018,15 @@ class JobStateRepository:
             # Refuse an owner-agnostic global scan by accident.
             return []
 
+        # #50 note: this path intentionally stays on the bounded legacy scan and
+        # is NOT served by the time-ordered index. The index key is immutable
+        # (owner_oid + created_at), but ``cluster_name`` / ``subscription_id`` /
+        # ``resource_group`` are MUTABLE — ``update()`` backfills them after
+        # create — so a scope-keyed index row would have to MOVE when the scope
+        # is filled in, breaking the add-on-create / remove-on-delete invariant
+        # the index relies on. ``list_for_scope`` is also an operator surface
+        # (explicit cluster scope from a route), not the hot per-owner default
+        # path, so the scan is acceptable here.
         return self._list_recent_sorted(
             " and ".join(clauses),
             limit=limit,
