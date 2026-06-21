@@ -293,6 +293,50 @@ def test_stream_file_surfaces_401_when_no_token_recovered(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_stream_file_unreachable_openapi_returns_503(monkeypatch):
+    """A download against a stopped cluster surfaces a clean 503, not a 500.
+
+    Reproduces the Service-Bus completion ``download_url`` being followed after
+    the AKS cluster auto-stopped: the elb-openapi pod is gone, so the very first
+    ``client.send`` raises ``httpx.ConnectError`` inside ``_open`` before the
+    outer ``client`` is bound. The fix closes the just-created client and leaves
+    ``client = None`` so the ``except`` block raises ``HTTPException(503,
+    openapi_unreachable)`` instead of ``UnboundLocalError`` (a 500) — and never
+    leaks the connection pool.
+    """
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "_base_url", lambda *a, **k: "http://sibling.invalid")
+    monkeypatch.setattr(external_blast, "_headers", lambda **k: {})
+
+    closed = {"n": 0}
+    real_client = httpx.Client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        client = real_client(*args, **kwargs)
+        real_close = client.close
+
+        def counting_close() -> None:
+            closed["n"] += 1
+            real_close()
+
+        client.close = counting_close  # type: ignore[method-assign]
+        return client
+
+    monkeypatch.setattr(external_blast.httpx, "Client", client_factory)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.stream_file("job123", "result-001", api_token=None)
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "openapi_unreachable"
+    # The client created inside _open must be closed (no connection-pool leak).
+    assert closed["n"] >= 1
+
+
 
 def test_token_resync_coalesces_concurrent_callers(monkeypatch):
     """A burst of 401s must NOT each fire an independent cluster read — the

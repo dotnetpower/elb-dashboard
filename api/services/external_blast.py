@@ -1115,9 +1115,20 @@ def stream_file(
                 cluster_name=cluster_name,
             ),
         )
-        request = client.build_request("GET", target_path)
-        return client, client.send(request, stream=True)
+        # Close the just-created client if the connection itself fails (e.g. the
+        # AKS cluster — and thus the elb-openapi pod — is stopped). Without this
+        # the client leaks a connection pool on every unreachable-openapi
+        # download AND the caller's ``client`` stays unbound, so the except
+        # blocks below would raise ``UnboundLocalError`` (a 500) instead of the
+        # intended 503 ``openapi_unreachable``.
+        try:
+            request = client.build_request("GET", target_path)
+            return client, client.send(request, stream=True)
+        except BaseException:
+            client.close()
+            raise
 
+    client: httpx.Client | None = None
     try:
         client, resp = _open(api_token)
         # Self-heal a stale-token 401 exactly once — same failure mode and
@@ -1130,6 +1141,7 @@ def stream_file(
         if resp.status_code == 401:
             resp.close()
             client.close()
+            client = None
             healed = _resync_token_after_401()
             if healed:
                 LOGGER.warning(
@@ -1141,10 +1153,12 @@ def stream_file(
                 client, resp = _open(api_token)
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        client.close()
+        if client is not None:
+            client.close()
         _raise_upstream_error(exc)
     except httpx.HTTPError as exc:
-        client.close()
+        if client is not None:
+            client.close()
         raise HTTPException(
             503,
             detail={
