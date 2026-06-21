@@ -48,6 +48,10 @@ Sibling repo `dotnetpower/elastic-blast-azure` (`docker-openapi/app/main.py`):
 - A submit thread that is **alive** (a legitimately cold-staging submit waiting
   for nodes) is **never touched**, so the reclaim can never cancel healthy work.
 - New env knobs: `ELB_OPENAPI_RECLAIM_GRACE_SECONDS` (45), `ELB_OPENAPI_SUBMIT_MAX_RETRIES` (3).
+- **Startup reconcile shares the same bound.** `_reconcile_recovered_jobs` (the
+  startup-only recovery pass) now delegates to the same `_reclaim_dead_thread_job`
+  helper instead of requeueing unconditionally — see the live-validation note
+  below for why this was essential.
 
 Dashboard repo: `api/services/image_tags.py` pin `elb-openapi` **4.26 → 4.27**.
 
@@ -56,7 +60,8 @@ Dashboard repo: `api/services/image_tags.py` pin `elb-openapi` **4.26 → 4.27**
 `elb-openapi:4.27` was built directly from the **local sibling context**
 (`az acr build --registry acrelbdashboard3abp67bppe --image elb-openapi:4.27
 ~/dev/elastic-blast-azure/docker-openapi`) and pushed to the moonchoi ACR
-(digest `sha256:4abd54c6…`). The historical `scripts/dev/patch-openapi-build-context.py`
+(final digest `sha256:c2399f43…`, after the live-validation rebuild below). The
+historical `scripts/dev/patch-openapi-build-context.py`
 step was **not** used: the sibling master has natively absorbed every app- and
 Dockerfile-level patch it used to inject (the `eta.py` overlay is now a tracked
 sibling file), so the patch script's `patch_app` anchors no longer match and it
@@ -65,13 +70,28 @@ was built and pushed **before** moving the pin here.
 
 ## Validation evidence
 
-- Sibling unit tests: `docker-openapi/tests/test_watchdog_reclaim.py` — **7 new,
-  all green** (reclaim→queued, fail-after-max-retries, never-touch-alive-thread,
-  grace-skips-just-dispatched, leave-job-with-k8s-work, two helper-contract
-  tests). Full `docker-openapi` suite: **91 passed** (1 unrelated
-  `test_passthrough_fields` failure pre-dates this change — verified by stashing
-  the fix).
-- Image build: `Run ID: desv … successful after 2m44s`, pushed
-  `elb-openapi:4.27` + `:latest`.
-- Live stop/start cluster validation is pending the next BLAST run (all clusters
-  were Stopped at deploy time; the fix takes effect on the next openapi rollout).
+- Sibling unit tests: `docker-openapi/tests/test_watchdog_reclaim.py` — **9
+  green** (reclaim→queued, fail-after-max-retries, never-touch-alive-thread,
+  grace-skips-just-dispatched, leave-job-with-k8s-work, two helper-contract,
+  plus the two reconcile-bound tests added after live validation). Full
+  `docker-openapi` suite: **93 passed** (1 unrelated `test_passthrough_fields`
+  failure pre-dates this change — verified by stashing the fix).
+- **Live validation (2026-06-21, moonchoi `elb-cluster-01`).** Deployed 4.27 to
+  a fresh `elb` namespace (ACR pull verified), then loaded synthetic dead-thread
+  `submitting` zombie jobs (the exact post-restart stuck state #62 describes) via
+  job ConfigMaps + a pod restart:
+  - attempt=1 zombie → log `watchdog reclaimed dead-thread job … -> queued
+    (attempt 1/3)`, ConfigMap status flipped `submitting` → `queued` within one
+    tick: **slot released**.
+  - attempt=3 (budget-spent) zombie → log `watchdog failed dead-thread job …
+    after 3 attempts (slot released)`, status `failed`/`stuck_cancelled` and
+    **stayed failed**.
+- **Live validation caught a real bug.** The *first* live run showed the
+  budget-spent zombie end up back at `queued/recovered` despite the
+  `watchdog failed …` log — the startup-only `_reconcile_recovered_jobs` was
+  requeueing it **unconditionally**, resurrecting a job the watchdog had just
+  failed and re-wedging the dispatcher across the restarts #62 is about. Fixed by
+  routing reconcile through the same bounded `_reclaim_dead_thread_job` (sibling
+  commit `96e8fb89`); the rebuilt 4.27 (`sha256:c2399f43…`) re-validated clean
+  (attempt=3 zombie stays `failed`). Test resources + the cluster were torn down
+  after validation.
