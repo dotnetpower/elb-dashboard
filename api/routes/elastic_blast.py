@@ -503,6 +503,7 @@ def list_external_blast_jobs(
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     cluster_name: str = Query(default=""),
+    limit: int = Query(default=0, ge=0, le=500),
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
     """Forward to the external ElasticBLAST OpenAPI `/v1/jobs` listing.
@@ -518,18 +519,32 @@ def list_external_blast_jobs(
     `/api/blast/jobs` route uses). Without it, a stale or unreachable base
     URL costs the full ``_LIST_TIMEOUT_SECONDS`` then 503 on *every* poll,
     so this facade felt slower than the cached combined route (issue #30).
+
+    ``limit`` (#51) bounds the external fetch to the most-recent N jobs. It is
+    forwarded to ``external_blast.list_jobs`` which adds ``?limit=`` to the
+    sibling ``/v1/jobs`` request once that endpoint supports it; an older
+    sibling without pagination ignores the unknown query param and returns the
+    full list, so passing it always degrades cleanly. ``limit`` joins the
+    external-jobs cache key, so a wider request never serves a narrower cached
+    fetch. A true ``next_cursor`` is intentionally not folded in here: the
+    combined ``/api/blast/jobs`` route's local time-ordered index (#50) is the
+    effective combined cursor, so a bounded discovery fetch is all this facade
+    needs from the external side.
     """
     from api.services.blast.external_jobs import _external_list_jobs_cached
 
     LOGGER.info("external BLAST list requested caller_oid=%s", redact_oid(caller.object_id))
     del caller
-    rows = _external_list_jobs_cached(
+    scope_kwargs: dict[str, Any] = dict(
         _openapi_scope_kwargs(
             subscription_id=subscription_id,
             resource_group=resource_group,
             cluster_name=cluster_name,
         )
     )
+    if limit > 0:
+        scope_kwargs["limit"] = limit
+    rows = _external_list_jobs_cached(scope_kwargs)
     return {"jobs": rows, "count": len(rows)}
 
 
