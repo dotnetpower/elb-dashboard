@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, ExternalLink, Loader2 } from "lucide-react";
 
@@ -402,6 +402,12 @@ interface LineageNode {
  */
 function LineageTree({ rows, loading }: LineageTreeProps) {
   const tree = useMemo(() => buildLineageTree(rows), [rows]);
+  // Broadcast an expand/collapse-all command to every node. Each click bumps
+  // `n` so a repeated command still fires; nodes react via useEffect and stay
+  // individually toggleable afterwards.
+  const [forceSignal, setForceSignal] = useState<{ expand: boolean; n: number } | null>(
+    null,
+  );
 
   if (loading && tree.children.size === 0) {
     return (
@@ -424,29 +430,71 @@ function LineageTree({ rows, loading }: LineageTreeProps) {
   }
 
   return (
-    <ul
-      style={{
-        listStyle: "none",
-        margin: 0,
-        padding: 0,
-        fontSize: 13,
-      }}
-      role="tree"
-      aria-label="Taxonomic lineage tree"
-    >
-      {[...tree.children.values()]
-        .sort((a, b) => b.totalCount - a.totalCount)
-        .map((node) => (
-          <LineageNodeView key={`${node.taxid}:${node.name}`} node={node} depth={0} />
-        ))}
-    </ul>
+    <>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          gap: 6,
+          marginBottom: 6,
+        }}
+      >
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          onClick={() => setForceSignal((s) => ({ expand: true, n: (s?.n ?? 0) + 1 }))}
+        >
+          Expand all
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          onClick={() => setForceSignal((s) => ({ expand: false, n: (s?.n ?? 0) + 1 }))}
+        >
+          Collapse all
+        </button>
+      </div>
+      <ul
+        style={{
+          listStyle: "none",
+          margin: 0,
+          padding: 0,
+          fontSize: 13,
+        }}
+        role="tree"
+        aria-label="Taxonomic lineage tree"
+      >
+        {[...tree.children.values()]
+          .sort((a, b) => b.totalCount - a.totalCount)
+          .map((node) => (
+            <LineageNodeView
+              key={`${node.taxid}:${node.name}`}
+              node={node}
+              depth={0}
+              forceSignal={forceSignal}
+            />
+          ))}
+      </ul>
+    </>
   );
 }
 
-function LineageNodeView({ node, depth }: { node: LineageNode; depth: number }) {
+function LineageNodeView({
+  node,
+  depth,
+  forceSignal,
+}: {
+  node: LineageNode;
+  depth: number;
+  forceSignal: { expand: boolean; n: number } | null;
+}) {
   // Auto-expand the top two depths so users see the shape of the tree
   // without having to click every node. Deeper nodes default collapsed.
   const [expanded, setExpanded] = useState(depth < 2);
+  // React to an expand/collapse-all command from the tree root.
+  useEffect(() => {
+    if (forceSignal) setExpanded(forceSignal.expand);
+  }, [forceSignal]);
   const hasChildren = node.children.size > 0;
   const indent = depth * 16;
   return (
@@ -530,6 +578,7 @@ function LineageNodeView({ node, depth }: { node: LineageNode; depth: number }) 
                 key={`${child.taxid}:${child.name}`}
                 node={child}
                 depth={depth + 1}
+                forceSignal={forceSignal}
               />
             ))}
         </ul>

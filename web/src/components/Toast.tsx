@@ -46,11 +46,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={{ toast }}>
       {children}
-      <div className="toast-container">
+      <div className="toast-container" role="region" aria-label="Notifications">
         {toasts.map((t) => (
-          <div key={t.id} className={`toast toast--${t.type}${t.exiting ? " toast--exit" : ""}`}>
+          <div
+            key={t.id}
+            className={`toast toast--${t.type}${t.exiting ? " toast--exit" : ""}`}
+            role={t.type === "error" ? "alert" : "status"}
+            aria-live={t.type === "error" ? "assertive" : "polite"}
+          >
             <span style={{ flex: 1 }}>{t.message}</span>
-            <button className="toast__close" onClick={() => dismiss(t.id)}>
+            <button
+              className="toast__close"
+              onClick={() => dismiss(t.id)}
+              aria-label="Dismiss notification"
+            >
               <X size={14} />
             </button>
           </div>
