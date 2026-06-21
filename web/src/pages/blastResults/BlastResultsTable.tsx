@@ -1,6 +1,9 @@
 import { Link } from "react-router-dom";
+import { useMemo, useState } from "react";
 import {
   AlertTriangle,
+  ChevronDown,
+  ChevronUp,
   Download,
   FileJson,
   FileSearch,
@@ -143,6 +146,8 @@ function ResultSectionHeader({
   );
 }
 
+type FileSortKey = "name" | "size" | "modified";
+
 function ResultsFileTable({
   files,
   downloadingFile,
@@ -152,18 +157,71 @@ function ResultsFileTable({
   downloadingFile: string | null;
   onDownload: (file: BlastResultFile) => void;
 }) {
+  // Default to API order; sorting engages only once a header is clicked.
+  const [sortBy, setSortBy] = useState<FileSortKey | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const onSort = (key: FileSortKey) => {
+    if (sortBy === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortBy(key);
+      // Name reads best ascending; size / modified default to largest /
+      // newest first.
+      setSortDir(key === "name" ? "asc" : "desc");
+    }
+  };
+  const sortedFiles = useMemo(() => {
+    if (!sortBy) return files;
+    const arr = [...files];
+    arr.sort((a, b) => {
+      let cmp = 0;
+      if (sortBy === "name") {
+        cmp = a.name.localeCompare(b.name);
+      } else if (sortBy === "size") {
+        cmp = (a.size ?? -1) - (b.size ?? -1);
+      } else {
+        cmp =
+          (a.last_modified ? Date.parse(a.last_modified) : 0) -
+          (b.last_modified ? Date.parse(b.last_modified) : 0);
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return arr;
+  }, [files, sortBy, sortDir]);
+
   return (
     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
       <thead>
         <tr style={{ borderBottom: "1px solid var(--glass-border)" }}>
-          <ResultsHeaderCell label="File" align="left" />
-          <ResultsHeaderCell label="Size" align="right" />
-          <ResultsHeaderCell label="Modified" align="right" />
+          <ResultsHeaderCell
+            label="File"
+            align="left"
+            sortKey="name"
+            activeSort={sortBy}
+            sortDir={sortDir}
+            onSort={onSort}
+          />
+          <ResultsHeaderCell
+            label="Size"
+            align="right"
+            sortKey="size"
+            activeSort={sortBy}
+            sortDir={sortDir}
+            onSort={onSort}
+          />
+          <ResultsHeaderCell
+            label="Modified"
+            align="right"
+            sortKey="modified"
+            activeSort={sortBy}
+            sortDir={sortDir}
+            onSort={onSort}
+          />
           <th style={{ width: 60 }} />
         </tr>
       </thead>
       <tbody>
-        {files.map((file) => (
+        {sortedFiles.map((file) => (
           <BlastResultRow
             key={file.name}
             file={file}
@@ -215,20 +273,63 @@ function ArtifactDetails({
   );
 }
 
-function ResultsHeaderCell({ label, align }: { label: string; align: "left" | "right" }) {
+function ResultsHeaderCell({
+  label,
+  align,
+  sortKey,
+  activeSort,
+  sortDir,
+  onSort,
+}: {
+  label: string;
+  align: "left" | "right";
+  sortKey?: FileSortKey;
+  activeSort?: FileSortKey | null;
+  sortDir?: "asc" | "desc";
+  onSort?: (key: FileSortKey) => void;
+}) {
+  const headerStyle = {
+    textAlign: align,
+    padding: "8px 12px",
+    color: "var(--text-muted)",
+    fontWeight: 500,
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+  } as const;
+  if (!sortKey || !onSort) {
+    return <th style={headerStyle}>{label}</th>;
+  }
+  const active = activeSort === sortKey;
   return (
-    <th
-      style={{
-        textAlign: align,
-        padding: "8px 12px",
-        color: "var(--text-muted)",
-        fontWeight: 500,
-        fontSize: 11,
-        textTransform: "uppercase",
-        letterSpacing: "0.06em",
-      }}
-    >
-      {label}
+    <th style={headerStyle} aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        className="results-file-sort"
+        onClick={() => onSort(sortKey)}
+        style={{
+          all: "unset",
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 3,
+          color: active ? "var(--accent)" : "inherit",
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+        }}
+        title={`Sort by ${label.toLowerCase()}`}
+      >
+        {label}
+        {active ? (
+          sortDir === "asc" ? (
+            <ChevronUp size={12} strokeWidth={2} />
+          ) : (
+            <ChevronDown size={12} strokeWidth={2} />
+          )
+        ) : (
+          <ChevronDown size={12} strokeWidth={2} style={{ opacity: 0.3 }} />
+        )}
+      </button>
     </th>
   );
 }

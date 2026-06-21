@@ -9,6 +9,7 @@ import {
   Copy,
   Download,
   Edit3,
+  Link2,
   Loader2,
   StopCircle,
 } from "lucide-react";
@@ -104,6 +105,7 @@ export function BlastJobHeader({
   const navigate = useNavigate();
   const { toast } = useToast();
   const [copiedId, flashCopiedId] = useTransientState(false);
+  const [copiedLink, flashCopiedLink] = useTransientState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const [loadingQuery, setLoadingQuery] = useState(false);
   const [copyingCitation, setCopyingCitation] = useState(false);
@@ -135,6 +137,18 @@ export function BlastJobHeader({
       flashCopiedId(true, 1500);
     } catch {
       toast("Failed to copy search ID", "error");
+    }
+  };
+
+  // Copy a deep-link to the exact current view (the active ?tab= is part of
+  // window.location), so a result can be shared and reopened on the same tab.
+  const handleCopyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      flashCopiedLink(true, 1500);
+      toast("Link to this view copied", "success");
+    } catch {
+      toast("Failed to copy link", "error");
     }
   };
 
@@ -376,6 +390,24 @@ export function BlastJobHeader({
             <Copy size={14} strokeWidth={1.5} />
           )}{" "}
           {copyingCitation ? "Copying…" : "Copy citation"}
+        </button>
+        <button
+          className="glass-button"
+          onClick={handleCopyLink}
+          title="Copy a link to this exact result view (current tab) to the clipboard."
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: 12,
+          }}
+        >
+          {copiedLink ? (
+            <CheckCircle2 size={14} strokeWidth={1.5} />
+          ) : (
+            <Link2 size={14} strokeWidth={1.5} />
+          )}{" "}
+          {copiedLink ? "Copied" : "Copy link"}
         </button>
       </div>
 
