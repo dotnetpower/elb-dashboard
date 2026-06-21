@@ -177,6 +177,42 @@ def _result_files_for_event(
     return out
 
 
+def _persist_result_manifest(openapi_job_id: str, job: dict[str, Any]) -> None:
+    """Persist a ``file_id -> blob_path`` manifest as a durable JobState column.
+
+    Captured at the succeeded transition while the cluster is up (the elb-openapi
+    detail carrying ``result.files[].blob_path`` is in hand) so the download
+    route can stream the result straight from Storage when the openapi proxy is
+    later unreachable (the cluster auto-stopped). Best-effort: a failure here
+    never blocks the completion event — the download just falls back to the
+    openapi proxy as before. Blob paths are stored relative to
+    ``results/{job_id}/`` (the sibling's contract), so the fallback maps each to
+    ``stream_blob_bytes(account, "results", f"{job_id}/{blob_path}")``.
+    """
+    from api.services.blast.external_job_projection import _external_result_files
+
+    if not openapi_job_id:
+        return
+    try:
+        manifest = [
+            {"file_id": str(f["file_id"]), "blob_path": str(f["blob_path"])}
+            for f in _external_result_files(job)
+            if f.get("file_id") and f.get("blob_path")
+        ]
+        if not manifest:
+            return
+        import json as _json
+
+        from api.services.state_repo import get_state_repo
+
+        get_state_repo().update(openapi_job_id, result_manifest=_json.dumps(manifest))
+    except Exception:
+        LOGGER.debug(
+            "result manifest persist skipped job_id=%s", openapi_job_id, exc_info=True
+        )
+
+
+
 # Bound the pass-through value so a hostile/oversized producer value cannot bloat
 # the topic message envelope (Service Bus caps total application-property size).
 _REQUEST_ID_MAX_LEN = 256
@@ -833,6 +869,10 @@ def _publish_one_bridge(
                 "result-file link build failed corr=%s", rec.correlation_id, exc_info=True
             )
             result_files = []
+        # Durably capture the file_id -> blob_path manifest (best-effort) so the
+        # download route can serve results from Storage after the cluster
+        # auto-stops. Independent of the event-link build above.
+        _persist_result_manifest(rec.openapi_job_id, job)
     event = _transition_event(
         correlation_id=rec.correlation_id,
         openapi_job_id=rec.openapi_job_id,

@@ -170,6 +170,12 @@ class JobState:
     # and let an operator trace a request from the Service Bus queue to its job.
     external_correlation_id: str | None = None
     submission_source: str | None = None
+    # JSON array of ``{file_id, blob_path}`` for an external job's result files,
+    # captured at the succeeded transition (cluster up) so the download route
+    # can stream the result straight from Storage when the elb-openapi proxy is
+    # unreachable (cluster auto-stopped). Blob paths are relative to
+    # ``results/{job_id}/`` (the sibling's contract).
+    result_manifest: str | None = None
 
     def to_entity(self) -> dict[str, Any]:
         canonical = canonical_job_metadata(
@@ -208,6 +214,7 @@ class JobState:
             or _resolve_external_correlation_id(self.payload),
             "submission_source": self.submission_source
             or _resolve_payload_submission_source(self.payload),
+            "result_manifest": self.result_manifest or "",
         }
         if self.payload is not None:
             import json
@@ -255,6 +262,7 @@ class JobState:
             storage_account=e.get("storage_account") or canonical["storage_account"],
             external_correlation_id=e.get("external_correlation_id") or None,
             submission_source=e.get("submission_source") or None,
+            result_manifest=e.get("result_manifest") or None,
         )
 
 

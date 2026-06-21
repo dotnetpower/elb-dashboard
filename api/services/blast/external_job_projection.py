@@ -680,14 +680,22 @@ def _external_result_files(job: dict[str, Any]) -> list[dict[str, Any]]:
         file_id = str(item.get("file_id") or "")
         if not filename or not file_id:
             continue
-        out.append(
-            {
-                "file_id": file_id,
-                "name": filename,
-                "size": item.get("size_bytes") or item.get("size"),
-                "last_modified": item.get("last_modified"),
-                "format": item.get("format"),
-                "source": "external",
-            }
-        )
+        entry = {
+            "file_id": file_id,
+            "name": filename,
+            "size": item.get("size_bytes") or item.get("size"),
+            "last_modified": item.get("last_modified"),
+            "format": item.get("format"),
+            "source": "external",
+        }
+        # The sibling exposes the result blob's path relative to
+        # ``results/{job_id}/`` (``_list_result_files`` → ``blob_path``). Carry it
+        # through so the dashboard can persist a file_id → blob_path manifest and
+        # stream the result straight from Storage when the elb-openapi proxy is
+        # unreachable (cluster auto-stopped) — see the Service Bus completion
+        # manifest persistence + the download Storage fallback.
+        blob_path = str(item.get("blob_path") or "").strip()
+        if blob_path:
+            entry["blob_path"] = blob_path
+        out.append(entry)
     return out

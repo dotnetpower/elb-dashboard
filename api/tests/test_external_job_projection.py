@@ -340,3 +340,33 @@ def test_external_job_title_keeps_explicit_title_when_sibling_provides_it() -> N
 
 
 
+
+
+def test_external_result_files_preserves_blob_path() -> None:
+    """The result-file projection carries the sibling's blob_path through.
+
+    The Service Bus completion manifest persistence relies on blob_path to let
+    the download route stream a result straight from Storage after auto-stop.
+    Entries without a blob_path (older sibling payloads) simply omit the key.
+    """
+    from api.services.blast.external_job_projection import _external_result_files
+
+    job = {
+        "result": {
+            "files": [
+                {
+                    "file_id": "result-001",
+                    "filename": "batch_000.out.gz",
+                    "blob_path": "job-x/batch_000.out.gz",
+                    "size_bytes": 25549,
+                    "format": "blast_xml",
+                },
+                {"file_id": "result-002", "filename": "batch_001.out.gz"},
+            ]
+        }
+    }
+    files = _external_result_files(job)
+    assert files[0]["file_id"] == "result-001"
+    assert files[0]["blob_path"] == "job-x/batch_000.out.gz"
+    assert files[0]["name"] == "batch_000.out.gz"
+    assert "blob_path" not in files[1]  # absent → key omitted, never blank

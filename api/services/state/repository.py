@@ -539,6 +539,7 @@ class JobStateRepository:
         program: str | None = None,
         db: str | None = None,
         query_label: str | None = None,
+        result_manifest: str | None = None,
     ) -> JobState:
         """Patch the named properties of an existing job row (MERGE).
 
@@ -638,6 +639,9 @@ class JobStateRepository:
             if query_label is not None:
                 e["query_label"] = query_label
                 patch["query_label"] = query_label
+            if result_manifest is not None:
+                e["result_manifest"] = result_manifest
+                patch["result_manifest"] = result_manifest
             ts = updated_at or _now_iso()
             e["updated_at"] = ts
             patch["updated_at"] = ts

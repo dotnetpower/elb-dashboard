@@ -993,3 +993,59 @@ def test_dlq_cleanup_backs_up_then_purges(monkeypatch: pytest.MonkeyPatch) -> No
     out = sb_tasks.dlq_cleanup()
     assert out["purged"] == 1
     assert backed_up and backed_up[0]["message_id"] == "m1"
+
+
+def test_persist_result_manifest_writes_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The succeeded transition captures file_id -> blob_path as a durable column.
+
+    Lets the download route stream results from Storage after the cluster
+    auto-stops. Only entries carrying a blob_path are stored.
+    """
+    import json
+    from types import SimpleNamespace
+
+    captured: dict = {}
+
+    def fake_update(job_id: str, **kwargs):
+        captured["job_id"] = job_id
+        captured.update(kwargs)
+        return SimpleNamespace(job_id=job_id)
+
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(update=fake_update),
+    )
+
+    job = {
+        "result": {
+            "files": [
+                {"file_id": "result-001", "filename": "batch_000.out.gz",
+                 "blob_path": "job-x/batch_000.out.gz"},
+                {"file_id": "result-002", "filename": "batch_001.out.gz"},  # no blob_path → skipped
+            ]
+        }
+    }
+    sb_tasks._persist_result_manifest("op-7", job)
+
+    assert captured["job_id"] == "op-7"
+    manifest = json.loads(captured["result_manifest"])
+    assert manifest == [{"file_id": "result-001", "blob_path": "job-x/batch_000.out.gz"}]
+
+
+def test_persist_result_manifest_noop_without_blob_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No blob_path on any file → no write (older sibling payloads stay proxy-only)."""
+    from types import SimpleNamespace
+
+    called = {"update": False}
+
+    def fake_update(*_a, **_k):
+        called["update"] = True
+
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(update=fake_update),
+    )
+    sb_tasks._persist_result_manifest(
+        "op-8", {"result": {"files": [{"file_id": "result-001", "filename": "r.xml"}]}}
+    )
+    assert called["update"] is False

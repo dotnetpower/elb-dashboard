@@ -108,6 +108,27 @@ def test_job_state_round_trips_servicebus_correlation_columns() -> None:
     assert JobState.from_entity(native_entity).external_correlation_id is None
 
 
+def test_job_state_round_trips_result_manifest_column() -> None:
+    # The result manifest (file_id -> blob_path) captured at the succeeded
+    # transition must round-trip as a durable column so the download route can
+    # serve results from Storage after the cluster auto-stops.
+    manifest = '[{"file_id": "result-001", "blob_path": "job-x/batch_000.out.gz"}]'
+    state = JobState(
+        job_id="op-1",
+        type="blast",
+        status="completed",
+        result_manifest=manifest,
+    )
+    entity = state.to_entity()
+    assert entity["result_manifest"] == manifest
+    assert JobState.from_entity(entity).result_manifest == manifest
+
+    # Absent manifest round-trips to None (legacy / non-external rows).
+    bare = JobState(job_id="op-2", type="blast", status="completed")
+    assert bare.to_entity()["result_manifest"] == ""
+    assert JobState.from_entity(bare.to_entity()).result_manifest is None
+
+
 def test_job_state_writes_canonical_v2_job_metadata() -> None:
     state = JobState(
         job_id="job-1",

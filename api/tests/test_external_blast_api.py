@@ -337,6 +337,100 @@ def test_stream_file_unreachable_openapi_returns_503(monkeypatch):
     assert closed["n"] >= 1
 
 
+def test_stream_result_file_from_storage_streams_from_manifest(monkeypatch):
+    """The offline fallback maps file_id -> blob_path and streams from Storage.
+
+    Reproduces the post-auto-stop download: the openapi proxy is gone, so the
+    route falls back to ``stream_result_file_from_storage`` which resolves the
+    blob from the durable manifest and streams ``results/{job_id}/{blob_path}``
+    from the job's trusted account — never a SAS.
+    """
+    from types import SimpleNamespace
+
+    from api.services import external_blast
+
+    state = SimpleNamespace(
+        result_manifest='[{"file_id": "result-001", "blob_path": "job-x/batch_000.out.gz"}]',
+        storage_account="acct1",
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(get=lambda jid: state),
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    captured: dict = {}
+
+    def fake_stream(cred, account, container, path):
+        captured.update(account=account, container=container, path=path)
+        yield b"GZIP-RESULT-BYTES"
+
+    monkeypatch.setattr("api.services.storage.blob_io.stream_blob_bytes", fake_stream)
+
+    out = external_blast.stream_result_file_from_storage("abc123", "result-001")
+    body = b"".join(out.chunks)
+    assert body == b"GZIP-RESULT-BYTES"
+    assert captured["account"] == "acct1"
+    assert captured["container"] == "results"
+    assert captured["path"] == "abc123/job-x/batch_000.out.gz"
+    assert out.filename == "batch_000.out.gz"
+    assert out.media_type == "application/gzip"
+
+
+def test_stream_result_file_from_storage_404_without_manifest(monkeypatch):
+    """A job completed before the manifest existed surfaces a clear 404 offline."""
+    from types import SimpleNamespace
+
+    from api.services import external_blast
+
+    state = SimpleNamespace(result_manifest=None, storage_account="acct1")
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(get=lambda jid: state),
+    )
+    with pytest.raises(HTTPException) as raised:
+        external_blast.stream_result_file_from_storage("abc123", "result-001")
+    assert raised.value.status_code == 404
+    assert raised.value.detail["code"] == "result_unavailable_offline"
+
+
+def test_stream_result_file_from_storage_404_unknown_file_id(monkeypatch):
+    """A file_id absent from the manifest is a clean 404, not a stream of junk."""
+    from types import SimpleNamespace
+
+    from api.services import external_blast
+
+    state = SimpleNamespace(
+        result_manifest='[{"file_id": "result-001", "blob_path": "job-x/batch_000.out.gz"}]',
+        storage_account="acct1",
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(get=lambda jid: state),
+    )
+    with pytest.raises(HTTPException) as raised:
+        external_blast.stream_result_file_from_storage("abc123", "result-999")
+    assert raised.value.status_code == 404
+
+
+def test_stream_result_file_from_storage_404_without_account(monkeypatch):
+    """No recorded storage account → 404 (never guess an account to stream from)."""
+    from types import SimpleNamespace
+
+    from api.services import external_blast
+
+    state = SimpleNamespace(
+        result_manifest='[{"file_id": "result-001", "blob_path": "job-x/batch_000.out.gz"}]',
+        storage_account="",
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(get=lambda jid: state),
+    )
+    with pytest.raises(HTTPException) as raised:
+        external_blast.stream_result_file_from_storage("abc123", "result-001")
+    assert raised.value.status_code == 404
+
+
 
 def test_token_resync_coalesces_concurrent_callers(monkeypatch):
     """A burst of 401s must NOT each fire an independent cluster read — the
@@ -3049,6 +3143,63 @@ def test_canonical_result_fallback_threads_scope_query(monkeypatch):
     assert captured["stream_file"]["subscription_id"] == "sub-a"
     assert captured["stream_file"]["resource_group"] == "rg-a"
     assert captured["stream_file"]["cluster_name"] == "aks-a"
+
+
+def test_download_route_falls_back_to_storage_when_openapi_unreachable(monkeypatch):
+    """The download route serves results from Storage when the openapi is down.
+
+    Wires the cluster-auto-stopped path end to end. A stopped cluster surfaces as
+    either ``openapi_unreachable`` (cached endpoint, connect failed) or
+    ``openapi_not_configured`` (no cached endpoint to even attempt — raised in
+    ``_base_url`` right after a redeploy while the cluster is down); BOTH must
+    trigger the Storage fallback.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    for down_code in ("openapi_unreachable", "openapi_not_configured"):
+
+        def boom(*_a, _code=down_code, **_k):
+            raise HTTPException(503, detail={"code": _code, "message": "down"})
+
+        def fake_storage(job_id: str, file_id: str) -> external_blast.StreamedFile:
+            assert job_id == "abc123" and file_id == "result-001"
+            return external_blast.StreamedFile(
+                chunks=iter([b"OFFLINE-", b"RESULT"]),
+                media_type="application/gzip",
+                filename="batch_000.out.gz",
+            )
+
+        monkeypatch.setattr(external_blast, "stream_file", boom)
+        monkeypatch.setattr(external_blast, "stream_result_file_from_storage", fake_storage)
+        client = TestClient(app)
+        resp = client.get("/api/v1/elastic-blast/jobs/abc123/files/result-001")
+        assert resp.status_code == 200, down_code
+        assert resp.content == b"OFFLINE-RESULT", down_code
+
+
+def test_download_route_propagates_non_openapi_errors(monkeypatch):
+    """A non-openapi-unreachable error is NOT masked by the Storage fallback."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    reached = {"storage": False}
+
+    def boom(*_a, **_k):
+        raise HTTPException(404, detail={"code": "not_found", "message": "nope"})
+
+    def fake_storage(job_id: str, file_id: str) -> external_blast.StreamedFile:
+        reached["storage"] = True
+        raise AssertionError("storage fallback must not run for a non-503 error")
+
+    monkeypatch.setattr(external_blast, "stream_file", boom)
+    monkeypatch.setattr(external_blast, "stream_result_file_from_storage", fake_storage)
+    client = TestClient(app)
+    resp = client.get("/api/v1/elastic-blast/jobs/abc123/files/result-001")
+    assert resp.status_code == 404
+    assert reached["storage"] is False
 
 
 def test_canonical_local_result_file_id_must_match_job_prefix(monkeypatch):

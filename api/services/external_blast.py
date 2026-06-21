@@ -1184,3 +1184,67 @@ def stream_file(
         media_type=resp.headers.get("content-type", "application/xml").split(";", 1)[0],
         filename=filename,
     )
+
+
+def stream_result_file_from_storage(job_id: str, file_id: str) -> StreamedFile:
+    """Stream an external job's result file directly from Storage.
+
+    Fallback used when the elb-openapi proxy is unreachable (the AKS cluster
+    auto-stopped). Resolves ``file_id -> blob_path`` from the durable
+    ``result_manifest`` column captured on the JobState row at the succeeded
+    transition, then streams ``results/{job_id}/{blob_path}`` from the job's
+    trusted workload Storage account through the ``api`` sidecar via the shared
+    managed identity — never a SAS / direct blob URL handed to the caller
+    (charter §9). Raises ``HTTPException(404, result_unavailable_offline)`` when
+    the row / manifest / file / account is unknown (e.g. a job that completed
+    before the manifest was captured), so the caller can surface the original
+    ``openapi_unreachable`` error instead of a misleading failure.
+    """
+    import json as _json
+
+    from api.services import get_credential
+    from api.services.state_repo import get_state_repo
+    from api.services.storage.blob_io import stream_blob_bytes
+
+    def _offline_404(message: str) -> HTTPException:
+        return HTTPException(
+            404,
+            detail={"code": "result_unavailable_offline", "message": message},
+        )
+
+    try:
+        state = get_state_repo().get(job_id)
+    except Exception:
+        state = None
+    if state is None:
+        raise _offline_404("job not found for offline result download")
+
+    blob_path = ""
+    raw_manifest = getattr(state, "result_manifest", None)
+    if raw_manifest:
+        try:
+            manifest = _json.loads(raw_manifest)
+        except Exception:
+            manifest = []
+        for item in manifest if isinstance(manifest, list) else []:
+            if isinstance(item, dict) and str(item.get("file_id") or "") == file_id:
+                blob_path = str(item.get("blob_path") or "").strip()
+                break
+    if not blob_path:
+        raise _offline_404("result file is unavailable while the cluster is stopped")
+
+    account = str(getattr(state, "storage_account", "") or "").strip()
+    if not account:
+        raise _offline_404("result storage account is not recorded for this job")
+
+    # ``blob_path`` is relative to ``results/{job_id}/`` (the sibling's
+    # ``_list_result_files`` contract). ``stream_blob_bytes`` validates the full
+    # path against traversal and gates concurrency (§9).
+    full_path = f"{job_id}/{blob_path.lstrip('/')}"
+    filename = _safe_filename(blob_path.rsplit("/", 1)[-1])
+    media_type = "application/gzip" if filename.endswith(".gz") else "application/xml"
+    return StreamedFile(
+        chunks=stream_blob_bytes(get_credential(), account, "results", full_path),
+        media_type=media_type,
+        filename=filename,
+    )
