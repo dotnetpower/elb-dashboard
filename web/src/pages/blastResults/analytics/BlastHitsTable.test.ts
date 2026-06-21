@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { BlastHit } from "@/api/endpoints";
 
-import { buildSubjectAggregates } from "./BlastHitsTable";
+import { buildSubjectAggregates, clampDescription } from "./BlastHitsTable";
 
 const baseHit: BlastHit = {
   qseqid: "queryA",
@@ -85,5 +85,36 @@ describe("buildSubjectAggregates", () => {
     expect(map.size).toBe(2);
     expect(map.get("")?.hspCount).toBe(1);
     expect(map.get("NC_001")?.hspCount).toBe(1);
+  });
+});
+
+describe("clampDescription", () => {
+  it("flags an empty / whitespace-only title as empty with no preview", () => {
+    expect(clampDescription("")).toEqual({ isEmpty: true, isLong: false, preview: "" });
+    expect(clampDescription("   ")).toEqual({ isEmpty: true, isLong: false, preview: "" });
+  });
+
+  it("returns a short title verbatim and not long", () => {
+    const result = clampDescription("Monkeypox virus, complete genome");
+    expect(result.isEmpty).toBe(false);
+    expect(result.isLong).toBe(false);
+    expect(result.preview).toBe("Monkeypox virus, complete genome");
+  });
+
+  it("clamps a long title to the threshold with an ellipsis and marks it long", () => {
+    const long = "A".repeat(150);
+    const result = clampDescription(long, 100);
+    expect(result.isLong).toBe(true);
+    expect(result.preview).toBe(`${"A".repeat(100)}…`);
+    expect(result.preview.length).toBe(101);
+  });
+
+  it("does not clamp a title exactly at the threshold", () => {
+    const exact = "B".repeat(100);
+    expect(clampDescription(exact, 100)).toEqual({
+      isEmpty: false,
+      isLong: false,
+      preview: exact,
+    });
   });
 });

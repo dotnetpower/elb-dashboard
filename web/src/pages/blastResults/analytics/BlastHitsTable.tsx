@@ -49,6 +49,72 @@ export interface BlastHitsTableProps {
   onSubjectDrilldown?: (hit: BlastHit) => void;
 }
 
+/** Collapse a subject Description longer than this many characters. */
+const DESCRIPTION_COLLAPSE_THRESHOLD = 100;
+
+/**
+ * Pure truncation decision for a subject Description, extracted so the
+ * collapse behaviour is unit-testable without a DOM render (the frontend
+ * suite is logic-only). Returns whether the title is empty, whether it is
+ * long enough to collapse, and the clamped preview shown before "more".
+ */
+export function clampDescription(
+  text: string,
+  threshold: number = DESCRIPTION_COLLAPSE_THRESHOLD,
+): { isEmpty: boolean; isLong: boolean; preview: string } {
+  const trimmed = text.trim();
+  if (!trimmed) return { isEmpty: true, isLong: false, preview: "" };
+  if (trimmed.length <= threshold) {
+    return { isEmpty: false, isLong: false, preview: trimmed };
+  }
+  return {
+    isEmpty: false,
+    isLong: true,
+    preview: `${trimmed.slice(0, threshold).trimEnd()}…`,
+  };
+}
+
+/**
+ * Subject Description cell. BLAST subject titles range from a few words to
+ * 200+ characters (multi-organism / "PREDICTED:" records), which would blow up
+ * the row height. Long descriptions are clamped to the first
+ * `DESCRIPTION_COLLAPSE_THRESHOLD` characters with a "more" toggle that expands
+ * the full title in place (and "less" to collapse again). Short titles render
+ * verbatim with no button.
+ */
+function DescriptionCell({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const { isEmpty, isLong, preview } = clampDescription(text);
+  if (isEmpty) return <>—</>;
+  if (!isLong) return <>{preview}</>;
+  return (
+    <span>
+      {expanded ? text.trim() : preview}{" "}
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        title={expanded ? "Collapse description" : "Show the full description"}
+        style={{
+          background: "transparent",
+          border: 0,
+          padding: 0,
+          cursor: "pointer",
+          color: "var(--accent)",
+          fontFamily: "inherit",
+          fontSize: "inherit",
+          fontWeight: 600,
+          textDecoration: "underline dotted",
+          textUnderlineOffset: 3,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {expanded ? "less" : "more"}
+      </button>
+    </span>
+  );
+}
+
 /**
  * The "Descriptions" table — equivalent to NCBI's
  * "Sequences producing significant alignments" panel. Adds bulk
@@ -448,7 +514,7 @@ export function BlastHitsTable({
                     })()}
                   </td>
                   <td style={{ maxWidth: 280, color: "var(--text-muted)" }}>
-                    {hit.stitle || "—"}
+                    <DescriptionCell text={hit.stitle || ""} />
                   </td>
                   <td style={{ maxWidth: 180, color: "var(--text-muted)" }}>
                     <ScientificNameCell
