@@ -1,6 +1,7 @@
 import { RefreshCw } from "lucide-react";
 
 import { AUTO_REFRESH_OPTIONS, useAutoRefresh } from "@/hooks/useAutoRefresh";
+import { RefreshRing } from "@/components/RefreshRing";
 
 /**
  * Compact dropdown for the global dashboard auto-refresh interval.
@@ -8,7 +9,7 @@ import { AUTO_REFRESH_OPTIONS, useAutoRefresh } from "@/hooks/useAutoRefresh";
  * Workload RG pickers next to it.
  */
 export function AutoRefreshChip() {
-  const { intervalMs, setIntervalMs } = useAutoRefresh();
+  const { intervalMs, setIntervalMs, secondsToRefresh } = useAutoRefresh();
   return (
     <label
       className="cfg-chip"
@@ -33,6 +34,7 @@ export function AutoRefreshChip() {
           </option>
         ))}
       </select>
+      <RefreshRing seconds={secondsToRefresh} total={Math.round(intervalMs / 1000)} />
     </label>
   );
 }

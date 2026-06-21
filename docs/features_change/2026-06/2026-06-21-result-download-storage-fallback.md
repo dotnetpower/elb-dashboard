@@ -62,5 +62,10 @@ No IaC change. The new Table column is additive and schemaless.
   - `test_download_route_falls_back_to_storage_when_openapi_unreachable` /
     `_propagates_non_openapi_errors`
 - Live (moonchoi, cluster stopped): the offline `404 result_unavailable_offline`
-  path verified against pre-feature job `9ca72c6092b0`. The success path activates
-  for jobs that complete after this deploy (manifest captured at completion).
+  path is verified against pre-feature job `9ca72c6092b0` on revision 0000632 —
+  the route catches the openapi-down 503 (both `openapi_unreachable` and the
+  `openapi_not_configured` variant a redeploy-while-stopped surfaces, which a
+  first live run caught the fallback was missing) and the Storage fallback
+  returns the honest offline 404 because that job predates the manifest. The
+  success path (a real result byte-stream after auto-stop) activates for jobs
+  that complete after this deploy and is covered by the unit tests above.
