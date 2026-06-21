@@ -8620,6 +8620,49 @@ select.terminal-cockpit__cfg-input {
   font-variant-numeric: tabular-nums;
 }
 
+/* ScrollShadow — subtle edge fade on a horizontally-scrollable container so a
+   wide table signals it can scroll sideways. The fade hides on whichever edge
+   is fully reached (classes toggled by the component from scroll geometry). */
+.scroll-shadow {
+  position: relative;
+}
+.scroll-shadow__content {
+  overflow-x: auto;
+}
+.scroll-shadow::before,
+.scroll-shadow::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 1;
+  transition: opacity 150ms ease-out;
+}
+.scroll-shadow::before {
+  left: 0;
+  background: linear-gradient(to right, var(--bg-secondary), transparent);
+}
+.scroll-shadow::after {
+  right: 0;
+  background: linear-gradient(to left, var(--bg-secondary), transparent);
+}
+.scroll-shadow--at-start::before {
+  opacity: 0;
+}
+.scroll-shadow--at-end::after {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .scroll-shadow::before,
+  .scroll-shadow::after {
+    transition: none;
+  }
+}
+
+
 /* Submit button keyboard-shortcut hint badge (Ctrl/⌘ + Enter). Sits on the
    accent-filled Run BLAST button, so it uses translucent white chrome. */
 .blast-submit-kbd {

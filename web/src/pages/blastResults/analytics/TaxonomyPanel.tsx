@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, ExternalLink, Loader2 } from "lucide-react";
 
 import { blastApi, type BlastHit, type BlastTaxonomyRow } from "@/api/endpoints";
+import { ScrollShadow } from "@/components/ScrollShadow";
 import {
   formatEvalue,
   isPartialResult,
@@ -280,7 +281,7 @@ interface OrganismTableProps {
 
 function OrganismTable({ rows, topHitsPerOrg }: OrganismTableProps) {
   return (
-    <div style={{ overflowX: "auto" }}>
+    <ScrollShadow>
       <table className="table" style={{ width: "100%", fontSize: 13 }}>
         <thead>
           <tr>
@@ -376,7 +377,7 @@ function OrganismTable({ rows, topHitsPerOrg }: OrganismTableProps) {
           ))}
         </tbody>
       </table>
-    </div>
+    </ScrollShadow>
   );
 }
 
