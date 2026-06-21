@@ -68,15 +68,23 @@ _ANALYTICS_ARTIFACT_TYPES = {
 # fallback and `build_default_taxonomy_payload` now enriches with
 # lineage / blast_name. Older "ready" artifacts must be rebuilt.
 #
+# 2026-06-21 v3 — `parse_blast_xml` became tolerant of byte-cap
+# truncation (oversized BLAST XML now yields partial hits instead of a
+# ParseError that surfaced as a false "results degraded / all reads
+# failed" artifact). Older aggregate/alignments/taxonomy artifacts baked
+# with the pre-fix parser must be rebuilt so those jobs stop showing the
+# false degraded state. `result_aggregate` is gated from 0 -> 3 here, so
+# its builder now stamps the version in BOTH the OK and degraded returns.
+#
 # IMPORTANT: a builder whose minimum is N MUST stamp its payload with
 # `"artifact_schema_version": N` (or higher), otherwise the bake would
 # write a payload that the next read immediately marks stale → infinite
 # rebuild loop. Builders for types with minimum 0 may skip the stamp.
 _ANALYTICS_ARTIFACT_MIN_SCHEMA_VERSION = {
     "result_manifest": 0,
-    "result_aggregate": 0,
-    "result_alignments": 2,
-    "result_taxonomy": 2,
+    "result_aggregate": 3,
+    "result_alignments": 3,
+    "result_taxonomy": 3,
 }
 
 

@@ -356,6 +356,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
             )
     if aggregate.total == 0 and parsed_files == 0 and read_failures:
         return {
+            "artifact_schema_version": 3,
             "job_id": job_id,
             "status": "degraded",
             "degraded": True,
@@ -366,6 +367,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
             "read_failures": read_failures,
         }
     return {
+        "artifact_schema_version": 3,
         "job_id": job_id,
         "status": "ok" if aggregate.total else "no_hits",
         "stats": aggregate.as_stats(),
@@ -405,7 +407,7 @@ def build_default_alignments_payload(job_id: str, storage_account: str) -> dict[
     page_count = (len(filtered) + page_size - 1) // page_size
     tie_cutoff = _load_merge_report_tie_cutoff(job_id, storage_account)
     payload: dict[str, Any] = {
-        "artifact_schema_version": 2,
+        "artifact_schema_version": 3,
         "job_id": job_id,
         "blob_name": read["blob_names"][0] if len(read["blob_names"]) == 1 else "",
         "blob_names": read["blob_names"],
@@ -474,7 +476,7 @@ def build_default_taxonomy_payload(job_id: str, storage_account: str) -> dict[st
                 type(exc).__name__,
             )
     return {
-        "artifact_schema_version": 2,
+        "artifact_schema_version": 3,
         "job_id": job_id,
         "organisms": organisms,
         "total_hits": len(hits),

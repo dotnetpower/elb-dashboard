@@ -466,7 +466,7 @@ def test_read_result_analytics_artifact_returns_fresh_payload(monkeypatch) -> No
     """Payloads that meet the schema floor pass through unchanged and
     the state row is left alone."""
     fresh_payload = {
-        "artifact_schema_version": 2,
+        "artifact_schema_version": 3,
         "job_id": "job-1",
         "organisms": [
             {
