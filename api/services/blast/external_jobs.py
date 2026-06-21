@@ -786,17 +786,22 @@ def collect_and_sync_external_jobs(
     budget = max(0, int(detail_enrich_budget))
     for target in targets:
         t_kwargs = dict(target["kwargs"])
-        # #51: bound the external /v1/jobs fetch to the most-recent ``limit``
-        # jobs once the sibling supports it (older sibling ignores the param and
-        # returns the full list — degrades cleanly). ``limit`` joins the cache
-        # key so a wider page does not serve a narrower cached fetch.
+        # #51: bound the external /v1/jobs LIST fetch to the most-recent
+        # ``limit`` jobs once the sibling supports it (older sibling ignores the
+        # param and returns the full list — degrades cleanly). ``limit`` is a
+        # list-only parameter, so it goes ONLY into the fetch kwargs — NOT
+        # ``t_kwargs``, which is also reused for the per-row ``get_job`` detail
+        # enrichment whose signature rejects ``limit`` (passing it there raised
+        # TypeError and silently skipped enrichment). ``limit`` joins the list
+        # cache key so a wider page does not serve a narrower cached fetch.
+        list_kwargs = dict(t_kwargs)
         if isinstance(limit, int) and limit > 0:
-            t_kwargs["limit"] = limit
+            list_kwargs["limit"] = limit
         t_sub = target["subscription_id"]
         t_rg = target["resource_group"]
         t_cluster = target["cluster_name"]
         try:
-            external_rows = _external_list_jobs_cached(t_kwargs)
+            external_rows = _external_list_jobs_cached(list_kwargs)
         except Exception as exc:
             # One unreachable cluster (e.g. Stopped) must not hide jobs on the
             # other reachable clusters in a subscription-wide discovery.
