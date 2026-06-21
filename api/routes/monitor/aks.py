@@ -82,6 +82,12 @@ def list_aks(
                 ),
                 "scope": "subscription",
             },
+            # The subscription-wide ARM list enumerates + deserializes every
+            # managed cluster, which is the heaviest AKS read; a 60 s TTL halves
+            # its poll frequency on large subscriptions. Lifecycle transitions
+            # still settle promptly because the SPA passes ``fresh=true`` while a
+            # start/stop is in flight, bypassing the cache.
+            ttl_seconds=60.0,
             force=fresh,
         )
     except Exception as exc:

@@ -1149,28 +1149,33 @@ class JobStateRepository:
         if not job_ids:
             return {}
         unique_ids = list(dict.fromkeys(job_ids))
-        clauses = " or ".join(
-            f"PartitionKey eq '{_sanitise_odata_value(job_id)}'" for job_id in unique_ids
-        )
-        # Generous per-page so the SDK doesn't paginate mid-flight for a
-        # 20-job batch with up to ``per_job_limit`` rows each. Clamp to
-        # Azure Tables' hard max of 1000 entities per response.
-        page_size = _clamp_page_size(
-            max(per_job_limit, per_job_limit * len(unique_ids))
-        )
         grouped: dict[str, list[dict[str, Any]]] = {job_id: [] for job_id in unique_ids}
+        # Chunk the PartitionKey-OR filter the same way ``get_many`` does so a
+        # large ``job_ids`` batch never builds an over-length OData filter that
+        # fails with HTTP 400 (the get_many CPU-storm bug). The audit route caps
+        # the input at 20 today, but the function contract accepts any list.
         with self._history_client() as t:
-            try:
-                entities = t.query_entities(clauses, results_per_page=page_size)
-                for e in entities:
-                    row = dict(e)
-                    partition = str(row.get("PartitionKey") or "")
-                    bucket = grouped.get(partition)
-                    if bucket is None or len(bucket) >= per_job_limit:
-                        continue
-                    bucket.append(row)
-            except ResourceNotFoundError:
-                self._ensure_table("jobhistory")
+            for start in range(0, len(unique_ids), _GET_MANY_FILTER_CHUNK):
+                chunk = unique_ids[start : start + _GET_MANY_FILTER_CHUNK]
+                clauses = " or ".join(
+                    f"PartitionKey eq '{_sanitise_odata_value(job_id)}'" for job_id in chunk
+                )
+                # Generous per-page so the SDK doesn't paginate mid-flight for a
+                # chunk with up to ``per_job_limit`` rows each. Clamp to Azure
+                # Tables' hard max of 1000 entities per response.
+                page_size = _clamp_page_size(max(per_job_limit, per_job_limit * len(chunk)))
+                try:
+                    entities = t.query_entities(clauses, results_per_page=page_size)
+                    for e in entities:
+                        row = dict(e)
+                        partition = str(row.get("PartitionKey") or "")
+                        bucket = grouped.get(partition)
+                        if bucket is None or len(bucket) >= per_job_limit:
+                            continue
+                        bucket.append(row)
+                except ResourceNotFoundError:
+                    self._ensure_table("jobhistory")
+                    break
         for rows in grouped.values():
             rows.sort(key=lambda r: r.get("RowKey", ""))
         return grouped

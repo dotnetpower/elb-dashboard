@@ -26,37 +26,62 @@ from api.services.blast.job_state import (
 router = APIRouter()
 
 
+def _build_jobs_snapshot(caller: CallerIdentity, limit: int) -> dict[str, Any]:
+    """Read the most-recent jobs for the caller and project the summary shape.
+
+    Pulled out of the route so the polling hot path can serve it through the
+    shared monitor cache (SWR): the per-poll full-table scan + in-memory sort
+    in ``_list_recent_sorted`` runs at most once per TTL window regardless of
+    how many browser tabs poll ``/api/monitor/jobs``.
+    """
+    from api.services.state_repo import get_state_repo
+
+    repo = get_state_repo()
+    # Only summary fields are returned; ``include_payload=False`` skips the
+    # potentially-large payload_json column on the Table-Storage row so
+    # dashboard polls do not pull megabytes per refresh.
+    if blast_shared_visibility_enabled() and hasattr(repo, "list_all"):
+        rows = repo.list_all(limit=limit, include_payload=False)
+    else:
+        rows = repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
+    return {
+        "jobs": [
+            {
+                "job_id": j.job_id,
+                "type": j.type,
+                "status": j.status,
+                "phase": j.phase,
+                "task_id": j.task_id,
+                "created_at": j.created_at,
+                "updated_at": j.updated_at,
+                "error_code": j.error_code,
+            }
+            for j in rows
+        ]
+    }
+
+
 @router.get("/jobs")
 def list_jobs(
     limit: int = Query(default=50, ge=1, le=200),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.monitor_cache import cached_snapshot
 
-        repo = get_state_repo()
-        # Only summary fields are returned; ``include_payload=False`` skips the
-        # potentially-large payload_json column on the Table-Storage row so
-        # dashboard polls do not pull megabytes per refresh.
-        if blast_shared_visibility_enabled() and hasattr(repo, "list_all"):
-            rows = repo.list_all(limit=limit, include_payload=False)
+        # Cache key is isolated per caller (or a single ``shared`` bucket when
+        # the dev shared-visibility flag is on) so one caller's job list is
+        # never served to another from a shared entry — mirrors the
+        # message-flow card's keying.
+        if blast_shared_visibility_enabled():
+            scope_key = "shared"
         else:
-            rows = repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
-        return {
-            "jobs": [
-                {
-                    "job_id": j.job_id,
-                    "type": j.type,
-                    "status": j.status,
-                    "phase": j.phase,
-                    "task_id": j.task_id,
-                    "created_at": j.created_at,
-                    "updated_at": j.updated_at,
-                    "error_code": j.error_code,
-                }
-                for j in rows
-            ]
-        }
+            scope_key = caller.object_id or "anon"
+        return cached_snapshot(
+            f"monitor:jobs:{scope_key}:{limit}",
+            lambda: _build_jobs_snapshot(caller, limit),
+            ttl_seconds=10.0,
+        )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("list_jobs", exc, empty={"jobs": []}))
 

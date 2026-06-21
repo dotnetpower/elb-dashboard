@@ -38,7 +38,7 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(tags=["identity"])
 
-_SUBSCRIPTION_CACHE_TTL_SECONDS = float(os.environ.get("ME_SUBSCRIPTIONS_TTL_SECONDS", "60"))
+_SUBSCRIPTION_CACHE_TTL_SECONDS = float(os.environ.get("ME_SUBSCRIPTIONS_TTL_SECONDS", "300"))
 _SUBSCRIPTION_LIST_LIMIT = max(1, int(os.environ.get("ME_SUBSCRIPTIONS_LIST_LIMIT", "100")))
 _SUBSCRIPTION_CACHE_LOCK = threading.Lock()
 _SUBSCRIPTION_CACHE: tuple[float, tuple[list[dict[str, Any]], str | None]] | None = None

@@ -569,6 +569,49 @@ def test_get_many_chunks_large_id_set(monkeypatch) -> None:
     assert set(out) == set(job_ids)
 
 
+def test_get_history_for_jobs_chunks_large_id_set(monkeypatch) -> None:
+    """get_history_for_jobs MUST chunk the PartitionKey-OR filter the same way
+    get_many does, so a large id batch never builds an over-length OData filter
+    (the same HTTP-400 / re-create-storm bug class as get_many)."""
+    captured: list[str] = []
+    job_ids = [f"job-{i:04d}" for i in range(120)]
+    rows_by_pk = {
+        jid: {"PartitionKey": jid, "RowKey": "0001", "event": "created"} for jid in job_ids
+    }
+
+    class ChunkingHistoryClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> ChunkingHistoryClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, *, results_per_page: int):
+            captured.append(query_filter)
+            return [
+                entity
+                for pk, entity in rows_by_pk.items()
+                if f"PartitionKey eq '{pk}'" in query_filter
+            ]
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", ChunkingHistoryClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    out = repo.get_history_for_jobs(job_ids, per_job_limit=20)
+
+    # 120 ids / 50-per-chunk -> 3 queries, none over-length.
+    assert len(captured) == 3
+    assert all(len(f) < 8000 for f in captured)
+    # Every requested job keeps its history rows despite chunking.
+    assert set(out) == set(job_ids)
+    assert all(len(out[jid]) == 1 for jid in job_ids)
+
+
 def test_create_returns_existing_on_resource_exists(monkeypatch) -> None:
     """Concurrent create races MUST return the existing row, not raise."""
     from azure.core.exceptions import ResourceExistsError

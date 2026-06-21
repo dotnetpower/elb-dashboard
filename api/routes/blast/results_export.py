@@ -23,6 +23,7 @@ Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -73,9 +74,6 @@ def blast_job_results_export(
     """
     _ensure_job_read_allowed(job_id, caller)
     storage_account = _resolve_job_storage_account(job_id, storage_account)
-    import csv
-    import io
-    import json
 
     from api.services import get_credential
     from api.services.blast.results_parser import (
@@ -153,13 +151,9 @@ def blast_job_results_export(
 
     if export_format in {"json", "json-seqalign"}:
         key = "seq_alignments" if export_format == "json-seqalign" else "hits"
-        body = json.dumps(
-            {"job_id": job_id, "format": export_format, key: all_hits, "total": len(all_hits)},
-            default=str,
-        )
         filename = f"{job_id}_{'seqalign' if export_format == 'json-seqalign' else 'results'}.json"
         return StreamingResponse(
-            iter([body.encode("utf-8")]),
+            _stream_json_export(job_id, export_format, key, all_hits),
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
@@ -170,18 +164,61 @@ def blast_job_results_export(
     delimiter = "\t" if export_format == "tsv" else ","
     extras_present = [col for col in EXPORT_EXTRA_COLUMNS if any(col in hit for hit in all_hits)]
     columns = list(EXPORT_DEFAULT_COLUMNS) + extras_present
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=columns, delimiter=delimiter, extrasaction="ignore")
-    writer.writeheader()
-    for hit in all_hits:
-        writer.writerow(hit)
     ext = "tsv" if export_format == "tsv" else "csv"
     mime = "text/tab-separated-values" if export_format == "tsv" else "text/csv"
     return StreamingResponse(
-        iter([buf.getvalue().encode("utf-8")]),
+        _stream_delimited_export(columns, delimiter, all_hits),
         media_type=mime,
         headers={"Content-Disposition": f'attachment; filename="{job_id}_results.{ext}"'},
     )
+
+
+def _stream_json_export(
+    job_id: str, export_format: str, key: str, all_hits: list[dict[str, Any]]
+) -> Iterator[bytes]:
+    """Yield the JSON export incrementally so the full payload is never
+    materialized twice (a 50K-hit export is ~50 MB; the previous
+    ``json.dumps`` + ``.encode`` held two copies at once). ``all_hits`` is
+    already in memory from parsing; this only avoids the duplicate
+    serialization buffer."""
+    import json
+
+    head = (
+        '{"job_id": '
+        + json.dumps(job_id)
+        + ', "format": '
+        + json.dumps(export_format)
+        + ', "'
+        + key
+        + '": ['
+    )
+    yield head.encode("utf-8")
+    for index, hit in enumerate(all_hits):
+        chunk = ("," if index else "") + json.dumps(hit, default=str)
+        yield chunk.encode("utf-8")
+    yield ('], "total": ' + str(len(all_hits)) + "}").encode("utf-8")
+
+
+def _stream_delimited_export(
+    columns: list[str], delimiter: str, all_hits: list[dict[str, Any]]
+) -> Iterator[bytes]:
+    """Yield CSV/TSV rows one at a time, reusing a single ``StringIO`` buffer
+    so peak memory stays at one row instead of the whole file. ``all_hits`` is
+    already parsed in memory; this removes the full-file ``StringIO`` copy."""
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=columns, delimiter=delimiter, extrasaction="ignore")
+    writer.writeheader()
+    yield buf.getvalue().encode("utf-8")
+    buf.seek(0)
+    buf.truncate(0)
+    for hit in all_hits:
+        writer.writerow(hit)
+        yield buf.getvalue().encode("utf-8")
+        buf.seek(0)
+        buf.truncate(0)
 
 
 def _normalise_results_export_format(format_value: str) -> str:
