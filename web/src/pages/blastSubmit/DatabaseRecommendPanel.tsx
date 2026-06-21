@@ -189,6 +189,17 @@ export function DatabaseRecommendPanel({
               {error}
             </div>
           )}
+          {loading && !error && (
+            <div
+              className="blast-db-reco__results blast-db-reco__skeleton"
+              aria-busy="true"
+              aria-label="Loading recommendation"
+            >
+              <div className="skeleton skeleton-line" style={{ width: "70%" }} />
+              <div className="skeleton skeleton-line" style={{ width: "85%" }} />
+              <div className="skeleton skeleton-line" style={{ width: "55%" }} />
+            </div>
+          )}
           {result && !error && (
             <div className="blast-db-reco__results">
               <SuggestionRow

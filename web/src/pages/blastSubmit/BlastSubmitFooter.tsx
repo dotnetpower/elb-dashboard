@@ -246,6 +246,11 @@ export function BlastSubmitFooter({
                   ? "Resolve blockers"
                   : "Run BLAST"}
             </span>
+            {!submitPending && !preFlightBlocked && (
+              <kbd className="blast-submit-kbd" aria-hidden="true">
+                Ctrl+↵
+              </kbd>
+            )}
           </button>
         </div>
       </div>

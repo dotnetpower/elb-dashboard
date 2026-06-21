@@ -8614,3 +8614,52 @@ select.terminal-cockpit__cfg-input {
   min-width: 0;
 }
 
+/* Submit button keyboard-shortcut hint badge (Ctrl/⌘ + Enter). Sits on the
+   accent-filled Run BLAST button, so it uses translucent white chrome. */
+.blast-submit-kbd {
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+/* DB recommendation loading skeleton wrapper. */
+.blast-db-reco__skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+/* ExamplePicker filter box (shown only for long preset lists). */
+.example-picker__search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border: 1px solid var(--border-weak);
+  border-radius: 999px;
+  color: var(--text-faint);
+  min-width: 150px;
+}
+.example-picker__search:focus-within {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.example-picker__search input {
+  all: unset;
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text);
+}
+.example-picker__search input::placeholder {
+  color: var(--text-faint);
+}
+

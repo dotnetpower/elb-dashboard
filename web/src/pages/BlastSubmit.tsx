@@ -431,6 +431,22 @@ export function BlastSubmit() {
       return;
     }
     if (!validation.canSubmit) {
+      // Jump the user to the first incomplete step so the missing field is on
+      // screen, not just named in a toast. readySteps order is
+      // [Config, Sequence, Database, Taxonomy, Cluster]; map the first failing
+      // one to its wizard step number (Database=2, Sequence=3, Taxonomy=4,
+      // Cluster=6) in visual order.
+      const rs = validation.readySteps;
+      const firstIncompleteStep = !rs[2]?.ok
+        ? 2
+        : !rs[1]?.ok
+          ? 3
+          : !rs[3]?.ok
+            ? 4
+            : !rs[4]?.ok
+              ? 6
+              : null;
+      if (firstIncompleteStep !== null) scrollToStep(firstIncompleteStep);
       toast(
         validation.missing[0]?.text ?? "Complete the required BLAST submit fields first.",
         "error",
@@ -490,6 +506,20 @@ export function BlastSubmit() {
     // handleSubmit closes over fresh form/validation state on every render,
     // so the listener naturally tracks the latest values.
   });
+
+  // Warn before unloading the tab while a submit is in flight so a refresh /
+  // close does not abandon an in-progress BLAST submission. Scoped to the
+  // pending window only (mirrors the OpenAPI deploy panel) so it never nags a
+  // user who is just editing the auto-saved draft.
+  useEffect(() => {
+    if (!submitMutation.isPending) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [submitMutation.isPending]);
 
   // Re-render the "Saved Ns ago" label every 15s.
   useEffect(() => {

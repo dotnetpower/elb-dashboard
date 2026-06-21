@@ -1,4 +1,5 @@
-import { Sparkles, Star } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Search, Sparkles, Star } from "lucide-react";
 import type { ExamplePreset } from "@/data/labToolExamples";
 
 interface Props<T> {
@@ -7,11 +8,27 @@ interface Props<T> {
   label?: string;
 }
 
+// Show the filter box only once the preset list is long enough to be worth
+// searching — for a handful of presets the buttons alone are faster.
+const SEARCH_THRESHOLD = 6;
+
 export function ExamplePicker<T>({
   examples,
   onSelect,
   label = "Try an example",
 }: Props<T>) {
+  const [query, setQuery] = useState("");
+  const showSearch = examples.length > SEARCH_THRESHOLD;
+  const trimmed = query.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!trimmed) return examples;
+    return examples.filter(
+      (ex) =>
+        ex.label.toLowerCase().includes(trimmed) ||
+        (ex.description ?? "").toLowerCase().includes(trimmed),
+    );
+  }, [examples, trimmed]);
+
   return (
     <div
       style={{
@@ -33,7 +50,20 @@ export function ExamplePicker<T>({
       >
         <Sparkles size={12} /> {label}
       </span>
-      {examples.map((ex) => (
+      {showSearch && (
+        <label className="example-picker__search">
+          <Search size={12} strokeWidth={1.5} aria-hidden="true" />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter examples…"
+            aria-label="Filter examples"
+            spellCheck={false}
+          />
+        </label>
+      )}
+      {filtered.map((ex) => (
         <button
           key={ex.id}
           type="button"
@@ -56,6 +86,11 @@ export function ExamplePicker<T>({
           )}
         </button>
       ))}
+      {showSearch && filtered.length === 0 && (
+        <span className="muted" style={{ fontSize: 11 }}>
+          No examples match “{query.trim()}”.
+        </span>
+      )}
     </div>
   );
 }
