@@ -55,6 +55,19 @@ from __future__ import annotations
 # self-heal that invalidates a pre-fix ``.download-complete`` warm cache missing
 # that index so already-warmed clusters re-stage it on the next warmup. See
 # docs/features_change/2026-06/2026-06-20-sharded-negative-taxids-not-nos-fix.md.
+# 4.27 == sibling watchdog now reclaims a dispatching/submitting job whose
+# in-process submit thread died (pod restart after the cluster was stopped
+# mid-submit) within one watchdog tick instead of after SUBMIT_STUCK_SECONDS
+# (2h), so post-stop/start zombies stop wedging the MAX_ACTIVE dispatcher
+# (fixes #62). Bounded by ELB_OPENAPI_SUBMIT_MAX_RETRIES; an alive (cold-staging)
+# submit thread is never touched. See
+# docs/features_change/2026-06/2026-06-21-openapi-dead-thread-slot-reclaim.md.
+# NOTE: sibling master has natively absorbed every patch the dashboard
+# patch-openapi-build-context.py used to inject (app + Dockerfile + the eta.py
+# overlay is now a tracked sibling file), so 4.27 was built directly from the
+# local sibling context (``az acr build --registry <acr> --image elb-openapi:4.27
+# ~/dev/elastic-blast-azure/docker-openapi``) -- the patch script's patch_app
+# anchors no longer match and it is effectively retired for this image.
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
@@ -74,7 +87,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.26",
+    "elb-openapi": "4.27",
 }
 
 # GitHub source repo for ACR Build Tasks.
