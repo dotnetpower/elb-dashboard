@@ -143,6 +143,7 @@ def blast_job_results_alignments(
     parsed_files = 0
     read_failures = 0
     hit_limit_reached = False
+    content_truncated = False
     blob_names: list[str] = []
     for blob_info in result_blobs[:RESULTS_MAX_FILES]:
         if len(all_hits) >= RESULTS_ALIGNMENTS_MAX_HITS:
@@ -160,6 +161,12 @@ def blast_job_results_alignments(
                 max_bytes=RESULTS_ALIGNMENTS_MAX_BYTES,
             )
             parsed_hits = parse_blast_result_content(content)
+            if len(content) >= RESULTS_ALIGNMENTS_MAX_BYTES - 4:
+                # The read filled the byte budget, so the BLAST output is
+                # larger than the cap and parse_blast_result_content sees a
+                # truncated tail (parse_blast_xml returns the hits before the
+                # cut). Flag the result partial so the UI says so honestly.
+                content_truncated = True
             remaining_hit_slots = RESULTS_ALIGNMENTS_MAX_HITS - len(all_hits)
             all_hits.extend(
                 annotate_result_hit(hit, blob_path) for hit in parsed_hits[:remaining_hit_slots]
@@ -236,7 +243,9 @@ def blast_job_results_alignments(
         "files_parsed": parsed_files,
         "total_files": len(result_blobs),
         "read_failures": read_failures,
-        "truncated": len(result_blobs) > RESULTS_MAX_FILES or hit_limit_reached,
+        "truncated": (
+            len(result_blobs) > RESULTS_MAX_FILES or hit_limit_reached or content_truncated
+        ),
         "hit_limit_reached": hit_limit_reached,
         "filters": {
             "query_id": qid_filter or None,
@@ -329,6 +338,7 @@ def blast_job_results_taxonomy(
     all_hits: list[dict[str, Any]] = []
     parsed_files = 0
     read_failures = 0
+    content_truncated = False
     for blob_info in result_blobs[:RESULTS_MAX_FILES]:
         if len(all_hits) >= RESULTS_ALIGNMENTS_MAX_HITS:
             break
@@ -344,6 +354,8 @@ def blast_job_results_taxonomy(
                 max_bytes=RESULTS_ALIGNMENTS_MAX_BYTES,
             )
             parsed_hits = parse_blast_result_content(content)
+            if len(content) >= RESULTS_ALIGNMENTS_MAX_BYTES - 4:
+                content_truncated = True
             remaining = RESULTS_ALIGNMENTS_MAX_HITS - len(all_hits)
             all_hits.extend(annotate_result_hit(hit, blob_path) for hit in parsed_hits[:remaining])
             parsed_files += 1
@@ -402,7 +414,7 @@ def blast_job_results_taxonomy(
         "files_parsed": parsed_files,
         "total_files": len(result_blobs),
         "read_failures": read_failures,
-        "truncated": len(result_blobs) > RESULTS_MAX_FILES,
+        "truncated": len(result_blobs) > RESULTS_MAX_FILES or content_truncated,
         "lineage": lineage_meta,
     }
 
