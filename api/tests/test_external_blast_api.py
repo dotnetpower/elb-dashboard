@@ -1077,7 +1077,7 @@ def test_external_blast_list_uses_short_timeout(monkeypatch) -> None:
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def get(self, _path: str) -> object:
+        def get(self, _path: str, **_kwargs: object) -> object:
             raise httpx.ReadTimeout("slow list endpoint")
 
     monkeypatch.setattr(external_blast.httpx, "Client", FakeClient)
@@ -1088,6 +1088,45 @@ def test_external_blast_list_uses_short_timeout(monkeypatch) -> None:
     assert captured["timeout"] == external_blast._LIST_TIMEOUT_SECONDS
     assert raised.value.status_code == 503
     assert raised.value.detail["code"] == "openapi_unreachable"
+
+
+def test_list_jobs_forwards_limit_query(monkeypatch) -> None:
+    """#51: list_jobs forwards ``?limit=`` to /v1/jobs so the fetch is bounded;
+    omitting it keeps the legacy unbounded call. An older sibling ignores the
+    unknown param and returns the full list, so passing it is always safe.
+    """
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "_base_url", lambda *a, **k: "http://openapi")
+    monkeypatch.setattr(external_blast, "_headers", lambda **k: {})
+
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["limit"] = request.url.params.get("limit")
+        return httpx.Response(
+            200, json={"jobs": [{"job_id": "j1"}], "count": 1, "next_cursor": "abc"}
+        )
+
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(external_blast.httpx, "Client", client_factory)
+
+    # With a limit -> ?limit= present, and the jobs payload is returned as-is.
+    out = external_blast.list_jobs(base_url="http://openapi", api_token=None, limit=20)
+    assert out["jobs"] == [{"job_id": "j1"}]
+    assert captured["path"] == "/v1/jobs"
+    assert captured["limit"] == "20"
+
+    # Without a limit -> no limit param (legacy unbounded call preserved).
+    captured.clear()
+    external_blast.list_jobs(base_url="http://openapi", api_token=None)
+    assert captured["limit"] is None
 
 
 def test_external_blast_facade_list_is_cached(monkeypatch) -> None:
@@ -1118,6 +1157,34 @@ def test_external_blast_facade_list_is_cached(monkeypatch) -> None:
     assert second.json() == first.json()
     # Both polls share the TTL cache → exactly one upstream round-trip.
     assert hits["count"] == 1
+
+
+def test_external_blast_facade_list_passes_limit(monkeypatch) -> None:
+    """#51: the facade forwards ``?limit=`` to the sibling ``/v1/jobs`` fetch so
+    external discovery is bounded. An older sibling without pagination ignores
+    the unknown query param and returns the full list (degrades cleanly).
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+    from api.services.blast.external_jobs import _reset_external_jobs_cache
+
+    _reset_external_jobs_cache()
+    seen: dict = {}
+
+    def list_jobs(**kwargs):
+        seen.update(kwargs)
+        return {"jobs": [{"job_id": "facade-1"}], "count": 1}
+
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
+    client = TestClient(app)
+
+    resp = client.get("/api/v1/elastic-blast/jobs?limit=5")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"jobs": [{"job_id": "facade-1"}], "count": 1}
+    assert seen.get("limit") == 5
+    _reset_external_jobs_cache()
 
 
 def test_external_blast_facade_list_caches_upstream_failure(monkeypatch) -> None:
@@ -1256,7 +1323,7 @@ def test_canonical_jobs_list_merges_external_when_table_unconfigured(monkeypatch
     monkeypatch.setattr(
         external_blast,
         "list_jobs",
-        lambda: {
+        lambda **_kwargs: {
             "jobs": [
                 {
                     "job_id": "aaaaaaaaaaaa",
@@ -1326,6 +1393,9 @@ def test_canonical_jobs_list_uses_cluster_openapi_context(monkeypatch):
     assert captured == {
         "base_url": "http://elb-cluster.rg-elb-01.sub-1",
         "api_token": "cluster-token",
+        # #51: the route bounds the external fetch to one page (default 50 + 1
+        # has_more probe).
+        "limit": 51,
     }
     body = response.json()
     assert body["jobs"][0]["job_id"] == "bbbbbbbbbbbb"
@@ -1766,6 +1836,8 @@ def test_canonical_jobs_list_enriches_external_rows_with_detail(monkeypatch):
     assert captured["list"] == {
         "base_url": "http://elb-cluster.rg-elb-01.sub-1",
         "api_token": "cluster-token",
+        # #51: external fetch bounded to one page (default 50 + 1 probe).
+        "limit": 51,
     }
     assert captured["get"] == {
         "job_id": "cccccccccccc",
@@ -2885,7 +2957,7 @@ def test_canonical_jobs_list_reports_external_detail_code(monkeypatch):
         def list_for_owner(self, *_args, **_kwargs):
             return []
 
-    def list_jobs_unavailable():
+    def list_jobs_unavailable(**_kwargs):
         raise HTTPException(
             502,
             detail={"code": "openapi_upstream_error", "message": "bad gateway"},
@@ -2923,7 +2995,7 @@ def test_canonical_jobs_list_silent_when_external_not_configured(monkeypatch):
         def list_for_owner(self, *_args, **_kwargs):
             return []
 
-    def list_jobs_not_configured():
+    def list_jobs_not_configured(**_kwargs):
         raise HTTPException(
             503,
             detail={
@@ -2966,7 +3038,7 @@ def test_canonical_jobs_list_silent_for_every_not_enabled_reason(monkeypatch, re
         def list_for_owner(self, *_args, **_kwargs):
             return []
 
-    def list_jobs_not_enabled():
+    def list_jobs_not_enabled(**_kwargs):
         raise HTTPException(
             503,
             detail={"code": reason_code, "message": f"{reason_code} active"},
@@ -3442,7 +3514,7 @@ class _FakeReadyClient:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def get(self, path: str) -> httpx.Response:
+    def get(self, path: str, **_kwargs: object) -> httpx.Response:
         self.captured["path"] = path
         if self._exc is not None:
             raise self._exc
@@ -3551,7 +3623,7 @@ class _SequencedReadyClient:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def get(self, path: str) -> httpx.Response:
+    def get(self, path: str, **_kwargs: object) -> httpx.Response:
         idx = min(self.calls, len(self._statuses) - 1)
         status = self._statuses[idx]
         payload = self._payloads[idx]
@@ -3731,7 +3803,7 @@ def test_external_blast_ready_inflight_serialises_concurrent_callers(
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def get(self, _path: str) -> httpx.Response:
+        def get(self, _path: str, **_kwargs: object) -> httpx.Response:
             with call_lock:
                 call_count["n"] += 1
             leader_in.set()

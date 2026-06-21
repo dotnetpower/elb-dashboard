@@ -608,6 +608,7 @@ def list_jobs(
     subscription_id: str = "",
     resource_group: str = "",
     cluster_name: str = "",
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """List all jobs tracked by the external ElasticBLAST OpenAPI service.
 
@@ -617,6 +618,16 @@ def list_jobs(
 
     Supplying the cluster context resolves the per-cluster base URL + token
     (#26); empty context keeps the legacy global-key resolution.
+
+    ``limit`` (#51) bounds the fetch to the most-recent N jobs once the sibling
+    supports `/v1/jobs?limit=` (commit ``2da82ca2``). An older sibling simply
+    ignores the unknown query param and returns the full list, so passing it is
+    always safe (degrades cleanly). The ``next_cursor`` the sibling returns
+    alongside is intentionally not consumed here: discovered external rows are
+    upserted into the local Table by ``collect_and_sync_external_jobs`` and then
+    served by the bounded local time-ordered index (#50), so the local index is
+    the effective combined cursor — a bounded discovery fetch is all that is
+    needed from the external side.
     """
 
     resolved_base = _base_url(
@@ -625,6 +636,9 @@ def list_jobs(
         resource_group=resource_group,
         cluster_name=cluster_name,
     )
+    params: dict[str, Any] = {}
+    if isinstance(limit, int) and limit > 0:
+        params["limit"] = limit
     try:
         resp = _request_with_token_resync(
             base_url=resolved_base,
@@ -633,7 +647,7 @@ def list_jobs(
             subscription_id=subscription_id,
             resource_group=resource_group,
             cluster_name=cluster_name,
-            send=lambda client: client.get("/v1/jobs"),
+            send=lambda client: client.get("/v1/jobs", params=params),
             label="list_jobs",
         )
         resp.raise_for_status()

@@ -449,6 +449,11 @@ def _compute_blast_jobs_response(
                 detail_enrich_budget=min(
                     _EXTERNAL_DETAIL_ENRICH_LIMIT, max(0, fetch_limit - len(jobs))
                 ),
+                # #51: bound the external /v1/jobs fetch to ~one page instead of
+                # pulling the full cluster list every poll. Discovered rows still
+                # sync into the local Table, so the bounded local index (#50)
+                # remains the source of truth for pagination.
+                limit=fetch_limit,
             )
 
             for ext_row in sync.rows:
