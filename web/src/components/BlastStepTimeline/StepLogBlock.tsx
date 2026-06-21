@@ -1,5 +1,16 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle, Check, Copy, Download, Search, XCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Clock,
+  Copy,
+  Download,
+  Minus,
+  Plus,
+  Search,
+  WrapText,
+  XCircle,
+} from "lucide-react";
 
 import { useTransientState } from "../../hooks/useTransientState";
 import type { StepState } from "./constants";
@@ -20,6 +31,11 @@ type RenderGroup =
   | { kind: "noise"; lines: ParsedLogLine[] };
 
 const MIN_NOISE_RUN = 3;
+
+// Reader font-size steps (px) the user can cycle through with the A-/A+
+// controls. Index 1 is the default; clamped to the array bounds.
+const FONT_SIZE_STEPS_PX = [10.5, 11.5, 12.5, 14] as const;
+const DEFAULT_FONT_STEP = 1;
 
 const SEVERITY_CLASS: Record<ParsedLogLine["severity"], string> = {
   error: "step-log-text step-log-text--error",
@@ -103,6 +119,14 @@ export function StepLogBlock({
   const [copied, flashCopied] = useTransientState(false);
   const [filter, setFilter] = useState<LogFilter>("all");
   const [query, setQuery] = useState("");
+  // Reader preferences (local to this step's log block):
+  //  - wrap: soft-wrap long lines (default) vs. horizontal scroll;
+  //  - fontStep: index into FONT_SIZE_STEPS_PX;
+  //  - showTs: show/hide the per-line timestamp column.
+  const [wrap, setWrap] = useState(true);
+  const [fontStep, setFontStep] = useState(DEFAULT_FONT_STEP);
+  const [showTs, setShowTs] = useState(true);
+  const fontSizePx = FONT_SIZE_STEPS_PX[fontStep] ?? FONT_SIZE_STEPS_PX[DEFAULT_FONT_STEP];
 
   const { summary, detail, counts } = useMemo(() => {
     const lines = parseStepLog(log);
@@ -163,7 +187,14 @@ export function StepLogBlock({
   const listId = `step-log-${stepKey}`;
 
   return (
-    <div className="step-log-block" data-state={state} id={listId}>
+    <div
+      className="step-log-block"
+      data-state={state}
+      data-wrap={wrap ? "on" : "off"}
+      data-ts={showTs ? "on" : "off"}
+      id={listId}
+      style={{ ["--step-log-fs" as string]: `${fontSizePx}px` }}
+    >
       <div className="step-log-summary">
         <span>{summaryText || (hasDetail ? "" : "\u00A0")}</span>
         <div className="step-log-tools">
@@ -247,6 +278,52 @@ export function StepLogBlock({
                   spellCheck={false}
                 />
               </label>
+              <div className="step-log-view" role="group" aria-label="Log view options">
+                <button
+                  type="button"
+                  className="step-log-chip step-log-chip--icon"
+                  aria-pressed={!wrap}
+                  title={wrap ? "Disable line wrap (scroll horizontally)" : "Enable line wrap"}
+                  onClick={() => setWrap((v) => !v)}
+                >
+                  <WrapText size={12} strokeWidth={1.6} aria-hidden="true" />
+                  <span className="sr-only">Toggle line wrap</span>
+                </button>
+                <button
+                  type="button"
+                  className="step-log-chip step-log-chip--icon"
+                  aria-pressed={!showTs}
+                  title={showTs ? "Hide timestamps" : "Show timestamps"}
+                  onClick={() => setShowTs((v) => !v)}
+                >
+                  <Clock size={12} strokeWidth={1.6} aria-hidden="true" />
+                  <span className="sr-only">Toggle timestamps</span>
+                </button>
+                <span className="step-log-fontsize">
+                  <button
+                    type="button"
+                    className="step-log-chip step-log-chip--icon"
+                    title="Smaller text"
+                    disabled={fontStep <= 0}
+                    onClick={() => setFontStep((s) => Math.max(0, s - 1))}
+                  >
+                    <Minus size={12} strokeWidth={1.6} aria-hidden="true" />
+                    <span className="sr-only">Decrease log font size</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="step-log-chip step-log-chip--icon"
+                    title="Larger text"
+                    disabled={fontStep >= FONT_SIZE_STEPS_PX.length - 1}
+                    onClick={() =>
+                      setFontStep((s) => Math.min(FONT_SIZE_STEPS_PX.length - 1, s + 1))
+                    }
+                  >
+                    <Plus size={12} strokeWidth={1.6} aria-hidden="true" />
+                    <span className="sr-only">Increase log font size</span>
+                  </button>
+                </span>
+              </div>
             </div>
           )}
           <ol

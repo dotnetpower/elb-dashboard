@@ -6086,7 +6086,7 @@ button.blast-db-table__row:focus-visible {
   gap: 0;
   line-height: 1.55;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: var(--step-log-fs, 11.5px);
   list-style: none;
 }
 .step-log-line:nth-child(even of .step-log-line) {
@@ -6237,6 +6237,39 @@ button.blast-db-table__row:focus-visible {
 .step-log-filter {
   display: inline-flex;
   gap: 4px;
+}
+/* Reader view controls: wrap toggle, timestamp toggle, font-size stepper. */
+.step-log-view {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.step-log-fontsize {
+  display: inline-flex;
+  gap: 2px;
+}
+.step-log-chip--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 7px;
+  line-height: 0;
+}
+/* No-wrap mode: long lines scroll horizontally instead of soft-wrapping. */
+.step-log-block[data-wrap="off"] .step-log-lines {
+  overflow-x: auto;
+}
+.step-log-block[data-wrap="off"] .step-log-text {
+  white-space: pre;
+  word-break: normal;
+}
+.step-log-block[data-wrap="off"] .step-log-row {
+  text-indent: 0;
+  padding-left: 8px;
+}
+/* Timestamp column visibility toggle. */
+.step-log-block[data-ts="off"] .step-log-ts {
+  display: none;
 }
 .step-log-chip {
   padding: 2px 10px;
@@ -8550,3 +8583,34 @@ select.terminal-cockpit__cfg-input {
 :where(.panel-whisper, .panel-whisper span, .panel-whisper__btn) {
   font-size: var(--font-size-small) !important;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Accessibility + shared utilities (app-wide)
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Global reduced-motion guard. The app already disables specific infinite
+   animations in targeted places; this is the broad safety net so EVERY
+   animation/transition collapses to near-instant and smooth-scroll is
+   disabled for users who ask the OS for reduced motion. Motion is removed,
+   never function — transitions still "complete", just instantly. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Single-line truncation utility: clips overflow and adds an ellipsis while
+   keeping the full value available via the element's native `title`. Pair
+   with a `title={value}` attribute so the elided text stays discoverable. */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
