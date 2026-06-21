@@ -88,6 +88,7 @@ def jobs_list_cache_key(
     resource_group: str,
     cluster_name: str,
     shared_visibility: bool,
+    cursor: str = "",
 ) -> str:
     return json.dumps(
         {
@@ -97,6 +98,9 @@ def jobs_list_cache_key(
             "resource_group": resource_group,
             "cluster_name": cluster_name,
             "shared_visibility": shared_visibility,
+            # #50/#51: each cursor page is a distinct SWR cache entry so a
+            # paginated request never serves another page's cached payload.
+            "cursor": cursor,
         },
         sort_keys=True,
         separators=(",", ":"),

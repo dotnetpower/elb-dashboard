@@ -50,9 +50,11 @@ def build_page(
     for, ``returned`` is how many items this page actually carries, and
     ``has_more`` signals whether at least one more item exists beyond this page
     (the list route derives it with a fetch-one-extra probe so it stays honest
-    without a server-side ordered index). ``next_cursor`` is reserved for true
-    cursor pagination once a time-ordered secondary index lands; it is omitted
-    while None so the shape stays clean until then.
+    without a server-side ordered index). ``next_cursor`` carries the keyset of
+    the last emitted row for true cursor pagination, served by the BLAST jobs
+    list route off the time-ordered index (#50/#51) when the index flag is on;
+    it is omitted while None so the shape stays clean for callers that do not
+    paginate (scoped listings and the flag-off path).
     """
 
     page: dict[str, Any] = {

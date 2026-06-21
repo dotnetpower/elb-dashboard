@@ -376,6 +376,152 @@ def test_jobs_list_page_envelope_has_more_false_on_last_page(monkeypatch) -> Non
     assert seen["limit"] == 6
 
 
+def _cursor_route_setup(monkeypatch, *, row_count: int):
+    """Wire a fake repo whose ``list_owner_page`` honours the keyset cursor.
+
+    ``rows`` are newest-first (``job-0`` is the latest ``created_at``). The fake
+    mirrors the real repo: the first page (empty cursor) goes through
+    ``list_for_owner`` while a non-empty cursor steers ``list_owner_page`` and
+    filters ``RowKey gt cursor`` (i.e. strictly older than the boundary). The
+    time-index flag is forced ON so the route emits ``next_cursor``.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+
+    import api.services.blast.jobs_list_cache as cache_mod
+    import api.services.state_repo as state_repo_mod
+    from api.routes.blast import jobs as jobs_mod
+    from api.services.state.time_index import decode_cursor, row_key
+
+    cache_mod.reset_jobs_list_cache()
+
+    rows = [
+        SimpleNamespace(
+            job_id=f"job-{i}",
+            type="blast",
+            status="completed",
+            phase="completed",
+            owner_oid="00000000-0000-0000-0000-000000000000",
+            created_at=f"2026-06-{(row_count - i):02d}T00:00:00Z",
+        )
+        for i in range(row_count)
+    ]
+    # Index order: ascending RowKey == newest-first (inverted ticks).
+    indexed = sorted(rows, key=lambda r: row_key(r.created_at, r.job_id))
+    calls: dict[str, object] = {}
+
+    class Repo:
+        def list_for_owner(self, owner_oid, limit=50, *, include_payload=True):
+            calls["first_page_limit"] = limit
+            return indexed[:limit]
+
+        def list_owner_page(
+            self, owner_oid, *, limit=50, include_payload=True, cursor=""
+        ):
+            calls["cursor"] = cursor
+            calls["page_limit"] = limit
+            boundary = decode_cursor(cursor)
+            window = (
+                [r for r in indexed if row_key(r.created_at, r.job_id) > boundary]
+                if boundary
+                else indexed
+            )
+            return window[:limit], None
+
+    monkeypatch.setattr(state_repo_mod, "get_state_repo", lambda: Repo())
+    monkeypatch.setattr(
+        jobs_mod,
+        "_local_to_blast_job",
+        lambda row, **_kwargs: {
+            "job_id": row.job_id,
+            "status": row.status,
+            "created_at": row.created_at,
+        },
+    )
+    monkeypatch.setattr(jobs_mod, "_local_state_matches_job_scope", lambda *a, **k: True)
+    monkeypatch.setattr(
+        jobs_mod, "_local_list_row_may_have_split_children", lambda _row: False
+    )
+    monkeypatch.setattr(jobs_mod, "_blocked_refresh_reasons", lambda _rows: {})
+    monkeypatch.setattr(
+        jobs_mod,
+        "collect_and_sync_external_jobs",
+        lambda **_kwargs: SimpleNamespace(
+            rows=[], tombstoned_ids=set(), any_target_ok=True, target_failures=[]
+        ),
+    )
+
+    from api.main import app
+
+    return TestClient(app), calls, rows
+
+
+def test_jobs_list_emits_next_cursor_keyset_of_last_row(monkeypatch) -> None:
+    """With the time index on, a full page carries ``next_cursor`` equal to the
+    keyset (encoded RowKey) of the LAST displayed row, not the fetch cursor."""
+    from api.services.state.time_index import encode_cursor, row_key
+
+    client, calls, rows = _cursor_route_setup(monkeypatch, row_count=5)
+
+    body = client.get("/api/blast/jobs", params={"limit": 2}).json()
+
+    assert [j["job_id"] for j in body["jobs"]] == ["job-0", "job-1"]
+    assert body["page"]["has_more"] is True
+    expected = encode_cursor(row_key(rows[1].created_at, "job-1"))
+    assert body["page"]["next_cursor"] == expected
+    # First page goes through list_for_owner (cursor empty → not paginating).
+    assert "cursor" not in calls
+
+
+def test_jobs_list_cursor_page_continues_without_overlap(monkeypatch) -> None:
+    """Passing the prior page's ``next_cursor`` steers ``list_owner_page`` and
+    returns strictly-older rows — no overlap with, and no gap after, page one."""
+    from api.services.state.time_index import encode_cursor, row_key
+
+    client, calls, rows = _cursor_route_setup(monkeypatch, row_count=5)
+
+    cursor = encode_cursor(row_key(rows[1].created_at, "job-1"))
+    body = client.get(
+        "/api/blast/jobs", params={"limit": 2, "cursor": cursor}
+    ).json()
+
+    # Page two = the next two strictly-older rows, no overlap with [job-0, job-1].
+    assert [j["job_id"] for j in body["jobs"]] == ["job-2", "job-3"]
+    assert body["page"]["has_more"] is True
+    assert calls["cursor"] == cursor
+    # next_cursor advances to the last displayed row of page two.
+    assert body["page"]["next_cursor"] == encode_cursor(
+        row_key(rows[3].created_at, "job-3")
+    )
+
+
+def test_jobs_list_no_next_cursor_when_index_disabled(monkeypatch) -> None:
+    """With the time-index flag OFF the route never emits ``next_cursor`` even
+    when ``has_more`` is true — pagination stays first-page-only."""
+    monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
+    client, _seen = _pagination_route_setup(monkeypatch, row_count=3)
+
+    body = client.get("/api/blast/jobs", params={"limit": 2}).json()
+
+    assert body["page"]["has_more"] is True
+    assert "next_cursor" not in body["page"]
+
+
+def test_jobs_list_scoped_listing_has_no_cursor(monkeypatch) -> None:
+    """A scoped listing (mutable-column scan) is first-page-only: it ignores an
+    inbound cursor and never emits ``next_cursor`` even with the index flag on."""
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    client, _seen = _pagination_route_setup(monkeypatch, row_count=3)
+
+    body = client.get(
+        "/api/blast/jobs",
+        params={"limit": 2, "cluster_name": "elb-cluster-01", "cursor": "x"},
+    ).json()
+
+    assert body["page"]["has_more"] is True
+    assert "next_cursor" not in body["page"]
+
+
 def _query_route_repo(payload: dict, *, storage_account: str = "elbstg01"):
     """Build a fake repo whose ``get`` returns a single owned state row."""
     owner_oid = "00000000-0000-0000-0000-000000000000"

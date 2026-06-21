@@ -59,6 +59,28 @@ def test_get_returns_isolated_dict() -> None:
     assert second == {"jobs": [{"id": 1}]}
 
 
+def test_cursor_distinguishes_cache_key() -> None:
+    """Each cursor page is a distinct cache entry so a paginated request never
+    serves another page's payload (#50/#51 C10)."""
+    base = dict(
+        caller_oid="a",
+        limit=50,
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="cl",
+        shared_visibility=False,
+    )
+    first_page = jobs_list_cache_key(**base)
+    same_first = jobs_list_cache_key(**base, cursor="")
+    second_page = jobs_list_cache_key(**base, cursor="CURSOR_PAGE_2")
+    third_page = jobs_list_cache_key(**base, cursor="CURSOR_PAGE_3")
+
+    # Empty cursor is the default → identical to the no-cursor call (back-compat).
+    assert first_page == same_first
+    # Distinct cursors → distinct keys, so pages cannot collide in the cache.
+    assert len({first_page, second_page, third_page}) == 3
+
+
 def test_ttl_expiry(monkeypatch) -> None:
     clock = {"now": 1000.0}
     monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock["now"])

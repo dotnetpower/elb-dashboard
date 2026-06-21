@@ -57,6 +57,12 @@ from api.services.response_contracts import (
     build_page,
     request_id_from_scope,
 )
+from api.services.state.time_index import (
+    decode_cursor,
+    encode_cursor,
+    row_key,
+    time_index_enabled,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -123,6 +129,7 @@ def blast_jobs_list(
     request: Request,
     background_tasks: BackgroundTasks,
     limit: int = Query(default=50, ge=1, le=500),
+    cursor: str = Query(default=""),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     cluster_name: str = Query(default=""),
@@ -148,6 +155,7 @@ def blast_jobs_list(
         resource_group=resource_group,
         cluster_name=cluster_name,
         shared_visibility=shared_visibility,
+        cursor=cursor,
     )
     request_id = request_id_from_scope(request)
     cached, is_stale = jobs_list_cache_get_swr(cache_key)
@@ -169,6 +177,7 @@ def blast_jobs_list(
                 cluster_name=cluster_name,
                 shared_visibility=shared_visibility,
                 request_id=request_id,
+                cursor=cursor,
             )
         return cached
 
@@ -195,6 +204,7 @@ def blast_jobs_list(
         cluster_name=cluster_name,
         shared_visibility=shared_visibility,
         request_id=request_id,
+        cursor=cursor,
         skip_enrichment=True,
     )
     if fast_response.get("jobs"):
@@ -211,6 +221,7 @@ def blast_jobs_list(
                 cluster_name=cluster_name,
                 shared_visibility=shared_visibility,
                 request_id=request_id,
+                cursor=cursor,
             )
         return fast_response
 
@@ -223,6 +234,7 @@ def blast_jobs_list(
         cluster_name=cluster_name,
         shared_visibility=shared_visibility,
         request_id=request_id,
+        cursor=cursor,
     )
     jobs_list_cache_set(cache_key, response)
     return response
@@ -239,6 +251,7 @@ def _revalidate_blast_jobs_list(
     cluster_name: str,
     shared_visibility: bool,
     request_id: str,
+    cursor: str = "",
 ) -> None:
     """Background stale-while-revalidate rebuild of one jobs-list cache entry.
 
@@ -257,6 +270,7 @@ def _revalidate_blast_jobs_list(
             cluster_name=cluster_name,
             shared_visibility=shared_visibility,
             request_id=request_id,
+            cursor=cursor,
         )
         jobs_list_cache_set(cache_key, response)
     except Exception as exc:
@@ -277,6 +291,7 @@ def _compute_blast_jobs_response(
     cluster_name: str,
     shared_visibility: bool,
     request_id: str,
+    cursor: str = "",
     skip_enrichment: bool = False,
 ) -> dict[str, Any]:
     """Build the BLAST jobs-list response payload (no caching side effects).
@@ -305,11 +320,24 @@ def _compute_blast_jobs_response(
     # exceeds ``limit`` there is at least one more page. The extra row is
     # dropped by the final ``jobs[:limit]`` slice and never reaches the client.
     fetch_limit = limit + 1
+    scoped_listing = bool(subscription_id or resource_group or cluster_name)
+    # Keyset pagination is index-only and owner/all-scope-only. The time-ordered
+    # index keys on the immutable (owner_oid, created_at) pair; ``list_for_scope``
+    # is a mutable-column scan (cluster_name/subscription_id/resource_group can be
+    # rewritten by ``update()``), so a scoped listing can only serve the first
+    # page and reports ``next_cursor=None``. A non-empty ``cursor`` therefore
+    # only steers the owner/all branches, and only when the index flag is on.
+    paginating = bool(cursor) and time_index_enabled() and not scoped_listing
+    # Decode the keyset boundary once so external rows newer-than-or-equal to it
+    # (i.e. already shown on a previous page) are dropped from a cursor page.
+    # The local index page is already filtered by ``RowKey gt cursor``; without
+    # this, the unbounded external /v1/jobs merge would re-add the newest jobs
+    # on top of every subsequent page and break keyset pagination with dupes.
+    cursor_boundary = decode_cursor(cursor) if paginating else ""
     try:
         from api.services.state_repo import get_state_repo
 
         repo = get_state_repo()
-        scoped_listing = bool(subscription_id or resource_group or cluster_name)
         if scoped_listing and hasattr(repo, "list_for_scope"):
             source_rows = repo.list_for_scope(
                 subscription_id=subscription_id,
@@ -321,11 +349,24 @@ def _compute_blast_jobs_response(
         elif shared_visibility and hasattr(repo, "list_all"):
             # Dev-stage owner-agnostic listing: Recent searches shows every
             # submitter's jobs. Gated by BLAST_JOBS_SHARED_VISIBILITY.
-            source_rows = repo.list_all(limit=fetch_limit, include_payload=False)
+            if paginating and hasattr(repo, "list_all_page"):
+                source_rows, _ = repo.list_all_page(
+                    limit=fetch_limit, include_payload=False, cursor=cursor
+                )
+            else:
+                source_rows = repo.list_all(limit=fetch_limit, include_payload=False)
         else:
-            source_rows = repo.list_for_owner(
-                caller_oid, limit=fetch_limit, include_payload=False
-            )
+            if paginating and hasattr(repo, "list_owner_page"):
+                source_rows, _ = repo.list_owner_page(
+                    caller_oid,
+                    limit=fetch_limit,
+                    include_payload=False,
+                    cursor=cursor,
+                )
+            else:
+                source_rows = repo.list_for_owner(
+                    caller_oid, limit=fetch_limit, include_payload=False
+                )
         rows = [
             row
             for row in source_rows
@@ -462,6 +503,17 @@ def _compute_blast_jobs_response(
                     # Soft-deleted in our Table; suppress from the list view
                     # so the row stays gone after the user's delete click.
                     continue
+                if cursor_boundary:
+                    # Cursor page: skip external rows at-or-newer-than the page
+                    # boundary (RowKey <= cursor). The local index already
+                    # filtered to RowKey gt cursor; these rows were shown on an
+                    # earlier page, so re-merging them would duplicate.
+                    try:
+                        ext_key = row_key(str(ext_row.get("created_at") or ""), job_id)
+                    except Exception:
+                        ext_key = ""
+                    if ext_key and ext_key <= cursor_boundary:
+                        continue
                 jobs.append(_external_to_blast_job(ext_row))
 
             # Surface external_degraded only when EVERY target failed (none
@@ -487,12 +539,30 @@ def _compute_blast_jobs_response(
     jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
     has_more = len(jobs) > limit
     page_jobs = jobs[:limit]
+    # Keyset cursor for the NEXT page: the (created_at, job_id) of the last row
+    # actually shown. External OpenAPI rows are synced into the local Table, so
+    # they re-enter the time index and the keyset stays the single source of
+    # truth across both sources. Only emitted for owner/all listings with the
+    # index flag on — scoped (mutable-column scan) listings stay first-page-only.
+    next_cursor: str | None = None
+    if has_more and page_jobs and not scoped_listing and time_index_enabled():
+        last = page_jobs[-1]
+        try:
+            next_cursor = encode_cursor(
+                row_key(
+                    str(last.get("created_at") or ""),
+                    str(last.get("job_id") or ""),
+                )
+            )
+        except Exception:
+            next_cursor = None
     response: dict[str, Any] = {
         "jobs": page_jobs,
         "page": build_page(
             limit=limit,
             returned=len(page_jobs),
             has_more=has_more,
+            next_cursor=next_cursor,
         ),
         "meta": build_meta(request_id=request_id),
     }
