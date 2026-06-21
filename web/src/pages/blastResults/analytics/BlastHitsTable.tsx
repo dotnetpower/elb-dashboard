@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   ExternalLink,
@@ -52,6 +52,12 @@ export interface BlastHitsTableProps {
 
 /** Collapse a subject Description longer than this many characters. */
 const DESCRIPTION_COLLAPSE_THRESHOLD = 100;
+
+// Incremental row windowing (#29): initial rows painted, then more per
+// sentinel intersection. Rows are far cheaper than the Alignments cards, so
+// the batches are larger.
+const INITIAL_ROWS = 60;
+const ROW_STEP = 60;
 
 /**
  * Pure truncation decision for a subject Description, extracted so the
@@ -188,6 +194,40 @@ export function BlastHitsTable({
     }
     return buildSubjectAggregates(hits);
   }, [serverAggregates, hits]);
+
+  // Incremental row windowing (#29): a large hit set (high max_target_seqs /
+  // full-DB search) is many DOM rows. Render an initial batch and mount more
+  // as a sentinel below the table scrolls into view. Sorting / filtering /
+  // selection all operate on the full `hits` array upstream, so this only
+  // bounds what is painted — never what is sorted or selected.
+  const [visibleCount, setVisibleCount] = useState(INITIAL_ROWS);
+  const rowSentinelRef = useRef<HTMLDivElement | null>(null);
+  // Reset the window whenever the hit set changes identity (sort apply, page
+  // change, refetch). useBlastAnalyticsState returns a fresh array each time.
+  useEffect(() => {
+    setVisibleCount(INITIAL_ROWS);
+  }, [hits]);
+  useEffect(() => {
+    const node = rowSentinelRef.current;
+    if (!node) return;
+    if (visibleCount >= hits.length) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setVisibleCount(hits.length);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisibleCount((current) => Math.min(current + ROW_STEP, hits.length));
+        }
+      },
+      { rootMargin: "600px 0px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [visibleCount, hits.length]);
+  const visibleHits = hits.slice(0, visibleCount);
+  const hasMoreRows = visibleCount < hits.length;
 
   const handleHeaderSort = (column: HitSortBy) => {
     if (applied.sortBy === column) {
@@ -388,7 +428,7 @@ export function BlastHitsTable({
             </tr>
           </thead>
           <tbody>
-            {hits.map((hit) => {
+            {visibleHits.map((hit) => {
               const key = hitKey(hit);
               const checked = selectedHits.has(key);
               const aggregate = subjectAggregates.get(hit.sseqid);
@@ -634,6 +674,24 @@ export function BlastHitsTable({
           </tbody>
         </table>
         </ScrollShadow>
+        {hasMoreRows && (
+          <div
+            ref={rowSentinelRef}
+            aria-hidden="true"
+            style={{ height: 1 }}
+          />
+        )}
+        {hits.length > INITIAL_ROWS && (
+          <p
+            className="muted"
+            style={{ margin: "8px 2px 0", fontSize: 11, textAlign: "center" }}
+            aria-live="polite"
+          >
+            Showing {visibleHits.length.toLocaleString()} of{" "}
+            {hits.length.toLocaleString()} hits
+            {hasMoreRows ? " — scroll for more" : ""}
+          </p>
+        )}
       </div>
       {activeTaxon && (
         <TaxonomyDetailModal
