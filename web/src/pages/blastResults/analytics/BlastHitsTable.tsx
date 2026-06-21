@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import type { BlastHit } from "@/api/endpoints";
+import { ScrollShadow } from "@/components/ScrollShadow";
 import { TaxonomyDetailModal } from "@/components/taxonomy/TaxonomyDetailModal";
 import { Tooltip } from "@/components/Tooltip";
 import {
@@ -217,7 +218,7 @@ export function BlastHitsTable({
           }
         />
       )}
-      <div style={{ padding: 16, overflowX: "auto" }}>
+      <div style={{ padding: 16 }}>
         {showOutfmtGapHint && (
           <div
             role="note"
@@ -245,6 +246,7 @@ export function BlastHitsTable({
             <code>outfmt 5</code> (XML), to populate these columns.
           </div>
         )}
+        <ScrollShadow>
         <table className="table" style={{ width: "100%", minWidth: 1320, fontSize: 13 }}>
           <thead>
             <tr>
@@ -631,6 +633,7 @@ export function BlastHitsTable({
             })}
           </tbody>
         </table>
+        </ScrollShadow>
       </div>
       {activeTaxon && (
         <TaxonomyDetailModal

@@ -18,13 +18,9 @@ existed off-screen.
 
 - A reusable **`ScrollShadow`** wrapper shows a subtle edge fade on whichever
   side still has hidden content; the fade disappears once that edge is reached.
-  Applied to the taxonomy **Organism** table first (7 columns, the most likely
-  to overflow on narrow viewports). Respects `prefers-reduced-motion`.
-
-> The Descriptions hits table (which already scrolls, `minWidth: 1320`) was left
-> untouched in this batch — its scroll container is interleaved with an
-> outfmt-gap hint note, so wrapping it cleanly needs a larger JSX restructure
-> best done with a screenshot in hand. The reusable component is ready for it.
+  Applied to the taxonomy **Organism** table and the **Descriptions** hits table
+  (the widest, `minWidth: 1320`) — on the latter only the table is wrapped, not
+  the outfmt-gap hint note above it. Respects `prefers-reduced-motion`.
 
 ## Code change summary
 
@@ -36,6 +32,9 @@ existed off-screen.
   toggled by the start/end classes, reduced-motion guard.
 - [web/src/pages/blastResults/analytics/TaxonomyPanel.tsx](../../../web/src/pages/blastResults/analytics/TaxonomyPanel.tsx):
   wrapped the Organism table in `ScrollShadow`.
+- [web/src/pages/blastResults/analytics/BlastHitsTable.tsx](../../../web/src/pages/blastResults/analytics/BlastHitsTable.tsx):
+  wrapped the Descriptions table in `ScrollShadow` (outer container loses its
+  own `overflow-x`; the hint note stays full-width above it).
 
 ## Validation evidence
 
