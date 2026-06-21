@@ -91,7 +91,12 @@ export function BlastJobs() {
       )}
 
       {allJobs.length === 0 && !jobsQuery.isLoading && (
-        <NoJobsEmpty cluster={cluster} degradedNotice={degradedNotice} />
+        <NoJobsEmpty
+          cluster={cluster}
+          degradedNotice={degradedNotice}
+          onRetry={() => void jobsQuery.refetch()}
+          retrying={jobsQuery.isFetching}
+        />
       )}
       {filtered.length === 0 && allJobs.length > 0 && !jobsQuery.isLoading && (
         <NoFilteredEmpty search={search} filter={filter} />

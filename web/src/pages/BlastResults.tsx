@@ -87,6 +87,27 @@ export function BlastResults() {
     setSearchParams(next, { replace: true });
   }, [effectivePhase, jobId, tab, searchParams, setSearchParams]);
 
+  // Per-tab scroll memory: record the window scroll position for the active
+  // tab continuously, then restore it when the user returns to that tab so
+  // switching tabs no longer dumps them back at the top. The "run" tab is
+  // excluded — its ExecutionStepsCard owns scroll (live-log tail follow).
+  const scrollByTabRef = useRef<Record<string, number>>({});
+  useEffect(() => {
+    const onScroll = () => {
+      scrollByTabRef.current[tab] = window.scrollY;
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [tab]);
+  useEffect(() => {
+    if (tab === "run") return;
+    const saved = scrollByTabRef.current[tab] ?? 0;
+    const id = requestAnimationFrame(() =>
+      window.scrollTo({ top: saved, behavior: "auto" }),
+    );
+    return () => cancelAnimationFrame(id);
+  }, [tab]);
+
   const isResultAnalyticsTab =
     tab === "descriptions" ||
     tab === "graphic" ||

@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { RefreshCw } from "lucide-react";
 
 import { DegradedNotice } from "@/components/DegradedNotice";
 
@@ -7,9 +8,18 @@ import type { BlastJobsState } from "./useBlastJobsState";
 export interface NoJobsEmptyProps {
   cluster: BlastJobsState["cluster"];
   degradedNotice: BlastJobsState["degradedNotice"];
+  /** Re-run the job listing query (shown as a Retry button on the degraded notice). */
+  onRetry?: () => void;
+  /** Whether a retry is currently in flight. */
+  retrying?: boolean;
 }
 
-export function NoJobsEmpty({ cluster, degradedNotice }: NoJobsEmptyProps) {
+export function NoJobsEmpty({
+  cluster,
+  degradedNotice,
+  onRetry,
+  retrying,
+}: NoJobsEmptyProps) {
   return (
     <section
       className="glass-card jobs-empty"
@@ -37,6 +47,29 @@ export function NoJobsEmpty({ cluster, degradedNotice }: NoJobsEmptyProps) {
             reason={degradedNotice.reason}
             message={degradedNotice.message}
             scope="Job listing"
+            action={
+              onRetry ? (
+                <button
+                  type="button"
+                  className="glass-button"
+                  onClick={onRetry}
+                  disabled={retrying}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    fontSize: 12,
+                  }}
+                >
+                  <RefreshCw
+                    size={12}
+                    strokeWidth={1.5}
+                    className={retrying ? "spin" : undefined}
+                  />
+                  {retrying ? "Retrying…" : "Retry"}
+                </button>
+              ) : undefined
+            }
           />
         </div>
       )}
