@@ -522,6 +522,53 @@ def test_get_many_batches_into_single_query(monkeypatch) -> None:
     assert set(out) == {"abc", "def"}
 
 
+def test_get_many_chunks_large_id_set(monkeypatch) -> None:
+    """get_many MUST chunk the OData filter so a large id set never builds a
+    single over-length request (the external-jobs sync passes 1000+ ids; an
+    unbounded filter fails with HTTP 400 and silently degrades to an empty
+    map, which re-creates every row on every poll)."""
+    captured: list[str] = []
+    job_ids = [f"job-{i:04d}" for i in range(120)]
+    rows = [
+        JobState(job_id=jid, type="blast", status="completed").to_entity()
+        for jid in job_ids
+    ]
+    rows_by_pk = {entity["PartitionKey"]: entity for entity in rows}
+
+    class ChunkingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> ChunkingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, *, results_per_page: int):
+            captured.append(query_filter)
+            # Return only the rows whose PartitionKey appears in this chunk's
+            # filter, mirroring server-side filtering.
+            return [
+                entity
+                for pk, entity in rows_by_pk.items()
+                if f"PartitionKey eq '{pk}'" in query_filter
+            ]
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", ChunkingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    out = repo.get_many(job_ids)
+
+    # 120 ids / 50-per-chunk -> 3 queries, none over-length.
+    assert len(captured) == 3
+    assert all(len(f) < 8000 for f in captured)
+    # Every requested row is still found despite the chunking.
+    assert set(out) == set(job_ids)
+
+
 def test_create_returns_existing_on_resource_exists(monkeypatch) -> None:
     """Concurrent create races MUST return the existing row, not raise."""
     from azure.core.exceptions import ResourceExistsError

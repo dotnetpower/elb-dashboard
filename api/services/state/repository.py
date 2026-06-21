@@ -73,6 +73,21 @@ def _clamp_page_size(limit: int) -> int:
     return min(limit, _AZURE_TABLES_MAX_PAGE_SIZE)
 
 
+# Max number of job_ids folded into a single `get_many` OData `$filter`.
+# Each id contributes a `(PartitionKey eq '<id>' and RowKey eq 'current')`
+# clause (~70 bytes) joined by ` or `. Azure Table Storage carries the
+# filter in the request URI, so an unbounded clause count produces an
+# over-length request that fails with HTTP 400 — the error is swallowed by
+# callers that wrap `get_many` in a best-effort try/except, which silently
+# degrades a batch lookup to "nothing found". The external-jobs sync hit
+# this with 1029 ids: every poll saw an empty existing-map, re-`create()`d
+# all 1029 rows (each a 409 + point-read round-trip), and pinned the api
+# sidecar at 100% CPU. Chunking keeps every filter small and the lookup
+# correct regardless of batch size. 50 clauses ≈ 3.7 KB — far under any
+# practical URI limit.
+_GET_MANY_FILTER_CHUNK = 50
+
+
 # Hard cap on how many rows a user-facing "most recent N" listing
 # (`list_for_owner` / `list_all` / `list_for_scope`) will scan before
 # sorting. Azure Table Storage has no server-side ordering and jobstate rows
@@ -463,9 +478,9 @@ class JobStateRepository:
         Returns a dict mapping job_id -> JobState for rows that exist.
         Missing job_ids are simply absent from the result.
 
-        OData filter length limit is generous (~8 KB), and `limit` on the
-        list route is capped at 500. A 12-char job_id contributes ~55 bytes
-        to the filter, so 500 ids stay well under the limit.
+        The lookup is chunked into batches of ``_GET_MANY_FILTER_CHUNK`` ids so
+        the OData ``$filter`` stays within a safe request-URI length regardless
+        of how many ids the caller passes (the external-jobs sync can pass 1000+).
         """
         if not job_ids:
             return {}
@@ -478,22 +493,32 @@ class JobStateRepository:
                 unique_ids.append(jid)
         if not unique_ids:
             return {}
-        parts = [
-            f"(PartitionKey eq '{_sanitise_odata_value(jid)}' and RowKey eq 'current')"
-            for jid in unique_ids
-        ]
-        filter_expr = " or ".join(parts)
-        query_kwargs: dict[str, Any] = {"results_per_page": len(unique_ids)}
-        if select is not None:
-            query_kwargs["select"] = select
         result: dict[str, JobState] = {}
+        # Chunk the lookup so the OData `$filter` never grows past a safe URI
+        # length. A single mega-filter (e.g. 1029 ids from the external-jobs
+        # sync) fails with HTTP 400 and, because best-effort callers swallow the
+        # error, degrades to "nothing found" — which makes the sync re-create
+        # every row on every poll. See `_GET_MANY_FILTER_CHUNK`.
         with self._state_client() as t:
-            try:
-                for e in t.query_entities(filter_expr, **query_kwargs):
-                    state = JobState.from_entity(dict(e))
-                    result[state.job_id] = state
-            except ResourceNotFoundError:
-                self._ensure_table("jobstate")
+            for start in range(0, len(unique_ids), _GET_MANY_FILTER_CHUNK):
+                chunk = unique_ids[start : start + _GET_MANY_FILTER_CHUNK]
+                parts = [
+                    f"(PartitionKey eq '{_sanitise_odata_value(jid)}' and RowKey eq 'current')"
+                    for jid in chunk
+                ]
+                filter_expr = " or ".join(parts)
+                query_kwargs: dict[str, Any] = {
+                    "results_per_page": _clamp_page_size(len(chunk))
+                }
+                if select is not None:
+                    query_kwargs["select"] = select
+                try:
+                    for e in t.query_entities(filter_expr, **query_kwargs):
+                        state = JobState.from_entity(dict(e))
+                        result[state.job_id] = state
+                except ResourceNotFoundError:
+                    self._ensure_table("jobstate")
+                    break
         return result
 
     def update(
