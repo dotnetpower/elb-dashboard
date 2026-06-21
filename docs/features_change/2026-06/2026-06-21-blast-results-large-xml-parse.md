@@ -40,10 +40,19 @@ unreachable. Successfully parsed 0 of 1 result file. 1 read failure."** with
   hit parsed (genuinely corrupt file) it **re-raises**, so a real read failure
   is still recorded. Verified on the real artifact: 20 MB cut → 324 hits,
   10 MB cut → 161 hits, garbage → still raises.
-* **`api/services/blast/result_artifacts.py`** — both read paths (`_read_hits`
-  and `build_result_aggregate_payload`) now flag the result **`truncated`** when
-  a read fills the byte budget, so the UI honestly shows "Results are partial"
-  instead of presenting a clipped result as complete.
+* **`api/services/blast/result_artifacts.py` + `api/routes/blast/result_analytics.py`**
+  — both the worker bake (`_read_hits`, `build_result_aggregate_payload`) and the
+  request-thread live-parse loops (the alignments and taxonomy routes keep their
+  own inline read loops) now flag the result **`truncated`** when a read fills the
+  byte budget, so the UI honestly shows "Results are partial" instead of
+  presenting a clipped hit set as complete.
+* **`api/services/job_artifacts.py`** — bumped the analytics artifact schema
+  version **2 → 3** (`result_aggregate` gated 0 → 3 with its builder now stamping
+  the version). A job whose aggregate/alignments/taxonomy artifact was already
+  baked as a false "degraded" by the pre-fix parser is served from that cached
+  artifact via the `read_ready_result_artifact` fast path; the version bump
+  auto-invalidates those stale artifacts so they rebuild with the
+  truncation-tolerant parser.
 * **`web/src/pages/blastResults/analytics/DegradedBanner.tsx`** — corrected the
   misleading `all_reads_failed` copy. Since the blob list already succeeded,
   this state is never an RBAC / network / storage problem; it now reads "The
@@ -55,6 +64,12 @@ A large successful search now shows its hits (marked "partial" when the result
 exceeds the analytics byte cap) instead of a false "results degraded" banner
 with zero hits. No security configuration changed (no auth / RBAC / network /
 JWT / CORS edits); the fix is parser resilience + honest UI labelling.
+
+## Live verification (job c8492da4…, customer dev env)
+Before: "Results are degraded — Every result file failed to download …",
+`0 hits`. After (rev 0000092): **"100 shown, 324 filtered of 324 hits"** plus a
+yellow **"Results are partial"** banner. The header runtime also corrected from a
+stale `Workflow <1s` to the real `Workflow 193m 5s`.
 
 ## Follow-up (not in this change)
 For full-fidelity display of very large results, raise/unify the analytics byte
