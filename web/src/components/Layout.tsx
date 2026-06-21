@@ -390,6 +390,7 @@ export function Layout({ children }: PropsWithChildren) {
           className="cfg-gear"
           onClick={() => setShowHelp(true)}
           title="Keyboard shortcuts (?)"
+          aria-label="Keyboard shortcuts"
           style={{ marginLeft: 0 }}
         >
           <HelpCircle size={14} />
@@ -400,6 +401,7 @@ export function Layout({ children }: PropsWithChildren) {
           className="cfg-gear"
           onClick={() => settingsPanel.open(upgrade.attention ? "updates" : undefined)}
           title={upgrade.attention ? "Settings — an update is available" : "Settings"}
+          aria-label="Settings"
           style={{ marginLeft: 0, position: "relative" }}
         >
           <SettingsIcon size={14} />
