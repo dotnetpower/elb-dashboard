@@ -116,6 +116,7 @@ export function ResultsCard({ jobId, state }: ResultsCardProps) {
         debugFiles={debugFiles}
         hasOnlyDebugFiles={hasOnlyDebugFiles}
         downloadingFile={actions.downloadingFile}
+        downloadProgress={actions.downloadProgress}
         terminalSidecarHealthy={terminalSidecar.isHealthy}
         hasRunningCluster={cluster.hasRunningCluster}
         hasAnyCluster={cluster.hasAnyCluster}

@@ -4,6 +4,7 @@ import { Loader2, XCircle } from "lucide-react";
 import { BlastResultsTable, NoResultFilesPanel } from "./BlastResultsTable";
 import { StorageLockedPanel } from "./StorageLockedPanel";
 import { phaseLabel } from "@/constants";
+import type { BlastDownloadProgress } from "@/hooks/useBlastResultActions";
 import type { splitBlastResultFiles } from "@/pages/blastResultsModel";
 
 type ResultFile = ReturnType<typeof splitBlastResultFiles>["files"][number];
@@ -26,6 +27,7 @@ export interface ResultsBodyProps {
   debugFiles: ReturnType<typeof splitBlastResultFiles>["debugFiles"];
   hasOnlyDebugFiles: boolean;
   downloadingFile: string | null;
+  downloadProgress: BlastDownloadProgress | null;
   terminalSidecarHealthy: boolean;
   hasRunningCluster: boolean;
   hasAnyCluster: boolean;
@@ -52,6 +54,7 @@ export function ResultsBody({
   debugFiles,
   hasOnlyDebugFiles,
   downloadingFile,
+  downloadProgress,
   terminalSidecarHealthy,
   hasRunningCluster,
   hasAnyCluster,
@@ -122,6 +125,7 @@ export function ResultsBody({
         debugFiles={debugFiles}
         hasOnlyDebugFiles={hasOnlyDebugFiles}
         downloadingFile={downloadingFile}
+        downloadProgress={downloadProgress}
         onDownload={onDownload}
       />
     );

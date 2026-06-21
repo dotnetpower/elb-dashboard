@@ -309,6 +309,7 @@ export const blastApi = {
     subscriptionId: string,
     storageAccount: string,
     resourceGroup?: string,
+    onProgress?: (received: number, total: number | null) => void,
   ) => {
     const response = await fetchApiRaw(
       `/blast/jobs/${encodeURIComponent(jobId)}/results/${encodeURIComponent(fileId)}?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
@@ -317,10 +318,40 @@ export const blastApi = {
       const text = await response.text();
       throw new Error(text || `HTTP ${response.status}`);
     }
+    const filename = filenameFromDisposition(
+      response.headers.get("Content-Disposition"),
+    );
+    const contentType =
+      response.headers.get("Content-Type") ?? "application/octet-stream";
+    const totalHeader = response.headers.get("Content-Length");
+    const total = totalHeader ? Number(totalHeader) : null;
+    // Stream the body so the caller can render real download progress. The
+    // blob is still fully materialised (same behaviour as before); we just
+    // observe the bytes as they arrive. Falls back to a one-shot blob read
+    // when the body stream is unavailable (older runtimes / no onProgress).
+    if (onProgress && response.body) {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          received += value.length;
+          onProgress(received, Number.isFinite(total) ? total : null);
+        }
+      }
+      return {
+        blob: new Blob(chunks as BlobPart[], { type: contentType }),
+        filename,
+        contentType,
+      };
+    }
     return {
       blob: await response.blob(),
-      filename: filenameFromDisposition(response.headers.get("Content-Disposition")),
-      contentType: response.headers.get("Content-Type") ?? "application/octet-stream",
+      filename,
+      contentType,
     };
   },
 

@@ -5,6 +5,12 @@ import { blastApi, type BlastExportFormat, type BlastResultFile } from "@/api/en
 import { useToast } from "@/components/Toast";
 import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
 
+/** Live byte progress for an in-flight result-file download. */
+export interface BlastDownloadProgress {
+  received: number;
+  total: number | null;
+}
+
 export function useBlastResultActions({
   jobId,
   subscriptionId,
@@ -22,11 +28,13 @@ export function useBlastResultActions({
   const queryClient = useQueryClient();
   const { copied, copyText } = useClipboardFeedback();
   const [downloadingFile, setDownloadingFile] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<BlastDownloadProgress | null>(null);
   const [exportingFormat, setExportingFormat] = useState<BlastExportFormat | null>(null);
 
   const handleDownload = async (file: BlastResultFile) => {
     if (!jobId) return;
     setDownloadingFile(file.name);
+    setDownloadProgress(null);
     let url: string | null = null;
     try {
       if (file.file_id) {
@@ -36,6 +44,7 @@ export function useBlastResultActions({
           subscriptionId,
           storageAccount,
           resourceGroup,
+          (received, total) => setDownloadProgress({ received, total }),
         );
         url = URL.createObjectURL(response.blob);
         const anchor = document.createElement("a");
@@ -59,6 +68,7 @@ export function useBlastResultActions({
     } finally {
       if (url) URL.revokeObjectURL(url);
       setDownloadingFile(null);
+      setDownloadProgress(null);
     }
   };
 
@@ -114,6 +124,7 @@ export function useBlastResultActions({
     copiedId: copied === "jobId",
     copyJobId,
     downloadingFile,
+    downloadProgress,
     exportingFormat,
     handleDownload,
     handleExport,

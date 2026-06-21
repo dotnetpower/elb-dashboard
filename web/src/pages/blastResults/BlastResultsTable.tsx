@@ -13,6 +13,7 @@ import {
 
 import { formatBytes } from "@/components/BlastFilePreview";
 import type { BlastResultFile } from "@/api/endpoints";
+import type { BlastDownloadProgress } from "@/hooks/useBlastResultActions";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { classifyBlastResultFile } from "@/pages/blastResultsModel";
 
@@ -23,6 +24,7 @@ interface BlastResultsTableProps {
   debugFiles: BlastResultFile[];
   hasOnlyDebugFiles: boolean;
   downloadingFile: string | null;
+  downloadProgress: BlastDownloadProgress | null;
   onDownload: (file: BlastResultFile) => void;
 }
 
@@ -39,6 +41,7 @@ export function BlastResultsTable({
   debugFiles,
   hasOnlyDebugFiles,
   downloadingFile,
+  downloadProgress,
   onDownload,
 }: BlastResultsTableProps) {
   const primaryFiles = resultFiles.length > 0 ? resultFiles : files;
@@ -64,6 +67,7 @@ export function BlastResultsTable({
       <ResultsFileTable
         files={primaryFiles}
         downloadingFile={downloadingFile}
+        downloadProgress={downloadProgress}
         onDownload={onDownload}
       />
       {hasOnlyDebugFiles && (
@@ -96,6 +100,7 @@ export function BlastResultsTable({
           title="Reports and manifests"
           files={supportFiles}
           downloadingFile={downloadingFile}
+          downloadProgress={downloadProgress}
           onDownload={onDownload}
         />
       )}
@@ -105,6 +110,7 @@ export function BlastResultsTable({
           title="Diagnostic logs"
           files={debugFiles}
           downloadingFile={downloadingFile}
+          downloadProgress={downloadProgress}
           onDownload={onDownload}
         />
       )}
@@ -151,10 +157,12 @@ type FileSortKey = "name" | "size" | "modified";
 function ResultsFileTable({
   files,
   downloadingFile,
+  downloadProgress,
   onDownload,
 }: {
   files: BlastResultFile[];
   downloadingFile: string | null;
+  downloadProgress: BlastDownloadProgress | null;
   onDownload: (file: BlastResultFile) => void;
 }) {
   // Default to API order; sorting engages only once a header is clicked.
@@ -226,6 +234,7 @@ function ResultsFileTable({
             key={file.name}
             file={file}
             isDownloading={downloadingFile === file.name}
+            downloadProgress={downloadingFile === file.name ? downloadProgress : null}
             onDownload={() => onDownload(file)}
           />
         ))}
@@ -239,12 +248,14 @@ function ArtifactDetails({
   title,
   files,
   downloadingFile,
+  downloadProgress,
   onDownload,
 }: {
   icon: "support" | "diagnostic";
   title: string;
   files: BlastResultFile[];
   downloadingFile: string | null;
+  downloadProgress: BlastDownloadProgress | null;
   onDownload: (file: BlastResultFile) => void;
 }) {
   const Icon = icon === "support" ? FileJson : FileSearch;
@@ -266,6 +277,7 @@ function ArtifactDetails({
         <ResultsFileTable
           files={files}
           downloadingFile={downloadingFile}
+          downloadProgress={downloadProgress}
           onDownload={onDownload}
         />
       </div>
@@ -337,10 +349,12 @@ function ResultsHeaderCell({
 function BlastResultRow({
   file,
   isDownloading,
+  downloadProgress,
   onDownload,
 }: {
   file: BlastResultFile;
   isDownloading: boolean;
+  downloadProgress: BlastDownloadProgress | null;
   onDownload: () => void;
 }) {
   const fname = file.name.split("/").pop() || file.name;
@@ -355,6 +369,18 @@ function BlastResultRow({
         ? "var(--accent)"
         : "var(--warning)";
   const typeLabel = kind === "result" ? "RESULT" : kind === "support" ? "REPORT" : "LOG";
+  const pct =
+    isDownloading && downloadProgress && downloadProgress.total
+      ? Math.min(100, Math.round((downloadProgress.received / downloadProgress.total) * 100))
+      : null;
+  const downloadLabel =
+    !isDownloading
+      ? null
+      : pct != null
+        ? `${pct}%`
+        : downloadProgress
+          ? formatBytes(downloadProgress.received)
+          : null;
 
   return (
     <tr style={{ borderBottom: "1px solid var(--glass-border)" }}>
@@ -403,10 +429,22 @@ function BlastResultRow({
           className="glass-button"
           onClick={onDownload}
           disabled={isDownloading}
-          title="Download"
+          title={isDownloading ? "Downloading…" : "Download"}
         >
           {isDownloading ? (
-            <Loader2 size={14} className="spin" />
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                fontSize: 11,
+                whiteSpace: "nowrap",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              <Loader2 size={14} className="spin" />
+              {downloadLabel}
+            </span>
           ) : (
             <Download size={14} strokeWidth={1.5} />
           )}
