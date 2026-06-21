@@ -2944,6 +2944,49 @@ textarea.form-input {
   font-size: 13px;
   letter-spacing: 0;
 }
+/* Floating "jump to latest" pill shown when the live-log auto-follow is
+   paused (the user scrolled up). Clicking it re-arms following and snaps to
+   the tail. Calm glass surface, no neon — matches the design rules. */
+.blast-jump-latest {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--text-primary, #e6ecf5);
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  border: 1px solid var(--border-weak);
+  border-radius: 20px;
+  cursor: pointer;
+  backdrop-filter: blur(12px) saturate(120%);
+  -webkit-backdrop-filter: blur(12px) saturate(120%);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+  transition:
+    background 160ms ease-out,
+    transform 160ms ease-out,
+    opacity 160ms ease-out;
+}
+.blast-jump-latest:hover {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-secondary));
+  transform: translateX(-50%) translateY(-1px);
+}
+.blast-jump-latest:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .blast-jump-latest {
+    transition: none;
+  }
+}
 .blast-header {
   display: flex;
   justify-content: space-between;

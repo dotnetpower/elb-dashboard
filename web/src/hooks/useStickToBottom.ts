@@ -15,14 +15,19 @@
  * on a specific DOM container. Components opt in by calling the hook with
  * an opaque `version` value that increments whenever new content arrives,
  * and optionally an `anchorSelector` that resolves to the row to tail.
- * Key entry points: `useStickToBottom({ version, enabled, anchorSelector })`,
- * `shouldFollow`, `shouldFollowAnchor`, `anchorFollowTarget`.
+ * Key entry points: `useStickToBottom({ version, enabled, anchorSelector,
+ * onFollowingChange })` (returns `{ scrollToTail }`), `shouldFollow`,
+ * `shouldFollowAnchor`, `anchorFollowTarget`.
  * Risky contracts: Only safe in the browser (uses `window`). The threshold
  * for "at bottom" must be generous enough to survive layout reflows and
  * sub-pixel rounding; 96 px matches typical sticky-footer heights. The
  * smooth follow relies on a ResizeObserver firing on every body-height
  * growth (each appended live-log line); dropping it reverts to the old
  * coarse, multi-second "lurch" follow driven by the debounced `version`.
+ * Scroll requests are rAF-coalesced through a pending flag so a growth that
+ * lands while a previous rAF is in flight (typically the FINAL streamed line)
+ * is re-asserted instead of dropped — dropping it left the tail below the
+ * fold ("logs keep appearing at the bottom un-scrolled").
  * When an anchor is present the follow/pause decision MUST be measured
  * against the anchor bottom (not the document bottom) or a small user
  * scroll after an anchor-aligned auto-scroll would be misread as
@@ -89,6 +94,7 @@ export function useStickToBottom({
   version,
   enabled = true,
   anchorSelector,
+  onFollowingChange,
 }: {
   /** Monotonically-increasing token whose change signals new tail content. */
   version: number | string;
@@ -101,11 +107,23 @@ export function useStickToBottom({
    * follows the document bottom.
    */
   anchorSelector?: string;
-}): void {
+  /**
+   * Optional callback fired whenever the follow/pause state changes — `true`
+   * while glued to the tail, `false` after the user scrolls up. Lets a host
+   * render a "jump to latest" affordance only when auto-follow is paused.
+   */
+  onFollowingChange?: (following: boolean) => void;
+}): { scrollToTail: () => void } {
   // Latest selector lives in a ref so the rAF / scroll closures below read
   // the current value without re-subscribing every render.
   const anchorSelectorRef = useRef<string | undefined>(anchorSelector);
   anchorSelectorRef.current = anchorSelector;
+  // Latest follow-change callback in a ref so the listeners below never need
+  // to re-subscribe when the host passes a fresh closure each render.
+  const onFollowingChangeRef = useRef<((following: boolean) => void) | undefined>(
+    onFollowingChange,
+  );
+  onFollowingChangeRef.current = onFollowingChange;
 
   // Absolute document-Y of the follow anchor's bottom edge, or null when no
   // anchor element is present (→ fall back to document-bottom follow).
@@ -155,6 +173,11 @@ export function useStickToBottom({
   // Coalesce rapid scroll requests (many ResizeObserver callbacks in one
   // frame) into a single rAF-driven scroll so we never thrash layout.
   const rafRef = useRef<number | null>(null);
+  // A scroll was requested while a rAF was already in flight. The in-flight
+  // pass re-asserts the scroll when it sees this flag, so the FINAL growth
+  // (e.g. the last streamed log line arriving exactly as the previous rAF
+  // runs) is never dropped — that drop is what left the tail below the fold.
+  const pendingScrollRef = useRef(false);
   // While we are programmatically scrolling, the resulting `scroll` event
   // must not be misread as a manual scroll-away. This flag suppresses that
   // one self-induced event.
@@ -168,20 +191,45 @@ export function useStickToBottom({
   // read the current anchor logic without re-subscribing every render.
   const isFollowingRef = useRef<() => boolean>(() => false);
   isFollowingRef.current = isFollowing;
+  // Set the follow flag and notify the host only on an actual transition so
+  // the "jump to latest" affordance flips exactly when the user leaves / re-
+  // joins the tail.
+  const markFollowing = (next: boolean): void => {
+    if (followingRef.current === next) return;
+    followingRef.current = next;
+    onFollowingChangeRef.current?.(next);
+  };
   requestScrollRef.current = () => {
     if (typeof window === "undefined") return;
+    // Always record that the tail wants to be followed. Even if a rAF is
+    // already scheduled, this flag makes the in-flight pass run one more time
+    // so a growth that lands mid-flight is never silently dropped.
+    pendingScrollRef.current = true;
     if (rafRef.current !== null) return;
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = null;
-      selfScrollingRef.current = true;
-      scrollToTail();
-      followingRef.current = true;
-      // Release the self-scroll guard after the scroll event has had a
-      // chance to fire (next frame).
-      requestAnimationFrame(() => {
-        selfScrollingRef.current = false;
+    const tick = () => {
+      rafRef.current = requestAnimationFrame(() => {
+        // Consume the pending request for THIS frame and scroll against the
+        // freshest layout (the rAF runs after the browser has laid out every
+        // appended line committed so far).
+        pendingScrollRef.current = false;
+        selfScrollingRef.current = true;
+        scrollToTail();
+        markFollowing(true);
+        // Release the self-scroll guard after the scroll event has had a
+        // chance to fire (next frame). If more growth arrived while we were
+        // scrolling, run another pass so the final tail lines are followed
+        // instead of being left below the fold.
+        rafRef.current = requestAnimationFrame(() => {
+          selfScrollingRef.current = false;
+          if (pendingScrollRef.current && followingRef.current) {
+            tick();
+          } else {
+            rafRef.current = null;
+          }
+        });
       });
-    });
+    };
+    tick();
   };
 
   // Track manual scroll to toggle following on/off. Ignore the single
@@ -190,7 +238,7 @@ export function useStickToBottom({
     if (!enabled || typeof window === "undefined") return;
     const onScroll = () => {
       if (selfScrollingRef.current) return;
-      followingRef.current = isFollowingRef.current();
+      markFollowing(isFollowingRef.current());
     };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
@@ -245,4 +293,16 @@ export function useStickToBottom({
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
   }, []);
+
+  // Imperative re-arm: a host "jump to latest" button calls this to resume
+  // following and snap to the tail. Stable identity across renders.
+  const scrollToTailRef = useRef<() => void>(() => {});
+  scrollToTailRef.current = () => {
+    markFollowing(true);
+    requestScrollRef.current();
+  };
+  const stableScrollToTail = useRef((): void => {
+    scrollToTailRef.current();
+  }).current;
+  return { scrollToTail: stableScrollToTail };
 }
