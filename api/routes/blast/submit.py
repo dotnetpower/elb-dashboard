@@ -152,6 +152,27 @@ def _submit_response(
 def _validate_submit_contracts(body: dict[str, Any]) -> dict[str, Any]:
     """Validate precision and Web BLAST compatibility before side effects."""
 
+    # Best-effort program×database molecule guard (#56): convert a guaranteed
+    # ~30-minute pod failure (e.g. blastp against a nucleotide DB) into an
+    # instant, clear 4xx. Conservative — only an unambiguous known mismatch is
+    # blocked; a custom/unknown DB or program is always allowed through.
+    from api.services.blast.db_recommendation import (
+        program_database_compatibility_error,
+    )
+
+    program_db_error = program_database_compatibility_error(
+        str(body.get("program") or ""),
+        str(body.get("database") or body.get("db") or ""),
+    )
+    if program_db_error:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "program_database_incompatible",
+                "message": program_db_error,
+            },
+        )
+
     try:
         contracts = submit_contracts(body)
     except HTTPException:

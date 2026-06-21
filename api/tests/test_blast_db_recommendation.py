@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from api.services.blast.db_recommendation import (
     RECOMMENDATION_RULESET_VERSION,
+    program_database_compatibility_error,
     recommend_database,
 )
 from fastapi.testclient import TestClient
@@ -78,3 +79,35 @@ def test_recommend_route_returns_recommendation(monkeypatch) -> None:
     assert body["alternative"]["db"] == "refseq_protein"
     assert body["ruleset_version"] == RECOMMENDATION_RULESET_VERSION
     assert "rationale" in body["recommended"]
+
+
+def test_program_database_compatibility_blocks_known_mismatch() -> None:
+    """A known program against a known opposite-molecule DB is blocked."""
+    # blastp (protein) against a nucleotide DB -> blocked.
+    err = program_database_compatibility_error("blastp", "core_nt")
+    assert err is not None
+    assert "nucleotide" in err and "core_nt" in err
+    # blastn (nucleotide) against a protein DB -> blocked.
+    assert program_database_compatibility_error("blastn", "nr") is not None
+    # tblastn needs a nucleotide DB; nr is protein -> blocked.
+    assert program_database_compatibility_error("tblastn", "nr") is not None
+    # URL-form database value is normalised via extract_db_name.
+    url = "https://acct.blob.core.windows.net/blast-db/core_nt/core_nt"
+    assert program_database_compatibility_error("blastp", url) is not None
+
+
+def test_program_database_compatibility_allows_valid_and_unknown() -> None:
+    """Valid pairings AND any unknown side are allowed (no false rejects)."""
+    # Valid pairings.
+    assert program_database_compatibility_error("blastn", "core_nt") is None
+    assert program_database_compatibility_error("blastp", "nr") is None
+    assert program_database_compatibility_error("blastx", "nr") is None  # protein DB
+    assert program_database_compatibility_error("tblastn", "core_nt") is None  # nucl DB
+    assert program_database_compatibility_error("rpsblast", "cdd") is None
+    # Unknown database (custom BLAST DB) -> never rejected.
+    assert program_database_compatibility_error("blastp", "my_custom_db") is None
+    # Unknown program (future BLAST+ addition) -> never rejected.
+    assert program_database_compatibility_error("futureblast", "core_nt") is None
+    # Empty inputs -> allowed.
+    assert program_database_compatibility_error("", "") is None
+    assert program_database_compatibility_error("blastp", "") is None

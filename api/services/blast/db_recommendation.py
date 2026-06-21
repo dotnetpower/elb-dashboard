@@ -45,7 +45,92 @@ _PROGRAM_TO_DB_MOLECULE: dict[str, Molecule] = {
     "blastx": "protein",  # translated DNA query against protein DB
     "psiblast": "protein",
     "deltablast": "protein",
+    "rpsblast": "protein",  # protein/translated query against a conserved-domain (protein) DB
+    "rpstblastn": "protein",  # translated nucleotide query against a protein domain DB
 }
+
+
+# Known NCBI BLAST databases -> the molecule type of the database itself, used
+# ONLY for the best-effort submit-time program/database compatibility check
+# (e.g. blastp against a nucleotide DB). Keys are the bare DB name, lower-cased.
+# This is intentionally a curated allow-list of the well-known NCBI databases:
+# an UNKNOWN database (a user's custom BLAST DB, or one not listed here) maps to
+# ``None`` and is therefore never rejected — only an unambiguous mismatch
+# between a known program and a known database is blocked. Add new NCBI
+# databases here as they are surfaced in the picker.
+_KNOWN_DATABASE_MOLECULE: dict[str, Molecule] = {
+    # Nucleotide databases
+    "core_nt": "dna",
+    "nt": "dna",
+    "refseq_rna": "dna",
+    "refseq_select_rna": "dna",
+    "refseq_representative_genomes": "dna",
+    "16s_ribosomal_rna": "dna",
+    "18s_fungal_sequences": "dna",
+    "28s_fungal_sequences": "dna",
+    "its_eukaryote_sequences": "dna",
+    "its_refseq_fungi": "dna",
+    "lsu_eukaryote_rrna": "dna",
+    "lsu_prokaryote_rrna": "dna",
+    "ssu_eukaryote_rrna": "dna",
+    "betacoronavirus": "dna",
+    "ref_euk_rep_genomes": "dna",
+    "ref_prok_rep_genomes": "dna",
+    "ref_viroids_rep_genomes": "dna",
+    "ref_viruses_rep_genomes": "dna",
+    "env_nt": "dna",
+    "patnt": "dna",
+    "pdbnt": "dna",
+    "tsa_nt": "dna",
+    # Protein databases
+    "nr": "protein",
+    "refseq_protein": "protein",
+    "refseq_select_prot": "protein",
+    "swissprot": "protein",
+    "pdbaa": "protein",
+    "landmark": "protein",
+    "env_nr": "protein",
+    "pataa": "protein",
+    "tsa_nr": "protein",
+    "cdd": "protein",
+    "cdd_delta": "protein",
+}
+
+
+def _molecule_word(molecule: Molecule) -> str:
+    return "nucleotide" if molecule == "dna" else "protein"
+
+
+def program_database_compatibility_error(program: str, database: str) -> str | None:
+    """Return a human-readable error if a KNOWN program×database molecule
+    mismatch is detected at submit time, else ``None`` (allow).
+
+    Best-effort and deliberately conservative: it returns ``None`` (i.e. lets
+    the submit proceed) whenever EITHER side is unknown — an unrecognised
+    program (a future BLAST+ addition) or an unrecognised database (a user's
+    custom BLAST DB). Only an unambiguous mismatch between a known program and a
+    known NCBI database (e.g. ``blastp`` against the nucleotide ``core_nt``) is
+    blocked, so a custom database is never falsely rejected. The point is to
+    convert a guaranteed ~30-minute pod failure into an instant, clear 4xx.
+    """
+    from api.services.blast.db_metadata import extract_db_name
+
+    prog = (program or "").strip().lower()
+    required = _PROGRAM_TO_DB_MOLECULE.get(prog)
+    if required is None:
+        return None
+    db_name = extract_db_name(database or "").strip().lower()
+    if not db_name:
+        return None
+    actual = _KNOWN_DATABASE_MOLECULE.get(db_name)
+    if actual is None or actual == required:
+        return None
+    return (
+        f"{prog} searches a {_molecule_word(required)} database, but "
+        f"'{db_name}' is a {_molecule_word(actual)} database. Choose a "
+        f"{_molecule_word(required)} database, or a program that searches "
+        f"{_molecule_word(actual)} space."
+    )
 
 
 @dataclass(frozen=True)
