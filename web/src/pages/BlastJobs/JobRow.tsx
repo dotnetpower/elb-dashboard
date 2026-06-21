@@ -22,6 +22,14 @@ export interface JobRowProps {
   now?: number;
 }
 
+function shortJobId(jobId: string): string {
+  // UUID job ids (36 chars) would blow out the row; collapse to a
+  // prefix…suffix that is still enough to eyeball-match a log line. Short
+  // OpenAPI ids (12-char hex) are shown in full.
+  if (jobId.length <= 14) return jobId;
+  return `${jobId.slice(0, 8)}…${jobId.slice(-4)}`;
+}
+
 function formatDuration(seconds: number): string {
   const safeSeconds = Math.max(0, Math.floor(seconds));
   const days = Math.floor(safeSeconds / 86_400);
@@ -118,6 +126,30 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
               <span>
                 {job.program} · {view.db}
               </span>
+              {job.job_id && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void navigator.clipboard?.writeText(job.job_id);
+                  }}
+                  title={`Job ID: ${job.job_id} — click to copy`}
+                  style={{
+                    fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                    fontSize: 10,
+                    lineHeight: 1.4,
+                    padding: "0 4px",
+                    borderRadius: 3,
+                    border: "none",
+                    cursor: "pointer",
+                    background: "var(--glass-bg-strong)",
+                    color: "inherit",
+                  }}
+                >
+                  id {shortJobId(job.job_id)}
+                </button>
+              )}
               {view.query && view.query !== view.title && <span>{view.query}</span>}
               {noteSummary && (
                 <span
