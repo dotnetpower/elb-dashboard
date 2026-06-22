@@ -96,22 +96,56 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
             }}
           />
           <div style={{ minWidth: 0 }}>
-            <Link
-              to={`/blast/jobs/${encodeURIComponent(job.job_id)}`}
+            <div
               style={{
-                textDecoration: "none",
-                color: "inherit",
-                fontWeight: 600,
-                fontSize: 13,
-                display: "block",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
+                display: "flex",
+                alignItems: "baseline",
+                gap: 6,
+                minWidth: 0,
               }}
-              title={view.title || job.job_id}
             >
-              {view.title || job.job_id}
-            </Link>
+              {job.job_id && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void navigator.clipboard?.writeText(job.job_id);
+                  }}
+                  title={`Job ID: ${job.job_id} — click to copy`}
+                  style={{
+                    fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                    fontSize: 11,
+                    lineHeight: 1.4,
+                    padding: "0 4px",
+                    borderRadius: 3,
+                    border: "none",
+                    cursor: "pointer",
+                    background: "var(--glass-bg-strong)",
+                    color: "var(--text-muted)",
+                    flexShrink: 0,
+                  }}
+                >
+                  {shortJobId(job.job_id)}
+                </button>
+              )}
+              <Link
+                to={`/blast/jobs/${encodeURIComponent(job.job_id)}`}
+                style={{
+                  textDecoration: "none",
+                  color: "inherit",
+                  fontWeight: 600,
+                  fontSize: 13,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={view.title || job.job_id}
+              >
+                {view.title || job.job_id}
+              </Link>
+            </div>
             <div
               className="muted"
               style={{
@@ -126,30 +160,6 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
               <span>
                 {job.program} · {view.db}
               </span>
-              {job.job_id && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    void navigator.clipboard?.writeText(job.job_id);
-                  }}
-                  title={`Job ID: ${job.job_id} — click to copy`}
-                  style={{
-                    fontFamily: "var(--font-mono, ui-monospace, monospace)",
-                    fontSize: 10,
-                    lineHeight: 1.4,
-                    padding: "0 4px",
-                    borderRadius: 3,
-                    border: "none",
-                    cursor: "pointer",
-                    background: "var(--glass-bg-strong)",
-                    color: "inherit",
-                  }}
-                >
-                  id {shortJobId(job.job_id)}
-                </button>
-              )}
               {view.query && view.query !== view.title && <span>{view.query}</span>}
               {noteSummary && (
                 <span
