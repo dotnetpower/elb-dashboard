@@ -298,6 +298,42 @@ def test_build_v1_payload_does_not_override_caller_pinned_searchsp() -> None:
     assert str(_CORE_NT_SEARCHSP) not in extra
 
 
+def test_build_v1_payload_no_searchsp_for_uncalibrated_db() -> None:
+    """An uncalibrated database has no dashboard oracle value, so we inject
+    nothing and leave the sibling to apply its own default (no false parity)."""
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    body = _v1_no_searchsp_body(db="16S_ribosomal_RNA")
+    payload = sb._build_v1_jobs_payload(_msg(body), ServiceBusConfig())
+    assert payload is not None
+    extra = payload["blast_options"]["extra"]
+    assert "-searchsp" not in extra
+    # The caller's own flags are still preserved untouched.
+    assert "-word_size 28" in extra and "-dust yes" in extra
+
+
+def test_build_v1_payload_searchsp_resolution_failure_is_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bug/exception in searchsp resolution must NEVER fail an otherwise-valid
+    submit; the payload is produced and the sibling applies its own default."""
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    def _boom(**_kwargs: object) -> object:
+        raise RuntimeError("searchsp resolver exploded")
+
+    monkeypatch.setattr(
+        "api.services.blast.submit_payload.resolve_sharding_plan", _boom
+    )
+    payload = sb._build_v1_jobs_payload(_msg(_v1_no_searchsp_body()), ServiceBusConfig())
+    assert payload is not None
+    # No injection on failure, but the multi-token submit still goes through.
+    assert "-searchsp" not in payload["blast_options"]["extra"]
+    assert payload["blast_options"]["outfmt"] == "7 std staxids sstrand qseq sseq"
+
+
 # --------------------------------------------------------------------------- #
 # submit_job_v1 posts to /v1/jobs
 # --------------------------------------------------------------------------- #

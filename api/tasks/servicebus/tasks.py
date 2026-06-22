@@ -524,24 +524,41 @@ def _build_v1_jobs_payload(
     payload["resource_profile"] = resolve_sharded_db_resource_profile(
         payload.get("db") or "", payload.get("resource_profile")
     )
-    # Apply the shared Web BLAST search-space oracle to the free-form /v1/jobs
-    # path so an outfmt-7 Service Bus submit gets the SAME calibrated -searchsp
-    # as the XML (/api/v1/elastic-blast/submit) path and the dashboard New
-    # Search. The sibling /v1/jobs BlastOptions has no structured searchsp field
-    # and auto-injects a FIXED default -searchsp when none is present (only
-    # correct for the database it was calibrated against). resolve_sharding_plan
-    # (allow_servicebus_downgrade=True → never blocks, only degrades) resolves
-    # the per-database / drift-adjusted / caller-supplied value; we forward it as
-    # a raw -searchsp flag in blast_options.extra. A caller-pinned -searchsp /
-    # -dbsize is never overridden. db_effective_search_space is our convenience
-    # field (mirrors the XML path), not a sibling wire field, so it is stripped
-    # before the payload leaves. searchsp resolution must never fail a valid
-    # submit — on any error we skip injection and let the sibling apply its own.
+    # Forward the dashboard's Web BLAST search-space oracle value to BLAST on
+    # the free-form /v1/jobs path so an outfmt-7 Service Bus submit applies the
+    # SAME calibrated -searchsp the dashboard New Search native path emits
+    # (api/services/blast/config.py generate_config → "-searchsp <N>").
+    #
+    # Why this is needed (verified against the sibling):
+    #   * The sibling /v1/jobs BlastOptions has only outfmt + extra (no
+    #     structured searchsp field); raw flags in `extra` reach BLAST.
+    #   * When no -searchsp / -dbsize is present, the sibling submit_job
+    #     auto-injects a FIXED default -searchsp 32156241807668
+    #     (docker-openapi/app/main.py). That value is core_nt's calibration, so
+    #     it is correct ONLY for core_nt — a caller-supplied value, a snapshot
+    #     drift, or a future per-database calibration never reaches BLAST.
+    #   * The XML /api/v1/elastic-blast/submit path does NOT help here: the
+    #     sibling external_submit handler drops db_effective_search_space and
+    #     builds its own `extra` (word_size/dust only), then delegates to the
+    #     same submit_job → it too relies on that fixed auto-inject. So this v1
+    #     path is the first external surface that forwards the dashboard's
+    #     computed per-database value.
+    #
+    # resolve_sharding_plan (allow_servicebus_downgrade=True → never blocks, only
+    # degrades) resolves the per-database / drift-adjusted / caller-supplied
+    # value; we forward it as a raw -searchsp flag in blast_options.extra. A
+    # caller-pinned -searchsp / -dbsize is never overridden.
+    # db_effective_search_space is our convenience field (mirrors the XML
+    # request model), not a sibling wire field, so it is stripped before the
+    # payload leaves. searchsp resolution must never fail a valid submit — on any
+    # error we skip injection and let the sibling apply its own default.
     blast_options = payload.get("blast_options")
     if isinstance(blast_options, dict):
         caller_searchsp = blast_options.pop("db_effective_search_space", None)
         already = f"{blast_options.get('extra') or ''} {blast_options.get('outfmt') or ''}"
         if "-searchsp" not in already and "-dbsize" not in already:
+            resolved_searchsp = None
+            plan = None
             try:
                 plan = resolve_sharding_plan(
                     program=str(payload.get("program") or "blastn"),
@@ -575,6 +592,16 @@ def _build_v1_jobs_payload(
                     correlation_id,
                     payload.get("db"),
                     int(resolved_searchsp),
+                )
+            elif plan is not None and getattr(plan, "downgraded", False):
+                # Calibration does not apply to this DB snapshot; we inject
+                # nothing and the sibling falls back to its own default. Log so
+                # an unexpected e-value drift is traceable to a known cause.
+                LOGGER.info(
+                    "service bus v1 searchsp parity downgraded corr=%s db=%s reason=%s",
+                    correlation_id,
+                    payload.get("db"),
+                    getattr(plan, "downgrade_reason", None),
                 )
         payload["blast_options"] = blast_options
     # Server-derived source + correlation id (a producer cannot spoof the

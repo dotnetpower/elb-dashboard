@@ -11,27 +11,35 @@ tags:
 ## Motivation
 
 A researcher calibrates the Web BLAST effective search space (`searchsp`) with
-the dashboard oracle so dashboard BLAST results match NCBI Web BLAST e-values,
-and applies it on the API submit. Tracing the Service Bus request-queue path
-surfaced an asymmetry:
+the dashboard oracle so dashboard BLAST results match NCBI Web BLAST e-values.
+The dashboard **New Search** native path applies it correctly
+(`api/services/blast/config.py` `generate_config` → `-searchsp <N>`). Tracing the
+Service Bus request-queue path surfaced that the external submit surfaces do
+**not** apply the dashboard-computed value — they rely on the sibling's fixed
+default instead:
 
-- **XML path** (`options` → `ExternalBlastSubmitRequest` →
-  `/api/v1/elastic-blast/submit`): the drain runs the shared
-  `resolve_sharding_plan`, which resolves the calibrated / drift-adjusted /
-  caller-supplied `searchsp` and forwards it. **Parity applied.**
-- **Free-form path** (`blast_options` → `ExternalBlastV1Request` →
-  sibling `/v1/jobs`, the **only** way to request a multi-token `outfmt 7`):
-  `BlastV1Options` had **no structured searchsp field** and
-  `_build_v1_jobs_payload` did **not** run `resolve_sharding_plan`. The sibling
-  `/v1/jobs` then auto-injects a **fixed default** `-searchsp 32156241807668`
-  when none is present — correct only for the database it was calibrated against
-  (core_nt), and never reflecting a caller-supplied value, a snapshot drift, or
-  a future calibrated database. **Parity NOT applied on outfmt 7.**
+- **Sibling auto-inject (verified):** the sibling `submit_job`
+  (`docker-openapi/app/main.py`) appends a **fixed** `-searchsp 32156241807668`
+  whenever the BLAST options carry no `-searchsp` / `-dbsize`. That value is
+  core_nt's calibration, so it is correct **only** for core_nt.
+- **XML path** (`options` → `/api/v1/elastic-blast/submit`): the sibling
+  `external_submit` handler **drops** the dashboard's `db_effective_search_space`
+  and builds its own `extra` (word_size / dust only), then delegates to the same
+  `submit_job` → it too falls back to the fixed default. So the dashboard's
+  per-database oracle value never reaches BLAST on this path.
+- **Free-form path** (`blast_options` → sibling `/v1/jobs`, the **only** way to
+  request a multi-token `outfmt 7`): `BlastV1Options` had no structured searchsp
+  field and `_build_v1_jobs_payload` did not resolve one → same fixed default.
+
+For core_nt all three coincide (the fixed default equals the calibration), so the
+gap is invisible until a caller-supplied value, a snapshot drift, or a future
+per-database calibration is involved.
 
 ## User-facing change
 
-An outfmt-7 Service Bus submit now gets the **same** calibrated `-searchsp` as
-the XML path and the dashboard New Search:
+An outfmt-7 Service Bus submit now forwards the dashboard's resolved
+`searchsp` to BLAST, so it matches the value the **New Search** native path
+emits (rather than always relying on the sibling's fixed default):
 
 - `BlastV1Options` gained an optional `db_effective_search_space` field
   (mirrors the XML path's `ExternalBlastOptions.db_effective_search_space`).
@@ -50,7 +58,6 @@ the XML path and the dashboard New Search:
 outfmt-7 submit yields the identical `-searchsp`. The change only differs from
 the prior behaviour where the prior behaviour was already wrong (caller-supplied
 value, snapshot drift, or a future per-database calibration).
-
 ## Files
 
 - `api/routes/elastic_blast.py` — `BlastV1Options.db_effective_search_space`.
