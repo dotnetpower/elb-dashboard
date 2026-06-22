@@ -89,6 +89,12 @@ const SMALL_16S_FASTA =
 // carried by the `outfmt` field so the standard columns are never duplicated.
 const CORE_NT_EXTRA = "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668";
 
+// Detects a -searchsp / -dbsize flag already present in the raw `extra` string
+// (mirrors the backend guard): when present, the structured searchsp field is
+// redundant — the raw flag wins — so the UI disables the field and the body
+// builder omits the structured value.
+const SEARCHSP_IN_EXTRA_RE = /(?:^|\s)-(?:searchsp|dbsize)(?:\s|=|$)/;
+
 interface PlaygroundPreset {
   key: string;
   label: string;
@@ -106,6 +112,8 @@ interface PlaygroundPreset {
   // Tabular mode
   outfmt: string;
   extra: string;
+  /** Optional structured Web BLAST search space (db_effective_search_space). */
+  searchsp?: string;
   resourceProfile: string;
 }
 
@@ -216,6 +224,7 @@ export function ServiceBusPlayground() {
   const [maxTargetSeqs, setMaxTargetSeqs] = useState(DEFAULT_PRESET.maxTargetSeqs);
   const [outfmt, setOutfmt] = useState(DEFAULT_PRESET.outfmt);
   const [extra, setExtra] = useState(DEFAULT_PRESET.extra);
+  const [searchsp, setSearchsp] = useState(DEFAULT_PRESET.searchsp ?? "");
   const [resourceProfile, setResourceProfile] = useState(DEFAULT_PRESET.resourceProfile);
   const [requestId, setRequestId] = useState("");
   const [codeTab, setCodeTab] = useState<CodeTab>("python-send");
@@ -239,6 +248,7 @@ export function ServiceBusPlayground() {
     setMaxTargetSeqs(preset.maxTargetSeqs);
     setOutfmt(preset.outfmt);
     setExtra(preset.extra);
+    setSearchsp(preset.searchsp ?? "");
     setResourceProfile(preset.resourceProfile);
   }, []);
 
@@ -275,6 +285,9 @@ export function ServiceBusPlayground() {
   });
 
   const effectiveEnabled = status.data?.effective_enabled ?? false;
+  // True when the raw `extra` string already pins -searchsp / -dbsize; the
+  // structured searchsp field is then redundant (the raw flag wins server-side).
+  const extraPinsSearchsp = SEARCHSP_IN_EXTRA_RE.test(extra);
   const namespaceFqdn = status.data?.config.namespace_fqdn ?? "<namespace>.servicebus.windows.net";
   const requestQueue = status.data?.config.request_queue ?? "elastic-blast-requests";
   const completionTopic = status.data?.config.completion_topic ?? "elastic-blast-completions";
@@ -301,6 +314,20 @@ export function ServiceBusPlayground() {
         if (of) body.blast_options.outfmt = of;
         const ex = extra.trim();
         if (ex) body.blast_options.extra = ex;
+        // Structured Web BLAST search space (oracle value). Leave blank to let
+        // the backend auto-apply the calibrated value for a known DB. A
+        // -searchsp / -dbsize already pinned in `extra` always wins server-side,
+        // so do not also emit the structured field in that case (keep the wire
+        // body unambiguous and matching what the UI shows).
+        const ssNum = Number(searchsp.trim());
+        if (
+          !SEARCHSP_IN_EXTRA_RE.test(ex) &&
+          searchsp.trim() &&
+          Number.isFinite(ssNum) &&
+          ssNum >= 1
+        ) {
+          body.blast_options.db_effective_search_space = Math.floor(ssNum);
+        }
         const rp = resourceProfile.trim();
         if (rp) body.resource_profile = rp;
       } else {
@@ -334,6 +361,7 @@ export function ServiceBusPlayground() {
       maxTargetSeqs,
       outfmt,
       extra,
+      searchsp,
       resourceProfile,
       taxid,
       isInclusive,
@@ -724,6 +752,34 @@ export function ServiceBusPlayground() {
                 />
               </div>
               <div>
+                <label style={labelStyle} htmlFor="pg-searchsp">
+                  searchsp{" "}
+                  <span className="muted">(effective search space — blank = auto)</span>
+                </label>
+                <input
+                  id="pg-searchsp"
+                  value={extraPinsSearchsp ? "" : searchsp}
+                  onChange={(e) => setSearchsp(e.target.value)}
+                  inputMode="numeric"
+                  disabled={extraPinsSearchsp}
+                  title={
+                    extraPinsSearchsp
+                      ? "Ignored: extra already pins -searchsp / -dbsize, which always wins. Remove it from extra to set a structured value here."
+                      : "Leave blank to apply the calibrated oracle value automatically; set a number to override."
+                  }
+                  placeholder={
+                    extraPinsSearchsp
+                      ? "set via -searchsp in extra"
+                      : "auto (oracle value applied server-side for core_nt)"
+                  }
+                  style={{
+                    ...inputStyle,
+                    fontFamily: "var(--font-mono, monospace)",
+                    opacity: extraPinsSearchsp ? 0.55 : 1,
+                  }}
+                />
+              </div>
+              <div>
                 <label style={labelStyle} htmlFor="pg-rp">
                   resource_profile
                 </label>
@@ -739,6 +795,9 @@ export function ServiceBusPlayground() {
                 Tabular messages route to the sibling <code>/v1/jobs</code>. A sharded DB
                 (e.g. <code>core_nt</code>) re-ranks the standard 12 columns by
                 evalue/bitscore, so a tabular layout must keep <code>std</code> leading.
+                Leave <code>searchsp</code> blank to apply the calibrated Web BLAST value
+                automatically (matching the New Search path); a <code>-searchsp</code>
+                pinned in <code>extra</code> always wins.
               </p>
             </>
           )}
