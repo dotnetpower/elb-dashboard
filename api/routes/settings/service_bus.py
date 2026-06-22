@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import uuid
 from typing import Any
 
@@ -59,6 +60,87 @@ _PURGE_MAX_CAP = 5000
 # best-effort ceiling (a brief admin/counts outage fails open, see
 # ``_assert_send_capacity``), not a security control.
 _SEND_MAX_QUEUE_DEPTH = max(1, int(os.environ.get("SERVICEBUS_SEND_MAX_QUEUE_DEPTH", "2000")))
+
+# Fail-closed backpressure (charter §12a Rule 4, default-OFF). The capacity check
+# normally fails OPEN: if the queue depth cannot be read (no Manage claim, a
+# momentary admin-plane outage) the send proceeds, so a transient hiccup never
+# blocks a working integration. But a SUSTAINED counts outage means the ceiling
+# is silently gone and an unbounded producer can pile up BLAST cost unchecked.
+# When this gate is ON, a run of consecutive counts failures (>= the streak
+# threshold) flips the send to fail-closed (HTTP 503) so backpressure is
+# preserved. A single / brief failure still fails open, so a one-off blip never
+# blocks a normal send.
+# WARNING: only enable where the credential HAS the Service Bus ``Manage`` claim
+# (so the queue depth can actually be read). If counts are unreadable BY DESIGN
+# (no Manage claim), every check fails and a fail-closed gate would refuse EVERY
+# send — keep it OFF in that case (fail-open is the correct posture there).
+_capacity_fail_lock = threading.Lock()
+_capacity_fail_streak = 0
+
+
+def _send_failclosed_enabled() -> bool:
+    return os.environ.get("SERVICEBUS_SEND_FAILCLOSED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _send_failclosed_streak() -> int:
+    raw = os.environ.get("SERVICEBUS_SEND_FAILCLOSED_STREAK", "3")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 3
+    return max(1, value)
+
+
+def _reset_capacity_failure_streak() -> None:
+    """Clear the consecutive counts-failure streak after a successful read."""
+    global _capacity_fail_streak
+    with _capacity_fail_lock:
+        _capacity_fail_streak = 0
+
+
+def _note_capacity_check_failure() -> None:
+    """Record a counts-read failure; raise 503 once fail-closed engages.
+
+    Increments the consecutive-failure streak. When the fail-closed gate is on
+    and the streak reaches the threshold, raises HTTP 503 so the send is refused
+    (backpressure preserved). Below the threshold — or with the gate off — it
+    returns, preserving the historical fail-open behaviour for a transient blip.
+    """
+    global _capacity_fail_streak
+    with _capacity_fail_lock:
+        _capacity_fail_streak += 1
+        streak = _capacity_fail_streak
+    if _send_failclosed_enabled() and streak >= _send_failclosed_streak():
+        # Observability: fail-closed is an operational state worth surfacing
+        # (the admin plane is down long enough to drop backpressure), so log it
+        # at WARNING rather than burying it in the per-call DEBUG line below.
+        LOGGER.warning(
+            "servicebus send fail-closed: queue depth unreadable for %d consecutive "
+            "checks; refusing sends to preserve backpressure",
+            streak,
+        )
+        raise HTTPException(
+            503,
+            detail={
+                "code": "capacity_unknown",
+                "message": (
+                    f"Request queue depth has been unreadable for {streak} "
+                    "consecutive checks; refusing the send to preserve "
+                    "backpressure. Retry once the admin plane recovers."
+                ),
+                "consecutive_failures": streak,
+            },
+            # Steer the client's retry so a fleet of producers does not hammer
+            # the moment the admin plane is flaky (thundering herd).
+            headers={"Retry-After": "30"},
+        )
+    LOGGER.debug(
+        "send capacity check skipped (counts unavailable, streak=%d)", streak, exc_info=True
+    )
 
 
 def _runtime_counts(cfg: ServiceBusConfig) -> dict[str, Any]:
@@ -285,15 +367,21 @@ def _assert_send_capacity(cfg: ServiceBusConfig) -> None:
     Best-effort cost ceiling: reads the queue's pending backlog (active +
     scheduled) and raises HTTP 429 when it is at/over ``_SEND_MAX_QUEUE_DEPTH``.
     Dead-lettered messages are excluded — they are not pending work. A counts
-    failure (no Manage claim / namespace momentarily unreachable) fails OPEN
-    (logs, proceeds) because this is a ceiling, not a security control, and must
-    not block a working integration when the admin plane hiccups.
+    failure (no Manage claim / namespace momentarily unreachable) normally fails
+    OPEN (logs, proceeds) so a transient admin-plane hiccup never blocks a
+    working integration. With ``SERVICEBUS_SEND_FAILCLOSED`` on, a SUSTAINED run
+    of counts failures (>= the streak threshold) instead fails CLOSED (503) so a
+    silently-gone ceiling cannot let an unbounded producer pile up BLAST cost.
     """
     try:
         counts = service_bus.entity_counts(cfg)
     except Exception:
-        LOGGER.debug("send capacity check skipped (counts unavailable)", exc_info=True)
+        # May raise 503 when fail-closed engages; otherwise fail-open (return).
+        _note_capacity_check_failure()
         return
+    # A successful read clears the failure streak so a later transient blip gets
+    # the full relaxed allowance again before fail-closed can re-engage.
+    _reset_capacity_failure_streak()
     queue = counts.get("queue") if isinstance(counts, dict) else None
     if not isinstance(queue, dict):
         return

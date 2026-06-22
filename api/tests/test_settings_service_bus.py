@@ -260,6 +260,107 @@ def test_send_allowed_just_under_ceiling(
     assert r.json()["status"] == "queued"
 
 
+# --------------------------------------------------------------------------- #
+# Fail-closed backpressure (SERVICEBUS_SEND_FAILCLOSED). Default fails OPEN on a
+# counts-read failure; gate-on fails CLOSED only after a sustained streak.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _reset_capacity_streak():
+    # The fail-closed streak is module-global; reset around every test so one
+    # test's induced failures never leak into the next.
+    from api.routes.settings.service_bus import _reset_capacity_failure_streak
+
+    _reset_capacity_failure_streak()
+    yield
+    _reset_capacity_failure_streak()
+
+
+def test_send_fail_open_by_default_on_counts_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate off (default): a counts failure fails OPEN — the send proceeds even
+    on repeated failures, so a transient admin-plane blip never blocks sends."""
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    def _boom(_cfg: object) -> dict:
+        raise RuntimeError("no manage claim")
+
+    monkeypatch.setattr(service_bus, "entity_counts", _boom)
+    monkeypatch.setattr(service_bus, "send_request", lambda *_a, **_k: "msg-ok")
+    for _ in range(5):
+        r = client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY)
+        assert r.status_code == 200, r.text
+
+
+def test_send_fail_closed_after_consecutive_failures(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate on: a SUSTAINED counts outage (>= streak threshold) fails CLOSED."""
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    monkeypatch.setenv("SERVICEBUS_SEND_FAILCLOSED", "true")
+    monkeypatch.setenv("SERVICEBUS_SEND_FAILCLOSED_STREAK", "3")
+
+    def _boom(_cfg: object) -> dict:
+        raise RuntimeError("admin plane down")
+
+    monkeypatch.setattr(service_bus, "entity_counts", _boom)
+    monkeypatch.setattr(service_bus, "send_request", lambda *_a, **_k: "msg-ok")
+    # First two failures stay under the threshold → still fail open (200).
+    assert (
+        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
+    )
+    assert (
+        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
+    )
+    # Third consecutive failure reaches the threshold → fail closed (503).
+    r = client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY)
+    assert r.status_code == 503, r.text
+    assert r.json()["code"] == "capacity_unknown"
+    assert r.json()["consecutive_failures"] >= 3
+    # A Retry-After header steers the client's backoff (no thundering herd).
+    assert r.headers.get("Retry-After") == "30"
+
+
+def test_send_capacity_success_resets_failclosed_streak(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful counts read clears the streak so fail-closed re-arms fresh —
+    a single later blip does not immediately 503."""
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    monkeypatch.setenv("SERVICEBUS_SEND_FAILCLOSED", "true")
+    monkeypatch.setenv("SERVICEBUS_SEND_FAILCLOSED_STREAK", "2")
+    state = {"mode": "fail"}
+
+    def _counts(_cfg: object) -> dict:
+        if state["mode"] == "fail":
+            raise RuntimeError("blip")
+        return {"queue": {"active_message_count": 0, "scheduled_message_count": 0}}
+
+    monkeypatch.setattr(service_bus, "entity_counts", _counts)
+    monkeypatch.setattr(service_bus, "send_request", lambda *_a, **_k: "msg-ok")
+    # Fail 1 (streak=1 < 2) → open.
+    assert (
+        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
+    )
+    # Success → streak reset.
+    state["mode"] = "ok"
+    assert (
+        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
+    )
+    # Fail again: streak=1 (reset) < 2 → still open, NOT 503.
+    state["mode"] = "fail"
+    assert (
+        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
+    )
+
+
 def test_send_creates_queued_placeholder(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
