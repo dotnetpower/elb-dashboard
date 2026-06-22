@@ -46,10 +46,11 @@ rejected** — the guard is deliberately conservative.
 ## Not in this change (deferred to maintainer / cross-repo)
 
 The second #56 acceptance item — a **CI enum-sync guard** that fails when
-ElasticBLAST advertises a program our OpenAPI enum is missing — needs a decided
-mechanism for the CI job to obtain the sibling `elastic-blast-azure` program list
-(it is not a dependency of this repo's CI image). That is a cross-repo wiring
-decision, so #56 stays open with this item called out.
+ElasticBLAST advertises a program our OpenAPI enum is missing — was deferred
+here as a cross-repo wiring decision. It has since shipped; see
+[2026-06-22-program-enum-sync-guard.md](2026-06-22-program-enum-sync-guard.md).
+#56 stays open only for acceptance item 1 (exposing `psiblast` / `rpsblast` in
+the submit dropdown, which needs live validation).
 
 ## Validation
 
