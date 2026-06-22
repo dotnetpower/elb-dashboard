@@ -33,6 +33,30 @@ set -euo pipefail
 AZURE_CLI_APP_ID="04b07795-8ddb-461a-bbee-02f9e1bf7b46" # well-known Azure CLI public client
 SCOPE_VALUE="user_impersonation"
 
+usage() {
+  cat <<'USAGE'
+preauthorize-cli-app.sh — pre-authorize the Azure CLI public client on the
+ElasticBLAST dashboard API app registration so Service Bus result-download
+consumers can mint a token (fixes the AADSTS65001 -> download 401 path).
+
+Usage:
+  preauthorize-cli-app.sh <api-client-id> [tenant-id] [--dry-run]
+  API_CLIENT_ID=<id> [AZURE_TENANT_ID=<tid>] preauthorize-cli-app.sh [--dry-run]
+
+Arguments:
+  <api-client-id>   App (client) id of the dashboard API app registration.
+  [tenant-id]       Optional; asserts the active 'az' tenant matches it.
+  --dry-run         Print the exact Microsoft Graph PATCH body, then exit.
+
+Requires an Entra admin with Application.ReadWrite.All (or app ownership),
+a prior 'az login', and 'az' + 'jq' on PATH.
+USAGE
+}
+
+# Lower-case helper that avoids the bash 4+ `${var,,}` expansion, so the script
+# also runs under the macOS system bash 3.2 an admin might use.
+to_lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+
 # --- Parse args (positional api-client-id / tenant-id + optional --dry-run) ---
 dry_run=false
 positional=()
@@ -40,7 +64,7 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run) dry_run=true ;;
     -h | --help)
-      sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
+      usage
       exit 0
       ;;
     --*)
@@ -50,8 +74,12 @@ for arg in "$@"; do
     *) positional+=("$arg") ;;
   esac
 done
-api_client_id="${positional[0]:-${API_CLIENT_ID:-}}"
-tenant_id="${positional[1]:-${AZURE_TENANT_ID:-}}"
+# Read positional args defensively: a direct ``${positional[0]}`` on an empty
+# array trips ``set -u`` on bash < 4.4, so gate on the element count first.
+api_client_id="${API_CLIENT_ID:-}"
+tenant_id="${AZURE_TENANT_ID:-}"
+if [[ ${#positional[@]} -ge 1 ]]; then api_client_id="${positional[0]}"; fi
+if [[ ${#positional[@]} -ge 2 ]]; then tenant_id="${positional[1]}"; fi
 
 if [[ -z "$api_client_id" ]]; then
   echo "ERROR: API client id is required." >&2
@@ -75,7 +103,7 @@ if ! account_json="$(az account show -o json 2>/dev/null)"; then
 fi
 active_tenant="$(jq -r '.tenantId' <<<"$account_json")"
 active_user="$(jq -r '.user.name // "unknown"' <<<"$account_json")"
-if [[ -n "$tenant_id" && "${active_tenant,,}" != "${tenant_id,,}" ]]; then
+if [[ -n "$tenant_id" && "$(to_lower "$active_tenant")" != "$(to_lower "$tenant_id")" ]]; then
   echo "ERROR: active az tenant ($active_tenant) != requested tenant ($tenant_id)." >&2
   echo "       Run 'az login --tenant $tenant_id' and retry." >&2
   exit 2
@@ -116,7 +144,9 @@ fi
 # Graph PATCH replaces the provided `api` sub-properties, so we must carry the
 # exposed scope forward or it would be wiped. Reconstruct the user_impersonation
 # scope from scope_id if the read-back is somehow empty, preserve any other
-# scopes / pre-authorized apps, and dedupe a prior Azure CLI entry. Idempotent.
+# scopes / pre-authorized apps, and merge (not overwrite) the Azure CLI's
+# existing delegated permissions with the scope id so a prior grant is never
+# dropped. Idempotent.
 payload="$(jq -cn \
   --argjson scopes "$(jq -c '.api.oauth2PermissionScopes // []' <<<"$app_json")" \
   --argjson preauth "$(jq -c '.api.preAuthorizedApplications // []' <<<"$app_json")" \
@@ -135,12 +165,14 @@ payload="$(jq -cn \
       type: "User",
       isEnabled: true
     }) as $imp
+  | ($preauth // []) as $pa
+  | (($pa | map(select(.appId == $cli) | (.delegatedPermissionIds // [])) | add) // []) as $cli_perms
   | {api: {
       requestedAccessTokenVersion: 2,
       oauth2PermissionScopes: ($others + [$imp]),
       preAuthorizedApplications: (
-        (($preauth // []) | map(select(.appId != $cli)))
-        + [{ appId: $cli, delegatedPermissionIds: [$imp.id] }]
+        ($pa | map(select(.appId != $cli)))
+        + [{ appId: $cli, delegatedPermissionIds: (($cli_perms + [$imp.id]) | unique) }]
       )
    }}')"
 
@@ -154,6 +186,7 @@ fi
 # --- Apply ---
 echo "==> Patching app registration (adds Azure CLI $AZURE_CLI_APP_ID -> $SCOPE_VALUE)"
 err_log="$(mktemp)"
+trap 'rm -f "$err_log"' EXIT
 if ! az rest --method PATCH \
   --uri "https://graph.microsoft.com/v1.0/applications/$object_id" \
   --headers "Content-Type=application/json" \
