@@ -89,6 +89,8 @@ def build_request_body(args: argparse.Namespace) -> dict:
             blast_options["max_target_seqs"] = args.max_target_seqs
         if args.extra:
             blast_options["extra"] = args.extra
+        if args.searchsp is not None:
+            blast_options["db_effective_search_space"] = args.searchsp
         body["blast_options"] = blast_options
     else:
         # XML-locked /api/v1/elastic-blast/submit options (outfmt fixed to 5).
@@ -236,6 +238,17 @@ def main() -> int:
         help="v1 mode only: multi-token tabular outfmt string.",
     )
     parser.add_argument("--extra", default=None, help="v1 mode only: raw CLI flags.")
+    parser.add_argument(
+        "--searchsp",
+        dest="searchsp",
+        type=int,
+        default=None,
+        help=(
+            "v1 mode only: calibrated Web BLAST effective search space "
+            "(db_effective_search_space). Omit to let the consumer apply the "
+            "calibrated value automatically for a known DB."
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",

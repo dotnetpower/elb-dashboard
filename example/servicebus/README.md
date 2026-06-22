@@ -41,10 +41,18 @@ Free-form body (`/v1/jobs`, multi-token tabular `outfmt`) — carries
   "program": "blastn",
   "db": "core_nt",
   "query_fasta": ">query1\nACGT...",
-  "blast_options": { "outfmt": "7 std staxids sstrand qseq sseq" },
+  "blast_options": { "outfmt": "7 std staxids sstrand qseq sseq", "db_effective_search_space": 32156241807668 },
   "external_correlation_id": "<hex>"
 }
 ```
+
+`blast_options.db_effective_search_space` is the calibrated Web BLAST effective
+search space (the oracle value, e.g. `32156241807668` for `core_nt`). It is
+**optional**: leave it out and the consumer applies the calibrated value
+automatically for a known database, so the e-values match NCBI Web BLAST (and the
+dashboard New Search). Set it to pin an explicit value. The consumer forwards it
+to BLAST as a `-searchsp` flag; a `-searchsp` already placed in
+`blast_options.extra` always wins.
 
 ### Completion event (optional `elastic-blast-completions` topic)
 
