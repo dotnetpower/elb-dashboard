@@ -35,6 +35,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -587,12 +588,57 @@ def promote_dead_letter_messages(
 
 
 
+def _safe_drain_handler(
+    handler: Callable[[ParsedMessage], MessageAction], parsed: ParsedMessage
+) -> MessageAction:
+    """Run one drain handler, converting any exception to ABANDON (retry, not lost).
+
+    Partial-failure isolation: a single bad message must never abort the batch
+    and must never be silently dropped — abandoning returns it to the broker for
+    redelivery on the next tick. Safe to call from a worker thread because it
+    does NOT touch the Service Bus receiver / message lock (settlement stays on
+    the main thread in :func:`drain_requests`).
+    """
+    try:
+        return handler(parsed)
+    except Exception:
+        LOGGER.exception(
+            "service bus drain handler raised; abandoning message seq=%s",
+            parsed.sequence_number,
+        )
+        return MessageAction.ABANDON
+
+
+def _run_drain_handlers(
+    handler: Callable[[ParsedMessage], MessageAction],
+    parsed_messages: list[ParsedMessage],
+    pool: ThreadPoolExecutor | None,
+) -> list[MessageAction]:
+    """Compute the per-message action for one batch, optionally in parallel.
+
+    Returns the actions in the SAME order as ``parsed_messages`` so the caller
+    can zip them back to their receiver messages and settle in receiver order on
+    the main thread. When ``pool`` is ``None`` (or a single message) the handlers
+    run serially — byte-for-byte the legacy behaviour. When a pool is supplied
+    the handler bodies (the slow sibling ``/v1/jobs`` submit) run concurrently;
+    every handler is wrapped by :func:`_safe_drain_handler`, so ``future.result``
+    never raises and one slow/failed submit cannot starve the rest.
+    """
+    if not parsed_messages:
+        return []
+    if pool is None or len(parsed_messages) == 1:
+        return [_safe_drain_handler(handler, p) for p in parsed_messages]
+    futures = [pool.submit(_safe_drain_handler, handler, p) for p in parsed_messages]
+    return [f.result() for f in futures]
+
+
 def drain_requests(
     cfg: ServiceBusConfig | None,
     handler: Callable[[ParsedMessage], MessageAction],
     *,
     max_messages: int,
     max_wait_seconds: int = _RECEIVE_MAX_WAIT_SECONDS,
+    max_concurrency: int = 1,
 ) -> DrainStats:
     """Receive up to ``max_messages`` request messages and settle each one.
 
@@ -601,10 +647,22 @@ def drain_requests(
     the submit task and return ``COMPLETE`` promptly. Any handler exception
     settles the message as ABANDON (so it is retried, not lost) and is logged;
     one bad message never aborts the whole batch (partial-failure isolation).
+
+    ``max_concurrency`` (default 1 = legacy serial) bounds how many handler
+    bodies run at once. The slow part of the handler is the synchronous sibling
+    ``/v1/jobs`` submit, so a value >1 lets one tick clear a burst instead of
+    serialising N submit latencies. Concurrency applies ONLY to the handler
+    bodies: messages are received and **settled on this (main) thread in
+    receiver order**, because an Azure Service Bus receiver and its message
+    locks are not safe to touch from multiple threads. The per-tick redelivery
+    guard (``seen``) is likewise evaluated on the main thread before any handler
+    runs, so parallelism never changes which messages are processed — only how
+    fast their submits complete.
     """
     cfg = _require_enabled_config(cfg)
     stats = DrainStats()
     budget = max(1, max_messages)
+    concurrency = max(1, max_concurrency)
     # An abandoned message becomes immediately receivable again, so without a
     # guard the same message can be re-received within THIS drain tick and burn
     # its whole delivery count (→ premature dead-letter) on a transient handler
@@ -612,43 +670,53 @@ def drain_requests(
     # once we see one again — the message is then retried on the NEXT tick, not
     # spun in a hot loop. Keyed by message_id (falls back to sequence_number).
     seen: set[str] = set()
-    with _client(cfg) as client, client.get_queue_receiver(
-        cfg.request_queue,
-        max_wait_time=max_wait_seconds,
-    ) as receiver:
-        while budget > 0:
-            batch = receiver.receive_messages(
-                max_message_count=min(budget, 32),
-                max_wait_time=max_wait_seconds,
-            )
-            if not batch:
-                break
-            wrapped = False
-            for message in batch:
-                parsed = _parse(message)
-                ident = str(parsed.message_id or parsed.sequence_number or "")
-                if ident and ident in seen:
-                    # Re-delivery of a message we already abandoned this tick.
-                    # Abandon it again WITHOUT counting another attempt-burn and
-                    # stop draining — it will be retried next tick.
-                    _safe_abandon(receiver, message)
-                    wrapped = True
+    pool = (
+        ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="sb-drain")
+        if concurrency > 1
+        else None
+    )
+    try:
+        with _client(cfg) as client, client.get_queue_receiver(
+            cfg.request_queue,
+            max_wait_time=max_wait_seconds,
+        ) as receiver:
+            while budget > 0:
+                batch = receiver.receive_messages(
+                    max_message_count=min(budget, 32),
+                    max_wait_time=max_wait_seconds,
+                )
+                if not batch:
                     break
-                if ident:
-                    seen.add(ident)
-                stats.received += 1
-                budget -= 1
-                try:
-                    action = handler(parsed)
-                except Exception:
-                    LOGGER.exception(
-                        "service bus drain handler raised; abandoning message seq=%s",
-                        parsed.sequence_number,
-                    )
-                    action = MessageAction.ABANDON
-                _settle(receiver, message, action, stats)
-            if wrapped:
-                break
+                # Phase 1 (main thread): apply the per-tick redelivery guard and
+                # claim budget. Stops at the first re-seen message so a hot loop
+                # cannot burn an abandoned message's delivery count this tick.
+                claimed: list[tuple[Any, ParsedMessage]] = []
+                wrapped = False
+                for message in batch:
+                    parsed = _parse(message)
+                    ident = str(parsed.message_id or parsed.sequence_number or "")
+                    if ident and ident in seen:
+                        _safe_abandon(receiver, message)
+                        wrapped = True
+                        break
+                    if ident:
+                        seen.add(ident)
+                    stats.received += 1
+                    budget -= 1
+                    claimed.append((message, parsed))
+                # Phase 2 (worker threads when concurrency>1): run handler bodies.
+                # NEVER settles a message here — only computes the action.
+                actions = _run_drain_handlers(
+                    handler, [parsed for _m, parsed in claimed], pool
+                )
+                # Phase 3 (main thread): settle in receiver order.
+                for (message, _parsed), action in zip(claimed, actions, strict=True):
+                    _settle(receiver, message, action, stats)
+                if wrapped:
+                    break
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
     return stats
 
 

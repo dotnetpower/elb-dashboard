@@ -67,6 +67,32 @@ LOGGER = logging.getLogger(__name__)
 
 # Per-tick bounds (self-critique: no unbounded loop). Tunable via env.
 _DRAIN_MAX_MESSAGES = int(os.environ.get("SERVICEBUS_DRAIN_MAX_MESSAGES", "50"))
+# How many request messages may be bridged to the sibling /v1/jobs plane
+# concurrently within one drain tick. Default 1 = legacy serial behaviour
+# (charter §12a Rule 4: a new throughput knob ships default-OFF). The slow part
+# of the drain handler is the synchronous sibling submit, so raising this clears
+# a parallel burst in one tick instead of serialising N submit latencies. Bound
+# it (1..32) so a misconfiguration cannot spawn an unbounded thread pool; 32
+# matches the receive batch ceiling. Settlement always stays on the main thread
+# (see service_bus.drain_requests), so this only parallelises the submit I/O.
+def _drain_concurrency_from_env() -> int:
+    """Resolve the drain fan-out from env, clamped to [1, 32], fail-safe to 1.
+
+    A non-numeric override must never crash module import (which would take the
+    whole worker down on startup); it logs and falls back to the serial default.
+    """
+    raw = os.environ.get("SERVICEBUS_DRAIN_CONCURRENCY", "1")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "invalid SERVICEBUS_DRAIN_CONCURRENCY=%r; defaulting to 1 (serial)", raw
+        )
+        value = 1
+    return max(1, min(32, value))
+
+
+_DRAIN_CONCURRENCY = _drain_concurrency_from_env()
 _PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "200"))
 # Give-up deadline for a bridge whose sibling job never reaches a terminal
 # status — without it a permanently-stuck job's row would stay "active" forever
@@ -867,12 +893,28 @@ def drain_and_resubmit() -> dict[str, Any]:
         cfg,
         lambda m: _drain_handler(m, cfg),
         max_messages=_DRAIN_MAX_MESSAGES,
+        max_concurrency=_DRAIN_CONCURRENCY,
     )
+    # Observability (self-critique #6): one structured line per non-empty tick so
+    # drain throughput / fan-out effectiveness is visible in App Insights without
+    # parsing per-message logs. Silent on an idle tick (received==0) to avoid
+    # flooding the log when the queue is empty.
+    if stats.received:
+        LOGGER.info(
+            "servicebus drain tick received=%d completed=%d abandoned=%d "
+            "dead_lettered=%d concurrency=%d",
+            stats.received,
+            stats.completed,
+            stats.abandoned,
+            stats.dead_lettered,
+            _DRAIN_CONCURRENCY,
+        )
     return {
         "received": stats.received,
         "completed": stats.completed,
         "abandoned": stats.abandoned,
         "dead_lettered": stats.dead_lettered,
+        "concurrency": _DRAIN_CONCURRENCY,
     }
 
 

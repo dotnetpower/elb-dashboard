@@ -14,6 +14,7 @@ Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py``.
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from typing import Any
 
@@ -272,4 +273,114 @@ def test_publish_event_queue_kind_uses_queue_sender(
     )
     assert len(sender.sent) == 1
     assert sender.sent[0].correlation_id == "corr-q"
+
+
+# --------------------------------------------------------------------------- #
+# Parallel drain (max_concurrency > 1): handler bodies run concurrently but
+# settlement still happens once per message on the main thread in receiver order.
+# --------------------------------------------------------------------------- #
+
+
+def test_parallel_drain_maps_each_action_and_settles_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With max_concurrency>1 every message settles exactly once with the action
+    its handler returned — parallelism must not reorder or drop settlements."""
+    msgs = [_FakeMessage(f"p{i}", {"db": "core_nt"}) for i in range(6)]
+    receiver = _FakeReceiver(msgs)
+    _patch_client(monkeypatch, receiver)
+
+    def handler(m: Any) -> MessageAction:
+        n = int(m.correlation_id[1:])
+        return MessageAction.COMPLETE if n % 2 == 0 else MessageAction.DEAD_LETTER
+
+    stats = service_bus.drain_requests(
+        _cfg(), handler, max_messages=50, max_concurrency=8
+    )
+    assert set(receiver.completed) == {"p0", "p2", "p4"}
+    assert set(receiver.dead_lettered) == {"p1", "p3", "p5"}
+    assert stats.completed == 3
+    assert stats.dead_lettered == 3
+    assert stats.received == 6
+
+
+def test_parallel_drain_isolates_one_handler_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One handler raising in a parallel batch abandons only that message; the
+    others still complete (partial-failure isolation across threads)."""
+    msgs = [_FakeMessage(f"e{i}", {"db": "core_nt"}) for i in range(4)]
+    receiver = _FakeReceiver(msgs)
+    _patch_client(monkeypatch, receiver)
+
+    def handler(m: Any) -> MessageAction:
+        if m.correlation_id == "e2":
+            raise RuntimeError("boom")
+        return MessageAction.COMPLETE
+
+    stats = service_bus.drain_requests(
+        _cfg(), handler, max_messages=4, max_concurrency=4
+    )
+    assert set(receiver.completed) == {"e0", "e1", "e3"}
+    assert "e2" in receiver.abandoned
+    assert stats.completed == 3
+
+
+def test_parallel_drain_actually_runs_handlers_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proof of concurrency: a barrier that only releases when all N handlers are
+    in-flight at once. Serial execution would time out (BrokenBarrierError →
+    ABANDON) and fail the completed-count assertion."""
+    msgs = [_FakeMessage(f"c{i}", {"db": "core_nt"}) for i in range(4)]
+    receiver = _FakeReceiver(msgs)
+    _patch_client(monkeypatch, receiver)
+    barrier = threading.Barrier(4, timeout=5)
+
+    def handler(_m: Any) -> MessageAction:
+        barrier.wait()  # all 4 must be in-flight together or this raises
+        return MessageAction.COMPLETE
+
+    stats = service_bus.drain_requests(
+        _cfg(), handler, max_messages=4, max_concurrency=4
+    )
+    assert stats.completed == 4
+    assert set(receiver.completed) == {"c0", "c1", "c2", "c3"}
+
+
+def test_serial_default_creates_no_thread_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """max_concurrency=1 (the default) must NOT spawn a ThreadPoolExecutor, so
+    the legacy serial path is byte-for-byte unchanged (charter §12a Rule 4)."""
+    created: list[int] = []
+    real_pool = service_bus.ThreadPoolExecutor
+
+    def spy(*a: Any, **k: Any) -> Any:
+        created.append(1)
+        return real_pool(*a, **k)
+
+    monkeypatch.setattr(service_bus, "ThreadPoolExecutor", spy)
+    receiver = _FakeReceiver([_FakeMessage("s1", {"db": "core_nt"})])
+    _patch_client(monkeypatch, receiver)
+
+    stats = service_bus.drain_requests(
+        _cfg(), lambda _m: MessageAction.COMPLETE, max_messages=50
+    )
+    assert created == []  # no pool created for the serial default
+    assert stats.completed == 1
+
+
+def test_parallel_drain_handles_multiple_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """70 messages span 3 receive batches (32+32+6); all settle under fan-out."""
+    msgs = [_FakeMessage(f"b{i}", {"db": "core_nt"}) for i in range(70)]
+    receiver = _FakeReceiver(msgs)
+    _patch_client(monkeypatch, receiver)
+
+    stats = service_bus.drain_requests(
+        _cfg(), lambda _m: MessageAction.COMPLETE, max_messages=100, max_concurrency=8
+    )
+    assert stats.completed == 70
+    assert stats.received == 70
+    assert len(receiver.completed) == 70
 

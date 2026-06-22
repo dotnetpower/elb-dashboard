@@ -137,7 +137,7 @@ def test_drain_bridges_valid_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(external_blast, "submit_job", fake_submit)
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
         action = handler(
             _msg(
                 {
@@ -199,7 +199,7 @@ def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) 
 
     enq = datetime.datetime(2026, 6, 14, 0, 0, 0, tzinfo=datetime.UTC)
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
         handler(
             _msg(
                 {
@@ -262,7 +262,7 @@ def test_drain_supersedes_send_time_placeholder(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(external_blast, "submit_job", lambda p, **k: {"job_id": "openapi-x"})
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
         handler(
             _msg(
                 {
@@ -302,7 +302,7 @@ def test_drain_fails_placeholder_on_permanent_rejection(monkeypatch: pytest.Monk
 
     actions: list = []
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
         actions.append(
             handler(
                 _msg(
@@ -337,7 +337,7 @@ def test_drain_fails_placeholder_on_malformed_message(monkeypatch: pytest.Monkey
         lambda cid, *, error_code: failed.append((cid, error_code)),
     )
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
         # No query_fasta / db → _build_request_payload returns None.
         handler(_msg({"external_correlation_id": "corr-bad"}))
         from api.services.service_bus import DrainStats
