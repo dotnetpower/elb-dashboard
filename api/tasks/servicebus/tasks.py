@@ -54,10 +54,12 @@ from api.services.service_bus_pref import (
 )
 from api.services.service_bus_tracking import (
     BridgeRecord,
+    claim_bridge,
     get_bridge,
     list_active_bridges,
     mark_done,
     mark_published,
+    release_bridge,
     upsert_bridge,
 )
 from api.tasks.servicebus.dlq_backup import backup_dead_letter_message
@@ -93,6 +95,18 @@ def _drain_concurrency_from_env() -> int:
 
 
 _DRAIN_CONCURRENCY = _drain_concurrency_from_env()
+
+# Atomic single-writer claim gate (charter §12a Rule 4, default-OFF). When ON the
+# drain reserves each correlation id with an atomic insert BEFORE submitting, so
+# a parallel / multi-worker drain can never submit the same request twice (the
+# get_bridge → upsert_bridge read-modify-write is otherwise racy). OFF keeps the
+# legacy "any existing bridge row dedups" behaviour unchanged. Pair this ON with
+# SERVICEBUS_DRAIN_CONCURRENCY>1 — parallel submit is only safe with the claim.
+_ATOMIC_CLAIM = os.environ.get("SERVICEBUS_ATOMIC_CLAIM", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 _PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "200"))
 # Give-up deadline for a bridge whose sibling job never reaches a terminal
 # status — without it a permanently-stuck job's row would stay "active" forever
@@ -737,11 +751,28 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     received_ts = _now_iso()
     request_id = _extract_request_id(msg)
 
-    # Idempotency: at-least-once delivery means we may see this twice.
+    # Idempotency: at-least-once delivery means we may see this twice. With the
+    # atomic-claim gate OFF (legacy) ANY existing bridge row dedups. With it ON
+    # only a CONFIRMED row (one carrying an openapi_job_id) dedups here; a bare
+    # in-flight reservation is handled by claim_bridge below, so two concurrent
+    # drains of the same correlation id can never both submit.
     existing = get_bridge(correlation_id)
-    if existing is not None:
+    if existing is not None and (existing.openapi_job_id or not _ATOMIC_CLAIM):
         LOGGER.info("service bus duplicate request corr=%s (already bridged)", correlation_id)
         return MessageAction.COMPLETE
+
+    # Atomic single-writer reservation (gate-on). The winner submits; a contended
+    # fresh reservation means another worker is mid-submit, so defer (abandon) and
+    # let that worker's single submit stand — this is what makes the parallel /
+    # multi-worker drain safe against duplicate BLAST runs. A stale reservation
+    # (a worker that crashed between claim and submit) is stolen inside
+    # claim_bridge, so a contended claim never wedges the correlation id forever.
+    if _ATOMIC_CLAIM and not claim_bridge(correlation_id, request_id):
+        LOGGER.info(
+            "service bus claim contended corr=%s — deferring to the in-flight submit",
+            correlation_id,
+        )
+        return MessageAction.ABANDON
 
     try:
         upstream = submit(payload, **_openapi_kwargs(cfg))
@@ -768,11 +799,19 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             # dead-lettered). A transient failure keeps the placeholder queued.
             _fail_placeholder(correlation_id, error_code=f"servicebus_submit_rejected_{status}")
             _publish_jobs_cache_invalidate("servicebus_drain_rejected")
+        if _ATOMIC_CLAIM:
+            # Submit failed after we reserved the correlation id, so roll the
+            # reservation back: a transient ABANDON can then re-claim + resubmit
+            # on redelivery, and a permanent DEAD_LETTER leaves no phantom
+            # ``claimed`` row behind.
+            release_bridge(correlation_id)
         return MessageAction.DEAD_LETTER if permanent else MessageAction.ABANDON
     except Exception:
         # Unknown/unexpected error — treat as transient (abandon → redelivery)
         # so a transient glitch never loses a submit.
         LOGGER.exception("service bus → OpenAPI submit failed corr=%s", correlation_id)
+        if _ATOMIC_CLAIM:
+            release_bridge(correlation_id)
         return MessageAction.ABANDON
 
     openapi_job_id = str(upstream.get("job_id") or "")

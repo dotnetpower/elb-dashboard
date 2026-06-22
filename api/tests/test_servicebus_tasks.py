@@ -19,6 +19,7 @@ import pytest
 from api.services import external_blast, service_bus
 from api.services.service_bus import MessageAction, ParsedMessage
 from api.services.service_bus_pref import ServiceBusConfig
+from api.services.service_bus_tracking import BridgeRecord
 from api.tasks.servicebus import tasks as sb_tasks
 
 
@@ -1049,3 +1050,100 @@ def test_persist_result_manifest_noop_without_blob_paths(monkeypatch: pytest.Mon
         "op-8", {"result": {"files": [{"file_id": "result-001", "filename": "r.xml"}]}}
     )
     assert called["update"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Atomic single-writer claim gate (SERVICEBUS_ATOMIC_CLAIM). Default OFF keeps
+# the legacy "any existing row dedups" behaviour; ON reserves before submitting.
+# --------------------------------------------------------------------------- #
+
+
+def _claim_msg(corr: str = "corr-z") -> ParsedMessage:
+    return _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">s\nACGT",
+            "external_correlation_id": corr,
+        }
+    )
+
+
+def test_atomic_claim_contended_abandons_without_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate ON + a lost claim → ABANDON and NEVER submit (the in-flight winner's
+    single submit is the only one)."""
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="": False)
+    submitted: list[dict] = []
+    monkeypatch.setattr(
+        external_blast, "submit_job", lambda p, **_k: submitted.append(p) or {"job_id": "x"}
+    )
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.ABANDON
+    assert submitted == []
+
+
+def test_atomic_claim_releases_on_submit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate ON + a transient submit failure after a won claim → release the
+    reservation so a redelivery can re-claim + resubmit."""
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="": True)
+    released: list[str] = []
+    monkeypatch.setattr(sb_tasks, "release_bridge", lambda c: released.append(c))
+
+    def _boom(_p: dict, **_k: object) -> dict:
+        raise RuntimeError("transient")
+
+    monkeypatch.setattr(external_blast, "submit_job", _boom)
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.ABANDON
+    assert released == ["corr-z"]
+
+
+def test_gate_off_keeps_legacy_any_row_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate OFF: ANY existing bridge row (even unconfirmed) dedups, and claim_bridge
+    is never called — byte-for-byte the legacy behaviour."""
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", False)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda c: BridgeRecord(correlation_id=c))
+    claimed: list[str] = []
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda c, _r="": claimed.append(c) or True)
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.COMPLETE
+    assert claimed == []
+
+
+def test_gate_on_confirmed_row_dedups_without_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate ON: a CONFIRMED row (openapi_job_id set) dedups early; no claim, no
+    submit."""
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(
+        sb_tasks,
+        "get_bridge",
+        lambda c: BridgeRecord(correlation_id=c, openapi_job_id="job-1"),
+    )
+    claimed: list[str] = []
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda c, _r="": claimed.append(c) or True)
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.COMPLETE
+    assert claimed == []
+
+
+def test_gate_on_unconfirmed_row_falls_through_to_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate ON: an existing UNCONFIRMED reservation does NOT early-COMPLETE; it
+    falls through to claim_bridge (which contends here → ABANDON), so a half-
+    written reservation can never masquerade as a finished job."""
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda c: BridgeRecord(correlation_id=c))
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="": False)
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.ABANDON
