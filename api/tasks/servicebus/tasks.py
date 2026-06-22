@@ -487,6 +487,7 @@ def _build_v1_jobs_payload(
     from api.services.blast.submit_payload import (
         canonical_submit_metadata,
         resolve_sharded_db_resource_profile,
+        resolve_sharding_plan,
     )
 
     body = dict(msg.body or {})
@@ -523,6 +524,59 @@ def _build_v1_jobs_payload(
     payload["resource_profile"] = resolve_sharded_db_resource_profile(
         payload.get("db") or "", payload.get("resource_profile")
     )
+    # Apply the shared Web BLAST search-space oracle to the free-form /v1/jobs
+    # path so an outfmt-7 Service Bus submit gets the SAME calibrated -searchsp
+    # as the XML (/api/v1/elastic-blast/submit) path and the dashboard New
+    # Search. The sibling /v1/jobs BlastOptions has no structured searchsp field
+    # and auto-injects a FIXED default -searchsp when none is present (only
+    # correct for the database it was calibrated against). resolve_sharding_plan
+    # (allow_servicebus_downgrade=True → never blocks, only degrades) resolves
+    # the per-database / drift-adjusted / caller-supplied value; we forward it as
+    # a raw -searchsp flag in blast_options.extra. A caller-pinned -searchsp /
+    # -dbsize is never overridden. db_effective_search_space is our convenience
+    # field (mirrors the XML path), not a sibling wire field, so it is stripped
+    # before the payload leaves. searchsp resolution must never fail a valid
+    # submit — on any error we skip injection and let the sibling apply its own.
+    blast_options = payload.get("blast_options")
+    if isinstance(blast_options, dict):
+        caller_searchsp = blast_options.pop("db_effective_search_space", None)
+        already = f"{blast_options.get('extra') or ''} {blast_options.get('outfmt') or ''}"
+        if "-searchsp" not in already and "-dbsize" not in already:
+            try:
+                plan = resolve_sharding_plan(
+                    program=str(payload.get("program") or "blastn"),
+                    database=str(payload.get("db") or ""),
+                    options={
+                        "additional_options": str(blast_options.get("extra") or ""),
+                        "db_effective_search_space": caller_searchsp,
+                        "db_total_letters": body.get("db_total_letters"),
+                        "db_total_sequences": body.get("db_total_sequences"),
+                    },
+                    caller_supplied_searchsp=(
+                        caller_searchsp if isinstance(caller_searchsp, int) else None
+                    ),
+                    allow_servicebus_downgrade=True,
+                )
+                resolved_searchsp = plan.options.get("db_effective_search_space")
+            except Exception as exc:  # never fail a valid submit over searchsp
+                LOGGER.warning(
+                    "service bus v1 searchsp resolution skipped corr=%s: %s",
+                    correlation_id,
+                    type(exc).__name__,
+                )
+                resolved_searchsp = None
+            if resolved_searchsp:
+                existing_extra = str(blast_options.get("extra") or "").strip()
+                blast_options["extra"] = (
+                    f"{existing_extra} -searchsp {int(resolved_searchsp)}".strip()
+                )
+                LOGGER.info(
+                    "service bus v1 searchsp applied corr=%s db=%s searchsp=%s",
+                    correlation_id,
+                    payload.get("db"),
+                    int(resolved_searchsp),
+                )
+        payload["blast_options"] = blast_options
     # Server-derived source + correlation id (a producer cannot spoof the
     # source). ``canonical_submit_metadata`` reads the just-promoted
     # resource_profile off ``payload`` and preserves it.

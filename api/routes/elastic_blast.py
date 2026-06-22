@@ -149,6 +149,15 @@ class BlastV1Options(BaseModel):
     max_target_seqs: int | None = Field(None, ge=1)
     outfmt: str | None = Field(None, max_length=512)
     extra: str | None = Field(None, max_length=2048)
+    # Calibrated Web BLAST effective search space (oracle value), mirroring the
+    # XML path's ``ExternalBlastOptions.db_effective_search_space``. The sibling
+    # ``/v1/jobs`` ``BlastOptions`` has no structured searchsp field and
+    # auto-injects a FIXED default ``-searchsp`` when none is present, so without
+    # this the per-database / drift-adjusted / caller-supplied value never
+    # reaches the free-form (outfmt 7) path. The Service Bus v1 builder resolves
+    # this through the shared sharding plan and forwards it as a raw
+    # ``-searchsp`` flag in ``extra`` (this field itself is NOT sent on the wire).
+    db_effective_search_space: int | None = Field(None, ge=1)
 
 
 class ExternalBlastV1Request(BaseModel):

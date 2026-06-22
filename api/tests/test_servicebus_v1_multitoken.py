@@ -220,6 +220,85 @@ def test_build_v1_payload_rejects_incompatible_outfmt() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Web BLAST search-space (searchsp) parity on the /v1/jobs path
+# --------------------------------------------------------------------------- #
+
+# core_nt's calibrated Web BLAST effective search space (api/services/
+# web_blast_searchsp.py WEB_BLAST_SEARCHSP_DEFAULTS["core_nt"].value).
+_CORE_NT_SEARCHSP = 32_156_241_807_668
+
+
+def _v1_no_searchsp_body(**overrides: object) -> dict:
+    """A v1 body whose blast_options carry NO -searchsp (so the oracle applies)."""
+    body = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": _FASTA,
+        "blast_options": {
+            "outfmt": "7 std staxids sstrand qseq sseq",
+            "extra": "-word_size 28 -dust yes",
+        },
+        "external_correlation_id": "corr-ss",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_build_v1_payload_injects_oracle_searchsp_when_absent() -> None:
+    """An outfmt-7 SB submit with no -searchsp gets the SAME calibrated value the
+    XML path / New Search apply, instead of relying on the sibling's fixed
+    default."""
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    payload = sb._build_v1_jobs_payload(_msg(_v1_no_searchsp_body()), ServiceBusConfig())
+    assert payload is not None
+    extra = payload["blast_options"]["extra"]
+    assert f"-searchsp {_CORE_NT_SEARCHSP}" in extra
+    # The pre-existing flags are preserved alongside the injected searchsp.
+    assert "-word_size 28" in extra and "-dust yes" in extra
+
+
+def test_build_v1_payload_honors_structured_db_effective_search_space() -> None:
+    """A caller may pass the oracle value via the structured
+    db_effective_search_space field (mirroring the XML path); it is applied as a
+    -searchsp flag and never leaks to the sibling wire payload."""
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    body = _v1_no_searchsp_body()
+    body["blast_options"] = {
+        "outfmt": "7 std staxids sstrand qseq sseq",
+        "db_effective_search_space": _CORE_NT_SEARCHSP,
+    }
+    payload = sb._build_v1_jobs_payload(_msg(body), ServiceBusConfig())
+    assert payload is not None
+    assert f"-searchsp {_CORE_NT_SEARCHSP}" in payload["blast_options"]["extra"]
+    # The convenience field is NOT a sibling /v1/jobs field — it must be stripped.
+    assert "db_effective_search_space" not in payload["blast_options"]
+
+
+def test_build_v1_payload_does_not_override_caller_pinned_searchsp() -> None:
+    """A caller who pins -searchsp themselves keeps exactly that value (the oracle
+    never double-injects or overrides it)."""
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    body = _v1_no_searchsp_body()
+    body["blast_options"] = {
+        "outfmt": "7 std staxids sstrand qseq sseq",
+        "extra": "-searchsp 999",
+    }
+    payload = sb._build_v1_jobs_payload(_msg(body), ServiceBusConfig())
+    assert payload is not None
+    extra = payload["blast_options"]["extra"]
+    assert "-searchsp 999" in extra
+    # Exactly one -searchsp token (no double-injection of the oracle value).
+    assert extra.count("-searchsp") == 1
+    assert str(_CORE_NT_SEARCHSP) not in extra
+
+
+# --------------------------------------------------------------------------- #
 # submit_job_v1 posts to /v1/jobs
 # --------------------------------------------------------------------------- #
 
