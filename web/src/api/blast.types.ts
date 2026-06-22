@@ -692,11 +692,14 @@ export type BlastExportFormat =
   | "json-seqalign"
   | "ncbi-hit-table-text"
   | "ncbi-hit-table-csv"
-  | "ncbi-report-text"
-  | "xml"
+  | "ncbi-report-text"  | "xml"
   | "text";
 
 export type BlastCitationFormat = "text" | "markdown" | "bibtex";
+
+/** Workflow-manager export formats (#57 R3). Mirrors the backend
+ * `api/services/blast/workflow_export.py` `SUPPORTED_WORKFLOW_FORMATS`. */
+export type WorkflowExportFormat = "nextflow" | "snakemake" | "cwl" | "wdl";
 
 export interface BlastCitation {
   job_id: string;

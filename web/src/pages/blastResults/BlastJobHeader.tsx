@@ -12,6 +12,7 @@ import {
   Link2,
   Loader2,
   StopCircle,
+  Workflow,
 } from "lucide-react";
 
 import { ElapsedTimer } from "@/components/BlastFilePreview";
@@ -23,6 +24,11 @@ import type {
 } from "@/api/endpoints";
 import { blastApi } from "@/api/blast";
 import { BlastHelpMenu } from "@/pages/blastResults/BlastHelpMenu";
+import {
+  WORKFLOW_EXPORT_FORMATS,
+  workflowExportFilename,
+  type WorkflowExportFormat,
+} from "@/pages/blastResults/workflowExportModel";
 import {
   buildConfigFilename,
   downloadConfigJson,
@@ -109,6 +115,8 @@ export function BlastJobHeader({
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const [loadingQuery, setLoadingQuery] = useState(false);
   const [copyingCitation, setCopyingCitation] = useState(false);
+  const [exportingWorkflow, setExportingWorkflow] = useState<WorkflowExportFormat | null>(null);
+  const [showPipelineMenu, setShowPipelineMenu] = useState(false);
 
   const hydratableFields = jobPayload ? partialFormFromJobPayload(jobPayload) : null;
   const canReuseConfig = Boolean(hydratableFields);
@@ -163,6 +171,37 @@ export function BlastJobHeader({
       toast("Citation is not available for this search yet", "error");
     } finally {
       setCopyingCitation(false);
+    }
+  };
+
+  const handleWorkflowExport = async (format: WorkflowExportFormat) => {
+    if (exportingWorkflow) return;
+    setShowPipelineMenu(false);
+    setExportingWorkflow(format);
+    try {
+      const exported = await blastApi.getWorkflowExport(jobId, format);
+      triggerWorkflowDownload(
+        exported.text,
+        exported.filename ?? workflowExportFilename(format),
+      );
+      toast(`Downloaded ${format} pipeline module`, "success");
+    } catch (err) {
+      const status =
+        err && typeof err === "object" && "status" in err
+          ? (err as { status?: number }).status
+          : undefined;
+      // 422 = the source job has no recorded database/parameters to pin
+      // (permanent for this job); anything else is treated as transient.
+      if (status === 422) {
+        toast(
+          "This search has no recorded parameters to export into a pipeline.",
+          "error",
+        );
+      } else {
+        toast("Pipeline export failed — please try again.", "error");
+      }
+    } finally {
+      setExportingWorkflow(null);
     }
   };
 
@@ -391,6 +430,12 @@ export function BlastJobHeader({
           )}{" "}
           {copyingCitation ? "Copying…" : "Copy citation"}
         </button>
+        <PipelineExportMenu
+          exportingWorkflow={exportingWorkflow}
+          onExport={handleWorkflowExport}
+          open={showPipelineMenu}
+          setOpen={setShowPipelineMenu}
+        />
         <button
           className="glass-button"
           onClick={handleCopyLink}
@@ -609,6 +654,143 @@ interface DownloadAllMenuProps {
   setOpen: (value: boolean) => void;
   submittedOutfmt: number | null;
   resultFiles: BlastResultFile[];
+}
+
+/** Trigger a browser download of a text workflow module without any external
+ * library (mirrors configSerializer.downloadConfigJson, but for arbitrary
+ * text/plain content). */
+function triggerWorkflowDownload(content: string, filename: string): void {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+interface PipelineExportMenuProps {
+  exportingWorkflow: WorkflowExportFormat | null;
+  onExport: (format: WorkflowExportFormat) => void;
+  open: boolean;
+  setOpen: (open: boolean) => void;
+}
+
+/**
+ * "Pipeline export" dropdown (#57 R3): downloads a Nextflow / Snakemake / CWL /
+ * WDL module that re-submits this job's exact parameters. Mirrors the
+ * DownloadAllMenu interaction (click-outside / Esc to close, role=menu).
+ */
+function PipelineExportMenu({
+  exportingWorkflow,
+  onExport,
+  open,
+  setOpen,
+}: PipelineExportMenuProps) {
+  const containerRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (event: MouseEvent) => {
+      const node = containerRef.current;
+      if (node && !node.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, setOpen]);
+
+  return (
+    <span ref={containerRef} style={{ position: "relative" }}>
+      <button
+        type="button"
+        className="glass-button"
+        onClick={() => setOpen(!open)}
+        disabled={exportingWorkflow !== null}
+        title="Download a Nextflow / Snakemake / CWL / WDL module that re-submits this search's exact parameters via the API."
+        aria-haspopup="menu"
+        aria-expanded={open}
+        style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}
+      >
+        {exportingWorkflow !== null ? (
+          <Loader2 size={14} strokeWidth={1.5} className="spin" aria-hidden="true" />
+        ) : (
+          <Workflow size={14} strokeWidth={1.5} aria-hidden="true" />
+        )}{" "}
+        Pipeline export <ChevronDown size={11} strokeWidth={1.5} aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Pipeline export format"
+          style={{
+            position: "absolute",
+            top: "100%",
+            right: 0,
+            marginTop: 4,
+            zIndex: 10,
+            minWidth: 320,
+            background: "var(--bg-secondary)",
+            border: "1px solid var(--glass-border)",
+            borderRadius: 6,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+            padding: 4,
+          }}
+        >
+          {WORKFLOW_EXPORT_FORMATS.map((meta) => (
+            <button
+              key={meta.format}
+              type="button"
+              role="menuitem"
+              onClick={() => onExport(meta.format)}
+              disabled={exportingWorkflow !== null}
+              title={meta.description}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "8px 12px",
+                textAlign: "left",
+                background: "transparent",
+                border: 0,
+                color: "var(--text-primary)",
+                cursor: exportingWorkflow !== null ? "wait" : "pointer",
+                borderRadius: 4,
+              }}
+              onMouseEnter={(event) => {
+                event.currentTarget.style.background = "var(--glass-bg)";
+              }}
+              onMouseLeave={(event) => {
+                event.currentTarget.style.background = "transparent";
+              }}
+            >
+              <span style={{ fontSize: 12, fontWeight: 600 }}>{meta.label}</span>
+              <span
+                style={{
+                  display: "block",
+                  fontSize: 11,
+                  color: "var(--text-muted)",
+                  marginTop: 2,
+                }}
+              >
+                {meta.description}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
 }
 
 interface DownloadAllOption {

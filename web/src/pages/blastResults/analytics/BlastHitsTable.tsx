@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { Link } from "react-router-dom";
 import {
   ExternalLink,
@@ -30,6 +37,7 @@ import {
   taxidLabel,
 } from "./helpers";
 import { ReviewBadgePopover } from "./ReviewBadgePopover";
+import { computeHitGridFocus, isHitGridNavKey } from "./hitGridNav";
 import {
   hitKey,
   type BlastAnalyticsState,
@@ -202,11 +210,69 @@ export function BlastHitsTable({
   // bounds what is painted — never what is sorted or selected.
   const [visibleCount, setVisibleCount] = useState(INITIAL_ROWS);
   const rowSentinelRef = useRef<HTMLDivElement | null>(null);
+  // Keyboard grid navigation (#30): roving row focus over the painted rows.
+  // `focusedRow` is a 0-based index into the full `hits` array; -1 = none yet.
+  const [focusedRow, setFocusedRow] = useState(-1);
+  const rowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
+  const pendingGridFocusRef = useRef(false);
   // Reset the window whenever the hit set changes identity (sort apply, page
   // change, refetch). useBlastAnalyticsState returns a fresh array each time.
   useEffect(() => {
     setVisibleCount(INITIAL_ROWS);
+    setFocusedRow(-1);
+    pendingGridFocusRef.current = false;
   }, [hits]);
+  // Move DOM focus to the keyboard-selected row once it is painted. Gated on an
+  // explicit pending flag so unrelated re-renders never steal focus, and keyed
+  // on visibleCount so a load-more seam (focus a not-yet-painted row) resolves
+  // on the next paint.
+  useEffect(() => {
+    if (!pendingGridFocusRef.current) return;
+    if (focusedRow < 0 || focusedRow >= visibleCount) return;
+    const node = rowRefs.current[focusedRow];
+    if (node) {
+      node.focus();
+      pendingGridFocusRef.current = false;
+    }
+  }, [focusedRow, visibleCount]);
+  const handleGridKeyDown = (event: ReactKeyboardEvent<HTMLTableSectionElement>) => {
+    if (!isHitGridNavKey(event.key)) return;
+    // Don't hijack arrows/Home/End from a control that consumes them itself
+    // (text input, textarea, select, contenteditable). Checkboxes / radios /
+    // buttons don't use these keys, so grid navigation still works while the
+    // row's selection checkbox is focused.
+    const target = event.target as HTMLElement | null;
+    if (target) {
+      const tag = target.tagName;
+      const isTextLikeInput =
+        tag === "INPUT" &&
+        !["checkbox", "radio", "button", "submit", "reset"].includes(
+          (target as HTMLInputElement).type,
+        );
+      if (tag === "SELECT" || tag === "TEXTAREA" || target.isContentEditable || isTextLikeInput) {
+        return;
+      }
+    }
+    const result = computeHitGridFocus({
+      key: event.key,
+      focusedRow,
+      paintedCount: visibleCount,
+      totalCount: hits.length,
+    });
+    if (result.nextRow < 0) return;
+    // Consume the key so the page never scrolls, but skip the state churn when
+    // the move is a no-op (e.g. ArrowDown already on the last row): no needless
+    // re-render and no dangling pending-focus flag.
+    event.preventDefault();
+    if (result.nextRow === focusedRow && !result.loadMore) {
+      return;
+    }
+    if (result.loadMore) {
+      setVisibleCount((current) => Math.min(current + ROW_STEP, hits.length));
+    }
+    pendingGridFocusRef.current = true;
+    setFocusedRow(result.nextRow);
+  };
   useEffect(() => {
     const node = rowSentinelRef.current;
     if (!node) return;
@@ -287,9 +353,14 @@ export function BlastHitsTable({
           </div>
         )}
         <ScrollShadow>
-        <table className="table" style={{ width: "100%", minWidth: 1320, fontSize: 13 }}>
+        <table
+          className="table"
+          style={{ width: "100%", minWidth: 1320, fontSize: 13 }}
+          aria-label="BLAST hits — use Up/Down arrows to move between rows, Home/End to jump"
+          aria-rowcount={hits.length + 1}
+        >
           <thead>
-            <tr>
+            <tr aria-rowindex={1}>
               <th style={{ width: 28, textAlign: "left" }}>
                 <input
                   type="checkbox"
@@ -427,18 +498,29 @@ export function BlastHitsTable({
               <th style={{ textAlign: "right" }}>Query Range</th>
             </tr>
           </thead>
-          <tbody>
-            {visibleHits.map((hit) => {
+          <tbody onKeyDown={handleGridKeyDown}>
+            {visibleHits.map((hit, rowIndex) => {
               const key = hitKey(hit);
               const checked = selectedHits.has(key);
               const aggregate = subjectAggregates.get(hit.sseqid);
               return (
                 <tr
                   key={key}
+                  ref={(node) => {
+                    rowRefs.current[rowIndex] = node;
+                  }}
+                  tabIndex={(focusedRow < 0 ? rowIndex === 0 : focusedRow === rowIndex) ? 0 : -1}
+                  aria-rowindex={rowIndex + 2}
+                  onFocus={() => {
+                    if (focusedRow !== rowIndex) setFocusedRow(rowIndex);
+                  }}
                   style={{
                     background: checked
                       ? "color-mix(in srgb, var(--accent) 8%, transparent)"
                       : undefined,
+                    outline:
+                      focusedRow === rowIndex ? "2px solid var(--accent)" : undefined,
+                    outlineOffset: -2,
                   }}
                 >
                   <td>

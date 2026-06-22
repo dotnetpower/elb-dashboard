@@ -107,6 +107,7 @@ nav:
       - BLAST Options Reference: user-guide/blast-options.md
       - Jobs: user-guide/jobs.md
       - Results: user-guide/results.md
+      - Pipeline Export: user-guide/pipeline-export.md
       - Web BLAST Parity: user-guide/web-blast-parity.md
       - API Reference: user-guide/api-reference.md
       - Observability: user-guide/observability.md

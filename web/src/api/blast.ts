@@ -28,6 +28,7 @@ import type {
   CapacityGateSnapshot,
   JobsForAccessionResponse,
   TaxonomyDetail,
+  WorkflowExportFormat,
   TaxonomyImageResponse,
   TaxonomySearchResponse,
   TaxonomyTreeResponse,
@@ -369,6 +370,17 @@ export const blastApi = {
   getCitation: (jobId: string, format: BlastCitationFormat = "text") =>
     api.get<BlastCitation>(
       `/blast/jobs/${encodeURIComponent(jobId)}/citation?format=${encodeURIComponent(format)}`,
+    ),
+
+  /**
+   * Download a workflow-manager module (Nextflow / Snakemake / CWL / WDL) that
+   * re-submits this job's exact parameters via one POST /api/blast/jobs call
+   * (#57 R3). The route streams the file body as text/plain; the caller turns
+   * it into a browser download. No storage URL or bearer token is embedded.
+   */
+  getWorkflowExport: (jobId: string, format: WorkflowExportFormat) =>
+    api.getText(
+      `/blast/jobs/${encodeURIComponent(jobId)}/export?format=${encodeURIComponent(format)}`,
     ),
 
   /**
