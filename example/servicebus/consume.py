@@ -33,6 +33,15 @@ Data Receiver`` on the namespace. ``--download`` also needs a dashboard bearer
 token — set ``ELB_BEARER_TOKEN`` directly, or ``ELB_API_CLIENT_ID`` so the
 script runs ``az account get-access-token --resource <id>`` for you.
 
+  NOTE: the ``ELB_API_CLIENT_ID`` path only works when the API app registration
+  has pre-authorized the well-known Azure CLI public client
+  (``04b07795-8ddb-461a-bbee-02f9e1bf7b46``) for its ``user_impersonation``
+  scope — ``scripts/dev/setup-app-registration.sh`` does this automatically.
+  Without it, ``az account get-access-token`` fails with ``AADSTS65001``
+  (consent not granted) and the download returns 401. In that case set
+  ``ELB_BEARER_TOKEN`` to a token obtained interactively, or ask an admin to
+  grant consent.
+
 Usage:
     python consume.py --self-test                       # offline parse/dedupe
     python consume.py --source requests --max 5         # drain up to 5 requests
@@ -217,6 +226,19 @@ def acquire_bearer_token() -> str:
         )
     except (subprocess.SubprocessError, OSError) as exc:
         print(f"token acquisition failed: {type(exc).__name__}", file=sys.stderr)
+        if isinstance(exc, subprocess.CalledProcessError):
+            stderr = (exc.stderr or "").strip()
+            if "AADSTS65001" in stderr or "has not consented" in stderr:
+                print(
+                    "  hint: the API app registration must pre-authorize the Azure CLI "
+                    "public client (04b07795-8ddb-461a-bbee-02f9e1bf7b46) for its "
+                    "'user_impersonation' scope. scripts/dev/setup-app-registration.sh "
+                    "does this automatically; otherwise an admin must grant consent. "
+                    "Until then, set ELB_BEARER_TOKEN to a pre-acquired token.",
+                    file=sys.stderr,
+                )
+            elif stderr:
+                print(f"  az: {stderr[:300]}", file=sys.stderr)
         return ""
     return out.stdout.strip()
 

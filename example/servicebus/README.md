@@ -157,6 +157,18 @@ ELB_API_CLIENT_ID=<api-client-id> \
   python consume.py --source completions --download --download-dir ./out
 ```
 
+> **`download_url` returns 401 / "download doesn't work"?** The completion
+> event's `result_files[].download_url` points at the dashboard's
+> *authenticated* streaming gateway (never a SAS URL). The `ELB_API_CLIENT_ID`
+> token path above only works when the API app registration has **pre-authorized
+> the Azure CLI public client** (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) for its
+> `user_impersonation` scope. `scripts/dev/setup-app-registration.sh` configures
+> this automatically. If it was not run (or the app was created another way),
+> `az account get-access-token --resource <api-client-id>` fails with
+> `AADSTS65001` (consent not granted) and the download returns 401. Fix it by
+> either re-running that script, having an admin add the pre-authorization, or
+> setting `ELB_BEARER_TOKEN` to a token acquired interactively.
+
 > `consume.py --source requests` with the default `--settle auto` **completes**
 > (removes) messages. Use `--settle abandon` against the live queue so the real
 > worker still processes them, or point the scripts at a throwaway namespace.

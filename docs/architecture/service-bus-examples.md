@@ -74,6 +74,19 @@ sequenceDiagram
   the result-streaming gateway — set `ELB_BEARER_TOKEN`, or `ELB_API_CLIENT_ID`
   so the script runs `az account get-access-token` for you.
 
+    !!! warning "`download_url` returns 401 / consent error"
+        The `ELB_API_CLIENT_ID` path only works when the API app registration
+        has pre-authorized the well-known Azure CLI public client
+        (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) for its `user_impersonation`
+        scope. [`scripts/dev/setup-app-registration.sh`][setup-script] does this
+        automatically. Without it, `az account get-access-token --resource
+        <api-client-id>` fails with `AADSTS65001` (consent not granted) and the
+        download returns 401 — re-run that script, have an admin add the
+        pre-authorization, or set `ELB_BEARER_TOKEN` to a token acquired
+        interactively.
+
+  [setup-script]: https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/setup-app-registration.sh
+
 ## Configuration
 
 All three scripts read these environment variables (defaults shown):

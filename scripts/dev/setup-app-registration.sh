@@ -98,6 +98,64 @@ else
   echo "==> Reusing scope id=$scope_id"
 fi
 
+# --- 3b. Pre-authorize the Azure CLI public client for `user_impersonation` ---
+# A programmatic consumer of the Service Bus completion events (see
+# example/servicebus/consume.py) downloads result files by calling the
+# dashboard's authenticated streaming gateway
+# (GET /api/v1/elastic-blast/jobs/{id}/files/{file_id}) with a bearer token it
+# acquires via `az account get-access-token --resource <api-client-id>`. Without
+# pre-authorizing the well-known Azure CLI public client for this app's
+# `user_impersonation` scope, that non-interactive token request fails with
+# AADSTS65001 ("the user or administrator has not consented") and the download
+# returns 401. Pre-authorizing lets any tenant user mint a delegated token for
+# the API audience without a per-user consent prompt; the backend still
+# validates the token (require_caller) and enforces RBAC on every call, so this
+# only removes the consent step — it grants no data access the SPA users (who
+# already request the same scope) do not have. The merge reads the current
+# `api` object so it preserves the exposed scope and any existing
+# pre-authorized apps, and is idempotent (it drops a prior Azure CLI entry
+# before re-adding it).
+azure_cli_app_id="04b07795-8ddb-461a-bbee-02f9e1bf7b46" # well-known Azure CLI public client
+echo "==> Pre-authorizing the Azure CLI public client ($azure_cli_app_id) for user_impersonation"
+current_scopes_json="$(az ad app show --id "$app_id" --query 'api.oauth2PermissionScopes' -o json 2>/dev/null || echo '[]')"
+current_preauth_json="$(az ad app show --id "$app_id" --query 'api.preAuthorizedApplications' -o json 2>/dev/null || echo '[]')"
+# Re-send the full `api` object (Graph PATCH replaces the provided `api`
+# sub-properties), so we must carry the exposed scope forward or it would be
+# wiped. Reconstruct the `user_impersonation` scope deterministically from the
+# resolved scope_id when the read-back is empty/stale (eventual consistency can
+# return [] immediately after step 3 created it), guaranteeing the scope is
+# never dropped while still preserving any other scopes and pre-authorized apps.
+preauth_payload="$(jq -cn \
+  --argjson scopes "${current_scopes_json:-[]}" \
+  --argjson preauth "${current_preauth_json:-[]}" \
+  --arg cli "$azure_cli_app_id" \
+  --arg scope "$scope_id" \
+  '
+  ($scopes // []) as $existing
+  | ($existing | map(select(.value != "user_impersonation"))) as $others
+  | (($existing | map(select(.value == "user_impersonation")))[0] // {
+      id: $scope,
+      adminConsentDescription: "Allow the app to access ElasticBLAST control plane on behalf of the signed-in user.",
+      adminConsentDisplayName: "Access ElasticBLAST control plane",
+      userConsentDescription: "Allow the app to access ElasticBLAST control plane on your behalf.",
+      userConsentDisplayName: "Access ElasticBLAST control plane",
+      value: "user_impersonation",
+      type: "User",
+      isEnabled: true
+    }) as $imp
+  | {api: {
+      requestedAccessTokenVersion: 2,
+      oauth2PermissionScopes: ($others + [$imp]),
+      preAuthorizedApplications: (
+        (($preauth // []) | map(select(.appId != $cli)))
+        + [{ appId: $cli, delegatedPermissionIds: [$imp.id] }]
+      )
+   }}')"
+az rest --method PATCH \
+  --uri "https://graph.microsoft.com/v1.0/applications/$object_id" \
+  --headers "Content-Type=application/json" \
+  --body "$preauth_payload" >/dev/null
+
 # --- 4. SPA redirect URI ---
 echo "==> Configuring SPA redirect URI"
 current_redirects_json="$(az ad app show --id "$app_id" --query 'spa.redirectUris' -o json 2>/dev/null || echo '[]')"
@@ -185,6 +243,9 @@ cat <<EOF
  App ID   : $app_id
  Scope    : ${identifier_uri}/user_impersonation
  Redirect : $REDIRECT_URI
+ CLI auth : Azure CLI ($azure_cli_app_id) pre-authorized for user_impersonation
+            (so 'az account get-access-token --resource $app_id' works for
+            Service Bus result-download consumers without a consent prompt)
 ============================================================
 
 Next steps:
