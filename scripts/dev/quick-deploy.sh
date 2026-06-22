@@ -299,7 +299,7 @@ load_simple_env_file "$REPO_ROOT/web/.env.local" \
 # serviceBusEnabled) while leaving explicit target overrides untouched.
 load_azd_env
 
-[[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal|all> [tag] [--logs] [--rebuild-terminal-base] [--no-build|--build-only] [--yes]"
+[[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal|all> [tag] [--logs] [--rebuild-terminal-base] [--no-build|--build-only] [--no-prune] [--yes]"
 
 SIDECAR="$1"; shift || true
 TAG=""
@@ -319,12 +319,20 @@ NO_BUILD=false
 # the running Container App; deploy.yml then triggers a separate run with
 # --no-build to actually swap the revision.
 BUILD_ONLY=false
+# --no-prune: skip the post-deploy ACR retention sweep that keeps only the
+# newest ELB_ACR_KEEP_IMAGES (default 3) tags per control-plane repository and
+# deletes the older ones. The sweep is best-effort (a delete failure never
+# fails the deploy) and only runs when a fresh image was actually built
+# (i.e. not on --no-build). Also disabled via ELB_SKIP_ACR_PRUNE=1.
+NO_PRUNE=false
+[[ "${ELB_SKIP_ACR_PRUNE:-0}" == "1" ]] && NO_PRUNE=true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --logs) TAIL_LOGS=true ;;
     --rebuild-terminal-base) REBUILD_TERMINAL_BASE=true ;;
     --no-build) NO_BUILD=true ;;
     --build-only) BUILD_ONLY=true ;;
+    --no-prune) NO_PRUNE=true ;;
     --yes|-y) SKIP_CONFIRM=true ;;
     -*)     die "unknown flag: $1" ;;
     *)      TAG="$1" ;;
@@ -532,6 +540,79 @@ resolve_image_digest() {
     printf 'WARN: could not resolve digest for %s; patching with the mutable tag (a re-pushed tag may not roll a new revision)\n' "$ref" >&2
     printf '%s' "$ref"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# acr_prune_repo_keep_recent -- bound ACR storage growth.
+#
+# Every deploy pushes a new tag (e.g. elb-api:20260622_…) so the registry
+# accumulates one manifest per deploy forever. This sweep keeps only the
+# newest ELB_ACR_KEEP_IMAGES (default 3) manifests per repository, ordered by
+# last-update time, and deletes the older ones.
+#
+# Safety:
+#   * Best-effort: a missing 'Contributor'/'AcrDelete' permission, a transient
+#     registry error, or a repo with <= keep manifests is a no-op — it never
+#     fails the deploy (the caller invokes it with `|| true`).
+#   * Keeps the newest N, so the just-pushed image AND the previously-running
+#     image (the rollback target) are always retained.
+#   * Skipped on --no-prune / ELB_SKIP_ACR_PRUNE=1 and on --no-build (no fresh
+#     image was pushed, so nothing new accumulated this run).
+#   * MUST be called WHILE the ACR firewall is open (between
+#     acr_ensure_build_access and acr_restore_build_access). Steady-state ACR
+#     is publicNetworkAccess=Disabled, so the data-plane list/delete calls
+#     below are network-refused once the registry is re-locked.
+# ---------------------------------------------------------------------------
+acr_prune_repo_keep_recent() {
+  local acr="$1" repo="$2" keep="${3:-3}"
+  [[ -n "$acr" && -n "$repo" ]] || return 0
+  # All digests for the repo, newest first. `--orderby time_desc` puts the most
+  # recently updated manifest at index 0.
+  local -a digests=()
+  mapfile -t digests < <(
+    az acr manifest list-metadata --registry "$acr" --name "$repo" \
+      --orderby time_desc \
+      --query "[].digest" -o tsv 2>/dev/null || true
+  )
+  local total="${#digests[@]}"
+  if (( total <= keep )); then
+    ts "    (acr prune: $repo has $total manifest(s) <= keep=$keep; nothing to delete)"
+    return 0
+  fi
+  local deleted=0 idx digest
+  for (( idx = keep; idx < total; idx++ )); do
+    digest="${digests[$idx]}"
+    [[ "$digest" == sha256:* ]] || continue
+    if az acr manifest delete --registry "$acr" --name "$repo@$digest" --yes -o none 2>/dev/null; then
+      deleted=$(( deleted + 1 ))
+    else
+      ts "    ! acr prune: failed to delete $repo@${digest:0:19}… (need 'Contributor'/'AcrDelete'?); skipping"
+    fi
+  done
+  ts "    ✓ acr prune: $repo kept newest $keep, deleted $deleted older manifest(s)"
+}
+
+# acr_prune_targets -- run the retention sweep over one or more repos unless
+# pruning is disabled. Honours ELB_ACR_KEEP_IMAGES (default 3).
+acr_prune_targets() {
+  if [[ "${NO_PRUNE:-false}" == "true" ]]; then
+    ts "==> Skipping ACR retention prune (--no-prune / ELB_SKIP_ACR_PRUNE=1)"
+    return 0
+  fi
+  if [[ "${NO_BUILD:-false}" == "true" ]]; then
+    ts "==> Skipping ACR retention prune (--no-build: no fresh image pushed)"
+    return 0
+  fi
+  local keep="${ELB_ACR_KEEP_IMAGES:-3}"
+  if ! [[ "$keep" =~ ^[0-9]+$ ]] || (( keep < 1 )); then
+    ts "    ! invalid ELB_ACR_KEEP_IMAGES='$keep'; falling back to 3"
+    keep=3
+  fi
+  ts "==> ACR retention prune (keep newest $keep per repository) on $ACR_NAME"
+  local repo
+  for repo in "$@"; do
+    acr_prune_repo_keep_recent "$ACR_NAME" "$repo" "$keep" || true
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -795,6 +876,12 @@ if ! $NO_BUILD; then
   fi
   ts "==> All 3 images built and pushed"
 
+  # Prune older manifests WHILE the ACR firewall is still open. Steady-state
+  # ACR is publicNetworkAccess=Disabled, so the data-plane list/delete calls
+  # below only work before acr_restore_build_access re-locks the registry.
+  # Best-effort: a delete failure never aborts the deploy.
+  acr_prune_targets elb-api elb-frontend elb-terminal
+
   acr_restore_build_access "$ACR_NAME"
   trap - EXIT
 fi  # end: if ! $NO_BUILD (all branch)
@@ -1036,6 +1123,11 @@ if ! $NO_BUILD; then
     "${BUILD_ARGS[@]}" \
     "$BUILD_CTX" \
     -o none
+
+  # Prune older manifests for this repo WHILE the ACR firewall is still open.
+  # Steady-state ACR is publicNetworkAccess=Disabled, so this MUST precede
+  # acr_restore_build_access below. Best-effort: never aborts the deploy.
+  acr_prune_targets "$IMAGE_NAME"
 
   acr_restore_build_access "$ACR_NAME"
   trap - EXIT

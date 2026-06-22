@@ -17,7 +17,7 @@ Key entry points: `reconcile_rolling_out_inline`, `reconcile_rolling_out`,
   `ROLLING_OUT_TIMEOUT_SECONDS`, `VALIDATING_TIMEOUT_SECONDS`,
   `CONFIRM_WINDOW_SECONDS`, `CONFIRM_CUTOVER_CONVERGE_GRACE_SECONDS`,
   `validating_timeout_seconds`, `confirm_window_seconds`,
-  `_RUNNING_STATE_TERMINAL_FAILURES`.
+  `_RUNNING_STATE_TERMINAL_FAILURES`, `_prune_acr_after_success`.
 Risky contracts: This task runs on every revision via beat. It MUST be
   safe to call against an idle/terminal row (no-op). The replica-zero
   guard escalates only when `started_at` is sufficiently in the past
@@ -28,6 +28,7 @@ Validation: `uv run pytest -q api/tests/test_upgrade_task.py
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -40,6 +41,41 @@ from api.services.upgrade import aca_template, history, revisions, rollout_watch
 from api.tasks.upgrade.pipeline import _fail_pre, _fail_rollout
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _prune_acr_after_success(row: state.UpgradeState) -> None:
+    """Best-effort ACR retention prune once an upgrade reaches `succeeded`.
+
+    Every upgrade pushes one new tag per control-plane repository, so without
+    a prune the registry grows a tag per upgrade forever. Keep only the newest
+    `UPGRADE_ACR_KEEP_IMAGES` (default 3) manifests per repository, protecting
+    the now-running images and the rollback target so a subsequent rollback is
+    never starved of its snapshot. Never raises — a missing `AcrDelete`
+    permission or a registry hiccup must not undo a successful upgrade.
+    """
+    try:
+        from api.services.upgrade import acr_retention
+
+        protected: list[str] = []
+        for raw in (row.current_images_json, row.rollback_target_json):
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict):
+                protected.extend(str(v) for v in parsed.values() if v)
+        summary = acr_retention.prune_control_plane_images(protected_image_refs=protected)
+        if summary.get("total_deleted"):
+            LOGGER.info(
+                "upgrade.reconcile: ACR retention pruned %d old image(s)",
+                summary["total_deleted"],
+            )
+    except Exception as exc:  # pragma: no cover - prune is fully best-effort
+        LOGGER.warning(
+            "upgrade.reconcile: ACR retention prune failed (non-fatal): %s", exc
+        )
 
 
 # Stuck guard for reconcile_rolling_out_inline. Reasonably generous;
@@ -359,6 +395,7 @@ def reconcile_rolling_out_inline(
                 job_id=row.job_id,
                 running_version=proven_version,
             )
+            _prune_acr_after_success(after)
             return after
         except (state.StateTransitionRefused, state.RowEtagMismatch):
             return state.get_state()
@@ -716,6 +753,7 @@ def _reconcile_confirming(
     history.record_event("succeeded", job_id=row.job_id, running_version=_api.__version__)
     # Garbage-collect blue so no leftover container revisions remain.
     _run_gc(gc)
+    _prune_acr_after_success(after)
     return after
 
 
