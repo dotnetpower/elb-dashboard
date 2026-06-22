@@ -22,7 +22,7 @@
 
 > **Issue discipline (NON-NEGOTIABLE).** If the work you do maps to a registered GitHub issue, you OWN that issue for the session:
 > 1. **Comment** on the issue with what you shipped (commit SHA), the validation evidence, and — for partial work — the explicit remaining gaps. Never leave a worked issue silent.
-> 2. **Close it** (`gh issue close <N>`) only when **every** acceptance criterion is met; otherwise leave it open with the gap spelled out. Partial work that satisfies only some criteria never closes the issue.
+> 2. **Close it** (`gh issue close <N>`) only when **every** acceptance criterion is met; otherwise leave it open with the gap spelled out. Partial work that satisfies only some criteria never closes the issue. When you do close it, add the `completed` label in the same step: `gh issue close <N> --reason completed` followed by `gh issue edit <N> --add-label completed` (create the label once with `gh label create completed` if it does not exist yet).
 > 3. **Re-verify before closing**: run `gh issue view <N>`, read the acceptance criteria, and confirm each one against the implemented diff + validation. Do not close on optimism.
 >
 > This applies whether or not a commit message names the issue. The full mechanics (commit-reference trigger, wording) are in §13 "GitHub issue closure hygiene".
@@ -400,9 +400,19 @@ docs/features_change/YYYY-MM/YYYY-MM-DD-<short-name>.md
 containing: motivation, user-facing change, API/IaC diff summary, validation evidence (screenshot, curl, or test name).
 
 ### GitHub issue closure hygiene
-When work is tied to a registered GitHub issue, do not leave the issue silent. Before marking the task done, verify the issue's acceptance criteria against the implemented diff and validation evidence. If the criteria are met, add an issue comment summarising the shipped change and validation, then close the issue. If anything remains, leave the issue open and comment with the completed work, validation evidence, and explicit remaining gap.
+When work is tied to a registered GitHub issue, do not leave the issue silent. Before marking the task done, verify the issue's acceptance criteria against the implemented diff and validation evidence. If the criteria are met, add an issue comment summarising the shipped change and validation, then close the issue **and apply the `completed` label**. If anything remains, leave the issue open and comment with the completed work, validation evidence, and explicit remaining gap (do not add the `completed` label to an issue that stays open).
 
-**Commit-reference trigger (do not skip).** Whenever a commit message references an issue (`(#N)`, `fixes #N`, `closes #N`, `refs #N`), that issue MUST be updated in the same session — a referenced-but-silent issue is a process violation. Concretely: after committing work that names an issue, run `gh issue view <N>` to re-read its acceptance criteria, then either (a) comment + `gh issue close <N>` when every criterion is met, or (b) comment with the completed subset, validation evidence, and the explicit remaining gaps when only part of the issue shipped (keep it open). Partial work that closes only one of several acceptance criteria never closes the issue.
+**`completed` label is mandatory on close.** Closing a fully-satisfied issue and labelling it `completed` are one atomic step, never one without the other:
+
+```bash
+gh label create completed --color 0E8A16 --description "All acceptance criteria met and shipped" 2>/dev/null || true
+gh issue close <N> --reason completed
+gh issue edit <N> --add-label completed
+```
+
+The `gh label create` line is idempotent — it is a no-op (the `|| true` swallows the "already exists" error) once the label exists in the repo, so it is safe to run every time. Never add the `completed` label to an issue you are leaving open for remaining work.
+
+**Commit-reference trigger (do not skip).** Whenever a commit message references an issue (`(#N)`, `fixes #N`, `closes #N`, `refs #N`), that issue MUST be updated in the same session — a referenced-but-silent issue is a process violation. Concretely: after committing work that names an issue, run `gh issue view <N>` to re-read its acceptance criteria, then either (a) comment + close + add the `completed` label when every criterion is met, or (b) comment with the completed subset, validation evidence, and the explicit remaining gaps when only part of the issue shipped (keep it open, no `completed` label). Partial work that closes only one of several acceptance criteria never closes the issue.
 
 ### Validation before marking done
 * Backend changes (`api/`): `uv run pytest -q api/tests` + a local smoke test (`uv run uvicorn api.main:app --reload` for HTTP routes; `uv run celery -A api.celery_app worker -l info` for task changes). Curl the new route or trigger the new task with evidence in the change note.
@@ -454,6 +464,13 @@ Validation = pytest + local smoke (`uv run uvicorn …`, `npm run dev`, or the `
 2. The bug or behaviour genuinely cannot be reproduced in Tier 1 (pytest) or Tier 2a (host-mode `fullstack: start`).
 
 When you do redeploy, state the reason in the change note (which sidecar, which Tier 2a check was tried and why it failed). Building images "just to be sure" wastes 5-10 minutes per cycle and is a charter violation.
+
+### Load / performance testing — never create or repoint shared resources (NON-NEGOTIABLE)
+Load and performance tests run against **existing** infrastructure. They must not provision new billable Azure resources, and must never mutate shared runtime configuration that other users or production depend on.
+
+1. **No new resources for a test.** Do not `az <service> ... create` (Service Bus namespaces, Storage accounts, AKS clusters, ACR, Key Vault, etc.) to drive a load/perf run. Reuse the namespace/cluster/account already configured for the environment. If a throwaway resource is genuinely unavoidable, you OWN its teardown: record its exact name **and** the `delete` command before you create it, and tear it down in the **same session**. Never leave an orphaned billable resource behind.
+2. **Never repoint production/shared config at a test target.** The Service Bus integration config is a single deployment-wide row (Table `servicebuspref`, PK/RK `servicebus_config`/`current`) written only by `PUT /api/settings/service-bus`; saving a test namespace there **clobbers the live value and there is no auto-revert**. The same caution applies to any other single-row, deployment-wide setting. If a test truly needs to change such a row, snapshot the original value first and restore it before the session ends.
+3. **Customer / shared environments are highest risk.** In any environment you do not exclusively own, prefer a read-only or send-into-existing-queue test over standing up parallel infrastructure. Leaving a stray resource or a switched config in a customer subscription is a billing and trust incident, not a cleanup nit.
 
 ### Cross-repo consistency
 When `dotnetpower/elastic-blast-azure` updates `src/elastic_blast/constants.py` image tags or the `azure-prereq.md` step structure, open a tracking issue here and bump `IMAGE_TAGS` / cloud-init in the same PR.

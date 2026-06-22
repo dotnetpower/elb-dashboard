@@ -174,6 +174,18 @@ where the failure was found, but knowing them up front saves a lot of time.
     mechanical §13 checklist cannot see those, and they are where the recurring
     Critical/High critique findings come from. Apply it during planning too so
     the defect is designed out, not patched in.
+15. **Load / performance tests must not create new Azure resources or
+    repoint shared config.** A past session stood up a throwaway Service Bus
+    namespace for a load run and saved it into the deployment-wide SB config
+    row (`PUT /api/settings/service-bus`), silently clobbering the
+    environment's real namespace and leaving an orphaned billable resource.
+    Run load tests against the **existing** namespace/cluster/account; if a
+    throwaway resource is unavoidable, record its name + `delete` command up
+    front and tear it down in the **same session**; never repoint a single-row,
+    deployment-wide setting (SB config, etc.) at a test target without
+    snapshotting and restoring the original. Highest risk in customer / shared
+    subscriptions — see [.github/copilot-instructions.md §13](./.github/copilot-instructions.md)
+    "Load / performance testing".
 14. **Every docs page's `tags:` frontmatter must use only canonical tags.**
     The Publish Docs CI job runs [scripts/docs/check_frontmatter.py](./scripts/docs/check_frontmatter.py)
     which fails the build if any navigated `docs/**/*.md` file is missing
@@ -239,12 +251,15 @@ where the failure was found, but knowing them up front saves a lot of time.
 - **Per-feature change notes** in `docs/features_change/YYYY-MM/YYYY-MM-DD-<name>.md`
   before each behaviour-changing commit.
 - **GitHub issue hygiene**: if a change implements a registered issue, comment with
-   the completed work and validation; close it only after acceptance criteria are met,
-   otherwise leave it open with the remaining gap. **A commit that references an issue
-   (`(#N)` / `fixes #N` / `closes #N`) MUST update that issue in the same session** —
-   `gh issue view <N>` to re-check acceptance criteria, then comment + close when all
-   criteria are met, or comment with the shipped subset + explicit remaining gaps when
-   only part of it landed. A referenced-but-silent issue is a process violation.
+   the completed work and validation; close it only after acceptance criteria are met
+   (`gh issue close <N> --reason completed` then `gh issue edit <N> --add-label completed`,
+   creating the label once with `gh label create completed` if missing), otherwise leave
+   it open with the remaining gap and **no** `completed` label. **A commit that references
+   an issue (`(#N)` / `fixes #N` / `closes #N`) MUST update that issue in the same
+   session** — `gh issue view <N>` to re-check acceptance criteria, then comment + close +
+   add the `completed` label when all criteria are met, or comment with the shipped subset
+   + explicit remaining gaps when only part of it landed. A referenced-but-silent issue is
+   a process violation.
 - **No new dependency without justification** in the PR description.
 - **Tests live next to their code** (`api/tests/`); cross-cutting only at root `tests/`.
 
