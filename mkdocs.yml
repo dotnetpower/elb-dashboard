@@ -121,6 +121,7 @@ nav:
       - Feature Gate Registry: operate/feature-gates.md
       - OpenAPI Execution RBAC Gate: operate/openapi-exec-rbac-gate.md
       - OpenAPI Direct Access: operate/openapi-direct-access.md
+      - Service Bus Result Downloads: operate/service-bus-result-downloads.md
       - Architecture:
           - architecture/index.md
           - High Level Architecture: architecture/high-level.md
