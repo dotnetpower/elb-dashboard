@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -107,6 +108,89 @@ _ATOMIC_CLAIM = os.environ.get("SERVICEBUS_ATOMIC_CLAIM", "").strip().lower() in
     "true",
     "yes",
 }
+
+# Single-flight drain gate (charter §12a Rule 4, default-OFF). When ON, a drain
+# tick takes a short-lived Redis lease before draining so two overlapping beat
+# ticks (a tick that ran longer than the 10s interval) or two workers cannot
+# drain the same queue at once. The atomic claim (#2) already prevents duplicate
+# submits; this just removes the wasted receiver contention / lock churn / log
+# noise of N workers racing the same queue. FAIL-OPEN: a Redis error never
+# blocks a drain (the lease is an optimisation, not a correctness gate), so a
+# broker blip degrades to the legacy every-tick drain instead of stalling.
+_DRAIN_SINGLEFLIGHT = os.environ.get(
+    "SERVICEBUS_DRAIN_SINGLEFLIGHT", ""
+).strip().lower() in {"1", "true", "yes"}
+_DRAIN_LOCK_KEY = "servicebus:drain:singleflight"
+
+
+def _drain_lock_key(queue_name: str) -> str:
+    """Queue-scoped lease key so distinct request queues never block each other."""
+    return f"{_DRAIN_LOCK_KEY}:{queue_name}" if queue_name else _DRAIN_LOCK_KEY
+
+
+def _drain_lock_ttl_from_env() -> int:
+    """Lease TTL in seconds, floored at 10s, fail-safe on a bad value.
+
+    Must exceed a normal tick's drain time so the holder finishes before it
+    expires, but stay small enough that a crashed holder (which never runs the
+    release) frees the lease quickly. The release is best-effort; the TTL is the
+    backstop.
+    """
+    raw = os.environ.get("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "120")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "invalid SERVICEBUS_DRAIN_LOCK_TTL_SECONDS=%r; defaulting to 120", raw
+        )
+        value = 120
+    return max(10, value)
+
+
+_DRAIN_LOCK_TTL = _drain_lock_ttl_from_env()
+# Atomic compare-and-delete so a tick only releases a lease it still owns (never
+# one a later tick re-acquired after this one's TTL expired).
+_DRAIN_LOCK_RELEASE_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] "
+    "then return redis.call('del', KEYS[1]) else return 0 end"
+)
+
+
+def _acquire_drain_lock(queue_name: str = "") -> tuple[bool, str | None]:
+    """Try to take the single-flight drain lease for ``queue_name``.
+
+    Returns ``(proceed, token)``. ``proceed`` is False ONLY when another drain
+    demonstrably holds the lease (skip this tick). It is True both when we won
+    the lease (``token`` is the release handle) and when the gate is off or Redis
+    is unreachable (``token`` is None → nothing to release, fail-open so a broker
+    blip never stalls the drain).
+    """
+    if not _DRAIN_SINGLEFLIGHT:
+        return (True, None)
+    try:
+        from api.services.redis_clients import get_broker_redis_client
+
+        client = get_broker_redis_client(socket_timeout=2)
+        token = uuid.uuid4().hex
+        if client.set(_drain_lock_key(queue_name), token, nx=True, ex=_DRAIN_LOCK_TTL):
+            return (True, token)
+        return (False, None)
+    except Exception:
+        LOGGER.debug("drain lock acquire failed; proceeding without lease", exc_info=True)
+        return (True, None)
+
+
+def _release_drain_lock(token: str | None, queue_name: str = "") -> None:
+    """Release the drain lease iff we still own it (best-effort, TTL backstop)."""
+    if not token:
+        return
+    try:
+        from api.services.redis_clients import get_broker_redis_client
+
+        client = get_broker_redis_client(socket_timeout=2)
+        client.eval(_DRAIN_LOCK_RELEASE_LUA, 1, _drain_lock_key(queue_name), token)
+    except Exception:
+        LOGGER.debug("drain lock release failed (will expire via TTL)", exc_info=True)
 _PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "200"))
 # Give-up deadline for a bridge whose sibling job never reaches a terminal
 # status — without it a permanently-stuck job's row would stay "active" forever
@@ -928,33 +1012,46 @@ def drain_and_resubmit() -> dict[str, Any]:
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
-    stats = service_bus.drain_requests(
-        cfg,
-        lambda m: _drain_handler(m, cfg),
-        max_messages=_DRAIN_MAX_MESSAGES,
-        max_concurrency=_DRAIN_CONCURRENCY,
-    )
-    # Observability (self-critique #6): one structured line per non-empty tick so
-    # drain throughput / fan-out effectiveness is visible in App Insights without
-    # parsing per-message logs. Silent on an idle tick (received==0) to avoid
-    # flooding the log when the queue is empty.
-    if stats.received:
-        LOGGER.info(
-            "servicebus drain tick received=%d completed=%d abandoned=%d "
-            "dead_lettered=%d concurrency=%d",
-            stats.received,
-            stats.completed,
-            stats.abandoned,
-            stats.dead_lettered,
-            _DRAIN_CONCURRENCY,
+    proceed, lock_token = _acquire_drain_lock(cfg.request_queue)
+    if not proceed:
+        # Another drain holds the single-flight lease — skip this overlapping
+        # tick instead of racing it on the same queue. The held drain covers the
+        # backlog; the next tick re-evaluates once the lease frees.
+        LOGGER.debug(
+            "servicebus drain tick skipped: single-flight lease held queue=%s",
+            cfg.request_queue,
         )
-    return {
-        "received": stats.received,
-        "completed": stats.completed,
-        "abandoned": stats.abandoned,
-        "dead_lettered": stats.dead_lettered,
-        "concurrency": _DRAIN_CONCURRENCY,
-    }
+        return {"skipped": "locked"}
+    try:
+        stats = service_bus.drain_requests(
+            cfg,
+            lambda m: _drain_handler(m, cfg),
+            max_messages=_DRAIN_MAX_MESSAGES,
+            max_concurrency=_DRAIN_CONCURRENCY,
+        )
+        # Observability (self-critique #6): one structured line per non-empty tick
+        # so drain throughput / fan-out effectiveness is visible in App Insights
+        # without parsing per-message logs. Silent on an idle tick (received==0)
+        # to avoid flooding the log when the queue is empty.
+        if stats.received:
+            LOGGER.info(
+                "servicebus drain tick received=%d completed=%d abandoned=%d "
+                "dead_lettered=%d concurrency=%d",
+                stats.received,
+                stats.completed,
+                stats.abandoned,
+                stats.dead_lettered,
+                _DRAIN_CONCURRENCY,
+            )
+        return {
+            "received": stats.received,
+            "completed": stats.completed,
+            "abandoned": stats.abandoned,
+            "dead_lettered": stats.dead_lettered,
+            "concurrency": _DRAIN_CONCURRENCY,
+        }
+    finally:
+        _release_drain_lock(lock_token, cfg.request_queue)
 
 
 def _publish_one_bridge(

@@ -1147,3 +1147,109 @@ def test_gate_on_unconfirmed_row_falls_through_to_claim(
     monkeypatch.setattr(sb_tasks, "get_bridge", lambda c: BridgeRecord(correlation_id=c))
     monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="": False)
     assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.ABANDON
+
+
+# --------------------------------------------------------------------------- #
+# Single-flight drain lease (SERVICEBUS_DRAIN_SINGLEFLIGHT). Default OFF never
+# touches Redis; ON skips an overlapping tick and is fail-open on a Redis error.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeLockRedis:
+    def __init__(self, set_result: object = True) -> None:
+        self._set_result = set_result
+        self.set_keys: list[str] = []
+        self.eval_keys: list[object] = []
+        self.evaled: list[tuple] = []
+
+    def set(self, key: str, value: str, nx: bool = False, ex: int | None = None) -> object:
+        self.set_keys.append(key)
+        return self._set_result
+
+    def eval(self, script: str, numkeys: int, *args: object) -> int:
+        self.evaled.append(args)
+        self.eval_keys.append(args[0])  # KEYS[1]
+        return 1
+
+
+def _stats0() -> object:
+    return service_bus.DrainStats()
+
+
+def test_singleflight_off_never_touches_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_DRAIN_SINGLEFLIGHT", False)
+    drained: list[int] = []
+    monkeypatch.setattr(
+        sb_tasks.service_bus, "drain_requests", lambda *a, **k: drained.append(1) or _stats0()
+    )
+
+    def _explode(**_k: object) -> object:
+        raise AssertionError("redis must not be touched when single-flight is off")
+
+    monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", _explode)
+    out = sb_tasks.drain_and_resubmit()
+    assert "skipped" not in out
+    assert drained == [1]
+
+
+def test_singleflight_acquires_then_releases(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_DRAIN_SINGLEFLIGHT", True)
+    fake = _FakeLockRedis(set_result=True)
+    monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", lambda **_k: fake)
+    monkeypatch.setattr(sb_tasks.service_bus, "drain_requests", lambda *a, **k: _stats0())
+    out = sb_tasks.drain_and_resubmit()
+    assert "skipped" not in out
+    assert len(fake.evaled) == 1  # released its own lease (compare-and-delete)
+    # The lease is queue-scoped and the release targets the SAME key it locked.
+    assert fake.set_keys[0] == sb_tasks._drain_lock_key(cfg.request_queue)
+    assert fake.eval_keys[0] == fake.set_keys[0]
+
+
+def test_singleflight_contended_tick_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_DRAIN_SINGLEFLIGHT", True)
+    fake = _FakeLockRedis(set_result=None)  # NX failed → lease already held
+    monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", lambda **_k: fake)
+    drained: list[int] = []
+    monkeypatch.setattr(
+        sb_tasks.service_bus, "drain_requests", lambda *a, **k: drained.append(1)
+    )
+    out = sb_tasks.drain_and_resubmit()
+    assert out["skipped"] == "locked"
+    assert drained == []  # the held drain covers the backlog; we did not race it
+    assert fake.evaled == []  # never released a lease we did not own
+
+
+def test_singleflight_redis_error_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_DRAIN_SINGLEFLIGHT", True)
+
+    def _boom(**_k: object) -> object:
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", _boom)
+    drained: list[int] = []
+    monkeypatch.setattr(
+        sb_tasks.service_bus, "drain_requests", lambda *a, **k: drained.append(1) or _stats0()
+    )
+    out = sb_tasks.drain_and_resubmit()
+    assert "skipped" not in out  # fail-open: a broker blip never stalls the drain
+    assert drained == [1]
+
+
+def test_drain_lock_key_is_queue_scoped() -> None:
+    assert sb_tasks._drain_lock_key("q1") != sb_tasks._drain_lock_key("q2")
+    assert sb_tasks._drain_lock_key("") == sb_tasks._DRAIN_LOCK_KEY
+    assert sb_tasks._drain_lock_key("q1").endswith(":q1")
+
+
+def test_drain_lock_ttl_env_invalid_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "nope")
+    assert sb_tasks._drain_lock_ttl_from_env() == 120
+
+
+def test_drain_lock_ttl_env_is_floored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "3")
+    assert sb_tasks._drain_lock_ttl_from_env() == 10
