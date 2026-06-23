@@ -63,3 +63,17 @@ needed. No managed-DB / SAS / Storage-network changes.
 * Live: after deploy, the worker re-stamps the durable endpoint every 5 min while
   the cluster is up; the manual `ELB_OPENAPI_BASE_URL` pin is then removed and the
   drain verified to still resolve the endpoint (recorded with the customer deploy).
+
+## Live validation (customer deploy)
+
+* Beat scheduled + worker executed the new task:
+  `Task api.tasks.openapi.reconcile_runtime_endpoint succeeded ... {'status':
+  'reconciled', 'cluster_name': 'elb-cluster-01'}`.
+* The manual `ELB_OPENAPI_BASE_URL` pin was then **removed** from both the
+  `worker` and `api` containers. On the resulting pin-less revision the drain
+  kept succeeding (`drain_and_resubmit ... succeeded {'received': 1,
+  'completed': 1}`) with no `cluster_not_ready` / `openapi_not_configured`
+  deferral — the reconciler-refreshed durable endpoint resolved `ready()` with no
+  pin. A fresh outfmt-7 BLAST submit drained, ran, and completed end-to-end on
+  the pin-less revision.
+
