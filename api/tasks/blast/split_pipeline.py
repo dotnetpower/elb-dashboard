@@ -879,19 +879,31 @@ def _aggregate_split_child_states(
 
 
 def _split_child_result_paths(child_job_id: str) -> dict[str, str]:
-    child_id = _blast._relative_blob_path(child_job_id, "child_job_id")
+    # Resolve the child's canonical prefix (#75): split children are created
+    # without a dated stamp so this is flat (`{child_job_id}/`), but routing it
+    # through the resolver keeps child read/probe paths consistent with whatever
+    # the child row carries.
+    from api.services.storage.job_prefix import resolve_results_prefix
+
+    prefix = resolve_results_prefix(child_job_id)
     return {
-        "merged_result_path": f"{child_id}/{SPLIT_CHILD_MERGED_RESULT_BLOB}",
-        "merge_report_path": f"{child_id}/{SPLIT_CHILD_MERGE_REPORT_BLOB}",
+        "merged_result_path": f"{prefix}{SPLIT_CHILD_MERGED_RESULT_BLOB}",
+        "merge_report_path": f"{prefix}{SPLIT_CHILD_MERGE_REPORT_BLOB}",
     }
 
 
 def _parent_split_result_paths(parent_job_id: str) -> dict[str, str]:
-    parent_id = _blast._relative_blob_path(parent_job_id, "parent_job_id")
+    # Resolve the parent's canonical (possibly date-tiered) prefix (#75) so the
+    # merge WRITE destination, the readiness probe, and the manifest all land
+    # under the SAME prefix the Results page reads via resolve_results_prefix —
+    # no flat/dated desync for split parents.
+    from api.services.storage.job_prefix import resolve_results_prefix
+
+    prefix = resolve_results_prefix(parent_job_id)
     return {
-        "merged_result_path": f"{parent_id}/{SPLIT_CHILD_MERGED_RESULT_BLOB}",
-        "merge_report_path": f"{parent_id}/{SPLIT_CHILD_MERGE_REPORT_BLOB}",
-        "manifest_path": f"{parent_id}/{SPLIT_PARENT_MANIFEST_BLOB}",
+        "merged_result_path": f"{prefix}{SPLIT_CHILD_MERGED_RESULT_BLOB}",
+        "merge_report_path": f"{prefix}{SPLIT_CHILD_MERGE_REPORT_BLOB}",
+        "manifest_path": f"{prefix}{SPLIT_PARENT_MANIFEST_BLOB}",
     }
 
 
@@ -920,15 +932,15 @@ def _parent_split_result_artifacts_present(
     credential: Any | None = None,
 ) -> dict[str, Any]:
     paths = _blast._parent_split_result_paths(parent_job_id)
-    # Split jobs stay on the flat ``{job_id}/`` layout (the path-key builders
-    # above are flat); date-tiering split parents/children is a deferred
-    # follow-up that must change the result-map AND the path-key builders
-    # together. Using the flat resolver here keeps split self-consistent.
-    from api.services.storage.job_prefix import default_results_prefix
+    # Resolve the SAME prefix the path-key builder used (#75) so a dated parent's
+    # merge output is found. Children stay flat (their rows are unstamped), the
+    # parent is dated when the layout flag is on — both driven by the stored
+    # results_prefix, so the result-map and path-keys never desync.
+    from api.services.storage.job_prefix import resolve_results_prefix
 
     blobs = _blast._result_blob_map(
         storage_account=storage_account,
-        prefix=default_results_prefix(parent_job_id),
+        prefix=resolve_results_prefix(parent_job_id),
         credential=credential,
     )
     present = {
@@ -973,12 +985,12 @@ def _verify_split_child_result_artifacts(
     def _probe(item: tuple[Any, str, dict[str, Any]]) -> dict[str, Any]:
         _child, child_job_id, payload = item
         paths = _blast._split_child_result_paths(child_job_id)
-        # Flat layout for split children (see the parent probe note above).
-        from api.services.storage.job_prefix import default_results_prefix
+        # Resolve the same prefix the child path-key builder used (#75).
+        from api.services.storage.job_prefix import resolve_results_prefix
 
         blobs = _blast._result_blob_map(
             storage_account=storage_account,
-            prefix=default_results_prefix(child_job_id),
+            prefix=resolve_results_prefix(child_job_id),
             credential=credential,
         )
         has_merged = paths["merged_result_path"] in blobs

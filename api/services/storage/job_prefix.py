@@ -44,15 +44,13 @@ def date_layout_enabled() -> bool:
     flat jobs keep resolving via their stored ``results_prefix`` (= ``{job_id}/``)
     so the two layouts coexist without a migration.
 
-    LIMITATION (do not flip ON until resolved): **split jobs are not yet
-    date-aware.** Split parents/children keep the flat ``{job_id}/`` layout
-    (their path-key builders in ``tasks/blast/split_pipeline`` are flat), but the
-    submit route stamps a dated ``results_prefix`` on every blast submission
-    including split parents. Enabling this flag while split submissions occur
-    would desync a split parent's dated Results-page read from its flat merge
-    output. Date-tiering split requires changing the result-map AND the path-key
-    builders together (tracked as a #67 follow-up). Queries/uploads and the
-    ``queries`` config blob also stay flat by design (separate container).
+    LIMITATION (do not flip ON until resolved): queries/uploads and the
+    ``queries`` config blob stay flat by design (separate container; queries are
+    deleted per-job so they need no date-bucketing — see #74). Split jobs ARE
+    date-aware as of #75 (parent merge output + readiness probes + path-key
+    builders all resolve through ``resolve_results_prefix``; children stay flat
+    and self-consistent). Flipping the flag ON still requires the blob
+    soft-delete safety net (#76) and a live-cluster validation pass.
     """
     return os.environ.get(_DATE_LAYOUT_ENV, "").strip().lower() in _ON_VALUES
 
