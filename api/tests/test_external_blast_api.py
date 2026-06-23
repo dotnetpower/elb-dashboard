@@ -2115,6 +2115,130 @@ def test_sync_external_jobs_creates_missing_rows(monkeypatch):
     assert updated == []
 
 
+def test_sync_external_persists_results_prefix_on_create(monkeypatch):
+    """A drained row carrying a date-tiered ``results_prefix`` must persist it
+    verbatim onto the new JobState so resolve_results_prefix returns the date
+    path for analytics blob reads (the flat fallback finds zero blobs)."""
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+
+    created: list[object] = []
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {}
+
+        def create(self, state):
+            created.append(state)
+            return state
+
+        def update(self, *_a, **_kw):
+            raise AssertionError("new row should be created, not updated")
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.job_id = kwargs.get("job_id")
+            self.status = kwargs.get("status")
+            self.phase = kwargs.get("phase")
+            self.results_prefix = kwargs.get("results_prefix")
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "c75483f2a08c",
+                "status": "queued",
+                "created_at": "2026-06-23T00:00:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                "results_prefix": "2026/06/23/c75483f2a08c/",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    assert result[0] == 1
+    assert len(created) == 1
+    assert created[0].kwargs["results_prefix"] == "2026/06/23/c75483f2a08c/"
+
+
+def test_sync_external_backfills_results_prefix_on_update(monkeypatch):
+    """A row first persisted without a results_prefix (e.g. before the date
+    layout shipped) gets the stamped prefix backfilled on a later sync, while a
+    row that already carries one is never overwritten."""
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+
+    updated: list[dict[str, object]] = []
+
+    class _Existing:
+        def __init__(self, results_prefix):
+            self.job_id = "c75483f2a08c"
+            self.status = "queued"
+            self.phase = "queued"
+            self.results_prefix = results_prefix
+            self.error_code = ""
+            self.program = "blastn"
+            self.db = "core_nt"
+            self.job_title = "blastn"
+            self.query_label = "q"
+            self.subscription_id = "sub"
+            self.resource_group = "rg"
+            self.cluster_name = "elb-cluster"
+            self.storage_account = "stacct"
+
+    class FakeRepo:
+        def __init__(self, existing):
+            self._existing = existing
+
+        def get_many(self, ids):
+            return {"c75483f2a08c": self._existing}
+
+        def create(self, state):
+            raise AssertionError("existing row should be updated, not created")
+
+        def update(self, job_id, **kw):
+            updated.append({"job_id": job_id, "kw": kw})
+
+    # Empty stored prefix -> backfilled from the stamped row value.
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo(_Existing("")))
+    monkeypatch.setattr(state_repo, "JobState", object)
+    shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "c75483f2a08c",
+                "status": "running",
+                "results_prefix": "2026/06/23/c75483f2a08c/",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+    assert updated
+    assert updated[0]["kw"].get("results_prefix") == "2026/06/23/c75483f2a08c/"
+
+    # Already-set prefix -> never overwritten by the backfill.
+    updated.clear()
+    monkeypatch.setattr(
+        state_repo, "JobStateRepository", lambda: FakeRepo(_Existing("2026/06/23/c75483f2a08c/"))
+    )
+    shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "c75483f2a08c",
+                "status": "completed",
+                "results_prefix": "1999/01/01/c75483f2a08c/",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+    # status flipped so an update happens, but results_prefix must NOT be in it.
+    assert updated
+    assert all("results_prefix" not in u["kw"] for u in updated)
+
+
 def test_sync_external_failed_new_row_recovers_error_into_error_code(monkeypatch):
     """A new external row first seen already FAILED must recover the real
     cause from the sibling /jobs/{id} detail (the LIST snapshot has no

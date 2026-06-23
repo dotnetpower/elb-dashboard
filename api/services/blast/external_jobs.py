@@ -404,6 +404,14 @@ def _sync_external_jobs_to_table(
         job_id = str(ext.get("job_id") or "")
         if not job_id:
             continue
+        # Date-tiered layout: the drain stamps the exact results prefix
+        # (``YYYY/MM/DD/<openapi_job_id>/``) it told the sibling to write under.
+        # Persist it verbatim so resolve_results_prefix(job_id) returns the date
+        # path for analytics/marker/runtime-failure blob reads. The sibling
+        # status/list snapshots never echo the results URL, so this stamped
+        # value is the only authoritative source the dashboard has. Empty/absent
+        # leaves the row on the flat ``<job_id>/`` fallback (legacy behaviour).
+        _row_results_prefix = str(ext.get("results_prefix") or "").strip() or None
         # Recover the dashboard's own submission_source (e.g. "servicebus") that
         # the sibling cannot report — over the wire a queue-drained job is
         # submitted as "external_api" (the sibling's enum has no "servicebus"
@@ -490,12 +498,20 @@ def _sync_external_jobs_to_table(
                     meta_backfill["job_title"] = fresh_title
                 if fresh_query and fresh_query not in {"", "query.fa"} and not cur_query:
                     meta_backfill["query_label"] = fresh_query
+                # Backfill the date-tiered results prefix onto a row that was
+                # first created without one (e.g. a poll-discovered row that
+                # predates the stamped value). Only ever fill when empty so a
+                # row already carrying its prefix is never rewritten.
+                prefix_backfill: dict[str, str] = {}
+                if _row_results_prefix and not (getattr(existing, "results_prefix", None) or ""):
+                    prefix_backfill["results_prefix"] = _row_results_prefix
                 status_changed = bool(
                     ext_status and (ext_status != cur_status or ext_phase != cur_phase)
                 )
-                if status_changed or scope_backfill or meta_backfill:
+                if status_changed or scope_backfill or meta_backfill or prefix_backfill:
                     update_kwargs: dict[str, Any] = dict(scope_backfill)
                     update_kwargs.update(meta_backfill)
+                    update_kwargs.update(prefix_backfill)
                     if status_changed:
                         update_kwargs["status"] = ext_status
                         update_kwargs["phase"] = ext_phase
@@ -566,6 +582,7 @@ def _sync_external_jobs_to_table(
                 storage_account=str(
                     (converted.get("infrastructure") or {}).get("storage_account") or ""
                 ),
+                results_prefix=_row_results_prefix,
             )
             repo.create(state)
             created += 1

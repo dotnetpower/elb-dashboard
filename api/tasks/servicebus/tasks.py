@@ -835,6 +835,21 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     received_ts = _now_iso()
     request_id = _extract_request_id(msg)
 
+    # Date-tiered layout: stamp the YYYY/MM/DD/ prefix ONCE here (not inside the
+    # submit_job choke point) so the SAME value reaches both the sibling (which
+    # writes results under it) AND the durable jobstate row below (which the
+    # dashboard's analytics resolve through resolve_results_prefix). Computing
+    # it once avoids a recompute drifting across a midnight boundary between the
+    # submit and the row write. submit_job honours a caller-set prefix, so this
+    # wins and its own injection is a no-op for this path.
+    try:
+        from api.services.storage.job_prefix import date_layout_enabled, dated_results_subdir
+
+        if date_layout_enabled() and "results_prefix" not in payload:
+            payload["results_prefix"] = dated_results_subdir()
+    except Exception:
+        LOGGER.debug("drain results_prefix stamp skipped corr=%s", correlation_id, exc_info=True)
+
     # Idempotency: at-least-once delivery means we may see this twice. With the
     # atomic-claim gate OFF (legacy) ANY existing bridge row dedups. With it ON
     # only a CONFIRMED row (one carrying an openapi_job_id) dedups here; a bare
@@ -983,6 +998,14 @@ def _persist_drain_row_and_trace(
             "external_correlation_id": correlation_id,
             "cluster_name": getattr(cfg, "cluster_name", "") or "",
         }
+        # Date-tiered layout: the sibling wrote results under
+        # results/<prefix><openapi_job_id>/, so record that exact prefix on the
+        # durable row. Without it resolve_results_prefix(openapi_job_id) falls
+        # back to the flat <openapi_job_id>/ and the dashboard's analytics
+        # (list_parseable_result_blobs) find zero blobs for a date-tiered job.
+        _date_prefix = str(payload.get("results_prefix") or "").strip()
+        if _date_prefix:
+            ext_row["results_prefix"] = f"{_date_prefix}{openapi_job_id}/"
         _sync_external_jobs_to_table([ext_row], caller_oid="", tenant_id="")
     except Exception as exc:
         LOGGER.warning(

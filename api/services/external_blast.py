@@ -429,8 +429,9 @@ def submit_job(
     # submit) flows through. The sibling appends its OWN job id; an older sibling
     # that does not know the field ignores it (``extra=allow``), so sending it is
     # safe whenever the layout is on. A caller that already set ``results_prefix``
-    # wins. Never fail a submit over this optional hint.
-    if isinstance(payload, dict) and not payload.get("results_prefix"):
+    # (including an explicit ``""`` to force the flat layout) wins, so only an
+    # ABSENT key triggers injection. Never fail a submit over this optional hint.
+    if isinstance(payload, dict) and "results_prefix" not in payload:
         try:
             from api.services.storage.job_prefix import (
                 date_layout_enabled,
@@ -440,7 +441,10 @@ def submit_job(
             if date_layout_enabled():
                 payload = {**payload, "results_prefix": dated_results_subdir()}
         except Exception:
-            LOGGER.debug("results_prefix injection skipped", exc_info=True)
+            # An import/compute failure here means date tiering meant to be on
+            # silently degrades to flat — surface it (rare: job_prefix is a core
+            # module) instead of hiding it at debug level.
+            LOGGER.warning("results_prefix injection skipped", exc_info=True)
 
     has_idempotency_key = bool(isinstance(payload, dict) and payload.get("idempotency_key"))
     import time as _time
