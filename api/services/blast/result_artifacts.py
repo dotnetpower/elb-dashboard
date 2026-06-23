@@ -241,9 +241,16 @@ class _StreamingAggregate:
         }
 
 
-def build_result_manifest_payload(job_id: str, storage_account: str) -> dict[str, Any]:
+def build_result_manifest_payload(
+    job_id: str, storage_account: str, *, prefix: str | None = None
+) -> dict[str, Any]:
+    from api.services.storage.job_prefix import default_results_prefix
+
     files = storage_data.list_result_blobs(
-        get_credential(), storage_account, container="results", prefix=job_id
+        get_credential(),
+        storage_account,
+        container="results",
+        prefix=prefix or default_results_prefix(job_id),
     )
     return {
         "job_id": job_id,

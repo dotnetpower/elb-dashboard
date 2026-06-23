@@ -55,10 +55,11 @@ def read_blast_runtime_failure(storage_account: str, job_id: str) -> str:
     try:
         from api.services import get_credential
         from api.services.storage.blob_io import list_result_blobs, read_blob_text
+        from api.services.storage.job_prefix import default_results_prefix
 
         credential = get_credential()
         blobs = list_result_blobs(
-            credential, storage_account, "results", f"{job_id}/", max_results=2000
+            credential, storage_account, "results", default_results_prefix(job_id), max_results=2000
         )
     except Exception as exc:
         LOGGER.debug(

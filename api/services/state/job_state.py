@@ -176,6 +176,13 @@ class JobState:
     # unreachable (cluster auto-stopped). Blob paths are relative to
     # ``results/{job_id}/`` (the sibling's contract).
     result_manifest: str | None = None
+    # Canonical results-container prefix for this job (system-of-record). When
+    # unset, ``to_entity`` defaults it to ``{job_id}/`` (the legacy flat layout)
+    # so every row carries it; issue #67 writes a date-tiered value here for
+    # dashboard-submitted jobs while external (``/v1/jobs``) jobs keep the flat
+    # default per the sibling's contract. Readers resolve it through
+    # ``api.services.storage.job_prefix`` rather than reconstructing it.
+    results_prefix: str | None = None
 
     def to_entity(self) -> dict[str, Any]:
         canonical = canonical_job_metadata(
@@ -215,6 +222,11 @@ class JobState:
             "submission_source": self.submission_source
             or _resolve_payload_submission_source(self.payload),
             "result_manifest": self.result_manifest or "",
+            # Persist the canonical results prefix on every row so readers can
+            # resolve it without reconstructing ``{job_id}/``. Defaults to the
+            # legacy flat layout when not explicitly set (issue #67 overrides it
+            # for dashboard-submitted jobs).
+            "results_prefix": self.results_prefix or f"{self.job_id}/",
         }
         if self.payload is not None:
             import json
@@ -263,6 +275,7 @@ class JobState:
             external_correlation_id=e.get("external_correlation_id") or None,
             submission_source=e.get("submission_source") or None,
             result_manifest=e.get("result_manifest") or None,
+            results_prefix=e.get("results_prefix") or None,
         )
 
 

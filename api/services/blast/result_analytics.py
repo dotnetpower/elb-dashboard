@@ -187,9 +187,11 @@ def has_blast_success_marker(storage_account: str, job_id: str) -> bool:
     if not storage_account or not job_id:
         return False
     try:
+        from api.services.storage.job_prefix import default_results_prefix
+
         cred = get_credential()
         blobs = storage_data.list_result_blobs(
-            cred, storage_account, container="results", prefix=f"{job_id}/"
+            cred, storage_account, container="results", prefix=default_results_prefix(job_id)
         )
     except Exception as exc:
         LOGGER.info(
@@ -201,11 +203,23 @@ def has_blast_success_marker(storage_account: str, job_id: str) -> bool:
     )
 
 
-def list_parseable_result_blobs(storage_account: str, job_id: str) -> list[dict[str, Any]]:
-    """Return BLAST result blobs the analytics parser can understand."""
+def list_parseable_result_blobs(
+    storage_account: str, job_id: str, *, prefix: str | None = None
+) -> list[dict[str, Any]]:
+    """Return BLAST result blobs the analytics parser can understand.
+
+    ``prefix`` overrides the results-container prefix (issue #67 threads the
+    stored, possibly date-tiered, prefix here); when None it falls back to the
+    legacy ``{job_id}/`` layout via the resolver.
+    """
+    from api.services.storage.job_prefix import default_results_prefix
+
     cred = get_credential()
     blobs = storage_data.list_result_blobs(
-        cred, storage_account, container="results", prefix=f"{job_id}/"
+        cred,
+        storage_account,
+        container="results",
+        prefix=prefix or default_results_prefix(job_id),
     )
     candidates = [
         blob

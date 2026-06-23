@@ -920,9 +920,11 @@ def _parent_split_result_artifacts_present(
     credential: Any | None = None,
 ) -> dict[str, Any]:
     paths = _blast._parent_split_result_paths(parent_job_id)
+    from api.services.storage.job_prefix import default_results_prefix
+
     blobs = _blast._result_blob_map(
         storage_account=storage_account,
-        prefix=f"{parent_job_id}/",
+        prefix=default_results_prefix(parent_job_id),
         credential=credential,
     )
     present = {
@@ -967,9 +969,11 @@ def _verify_split_child_result_artifacts(
     def _probe(item: tuple[Any, str, dict[str, Any]]) -> dict[str, Any]:
         _child, child_job_id, payload = item
         paths = _blast._split_child_result_paths(child_job_id)
+        from api.services.storage.job_prefix import default_results_prefix
+
         blobs = _blast._result_blob_map(
             storage_account=storage_account,
-            prefix=f"{child_job_id}/",
+            prefix=default_results_prefix(child_job_id),
             credential=credential,
         )
         has_merged = paths["merged_result_path"] in blobs
