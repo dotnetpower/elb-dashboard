@@ -5,12 +5,13 @@ when ``STORAGE_DFS_ENABLED`` is on. Returns the SAME row shape as
 ``blob_io.list_result_blobs`` (``file_id`` / ``name`` / ``size`` /
 ``last_modified``) so callers and the frontend are agnostic to which SDK served
 the request.
-Edit boundaries: dfs directory/file *listing* and *recursive delete* only. The
-pooled client lifecycle lives in ``dfs_client_pool``; single-blob reads/streams
-stay on the Blob API (they gain nothing from dfs on an HNS account and reuse the
-proven range/gzip/416/semaphore logic in ``blob_io``). Archive rename + lifecycle
-retention are tracked as #69 follow-ups.
-Key entry points: ``list_paths_dfs``, ``delete_directory_dfs``.
+Edit boundaries: dfs directory/file *listing*, *recursive delete*, and atomic
+*rename* only. The pooled client lifecycle lives in ``dfs_client_pool``;
+single-blob reads/streams stay on the Blob API (they gain nothing from dfs on an
+HNS account and reuse the proven range/gzip/416/semaphore logic in ``blob_io``).
+Lifecycle retention is a #69 follow-up.
+Key entry points: ``list_paths_dfs``, ``delete_directory_dfs``,
+``rename_directory_dfs``.
 Risky contracts: ``get_paths`` returns BOTH files and directories — directory
 entries are filtered out to match Blob ``list_blobs`` (which yields only blobs).
 A missing directory (job submitted, no results yet) degrades to ``[]`` exactly
@@ -125,6 +126,49 @@ def delete_directory_dfs(
     directory_client = fs.get_directory_client(dir_path)
     try:
         directory_client.delete_directory()
+        return True
+    except ResourceNotFoundError:
+        return False
+
+
+def rename_directory_dfs(
+    credential: TokenCredential,
+    account_name: str,
+    container: str,
+    src_path: str,
+    dst_path: str,
+    *,
+    expected_src_leaf: str | None = None,
+) -> bool:
+    """Atomically move a directory within a filesystem (metadata-only on HNS).
+
+    Returns ``True`` when the source existed and was renamed, ``False`` when the
+    source is already absent (idempotent — a prior run may have moved it). Both
+    paths live in the same ``container`` (dfs filesystem). On HNS this is a single
+    metadata operation with no blob copy, so moving a job's whole result tree is
+    O(1) regardless of size.
+
+    SAFETY: rejects empty / ``..`` paths on either side; when ``expected_src_leaf``
+    is given the SOURCE directory's last segment must equal it (a per-job move
+    passes ``expected_src_leaf=job_id`` so it can only move the job's own tree).
+    """
+    src = (src_path or "").strip("/")
+    dst = (dst_path or "").strip("/")
+    if not src or any(part == ".." for part in src.split("/")):
+        raise ValueError(f"invalid source path for rename: {src_path!r}")
+    if not dst or any(part == ".." for part in dst.split("/")):
+        raise ValueError(f"invalid destination path for rename: {dst_path!r}")
+    if expected_src_leaf is not None and src.split("/")[-1] != expected_src_leaf:
+        raise ValueError(
+            f"refusing rename of {src!r}: source leaf segment != {expected_src_leaf!r}"
+        )
+    from api.services.storage.dfs_client_pool import _dfs_filesystem
+
+    fs = _dfs_filesystem(credential, account_name, container)
+    directory_client = fs.get_directory_client(src)
+    try:
+        # The dfs SDK takes the new name as ``{filesystem}/{new_path}``.
+        directory_client.rename_directory(new_name=f"{container}/{dst}")
         return True
     except ResourceNotFoundError:
         return False
