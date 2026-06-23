@@ -28,7 +28,6 @@ from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerregistry import ContainerRegistryManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
 from azure.mgmt.dns import DnsManagementClient
-from azure.mgmt.keyvault import KeyVaultManagementClient
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.storage import StorageManagementClient
@@ -223,15 +222,6 @@ def aks_client(credential: TokenCredential, subscription_id: str) -> ContainerSe
 
 def kv_secret_client(credential: TokenCredential, vault_uri: str) -> SecretClient:
     return SecretClient(vault_url=vault_uri, credential=credential)
-
-
-def kv_mgmt_client(credential: TokenCredential, subscription_id: str) -> KeyVaultManagementClient:
-    return _pooled_mgmt_client(
-        "kv_mgmt",
-        credential,
-        subscription_id,
-        lambda: KeyVaultManagementClient(credential, subscription_id),
-    )
 
 
 # ---------------------------------------------------------------------------
