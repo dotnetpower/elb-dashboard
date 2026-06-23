@@ -461,6 +461,27 @@ def _refresh_min_interval_seconds(phase: str) -> float:
     return _K8S_REFRESH_MIN_INTERVAL_SECONDS
 
 
+def _arm_cluster_refresh_cooldown(
+    cluster_key: tuple[str, str, str], cluster_name: str, now: float, reason: str
+) -> None:
+    """Arm the cluster-level negative cache, logging once per outage episode.
+
+    Dedups by logging only when the cluster was not already cooling down, so a
+    sustained outage (re-armed on every refresh) yields a single INFO line
+    instead of a flood. A recovered+re-failed cluster logs again because the
+    success path pops the key first.
+    """
+    if cluster_key not in _K8S_REFRESH_CLUSTER_COOLDOWN:
+        LOGGER.info(
+            "blast k8s refresh: cluster '%s' unreachable (%s); cooling down live "
+            "refresh for %.0fs",
+            cluster_name,
+            reason,
+            _K8S_REFRESH_FAILURE_COOLDOWN_SECONDS,
+        )
+    _K8S_REFRESH_CLUSTER_COOLDOWN[cluster_key] = now + _K8S_REFRESH_FAILURE_COOLDOWN_SECONDS
+
+
 def _maybe_reload_with_payload(repo: Any, state: Any) -> Any:
     """Reload a row from the repo when its payload was omitted (list path).
 
@@ -1005,8 +1026,12 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     # the cooldown lapses, instead of re-paying the timeout once per job.
     cluster_key = (subscription_id, resource_group, cluster_name)
     cooldown_until = _K8S_REFRESH_CLUSTER_COOLDOWN.get(cluster_key)
-    if cooldown_until is not None and now < cooldown_until:
-        return state
+    if cooldown_until is not None:
+        if now < cooldown_until:
+            return state
+        # Cooldown lapsed — drop the stale entry so the map never retains
+        # expired keys and a re-failure logs as a fresh outage episode.
+        _K8S_REFRESH_CLUSTER_COOLDOWN.pop(cluster_key, None)
     try:
         from api.services import get_credential
         from api.services.monitoring import k8s_check_blast_status
@@ -1022,7 +1047,7 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     except Exception as exc:
         LOGGER.debug("blast k8s refresh skipped job_id=%s: %s", state.job_id, type(exc).__name__)
         _K8S_REFRESH_LAST_CHECK[refresh_key] = now
-        _K8S_REFRESH_CLUSTER_COOLDOWN[cluster_key] = now + _K8S_REFRESH_FAILURE_COOLDOWN_SECONDS
+        _arm_cluster_refresh_cooldown(cluster_key, cluster_name, now, type(exc).__name__)
         return state
     k8s_status = str(k8s.get("status") or "")
     if k8s_status == "unknown":
@@ -1031,7 +1056,7 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
         # outage and arm the cooldown so sibling jobs don't each re-pay the
         # multi-GET timeout.
         _K8S_REFRESH_LAST_CHECK[refresh_key] = now
-        _K8S_REFRESH_CLUSTER_COOLDOWN[cluster_key] = now + _K8S_REFRESH_FAILURE_COOLDOWN_SECONDS
+        _arm_cluster_refresh_cooldown(cluster_key, cluster_name, now, "status=unknown")
         return state
     # Reachable with a concrete status → the cluster recovered (if it was ever
     # cooling down), so clear the negative cache for immediate live refreshes.

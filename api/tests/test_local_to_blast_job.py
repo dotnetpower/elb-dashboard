@@ -21,8 +21,21 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from api.routes._blast_shared import _local_to_blast_job, _split_child_summaries_from_repo
 from api.services.blast import job_state as blast_job_state
+
+
+@pytest.fixture(autouse=True)
+def _isolate_k8s_refresh_caches():
+    """Clear the module-level K8s refresh throttle + cluster cooldown maps around
+    every test so a cooldown armed by one test cannot leak into the next (they
+    share cluster keys like ('sub-1', 'rg-elb', 'elb-cluster'))."""
+    blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
+    blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN.clear()
+    yield
+    blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
+    blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN.clear()
 
 
 def _state(**kw):
@@ -1009,6 +1022,33 @@ def test_refresh_running_blast_state_reachable_clears_cluster_cooldown(monkeypat
     assert cluster_key in blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN
     blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-B"))
     assert cluster_key not in blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN
+
+
+def test_refresh_running_blast_state_cooldown_logs_once_per_episode(monkeypatch, caplog):
+    """Cooldown arming logs one INFO per outage episode (deduped across sibling
+    jobs), and a lapsed cooldown is dropped from the map."""
+    import logging
+
+    def fake_k8s(*_args, **_kwargs):
+        return {"status": "unknown", "detail": "timeout"}
+
+    blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
+    blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN.clear()
+    cooldown = blast_job_state._K8S_REFRESH_FAILURE_COOLDOWN_SECONDS
+    # ep1: job-A arms at t=100 (logs); job-B within cooldown is skipped (no arm,
+    # no log); job-A re-fails after the cooldown lapses = new episode (logs again).
+    times = iter([100.0, 101.0, 100.0 + cooldown + 1.0])
+    monkeypatch.setattr(blast_job_state, "monotonic", lambda: next(times))
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    with caplog.at_level(logging.INFO, logger="api.services.blast.job_state"):
+        blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-A"))
+        blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-B"))
+        blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-A"))
+
+    logs = [r for r in caplog.records if "unreachable" in r.getMessage()]
+    assert len(logs) == 2  # one per outage episode, not one per job
 
 
 def test_refresh_running_blast_state_skips_pre_runtime_phases(monkeypatch):

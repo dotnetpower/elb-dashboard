@@ -73,3 +73,23 @@ previous behavior when the cluster is reachable.
   a shorter connect timeout or a fail-fast on the first GET would shrink the
   one unavoidable first-hit timeout below ~27s. Deferred — the negative cache
   removes the repeated cost, which was the user-visible problem.
+
+## Update (critique-hardening pass, 2026-06-24)
+
+A 30-round critique-hardening pass over the SB queue / results / paths /
+download conditions surfaced two minor findings on this cooldown:
+
+- **Observability (R29)**: arming the cooldown was silent. Added
+  `_arm_cluster_refresh_cooldown`, which logs one INFO line per outage episode
+  (deduped across sibling jobs — re-arming an already-cooling cluster does not
+  re-log) so a job-detail K8s outage is visible, not just the monitor card's
+  `aks_top_nodes` degrade.
+- **Map hygiene (R4)**: the cooldown check now pops a lapsed key instead of
+  leaving an expired entry in `_K8S_REFRESH_CLUSTER_COOLDOWN`, so the map never
+  retains stale keys and a re-failure logs as a fresh episode.
+
+Regression: `test_refresh_running_blast_state_cooldown_logs_once_per_episode`
+plus an autouse isolation fixture clearing the throttle + cooldown maps around
+every refresh test. `uv run pytest -q api/tests/test_local_to_blast_job.py
+api/tests/test_external_blast_api.py api/tests/test_blast_jobs_routes.py` → 191
+passed.
