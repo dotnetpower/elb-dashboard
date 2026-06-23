@@ -285,12 +285,30 @@ def list_result_blobs(
     max_results: int | None = None,
 ) -> list[dict[str, Any]]:
     """List blobs under a results prefix."""
-    svc = _blob_service(credential, account_name)
-    cc = svc.get_container_client(container)
-    blobs: list[dict[str, Any]] = []
     limit = max_results
     if limit is None:
         limit = max(1, int(os.environ.get("STORAGE_RESULT_BLOB_LIST_LIMIT", "5000")))
+    # When the ADLS Gen2 (dfs) data-plane is enabled, list via the native
+    # directory walk (get_paths) for true hierarchical enumeration. On any dfs
+    # error fall back to the Blob prefix scan so a transient dfs issue never
+    # breaks result listing. Both target the same HNS account and return the
+    # same row shape.
+    from api.services.storage.dfs_client_pool import dfs_enabled
+
+    if dfs_enabled():
+        try:
+            from api.services.storage.dfs_io import list_paths_dfs
+
+            return list_paths_dfs(credential, account_name, container, prefix, limit=limit)
+        except Exception as exc:
+            LOGGER.warning(
+                "dfs listing failed (prefix=%s), falling back to blob: %s",
+                prefix,
+                type(exc).__name__,
+            )
+    svc = _blob_service(credential, account_name)
+    cc = svc.get_container_client(container)
+    blobs: list[dict[str, Any]] = []
     for blob in cc.list_blobs(name_starts_with=prefix):
         blobs.append(
             {
