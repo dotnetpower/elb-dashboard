@@ -33,36 +33,37 @@ export function useBlastResultActions({
 
   const handleDownload = async (file: BlastResultFile) => {
     if (!jobId) return;
+    if (!file.file_id) {
+      // Every result file from the listing carries a file_id: local result
+      // blobs get a deterministic base64 encoding of their path, and external
+      // (OpenAPI / Service Bus) jobs keep their sibling-generated `result-NNN`
+      // id. A missing file_id therefore means a malformed listing entry. The
+      // removed legacy fallback POSTed to `/results/download` expecting a SAS
+      // `download_url`, but that endpoint now streams bytes through the api
+      // sidecar (charter §9, no SAS to the browser), so it could never succeed.
+      // Surface a clear error instead of silently opening `undefined`.
+      toast("This result file cannot be downloaded (missing file id).", "error");
+      return;
+    }
     setDownloadingFile(file.name);
     setDownloadProgress(null);
     let url: string | null = null;
     try {
-      if (file.file_id) {
-        const response = await blastApi.downloadResultFile(
-          jobId,
-          file.file_id,
-          subscriptionId,
-          storageAccount,
-          resourceGroup,
-          (received, total) => setDownloadProgress({ received, total }),
-        );
-        url = URL.createObjectURL(response.blob);
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = response.filename ?? file.name.split("/").pop() ?? `${jobId}-result`;
-        document.body.append(anchor);
-        anchor.click();
-        anchor.remove();
-      } else {
-        const resp = await blastApi.downloadResult(
-          jobId,
-          subscriptionId,
-          storageAccount,
-          file.name,
-          resourceGroup,
-        );
-        window.open(resp.download_url, "_blank");
-      }
+      const response = await blastApi.downloadResultFile(
+        jobId,
+        file.file_id,
+        subscriptionId,
+        storageAccount,
+        resourceGroup,
+        (received, total) => setDownloadProgress({ received, total }),
+      );
+      url = URL.createObjectURL(response.blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = response.filename ?? file.name.split("/").pop() ?? `${jobId}-result`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
     } catch (e) {
       toast(`Download failed: ${(e as Error).message}`, "error");
     } finally {

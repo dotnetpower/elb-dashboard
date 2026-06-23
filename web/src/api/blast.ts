@@ -293,17 +293,6 @@ export const blastApi = {
       max_bytes: number;
     }>(`/blast/jobs/${encodeURIComponent(jobId)}/query`),
 
-  downloadResult: (
-    jobId: string,
-    subscriptionId: string,
-    storageAccount: string,
-    blobName: string,
-    resourceGroup?: string,
-  ) =>
-    api.get<{ download_url: string }>(
-      `/blast/jobs/${encodeURIComponent(jobId)}/results/download?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&blob_name=${encodeURIComponent(blobName)}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
-    ),
-
   downloadResultFile: async (
     jobId: string,
     fileId: string,
