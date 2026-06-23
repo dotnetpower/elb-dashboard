@@ -5,12 +5,12 @@ when ``STORAGE_DFS_ENABLED`` is on. Returns the SAME row shape as
 ``blob_io.list_result_blobs`` (``file_id`` / ``name`` / ``size`` /
 ``last_modified``) so callers and the frontend are agnostic to which SDK served
 the request.
-Edit boundaries: dfs directory/file *listing* only. The pooled client lifecycle
-lives in ``dfs_client_pool``; single-blob reads/streams stay on the Blob API
-(they gain nothing from dfs on an HNS account and reuse the proven
-range/gzip/416/semaphore logic in ``blob_io``). Recursive delete/rename belong
-to issue #69, not here.
-Key entry points: ``list_paths_dfs``.
+Edit boundaries: dfs directory/file *listing* and *recursive delete* only. The
+pooled client lifecycle lives in ``dfs_client_pool``; single-blob reads/streams
+stay on the Blob API (they gain nothing from dfs on an HNS account and reuse the
+proven range/gzip/416/semaphore logic in ``blob_io``). Archive rename + lifecycle
+retention are tracked as #69 follow-ups.
+Key entry points: ``list_paths_dfs``, ``delete_directory_dfs``.
 Risky contracts: ``get_paths`` returns BOTH files and directories — directory
 entries are filtered out to match Blob ``list_blobs`` (which yields only blobs).
 A missing directory (job submitted, no results yet) degrades to ``[]`` exactly
@@ -88,3 +88,43 @@ def list_paths_dfs(
         # Blob prefix scan.
         return []
     return blobs
+
+
+def delete_directory_dfs(
+    credential: TokenCredential,
+    account_name: str,
+    container: str,
+    directory_path: str,
+    *,
+    expected_leaf: str | None = None,
+) -> bool:
+    """Recursively delete a directory on the HNS account in one metadata op.
+
+    Returns ``True`` when the directory existed and was deleted, ``False`` when
+    it was already absent (idempotent). On a non-HNS account this would be a
+    per-blob loop, but the platform account is HNS so this is a single atomic
+    ``delete_directory`` call regardless of how many blobs are underneath.
+
+    SAFETY (recursive delete is irreversible):
+      - ``directory_path`` must be non-empty and free of ``..`` segments.
+      - When ``expected_leaf`` is given, the directory's LAST path segment must
+        equal it. A per-job delete passes ``expected_leaf=job_id`` so a bug can
+        never target a parent date bucket (``results/2026/06/23``) and wipe an
+        entire day of unrelated jobs.
+    """
+    dir_path = (directory_path or "").strip("/")
+    if not dir_path or any(part == ".." for part in dir_path.split("/")):
+        raise ValueError(f"invalid directory path for delete: {directory_path!r}")
+    if expected_leaf is not None and dir_path.split("/")[-1] != expected_leaf:
+        raise ValueError(
+            f"refusing recursive delete of {dir_path!r}: leaf segment != {expected_leaf!r}"
+        )
+    from api.services.storage.dfs_client_pool import _dfs_filesystem
+
+    fs = _dfs_filesystem(credential, account_name, container)
+    directory_client = fs.get_directory_client(dir_path)
+    try:
+        directory_client.delete_directory()
+        return True
+    except ResourceNotFoundError:
+        return False

@@ -177,9 +177,21 @@ def blast_job_delete(
         if state is None:
             raise HTTPException(404, "job not found")
         _assert_job_owner(state.owner_oid, caller)
+        # Recursively purge the job's result/query directories (best-effort,
+        # dfs-only). Fixes the historical soft-delete-only leak where result
+        # blobs accumulated forever. A no-op when STORAGE_DFS_ENABLED is off, so
+        # the legacy tombstone-only behaviour is preserved by default. Never
+        # raises — a storage failure must not block the tombstone.
+        from api.services.storage.job_purge import purge_job_result_storage
+
+        purge = purge_job_result_storage(state)
         repo.update(job_id, status="deleted", phase="deleted")
         _reset_external_jobs_cache()
-        return {"job_id": job_id, "status": "deleted"}
+        return {
+            "job_id": job_id,
+            "status": "deleted",
+            "storage_purged": bool(purge.get("purged")),
+        }
     except HTTPException:
         raise
     except Exception as exc:
