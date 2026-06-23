@@ -305,21 +305,59 @@ def _is_merged_result_blob_name(blob_name: str) -> bool:
 
 
 def validate_result_blob_name(blob_name: str, job_id: str) -> None:
-    """Raise InvalidResultBlobName if the blob name escapes the job prefix."""
+    """Raise InvalidResultBlobName if the blob name escapes the job prefix.
+
+    Layout-aware (issue #70): a job's result blobs live under its own directory
+    in either the flat (``{job_id}/file``) or the date-tiered
+    (``YYYY/MM/DD/{job_id}/file``) layout. The check stays as tight as the
+    legacy ``startswith({job_id}/)`` for flat blobs — the only segments allowed
+    before the ``{job_id}`` directory are a ``YYYY/MM/DD`` date path — so an
+    arbitrary ``other/{job_id}/x`` is still rejected, while a genuine dated blob
+    is accepted. Traversal / URL-encoding tricks are rejected first.
+    """
     if not job_id or "/" in job_id or ".." in job_id:
         raise InvalidResultBlobName("invalid_job_id")
-    if not blob_name.startswith(f"{job_id}/"):
-        raise InvalidResultBlobName("invalid_blob_name", "blob does not belong to this job")
     # Block path-traversal / URL-encoding tricks. Backslashes are treated as
     # separators by some Azure SDK layers, so reject them too.
     if ".." in blob_name or "?" in blob_name or "#" in blob_name or "\\" in blob_name:
         raise InvalidResultBlobName("invalid_blob_name")
     if "%2e" in blob_name.lower() or "%2f" in blob_name.lower():
         raise InvalidResultBlobName("invalid_blob_name")
-    # Reject leading slash in the part after the prefix (defence in depth).
-    remainder = blob_name[len(job_id) + 1 :]
-    if remainder.startswith("/") or remainder == "":
+    if blob_name.startswith("/"):
         raise InvalidResultBlobName("invalid_blob_name")
+    if not blob_belongs_to_job(blob_name, job_id):
+        raise InvalidResultBlobName("invalid_blob_name", "blob does not belong to this job")
+
+
+_DATE_PREFIX_RE = re.compile(r"^\d{4}/\d{2}/\d{2}$")
+
+
+def blob_belongs_to_job(blob_name: str, job_id: str) -> bool:
+    """Return True when ``blob_name`` is a file inside ``job_id``'s directory.
+
+    Layout-agnostic ownership test used by the result read/download guards:
+      - the ``{job_id}`` must appear as a path SEGMENT (not a substring), with
+        at least one non-empty path component AFTER it (a file, not the bare
+        directory), and no empty segments (no ``//``); and
+      - the segments BEFORE the ``{job_id}`` directory must be empty (flat
+        layout) or exactly a ``YYYY/MM/DD`` date path (the #67 dated layout).
+    Job ids are unique, so ``.../{job_id}/...`` can only be this job's directory.
+    Does NOT itself reject ``..`` / encoding tricks — callers run those guards
+    first (see :func:`validate_result_blob_name`).
+    """
+    if not job_id:
+        return False
+    segments = blob_name.split("/")
+    if job_id not in segments:
+        return False
+    idx = segments.index(job_id)
+    tail = segments[idx + 1 :]
+    if not tail or any(part == "" for part in tail):
+        return False
+    head = segments[:idx]
+    if head and not _DATE_PREFIX_RE.match("/".join(head)):
+        return False
+    return True
 
 
 def numeric_result_value(value: Any) -> float | None:

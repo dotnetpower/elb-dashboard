@@ -427,7 +427,9 @@ def blast_job_result_file(
 
         blob_path = decode_blob_file_id(file_id)
         if blob_path is not None:
-            if blob_path != job_id and not blob_path.startswith(f"{job_id}/"):
+            from api.services.blast.result_analytics import blob_belongs_to_job
+
+            if blob_path != job_id and not blob_belongs_to_job(blob_path, job_id):
                 raise HTTPException(
                     400,
                     detail={
