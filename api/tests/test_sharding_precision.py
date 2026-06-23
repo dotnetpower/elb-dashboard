@@ -18,10 +18,48 @@ from __future__ import annotations
 import pytest
 from api.services.sharding_precision import (
     build_precision_report,
+    enrich_tabular_outfmt,
     merge_format_for_outfmt,
     normalize_sharding_mode,
     outfmt_spec_value,
 )
+
+_PARITY = "staxids sscinames stitle qcovs"
+
+
+def test_enrich_bare_tabular_adds_std_and_parity() -> None:
+    assert enrich_tabular_outfmt("7") == f"7 std {_PARITY}"
+    assert enrich_tabular_outfmt("6") == f"6 std {_PARITY}"
+    assert enrich_tabular_outfmt("7 std") == f"7 std {_PARITY}"
+
+
+def test_enrich_preserves_user_columns() -> None:
+    out = enrich_tabular_outfmt("7 qseqid sseqid pident evalue bitscore")
+    assert out == f"7 qseqid sseqid pident evalue bitscore {_PARITY}"
+
+
+def test_enrich_does_not_duplicate_present_columns() -> None:
+    # stitle already present → only the other three parity columns are appended.
+    assert enrich_tabular_outfmt("7 std stitle") == "7 std stitle staxids sscinames qcovs"
+
+
+def test_enrich_is_idempotent() -> None:
+    once = enrich_tabular_outfmt("7")
+    assert enrich_tabular_outfmt(once) == once
+    # A layout that already has every parity column is returned untouched.
+    full = f"7 std {_PARITY}"
+    assert enrich_tabular_outfmt(full) == full
+
+
+@pytest.mark.parametrize("value", [None, "", "5", "5 ", "  "])
+def test_enrich_noop_for_xml_or_empty(value: object) -> None:
+    assert enrich_tabular_outfmt(value) == value
+
+
+def test_enrich_keeps_merge_compatible() -> None:
+    # Every enriched tabular layout still passes the shard-merge gate.
+    for spec in ("7", "6", "7 std", "7 qseqid sseqid pident evalue bitscore"):
+        assert merge_format_for_outfmt(enrich_tabular_outfmt(spec)) == "tabular"
 
 
 def test_default_sharding_mode_is_off() -> None:

@@ -223,7 +223,10 @@ class ExternalBlastV1Request(BaseModel):
         # later in the merge. XML (outfmt 5) and a bare numeric code merge fine.
         outfmt = self.blast_options.outfmt
         if outfmt is not None and str(outfmt).strip():
-            from api.services.sharding_precision import merge_format_for_outfmt
+            from api.services.sharding_precision import (
+                enrich_tabular_outfmt,
+                merge_format_for_outfmt,
+            )
 
             if merge_format_for_outfmt(outfmt) is None:
                 raise ValueError(
@@ -231,6 +234,12 @@ class ExternalBlastV1Request(BaseModel):
                     "layout must include both evalue and bitscore (use 'std' or list "
                     "them explicitly)"
                 )
+            # Inject the result-UI parity columns (staxids/sscinames/stitle/qcovs)
+            # into a tabular layout so the dashboard's Description / Scientific
+            # name / Query Cover columns populate for an outfmt 6/7 run the same
+            # way they do for outfmt 5 (XML). Idempotent + preserves the caller's
+            # columns; a no-op for XML or an already-enriched layout.
+            self.blast_options.outfmt = enrich_tabular_outfmt(outfmt)
         return self
 
 

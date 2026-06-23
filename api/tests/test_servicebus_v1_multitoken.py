@@ -46,7 +46,13 @@ def test_v1_request_accepts_multitoken_std_outfmt() -> None:
     from api.routes.elastic_blast import ExternalBlastV1Request
 
     req = ExternalBlastV1Request(**{**_USER_BODY, "external_correlation_id": "corr-1"})
-    assert req.blast_options.outfmt == "7 std staxids sstrand qseq sseq"
+    # Caller columns survive; the dashboard appends the result-UI parity columns
+    # (sscinames/stitle/qcovs; staxids already present) so Description / Scientific
+    # name / Query Cover populate for the tabular run.
+    assert (
+        req.blast_options.outfmt
+        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
+    )
     assert req.blast_options.extra and "-searchsp" in req.blast_options.extra
     assert req.db == "core_nt"
 
@@ -118,8 +124,12 @@ def test_build_v1_payload_preserves_multitoken_and_stamps_metadata() -> None:
         _msg({**_USER_BODY, "external_correlation_id": "corr-1"}), ServiceBusConfig()
     )
     assert payload is not None
-    # Multi-token outfmt + extra survive end-to-end.
-    assert payload["blast_options"]["outfmt"] == "7 std staxids sstrand qseq sseq"
+    # Multi-token outfmt + extra survive end-to-end; the dashboard appends the
+    # result-UI parity columns to the tabular layout.
+    assert (
+        payload["blast_options"]["outfmt"]
+        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
+    )
     assert "-searchsp" in payload["blast_options"]["extra"]
     # The sibling /v1/jobs only accepts {dashboard, external_api, terminal,
     # system}; "servicebus" 400s. We send external_api on the wire while the
@@ -199,7 +209,13 @@ def test_build_v1_payload_accepts_external_queue_body_without_internal_metadata(
     assert payload["resource_profile"] == "core_nt_safe"
     assert payload["taxid"] == 10244
     assert payload["is_inclusive"] is True
-    assert payload["blast_options"] == body["blast_options"]
+    # Non-outfmt options survive verbatim; the dashboard appends the result-UI
+    # parity columns to the tabular outfmt (the external body used the
+    # staxid/ssciname/qcovhsp variants the analytics do not read).
+    assert payload["blast_options"] == {
+        **body["blast_options"],
+        "outfmt": body["blast_options"]["outfmt"] + " staxids sscinames stitle qcovs",
+    }
     assert "request_id" not in payload
     assert "type" not in payload
 
@@ -329,9 +345,13 @@ def test_build_v1_payload_searchsp_resolution_failure_is_safe(
     )
     payload = sb._build_v1_jobs_payload(_msg(_v1_no_searchsp_body()), ServiceBusConfig())
     assert payload is not None
-    # No injection on failure, but the multi-token submit still goes through.
+    # No searchsp injection on failure, but the multi-token submit still goes
+    # through (and the result-UI parity columns are still appended).
     assert "-searchsp" not in payload["blast_options"]["extra"]
-    assert payload["blast_options"]["outfmt"] == "7 std staxids sstrand qseq sseq"
+    assert (
+        payload["blast_options"]["outfmt"]
+        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
+    )
 
 
 # --------------------------------------------------------------------------- #

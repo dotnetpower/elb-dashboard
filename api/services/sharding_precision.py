@@ -191,6 +191,39 @@ def merge_format_for_outfmt(value: object | None) -> Literal["tabular", "xml"] |
     return None
 
 
+# Web BLAST parity columns the dashboard result analytics need to populate
+# Description (`stitle`), Scientific name (`sscinames` / `staxids`), and Query
+# Cover (`qcovs`). The default tabular layout (`std`, or a bare `6` / `7`) omits
+# all of them, so an outfmt 6/7 run would show blanks on the result page where
+# an outfmt 5 (XML) run is rich. Injecting them at submit time closes that gap.
+# Resolved BY NAME by both the shard merge (`merge-sharded-results.sh`, which
+# re-emits trailing columns) and the analytics parser, so order does not matter.
+_PARITY_TABULAR_FIELDS: tuple[str, ...] = ("staxids", "sscinames", "stitle", "qcovs")
+
+
+def enrich_tabular_outfmt(value: object | None) -> object | None:
+    """Append the result-UI parity columns to a tabular (6/7) outfmt, idempotently.
+
+    Returns ``value`` unchanged for XML (``5``), a non-tabular code, or a value
+    that already lists every parity column. A bare ``6`` / ``7`` is expanded to
+    ``std`` first so ``evalue`` + ``bitscore`` (required by the shard merge) stay
+    present. Already-present columns are never duplicated, so re-running this on
+    an enriched value is a no-op.
+    """
+    if value in (None, ""):
+        return value
+    parts = str(value).strip().strip("'\"").split()
+    if not parts or parts[0] not in ("6", "7"):
+        return value
+    code = parts[0]
+    cols = parts[1:] or ["std"]
+    present = set(_expand_outfmt_field_codes(cols))
+    additions = [f for f in _PARITY_TABULAR_FIELDS if f not in present]
+    if not additions and parts[1:]:
+        return value
+    return " ".join([code, *cols, *additions])
+
+
 def positive_int(value: object | None) -> int | None:
     if value in (None, ""):
         return None
