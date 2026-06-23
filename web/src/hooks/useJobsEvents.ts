@@ -9,8 +9,8 @@
  *   2. EventSource /api/monitor/jobs-events?ticket=…
  *   3. on "jobs-changed" → queryClient.invalidateQueries for the job keys
  *
- * The backend feature is default-OFF (JOBS_EVENTS_SSE_ENABLED). When off the
- * ticket returns { enabled:false } and this hook stays inert — every card's
+ * The backend feature is ON by default (env kill-switch JOBS_EVENTS_SSE_DISABLED).
+ * When disabled the ticket returns { enabled:false } and this hook stays inert — every card's
  * existing polling is the unchanged fallback. Polling also stays on as a
  * resilience net when the stream drops, so this hook only ever makes the UI
  * faster, never the sole source of freshness.

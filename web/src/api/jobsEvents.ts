@@ -9,9 +9,9 @@
  *        :   heartbeat
  *
  * EventSource cannot send bearer headers, so access is ticket-gated (the ticket
- * POST carries the bearer). The feature is default-OFF on the backend
- * (JOBS_EVENTS_SSE_ENABLED); when off the ticket call returns { enabled: false }
- * and the SPA keeps polling.
+ * POST carries the bearer). The feature is ON by default on the backend (env
+ * kill-switch JOBS_EVENTS_SSE_DISABLED); when disabled the ticket call returns
+ * { enabled: false } and the SPA keeps polling.
  */
 import { fetchApiRaw } from "@/api/client";
 
