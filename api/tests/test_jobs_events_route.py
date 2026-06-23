@@ -30,21 +30,8 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(app)
 
 
-def test_ticket_disabled_by_default(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("JOBS_EVENTS_SSE_ENABLED", raising=False)
-    r = client.post("/api/monitor/jobs-events/ticket")
-    assert r.status_code == 200
-    assert r.json() == {"enabled": False}
-
-
-def test_stream_204_when_disabled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("JOBS_EVENTS_SSE_ENABLED", raising=False)
-    r = client.get("/api/monitor/jobs-events?ticket=whatever")
-    assert r.status_code == 204
-
-
-def test_ticket_issued_when_enabled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("JOBS_EVENTS_SSE_ENABLED", "true")
+def test_ticket_enabled_by_default(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JOBS_EVENTS_SSE_DISABLED", raising=False)
     r = client.post("/api/monitor/jobs-events/ticket")
     assert r.status_code == 200
     body = r.json()
@@ -53,16 +40,33 @@ def test_ticket_issued_when_enabled(client: TestClient, monkeypatch: pytest.Monk
     assert body["expires_at"] > 0
 
 
+def test_ticket_disabled_by_kill_switch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JOBS_EVENTS_SSE_DISABLED", "true")
+    r = client.post("/api/monitor/jobs-events/ticket")
+    assert r.status_code == 200
+    assert r.json() == {"enabled": False}
+
+
+def test_stream_204_when_kill_switch_set(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JOBS_EVENTS_SSE_DISABLED", "true")
+    r = client.get("/api/monitor/jobs-events?ticket=whatever")
+    assert r.status_code == 204
+
+
 def test_stream_204_on_absent_or_bad_ticket(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("JOBS_EVENTS_SSE_ENABLED", "true")
+    monkeypatch.delenv("JOBS_EVENTS_SSE_DISABLED", raising=False)
     assert client.get("/api/monitor/jobs-events").status_code == 204
     assert client.get("/api/monitor/jobs-events?ticket=nope").status_code == 204
 
 
 def test_ticket_is_single_use(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("JOBS_EVENTS_SSE_ENABLED", "true")
+    monkeypatch.delenv("JOBS_EVENTS_SSE_DISABLED", raising=False)
     ticket = client.post("/api/monitor/jobs-events/ticket").json()["ticket"]
     # A redeemed ticket cannot be reused; the second consume returns None. (The
     # live stream blocks once a valid ticket is accepted, so exercise the consume

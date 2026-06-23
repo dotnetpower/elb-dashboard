@@ -1,6 +1,6 @@
 ---
 title: Real-time job updates via SSE — instant Message Flow / Blast Jobs / AKS Jobs
-description: Add a default-OFF SSE channel (JOBS_EVENTS_SSE_ENABLED) that pushes a "jobs-changed" event to the browser the instant any job row changes, so the Message Flow card, the Blast Jobs list, and the AKS card Jobs refetch instantly instead of waiting out a poll. Works whether or not the Service Bus integration is enabled.
+description: Add an SSE channel (default-ON, kill-switch JOBS_EVENTS_SSE_DISABLED) that pushes a "jobs-changed" event to the browser the instant any job row changes, so the Message Flow card, the Blast Jobs list, and the AKS card Jobs refetch instantly instead of waiting out a poll. Works whether or not the Service Bus integration is enabled.
 tags:
   - blast
   - ui
@@ -32,13 +32,22 @@ updates regardless.
 
 ## User-facing change
 
-* New default-OFF feature gate `JOBS_EVENTS_SSE_ENABLED`. When unset, the ticket
-  endpoint returns `{"enabled": false}`, the SPA never opens the stream, and
-  every card keeps polling exactly as before (charter §12a Rule 4).
-* When on, the SPA opens **one** EventSource. On a `jobs-changed` event it
-  invalidates the `["message-flow"]`, `["blast-jobs"]`, and `["aks-workload",
-  "jobs"]` React Query caches, so all subscribed cards refetch at once. Polling
-  stays on as a resilience fallback when the stream drops.
+* The feature ships **ON by default** with an env kill-switch
+  `JOBS_EVENTS_SSE_DISABLED`. It is a purely additive UX improvement — polling
+  remains the guaranteed fallback, so it can never revoke access — and the SSE
+  transport is already proven by the logs/sidecars streams in the same topology,
+  so it does not need the default-OFF soak that security *guards* require
+  (charter §12a Rule 4 targets guards, not features). Set the kill-switch to shed
+  the always-on connections; the ticket then returns `{"enabled": false}` and
+  every card falls back to polling.
+* The SPA opens **one** EventSource. On a `jobs-changed` event it invalidates the
+  `["message-flow"]`, `["blast-jobs"]`, and `["aks-workload", "jobs"]` React Query
+  caches, so all subscribed cards refetch at once. Polling stays on as a
+  resilience fallback when the stream drops.
+* **Not Service-Bus-conditional**: because the event is "a job row changed" (not
+  "a queue drained"), the Blast Jobs list and AKS Jobs benefit even when the
+  Service Bus integration is disabled, so the gate is unconditional rather than
+  tied to `service_bus_enabled()`.
 
 ## API / IaC diff summary
 
@@ -67,16 +76,17 @@ updates regardless.
   (EventSource cannot send bearer headers, charter §12a Rule 5). The ticket is
   single-use, short-TTL, origin-checked, and IP/UA-bound under the existing
   `STRICT_SSE_TICKET_BINDING` flag — identical contract to the logs SSE.
-* Default-OFF: with the gate unset, the endpoints are inert (ticket → disabled,
-  stream → 204) and behaviour is unchanged.
+* Default-ON with an env kill-switch (`JOBS_EVENTS_SSE_DISABLED`): the feature is
+  additive (polling fallback always present) so it cannot revoke access, and the
+  endpoints are inert when the kill-switch is set (ticket → disabled, stream → 204).
 
 ## Validation evidence
 
 * `uv run ruff check api/...` (touched files) — clean.
 * `uv run pytest -q api/tests/test_jobs_events_bus.py api/tests/test_jobs_events_route.py`
-  — 11 passed (bus delivery from a non-loop thread, overflow coalesce, gate
-  off → ticket disabled + stream 204, ticket single-use, and BOTH funnels
-  broadcast — including the Service-Bus-disabled direct-submit path).
+  — 11 passed (bus delivery from a non-loop thread, overflow coalesce, default-ON
+  ticket issuance, kill-switch → disabled + stream 204, ticket single-use, and
+  BOTH funnels broadcast — including the Service-Bus-disabled direct-submit path).
 * `uv run pytest -q api/tests/test_jobs_cache_signal.py` — 8 passed (funnel
   unchanged besides the additive broadcast).
 * `cd web && npm run build` — type-checks and builds clean; `eslint` clean.

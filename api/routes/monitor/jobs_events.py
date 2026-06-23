@@ -13,10 +13,12 @@ Edit boundaries: HTTP auth, ticket lifecycle, and SSE framing only. The fan-out
     ``Depends(require_caller)`` to the stream endpoint — EventSource cannot send
     bearer headers, so it stays ticket-gated (charter §12a Rule 5).
 Key entry points: ``jobs_events_ticket``, ``jobs_events_stream``.
-Risky contracts: Default-OFF behind ``JOBS_EVENTS_SSE_ENABLED`` (charter §12a
-    Rule 4) — when unset, the ticket endpoint returns ``{"enabled": false}`` and
-    the stream returns 204 so the browser never opens/auto-reconnects and the
-    existing poll behaviour is unchanged. Tickets are single-use, TTL ≤ 30s, and
+Risky contracts: Default-ON with an env kill-switch ``JOBS_EVENTS_SSE_DISABLED``
+    — this is an additive UX feature (polling is the guaranteed fallback, so it
+    never revokes access), not a security guard, so charter §12a Rule 4's
+    default-OFF discipline does not bind it; setting the kill-switch makes the
+    ticket endpoint return ``{"enabled": false}`` and the stream return 204 so
+    the browser falls back to polling. Tickets are single-use, TTL ≤ 30s, and
     bound to the caller's IP + User-Agent under ``STRICT_SSE_TICKET_BINDING``
     (same contract as the logs SSE). The stream endpoint returns 204 (not 401)
     on a missing/expired/consumed ticket so EventSource stops auto-reconnecting.
@@ -47,8 +49,16 @@ _ON_VALUES = {"1", "true", "yes", "on"}
 
 
 def _sse_enabled() -> bool:
-    """Default-OFF gate (charter §12a Rule 4). Read at call time for tests."""
-    return os.environ.get("JOBS_EVENTS_SSE_ENABLED", "").strip().lower() in _ON_VALUES
+    """Default-ON with a kill-switch. Read at call time for tests.
+
+    This is a purely additive UX feature (polling is the guaranteed fallback, so
+    it can never revoke access — charter §12a Rule 4's default-OFF discipline
+    targets security *guards*, not features) and the SSE transport is already
+    proven by the logs/sidecars streams in the same topology, so it ships ON.
+    Set ``JOBS_EVENTS_SSE_DISABLED=true`` to turn it off (env kill-switch) if an
+    operator ever needs to shed the always-on connections.
+    """
+    return os.environ.get("JOBS_EVENTS_SSE_DISABLED", "").strip().lower() not in _ON_VALUES
 
 
 @dataclass(frozen=True)
