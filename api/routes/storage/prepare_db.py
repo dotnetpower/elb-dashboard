@@ -966,16 +966,43 @@ def prepare_db_delete(
     # otherwise interact with the server-side continuation marker. The name
     # list is tiny (a few hundred KB even for nt's ~4.8k shards).
     names = [blob.name for blob in container.list_blobs(name_starts_with=f"{db_name}/")]
-    for name in names:
-        chunk.append(name)
-        if len(chunk) >= 256:
-            ok, bad = _delete_chunk(chunk)
-            deleted += ok
-            errors += bad
-            chunk = []
-    ok, bad = _delete_chunk(chunk)
-    deleted += ok
-    errors += bad
+    # When the dfs (ADLS Gen2) data-plane is enabled, collapse the shard delete
+    # — up to ~4.8k blobs / ~19 batch round-trips for `nt` — into a SINGLE
+    # atomic HNS recursive delete_directory. ``expected_leaf=db_name`` (a
+    # single-segment, ``_RE_DB_NAME``-validated name) guarantees it can only
+    # target this DB's directory, never the whole ``blast-db`` container. Any
+    # dfs error falls back to the proven batch loop below.
+    from api.services.storage.dfs_client_pool import dfs_enabled
+
+    dfs_done = False
+    if dfs_enabled() and names:
+        try:
+            from api.services.storage.dfs_io import delete_directory_dfs
+
+            delete_directory_dfs(
+                cred, account_name, "blast-db", f"{db_name}/", expected_leaf=db_name
+            )
+            deleted = len(names)
+            dfs_done = True
+        except Exception as exc:
+            LOGGER.warning(
+                "prepare_db_delete dfs recursive delete failed db=%s n=%d: %s; "
+                "falling back to batch",
+                db_name,
+                len(names),
+                type(exc).__name__,
+            )
+    if not dfs_done:
+        for name in names:
+            chunk.append(name)
+            if len(chunk) >= 256:
+                ok, bad = _delete_chunk(chunk)
+                deleted += ok
+                errors += bad
+                chunk = []
+        ok, bad = _delete_chunk(chunk)
+        deleted += ok
+        errors += bad
 
     metadata_deleted = False
     if errors:

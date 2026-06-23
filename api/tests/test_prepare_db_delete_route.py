@@ -231,6 +231,76 @@ def test_delete_partial_failure_keeps_metadata(
     assert container._blobs == ["core_nt/core_nt.001.nhr"]
 
 
+def test_delete_dfs_recursive_path(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With STORAGE_DFS_ENABLED on, the shard delete collapses to a single
+    # recursive delete_directory; the route reports deleted=len(names) and
+    # then removes the metadata blob.
+    monkeypatch.setenv("STORAGE_DFS_ENABLED", "true")
+    container = _FakeContainer(
+        meta={"db_name": "core_nt", "copy_status": {"phase": "completed"}},
+        blobs=["core_nt/core_nt.000.nhr", "core_nt/core_nt.000.nin"],
+    )
+    _patch_common(monkeypatch, container)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_delete_dir(_cred, _account, fs, path, *, expected_leaf=None):
+        captured["fs"] = fs
+        captured["path"] = path
+        captured["expected_leaf"] = expected_leaf
+        # Simulate the recursive delete removing every shard under {db_name}/.
+        container._blobs = [b for b in container._blobs if not b.startswith("core_nt/")]
+        return True
+
+    monkeypatch.setattr(
+        "api.services.storage.dfs_io.delete_directory_dfs", _fake_delete_dir, raising=True
+    )
+
+    resp = client.post("/api/storage/prepare-db/core_nt/delete", json=_BODY)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["deleted"] == 2
+    assert payload["errors"] == 0
+    assert payload["metadata_deleted"] is True
+    assert captured["fs"] == "blast-db"
+    assert captured["path"] == "core_nt/"
+    assert captured["expected_leaf"] == "core_nt"
+    # Per-blob batch API must NOT have been used on the dfs path.
+    assert container.deleted == ["core_nt-metadata.json"]
+
+
+def test_delete_dfs_failure_falls_back_to_batch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A dfs error must fall back to the proven per-batch delete loop.
+    monkeypatch.setenv("STORAGE_DFS_ENABLED", "true")
+    container = _FakeContainer(
+        meta={"db_name": "core_nt", "copy_status": {"phase": "completed"}},
+        blobs=["core_nt/core_nt.000.nhr", "core_nt/core_nt.000.nin"],
+    )
+    _patch_common(monkeypatch, container)
+
+    def _boom_delete_dir(*_a, **_kw):
+        raise RuntimeError("dfs unreachable")
+
+    monkeypatch.setattr(
+        "api.services.storage.dfs_io.delete_directory_dfs", _boom_delete_dir, raising=True
+    )
+
+    resp = client.post("/api/storage/prepare-db/core_nt/delete", json=_BODY)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["deleted"] == 2
+    assert payload["errors"] == 0
+    assert payload["metadata_deleted"] is True
+    # Fallback used the batch API → the shard blobs were removed that way.
+    assert "core_nt/core_nt.000.nhr" in container.deleted
+
+
 def test_delete_metadata_failure_reports_partial(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
