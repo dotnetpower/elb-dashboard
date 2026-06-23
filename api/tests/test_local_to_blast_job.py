@@ -941,6 +941,76 @@ def test_refresh_running_blast_state_throttles_repeated_k8s_checks(monkeypatch):
     assert calls == 1
 
 
+def _cooldown_job(job_id):
+    return _state(
+        job_id=job_id,
+        status="running",
+        phase="running",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+            "elastic_blast_job_id": f"elastic-{job_id}",
+        },
+    )
+
+
+def test_refresh_running_blast_state_cluster_cooldown_skips_sibling_jobs(monkeypatch):
+    """An unreachable cluster (status=unknown) arms a cluster-level cooldown so
+    sibling jobs skip the slow K8s refresh instead of each re-paying the
+    multi-GET timeout that produced the observed ~27 s /api/blast/jobs/{id}."""
+    calls = 0
+
+    def fake_k8s(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": "unknown", "detail": "timeout"}
+
+    blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
+    blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN.clear()
+    cooldown = blast_job_state._K8S_REFRESH_FAILURE_COOLDOWN_SECONDS
+    # job-A at t=100 (refresh runs, cluster marked down); job-B at t=101
+    # (within cooldown → skipped); job-B again after the cooldown lapses (retry).
+    times = iter([100.0, 101.0, 100.0 + cooldown + 1.0])
+    monkeypatch.setattr(blast_job_state, "monotonic", lambda: next(times))
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-A"))
+    blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-B"))
+    blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-B"))
+
+    # job-A ran (1), sibling job-B skipped during cooldown (still 1), job-B after
+    # the cooldown lapses re-checked (2).
+    assert calls == 2
+
+
+def test_refresh_running_blast_state_reachable_clears_cluster_cooldown(monkeypatch):
+    """A reachable refresh (concrete status) clears a prior cooldown so recovery
+    is immediate for sibling jobs on the same cluster."""
+    statuses = iter(["unknown", "running"])
+
+    def fake_k8s(*_args, **_kwargs):
+        return {"status": next(statuses), "job_id": "elastic"}
+
+    blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
+    blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN.clear()
+    cooldown = blast_job_state._K8S_REFRESH_FAILURE_COOLDOWN_SECONDS
+    # job-A at t=100 marks the cluster down; job-B after the cooldown lapses sees
+    # a reachable "running" and clears the negative cache.
+    times = iter([100.0, 100.0 + cooldown + 1.0])
+    monkeypatch.setattr(blast_job_state, "monotonic", lambda: next(times))
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    cluster_key = ("sub-1", "rg-elb", "elb-cluster")
+    blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-A"))
+    assert cluster_key in blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN
+    blast_job_state._refresh_running_blast_state(object(), _cooldown_job("job-B"))
+    assert cluster_key not in blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN
+
+
 def test_refresh_running_blast_state_skips_pre_runtime_phases(monkeypatch):
     state = _state(
         status="running",

@@ -438,6 +438,20 @@ _K8S_REFRESH_MIN_INTERVAL_SECONDS = 20.0
 _K8S_REFRESH_FAST_INTERVAL_SECONDS = 5.0
 _K8S_REFRESH_FAST_PHASES = frozenset({"running", "results_pending"})
 _K8S_REFRESH_LAST_CHECK: dict[tuple[str, str, str, str], float] = {}
+# Cluster-level negative cache for the live K8s status refresh. When the K8s API
+# for a (subscription, resource_group, cluster) is unreachable — the cluster is
+# auto-stopped, the API-server cert is failing the TLS handshake, or a transient
+# network blip — each refresh blocks on three serial GETs at `timeout=10`
+# (namespace + pods + jobs) before `k8s_check_blast_status` maps the failure to
+# `status="unknown"`. The per-job `_K8S_REFRESH_LAST_CHECK` throttle only
+# suppresses that one job for a few seconds, so opening several running jobs'
+# detail views each paid the full ~27 s. Remember an unreachable cluster here so
+# every sibling job skips the slow call until the cooldown lapses; the next
+# reachable refresh clears it so recovery is immediate.
+_K8S_REFRESH_FAILURE_COOLDOWN_SECONDS = max(
+    5.0, float(os.environ.get("BLAST_K8S_REFRESH_FAILURE_COOLDOWN_SECONDS", "60") or "60")
+)
+_K8S_REFRESH_CLUSTER_COOLDOWN: dict[tuple[str, str, str], float] = {}
 _NON_ERROR_RUNNING_ERROR_CODES = frozenset({"blast_submit_lock_busy"})
 
 
@@ -986,6 +1000,13 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     last_check = _K8S_REFRESH_LAST_CHECK.get(refresh_key)
     if last_check is not None and now - last_check < _refresh_min_interval_seconds(phase):
         return state
+    # Cluster-level negative cache: if this cluster's K8s API was recently
+    # unreachable, skip the slow (~10 s/GET) refresh for every job on it until
+    # the cooldown lapses, instead of re-paying the timeout once per job.
+    cluster_key = (subscription_id, resource_group, cluster_name)
+    cooldown_until = _K8S_REFRESH_CLUSTER_COOLDOWN.get(cluster_key)
+    if cooldown_until is not None and now < cooldown_until:
+        return state
     try:
         from api.services import get_credential
         from api.services.monitoring import k8s_check_blast_status
@@ -1001,8 +1022,20 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     except Exception as exc:
         LOGGER.debug("blast k8s refresh skipped job_id=%s: %s", state.job_id, type(exc).__name__)
         _K8S_REFRESH_LAST_CHECK[refresh_key] = now
+        _K8S_REFRESH_CLUSTER_COOLDOWN[cluster_key] = now + _K8S_REFRESH_FAILURE_COOLDOWN_SECONDS
         return state
     k8s_status = str(k8s.get("status") or "")
+    if k8s_status == "unknown":
+        # `k8s_check_blast_status` maps an unreachable / errored cluster API
+        # (timeout, TLS failure, non-200) to "unknown". Treat it as a cluster
+        # outage and arm the cooldown so sibling jobs don't each re-pay the
+        # multi-GET timeout.
+        _K8S_REFRESH_LAST_CHECK[refresh_key] = now
+        _K8S_REFRESH_CLUSTER_COOLDOWN[cluster_key] = now + _K8S_REFRESH_FAILURE_COOLDOWN_SECONDS
+        return state
+    # Reachable with a concrete status → the cluster recovered (if it was ever
+    # cooling down), so clear the negative cache for immediate live refreshes.
+    _K8S_REFRESH_CLUSTER_COOLDOWN.pop(cluster_key, None)
     if k8s_status not in {"completed", "failed"}:
         _K8S_REFRESH_LAST_CHECK[refresh_key] = now
         return state
