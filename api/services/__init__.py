@@ -87,6 +87,7 @@ def reset_credential() -> None:
     # indirectly via get_credential helpers).
     for module_name, attr in (
         ("api.services.storage.data", "reset_blob_service_pool"),
+        ("api.services.storage.dfs_client_pool", "reset_dfs_service_pool"),
         ("api.services.job_artifacts", "_reset_artifact_table_pool"),
         ("api.services.auto_warmup", "_reset_autowarmup_table_pool"),
         ("api.services.redis_clients", "reset_redis_clients"),

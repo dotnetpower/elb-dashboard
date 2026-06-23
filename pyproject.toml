@@ -20,6 +20,11 @@ dependencies = [
   # Azure SDK surface — covers everything api/services/* uses
   "azure-identity==1.19.0",
   "azure-storage-blob==12.23.1",
+  # ADLS Gen2 (HNS) data-plane — native dfs directory operations (atomic
+  # recursive delete / rename, hierarchical get_paths) layered on the same
+  # storage account as azure-storage-blob. Gated OFF by default via
+  # STORAGE_DFS_ENABLED (see api/services/storage/dfs_client_pool.py).
+  "azure-storage-file-datalake==12.17.0",
   "azure-data-tables==12.5.0",
   "azure-keyvault-secrets==4.9.0",
   "azure-mgmt-resource==23.2.0",

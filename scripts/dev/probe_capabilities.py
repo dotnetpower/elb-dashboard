@@ -179,6 +179,39 @@ def probe_table_list() -> str:
     return "list_tables OK"
 
 
+def probe_dfs_list() -> str:
+    """Probe the ADLS Gen2 (dfs) data-plane via list_file_systems.
+
+    Gated on STORAGE_DFS_ENABLED: when the feature is OFF (default) the dfs
+    path is never exercised by production code, so a missing dfs permission /
+    unresolved dfs private endpoint is irrelevant and we skip. When the
+    feature is ON, this probe is required and a 403 fails the deploy closed.
+
+    The dfs data-plane reuses the same ``Storage Blob Data Contributor`` /
+    ``Reader`` role as the Blob path — no extra role assignment — so on an
+    HNS account where the Blob probe passes this should pass too, provided the
+    ``dfs`` private endpoint zone resolves.
+    """
+    if os.environ.get("STORAGE_DFS_ENABLED", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        raise SkipProbe("STORAGE_DFS_ENABLED is OFF (dfs data-plane not in use)")
+    from azure.storage.filedatalake import DataLakeServiceClient
+
+    account = os.environ["STORAGE_ACCOUNT_NAME"]
+    url = f"https://{account}.dfs.core.windows.net"
+    client = DataLakeServiceClient(account_url=url, credential=_credential())
+    try:
+        iterator = client.list_file_systems(results_per_page=1)
+        next(iter(iterator), None)
+    finally:
+        client.close()
+    return "list_file_systems OK"
+
+
 def probe_acr_get() -> str:
     from azure.mgmt.containerregistry import ContainerRegistryManagementClient
 
@@ -270,6 +303,14 @@ PROBES: tuple[Probe, ...] = (
         name="Storage Table (data plane)",
         runner=probe_table_list,
         role="Storage Table Data Contributor",
+        bicep="infra/modules/storage.bicep",
+        required=True,
+        env_vars=("STORAGE_ACCOUNT_NAME",),
+    ),
+    Probe(
+        name="Storage ADLS Gen2 dfs (data plane)",
+        runner=probe_dfs_list,
+        role="Storage Blob Data Contributor (dfs reuses the Blob Data role)",
         bicep="infra/modules/storage.bicep",
         required=True,
         env_vars=("STORAGE_ACCOUNT_NAME",),

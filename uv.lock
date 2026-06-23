@@ -439,6 +439,21 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-storage-file-datalake"
+version = "12.17.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "azure-storage-blob" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d4/a3/cb5c1863ffa755026d68bb3fc5da1c8375711357260abe58581331637dc5/azure_storage_file_datalake-12.17.0.tar.gz", hash = "sha256:3f65ed4724014e0845841ea34e96459b03fa515c3082524462a17d161368d145", size = 275045, upload-time = "2024-09-17T21:40:43.173Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/47/9b/6f68865c36f376c198f4b509b193a2d8a10e0c8a271266091814af2a11b3/azure_storage_file_datalake-12.17.0-py3-none-any.whl", hash = "sha256:5e96d6ba0f2ae61951e0880fd86a2a8037a52303e94560ebd6a7199d04cd7f38", size = 255694, upload-time = "2024-09-17T21:40:45.498Z" },
+]
+
+[[package]]
 name = "babel"
 version = "2.18.0"
 source = { registry = "https://pypi.org/simple" }
@@ -763,6 +778,7 @@ dependencies = [
     { name = "azure-monitor-query" },
     { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
+    { name = "azure-storage-file-datalake" },
     { name = "celery" },
     { name = "defusedxml" },
     { name = "fastapi" },
@@ -818,6 +834,7 @@ requires-dist = [
     { name = "azure-monitor-query", specifier = "==1.4.1" },
     { name = "azure-servicebus", specifier = "==7.12.3" },
     { name = "azure-storage-blob", specifier = "==12.23.1" },
+    { name = "azure-storage-file-datalake", specifier = "==12.17.0" },
     { name = "celery", specifier = "==5.4.0" },
     { name = "defusedxml", specifier = "==0.7.1" },
     { name = "fastapi", specifier = "==0.115.5" },

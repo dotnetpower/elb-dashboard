@@ -208,6 +208,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     from api.services.storage.database_catalog_cache import (
         _reset_blast_db_listing_cache,
     )
+    from api.services.storage.dfs_client_pool import reset_dfs_service_pool
 
     # Per-token rate-limit middleware keeps in-process counters; reset
     # between tests so a burst-test doesn't leak its sliding window into
@@ -224,6 +225,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     _reset_blast_status_cache()
     reset_state_repo_cache()
     reset_blob_service_pool()
+    reset_dfs_service_pool()
     reset_mgmt_client_pool()
     reset_ncbi_catalogue_cache()
     reset_k8s_credential_cache()
@@ -244,6 +246,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     _reset_blast_status_cache()
     reset_state_repo_cache()
     reset_blob_service_pool()
+    reset_dfs_service_pool()
     reset_mgmt_client_pool()
     reset_ncbi_catalogue_cache()
     reset_k8s_session_pool()
