@@ -92,6 +92,19 @@ def build_dated_results_prefix(job_id: str, *, now: datetime | None = None) -> s
     return normalize_results_prefix(f"{stamp}/{job_id}", job_id)
 
 
+def dated_results_subdir(*, now: datetime | None = None) -> str:
+    """Return ONLY the date directory ``YYYY/MM/DD/`` (UTC), no job id.
+
+    Used for the EXTERNAL (sibling OpenAPI ``/v1/jobs``) submit path: the
+    dashboard forwards this as ``results_prefix`` and the sibling appends its
+    OWN job id, writing results under ``results/<YYYY/MM/DD>/<openapi_job_id>/``.
+    This mirrors the native date tiering (:func:`build_dated_results_prefix`,
+    which appends the dashboard job id) so both submit surfaces land under the
+    same ``YYYY/MM/DD/`` shape. Always ends with a single trailing slash.
+    """
+    return (now or datetime.now(UTC)).strftime("%Y/%m/%d/")
+
+
 def results_prefix_from_state(state: Any) -> str:
     """Authoritative results prefix for a job from its ``JobState`` row.
 

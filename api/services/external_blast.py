@@ -420,6 +420,28 @@ def submit_job(
             # Copy so we never mutate the caller's payload dict.
             payload = {**payload, "idempotency_key": derived_key}
 
+    # Date-tiered results layout (dashboard STORAGE_DATE_LAYOUT_ENABLED): ask the
+    # sibling to write this external job's results under
+    # ``results/<YYYY/MM/DD>/<job_id>/`` instead of the flat ``results/<job_id>/``
+    # so SB / OpenAPI jobs match the native date tiering. This is the single
+    # choke point every external submit surface (SB drain, the XML
+    # ``/api/v1/elastic-blast/submit`` direct path, and the canonical external
+    # submit) flows through. The sibling appends its OWN job id; an older sibling
+    # that does not know the field ignores it (``extra=allow``), so sending it is
+    # safe whenever the layout is on. A caller that already set ``results_prefix``
+    # wins. Never fail a submit over this optional hint.
+    if isinstance(payload, dict) and not payload.get("results_prefix"):
+        try:
+            from api.services.storage.job_prefix import (
+                date_layout_enabled,
+                dated_results_subdir,
+            )
+
+            if date_layout_enabled():
+                payload = {**payload, "results_prefix": dated_results_subdir()}
+        except Exception:
+            LOGGER.debug("results_prefix injection skipped", exc_info=True)
+
     has_idempotency_key = bool(isinstance(payload, dict) and payload.get("idempotency_key"))
     import time as _time
 

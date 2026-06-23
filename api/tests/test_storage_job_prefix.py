@@ -143,6 +143,16 @@ def test_build_dated_results_prefix() -> None:
     assert build_dated_results_prefix("job-x", now=fixed) == "2026/06/23/job-x/"
 
 
+def test_dated_results_subdir_is_date_only() -> None:
+    from datetime import UTC, datetime
+
+    from api.services.storage.job_prefix import dated_results_subdir
+
+    fixed = datetime(2026, 6, 23, 9, 0, 0, tzinfo=UTC)
+    # Date directory only (no job id) — the sibling appends its own job id.
+    assert dated_results_subdir(now=fixed) == "2026/06/23/"
+
+
 def test_resolve_uses_explicit_state_without_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     # Even with the flag on, an explicit state short-circuits the Table lookup.
     monkeypatch.setenv("STORAGE_DATE_LAYOUT_ENABLED", "true")
