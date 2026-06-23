@@ -222,6 +222,17 @@ celery_app.conf.update(
             "schedule": float(os.environ.get("CELERY_BEAT_OPENAPI_PUBLIC_HTTPS_SECONDS", "120")),
             "options": {"queue": "reconcile"},
         },
+        # Keep the IP-based OpenAPI runtime endpoint durable cache fresh so the
+        # Service Bus drain readiness gate resolves it after a revision restart
+        # without a manual ELB_OPENAPI_BASE_URL pin. No-op unless SERVICEBUS is
+        # enabled AND a cluster context is resolvable (one cheap guard per tick).
+        "openapi-runtime-endpoint-reconcile": {
+            "task": "api.tasks.openapi.reconcile_runtime_endpoint",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_OPENAPI_RUNTIME_ENDPOINT_SECONDS", "300")
+            ),
+            "options": {"queue": "reconcile"},
+        },
         # Optional Service Bus BLAST integration. All three no-op unless
         # SERVICEBUS_ENABLED=true AND the saved config opts in, so leaving them
         # scheduled on every deployment is free (one cheap guard check per tick).

@@ -40,6 +40,7 @@ from api.tasks.openapi.rbac import (
 )
 from api.tasks.openapi.rebuild import rebuild_and_redeploy_openapi
 from api.tasks.openapi.reconcile_public_https import reconcile_openapi_public_https
+from api.tasks.openapi.reconcile_runtime_endpoint import reconcile_openapi_runtime_endpoint
 
 __all__ = (
     "AUTO_DEPLOY_ENV",
@@ -55,5 +56,6 @@ __all__ = (
     "get_openapi_public_https_status",
     "rebuild_and_redeploy_openapi",
     "reconcile_openapi_public_https",
+    "reconcile_openapi_runtime_endpoint",
     "setup_openapi_public_https",
 )
