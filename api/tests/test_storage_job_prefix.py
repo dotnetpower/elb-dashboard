@@ -19,9 +19,12 @@ from __future__ import annotations
 import pytest
 from api.services.state.job_state import JobState
 from api.services.storage.job_prefix import (
+    build_dated_results_prefix,
+    date_layout_enabled,
     default_results_prefix,
     elastic_blast_subdir_prefix,
     normalize_results_prefix,
+    resolve_results_prefix,
     results_prefix_from_state,
 )
 
@@ -117,3 +120,119 @@ def test_jobstate_roundtrip_results_prefix() -> None:
     )
     restored = JobState.from_entity(state.to_entity())
     assert restored.results_prefix == "2026/06/23/job-7/"
+
+
+# --- date layout (issue #67) ----------------------------------------------
+
+
+def test_date_layout_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STORAGE_DATE_LAYOUT_ENABLED", raising=False)
+    assert date_layout_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "On", "yes"])
+def test_date_layout_enabled_truthy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("STORAGE_DATE_LAYOUT_ENABLED", value)
+    assert date_layout_enabled() is True
+
+
+def test_build_dated_results_prefix() -> None:
+    from datetime import UTC, datetime
+
+    fixed = datetime(2026, 6, 23, 9, 0, 0, tzinfo=UTC)
+    assert build_dated_results_prefix("job-x", now=fixed) == "2026/06/23/job-x/"
+
+
+def test_resolve_uses_explicit_state_without_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Even with the flag on, an explicit state short-circuits the Table lookup.
+    monkeypatch.setenv("STORAGE_DATE_LAYOUT_ENABLED", "true")
+    state = JobState(
+        job_id="job-1", type="blast", status="completed", results_prefix="2026/06/23/job-1/"
+    )
+
+    class _Repo:
+        def get(self, _job_id: str) -> None:  # pragma: no cover - must not be called
+            raise AssertionError("lookup must be skipped when state is provided")
+
+    assert resolve_results_prefix("job-1", state=state, repo=_Repo()) == "2026/06/23/job-1/"
+
+
+def test_resolve_flag_off_skips_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STORAGE_DATE_LAYOUT_ENABLED", raising=False)
+
+    class _Repo:
+        def get(self, _job_id: str) -> None:  # pragma: no cover - must not be called
+            raise AssertionError("no Table lookup when date layout is OFF")
+
+    assert resolve_results_prefix("job-2", repo=_Repo()) == "job-2/"
+
+
+def test_resolve_flag_on_looks_up_dated_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_DATE_LAYOUT_ENABLED", "true")
+    dated = JobState(
+        job_id="job-3", type="blast", status="completed", results_prefix="2026/06/23/job-3/"
+    )
+
+    class _Repo:
+        def get(self, job_id: str) -> JobState:
+            assert job_id == "job-3"
+            return dated
+
+    assert resolve_results_prefix("job-3", repo=_Repo()) == "2026/06/23/job-3/"
+
+
+def test_resolve_flag_on_legacy_flat_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_DATE_LAYOUT_ENABLED", "true")
+    legacy = JobState(job_id="job-4", type="blast", status="completed")  # results_prefix None
+
+    class _Repo:
+        def get(self, _job_id: str) -> JobState:
+            return legacy
+
+    assert resolve_results_prefix("job-4", repo=_Repo()) == "job-4/"
+
+
+def test_resolve_lookup_failure_degrades_to_flat(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_DATE_LAYOUT_ENABLED", "true")
+
+    class _Repo:
+        def get(self, _job_id: str) -> JobState:
+            raise RuntimeError("table unreachable")
+
+    # A resolver must never raise into a listing/streaming path.
+    assert resolve_results_prefix("job-5", repo=_Repo()) == "job-5/"
+
+
+def test_results_job_url_flat_when_date_layout_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The critical no-op guarantee: with the flag OFF, the elastic-blast results
+    # bucket is byte-identical to the legacy flat layout.
+    monkeypatch.delenv("STORAGE_DATE_LAYOUT_ENABLED", raising=False)
+    from api.services.blast.task_config import results_job_url
+
+    assert (
+        results_job_url("elbstg01", "job-9")
+        == "https://elbstg01.blob.core.windows.net/results/job-9"
+    )
+
+
+def test_results_job_url_dated_when_flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Flag ON + a stored dated row → the elastic-blast results bucket is dated,
+    # matching the stored results_prefix exactly (no midnight-boundary drift).
+    monkeypatch.setenv("STORAGE_DATE_LAYOUT_ENABLED", "true")
+    dated = JobState(
+        job_id="job-9", type="blast", status="queued", results_prefix="2026/06/23/job-9/"
+    )
+
+    class _Repo:
+        def get(self, _job_id: str) -> JobState:
+            return dated
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _Repo())
+    from api.services.blast.task_config import results_job_url
+
+    assert (
+        results_job_url("elbstg01", "job-9")
+        == "https://elbstg01.blob.core.windows.net/results/2026/06/23/job-9"
+    )
+
+

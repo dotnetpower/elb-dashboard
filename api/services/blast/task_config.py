@@ -333,7 +333,14 @@ def validate_blast_database_ready(
 
 
 def results_job_url(storage_account: str, job_id: str) -> str:
-    return storage_url(storage_account, "results", relative_blob_path(job_id, "job_id"))
+    # Derive the results bucket from the job's canonical (possibly date-tiered)
+    # prefix so the URL handed to elastic-blast always matches the stored
+    # ``JobState.results_prefix``. With the date layout flag OFF this resolves
+    # to ``{job_id}`` — byte-identical to the legacy behaviour.
+    from api.services.storage.job_prefix import resolve_results_prefix
+
+    prefix = resolve_results_prefix(job_id).rstrip("/")
+    return storage_url(storage_account, "results", relative_blob_path(prefix, "results_prefix"))
 
 
 def metadata_has_prepared_shard_layout(db_name: str, meta: Mapping[str, Any]) -> bool:

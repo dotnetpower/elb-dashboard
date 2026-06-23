@@ -10,7 +10,8 @@ Edit boundaries: Pure string normalization plus reading an already-fetched
 that have a state row pass it; callers that only have a ``job_id`` get the
 legacy ``{job_id}/`` fallback.
 Key entry points: ``normalize_results_prefix``, ``default_results_prefix``,
-``results_prefix_from_state``, ``elastic_blast_subdir_prefix``.
+``build_dated_results_prefix``, ``results_prefix_from_state``,
+``resolve_results_prefix``, ``date_layout_enabled``, ``elastic_blast_subdir_prefix``.
 Risky contracts: The returned prefix ALWAYS ends with a single ``/`` and never
 contains ``..`` — a bare ``{job_id}`` (no trailing slash) was a latent
 prefix-collision bug (``name_starts_with="job-abc"`` also matches
@@ -22,7 +23,38 @@ Validation: ``uv run pytest -q api/tests/test_storage_job_prefix.py``.
 
 from __future__ import annotations
 
+import logging
+import os
+from datetime import UTC, datetime
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
+
+_DATE_LAYOUT_ENV = "STORAGE_DATE_LAYOUT_ENABLED"
+_ON_VALUES = {"1", "true", "yes", "on"}
+
+
+def date_layout_enabled() -> bool:
+    """Return True when new submissions write results under a date-tiered prefix.
+
+    Default OFF (charter §12a Rule 4). When OFF, ``results_job_url`` and the
+    submit route keep the legacy flat ``{job_id}/`` layout and the read-side
+    resolver skips its Table lookup (every job is flat, so ``{job_id}/`` is
+    always correct). Flipping it ON only affects *new* submissions; existing
+    flat jobs keep resolving via their stored ``results_prefix`` (= ``{job_id}/``)
+    so the two layouts coexist without a migration.
+
+    LIMITATION (do not flip ON until resolved): **split jobs are not yet
+    date-aware.** Split parents/children keep the flat ``{job_id}/`` layout
+    (their path-key builders in ``tasks/blast/split_pipeline`` are flat), but the
+    submit route stamps a dated ``results_prefix`` on every blast submission
+    including split parents. Enabling this flag while split submissions occur
+    would desync a split parent's dated Results-page read from its flat merge
+    output. Date-tiering split requires changing the result-map AND the path-key
+    builders together (tracked as a #67 follow-up). Queries/uploads and the
+    ``queries`` config blob also stay flat by design (separate container).
+    """
+    return os.environ.get(_DATE_LAYOUT_ENV, "").strip().lower() in _ON_VALUES
 
 
 def normalize_results_prefix(prefix: str | None, job_id: str) -> str:
@@ -49,6 +81,19 @@ def default_results_prefix(job_id: str) -> str:
     return normalize_results_prefix("", job_id)
 
 
+def build_dated_results_prefix(job_id: str, *, now: datetime | None = None) -> str:
+    """Date-tiered results prefix: ``YYYY/MM/DD/{job_id}/`` (UTC).
+
+    Computed once at submit time and persisted to ``JobState.results_prefix``
+    so every later read/write derives from the stored value rather than
+    recomputing the date (which would drift across a midnight boundary). Nesting
+    is fixed at three date segments + the job id; do not nest deeper (each path
+    segment is an ACL-traversal cost on an HNS account).
+    """
+    stamp = (now or datetime.now(UTC)).strftime("%Y/%m/%d")
+    return normalize_results_prefix(f"{stamp}/{job_id}", job_id)
+
+
 def results_prefix_from_state(state: Any) -> str:
     """Authoritative results prefix for a job from its ``JobState`` row.
 
@@ -61,6 +106,50 @@ def results_prefix_from_state(state: Any) -> str:
     job_id = str(getattr(state, "job_id", "") or "")
     stored = getattr(state, "results_prefix", None)
     return normalize_results_prefix(stored if isinstance(stored, str) else "", job_id)
+
+
+def resolve_results_prefix(
+    job_id: str, *, state: Any | None = None, repo: Any | None = None
+) -> str:
+    """Resolve a job's results prefix, honouring the stored (dated) value.
+
+    Resolution order:
+      1. an explicit ``state`` row's ``results_prefix`` (no I/O), else
+      2. when :func:`date_layout_enabled`, a single ``jobstate`` lookup by
+         ``job_id`` (the row carries the canonical, possibly date-tiered prefix),
+         else
+      3. the legacy ``{job_id}/`` fallback.
+
+    Step 2 is gated on the flag so the OFF path stays zero-I/O: with date layout
+    disabled every job is flat and ``{job_id}/`` is always correct, so no Table
+    read is paid. With it ON, old flat jobs resolve to their stored ``{job_id}/``
+    and new dated jobs to ``YYYY/MM/DD/{job_id}/`` — the two coexist with no
+    migration. A lookup failure degrades to the flat fallback (never raises).
+    """
+    if state is not None:
+        stored = getattr(state, "results_prefix", None)
+        if isinstance(stored, str) and stored.strip():
+            return normalize_results_prefix(stored, job_id)
+    if date_layout_enabled():
+        try:
+            if repo is None:
+                from api.services.state_repo import get_state_repo
+
+                repo = get_state_repo()
+            row = repo.get(job_id)
+            stored = getattr(row, "results_prefix", None) if row is not None else None
+            if isinstance(stored, str) and stored.strip():
+                return normalize_results_prefix(stored, job_id)
+        except Exception as exc:
+            # Degrade to the flat fallback — a resolver must never raise into a
+            # listing/streaming path.
+            LOGGER.debug(
+                "results prefix lookup degraded to flat job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
+    return default_results_prefix(job_id)
+
 
 
 def elastic_blast_subdir_prefix(results_prefix: str) -> str:

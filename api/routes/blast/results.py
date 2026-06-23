@@ -212,13 +212,13 @@ def blast_job_results(
                 storage_account,
                 context="blast_job_results",
             )
-            from api.services.storage.job_prefix import default_results_prefix
+            from api.services.storage.job_prefix import resolve_results_prefix
 
             files = list_result_blobs(
                 cred,
                 storage_account,
                 container="results",
-                prefix=default_results_prefix(job_id),
+                prefix=resolve_results_prefix(job_id),
             )
             from api.services.blast.result_manifest import build_result_manifest
 

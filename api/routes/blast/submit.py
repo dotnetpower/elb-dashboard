@@ -450,6 +450,17 @@ def blast_submit(
             updated_at=now,
             payload=normalised_body,
         )
+        # Stamp the canonical results prefix once, at submit, so every later
+        # read/write derives from the stored value (no midnight-boundary drift).
+        # With the date layout flag OFF this is left unset and ``to_entity``
+        # defaults it to the legacy ``{job_id}/`` layout.
+        from api.services.storage.job_prefix import (
+            build_dated_results_prefix,
+            date_layout_enabled,
+        )
+
+        if date_layout_enabled():
+            state.results_prefix = build_dated_results_prefix(job_id)
         created_state = repo.create(state)
         _reset_jobs_list_cache()
         if normalised_body.get("idempotency_key") and not getattr(

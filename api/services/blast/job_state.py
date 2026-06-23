@@ -1189,11 +1189,11 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
 
         container = _blob_service(get_credential(), storage_account).get_container_client("results")
         from api.services.storage.job_prefix import (
-            default_results_prefix,
             elastic_blast_subdir_prefix,
+            resolve_results_prefix,
         )
 
-        prefix = elastic_blast_subdir_prefix(default_results_prefix(job_id))
+        prefix = elastic_blast_subdir_prefix(resolve_results_prefix(job_id))
         for blob in container.list_blobs(name_starts_with=prefix):
             name = str(blob.name or "")
             parts = name.split("/", 2)

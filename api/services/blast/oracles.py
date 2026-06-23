@@ -45,7 +45,7 @@ def upload_tie_order_oracle_if_present(
     from api.services import get_credential
     from api.services.storage.data import upload_blob_text
 
-    blob_path = f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_BLOB}"
+    blob_path = f"{_job_results_prefix(job_id)}/{TIE_ORDER_ORACLE_BLOB}"
     upload_blob_text(
         get_credential(),
         storage_account,
@@ -60,7 +60,7 @@ def upload_tie_order_oracle_if_present(
             get_credential(),
             storage_account,
             "results",
-            f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_STRICT_BLOB}",
+            f"{_job_results_prefix(job_id)}/{TIE_ORDER_ORACLE_STRICT_BLOB}",
             "1\n",
             content_type="text/plain; charset=utf-8",
         )
@@ -97,7 +97,7 @@ def upload_db_order_oracle_pointer_if_available(
     from api.services import get_credential
     from api.services.storage.data import upload_blob_text
 
-    blob_path = f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_URLS_BLOB}"
+    blob_path = f"{_job_results_prefix(job_id)}/{TIE_ORDER_ORACLE_URLS_BLOB}"
     upload_blob_text(
         get_credential(),
         storage_account,
@@ -192,6 +192,19 @@ def _relative_blob_path(value: str, label: str) -> str:
     if not path or any(part == ".." for part in path.split("/")):
         raise ValueError(f"{label} must be a relative blob path without '..'")
     return path
+
+
+def _job_results_prefix(job_id: str) -> str:
+    """Results-area prefix (no trailing slash) for a job's oracle blobs.
+
+    Resolves the job's canonical (possibly date-tiered) results prefix so oracle
+    blobs land in the same bucket as elastic-blast's ``--results`` (which is
+    built from the same resolver). With the date layout flag OFF this is
+    ``{job_id}`` — unchanged from the legacy layout.
+    """
+    from api.services.storage.job_prefix import resolve_results_prefix
+
+    return _relative_blob_path(resolve_results_prefix(job_id).rstrip("/"), "job_id")
 
 
 def _option_enabled(options: Mapping[str, Any], key: str) -> bool:

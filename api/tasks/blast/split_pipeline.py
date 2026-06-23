@@ -920,6 +920,10 @@ def _parent_split_result_artifacts_present(
     credential: Any | None = None,
 ) -> dict[str, Any]:
     paths = _blast._parent_split_result_paths(parent_job_id)
+    # Split jobs stay on the flat ``{job_id}/`` layout (the path-key builders
+    # above are flat); date-tiering split parents/children is a deferred
+    # follow-up that must change the result-map AND the path-key builders
+    # together. Using the flat resolver here keeps split self-consistent.
     from api.services.storage.job_prefix import default_results_prefix
 
     blobs = _blast._result_blob_map(
@@ -969,6 +973,7 @@ def _verify_split_child_result_artifacts(
     def _probe(item: tuple[Any, str, dict[str, Any]]) -> dict[str, Any]:
         _child, child_job_id, payload = item
         paths = _blast._split_child_result_paths(child_job_id)
+        # Flat layout for split children (see the parent probe note above).
         from api.services.storage.job_prefix import default_results_prefix
 
         blobs = _blast._result_blob_map(
