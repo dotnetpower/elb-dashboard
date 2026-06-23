@@ -240,6 +240,14 @@ celery_app.conf.update(
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS", "3600")),
             "options": {"queue": "reconcile"},
         },
+        # Age-based result retention. No-op every tick unless STORAGE_DFS_ENABLED
+        # is on AND BLAST_RESULT_RETENTION_DAYS > 0 (default 0 = disabled), so
+        # leaving it scheduled is one cheap guard check per day.
+        "blast-retention-purge": {
+            "task": "api.tasks.storage.purge_aged_results",
+            "schedule": float(os.environ.get("CELERY_BEAT_RETENTION_SECONDS", str(24 * 60 * 60))),
+            "options": {"queue": "reconcile"},
+        },
     },
     timezone="UTC",
     enable_utc=True,

@@ -52,6 +52,7 @@ from api.tasks.storage.prepare_db_via_aks import prepare_db_via_aks
 from api.tasks.storage.reconcile import reconcile_auto_warmup
 from api.tasks.storage.reconcile_orphan_prepare_db import reconcile_orphaned_prepare_db
 from api.tasks.storage.reconcile_stale_dbops import reconcile_stale_dbops_jobs
+from api.tasks.storage.retention_task import purge_aged_results_task
 from api.tasks.storage.update_check import check_database_updates
 from api.tasks.storage.warmup import warmup_database
 
@@ -69,6 +70,7 @@ __all__ = (
     "check_database_updates",
     "get_credential",
     "prepare_db_via_aks",
+    "purge_aged_results_task",
     "reconcile_auto_warmup",
     "reconcile_orphaned_prepare_db",
     "reconcile_stale_dbops_jobs",

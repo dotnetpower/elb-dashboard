@@ -70,6 +70,70 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 }
 
 // ---------------------------------------------------------------------------
+// Blob soft-delete safety net + cost lifecycle (issues #69 / #76).
+// The dfs recursive directory delete used by job-delete + retention purge is
+// irreversible at the API level; blob + container soft-delete keep deleted
+// result/query blobs recoverable for 7 days — a guardrail REQUIRED before
+// STORAGE_DATE_LAYOUT_ENABLED / age-based retention is enabled in any
+// environment. Soft delete and lifecycle management are supported on HNS
+// (ADLS Gen2) accounts; validated at `azd provision`.
+// ---------------------------------------------------------------------------
+resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: storage
+  name: 'default'
+  properties: {
+    deleteRetentionPolicy: {
+      enabled: true
+      days: 7
+    }
+    containerDeleteRetentionPolicy: {
+      enabled: true
+      days: 7
+    }
+  }
+}
+
+// Cost lifecycle: tier result blobs to Cool after 30 days of no modification.
+// Tiering ONLY (no delete, no Archive) — actual retention/deletion is the
+// app-level retention task (which also keeps the job catalog consistent), and
+// Cool stays directly readable (no rehydration, unlike Archive).
+resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = {
+  parent: storage
+  name: 'default'
+  dependsOn: [
+    blobServices
+  ]
+  properties: {
+    policy: {
+      rules: [
+        {
+          enabled: true
+          name: 'results-tier-cool-30d'
+          type: 'Lifecycle'
+          definition: {
+            filters: {
+              blobTypes: [
+                'blockBlob'
+              ]
+              prefixMatch: [
+                'results/'
+              ]
+            }
+            actions: {
+              baseBlob: {
+                tierToCool: {
+                  daysAfterModificationGreaterThan: 30
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Data-plane RBAC for the shared UAMI.
 // File-SMB role removed because we no longer mount Azure Files via SMB.
 // ---------------------------------------------------------------------------
