@@ -247,6 +247,16 @@ def send_request(
     )
     with _client(cfg) as client, client.get_queue_sender(cfg.request_queue) as sender:
         sender.send_messages(message)
+    # Event-driven auto-start: the moment a request lands on the queue, kick an
+    # immediate idle/auto-start evaluation so a Stopped cluster starts within
+    # seconds instead of waiting out the next 5-min beat tick. Gated + best-effort
+    # (no-op when SERVICEBUS_QUEUE_AUTOSTART is off; never raises into the send).
+    try:
+        from api.services.aks.queue_autostart import request_autostart_evaluation
+
+        request_autostart_evaluation(reason="servicebus_request_enqueued")
+    except Exception as exc:  # never let the autostart trigger fail a send
+        LOGGER.debug("autostart eval trigger import skipped: %s", type(exc).__name__)
     return message.message_id or ""
 
 

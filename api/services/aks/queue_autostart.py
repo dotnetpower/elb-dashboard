@@ -10,7 +10,8 @@ Edit boundaries: decision + lease only. NO AKS SDK call (the beat task enqueues
     ``start_aks``), NO queue read (that is
     ``auto_stop_sb_signal.read_request_queue_depth``), NO HTTP shaping.
 Key entry points: ``queue_autostart_enabled``, ``should_autostart``,
-    ``acquire_autostart_lease``, ``release_autostart_lease``.
+    ``acquire_autostart_lease``, ``release_autostart_lease``,
+    ``request_autostart_evaluation``.
 Risky contracts: ``should_autostart`` returns True ONLY for an exactly-``Stopped``
     cluster (never ``Stopping`` / ``Starting`` / ``Running`` / blank-unknown) with
     a positive pending depth and the gate on, so a transient power-state blank or
@@ -115,3 +116,29 @@ def release_autostart_lease(
         client.delete(_lease_key(subscription_id, resource_group, cluster_name))
     except Exception as exc:
         LOGGER.debug("queue-autostart lease release failed (will expire via TTL): %s", exc)
+
+
+def request_autostart_evaluation(reason: str = "") -> None:
+    """Trigger an immediate idle/auto-start evaluation the moment a request is
+    enqueued — the event-driven counterpart to the 5-minute beat tick.
+
+    Without this, a queued request waits out the next scheduled
+    ``evaluate_idle_clusters`` run (up to ``CELERY_BEAT_AKS_IDLE_AUTOSTOP_SECONDS``,
+    default 300s) before a Stopped cluster is started. Kicking the same task here
+    starts the cluster within seconds of the message landing. Gated by
+    ``queue_autostart_enabled()`` (a no-op when the feature is off, so the legacy
+    poll-only behaviour is unchanged). Best-effort: a broker hiccup is swallowed
+    (the scheduled tick remains the fallback) so this never raises into the
+    producer. The single-flight cooldown lease in ``evaluate_idle_clusters``
+    de-dupes a burst of enqueues into at most one start per cooldown.
+    """
+    if not queue_autostart_enabled():
+        return
+    try:
+        from api.tasks.azure.idle_autostop import evaluate_idle_clusters
+
+        evaluate_idle_clusters.delay()  # type: ignore[attr-defined]
+        LOGGER.debug("queue-autostart eval triggered on enqueue (reason=%s)", reason or "")
+    except Exception as exc:
+        LOGGER.debug("queue-autostart eval trigger skipped: %s", exc)
+

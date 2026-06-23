@@ -112,3 +112,40 @@ def test_release_lease_swallows_redis_error(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", _boom)
     # Best-effort: a Redis error leaves the lease to expire via TTL, never raises.
     qa.release_autostart_lease("s", "rg", "c")
+
+
+def test_request_autostart_evaluation_gate_off_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.tasks.azure import idle_autostop
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        idle_autostop.evaluate_idle_clusters, "delay", lambda *a, **k: calls.append(1)
+    )
+    qa.request_autostart_evaluation()  # gate off (default) → no enqueue
+    assert calls == []
+
+
+def test_request_autostart_evaluation_gate_on_enqueues(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
+    from api.tasks.azure import idle_autostop
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        idle_autostop.evaluate_idle_clusters, "delay", lambda *a, **k: calls.append(1)
+    )
+    qa.request_autostart_evaluation(reason="x")
+    assert calls == [1]
+
+
+def test_request_autostart_evaluation_swallows_enqueue_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
+    from api.tasks.azure import idle_autostop
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("broker down")
+
+    monkeypatch.setattr(idle_autostop.evaluate_idle_clusters, "delay", _boom)
+    # Best-effort: a broker hiccup must not raise into the producer.
+    qa.request_autostart_evaluation()
