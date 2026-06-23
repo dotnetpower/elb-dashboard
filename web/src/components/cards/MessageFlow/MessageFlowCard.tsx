@@ -28,15 +28,16 @@ export function MessageFlowCard() {
     queryFn: () => messageFlowApi.get(),
     // Poll faster while something is in flight or fading out so a status change
     // surfaces quickly; back off to a calm cadence when the queue is idle. The
-    // idle cadence is kept short (10s) so a brand-new job — which appears while
-    // the queue is still "idle" (visible === 0) — surfaces within one poll
-    // instead of waiting a full 20s. The submit routes invalidate the backend
-    // monitor/external caches, so this poll returns the fresh job immediately;
-    // when nothing changed the GET is a cheap cache hit (30s server TTL).
+    // idle cadence is kept short (5s) so a brand-new job — which appears while
+    // the queue is still "idle" (visible === 0) — surfaces within one poll. The
+    // submit routes (and the queue drain) invalidate the backend monitor cache,
+    // and the message-flow snapshot runs a dedicated ~10s TTL, so this poll
+    // returns the fresh job quickly; when nothing changed the GET is a cheap
+    // cache hit.
     refetchInterval: (q) => {
       const d = q.state.data;
       const visible = (d?.active_total ?? 0) + (d?.settling_total ?? 0);
-      return visible > 0 ? 8_000 : 10_000;
+      return visible > 0 ? 4_000 : 5_000;
     },
     retry: false,
     staleTime: 5_000,

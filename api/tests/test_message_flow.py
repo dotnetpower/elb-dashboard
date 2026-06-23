@@ -606,6 +606,52 @@ def test_route_enabled_path(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     reset_monitor_snapshot_cache()
 
 
+def test_message_flow_ttl_default_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The card runs a dedicated 10s TTL by default; the env override + fail-safe."""
+    from api.routes.monitor import message_flow as mf_route
+
+    monkeypatch.delenv("MONITOR_MESSAGE_FLOW_TTL_SECONDS", raising=False)
+    assert mf_route._message_flow_ttl_seconds() == 10.0
+    monkeypatch.setenv("MONITOR_MESSAGE_FLOW_TTL_SECONDS", "3")
+    assert mf_route._message_flow_ttl_seconds() == 3.0
+    monkeypatch.setenv("MONITOR_MESSAGE_FLOW_TTL_SECONDS", "nope")
+    assert mf_route._message_flow_ttl_seconds() == 10.0  # bad value -> default
+    monkeypatch.setenv("MONITOR_MESSAGE_FLOW_TTL_SECONDS", "0")
+    assert mf_route._message_flow_ttl_seconds() == 10.0  # non-positive -> default
+
+
+def test_route_passes_dedicated_ttl(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The route serves the snapshot with its dedicated TTL, not the 30s default."""
+    captured: dict[str, Any] = {}
+
+    def _fake_cached_snapshot(key, fn, *, ttl_seconds=None, force=False, **_kw):
+        captured["ttl"] = ttl_seconds
+        captured["force"] = force
+        return {"enabled": True}
+
+    monkeypatch.delenv("MONITOR_MESSAGE_FLOW_TTL_SECONDS", raising=False)
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.service_bus_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        "api.services.blast.job_state.blast_shared_visibility_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        "api.services.monitor_cache.cached_snapshot", _fake_cached_snapshot
+    )
+
+    r = client.get("/api/monitor/message-flow")
+    assert r.status_code == 200
+    assert captured["ttl"] == 10.0
+    assert captured["force"] is False
+
+    # refresh=true forces a synchronous re-query, still at the dedicated TTL.
+    r2 = client.get("/api/monitor/message-flow?refresh=true")
+    assert r2.status_code == 200
+    assert captured["ttl"] == 10.0
+    assert captured["force"] is True
+
+
 def test_snapshot_includes_dlq_delta_after_a_read(_enable, monkeypatch) -> None:
     """A successful counts read records a DLQ sample; the snapshot exposes the
     rolling-window delta. ``baseline_dlq == current_dlq`` on the first call

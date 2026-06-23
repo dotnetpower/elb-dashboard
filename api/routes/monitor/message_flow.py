@@ -15,6 +15,7 @@ Validation: ``uv run pytest -q api/tests/test_message_flow.py
 
 from __future__ import annotations
 
+import os
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Query
@@ -26,6 +27,30 @@ from api.services.message_flow import build_message_flow
 router = APIRouter()
 
 _DISABLED: dict[str, Any] = {"enabled": False}
+
+# The message-flow card carries a LIVE request-queue preview, so it runs a
+# fresher snapshot TTL than the shared 30s monitor default: a queued message
+# that is not being drained yet (cluster warming up under queue-arrival
+# auto-start, no consumer running, or one injected via the Azure portal) would
+# otherwise linger up to the full 30s cache window before it surfaces. This TTL
+# is applied PER-CALL (``ttl_seconds`` below), so only this card refreshes
+# faster — every other monitor card keeps ``MONITOR_SNAPSHOT_TTL_SECONDS``. The
+# snapshot cache is stale-while-revalidate, so the lower TTL refreshes in the
+# background and never blocks the poll. Tunable via the env override for
+# operators who want to trade Service Bus peek frequency against freshness.
+_DEFAULT_MESSAGE_FLOW_TTL_SECONDS = 10.0
+
+
+def _message_flow_ttl_seconds() -> float:
+    """Resolve the message-flow snapshot TTL (env override, fail-safe default)."""
+    raw = os.environ.get("MONITOR_MESSAGE_FLOW_TTL_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_MESSAGE_FLOW_TTL_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MESSAGE_FLOW_TTL_SECONDS
+    return value if value > 0 else _DEFAULT_MESSAGE_FLOW_TTL_SECONDS
 
 
 @router.get("/message-flow")
@@ -47,9 +72,12 @@ def message_flow(
     the card. On any unexpected failure the response degrades to the same
     disabled shape rather than surfacing an error to the dashboard.
 
-    The enabled snapshot is served through the shared monitor cache (TTL ~30s)
-    so the per-poll Table scan + Service Bus management call run at most once per
-    window regardless of how many browser tabs are open. The cache key is
+    The enabled snapshot is served through the shared monitor cache, but with a
+    dedicated, shorter TTL (``MONITOR_MESSAGE_FLOW_TTL_SECONDS``, default 10s)
+    than the 30s monitor default so a live request-queue message surfaces faster
+    on this card without changing the freshness of any other monitor card. The
+    per-poll Table scan + Service Bus call still run at most once per TTL window
+    regardless of how many browser tabs are open. The cache key is
     isolated per caller (or a single ``shared`` bucket when the dev
     shared-visibility flag is on) so one caller's private active-job list is
     never served to another from a shared cache entry. ``refresh=true`` forces a
@@ -76,6 +104,7 @@ def message_flow(
                 list_limit=limit,
                 tenant_id=getattr(caller, "tenant_id", "") or "",
             ),
+            ttl_seconds=_message_flow_ttl_seconds(),
             force=refresh,
         )
     except Exception as exc:
