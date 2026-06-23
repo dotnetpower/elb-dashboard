@@ -242,9 +242,18 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'api'
           image: apiImage
+          // The api sidecar serves public ingress, reverse-proxies the
+          // frontend/terminal, and runs the monitor fan-out + JWT validation
+          // on a Starlette threadpool. At 0.5 vCPU / 1.0Gi a burst of slow
+          // synchronous routes (e.g. /api/blast/jobs/{id} result analysis or
+          // overlapping /api/monitor/* polls) saturates the single half-core
+          // (observed 99% of the 0.5 vCPU) and the working set sits ~80% of
+          // 1.0Gi. Bump to 1.0 vCPU / 2.0Gi (1 vCPU : 2 GiB ratio) so those
+          // bursts have headroom. New per-replica total = 3.25 vCPU / 6.5Gi,
+          // still under the Consumption 4 vCPU / 8Gi cap.
           resources: {
-            cpu: json('0.5')
-            memory: '1.0Gi'
+            cpu: json('1.0')
+            memory: '2.0Gi'
           }
           env: [
             { name: 'SIDECAR_NAME', value: 'api' }
@@ -460,7 +469,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           // processes. At 0.5 vCPU / 1.0Gi that pool is heavily
           // over-subscribed; bump to 1.0 vCPU / 2.0Gi so the prefork children
           // are not starved when several azure / blast / storage tasks run at
-          // once. New per-replica total = 2.75 vCPU / 5.5Gi (api 0.5/1.0,
+          // once. Per-replica total = 3.25 vCPU / 6.5Gi (api 1.0/2.0,
           // frontend 0.25/0.5, worker 1.0/2.0, beat 0.25/0.5, redis 0.25/0.5,
           // terminal 0.5/1.0), still under the Consumption 4 vCPU / 8Gi cap
           // and keeping the 1 vCPU : 2 GiB ratio.

@@ -13,7 +13,7 @@ import { Group, Row, Section, StatusLine } from "@/components/settings/primitive
  */
 
 const SIDECAR_RESOURCES: Record<string, { cpu: number; memoryGi: number }> = {
-  api: { cpu: 0.5, memoryGi: 1.0 },
+  api: { cpu: 1.0, memoryGi: 2.0 },
   frontend: { cpu: 0.25, memoryGi: 0.5 },
   worker: { cpu: 0.5, memoryGi: 1.0 },
   beat: { cpu: 0.25, memoryGi: 0.5 },
