@@ -1643,14 +1643,25 @@ def test_mark_ready_skips_noop_write(monkeypatch, tmp_path) -> None:
     )
     before = saved.updated_at
 
-    import time as _t
-
-    _t.sleep(1)
     from api.services.auto_warmup import mark_auto_warmup_ready_state
 
-    # Same ready state, no trigger, no force clear → must be a no-op (updated_at
-    # unchanged because no write happened).
+    # Spy on the persistence path instead of sleeping a full second to make a
+    # later timestamp observable: a no-op must never call
+    # ``save_auto_warmup_preference`` at all, which is both faster to assert and
+    # a stronger guarantee than timestamp equality.
+    save_calls = {"n": 0}
+    real_save = auto_warmup.save_auto_warmup_preference
+
+    def _counting_save(pref: AutoWarmupPreference) -> AutoWarmupPreference:
+        save_calls["n"] += 1
+        return real_save(pref)
+
+    monkeypatch.setattr(auto_warmup, "save_auto_warmup_preference", _counting_save)
+
+    # Same ready state, no trigger, no force clear → must be a no-op (no write
+    # happens, so updated_at is the in-memory snapshot's unchanged value).
     result = mark_auto_warmup_ready_state(saved, ready=True)
+    assert save_calls["n"] == 0
     assert result.updated_at == before
 
 

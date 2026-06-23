@@ -48,6 +48,44 @@ os.environ.setdefault("OPENAPI_SUBMIT_MAX_RETRIES", "0")
 os.environ.setdefault("ELB_TEST_INLINE_BACKGROUND_REFRESH", "1")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _redis_connect_fast_fail() -> Generator[None, None, None]:
+    """Clamp every real Redis client's *connect* timeout so an unreachable
+    broker fails in tens of milliseconds instead of the OS connect timeout.
+
+    No Redis runs during the unit suite (by design — see ``_env_baseline``;
+    tests that need Redis semantics inject a fake). On CI a closed localhost
+    port is *refused* instantly, so this is a no-op there. But on a developer
+    host where the loopback port is *filtered* rather than refused (WSL2
+    mirrored networking drops the SYN instead of sending RST), every Redis
+    call blocks for the full socket timeout (~1-2 s). With ~3700 tests each
+    touching the ops/broker client through the autouse cache resets, that is
+    minutes of pure connect-timeout wait and is what pushes the local suite
+    past ``--session-timeout``.
+
+    Wrapping ``redis.Redis.from_url`` (the single construction point for every
+    real client — ``api.services.redis_clients`` plus the few documented
+    direct callers in ``event_bus`` / ``event_emitter``) injects a small
+    ``socket_connect_timeout`` default without changing any production code.
+    ``test_redis_clients.py`` swaps ``sys.modules['redis']`` for a fake module,
+    so its exact-kwargs assertions never see this wrapper.
+    """
+    timeout = float(os.environ.get("ELB_TEST_REDIS_CONNECT_TIMEOUT", "0.1"))
+    import redis
+
+    original = redis.Redis.from_url.__func__  # unwrap the classmethod
+
+    def _from_url(cls: type, url: str, **kwargs: object) -> object:
+        kwargs.setdefault("socket_connect_timeout", timeout)
+        return original(cls, url, **kwargs)
+
+    redis.Redis.from_url = classmethod(_from_url)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        redis.Redis.from_url = classmethod(original)  # type: ignore[assignment]
+
+
 @pytest.fixture(autouse=True)
 def _env_baseline(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
