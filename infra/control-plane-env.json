@@ -9,17 +9,20 @@
     "BLAST_JOBS_SHARED_VISIBILITY": "true",
     "STRICT_BLUEGREEN": "false",
     "SERVICEBUS_ENABLED": "",
-    "ENABLE_SB_SUBMIT_INGRESS": "false"
+    "ENABLE_SB_SUBMIT_INGRESS": "false",
+    "STORAGE_DATE_LAYOUT_ENABLED": "false"
   },
   "worker": {
     "BLAST_GATE_ENABLED": "false",
     "STRICT_BLUEGREEN": "false",
     "SERVICEBUS_ENABLED": "",
-    "SERVICEBUS_RESIDENT_CONSUMER": "false"
+    "SERVICEBUS_RESIDENT_CONSUMER": "false",
+    "STORAGE_DATE_LAYOUT_ENABLED": "false"
   },
   "beat": {
     "BLAST_GATE_ENABLED": "false",
     "STRICT_BLUEGREEN": "false",
-    "SERVICEBUS_ENABLED": ""
+    "SERVICEBUS_ENABLED": "",
+    "STORAGE_DATE_LAYOUT_ENABLED": "false"
   }
 }

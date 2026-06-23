@@ -55,6 +55,9 @@ param allowedOrigins string = ''
 @description('Per-deployment override for the optional Service Bus BLAST integration env gate. Empty (default) keeps the repo default from infra/control-plane-env.json (OFF, charter section 12a Rule 4); set to true (via azd env SERVICEBUS_ENABLED) to pin it ON so it survives every redeploy instead of being reset to the JSON default.')
 param serviceBusEnabled string = ''
 
+@description('Per-deployment override for the date-tiered results storage layout env gate (STORAGE_DATE_LAYOUT_ENABLED). Empty (default) keeps the repo default from infra/control-plane-env.json (OFF, charter section 12a Rule 4); set to true (via azd env STORAGE_DATE_LAYOUT_ENABLED) to pin it ON so native AND external (SB/OpenAPI) jobs write results under results/YYYY/MM/DD/<job_id>/ and the choice survives every redeploy instead of being reset to the JSON default.')
+param storageDateLayoutEnabled string = ''
+
 @description('If true, every backing resource (Storage, Key Vault, ACR) gets publicNetworkAccess=Disabled and private endpoints. The very first deploy must keep this false so the postprovision hook can push images and seed secrets; flip to true on the second azd provision.')
 param lockdownPrivateNetworking bool = false
 
@@ -384,6 +387,7 @@ module controlApp 'modules/containerAppControl.bicep' = {
     featureLabTools: featureLabTools
     featureTerminal: featureTerminal
     serviceBusEnabled: serviceBusEnabled
+    storageDateLayoutEnabled: storageDateLayoutEnabled
     applicationInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     logAnalyticsWorkspaceId: monitoring.outputs.workspaceCustomerId
     logAnalyticsWorkspaceResourceId: monitoring.outputs.workspaceResourceId

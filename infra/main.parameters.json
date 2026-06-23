@@ -23,6 +23,9 @@
     "serviceBusEnabled": {
       "value": "${SERVICEBUS_ENABLED=}"
     },
+    "storageDateLayoutEnabled": {
+      "value": "${STORAGE_DATE_LAYOUT_ENABLED=}"
+    },
     "lockdownPrivateNetworking": {
       "value": "${LOCKDOWN_PRIVATE_NETWORKING=false}"
     },

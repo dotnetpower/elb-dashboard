@@ -59,6 +59,9 @@ param featureTerminal string = 'true'
 @description('Per-deployment override for the Service Bus BLAST integration env (SERVICEBUS_ENABLED), a three-state deploy-time override of the runtime config. Empty (default) keeps the repo default from control-plane-env.json (also empty, so activation DEFERS to the saved Settings config row — a runtime feature flag that survives redeploys; default-OFF preserved because the config defaults disabled, charter section 12a Rule 4). A truthy value pins the capability on (config still required); a falsy value is a deployment kill switch forcing it OFF. Set via azd env so the chosen override survives every redeploy.')
 param serviceBusEnabled string = ''
 
+@description('Per-deployment override for the date-tiered results storage layout env (STORAGE_DATE_LAYOUT_ENABLED). Empty (default) keeps the repo default from control-plane-env.json (false, charter section 12a Rule 4). A truthy value pins it ON so native AND external (SB/OpenAPI) jobs write results under results/YYYY/MM/DD/<job_id>/; a falsy value forces flat. Set via azd env so the choice survives every redeploy. Mirrors the override scripts/dev/quick-deploy.sh applies on its api/worker/beat PATCH path.')
+param storageDateLayoutEnabled string = ''
+
 @description('App Insights connection string for telemetry from inside the containers.')
 param applicationInsightsConnectionString string
 
@@ -140,6 +143,16 @@ var controlPlaneEnv = loadJsonContent('../control-plane-env.json')
 var effectiveServiceBusEnabled = empty(serviceBusEnabled)
   ? controlPlaneEnv.api.SERVICEBUS_ENABLED
   : serviceBusEnabled
+
+// Per-deployment override for the date-tiered results layout. The repo default
+// in control-plane-env.json is 'false' (flat layout, default-OFF preserved,
+// charter §12a Rule 4). When a deployment exports STORAGE_DATE_LAYOUT_ENABLED
+// (via azd env), that value wins for all three python sidecars so native and
+// external (SB/OpenAPI) jobs land under results/YYYY/MM/DD/<job_id>/ and the
+// choice survives every redeploy. Mirrors the override quick-deploy.sh applies.
+var effectiveStorageDateLayout = empty(storageDateLayoutEnabled)
+  ? controlPlaneEnv.api.STORAGE_DATE_LAYOUT_ENABLED
+  : storageDateLayoutEnabled
 
 resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
@@ -360,6 +373,9 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // submit route enqueues to Service Bus instead of calling /v1/jobs
             // directly; a publish failure falls back to the direct path.
             { name: 'ENABLE_SB_SUBMIT_INGRESS', value: controlPlaneEnv.api.ENABLE_SB_SUBMIT_INGRESS }
+            // Date-tiered results layout (native + external/SB jobs write under
+            // results/YYYY/MM/DD/<job_id>/). Default OFF (flat). Charter §12a Rule 4.
+            { name: 'STORAGE_DATE_LAYOUT_ENABLED', value: effectiveStorageDateLayout }
             // Dev-stage job visibility (issue: recent searches only showed
             // API-submitted jobs). Default ON for the single-tenant
             // development phase: every authenticated tenant member can see and
@@ -528,6 +544,9 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // worker-run pipeline/rollback tasks branch identically. Default
             // OFF (Charter §12a Rule 4).
             { name: 'STRICT_BLUEGREEN', value: controlPlaneEnv.worker.STRICT_BLUEGREEN }
+            // Date-tiered results layout — must match the api sidecar so the
+            // worker drain resolves the same results prefix. Default OFF.
+            { name: 'STORAGE_DATE_LAYOUT_ENABLED', value: effectiveStorageDateLayout }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
@@ -579,6 +598,9 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // beat-driven reconciler drives validating→confirming→succeeded
             // identically. Default OFF (Charter §12a Rule 4).
             { name: 'STRICT_BLUEGREEN', value: controlPlaneEnv.beat.STRICT_BLUEGREEN }
+            // Date-tiered results layout — match api/worker so the beat
+            // reconcilers resolve the same results prefix. Default OFF.
+            { name: 'STORAGE_DATE_LAYOUT_ENABLED', value: effectiveStorageDateLayout }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }

@@ -46,6 +46,25 @@ so write and read follow the same path automatically. With the flag off
 
 No managed-DB / Service Bus / SAS changes. Storage stays private.
 
+## Permanence (deploy wiring)
+
+`STORAGE_DATE_LAYOUT_ENABLED` is wired through both deploy paths as a default-OFF
+gate with a per-deployment override (mirrors `SERVICEBUS_ENABLED`):
+
+* `infra/control-plane-env.json`: added to `api` / `worker` / `beat` with the
+  repo default `"false"` (charter §12a Rule 4). `scripts/dev/quick-deploy.sh`
+  emits it as `--set-env-vars` on every api/worker/beat PATCH; a process/azd-env
+  override of `true` wins over the JSON default.
+* `infra/modules/containerAppControl.bicep`: new `storageDateLayoutEnabled`
+  param + `effectiveStorageDateLayout` var + a `STORAGE_DATE_LAYOUT_ENABLED` env
+  entry on all three python sidecars, so a full `azd provision` applies the same
+  value.
+* `infra/main.bicep` + `infra/main.parameters.json`: the param flows from the
+  azd env var `STORAGE_DATE_LAYOUT_ENABLED`.
+
+A deployment pins it on with `azd env set STORAGE_DATE_LAYOUT_ENABLED true`; the
+repo default stays OFF so other environments are unaffected.
+
 ## Validation evidence
 
 * Sibling: `python -m pytest tests/test_results_prefix.py tests/test_external_payload_hardening.py -q` → 22 passed (new validator: valid date / empty-flat / traversal-rejection cases).
