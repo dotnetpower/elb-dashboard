@@ -117,3 +117,44 @@ def test_cache_re_reads_after_reset(monkeypatch: pytest.MonkeyPatch) -> None:
     assert auto_stop_sb_signal.pending_queue_signal("Running", ttl_seconds=60.0) == 4
     auto_stop_sb_signal._reset_cache_for_tests()
     assert auto_stop_sb_signal.pending_queue_signal("Running", ttl_seconds=60.0) == 8
+
+
+# --------------------------------------------------------------------------- #
+# read_request_queue_depth — the queue-arrival auto-START read (power-state
+# agnostic, NOT gated by AKS_AUTOSTOP_RESPECT_SB_QUEUE).
+# --------------------------------------------------------------------------- #
+
+
+def test_autostart_depth_reads_for_a_stopped_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unlike pending_queue_signal (Running-only), this read is power-state
+    # agnostic — a Stopped cluster MUST still see the queued work so it can start.
+    monkeypatch.setattr(service_bus_pref, "service_bus_enabled", lambda: True)
+    monkeypatch.setattr(service_bus_pref, "get_service_bus_config", lambda: object())
+    monkeypatch.setattr(service_bus, "pending_request_count", lambda _cfg: 7)
+    assert auto_stop_sb_signal.read_request_queue_depth() == 7
+
+
+def test_autostart_depth_ignores_respect_queue_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stop-side keep-alive gate must NOT suppress the start-side read.
+    monkeypatch.setenv("AKS_AUTOSTOP_RESPECT_SB_QUEUE", "false")
+    monkeypatch.setattr(service_bus_pref, "service_bus_enabled", lambda: True)
+    monkeypatch.setattr(service_bus_pref, "get_service_bus_config", lambda: object())
+    monkeypatch.setattr(service_bus, "pending_request_count", lambda _cfg: 3)
+    assert auto_stop_sb_signal.read_request_queue_depth() == 3
+
+
+def test_autostart_depth_none_when_sb_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service_bus_pref, "service_bus_enabled", lambda: False)
+    assert auto_stop_sb_signal.read_request_queue_depth() is None
+
+
+def test_autostart_depth_none_on_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service_bus_pref, "service_bus_enabled", lambda: True)
+    monkeypatch.setattr(service_bus_pref, "get_service_bus_config", lambda: object())
+
+    def _boom(_cfg: object) -> int:
+        raise RuntimeError("admin read failed")
+
+    monkeypatch.setattr(service_bus, "pending_request_count", _boom)
+    # Never raise: a failed read must not trigger a cost-bearing start.
+    assert auto_stop_sb_signal.read_request_queue_depth() is None

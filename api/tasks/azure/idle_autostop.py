@@ -373,6 +373,7 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "evaluated": 0,
         "queued_stops": 0,
+        "queued_starts": 0,
         "kept_running": 0,
         "warnings": 0,
         "errors": 0,
@@ -405,6 +406,19 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     # total (the evaluator will keep them running, which is safe
     # behaviour but represents lost cost savings).
     summary["errors"] += batch_summary["rg_failed"]
+    # Queue-arrival auto-start state (default-OFF). The request queue is a single
+    # deployment-wide entity, so its depth is probed at most ONCE per tick and
+    # only when a Stopped cluster is actually seen (lazy).
+    from api.services.aks.queue_autostart import (
+        acquire_autostart_lease,
+        queue_autostart_enabled,
+        release_autostart_lease,
+        should_autostart,
+    )
+
+    autostart_on = queue_autostart_enabled()
+    autostart_pending: int | None = None
+    autostart_probed = False
     for pref in enabled_prefs:
         summary["evaluated"] += 1
         try:
@@ -525,6 +539,51 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
                 pref.last_skip_reason or ""
             ) != decision.reason:
                 mark_auto_stop_event(pref, stopped=False, reason=decision.reason)
+
+        # Queue-arrival auto-START (default-OFF; the deliberate inverse of idle
+        # auto-stop). A cluster the evaluator KEPT because it is Stopped becomes
+        # a start candidate when the deployment-wide request queue still holds
+        # undrained work. ``start_aks`` is idempotent (a Running/Starting cluster
+        # is a no-op) and stamps ``last_started_at`` so the next idle tick grants
+        # a full grace, so this can never start-storm. The cooldown lease
+        # (fail-closed) is the single-flight guard across overlapping ticks.
+        if autostart_on and cluster_power_state == "Stopped":
+            if not autostart_probed:
+                from api.services.auto_stop_sb_signal import read_request_queue_depth
+
+                autostart_pending = read_request_queue_depth()
+                autostart_probed = True
+            if should_autostart(cluster_power_state, autostart_pending) and acquire_autostart_lease(
+                pref.subscription_id, pref.resource_group, pref.cluster_name
+            ):
+                try:
+                    from api.tasks.azure.lifecycle import start_aks
+
+                    start_aks.delay(  # type: ignore[attr-defined]
+                        subscription_id=pref.subscription_id,
+                        resource_group=pref.resource_group,
+                        cluster_name=pref.cluster_name,
+                    )
+                    summary["queued_starts"] += 1
+                    LOGGER.info(
+                        "queue_autostart queued start cluster=%s pending=%s",
+                        pref.cluster_name,
+                        autostart_pending,
+                    )
+                except Exception as exc:
+                    # Roll back the cooldown lease so the next tick can retry the
+                    # start immediately — the reservation was taken on the
+                    # assumption the enqueue would succeed, and no start was
+                    # actually queued.
+                    release_autostart_lease(
+                        pref.subscription_id, pref.resource_group, pref.cluster_name
+                    )
+                    LOGGER.warning(
+                        "queue_autostart enqueue failed cluster=%s: %s",
+                        pref.cluster_name,
+                        exc,
+                    )
+                    summary["errors"] += 1
     return summary
 
 

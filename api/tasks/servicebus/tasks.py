@@ -1004,6 +1004,27 @@ def _persist_drain_row_and_trace(
         )
 
 
+def _openapi_ready_for_drain(cfg: ServiceBusConfig) -> bool:
+    """True when the sibling OpenAPI plane is reachable + ready for a submit.
+
+    Used ONLY when queue-arrival auto-start is enabled (charter §12a Rule 4
+    default-OFF gate ``SERVICEBUS_QUEUE_AUTOSTART``). While an auto-started
+    Stopped cluster warms up, its OpenAPI plane is unreachable, and draining
+    then would ABANDON-loop every received message (delivery-count burn →
+    premature dead-letter) before the cluster is ready. A False result defers
+    the whole drain tick so the messages stay on the queue — which also keeps
+    the auto-start trigger (pending depth) alive — until the plane is up.
+    ``external_blast.ready`` is already short-TTL cached (≈5s) so this adds at
+    most one cheap probe per tick. Never raises: any probe failure (including
+    the expected ``openapi_unreachable`` while the cluster is down) returns
+    False so an unreadable plane defers rather than crashes the tick.
+    """
+    try:
+        external_blast.ready(**_openapi_kwargs(cfg))
+        return True
+    except Exception:
+        return False
+
 
 @shared_task(name="api.tasks.servicebus.drain_and_resubmit")
 @skip_tick_on_transient_infra
@@ -1012,6 +1033,20 @@ def drain_and_resubmit() -> dict[str, Any]:
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
+    # Queue-arrival auto-start readiness guard (default-OFF). When the gate is
+    # on, a Stopped cluster may be mid-warmup after an auto-start enqueue; pulling
+    # messages now would abandon-loop them toward the DLQ. Defer the tick so the
+    # backlog (and thus the pending-depth start trigger) is preserved until the
+    # OpenAPI plane is ready. No-op when the gate is off — the legacy every-tick
+    # drain is unchanged.
+    from api.services.aks.queue_autostart import queue_autostart_enabled
+
+    if queue_autostart_enabled() and not _openapi_ready_for_drain(cfg):
+        LOGGER.info(
+            "servicebus drain tick deferred: cluster not ready (queue-autostart warmup) queue=%s",
+            cfg.request_queue,
+        )
+        return {"skipped": "cluster_not_ready"}
     proceed, lock_token = _acquire_drain_lock(cfg.request_queue)
     if not proceed:
         # Another drain holds the single-flight lease — skip this overlapping

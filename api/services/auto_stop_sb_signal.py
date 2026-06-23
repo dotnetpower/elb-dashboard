@@ -118,4 +118,28 @@ def _reset_cache_for_tests() -> None:
         _CACHE = None
 
 
+def read_request_queue_depth() -> int | None:
+    """Active request-queue depth regardless of cluster power state.
+
+    This is the **queue-arrival auto-START** read, the deliberate counterpart to
+    :func:`pending_queue_signal` (which is Running-only keep-alive and returns
+    ``None`` for a stopped cluster). The auto-start evaluator needs the depth for
+    a STOPPED cluster so a queued submission can trigger a start, so this read is
+    power-state agnostic.
+
+    Gated ONLY by the Service Bus enable state — NOT by
+    ``AKS_AUTOSTOP_RESPECT_SB_QUEUE`` (that env is the stop-side keep-alive knob;
+    the start side has its own gate in ``queue_autostart``). Never raises: any
+    failure (SB disabled, missing claims, admin call error) degrades to ``None``
+    so an unreadable queue can never trigger a cost-bearing start.
+    """
+    try:
+        if not service_bus_pref.service_bus_enabled():
+            return None
+        return service_bus.pending_request_count(service_bus_pref.get_service_bus_config())
+    except Exception as exc:  # never trigger a start on a failed read
+        LOGGER.debug("autostart pending depth read failed: %s", exc)
+        return None
+
+
 __all__ = ["pending_queue_signal"]

@@ -419,6 +419,118 @@ def test_evaluate_idle_clusters_batches_power_state(
     assert batch_calls["n"] == 1
 
 
+def _fake_batch_stopped(prefs):
+    states = {
+        (p.subscription_id, p.resource_group, p.cluster_name): "Stopped" for p in prefs
+    }
+    return states, {"rg_groups": 1, "rg_failed": 0, "failed_rgs": []}
+
+
+def test_evaluate_idle_clusters_queue_autostart_starts_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate ON + a Stopped cluster + pending queue work → enqueue ``start_aks``."""
+    from api.tasks.azure import idle_autostop, lifecycle
+
+    save_auto_stop_preference(_pref(cluster_name="cluster-stopped", enabled=True))
+    monkeypatch.setattr(idle_autostop, "_batch_power_states", _fake_batch_stopped)
+    monkeypatch.setattr(
+        idle_autostop,
+        "evaluate_cluster",
+        lambda pref, *, repo, power_state, **_extra: IdleDecision(
+            verdict="keep", reason="power_state:Stopped"
+        ),
+    )
+    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
+    monkeypatch.setattr(
+        "api.services.auto_stop_sb_signal.read_request_queue_depth", lambda: 5
+    )
+    monkeypatch.setattr(
+        "api.services.aks.queue_autostart.acquire_autostart_lease", lambda *_a: True
+    )
+
+    started: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        lifecycle.start_aks, "delay", lambda **kw: started.append(kw) or object()
+    )
+
+    summary = idle_autostop.evaluate_idle_clusters.run()
+    assert summary["queued_starts"] == 1
+    assert started and started[0]["cluster_name"] == "cluster-stopped"
+
+
+def test_evaluate_idle_clusters_autostart_off_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate OFF (default): never probe the queue and never start a cluster."""
+    from api.tasks.azure import idle_autostop, lifecycle
+
+    monkeypatch.delenv("SERVICEBUS_QUEUE_AUTOSTART", raising=False)
+    save_auto_stop_preference(_pref(cluster_name="cluster-stopped", enabled=True))
+    monkeypatch.setattr(idle_autostop, "_batch_power_states", _fake_batch_stopped)
+    monkeypatch.setattr(
+        idle_autostop,
+        "evaluate_cluster",
+        lambda pref, *, repo, power_state, **_extra: IdleDecision(
+            verdict="keep", reason="power_state:Stopped"
+        ),
+    )
+
+    probed: list[int] = []
+    monkeypatch.setattr(
+        "api.services.auto_stop_sb_signal.read_request_queue_depth",
+        lambda: probed.append(1) or 5,
+    )
+    started: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        lifecycle.start_aks, "delay", lambda **kw: started.append(kw) or object()
+    )
+
+    summary = idle_autostop.evaluate_idle_clusters.run()
+    assert summary["queued_starts"] == 0
+    assert probed == []  # gate off → the queue is never even probed
+    assert started == []
+
+
+def test_evaluate_idle_clusters_autostart_releases_lease_on_enqueue_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2: a lease is taken then the enqueue fails → roll the lease back."""
+    from api.tasks.azure import idle_autostop, lifecycle
+
+    save_auto_stop_preference(_pref(cluster_name="cluster-stopped", enabled=True))
+    monkeypatch.setattr(idle_autostop, "_batch_power_states", _fake_batch_stopped)
+    monkeypatch.setattr(
+        idle_autostop,
+        "evaluate_cluster",
+        lambda pref, *, repo, power_state, **_extra: IdleDecision(
+            verdict="keep", reason="power_state:Stopped"
+        ),
+    )
+    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
+    monkeypatch.setattr(
+        "api.services.auto_stop_sb_signal.read_request_queue_depth", lambda: 3
+    )
+    monkeypatch.setattr(
+        "api.services.aks.queue_autostart.acquire_autostart_lease", lambda *_a: True
+    )
+    released: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "api.services.aks.queue_autostart.release_autostart_lease",
+        lambda *a: released.append(a),
+    )
+
+    def _boom(**_kw: Any) -> object:
+        raise RuntimeError("broker down")
+
+    monkeypatch.setattr(lifecycle.start_aks, "delay", _boom)
+
+    summary = idle_autostop.evaluate_idle_clusters.run()
+    assert summary["queued_starts"] == 0
+    assert summary["errors"] >= 1
+    assert released and released[0][2] == "cluster-stopped"
+
+
 def test_batch_power_states_groups_by_rg(monkeypatch: pytest.MonkeyPatch) -> None:
     """`_batch_power_states` issues one ARM `list_by_resource_group` per
     unique (subscription_id, resource_group) tuple, NOT per cluster."""

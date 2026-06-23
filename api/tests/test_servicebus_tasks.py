@@ -66,6 +66,81 @@ def test_tasks_skip_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sb_tasks.dlq_cleanup()["skipped"] == "disabled"
 
 
+class _DrainStats:
+    received = 0
+    completed = 0
+    abandoned = 0
+    dead_lettered = 0
+
+
+def test_drain_defers_when_gate_on_and_cluster_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1: gate ON + plane not ready → defer the tick, do NOT pull messages."""
+    _enable(monkeypatch)
+    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
+    monkeypatch.setattr(sb_tasks, "_openapi_ready_for_drain", lambda _c: False)
+    pulled: list[int] = []
+    monkeypatch.setattr(
+        service_bus, "drain_requests", lambda *a, **k: pulled.append(1) or _DrainStats()
+    )
+    out = sb_tasks.drain_and_resubmit()
+    assert out["skipped"] == "cluster_not_ready"
+    assert pulled == []  # queue preserved so the auto-start trigger stays alive
+
+
+def test_drain_proceeds_when_gate_on_and_cluster_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1: gate ON + plane ready → the readiness guard is transparent."""
+    _enable(monkeypatch)
+    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
+    monkeypatch.setattr(sb_tasks, "_openapi_ready_for_drain", lambda _c: True)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda q="": (True, "tok"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda t, q="": None)
+    monkeypatch.setattr(service_bus, "drain_requests", lambda *a, **k: _DrainStats())
+    out = sb_tasks.drain_and_resubmit()
+    assert "skipped" not in out
+    assert out["received"] == 0
+
+
+def test_drain_skips_readiness_probe_when_gate_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1: gate OFF (default) → no readiness probe; the legacy drain is unchanged."""
+    _enable(monkeypatch)
+    monkeypatch.delenv("SERVICEBUS_QUEUE_AUTOSTART", raising=False)
+    probed: list[int] = []
+    monkeypatch.setattr(
+        sb_tasks, "_openapi_ready_for_drain", lambda _c: probed.append(1) or False
+    )
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda q="": (True, "tok"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda t, q="": None)
+    monkeypatch.setattr(service_bus, "drain_requests", lambda *a, **k: _DrainStats())
+    out = sb_tasks.drain_and_resubmit()
+    assert probed == []  # gate off → never probe readiness
+    assert "skipped" not in out
+
+
+def test_openapi_ready_for_drain_true_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _enabled_cfg()
+    monkeypatch.setattr(sb_tasks, "_openapi_kwargs", lambda _c: {})
+    monkeypatch.setattr(external_blast, "ready", lambda **k: {"ready": True})
+    assert sb_tasks._openapi_ready_for_drain(cfg) is True
+
+
+def test_openapi_ready_for_drain_false_on_probe_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _enabled_cfg()
+    monkeypatch.setattr(sb_tasks, "_openapi_kwargs", lambda _c: {})
+
+    def _boom(**_k: object) -> object:
+        raise RuntimeError("openapi_unreachable")
+
+    monkeypatch.setattr(external_blast, "ready", _boom)
+    # Never raises: an unreachable plane defers the tick rather than crashing it.
+    assert sb_tasks._openapi_ready_for_drain(cfg) is False
+
+
 def test_drain_skips_tick_on_transient_infra_error(monkeypatch: pytest.MonkeyPatch) -> None:
     # A transient Table/Service Bus DNS blip must skip the tick, not crash with
     # an exception Celery cannot pickle (UnpickleableExceptionWrapper).
