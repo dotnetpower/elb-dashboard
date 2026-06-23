@@ -500,4 +500,15 @@ def reconcile_stale_jobs(
             "errors=%(errors)d",
             summary,
         )
+        # Real-time status: a reconcile that advanced a job (completed / failed /
+        # worker_lost / k8s or external refresh) changed a jobstate row. Publish
+        # the cross-sidecar invalidation so the api drops its jobs caches and the
+        # jobs-events SSE pushes the new status to the dashboard instantly,
+        # instead of the change only surfacing on the next poll. Best-effort.
+        try:
+            from api.services.blast.jobs_cache_signal import publish_jobs_cache_invalidate
+
+            publish_jobs_cache_invalidate("blast_reconcile_progress")
+        except Exception as exc:
+            LOGGER.debug("reconcile jobs cache invalidate skipped: %s", type(exc).__name__)
     return summary

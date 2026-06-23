@@ -912,16 +912,26 @@ def test_publish_transitions_emits_on_change(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
     monkeypatch.setattr(external_blast, "get_job", lambda jid, **k: {"status": "running"})
 
+    invalidations: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks, "_publish_jobs_cache_invalidate", lambda reason="": invalidations.append(reason)
+    )
+
     out = sb_tasks.publish_transitions()
     assert out["published"] == 1
     assert events[0]["status"] == "running"
     assert get_bridge("corr-2").last_status == "running"  # marker advanced
+    # A real transition fans out to the jobs-events SSE so the status updates live.
+    assert invalidations == ["servicebus_transition"]
 
-    # Second tick with the SAME status publishes nothing (de-dup).
+    # Second tick with the SAME status publishes nothing (de-dup) and does NOT
+    # invalidate (no change to announce).
     events.clear()
+    invalidations.clear()
     out2 = sb_tasks.publish_transitions()
     assert out2["published"] == 0
     assert events == []
+    assert invalidations == []
 
 
 def test_publish_transitions_marks_terminal_done(monkeypatch: pytest.MonkeyPatch) -> None:

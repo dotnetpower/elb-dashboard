@@ -3827,10 +3827,19 @@ def test_reconcile_celery_success_marks_row_completed(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
 
+    invalidations: list[str] = []
+    monkeypatch.setattr(
+        "api.services.blast.jobs_cache_signal.publish_jobs_cache_invalidate",
+        lambda reason="": invalidations.append(reason),
+    )
+
     summary = blast.reconcile_stale_jobs.run()
 
     assert summary["completed"] == 1
     assert repo.updates[0][1]["status"] == "completed"
+    # Progress (a completed row) fans out to the jobs-events SSE so the dashboard
+    # status updates live instead of on the next poll.
+    assert invalidations == ["blast_reconcile_progress"]
 
 
 def test_reconcile_submit_success_keeps_running_row_running(

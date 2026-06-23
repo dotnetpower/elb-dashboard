@@ -1234,6 +1234,14 @@ def publish_transitions() -> dict[str, Any]:
             continue
         published += p_delta
         finished += f_delta
+    # Real-time status: a published transition (Queued→Running→Succeeded/Failed)
+    # changed a jobstate row, so drop the api caches + wake the jobs-events SSE
+    # clients cross-process. Without this the new status only surfaced on the
+    # next dashboard poll (the "status changes late" lag); now it pushes the
+    # instant the bridge advances. Best-effort, gated only by there being a real
+    # change to announce.
+    if published or finished:
+        _publish_jobs_cache_invalidate("servicebus_transition")
     return {"scanned": scanned, "published": published, "finished": finished, "errors": errors}
 
 
