@@ -15,6 +15,9 @@ interface StorageLockedPanelProps {
   storageAccount: string;
   resourceGroup: string;
   jobId: string;
+  /** Canonical results prefix (date-tiered when the layout flag is on); falls
+   * back to the flat `{jobId}/` when absent. Display hint only. */
+  resultsPrefix?: string;
   /** Called ~8s after the unlock succeeds — gives RBAC + DNS time to settle. */
   onUnlocked: () => void;
 }
@@ -31,10 +34,12 @@ export function StorageLockedPanel({
   storageAccount,
   resourceGroup,
   jobId,
+  resultsPrefix,
   onUnlocked,
 }: StorageLockedPanelProps) {
   const { toast } = useToast();
-  const resultsUrl = `https://${storageAccount}.blob.core.windows.net/results/${jobId}`;
+  const resultsPath = (resultsPrefix ?? `${jobId}/`).replace(/\/+$/, "");
+  const resultsUrl = `https://${storageAccount}.blob.core.windows.net/results/${resultsPath}`;
   // Hold the post-unlock handoff timer so it can be cancelled if the panel
   // unmounts within the 8s window (avoids calling onUnlocked after unmount).
   const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

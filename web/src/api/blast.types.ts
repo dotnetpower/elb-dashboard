@@ -208,6 +208,9 @@ export interface BlastJobSummary {
     acr_name?: string;
     cluster_name?: string;
     terminal_vm?: string;
+    /** Canonical results-container prefix (#66/#67); date-tiered when the
+     * layout flag is on, else `{job_id}/`. Used for display hints only. */
+    results_prefix?: string;
   };
   database_metadata?: BlastDatabaseMetadata;
   parent_job_id?: string;

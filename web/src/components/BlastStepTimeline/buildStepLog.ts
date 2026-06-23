@@ -212,7 +212,12 @@ export function buildStepLog({
       if (state === "error") return `✗ Completion failed:\n${failureText}`;
       const totalPolls = (stepsData.running?.polls as number) || 0;
       const completionOutput = ((sd.output as string) || (sd.last_output as string) || "").trim();
-      return `✓ All steps completed.\n\n  Total polling time: ~${totalPolls * 30}s\n  Results container: results/${jobId}/${
+      // Prefer the backend-provided results prefix (date-tiered when the
+      // layout flag is on) over a reconstructed flat `{jobId}/` hint.
+      const resultsPrefix =
+        (job.infrastructure as { results_prefix?: string } | undefined)?.results_prefix ||
+        `${jobId}/`;
+      return `✓ All steps completed.\n\n  Total polling time: ~${totalPolls * 30}s\n  Results container: results/${resultsPrefix}${
         completionOutput ? `\n\n--- Completion Log ---\n${completionOutput}` : ""
       }`;
     }

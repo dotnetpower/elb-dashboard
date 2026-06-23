@@ -583,6 +583,11 @@ def _local_to_blast_job(
         "acr_name": _payload_value(payload, "acr_name"),
         "cluster_name": getattr(state, "cluster_name", None)
         or _payload_value(payload, "aks_cluster_name", "cluster_name"),
+        # Canonical results prefix (#66/#67) so the SPA can show the real
+        # results location (date-tiered when the layout flag is on) instead of
+        # reconstructing a flat ``{job_id}/`` hint. Flat jobs surface
+        # ``{job_id}/`` (matches the frontend fallback); omitted when unset.
+        "results_prefix": getattr(state, "results_prefix", None),
     }
     # External-origin rows: when status is terminal-success the embedded
     # sibling snapshot is authoritative for ``error_code`` / ``error``. A

@@ -110,6 +110,7 @@ export function ResultsCard({ jobId, state }: ResultsCardProps) {
         publicAccessDisabled={publicAccessDisabled}
         resultsQueryIsError={resultsQuery.isError}
         phase={phase}
+        resultsPrefix={job?.infrastructure?.results_prefix}
         files={files}
         resultFiles={resultFiles}
         supportFiles={supportFiles}

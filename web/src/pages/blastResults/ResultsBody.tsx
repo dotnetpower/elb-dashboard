@@ -34,6 +34,8 @@ export interface ResultsBodyProps {
   onRetry: () => void;
   onDownload: (file: ResultFile) => void;
   onUnlocked: () => void;
+  /** Canonical results prefix for the storage-locked browse hint (date-aware). */
+  resultsPrefix?: string;
 }
 
 export function ResultsBody({
@@ -61,6 +63,7 @@ export function ResultsBody({
   onRetry,
   onDownload,
   onUnlocked,
+  resultsPrefix,
 }: ResultsBodyProps) {
   if (effectiveIsFailed) {
     return (
@@ -112,6 +115,7 @@ export function ResultsBody({
         storageAccount={storageAccount}
         resourceGroup={resourceGroup}
         jobId={jobId}
+        resultsPrefix={resultsPrefix}
         onUnlocked={onUnlocked}
       />
     );
