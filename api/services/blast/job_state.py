@@ -244,11 +244,85 @@ def _job_payload_for_file_preview(job_id: str, caller: CallerIdentity) -> dict[s
     return payload
 
 
+def _enrich_preview_outfmt(options: dict[str, Any]) -> None:
+    """Reflect the result-UI parity columns in the Configure preview, idempotently.
+
+    The actual run already carries them (``enrich_tabular_outfmt`` runs at
+    submit), but jobs recorded before that shipped — or whose stored options
+    keep a bare ``6`` / ``7`` — would render a Configure preview without the
+    Description / Scientific-name / Query-Cover columns the result page reads.
+    The extended layout is parked in ``additional_options`` (``-outfmt 7 std
+    …``) because the bare ``outfmt`` field rejects a multi-token specifier.
+    """
+    from api.services.sharding_precision import (
+        enrich_tabular_outfmt,
+        outfmt_spec_value,
+        set_outfmt_spec,
+    )
+
+    additional = str(options.get("additional_options") or "")
+    current = outfmt_spec_value(additional) if additional.strip() else None
+    if current is None:
+        bare = options.get("outfmt")
+        current = str(bare).strip() if bare not in (None, "") else None
+    if not current:
+        return
+    enriched = enrich_tabular_outfmt(current)
+    if not isinstance(enriched, str) or enriched == current:
+        return
+    options["additional_options"] = set_outfmt_spec(additional, enriched).strip()
+    # The enriched tabular spec is multi-token; keep a single ``-outfmt`` in the
+    # rendered ini by dropping any conflicting bare ``outfmt`` field.
+    options.pop("outfmt", None)
+
+
+def _apply_existing_cluster_shape(
+    options: dict[str, Any],
+    *,
+    credential: Any,
+    subscription_id: str | None,
+    resource_group: str,
+    cluster_name: str,
+    job_id: str,
+) -> None:
+    """Reflect the existing cluster's blastpool SKU / node count in the preview.
+
+    Externally-submitted jobs reuse an already-provisioned cluster, so the
+    Configure preview should show that cluster's machine-type / num-nodes
+    ("the current cluster as-is") rather than the generic ``DEFAULT_SKU`` /
+    ``num-nodes = 1`` fallbacks ``generate_config`` applies when the options
+    omit them. Best-effort: a resolution failure leaves the prior behaviour.
+    """
+    if credential is None:
+        return
+    sub = (subscription_id or "").strip() or os.environ.get("AZURE_SUBSCRIPTION_ID", "").strip()
+    if not (sub and resource_group and cluster_name):
+        return
+    try:
+        from api.services.monitoring.aks import get_aks_cluster_snapshot
+
+        snapshot = get_aks_cluster_snapshot(credential, sub, resource_group, cluster_name)
+    except Exception:
+        # Best-effort preview enrichment: a lookup failure keeps the fallback.
+        LOGGER.debug("config preview cluster lookup failed job_id=%s", job_id, exc_info=True)
+        return
+    if not snapshot:
+        return
+    sku = snapshot.get("node_sku")
+    if isinstance(sku, str) and sku.strip():
+        options["machine_type"] = sku.strip()
+    count = snapshot.get("node_count")
+    if isinstance(count, int) and count > 0:
+        options["num_nodes"] = count
+
+
 def _config_preview_from_payload(
     *,
     job_id: str,
     storage_account: str,
     payload: dict[str, Any],
+    credential: Any = None,
+    subscription_id: str | None = None,
 ) -> str:
     from api.tasks.blast import _build_config_content
 
@@ -313,6 +387,16 @@ def _config_preview_from_payload(
         openapi_id = str(external.get("job_id") or "").strip()
         if openapi_id and "/" not in openapi_id and ".." not in openapi_id:
             query_file = f"{openapi_id}.fa"
+
+    _enrich_preview_outfmt(options)
+    _apply_existing_cluster_shape(
+        options,
+        credential=credential,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        job_id=job_id,
+    )
 
     return _build_config_content(
         job_id=job_id,

@@ -224,6 +224,40 @@ def enrich_tabular_outfmt(value: object | None) -> object | None:
     return " ".join([code, *cols, *additions])
 
 
+def set_outfmt_spec(options: str, spec: str) -> str:
+    """Return ``options`` with its ``-outfmt`` specifier replaced by ``spec``.
+
+    Drops any existing ``-outfmt <code> [fields...]`` run (and the ``-outfmt=``
+    form) and appends ``-outfmt <spec>`` as separate UNQUOTED tokens at the end.
+    Mirrors the tokenisation in :func:`outfmt_spec_value`; the unquoted multi-
+    token form is required because the generated elastic-blast.ini rejects a
+    quoted ``-outfmt`` value (it breaks the K8s Job YAML the sibling renders).
+    """
+    try:
+        tokens = shlex.split(options or "")
+    except ValueError as exc:
+        raise ValueError(f"invalid blast options: {exc}") from exc
+    out: list[str] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == "-outfmt":
+            j = i + 1
+            while j < n and not tokens[j].startswith("-"):
+                j += 1
+            i = j
+            continue
+        if tok.startswith("-outfmt="):
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    out.append("-outfmt")
+    out.extend(str(spec).split())
+    return " ".join(out)
+
+
 def positive_int(value: object | None) -> int | None:
     if value in (None, ""):
         return None

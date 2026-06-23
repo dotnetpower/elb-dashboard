@@ -22,6 +22,7 @@ from api.services.sharding_precision import (
     merge_format_for_outfmt,
     normalize_sharding_mode,
     outfmt_spec_value,
+    set_outfmt_spec,
 )
 
 _PARITY = "staxids sscinames stitle qcovs"
@@ -60,6 +61,28 @@ def test_enrich_keeps_merge_compatible() -> None:
     # Every enriched tabular layout still passes the shard-merge gate.
     for spec in ("7", "6", "7 std", "7 qseqid sseqid pident evalue bitscore"):
         assert merge_format_for_outfmt(enrich_tabular_outfmt(spec)) == "tabular"
+
+
+def test_set_outfmt_spec_appends_when_absent() -> None:
+    out = set_outfmt_spec("-evalue 0.001", "7 std staxids")
+    assert out == "-evalue 0.001 -outfmt 7 std staxids"
+    assert set_outfmt_spec("", "5") == "-outfmt 5"
+
+
+def test_set_outfmt_spec_replaces_existing_multitoken() -> None:
+    out = set_outfmt_spec("-outfmt 6 -evalue 0.001", "7 std staxids sscinames")
+    # The bare ``-outfmt 6`` run is dropped and the enriched spec appended.
+    assert outfmt_spec_value(out) == "7 std staxids sscinames"
+    assert "-evalue 0.001" in out
+    assert out.count("-outfmt") == 1
+
+
+def test_set_outfmt_spec_handles_equals_form() -> None:
+    out = set_outfmt_spec("-outfmt=6 -word_size 11", "7 std qcovs")
+    assert outfmt_spec_value(out) == "7 std qcovs"
+    assert "-word_size 11" in out
+    assert out.count("-outfmt") == 1
+
 
 
 def test_default_sharding_mode_is_off() -> None:

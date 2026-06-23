@@ -151,6 +151,8 @@ def blast_job_file(
                             job_id=job_id,
                             storage_account=storage_account,
                             payload=payload,
+                            credential=cred,
+                            subscription_id=subscription_id,
                         )
                         selected_blob = f"{job_id}/elastic-blast.ini"
                     except ValueError as exc:

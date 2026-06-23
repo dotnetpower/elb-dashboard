@@ -206,6 +206,118 @@ def test_config_preview_prefers_top_level_dashboard_keys(monkeypatch) -> None:
     )
 
 
+def _capture_build(monkeypatch) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    def _fake_build(**kwargs: object) -> str:
+        captured.clear()
+        captured.update(kwargs)
+        return "INI"
+
+    monkeypatch.setattr(blast, "_build_config_content", _fake_build)
+    return captured
+
+
+def test_config_preview_enriches_outfmt_parity_columns(monkeypatch) -> None:
+    """The Configure preview reflects the result-UI parity columns the actual
+    run carries, parked in ``additional_options`` (the bare ``outfmt`` field
+    rejects a multi-token specifier)."""
+    from api.services.blast.job_state import _config_preview_from_payload
+
+    captured = _capture_build(monkeypatch)
+    payload = {
+        "resource_group": "rg-dash",
+        "aks_cluster_name": "aks-dash",
+        "db": "https://stelbx.blob.core.windows.net/blast-db/nt/nt",
+        "query_blob_url": "https://stelbx.blob.core.windows.net/queries/job-1.fa",
+        "storage_account": "stelbx",
+        "options": {"additional_options": "-outfmt 7 -evalue 0.001"},
+    }
+    _config_preview_from_payload(job_id="job-1", storage_account="stelbx", payload=payload)
+
+    additional = captured["options"]["additional_options"]  # type: ignore[index]
+    for col in ("staxids", "sscinames", "stitle", "qcovs"):
+        assert col in additional
+    assert "-evalue 0.001" in additional
+    assert additional.count("-outfmt") == 1
+
+
+def test_config_preview_enriches_bare_outfmt_field(monkeypatch) -> None:
+    """A bare single-code ``outfmt`` option is enriched into a multi-token
+    ``-outfmt`` parked in ``additional_options``; the conflicting bare field is
+    dropped so the rendered ini keeps a single ``-outfmt``."""
+    from api.services.blast.job_state import _config_preview_from_payload
+
+    captured = _capture_build(monkeypatch)
+    payload = {
+        "resource_group": "rg-dash",
+        "aks_cluster_name": "aks-dash",
+        "db": "https://stelbx.blob.core.windows.net/blast-db/nt/nt",
+        "query_blob_url": "https://stelbx.blob.core.windows.net/queries/job-1.fa",
+        "storage_account": "stelbx",
+        "options": {"outfmt": "7"},
+    }
+    _config_preview_from_payload(job_id="job-1", storage_account="stelbx", payload=payload)
+
+    opts = captured["options"]
+    assert "outfmt" not in opts  # bare field dropped
+    additional = opts["additional_options"]  # type: ignore[index]
+    for col in ("std", "staxids", "sscinames", "stitle", "qcovs"):
+        assert col in additional
+
+
+def test_config_preview_uses_existing_cluster_sku(monkeypatch) -> None:
+    """With a credential, the preview shows the existing cluster's blastpool SKU
+    / node count ("current cluster as-is") instead of the DEFAULT_SKU fallback."""
+    import api.services.monitoring.aks as aks_mod
+    from api.services.blast.job_state import _config_preview_from_payload
+
+    captured = _capture_build(monkeypatch)
+    monkeypatch.setattr(
+        aks_mod,
+        "get_aks_cluster_snapshot",
+        lambda *_a, **_k: {"node_sku": "Standard_E16s_v5", "node_count": 10},
+    )
+    payload = {
+        "resource_group": "rg-elb-cluster",
+        "aks_cluster_name": "elb-cluster-01",
+        "db": "https://stelbx.blob.core.windows.net/blast-db/nt/nt",
+        "query_blob_url": "https://stelbx.blob.core.windows.net/queries/job-1.fa",
+        "storage_account": "stelbx",
+        "options": {},
+    }
+    _config_preview_from_payload(
+        job_id="job-1",
+        storage_account="stelbx",
+        payload=payload,
+        credential=object(),
+        subscription_id="sub-123",
+    )
+
+    opts = captured["options"]
+    assert opts["machine_type"] == "Standard_E16s_v5"
+    assert opts["num_nodes"] == 10
+
+
+def test_config_preview_skips_cluster_lookup_without_credential(monkeypatch) -> None:
+    """The default call (no credential) does not attempt an ARM lookup and keeps
+    the DEFAULT_SKU fallback (no injected machine_type)."""
+    from api.services.blast.job_state import _config_preview_from_payload
+
+    captured = _capture_build(monkeypatch)
+    payload = {
+        "resource_group": "rg-elb-cluster",
+        "aks_cluster_name": "elb-cluster-01",
+        "db": "https://stelbx.blob.core.windows.net/blast-db/nt/nt",
+        "query_blob_url": "https://stelbx.blob.core.windows.net/queries/job-1.fa",
+        "storage_account": "stelbx",
+        "options": {},
+    }
+    _config_preview_from_payload(job_id="job-1", storage_account="stelbx", payload=payload)
+
+    assert "machine_type" not in captured["options"]  # type: ignore[operator]
+
+
 @pytest.mark.parametrize(
     ("database", "query_file", "match"),
     [
