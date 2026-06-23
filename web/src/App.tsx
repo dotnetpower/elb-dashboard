@@ -8,6 +8,7 @@ import { SignIn } from "@/pages/SignIn";
 import { AccessDenied } from "@/pages/AccessDenied";
 import { useAuthSessionIssue } from "@/auth/sessionEvents";
 import { useDashboardAccessGate } from "@/hooks/useDashboardAccessGate";
+import { useJobsEvents } from "@/hooks/useJobsEvents";
 import { Dashboard } from "@/pages/Dashboard";
 import { BlastSubmit } from "@/pages/BlastSubmit";
 import { BlastJobs } from "@/pages/BlastJobs";
@@ -123,6 +124,11 @@ function AppRoutes() {
   const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
   const terminalEnabled = usePreviewFeatureEnabled("terminal");
   const serviceBusPlaygroundEnabled = usePreviewFeatureEnabled("serviceBusPlayground");
+
+  // Real-time job-change push: invalidates Message Flow / Blast Jobs / AKS Jobs
+  // caches the instant a job row changes. No-op when the backend feature gate is
+  // off (the cards keep polling). Mounted once here, inside the auth-gated tree.
+  useJobsEvents();
 
   return (
     <ErrorBoundary>

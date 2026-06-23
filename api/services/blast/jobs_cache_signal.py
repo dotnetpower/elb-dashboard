@@ -86,6 +86,17 @@ def invalidate_jobs_visibility_caches_local() -> None:
         _reset_external_jobs_cache()
     except Exception as exc:
         LOGGER.debug("external jobs cache reset skipped: %s", type(exc).__name__)
+    # Real-time push: wake any connected jobs-events SSE clients so the browser
+    # refetches instantly instead of waiting out a poll interval. Best-effort and
+    # Service-Bus-agnostic (this funnel runs for every job change, queue-drained
+    # or directly submitted). A no-op when no stream is connected / the feature
+    # gate is off.
+    try:
+        from api.services.jobs_events_bus import broadcast_jobs_changed
+
+        broadcast_jobs_changed()
+    except Exception as exc:
+        LOGGER.debug("jobs-events broadcast skipped: %s", type(exc).__name__)
 
 
 def publish_jobs_cache_invalidate(reason: str = "") -> bool:

@@ -245,6 +245,17 @@ def _invalidate_message_flow_caches() -> None:
         invalidate_monitor_snapshot_prefix("monitor:message-flow")
     except Exception as exc:
         LOGGER.debug("message-flow cache invalidate skipped: %s", type(exc).__name__)
+    # Real-time push: wake any connected jobs-events SSE clients so a direct
+    # dashboard submit surfaces on watching browsers instantly — this is the
+    # Service-Bus-disabled path (a direct submit, not a queue drain), so the SSE
+    # push must not depend on the Service Bus integration. Best-effort; a no-op
+    # when no stream is connected / the feature gate is off.
+    try:
+        from api.services.jobs_events_bus import broadcast_jobs_changed
+
+        broadcast_jobs_changed()
+    except Exception as exc:
+        LOGGER.debug("jobs-events broadcast skipped: %s", type(exc).__name__)
 
 
 @router.post("/submit", responses=BLAST_SUBMIT_RESPONSES)
