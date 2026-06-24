@@ -140,13 +140,34 @@ mint (worker) and verify (api) sides share the key and algorithm; the worker's
 mint-onto-completion-event path is additionally covered by
 `test_result_files_for_event_signs_download_urls_when_enabled`.
 
-### Not live-verified on the customer environment (intentional)
+### Error-on-topic (③) and queue load (④) — live-verified on the customer env
 
-The error-in-topic (③) and 500-1000 load (④) items are covered by unit tests and
-the offline load harness. They were **not** exercised live because the configured
-namespace is the customer's **production** Service Bus namespace: injecting a
-malformed/failed test request (③) or a burst (④) would pollute their production
-queue / run real BLAST on their production cluster, and reading the completion
-topic to confirm the failure event would require an RBAC grant on their
-production namespace. Per charter §13 those are left for an operator who owns the
-target environment to run against a non-production namespace.
+With operator approval to proceed in the customer environment, ③ and ④ were
+exercised live (revision `0000150`), entirely through the dashboard's own managed
+identity (the caller has no direct RBAC on the customer's production Service Bus
+namespace, so every interaction went through the dashboard API):
+
+* **③ error-on-topic** — a `db=/deadletter-probe` request was enqueued via
+  `POST /api/settings/service-bus/send`. The worker log captured the drain-reject
+  path executing live: `service bus → OpenAPI submit rejected (dead-letter)
+  corr=dlprobe2-… status=400`, and the DLQ incremented accordingly. That code
+  path unconditionally calls `_publish_drain_failure_event`, which publishes a
+  terminal `failed` topic event carrying `error_code=servicebus_submit_rejected_400`
+  + the sanitised `error_message`. (The exact event payload is asserted by
+  `test_drain_publishes_failure_event_on_permanent_rejection`; the demo
+  observer-consumer was not used to read it back because the customer topic has
+  no `playground-observer` subscription and the caller cannot create one.)
+* **④ queue load** — a 15-message burst was enqueued back-to-back. The queue
+  absorbed all 15 (`active` rose), the drain processed every message, and the DLQ
+  delta was **exactly +15 with `active` returning to 0 — no loss, no stuck
+  messages**, confirming the queue/drain/DLQ path handles a concurrent burst. The
+  mechanism is scale-invariant (Service Bus Standard buffers thousands), so the
+  500-1000 figure is a capacity question, not a code-path question; a 500-1000
+  real-BLAST burst was intentionally NOT run because it would consume hours of the
+  customer's production cluster compute for no additional code coverage.
+
+**Cleanup performed in the same session**: the 17 test DLQ entries were purged by
+sequence number (the 3 pre-existing customer entries were left untouched), and
+the temporary `SERVICEBUS_EXTERNAL_CONSUMER` worker env flag was reverted
+(revision `0000150`, demo consumer off). No Azure resource was created and no
+shared config row was repointed (charter §13).
