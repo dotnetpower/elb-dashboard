@@ -116,12 +116,37 @@ and is intentionally **not** changed here.
 * `uv run ruff check` — clean on all touched files.
 * `python3 example/servicebus/load_test.py --self-test` — OK.
 
-## Deployment / live verification — PENDING operator sign-off
+## Deployment / live verification
 
-This change is validated by unit tests only. The signed-URL path activates on a
-deploy that carries `EXEC_TOKEN` (already present in the deployed environments),
-so a code-only image deploy is sufficient — **no infra change**. Live end-to-end
-verification (submit via Service Bus, consume the completion topic, download the
-signed URL with no bearer, and a 500-1000 burst) was intentionally **not** run
-autonomously because it targets a shared/customer environment; it is left for
-the operator to run and confirm.
+Deployed to the running customer environment as a code-only image deploy
+(`scripts/dev/quick-deploy.sh api` → api/worker/beat on revision
+`ca-elb-dashboard--0000148`). **No infra change** — the signed-URL path rides the
+existing `EXEC_TOKEN` secret already present on the api + worker sidecars.
+
+Live end-to-end proof of "download by URL alone, no bearer" against the live api,
+using a real completed job's result file (`92869d3eb92c` / `result-001`, a
+`core_nt` shard `.out.gz`). A token was minted with the same `EXEC_TOKEN`-derived
+key the api verifies with:
+
+* **Signed `?token=`, NO `Authorization` header → HTTP 200, 13078 bytes (exact),
+  valid gzip, real BLAST output** (`# BLASTN 2.17.0+ … # Database:
+  core_nt_shard_00`). Download by URL alone works.
+* **No token, no bearer → HTTP 401** — the route is not anonymous; the security
+  boundary holds (charter §9: still the dashboard gateway, never a SAS).
+* **Tampered token, no bearer → HTTP 401** — signature verification works.
+
+The fact that a locally-minted token verified on the live api confirms the
+mint (worker) and verify (api) sides share the key and algorithm; the worker's
+mint-onto-completion-event path is additionally covered by
+`test_result_files_for_event_signs_download_urls_when_enabled`.
+
+### Not live-verified on the customer environment (intentional)
+
+The error-in-topic (③) and 500-1000 load (④) items are covered by unit tests and
+the offline load harness. They were **not** exercised live because the configured
+namespace is the customer's **production** Service Bus namespace: injecting a
+malformed/failed test request (③) or a burst (④) would pollute their production
+queue / run real BLAST on their production cluster, and reading the completion
+topic to confirm the failure event would require an RBAC grant on their
+production namespace. Per charter §13 those are left for an operator who owns the
+target environment to run against a non-production namespace.
