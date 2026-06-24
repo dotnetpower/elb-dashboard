@@ -268,14 +268,19 @@ def _result_files_for_event(
     dashboard's authenticated file-streaming gateway
     (``GET /api/v1/elastic-blast/jobs/{job_id}/files/{file_id}``). The URL is the
     dashboard's own public base (resolved from the operator setting / Container
-    Apps FQDN), NOT a Storage SAS — a subscriber downloads by calling it with a
-    bearer token and the ``api`` sidecar streams the bytes (charter §9: never
-    hand a SAS / direct Storage URL to a consumer). When the dashboard public
-    URL cannot be resolved the metadata is still emitted but ``download_url`` is
-    omitted so a subscriber can fall back to ``result_ref``.
+    Apps FQDN), NOT a Storage SAS — the ``api`` sidecar streams the bytes
+    (charter §9: never hand a SAS / direct Storage URL to a consumer). When URL
+    signing is available the link carries a scoped, expiring ``?token=...`` so a
+    subscriber can download by URL alone (no bearer / interactive ``az`` login);
+    the token authorises exactly this one ``(job_id, file_id)``. When signing is
+    disabled the bearer-only URL is emitted unchanged and the consumer supplies a
+    bearer token instead. When the dashboard public URL cannot be resolved the
+    metadata is still emitted but ``download_url`` is omitted so a subscriber can
+    fall back to ``result_ref``.
     """
     from api.services.blast.external_job_projection import _external_result_files
     from api.services.control_plane_url import resolve_control_plane_url
+    from api.services.download_token import mint_download_token
 
     files = _external_result_files(job)
     if not files:
@@ -294,9 +299,17 @@ def _result_files_for_event(
             "size": item.get("size"),
         }
         if base:
-            entry["download_url"] = (
+            url = (
                 f"{base}/api/v1/elastic-blast/jobs/{openapi_job_id}/files/{file_id}"
             )
+            # Sign the link so a topic consumer can download by URL alone (no
+            # bearer / interactive az login). Still the dashboard's own
+            # streaming gateway — never a Storage SAS (charter §9). When signing
+            # is unavailable/disabled the bearer-only URL is emitted unchanged.
+            download_token = mint_download_token(openapi_job_id, file_id)
+            if download_token:
+                url = f"{url}?token={download_token}"
+            entry["download_url"] = url
         out.append(entry)
     return out
 
@@ -384,6 +397,7 @@ def _transition_event(
     status: str,
     attempt: int,
     error_code: str | None = None,
+    error_message: str | None = None,
     request_id: str = "",
     result_files: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -405,6 +419,11 @@ def _transition_event(
     only when the producer set one, so a subscriber correlates on the SAME value.
     It is NOT part of the ``event_id`` digest — it is constant per correlation
     id, so including it would not change dedup semantics.
+
+    On a failure event ``error_code`` is a short machine-readable reason and
+    ``error_message`` is a human-readable detail (sanitised + length-bounded by
+    ``_error_message_for_event`` before it reaches this builder) so a subscriber
+    sees WHY a job failed, not just THAT it failed.
     """
     event: dict[str, Any] = {
         "event": "blast.transition",
@@ -422,7 +441,32 @@ def _transition_event(
         event["request_id"] = request_id
     if error_code:
         event["error_code"] = error_code
+    if error_message:
+        event["error_message"] = error_message
     return event
+
+
+# Cap the human-readable error detail embedded on a failure event so a verbose
+# sibling stack/message cannot bloat the topic envelope past the Service Bus
+# size limit (mirrors ``_REQUEST_ID_MAX_LEN``).
+_ERROR_MESSAGE_MAX_LEN = 500
+
+
+def _error_message_for_event(job: dict[str, Any]) -> str:
+    """Extract a sanitised, length-bounded human-readable failure detail.
+
+    Reads the sibling job's ``error.message`` (or ``error.detail`` fallback),
+    runs it through ``sanitise`` so a token / subscription id / SAS URL can never
+    leak onto the completion topic (charter §12), and trims it to
+    ``_ERROR_MESSAGE_MAX_LEN``. Returns ``""`` when no detail is present.
+    """
+    err = job.get("error") if isinstance(job.get("error"), dict) else {}
+    raw = str((err or {}).get("message") or (err or {}).get("detail") or "").strip()
+    if not raw:
+        return ""
+    from api.services.sanitise import sanitise
+
+    return str(sanitise(raw))[:_ERROR_MESSAGE_MAX_LEN]
 
 
 def _record_transition_trace(openapi_job_id: str, status: str) -> None:
@@ -792,6 +836,60 @@ def _fail_placeholder_for_message(msg: ParsedMessage, *, error_code: str) -> Non
         _fail_placeholder(correlation_id, error_code=error_code)
 
 
+def _publish_drain_failure_event(
+    cfg: ServiceBusConfig,
+    *,
+    correlation_id: str,
+    request_id: str,
+    error_code: str,
+    error_message: str,
+) -> None:
+    """Publish a terminal ``failed`` transition for a drain-time rejection.
+
+    A message rejected BEFORE it bridges to a sibling job (malformed body, or a
+    permanent 4xx submit rejection) never reaches ``publish_transitions`` — there
+    is no bridge row to poll — so without this the completion topic would stay
+    silent and a subscriber would wait forever. This emits the same
+    ``blast.transition`` failure shape (``status=failed`` + ``error_code`` +
+    sanitised ``error_message``) with an empty ``openapi_job_id`` (no job was
+    created). Best-effort: a publish failure is logged and swallowed so it never
+    changes the message-settlement decision (the placeholder is already failed
+    and the message is being dead-lettered regardless). ``publish_event`` no-ops
+    when no completion topic is configured.
+    """
+    if not correlation_id:
+        return
+    try:
+        from api.services.sanitise import sanitise
+
+        event = _transition_event(
+            correlation_id=correlation_id,
+            openapi_job_id="",
+            status=_STATUS_FAILED,
+            attempt=1,
+            error_code=error_code,
+            error_message=(str(sanitise(error_message))[:_ERROR_MESSAGE_MAX_LEN] or None)
+            if error_message
+            else None,
+            request_id=request_id,
+        )
+        service_bus.publish_event(cfg, event)
+    except Exception as exc:  # pragma: no cover - best-effort
+        LOGGER.debug(
+            "drain failure event publish skipped corr=%s: %s",
+            correlation_id,
+            type(exc).__name__,
+        )
+
+
+def _detail_text(exc: HTTPException) -> str:
+    """Coerce an HTTPException detail (str or ``{code,message}`` dict) to text."""
+    detail = getattr(exc, "detail", "")
+    if isinstance(detail, dict):
+        return str(detail.get("message") or detail.get("detail") or detail.get("code") or "")
+    return str(detail or "")
+
+
 def _publish_jobs_cache_invalidate(reason: str) -> None:
     """Drop the api sidecar's jobs / message-flow caches cross-process.
 
@@ -828,6 +926,13 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         # forever even though the message is in the DLQ. The correlation id is
         # recovered from the raw body the same way the placeholder used it.
         _fail_placeholder_for_message(msg, error_code="servicebus_malformed_request")
+        _publish_drain_failure_event(
+            cfg,
+            correlation_id=_correlation_id_from_message(msg),
+            request_id=_extract_request_id(msg),
+            error_code="servicebus_malformed_request",
+            error_message="request message could not be parsed into a valid BLAST submit",
+        )
         _publish_jobs_cache_invalidate("servicebus_drain_malformed")
         return MessageAction.DEAD_LETTER
 
@@ -897,6 +1002,13 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             # row instead of leaving it ``queued`` forever (the message is now
             # dead-lettered). A transient failure keeps the placeholder queued.
             _fail_placeholder(correlation_id, error_code=f"servicebus_submit_rejected_{status}")
+            _publish_drain_failure_event(
+                cfg,
+                correlation_id=correlation_id,
+                request_id=request_id,
+                error_code=f"servicebus_submit_rejected_{status}",
+                error_message=_detail_text(exc),
+            )
             _publish_jobs_cache_invalidate("servicebus_drain_rejected")
         if _ATOMIC_CLAIM:
             # Submit failed after we reserved the correlation id, so roll the
@@ -1149,6 +1261,7 @@ def _publish_one_bridge(
                 status=_STATUS_FAILED,
                 attempt=1,
                 error_code="bridge_timeout",
+                error_message="job did not reach a terminal state before the bridge deadline",
                 request_id=rec.request_id,
             )
             try:
@@ -1169,9 +1282,11 @@ def _publish_one_bridge(
     # field is kept at 1 for schema stability — see ``_transition_event``.
     attempt = 1
     error_code: str | None = None
+    error_message: str | None = None
     if status == _STATUS_FAILED:
         err = job.get("error") if isinstance(job.get("error"), dict) else {}
         error_code = str((err or {}).get("code") or "failed")
+        error_message = _error_message_for_event(job) or None
     # On a succeeded transition, attach the result-file download links so a
     # topic subscriber can pull the results directly (via the dashboard's
     # authenticated streaming gateway — never a SAS URL). Best-effort: if the
@@ -1196,6 +1311,7 @@ def _publish_one_bridge(
         status=status,
         attempt=attempt,
         error_code=error_code,
+        error_message=error_message,
         request_id=rec.request_id,
         result_files=result_files,
     )

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import jwt
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 from jwt import PyJWKClient
 
 LOGGER = logging.getLogger(__name__)
@@ -512,6 +512,65 @@ async def require_caller_or_openapi_token(
             "X-ELB-API-Token auth rejected (gate on; token mismatch or unavailable)"
         )
         raise AuthError(status.HTTP_401_UNAUTHORIZED, "invalid X-ELB-API-Token")
+    return await require_caller(authorization=authorization)
+
+
+# Clearly non-UUID sentinel for a request authenticated by a signed download
+# token (see ``api/services/download_token.py``). Distinct from the bearer and
+# openapi-token sentinels so a token caller can never be mistaken for an Azure
+# AD principal in a downstream call.
+DOWNLOAD_TOKEN_OID: str = "download-token-caller"  # noqa: S105 - sentinel oid, not a secret.
+
+
+def _download_token_identity() -> CallerIdentity:
+    """Synthetic identity for a request authorised by a signed download token.
+
+    The token is already scoped to one ``(job_id, file_id)`` pair, so the gate
+    grants exactly the read this URL was minted for. Carries a non-UUID object
+    id and an empty raw token so any code that mistakes it for an Azure AD caller
+    fails loudly instead of leaking a token.
+    """
+    return CallerIdentity(
+        object_id=DOWNLOAD_TOKEN_OID,
+        tenant_id=os.environ.get("AZURE_TENANT_ID", ""),
+        upn="download-token@local",
+        raw_token="",
+        claims={"download_token_auth": True},
+    )
+
+
+def is_download_token_caller(caller: CallerIdentity) -> bool:
+    """True when the caller authorised via a signed download-URL token."""
+    return bool(caller) and caller.claims.get("download_token_auth") is True
+
+
+async def require_caller_or_download_token(request: Request) -> CallerIdentity:
+    """Like :func:`require_caller` but ALSO accepts a signed ``?token=`` query.
+
+    Auth precedence:
+
+    1. A non-empty ``token`` query parameter that verifies (constant-time, HMAC,
+       unexpired) against this route's ``job_id`` + ``file_id`` path params =>
+       synthetic download-token identity. This is how a Service Bus completion
+       consumer downloads a result file by URL alone, with no bearer token.
+    2. Otherwise: the standard MSAL bearer path (:func:`require_caller`). A
+       present-but-invalid token does NOT short-circuit to 401 — we fall through
+       to the bearer path so an interactive browser request (no token, valid
+       bearer) still works on the same route.
+
+    SECURITY: only mount this on the READ-ONLY result-file download route. The
+    token has no Azure RBAC gate, so it must never reach a mutating action; its
+    scope is enforced entirely by the ``(job_id, file_id)`` signature.
+    """
+    from api.services.download_token import verify_download_token
+
+    token = (request.query_params.get("token") or "").strip()
+    if token:
+        job_id = str(request.path_params.get("job_id") or "")
+        file_id = str(request.path_params.get("file_id") or "")
+        if job_id and file_id and verify_download_token(token, job_id, file_id):
+            return _download_token_identity()
+    authorization = request.headers.get("authorization")
     return await require_caller(authorization=authorization)
 
 

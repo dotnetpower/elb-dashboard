@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from api.auth import CallerIdentity, require_caller
+from api.auth import CallerIdentity, require_caller, require_caller_or_download_token
 from api.services import external_blast
 from api.services.blast.submit_payload import (
     canonical_submit_metadata,
@@ -35,6 +35,7 @@ router = APIRouter(prefix="/api/v1/elastic-blast", tags=["external-elastic-blast
 LOGGER = logging.getLogger(__name__)
 MAX_QUERY_FASTA_CHARS = 10_000_000
 _REQUIRE_CALLER = Depends(require_caller)
+_REQUIRE_CALLER_OR_DOWNLOAD_TOKEN = Depends(require_caller_or_download_token)
 
 
 class ExternalBlastOptions(BaseModel):
@@ -694,7 +695,16 @@ def download_external_blast_file(
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     cluster_name: str = Query(default=""),
-    caller: CallerIdentity = _REQUIRE_CALLER,
+    token: str = Query(
+        default="",
+        max_length=256,
+        description=(
+            "Optional signed download token. A completion-event download_url "
+            "embeds one so a Service Bus consumer can download by URL alone, "
+            "without a bearer token. Ignored when a bearer is supplied."
+        ),
+    ),
+    caller: CallerIdentity = _REQUIRE_CALLER_OR_DOWNLOAD_TOKEN,
 ) -> StreamingResponse:
     LOGGER.info(
         "external BLAST file requested caller_oid=%s job_id=%s file_id=%s",
@@ -702,7 +712,7 @@ def download_external_blast_file(
         job_id,
         file_id,
     )
-    del caller
+    del caller, token
     try:
         downloaded = external_blast.stream_file(
             job_id,

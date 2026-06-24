@@ -22,16 +22,21 @@ Service Bus integration. Pick one with ``--source``:
   observer would consume: ``{event, event_id, attempt, external_correlation_id,
   openapi_job_id, status, ts, result_ref, result_files?, request_id?,
   error_code?}``. A ``succeeded`` event carries ``result_files`` — each with a
-  ``download_url`` pointing at the dashboard's authenticated streaming gateway.
-  With ``--download`` the consumer calls each ``download_url`` with a bearer
-  token and saves the result bytes locally (never a SAS URL; the ``api`` sidecar
+  error_code?, error_message?}``. A ``succeeded`` event carries ``result_files``
+  — each with a ``download_url`` pointing at the dashboard's authenticated
+  streaming gateway. With ``--download`` the consumer calls each ``download_url``
+  and saves the result bytes locally (never a SAS URL; the ``api`` sidecar
   streams the bytes). Subscribers DEDUPE on the stable ``event_id`` (sha256 of
   corr:status) because Service Bus delivery is at-least-once.
 
 Auth (Entra ``DefaultAzureCredential``): both roles need ``Azure Service Bus
-Data Receiver`` on the namespace. ``--download`` also needs a dashboard bearer
-token — set ``ELB_BEARER_TOKEN`` directly, or ``ELB_API_CLIENT_ID`` so the
-script runs ``az account get-access-token --resource <id>`` for you.
+Data Receiver`` on the namespace. ``--download`` works WITHOUT a dashboard
+bearer token when the ``download_url`` carries a signed ``?token=`` — the link
+self-authorises and the ``api`` sidecar streams the bytes (still never a SAS
+URL). A bearer is only needed for a legacy UNSIGNED ``download_url`` (signing
+turned off server-side): set ``ELB_BEARER_TOKEN`` directly, or
+``ELB_API_CLIENT_ID`` so the script runs ``az account get-access-token
+--resource <id>`` for you.
 
   NOTE: the ``ELB_API_CLIENT_ID`` path only works when the API app registration
   has pre-authorized the well-known Azure CLI public client
@@ -403,8 +408,10 @@ def consume_completions_and_download(
     token = acquire_bearer_token()
     if not token:
         print(
-            "no bearer token (set ELB_BEARER_TOKEN or ELB_API_CLIENT_ID) — "
-            "downloads will be attempted unauthenticated and likely 401",
+            "no bearer token (set ELB_BEARER_TOKEN or ELB_API_CLIENT_ID). "
+            "When the completion download_url carries a signed ?token= this is "
+            "fine — the link self-authorises and downloads work without a bearer. "
+            "A bearer is only needed for legacy unsigned download_url links.",
             file=sys.stderr,
         )
     stats = {"received": 0, "processed": 0, "duplicates": 0, "downloaded": 0}

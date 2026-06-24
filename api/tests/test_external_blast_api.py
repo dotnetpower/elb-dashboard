@@ -4347,3 +4347,69 @@ def test_submit_job_without_any_key_does_not_retry(monkeypatch) -> None:
 
     assert raised.value.status_code == 503
     assert attempts["n"] == 1  # surfaced on the first failure, no retry
+
+
+def _fake_downloaded() -> SimpleNamespace:
+    return SimpleNamespace(
+        chunks=iter([b"RESULT-BYTES"]),
+        media_type="application/gzip",
+        filename="merged_results.out.gz",
+    )
+
+
+def test_download_file_accepts_valid_signed_token_without_bearer(monkeypatch):
+    """A completion-event consumer downloads by URL alone: valid ?token=, no bearer."""
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    monkeypatch.setenv("EXEC_TOKEN", "route-test-exec-token")
+    from api.main import app
+    from api.services import download_token, external_blast
+
+    captured: dict[str, Any] = {}
+
+    def fake_stream_file(job_id, file_id, **kwargs):
+        captured["job_id"] = job_id
+        captured["file_id"] = file_id
+        return _fake_downloaded()
+
+    monkeypatch.setattr(external_blast, "stream_file", fake_stream_file)
+    token = download_token.mint_download_token("abc123def456", "result-001")
+    assert token is not None
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/v1/elastic-blast/jobs/abc123def456/files/result-001?token={token}"
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"RESULT-BYTES"
+    assert captured == {"job_id": "abc123def456", "file_id": "result-001"}
+
+
+def test_download_file_rejects_missing_auth(monkeypatch):
+    """No bearer and no token => 401 (the gate never silently allows access)."""
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    monkeypatch.setenv("EXEC_TOKEN", "route-test-exec-token")
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get("/api/v1/elastic-blast/jobs/abc123def456/files/result-001")
+
+    assert response.status_code == 401
+
+
+def test_download_file_rejects_token_scoped_to_other_file(monkeypatch):
+    """A token minted for one file cannot download a different file id."""
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    monkeypatch.setenv("EXEC_TOKEN", "route-test-exec-token")
+    from api.main import app
+    from api.services import download_token
+
+    token = download_token.mint_download_token("abc123def456", "result-001")
+    assert token is not None
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/v1/elastic-blast/jobs/abc123def456/files/result-999?token={token}"
+    )
+
+    assert response.status_code == 401

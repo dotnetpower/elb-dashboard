@@ -721,6 +721,110 @@ def test_transition_event_includes_request_id_when_present() -> None:
     assert ev["event_id"] == sb_tasks._event_id("corr-r", "running")
 
 
+def test_transition_event_includes_error_message_on_failure() -> None:
+    ev = sb_tasks._transition_event(
+        correlation_id="corr-f",
+        openapi_job_id="op-f",
+        status="failed",
+        attempt=1,
+        error_code="blast_search_failed",
+        error_message="exited with code 255",
+    )
+    assert ev["status"] == "failed"
+    assert ev["error_code"] == "blast_search_failed"
+    assert ev["error_message"] == "exited with code 255"
+
+
+def test_error_message_for_event_sanitises_and_bounds() -> None:
+    # message preferred over detail, trimmed, length-bounded.
+    job = {"error": {"code": "x", "message": "  boom  "}}
+    assert sb_tasks._error_message_for_event(job) == "boom"
+    # falls back to detail when message absent.
+    assert (
+        sb_tasks._error_message_for_event({"error": {"detail": "fallback"}}) == "fallback"
+    )
+    # no error block → empty string.
+    assert sb_tasks._error_message_for_event({"status": "completed"}) == ""
+    # over-long detail is capped.
+    long_job = {"error": {"message": "y" * 2000}}
+    assert len(sb_tasks._error_message_for_event(long_job)) == sb_tasks._ERROR_MESSAGE_MAX_LEN
+
+
+def test_drain_publishes_failure_event_on_permanent_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanent 4xx rejection emits a terminal ``failed`` topic event so a
+    subscriber sees WHY a submit was rejected (it never reaches publish_transitions)."""
+    _enable(monkeypatch)
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        "api.services.blast.servicebus_placeholder.fail_placeholder",
+        lambda cid, *, error_code: None,
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
+
+    def _reject(payload, **_kw):
+        raise HTTPException(status_code=400, detail={"code": "bad", "message": "db invalid"})
+
+    monkeypatch.setattr(external_blast, "submit_job", _reject)
+
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+        handler(
+            _msg(
+                {
+                    "program": "blastn",
+                    "db": "core_nt",
+                    "query_fasta": ">s\nACGT",
+                    "external_correlation_id": "corr-rej",
+                    "request_id": "rid-1",
+                }
+            )
+        )
+        from api.services.service_bus import DrainStats
+
+        return DrainStats(received=1)
+
+    monkeypatch.setattr(service_bus, "drain_requests", fake_drain)
+
+    sb_tasks.drain_and_resubmit()
+    failure = [e for e in events if e.get("status") == "failed"]
+    assert failure, "expected a failed transition event on the topic"
+    ev = failure[0]
+    assert ev["external_correlation_id"] == "corr-rej"
+    assert ev["error_code"] == "servicebus_submit_rejected_400"
+    assert ev["error_message"] == "db invalid"
+    assert ev["request_id"] == "rid-1"
+    assert ev["openapi_job_id"] == ""
+
+
+def test_drain_publishes_failure_event_on_malformed_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed message also surfaces a terminal failure on the topic."""
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        "api.services.blast.servicebus_placeholder.fail_placeholder",
+        lambda cid, *, error_code: None,
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
+
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+        handler(_msg({"external_correlation_id": "corr-bad"}))
+        from api.services.service_bus import DrainStats
+
+        return DrainStats(received=1)
+
+    monkeypatch.setattr(service_bus, "drain_requests", fake_drain)
+
+    sb_tasks.drain_and_resubmit()
+    failure = [e for e in events if e.get("status") == "failed"]
+    assert failure and failure[0]["external_correlation_id"] == "corr-bad"
+    assert failure[0]["error_code"] == "servicebus_malformed_request"
+
+
 def _job_with_files() -> dict:
     """A sibling job detail carrying two normalisable result files."""
     return {
@@ -749,6 +853,8 @@ def test_result_files_for_event_builds_download_urls(
 ) -> None:
     from api.services import control_plane_url
 
+    # Signing OFF (no EXEC_TOKEN) → bearer-only URL with no ?token query.
+    monkeypatch.delenv("EXEC_TOKEN", raising=False)
     monkeypatch.setattr(
         control_plane_url,
         "resolve_control_plane_url",
@@ -767,6 +873,38 @@ def test_result_files_for_event_builds_download_urls(
         "https://ca-elb-dashboard.example.com"
         "/api/v1/elastic-blast/jobs/op-7/files/merged_results.out.gz"
     )
+    assert "blob.core.windows.net" not in first["download_url"]
+    assert "sig=" not in first["download_url"]
+    assert "token=" not in first["download_url"]
+
+
+def test_result_files_for_event_signs_download_urls_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With signing enabled (EXEC_TOKEN present) the link carries a scoped,
+    verifiable ?token= so a consumer downloads by URL alone (no bearer)."""
+    from api.services import control_plane_url, download_token
+
+    monkeypatch.setenv("EXEC_TOKEN", "sb-result-signing-key")
+    monkeypatch.setattr(
+        control_plane_url,
+        "resolve_control_plane_url",
+        lambda: ("https://ca-elb-dashboard.example.com", "container_app"),
+    )
+    files = sb_tasks._result_files_for_event(_job_with_files(), "abc123def456")
+    first = files[0]
+    assert "?token=" in first["download_url"]
+    base, _, query = first["download_url"].partition("?token=")
+    assert base == (
+        "https://ca-elb-dashboard.example.com"
+        "/api/v1/elastic-blast/jobs/abc123def456/files/merged_results.out.gz"
+    )
+    # The embedded token verifies against exactly this (job_id, file_id).
+    assert download_token.verify_download_token(
+        query, "abc123def456", "merged_results.out.gz"
+    )
+    assert not download_token.verify_download_token(query, "abc123def456", "other.gz")
+    # Still never a Storage SAS (charter §9).
     assert "blob.core.windows.net" not in first["download_url"]
     assert "sig=" not in first["download_url"]
 
