@@ -1043,3 +1043,174 @@ def test_job_detail_allows_other_owner_when_flag_on(monkeypatch) -> None:
     assert body["job_id"] == "job-other"
     assert body["status"] == "completed"
 
+
+# --- Job detail metadata & cache scenarios (queue/API enrichment) -----------
+# Integration coverage for the sibling-stats merge + OPS-Redis cache on the
+# detail route. Scenario IDs map to
+# `.github/skills/blast-execution-validation/references/scenario-matrix.md`
+# "Job Detail Metadata & Cache Scenarios".
+
+
+class _FakeOpsRedis:
+    """In-memory stand-in for the OPS Redis client (ignores TTL)."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.store[key] = value
+
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
+
+def _completed_external_state(job_id: str = "ext-done"):
+    """A completed Service Bus job row whose stored row carries no execution
+    stats (db_version / blast_version / run_seconds) — the detail merges them
+    live from the sibling and caches the result."""
+    return SimpleNamespace(
+        job_id=job_id,
+        task_id=None,
+        type="blast",
+        owner_oid="00000000-0000-0000-0000-000000000000",
+        status="completed",
+        phase="completed",
+        created_at="2026-06-20T00:00:00Z",
+        updated_at="2026-06-20T00:05:00Z",
+        error_code="",
+        parent_job_id=None,
+        subscription_id="sub-1",
+        resource_group="rg-1",
+        cluster_name="elb-cluster-01",
+        storage_account="",
+        payload={
+            "db": "core_nt",
+            "external": {"job_id": job_id, "submission_source": "servicebus"},
+        },
+    )
+
+
+def _detail_test_harness(monkeypatch, fake_get_job):
+    """Wire AUTH bypass, a completed external repo row, the region mock, a fake
+    OPS Redis, and the sibling get_job stub. Returns (client, calls, fake)."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.blast.external_config.resolve_cluster_region",
+        lambda *a, **k: "koreacentral",
+    )
+    state = _completed_external_state()
+
+    class Repo:
+        def get(self, job_id: str):
+            return state
+
+        def list_children(self, *_a, **_k):
+            return []
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    fake = _FakeOpsRedis()
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client", lambda: fake, raising=False
+    )
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "get_job", fake_get_job)
+
+    from api.main import app
+
+    return TestClient(app), fake
+
+
+def test_job_detail_merges_sibling_stats_and_caches(monkeypatch) -> None:
+    """Scenario #6: a completed external job missing db_version merges the
+    sibling stats on the FIRST detail load (one live get_job) and serves the
+    SECOND load from the OPS-Redis cache (no second get_job)."""
+    calls: list[str] = []
+
+    def fake_get_job(job_id, **_k):
+        calls.append(job_id)
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "db_version": "2026-06-06-01-05-02",
+            "blast_version": "2.17.0+",
+            "run_seconds": 95,
+        }
+
+    client, _fake = _detail_test_harness(monkeypatch, fake_get_job)
+
+    r1 = client.get(
+        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
+    )
+    assert r1.status_code == 200
+    b1 = r1.json()
+    assert b1["db_version"] == "2026-06-06-01-05-02"
+    assert b1["blast_version"] == "2.17.0+"
+    assert b1["run_seconds"] == 95
+    assert calls == ["ext-done"]  # exactly one live fetch
+
+    r2 = client.get(
+        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
+    )
+    assert r2.status_code == 200
+    assert r2.json()["db_version"] == "2026-06-06-01-05-02"
+    assert calls == ["ext-done"]  # cache hit — no second get_job
+
+
+def test_job_detail_sibling_stats_negative_marker_bounds_refetch(monkeypatch) -> None:
+    """Scenario #9: when the sibling is unreachable (Stopped cluster → get_job
+    raises) the detail still renders 200 (stats show "—"), and a short-lived
+    negative marker bounds the re-fetch so the next load within the TTL does NOT
+    re-pay the timeout."""
+    calls: list[str] = []
+
+    def fake_get_job(job_id, **_k):
+        calls.append(job_id)
+        raise RuntimeError("cluster API server unreachable (timeout)")
+
+    client, _fake = _detail_test_harness(monkeypatch, fake_get_job)
+
+    r1 = client.get(
+        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
+    )
+    assert r1.status_code == 200  # detail renders despite the timeout
+    assert not r1.json().get("db_version")
+    assert calls == ["ext-done"]
+
+    r2 = client.get(
+        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
+    )
+    assert r2.status_code == 200
+    assert calls == ["ext-done"]  # negative marker prevented the re-fetch
+
+
+def test_job_detail_legacy_external_row_renders_without_stats(monkeypatch) -> None:
+    """Scenario #11: a legacy external job whose sibling reports no usable stats
+    renders gracefully (null optional fields, no 500) and caches a negative
+    marker so it stops re-fetching."""
+    calls: list[str] = []
+
+    def fake_get_job(job_id, **_k):
+        calls.append(job_id)
+        return {"job_id": job_id, "status": "completed"}  # no stats at all
+
+    client, _fake = _detail_test_harness(monkeypatch, fake_get_job)
+
+    r1 = client.get(
+        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
+    )
+    assert r1.status_code == 200
+    b1 = r1.json()
+    assert not b1.get("db_version")
+    assert not b1.get("config_snapshot")  # legacy: nothing captured
+    assert not b1.get("query_length")
+    assert not b1.get("molecule")
+    assert calls == ["ext-done"]
+
+    r2 = client.get(
+        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
+    )
+    assert r2.status_code == 200
+    assert calls == ["ext-done"]  # negative marker bounds the re-fetch
+
