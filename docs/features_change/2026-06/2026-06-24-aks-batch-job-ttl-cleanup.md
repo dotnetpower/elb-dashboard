@@ -51,7 +51,10 @@ fix fails the terminal image build (no `elastic-blast` executable).
   purpose: the pinned ref's `azure.py` builds batch-job substitutions across two
   dicts that do not provide that key, so a `${...}` placeholder would render
   unsubstituted and yield an invalid integer. Build-time override via
-  `ELB_JOB_TTL_SECONDS` (digits, seconds; default 1800). Idempotent; raises on
+  `ELB_JOB_TTL_SECONDS` (digits, seconds; default 1800), wired as a build `ARG`
+  in `terminal/Dockerfile` and `terminal/Dockerfile.base` and passed into the
+  patch step (the base toolchain hash includes `Dockerfile.base`, so the wiring
+  change re-tags the base image). Idempotent; raises on missing
   missing `backoffLimit` anchor. The TTL governs GC only AFTER a terminal state,
   so the finalizer's `backoffLimit: 0` (not safely retryable) is preserved.
   Wired into `main()` after `patch_aks_workload_tolerations`.

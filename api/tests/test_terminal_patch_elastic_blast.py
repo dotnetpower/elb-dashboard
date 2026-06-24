@@ -732,3 +732,45 @@ def test_patch_aks_job_ttl_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     assert once.count("ttlSecondsAfterFinished") == 1
 
 
+def test_patch_aks_job_ttl_anchors_on_real_field_not_comment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A prose comment mentioning 'backoffLimit' must NOT be the insertion anchor.
+
+    Mirrors the real `elb-finalizer-aks` template, which carries a comment block
+    ("K8s default backoffLimit of 6 ... Pin to 0.") directly above the real
+    `backoffLimit: 0` field. The TTL line must land before the real field, and
+    the comment must survive intact.
+    """
+    monkeypatch.delenv("ELB_JOB_TTL_SECONDS", raising=False)
+    patch_module = _load_patch_module()
+    templates_dir = _write_batch_job_templates(tmp_path)
+    # Overwrite the finalizer with the real comment-block structure: a prose
+    # comment that mentions "backoffLimit" sits directly above the real field.
+    tmpl = templates_dir / "elb-finalizer-aks.yaml.template"
+    tmpl.write_text(
+        "---\n"
+        "apiVersion: batch/v1\n"
+        "kind: Job\n"
+        "spec:\n"
+        "  template:\n"
+        "    spec:\n"
+        "      restartPolicy: Never\n"
+        "  # The finalizer is NOT safely retryable. K8s default backoffLimit\n"
+        "  # of 6 would amplify the problem. Pin to 0.\n"
+        "  backoffLimit: 0\n"
+    )
+
+    patch_module.patch_aks_job_ttl(tmp_path)
+    text = tmpl.read_text()
+
+    # Inserted immediately before the REAL field, not into the comment block.
+    assert "  ttlSecondsAfterFinished: 1800\n  backoffLimit: 0\n" in text
+    assert "of 6 would amplify the problem" in text  # comment survived
+    import yaml
+
+    doc = yaml.safe_load(text)
+    assert doc["spec"]["ttlSecondsAfterFinished"] == 1800
+    assert doc["spec"]["backoffLimit"] == 0
+
+

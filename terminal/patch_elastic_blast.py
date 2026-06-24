@@ -16,6 +16,7 @@ api/tests/test_terminal_command_guard.py`.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -941,14 +942,18 @@ def patch_aks_job_ttl(root: Path) -> None:
         text = path.read_text()
         if "ttlSecondsAfterFinished" in text:
             continue
-        anchor = "\n  backoffLimit:"
-        pos = text.rfind(anchor)
-        if pos == -1:
+        # Anchor on the REAL Job.spec field: line-start + 2-space indent +
+        # `backoffLimit:` + a numeric value. A line-anchored numeric match can
+        # never hit a prose comment that merely mentions "backoffLimit" (e.g.
+        # the finalizer template's "K8s default backoffLimit of 6"), so the
+        # insertion point is deterministic rather than accidentally safe.
+        matches = list(re.finditer(r"^  backoffLimit: *\d+ *$", text, re.MULTILINE))
+        if not matches:
             raise RuntimeError(
-                f"{name}: no Job.spec 'backoffLimit' anchor for "
+                f"{name}: no Job.spec 'backoffLimit: <n>' anchor for "
                 "ttlSecondsAfterFinished insertion"
             )
-        insert_at = pos + 1  # after the newline, before the backoffLimit line
+        insert_at = matches[-1].start()  # the last (sole) real field
         path.write_text(text[:insert_at] + ttl_line + text[insert_at:])
 
 

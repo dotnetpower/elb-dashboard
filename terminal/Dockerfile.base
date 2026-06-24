@@ -70,12 +70,16 @@ COPY patch_elastic_blast.py /tmp/patch_elastic_blast.py
 COPY merge-sharded-results.sh /tmp/merge-sharded-results.sh
 ARG ELASTIC_BLAST_REPO=https://github.com/dotnetpower/elastic-blast-azure.git
 ARG ELASTIC_BLAST_REF=f4b8b734a82285a18a2ca9aadcbe02759d13f903
+# TTL (seconds) injected by patch_elastic_blast.py into the AKS batch + finalizer
+# Job templates so finished Jobs auto-GC. Override at build with
+# `--build-arg ELB_JOB_TTL_SECONDS=<seconds>`; default 1800 (30 min).
+ARG ELB_JOB_TTL_SECONDS=1800
 RUN git init /opt/elb/elastic-blast-azure \
     && cd /opt/elb/elastic-blast-azure \
     && git remote add origin "${ELASTIC_BLAST_REPO}" \
     && git fetch --depth 1 origin "${ELASTIC_BLAST_REF}" \
     && git checkout --detach FETCH_HEAD \
-    && python3.12 /tmp/patch_elastic_blast.py /opt/elb/elastic-blast-azure /tmp/merge-sharded-results.sh \
+    && ELB_JOB_TTL_SECONDS="${ELB_JOB_TTL_SECONDS}" python3.12 /tmp/patch_elastic_blast.py /opt/elb/elastic-blast-azure /tmp/merge-sharded-results.sh \
     && /opt/elb/venv/bin/pip install --no-cache-dir -r /opt/elb/elastic-blast-azure/requirements/base.txt packit glob2 \
     && /opt/elb/venv/bin/pip install --no-build-isolation --no-deps /opt/elb/elastic-blast-azure
 
