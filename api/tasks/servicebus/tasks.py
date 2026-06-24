@@ -277,10 +277,17 @@ def _result_files_for_event(
     bearer token instead. When the dashboard public URL cannot be resolved the
     metadata is still emitted but ``download_url`` is omitted so a subscriber can
     fall back to ``result_ref``.
+
+    Each entry also carries ``compressed`` (the stored file is gzip) and
+    ``media_type`` (its as-stored content type) so a consumer can pick a download
+    option without a HEAD request: fetch the stored bytes, append
+    ``?decompress=1`` to stream the plain file, or append ``?format=csv|tsv|json``
+    to have the gateway re-render the same hits (errors come back as a JSON body).
     """
     from api.services.blast.external_job_projection import _external_result_files
     from api.services.control_plane_url import resolve_control_plane_url
     from api.services.download_token import mint_download_token
+    from api.services.storage.blob_ids import result_media_type
 
     files = _external_result_files(job)
     if not files:
@@ -292,11 +299,19 @@ def _result_files_for_event(
         file_id = str(item.get("file_id") or "")
         if not file_id:
             continue
+        name = str(item.get("name") or file_id)
+        # Compression + media-type metadata lets a consumer decide download
+        # options up front (charter §9 keeps bytes flowing through the gateway):
+        # gzip results can be fetched as-is, decompressed via ``?decompress=1``,
+        # or re-rendered via ``?format=csv|tsv|json`` on the same download_url.
+        compressed = name.lower().endswith(".gz")
         entry: dict[str, Any] = {
             "file_id": file_id,
             "name": item.get("name"),
             "format": item.get("format"),
             "size": item.get("size"),
+            "compressed": compressed,
+            "media_type": result_media_type(name),
         }
         if base:
             url = (

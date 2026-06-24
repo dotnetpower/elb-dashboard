@@ -867,6 +867,12 @@ def test_result_files_for_event_builds_download_urls(
     assert first["name"] == "merged_results.out.gz"
     assert first["format"] == "blast_tabular"
     assert first["size"] == 12345
+    # Compression + media-type metadata lets a consumer pick a download option
+    # (as-is / ?decompress=1 / ?format=...) without a HEAD request.
+    assert first["compressed"] is True
+    assert first["media_type"] == "application/gzip"
+    assert files[1]["compressed"] is False
+    assert files[1]["media_type"] == "application/octet-stream"
     # download_url targets the dashboard's authenticated streaming gateway, NOT
     # a Storage SAS URL (charter §9).
     assert first["download_url"] == (

@@ -161,22 +161,36 @@ A body carrying `blast_options` instead of `options` is routed to the free-form
       "name": "batch_000-blastn-core_nt_shard_00.out.gz",
       "format": "blast_xml",
       "size": 744,
-      "download_url": "https://<dashboard-host>/api/v1/elastic-blast/jobs/{id}/files/result-001"
+      "compressed": true,
+      "media_type": "application/gzip",
+      "download_url": "https://<dashboard-host>/api/v1/elastic-blast/jobs/{id}/files/result-001?token=<signed>"
     }
   ],
   "request_id": "<optional pass-through>",
-  "error_code": "<optional, on failed>"
+  "error_code": "<optional, on failed>",
+  "error_message": "<optional human-readable reason, on failed>"
 }
 ```
 
 !!! note "download_url is a gateway URL, never a SAS"
     `result_files` is present only on a **succeeded** event. Each `download_url`
     points at the dashboard's authenticated file-streaming gateway
-    (`GET /api/v1/elastic-blast/jobs/{job_id}/files/{file_id}`). A consumer
-    downloads by calling it with a bearer token and the `api` sidecar streams
-    the bytes. It is **never** a Storage Shared Access Signature (SAS) URL or a
-    direct blob URL. Subscribers dedupe on the stable `event_id` because Service
-    Bus delivery is at-least-once.
+    (`GET /api/v1/elastic-blast/jobs/{job_id}/files/{file_id}`). A current
+    deployment **signs** the link with a scoped, expiring `?token=`, so a
+    consumer that received the event downloads **by URL alone — no bearer, no
+    401** (a bearer still works for legacy unsigned links). It is **never** a
+    Storage Shared Access Signature (SAS) URL or a direct blob URL. Subscribers
+    dedupe on the stable `event_id` because Service Bus delivery is
+    at-least-once.
+
+!!! tip "Per-file download options"
+    `compressed` (stored bytes are gzip) and `media_type` let a consumer choose
+    how to fetch the same result without a HEAD request. Append `&decompress=1`
+    to inflate a gzip result on the fly, or `&format=csv|tsv|json` to have the
+    gateway parse the hits and re-render them. A failed download returns a JSON
+    error body (`{"code", "message"}`), never a partial file; a **failed** job
+    event carries `error_message` (the human-readable reason) next to
+    `error_code`.
 
 ## Running the examples
 

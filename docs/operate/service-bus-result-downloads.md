@@ -20,6 +20,34 @@ account is `publicNetworkAccess: Disabled` and only the Container App can reach
 it over a private endpoint. The gateway therefore requires a bearer token for
 `aud=api://<API_CLIENT_ID>`.
 
+!!! tip "Signed links download without a bearer (no 401)"
+    A `download_url` minted by a current deployment is **signed** with a scoped,
+    expiring `?token=` (HMAC over `(job_id, file_id)`, derived from the shared
+    `EXEC_TOKEN` secret — never a SAS). A consumer that received the completion
+    event has already passed Service Bus auth, so it downloads **by URL alone,
+    with no bearer and no 401**. The bearer path below is only needed for a
+    **legacy unsigned** link (signing disabled, or an event published before the
+    feature shipped). Most consumers never hit the `AADSTS65001` symptom.
+
+## Download options (decompress / re-render)
+
+A consumer picks how to fetch *the same result* by appending a query parameter to
+`download_url` (the gateway streams through the `api` sidecar — still never a
+SAS):
+
+| Want | Append | Effect |
+| --- | --- | --- |
+| Stored bytes | _(nothing)_ | the file as stored (e.g. `merged_results.out.gz`) |
+| Uncompressed | `&decompress=1` | gzip inflated on the fly; `.gz` dropped from the filename |
+| Re-rendered | `&format=csv` \| `&format=tsv` \| `&format=json` | hits parsed (XML/tabular) and re-serialised |
+
+The `result_files[]` entries carry `compressed` and `media_type` so a consumer
+can decide up front. On a failure the gateway returns a **JSON error body**
+(`{"code", "message"}`) — e.g. `result_too_large` (over the transcode cap) or
+`result_unparseable` — never a partial file. The example
+[`consume.py`](https://github.com/dotnetpower/elb-dashboard/blob/main/example/servicebus/consume.py)
+exposes these as `--decompress` / `--format` and records any error body.
+
 ## Symptom: download returns 401 (`AADSTS65001`)
 
 The shipped example [`example/servicebus/consume.py`](https://github.com/dotnetpower/elb-dashboard/blob/main/example/servicebus/consume.py)

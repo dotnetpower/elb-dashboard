@@ -1314,6 +1314,153 @@ def test_external_blast_file_download_forwards(monkeypatch):
     assert response.headers["content-disposition"] == 'attachment; filename="blast_result.xml"'
 
 
+_DL_TABULAR = (
+    "# BLASTN 2.17.0+\n"
+    "# Fields: query id, subject id, % identity, alignment length, mismatches, "
+    "gap opens, q. start, q. end, s. start, s. end, evalue, bit score\n"
+    "q1\tNR_1\t99.5\t200\t1\t0\t1\t200\t1\t200\t1e-50\t370\n"
+)
+
+
+def _streamed_gzip_tabular(*_args, **_kwargs):
+    import gzip
+
+    from api.services import external_blast
+
+    blob = gzip.compress(_DL_TABULAR.encode("utf-8"))
+    return external_blast.StreamedFile(
+        chunks=iter([blob[: len(blob) // 2], blob[len(blob) // 2 :]]),
+        media_type="application/gzip",
+        filename="merged_results.out.gz",
+    )
+
+
+def test_download_decompress_gunzips_gzip_result(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "stream_file", _streamed_gzip_tabular)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/files/merged_results.out.gz",
+        params={"decompress": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == _DL_TABULAR.encode("utf-8")
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="merged_results.out"'
+    )
+
+
+def test_download_format_csv_transcodes_gzip_tabular(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    import csv
+    import io
+
+    from api.main import app
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "stream_file", _streamed_gzip_tabular)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/files/merged_results.out.gz",
+        params={"format": "csv"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="merged_results.csv"'
+    )
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert rows[0]["sseqid"] == "NR_1"
+
+
+def test_download_format_unparseable_returns_422_body(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    def _broken_xml(*_args, **_kwargs):
+        return external_blast.StreamedFile(
+            chunks=iter([b"<?xml version='1.0'?><BlastOutput><unterminated"]),
+            media_type="application/xml",
+            filename="broken.xml",
+        )
+
+    monkeypatch.setattr(external_blast, "stream_file", _broken_xml)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/files/broken.xml",
+        params={"format": "json"},
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "result_unparseable"
+    assert "parse" in body["message"]
+
+
+def test_download_format_too_large_returns_413_body(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+    from api.services.blast import result_transcode
+
+    monkeypatch.setattr(result_transcode, "TRANSCODE_MAX_BYTES", 16)
+
+    def _big_plain(*_args, **_kwargs):
+        return external_blast.StreamedFile(
+            chunks=iter([b"x" * 64]),
+            media_type="text/plain",
+            filename="big.out",
+        )
+
+    monkeypatch.setattr(external_blast, "stream_file", _big_plain)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/files/big.out",
+        params={"format": "json"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["code"] == "result_too_large"
+
+
+def test_download_signed_token_caller_can_use_format(monkeypatch):
+    """A Service Bus consumer (no bearer, signed ?token=) can still transcode."""
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    monkeypatch.setenv("EXEC_TOKEN", "dl-token-signing-key")
+    import csv
+    import io
+
+    from api.main import app
+    from api.services import external_blast
+    from api.services.download_token import mint_download_token
+
+    monkeypatch.setattr(external_blast, "stream_file", _streamed_gzip_tabular)
+    token = mint_download_token("aaaaaaaaaaaa", "merged_results.out.gz")
+    assert token
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/files/merged_results.out.gz",
+        params={"token": token, "format": "csv"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert rows[0]["sseqid"] == "NR_1"
+
+
 def test_canonical_jobs_list_merges_external_when_table_unconfigured(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)

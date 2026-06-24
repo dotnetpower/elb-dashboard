@@ -75,18 +75,42 @@ to BLAST as a `-searchsp` flag; a `-searchsp` already placed in
       "name": "merged_results.out.gz",
       "format": "blast_tabular",
       "size": 12345,
-      "download_url": "https://<dashboard-host>/api/v1/elastic-blast/jobs/{id}/files/merged_results.out.gz"
+      "compressed": true,
+      "media_type": "application/gzip",
+      "download_url": "https://<dashboard-host>/api/v1/elastic-blast/jobs/{id}/files/merged_results.out.gz?token=<signed>"
     }
   ],
   "request_id": "<optional pass-through>",
-  "error_code": "<optional, on failed>"
+  "error_code": "<optional, on failed>",
+  "error_message": "<optional human-readable reason, on failed>"
 }
 ```
 
 `result_files` is present only on a **succeeded** event. Each `download_url`
-points at the dashboard's authenticated file-streaming gateway — a consumer
-downloads by calling it with a **bearer token** (the `api` sidecar streams the
-bytes). It is **never** a Storage SAS URL or a direct blob URL (charter §9).
+points at the dashboard's authenticated file-streaming gateway and is **never** a
+Storage SAS URL or a direct blob URL (charter §9). A consumer that received the
+completion message has already passed Service Bus auth, so the link carries a
+scoped, signed `?token=` and **downloads without a bearer / 401** — the token
+authorises exactly that one `(job_id, file_id)`. (A bearer token still works and
+is the only option for legacy unsigned links.)
+
+**Per-file metadata + download options.** `compressed` (the stored bytes are
+gzip) and `media_type` (the as-stored content type) let a consumer choose how to
+fetch *the same result* — like picking a format on NCBI Web BLAST — without a
+HEAD request:
+
+| Want | Append to `download_url` | Result |
+| --- | --- | --- |
+| Stored bytes (default) | _(nothing)_ | e.g. `merged_results.out.gz` as-is |
+| Plain (uncompressed) | `&decompress=1` | gzip is inflated on the fly; `.gz` dropped from the filename |
+| Re-rendered format | `&format=csv` \| `&format=tsv` \| `&format=json` | the gateway parses the hits and re-renders them |
+
+Compression is a transport choice handled by the gateway — there is no separate
+“compressed vs uncompressed” file in `result_files`. On a failed download (parse
+error, too large, unreachable) the gateway returns a **JSON error body**
+(`{"code": ..., "message": ...}`), not an empty/partial file, so the consumer can
+log *why*. On a **failed** job event, `error_message` carries the human-readable
+reason in the message body alongside the machine-readable `error_code`.
 
 Subscribers dedupe on the stable `event_id` because Service Bus delivery is
 at-least-once.
@@ -151,22 +175,29 @@ SERVICEBUS_COMPLETION_KIND=queue \
   python consume.py --source completions --completion-kind queue --max 10
 
 # End-to-end: receive completion events and download result files via download_url.
-# Provide a bearer token for the dashboard (ELB_BEARER_TOKEN), or let the script
-# acquire one via `az account get-access-token` by setting ELB_API_CLIENT_ID:
-ELB_API_CLIENT_ID=<api-client-id> \
-  python consume.py --source completions --download --download-dir ./out
+# The completion download_url is signed (?token=), so downloads work with NO
+# bearer — receiving the event already proves auth. ELB_BEARER_TOKEN / a token
+# from ELB_API_CLIENT_ID is only needed for legacy unsigned links:
+python consume.py --source completions --download --download-dir ./out
+
+# Pick a download option (the gateway re-renders the SAME result, charter §9):
+python consume.py --source completions --download --decompress       # gunzip on the fly
+python consume.py --source completions --download --format csv        # tabular/XML -> CSV
+python consume.py --source completions --download --format json       # -> JSON hits
 ```
 
-> **`download_url` returns 401 / "download doesn't work"?** The completion
-> event's `result_files[].download_url` points at the dashboard's
-> *authenticated* streaming gateway (never a SAS URL). The `ELB_API_CLIENT_ID`
-> token path above only works when the API app registration has **pre-authorized
-> the Azure CLI public client** (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) for its
-> `user_impersonation` scope. `scripts/dev/setup-app-registration.sh` configures
-> this automatically. If it was not run (or the app was created another way),
-> `az account get-access-token --resource <api-client-id>` fails with
-> `AADSTS65001` (consent not granted) and the download returns 401. Fix it by
-> either re-running that script, having an admin add the pre-authorization, or
+> **`download_url` returns 401 / "download doesn't work"?** A completion
+> `download_url` minted by a current deployment is **signed** (`?token=`), so a
+> consumer that received the event downloads with **no bearer and no 401** — the
+> link self-authorises for exactly that `(job_id, file_id)`. You only hit the
+> bearer path for a **legacy unsigned** link (signing disabled, or an old event).
+> In that case the `ELB_API_CLIENT_ID` token path works only when the API app
+> registration has **pre-authorized the Azure CLI public client**
+> (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) for its `user_impersonation` scope.
+> `scripts/dev/setup-app-registration.sh` configures this automatically. If it
+> was not run, `az account get-access-token --resource <api-client-id>` fails
+> with `AADSTS65001` (consent not granted) and the download returns 401. Fix it
+> by re-running that script, having an admin add the pre-authorization, or
 > setting `ELB_BEARER_TOKEN` to a token acquired interactively.
 
 > `consume.py --source requests` with the default `--settle auto` **completes**

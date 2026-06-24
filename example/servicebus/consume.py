@@ -21,13 +21,16 @@ Service Bus integration. Pick one with ``--source``:
   topic and process transition events (``blast.transition``) an external
   observer would consume: ``{event, event_id, attempt, external_correlation_id,
   openapi_job_id, status, ts, result_ref, result_files?, request_id?,
-  error_code?}``. A ``succeeded`` event carries ``result_files`` — each with a
   error_code?, error_message?}``. A ``succeeded`` event carries ``result_files``
   — each with a ``download_url`` pointing at the dashboard's authenticated
-  streaming gateway. With ``--download`` the consumer calls each ``download_url``
-  and saves the result bytes locally (never a SAS URL; the ``api`` sidecar
-  streams the bytes). Subscribers DEDUPE on the stable ``event_id`` (sha256 of
-  corr:status) because Service Bus delivery is at-least-once.
+  streaming gateway plus ``compressed`` / ``media_type`` metadata. With
+  ``--download`` the consumer calls each ``download_url`` and saves the result
+  bytes locally (never a SAS URL; the ``api`` sidecar streams the bytes); add
+  ``--decompress`` to inflate a gzip result, or ``--format csv|tsv|json`` to have
+  the gateway re-render the same hits. A failed download records the gateway's
+  JSON error body, and a ``failed`` event surfaces ``error_message`` (the
+  human-readable reason). Subscribers DEDUPE on the stable ``event_id`` (sha256
+  of corr:status) because Service Bus delivery is at-least-once.
 
 Auth (Entra ``DefaultAzureCredential``): both roles need ``Azure Service Bus
 Data Receiver`` on the namespace. ``--download`` works WITHOUT a dashboard
@@ -165,6 +168,9 @@ def summarise_completion(event: dict[str, Any]) -> dict[str, Any]:
         "status": event.get("status"),
         "request_id": event.get("request_id"),
         "error_code": event.get("error_code"),
+        # A failed event carries a human-readable reason in the body so a
+        # subscriber sees WHY a job failed, not just THAT it failed.
+        "error_message": event.get("error_message"),
         "result_ref": event.get("result_ref"),
         "result_files": event.get("result_files"),
     }
@@ -249,13 +255,25 @@ def acquire_bearer_token() -> str:
 
 
 def download_result_files(
-    event: dict[str, Any], download_dir: str, token: str
+    event: dict[str, Any],
+    download_dir: str,
+    token: str,
+    *,
+    decompress: bool = False,
+    download_format: str = "",
 ) -> list[dict[str, Any]]:
     """Download every result file referenced by a succeeded event.
 
     Calls each ``download_url`` with the bearer token (the dashboard ``api``
     sidecar streams the bytes — never a SAS URL) and writes it under
     ``download_dir``. Returns a per-file result record.
+
+    Download options (the gateway re-renders the SAME result — charter §9):
+    ``decompress=True`` appends ``?decompress=1`` so a gzip result arrives plain;
+    ``download_format`` in ``{csv, tsv, json}`` appends ``?format=...`` so the
+    gateway parses + re-renders the hits. On any HTTP error the response body is
+    captured into ``record["error"]`` so the failure reason is visible, not just
+    the status code.
     """
     import urllib.error
     import urllib.request
@@ -263,8 +281,9 @@ def download_result_files(
     os.makedirs(download_dir, exist_ok=True)
     results: list[dict[str, Any]] = []
     for target in plan_downloads(event):
-        url = target["download_url"]
-        dest = os.path.join(download_dir, target["filename"])
+        url = _apply_download_options(target["download_url"], decompress, download_format)
+        filename = _adjust_filename(target["filename"], decompress, download_format)
+        dest = os.path.join(download_dir, filename)
         record: dict[str, Any] = {"url": url, "dest": dest}
         request = urllib.request.Request(url)  # noqa: S310 — https dashboard URL
         if token:
@@ -283,11 +302,48 @@ def download_result_files(
                 record["bytes"] = size
         except urllib.error.HTTPError as exc:
             record["status"] = f"http_{exc.code}"
+            # Surface the gateway's JSON error body (code/message) so the
+            # consumer sees WHY a download failed, not just the status.
+            try:
+                record["error"] = exc.read().decode("utf-8", "replace")[:1000]
+            except Exception:
+                record["error"] = ""
         except (urllib.error.URLError, OSError) as exc:
             record["status"] = f"error_{type(exc).__name__}"
         results.append(record)
         print(json.dumps({"download": record}, default=str))
     return results
+
+
+def _apply_download_options(url: str, decompress: bool, download_format: str) -> str:
+    """Append ``?decompress=1`` / ``?format=...`` to a download URL.
+
+    Preserves any existing query (the signed ``?token=`` link) by joining with
+    ``&``. Pure / offline.
+    """
+    params: list[str] = []
+    if decompress:
+        params.append("decompress=1")
+    if download_format:
+        params.append(f"format={download_format}")
+    if not params:
+        return url
+    sep = "&" if "?" in url else "?"
+    return url + sep + "&".join(params)
+
+
+def _adjust_filename(name: str, decompress: bool, download_format: str) -> str:
+    """Mirror the gateway's filename for a transformed download. Pure / offline."""
+    if download_format:
+        stem = name
+        for suffix in (".gz", ".out", ".xml", ".tsv", ".txt", ".csv", ".json"):
+            if stem.lower().endswith(suffix):
+                stem = stem[: -len(suffix)]
+        ext = "tsv" if download_format == "tsv" else download_format
+        return f"{stem or 'result'}.{ext}"
+    if decompress and name.lower().endswith(".gz"):
+        return name[:-3]
+    return name
 
 
 def consume_requests(max_messages: int, settle: str) -> dict[str, Any]:
@@ -392,7 +448,13 @@ def consume_completions(
 
 
 def consume_completions_and_download(
-    subscription: str, max_messages: int, download_dir: str, kind: str = COMPLETION_KIND
+    subscription: str,
+    max_messages: int,
+    download_dir: str,
+    kind: str = COMPLETION_KIND,
+    *,
+    decompress: bool = False,
+    download_format: str = "",
 ) -> dict[str, Any]:
     """Subscribe to the completion topic and download results on success.
 
@@ -449,7 +511,13 @@ def consume_completions_and_download(
                         stats["processed"] += 1
                         print(json.dumps({"event": summary}, default=str))
                         if summary.get("status") == "succeeded":
-                            downloaded = download_result_files(event, download_dir, token)
+                            downloaded = download_result_files(
+                                event,
+                                download_dir,
+                                token,
+                                decompress=decompress,
+                                download_format=download_format,
+                            )
                             stats["downloaded"] += sum(
                                 1 for d in downloaded if d.get("status") == "ok"
                             )
@@ -553,6 +621,24 @@ def _self_test() -> int:
     # An entry without a download_url is skipped (publisher could not resolve base).
     assert plan_downloads({"result_files": [{"file_id": "x"}]}) == []
 
+    # Download options append to the signed ?token= link and rename the output.
+    base_url = "https://h/api/v1/elastic-blast/jobs/job-abc/files/m.out.gz?token=t"
+    assert _apply_download_options(base_url, False, "") == base_url
+    assert _apply_download_options(base_url, True, "") == base_url + "&decompress=1"
+    assert _apply_download_options(base_url, False, "json") == base_url + "&format=json"
+    assert _apply_download_options("https://h/f", True, "") == "https://h/f?decompress=1"
+    assert _adjust_filename("m.out.gz", True, "") == "m.out"
+    assert _adjust_filename("m.out.gz", False, "csv") == "m.csv"
+    assert _adjust_filename("m.xml", False, "tsv") == "m.tsv"
+    assert _adjust_filename("m.out.gz", False, "") == "m.out.gz"
+
+    # A failed event surfaces the human-readable reason in the summary body.
+    failed = summarise_completion(
+        {"status": "failed", "error_code": "blast_search_failed", "error_message": "boom"}
+    )
+    assert failed["error_code"] == "blast_search_failed"
+    assert failed["error_message"] == "boom"
+
     print("self-test OK: request parse/route/settle + completion parse/dedupe + download plan")
     print(json.dumps({"request": summary, "v1": v1_summary, "completion": evt}, indent=2))
     return 0
@@ -613,6 +699,24 @@ def main() -> int:
         help="completions + --download: directory to write result files into.",
     )
     parser.add_argument(
+        "--decompress",
+        action="store_true",
+        help=(
+            "completions + --download: append ?decompress=1 so a gzip result is "
+            "streamed as plain bytes (the .gz suffix is dropped)."
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        dest="download_format",
+        choices=("csv", "tsv", "json"),
+        default="",
+        help=(
+            "completions + --download: append ?format=... so the gateway "
+            "re-renders the SAME result hits into csv/tsv/json."
+        ),
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="Validate parse/route/dedupe offline (no Azure).",
@@ -635,7 +739,12 @@ def main() -> int:
             if args.download:
                 print(f"download  : {args.download_dir}")
                 stats = consume_completions_and_download(
-                    args.subscription, args.max, args.download_dir, args.completion_kind
+                    args.subscription,
+                    args.max,
+                    args.download_dir,
+                    args.completion_kind,
+                    decompress=args.decompress,
+                    download_format=args.download_format,
                 )
             else:
                 stats = consume_completions(args.subscription, args.max, args.completion_kind)

@@ -17,7 +17,7 @@ import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from api.auth import CallerIdentity, require_caller, require_caller_or_download_token
@@ -728,13 +728,35 @@ def download_external_blast_file(
             "without a bearer token. Ignored when a bearer is supplied."
         ),
     ),
+    decompress: bool = Query(
+        default=False,
+        description=(
+            "When true and the stored result is gzip-compressed, the gateway "
+            "decompresses it on the fly and streams plain bytes (the ``.gz`` "
+            "suffix is dropped from the filename). No effect on an already-plain "
+            "file. Mutually independent from ``format``."
+        ),
+    ),
+    format: str = Query(
+        default="",
+        pattern=r"^(|csv|tsv|json)$",
+        description=(
+            "Optional re-render of the SAME result into ``csv`` / ``tsv`` / "
+            "``json`` (parsed from BLAST XML or tabular output). Omit for the "
+            "stored bytes. A parse failure or an oversized file returns a JSON "
+            "error body, never an empty/partial download."
+        ),
+    ),
     caller: CallerIdentity = _REQUIRE_CALLER_OR_DOWNLOAD_TOKEN,
-) -> StreamingResponse:
+) -> Response:
     LOGGER.info(
-        "external BLAST file requested caller_oid=%s job_id=%s file_id=%s",
+        "external BLAST file requested caller_oid=%s job_id=%s file_id=%s "
+        "decompress=%s format=%s",
         redact_oid(caller.object_id),
         job_id,
         file_id,
+        decompress,
+        format or "-",
     )
     del caller, token
     try:
@@ -758,8 +780,117 @@ def download_external_blast_file(
             downloaded = external_blast.stream_result_file_from_storage(job_id, file_id)
         else:
             raise
+
+    # Fast path: stored bytes, no transform. One streamed copy, never buffered.
+    if not decompress and not format:
+        return StreamingResponse(
+            downloaded.chunks,
+            media_type=downloaded.media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{downloaded.filename}"'
+            },
+        )
+    return _transform_download(downloaded, decompress=decompress, target_format=format)
+
+
+def _is_gzip_download(downloaded: external_blast.StreamedFile) -> bool:
+    """True when the stored result is gzip — by filename or upstream media type."""
+    from api.services.blast.result_transcode import is_gzip_name
+
+    return is_gzip_name(downloaded.filename) or downloaded.media_type == "application/gzip"
+
+
+def _buffer_streamed(downloaded: external_blast.StreamedFile, *, cap: int) -> bytes:
+    """Consume a streamed file into bytes, refusing payloads over ``cap``.
+
+    Closes the underlying response generator on overflow so the httpx stream
+    (and its connection) is released instead of leaking. Raises
+    ``HTTPException(413)`` with a JSON body the consumer can read.
+    """
+    buf = bytearray()
+    chunks = downloaded.chunks
+    for chunk in chunks:
+        buf += chunk
+        if len(buf) > cap:
+            close = getattr(chunks, "close", None)
+            if callable(close):
+                close()
+            raise HTTPException(
+                413,
+                detail={
+                    "code": "result_too_large",
+                    "message": (
+                        "result is too large to transform on the fly; download "
+                        "the stored file and convert it locally"
+                    ),
+                },
+            )
+    return bytes(buf)
+
+
+def _transform_download(
+    downloaded: external_blast.StreamedFile,
+    *,
+    decompress: bool,
+    target_format: str,
+) -> Response:
+    """Apply ``?decompress`` / ``?format`` to a streamed result file.
+
+    ``decompress`` alone stays streaming (memory-bounded gunzip). ``format``
+    buffers (size-capped) so it can parse + re-render, and surfaces any parse /
+    size failure as a JSON error body rather than a broken stream.
+    """
+    from api.services.blast.result_transcode import (
+        TRANSCODE_MAX_BYTES,
+        ResultParseError,
+        ResultTooLargeError,
+        ResultTranscodeError,
+        gunzip_bytes,
+        gunzip_stream,
+        result_media_type_for,
+        strip_gzip_suffix,
+        transcode_result_bytes,
+    )
+
+    is_gzip = _is_gzip_download(downloaded)
+
+    if target_format:
+        raw = _buffer_streamed(downloaded, cap=TRANSCODE_MAX_BYTES)
+        try:
+            if is_gzip:
+                raw = gunzip_bytes(raw)
+            body, media_type, filename = transcode_result_bytes(
+                raw,
+                source_filename=downloaded.filename,
+                target_format=target_format,
+            )
+        except ResultTooLargeError as exc:
+            raise HTTPException(
+                413, detail={"code": "result_too_large", "message": str(exc)}
+            ) from exc
+        except (ResultParseError, ResultTranscodeError) as exc:
+            raise HTTPException(
+                422, detail={"code": "result_unparseable", "message": str(exc)}
+            ) from exc
+        return Response(
+            content=body,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # decompress-only path.
+    if not is_gzip:
+        # Nothing to decompress — stream the stored bytes unchanged.
+        return StreamingResponse(
+            downloaded.chunks,
+            media_type=downloaded.media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{downloaded.filename}"'
+            },
+        )
+    filename = strip_gzip_suffix(downloaded.filename)
     return StreamingResponse(
-        downloaded.chunks,
-        media_type=downloaded.media_type,
-        headers={"Content-Disposition": f'attachment; filename="{downloaded.filename}"'},
+        gunzip_stream(downloaded.chunks),
+        media_type=result_media_type_for(filename),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
