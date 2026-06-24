@@ -207,7 +207,11 @@ test.describe("scenario:service-bus", () => {
 // --------------------------------------------------------------------------- //
 test.describe("scenario:api-blast", () => {
   test("external job list returns the public status vocabulary contract", async ({ request }) => {
-    const response = await getJson(request, "/api/v1/elastic-blast/jobs");
+    // Same external-discovery cost as /api/blast/jobs: this was measured at ~10s
+    // locally (right at the default action timeout), so give it the same budget
+    // to avoid a flaky timeout. The contract is reachability + sanitised degrade.
+    test.setTimeout(60_000);
+    const response = await getJson(request, "/api/v1/elastic-blast/jobs", 45_000);
     // When the OpenAPI plane is not configured (e.g. local dev without
     // ELB_OPENAPI_BASE_URL) this is a STRUCTURED 503 `openapi_not_configured`,
     // not a crash; in a wired environment it is a 200 job list.
@@ -241,7 +245,15 @@ test.describe("scenario:api-blast", () => {
 // --------------------------------------------------------------------------- //
 test.describe("scenario:queue-parallel", () => {
   test("jobs list merges local + external rows without 5xx", async ({ request }) => {
-    const response = await getJson(request, "/api/blast/jobs?limit=5");
+    // Locally there is no external ElasticBLAST cluster, so /api/blast/jobs runs
+    // a best-effort external discovery (subscription cluster list + per-cluster
+    // OpenAPI endpoint resolve) that is measured at ~20-25s on a dev box — far
+    // over the default 10s action timeout — before it degrades to the local-only
+    // Table list. Give it a generous budget; the contract under test is the
+    // SHAPE (healthy non-5xx / non-401 read), not latency. In a wired
+    // environment the discovery is cached and fast.
+    test.setTimeout(60_000);
+    const response = await getJson(request, "/api/blast/jobs?limit=5", 45_000);
     const text = await response.text();
     expectHealthyRead(response, text);
   });
