@@ -57,6 +57,31 @@ JSON.
 * **Contract** → all new summary fields optional/nullable; 256 backend + 11
   frontend tests green, no regressions.
 
+## Hardening (second pass — 10-point critique, 5 rounds)
+
+A follow-up design critique surfaced one **High** liveness defect and four
+robustness gaps; all five were fixed (commit after the feature commit):
+
+1. **(High) Sibling-stats cache defeated when the sibling lacks `db_version`.**
+   The live-fetch gate was `not db_version`, so a completed job whose sibling
+   reports no `db_version` (or whose cluster is Stopped, so `get_job` times out)
+   never filled the positive cache and re-paid the 10 s fetch on **every** detail
+   open. Fixed: gate the fetch on a cache **miss**, and write a short-lived
+   negative marker (`_attempted`, 5 min TTL) on an empty/raised fetch so the
+   re-fetch is bounded yet recovers quickly. Verified live: detail load 1 = 0.94 s
+   (fetch + cache), load 2 = 0.06 s (cache hit).
+2. **Query length over-counted.** Now counts only alphabetic residues — gaps
+   `-`, stops `*`, digits and interior whitespace are excluded.
+3. **Molecule mis-call on a tiny sequence.** A minimum-scan guard keeps a
+   <4-residue stub as `""` (unknown) rather than a confident wrong call.
+4. **BLAST command `-outfmt` could duplicate** when `extra` already carried one;
+   the preview now de-duplicates.
+5. **Tests** lock in the cache markers (positive vs negative TTL), the query-meta
+   length/min-scan edges, and the command de-dup.
+
+Drain ARM calls (cluster discovery + region) were confirmed already cached
+(60 s / 1 h, size-bounded), so a 500–1000-message drain burst cannot ARM-throttle.
+
 ## API / IaC diff summary
 
 * New: `api/services/blast/external_query_meta.py`,
