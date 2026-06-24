@@ -206,6 +206,10 @@ const FAILED_DETAIL = {
   updated_at: "2026-06-20T00:03:00Z",
   error_code:
     "BLAST database core_nt memory requirements exceed memory available on the selected machine type",
+  // BlastJobFailureBanner surfaces job.error (via getFailureText); an ERROR:
+  // prefix makes firstErrorLine pick it as the summary line.
+  error:
+    "ERROR: BLAST database core_nt memory requirements exceed memory available on the selected machine type",
   config_snapshot: {
     outfmt: "7 std staxids sscinames stitle qcovs",
     evalue: 0.01,
@@ -225,4 +229,12 @@ test("Run details renders a failed queue job with its captured parameters", asyn
   // A failed job still shows its captured parameters in the grid.
   await expect(grid.getByText("Output format", { exact: true })).toBeVisible();
   await expect(grid.getByText("E-value", { exact: true })).toBeVisible();
+
+  // The failure banner (a sibling of the grid) renders the header + the
+  // orchestrator error summary derived from job.error. The same error also
+  // appears in the execution-steps card, so scope to the first match (banner).
+  await expect(uiPage.getByText(/Job Failed at/)).toBeVisible();
+  await expect(
+    uiPage.getByText(/BLAST database core_nt memory requirements/).first(),
+  ).toBeVisible();
 });
