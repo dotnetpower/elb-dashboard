@@ -161,3 +161,68 @@ test("Run details shows 'not recorded' for a legacy queue job without captured p
   await expect(grid.getByText(/blastn .*-db core_nt/)).toBeVisible();
   await expect(grid.getByText(/-outfmt|-evalue/)).toHaveCount(0);
 });
+
+test("Run details raw-parameters panel expands to the captured config JSON", async ({
+  uiPage,
+}) => {
+  await stubDetail(uiPage, RICH_JOB_ID, RICH_DETAIL);
+  await uiPage.goto(`/blast/jobs/${RICH_JOB_ID}?tab=run`);
+
+  const grid = uiPage.getByTestId("blast-run-details-grid");
+  const summary = grid.getByText("Raw parameters", { exact: true });
+  await expect(summary).toBeVisible();
+
+  // The <pre> JSON is collapsed inside <details> until the summary is toggled.
+  const json = grid.locator("details > pre");
+  await expect(json).toBeHidden();
+  await summary.click();
+  await expect(json).toBeVisible();
+  await expect(json).toContainText('"outfmt"');
+  await expect(json).toContainText("32156241807668");
+});
+
+test("Run details Job ID copy button confirms the copy", async ({ uiPage }) => {
+  await stubDetail(uiPage, RICH_JOB_ID, RICH_DETAIL);
+  await uiPage.goto(`/blast/jobs/${RICH_JOB_ID}?tab=run`);
+
+  const grid = uiPage.getByTestId("blast-run-details-grid");
+  const copyBtn = grid.getByRole("button", { name: "Copy Job ID" });
+  await expect(copyBtn).toBeVisible();
+  await copyBtn.click();
+  // Copy success toggles the copy-btn--copied modifier (icon swaps to a check).
+  // navigator.clipboard.writeText is stubbed by the ui-mock fixture.
+  await expect(grid.locator("button.copy-btn--copied")).toBeVisible();
+});
+
+const FAILED_JOB_ID = "ext-meta-failed";
+const FAILED_DETAIL = {
+  job_id: FAILED_JOB_ID,
+  status: "failed",
+  phase: "failed",
+  submission_source: "servicebus",
+  program: "blastn",
+  db: "core_nt",
+  created_at: "2026-06-20T00:00:00Z",
+  updated_at: "2026-06-20T00:03:00Z",
+  error_code:
+    "BLAST database core_nt memory requirements exceed memory available on the selected machine type",
+  config_snapshot: {
+    outfmt: "7 std staxids sscinames stitle qcovs",
+    evalue: 0.01,
+    max_target_seqs: 50,
+  },
+  meta: {},
+};
+
+test("Run details renders a failed queue job with its captured parameters", async ({
+  uiPage,
+}) => {
+  await stubDetail(uiPage, FAILED_JOB_ID, FAILED_DETAIL);
+  await uiPage.goto(`/blast/jobs/${FAILED_JOB_ID}?tab=run`);
+
+  const grid = uiPage.getByTestId("blast-run-details-grid");
+  await expect(grid.getByText(FAILED_JOB_ID, { exact: true })).toBeVisible();
+  // A failed job still shows its captured parameters in the grid.
+  await expect(grid.getByText("Output format", { exact: true })).toBeVisible();
+  await expect(grid.getByText("E-value", { exact: true })).toBeVisible();
+});
