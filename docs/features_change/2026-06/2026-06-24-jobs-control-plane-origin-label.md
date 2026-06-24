@@ -56,11 +56,31 @@ plane — it cannot be forged by setting a message property.
   `api/tasks/servicebus/tasks.py` (stamp on drain),
   `api/services/blast/external_jobs.py` (`_stored_queue_origin` + relabel),
   `api/services/blast/external_job_projection.py` (surface on projection),
-  `api/services/blast/job_state.py` (`_resolve_local_queue_origin` + surface).
+  `api/services/blast/job_state.py` (`_resolve_local_queue_origin` + surface),
+  `api/services/state/job_state.py` (durable `queue_origin` column derived from
+  payload in `to_entity` so the payload-less list view surfaces it).
 * Frontend: `web/src/api/blast.types.ts` (`queue_origin?`),
   `web/src/pages/BlastJobs/jobSource.ts` (`jobSourceLabel` takes queue origin),
   `web/src/pages/BlastJobs/JobRow.tsx` (User column).
 * No IaC / Container App template change.
+
+## Deployment + live verification (customer environment)
+
+Deployed `api` + `frontend` to the customer Container App (revision `0000157`,
+RunningAtMaxScale, both new images), through the dashboard managed identity (the
+caller has no direct Service Bus RBAC):
+
+* A control-plane send (`POST /api/settings/service-bus/send`) created a
+  placeholder; `GET /api/blast/jobs` showed it with
+  `submission_source=servicebus` + **`queue_origin='control_plane'`** while
+  `queued`, and it **persisted as `control_plane` after the drain rejected it**
+  (status `failed`) → renders **"queue (dashboard)"**.
+* Pre-existing queue rows (drained before this deploy) carry `queue_origin=''`
+  → render plain **"queue"**, confirming the distinction.
+* The probe used a `db=/cp-label-probe` value the sibling rejects with 400, so
+  **no real BLAST ran**; its single DLQ entry was purged afterwards (the
+  customer's 3 pre-existing DLQ entries untouched). No Azure resource created,
+  no shared config repointed (charter §13).
 
 ## Validation evidence
 
