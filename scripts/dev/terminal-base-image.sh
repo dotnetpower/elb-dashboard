@@ -38,6 +38,9 @@ terminal_base_hash() {
     printf '\n-- KUBECTL_VERSION=%s\n' "${KUBECTL_VERSION:-v1.34.2}"
     printf '\n-- TTYD_VERSION=%s\n' "${TTYD_VERSION:-1.7.7}"
     printf '\n-- ELASTIC_BLAST_REF=%s\n' "${ELASTIC_BLAST_REF:-$_ELASTIC_BLAST_REF_DEFAULT}"
+    # Part of the base tag so an ELB_JOB_TTL_SECONDS override re-tags + rebuilds
+    # instead of silently reusing a cached base built with the old TTL.
+    printf '\n-- ELB_JOB_TTL_SECONDS=%s\n' "${ELB_JOB_TTL_SECONDS:-1800}"
   } | sha256sum | awk '{print substr($1, 1, 16)}'
 }
 
@@ -84,6 +87,7 @@ ensure_terminal_base_image() {
     --image "elb-terminal-base:latest" \
     --file "$REPO_ROOT/terminal/Dockerfile.base" \
     --build-arg "ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF:-$_ELASTIC_BLAST_REF_DEFAULT}" \
+    --build-arg "ELB_JOB_TTL_SECONDS=${ELB_JOB_TTL_SECONDS:-1800}" \
     "$REPO_ROOT/terminal" \
     --output none \
     > "$log" 2>&1

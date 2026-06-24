@@ -53,8 +53,11 @@ fix fails the terminal image build (no `elastic-blast` executable).
   unsubstituted and yield an invalid integer. Build-time override via
   `ELB_JOB_TTL_SECONDS` (digits, seconds; default 1800), wired as a build `ARG`
   in `terminal/Dockerfile` and `terminal/Dockerfile.base` and passed into the
-  patch step (the base toolchain hash includes `Dockerfile.base`, so the wiring
-  change re-tags the base image). Idempotent; raises on missing
+  patch step. `scripts/dev/terminal-base-image.sh` passes it as `--build-arg` to
+  the base build AND folds it into the base toolchain tag hash, so
+  `ELB_JOB_TTL_SECONDS=<n> quick-deploy.sh terminal --rebuild-terminal-base`
+  re-tags and rebuilds the base with the override instead of reusing a cached
+  base (verified: default tag != override tag). Idempotent; raises on missing
   missing `backoffLimit` anchor. The TTL governs GC only AFTER a terminal state,
   so the finalizer's `backoffLimit: 0` (not safely retryable) is preserved.
   Wired into `main()` after `patch_aks_workload_tolerations`.
