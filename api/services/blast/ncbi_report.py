@@ -222,11 +222,13 @@ def format_ncbi_hit_table(rows: Iterable[NcbiRow], *, delimiter: str = "\t") -> 
     import csv
     import io
 
+    from api.services.blast.csv_safety import csv_safe_cells
+
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=delimiter, lineterminator="\n")
     writer.writerow(NCBI_HIT_TABLE_COLUMNS)
     for row in rows:
-        writer.writerow(row.as_cells())
+        writer.writerow(csv_safe_cells(row.as_cells()))
     return buf.getvalue()
 
 

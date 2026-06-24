@@ -129,6 +129,21 @@ def test_transcode_tabular_to_tsv_uses_tab() -> None:
     assert "\t" in body.decode("utf-8").splitlines()[0]
 
 
+def test_transcode_csv_neutralises_formula_injection() -> None:
+    """A subject id starting with a formula trigger is escaped in CSV output."""
+    tabular = (
+        "# Fields: query id, subject id, % identity, alignment length, mismatches, "
+        "gap opens, q. start, q. end, s. start, s. end, evalue, bit score\n"
+        "q1\t=cmd|'/c calc'!A1\t99.5\t200\t1\t0\t1\t200\t1\t200\t1e-50\t370\n"
+    )
+    body, _media, _name = rt.transcode_result_bytes(
+        tabular.encode("utf-8"), source_filename="m.out", target_format="csv"
+    )
+    text = body.decode("utf-8")
+    assert "'=cmd" in text  # neutralised with a leading apostrophe
+    assert "\n=cmd" not in text  # never starts a cell with the bare formula
+
+
 def test_transcode_to_json_returns_hits() -> None:
     body, media_type, filename = rt.transcode_result_bytes(
         _TABULAR.encode("utf-8"),

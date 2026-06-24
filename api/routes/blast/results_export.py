@@ -208,6 +208,8 @@ def _stream_delimited_export(
     import csv
     import io
 
+    from api.services.blast.csv_safety import csv_safe_row
+
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=columns, delimiter=delimiter, extrasaction="ignore")
     writer.writeheader()
@@ -215,7 +217,7 @@ def _stream_delimited_export(
     buf.seek(0)
     buf.truncate(0)
     for hit in all_hits:
-        writer.writerow(hit)
+        writer.writerow(csv_safe_row(hit))
         yield buf.getvalue().encode("utf-8")
         buf.seek(0)
         buf.truncate(0)
