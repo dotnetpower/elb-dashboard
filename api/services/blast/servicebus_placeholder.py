@@ -110,6 +110,33 @@ def create_queued_placeholder(
         return False
 
 
+def placeholder_exists(correlation_id: str) -> bool:
+    """True when a send-time placeholder row exists for this correlation id.
+
+    The control-plane send route (``POST /api/settings/service-bus/send``) writes
+    this placeholder AT SEND TIME; an external producer that enqueues straight to
+    the Service Bus namespace cannot write to the dashboard's jobstate table, so
+    the presence of a placeholder is a spoof-resistant signal that the request
+    came through the control plane. Best-effort: any read failure returns
+    ``False`` (treated as "not control plane") so a transient Table blip never
+    mislabels a job. A soft-deleted (superseded) placeholder still counts — it
+    proves the row was created by the send route at some point.
+    """
+    cid = str(correlation_id or "").strip()
+    if not cid:
+        return False
+    try:
+        from api.services.state_repo import get_state_repo
+
+        existing = get_state_repo().get(cid)
+        if existing is None:
+            return False
+        payload = getattr(existing, "payload", None)
+        return bool(isinstance(payload, dict) and payload.get("placeholder"))
+    except Exception:  # pragma: no cover - best-effort, never raises into drain
+        return False
+
+
 def supersede_placeholder(correlation_id: str) -> None:
     """Soft-delete the placeholder once the real drained row exists.
 

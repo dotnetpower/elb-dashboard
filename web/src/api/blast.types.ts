@@ -241,6 +241,13 @@ export interface BlastJobSummary {
    * the payload) still shows the true origin of a queue-drained job.
    */
   submission_source?: string;
+  /**
+   * Queue origin for a Service Bus job: "control_plane" (the dashboard send
+   * route enqueued it) | "external" (an external producer enqueued straight to
+   * the namespace) | "" (not a queue job / older row). Drives the
+   * "queue (dashboard)" vs "queue" label in the User column.
+   */
+  queue_origin?: string;
   /** Legacy two-value origin: "dashboard" | "external_api". */
   source?: string;
   /**

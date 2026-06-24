@@ -648,6 +648,30 @@ def _resolve_local_submission_source(
     return "external_api" if is_external_origin else "dashboard"
 
 
+def _resolve_local_queue_origin(payload: dict[str, Any]) -> str:
+    """Resolve queue_origin (``control_plane`` | ``external`` | "") for a local row.
+
+    A send-time placeholder row is written ONLY by the control-plane send route,
+    so a row carrying ``payload.placeholder`` is control-plane even before the
+    drain stamps the durable value. Otherwise prefer the nested
+    ``payload.external.queue_origin`` (drained shared rows) then the payload top
+    level. Empty string for rows with no queue origin (UI/API submits).
+    """
+    if not isinstance(payload, dict):
+        return ""
+    external = payload.get("external")
+    if isinstance(external, dict):
+        nested = str(external.get("queue_origin") or "").strip()
+        if nested:
+            return nested
+    top = str(payload.get("queue_origin") or "").strip()
+    if top:
+        return top
+    if payload.get("placeholder"):
+        return "control_plane"
+    return ""
+
+
 def _resolve_external_correlation_id(payload: dict[str, Any] | None) -> str:
     """Service Bus / external correlation id from a job payload (external first)."""
     if not isinstance(payload, dict):
@@ -727,6 +751,7 @@ def _local_to_blast_job(
     _row_submission_source = _resolve_local_submission_source(
         payload, is_external_origin, column=getattr(state, "submission_source", None)
     )
+    _row_queue_origin = _resolve_local_queue_origin(payload)
     _row_correlation_id = (
         str(getattr(state, "external_correlation_id", "") or "")
         or _resolve_external_correlation_id(payload)
@@ -752,6 +777,7 @@ def _local_to_blast_job(
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
         "source": "dashboard" if _row_submission_source == "dashboard" else "external_api",
         "submission_source": _row_submission_source,
+        "queue_origin": _row_queue_origin,
         "external_correlation_id": _row_correlation_id or None,
         "owner_upn": getattr(state, "owner_upn", None) or None,
     }

@@ -1099,6 +1099,16 @@ def _persist_drain_row_and_trace(
         return
     try:
         from api.services.blast.external_jobs import _sync_external_jobs_to_table
+        from api.services.blast.servicebus_placeholder import placeholder_exists
+
+        # control_plane = the dashboard send route wrote a send-time placeholder
+        # for this correlation id (an external producer that enqueues straight to
+        # the namespace cannot). external = no placeholder => the request entered
+        # the queue from outside the control plane. Surfaced on the job row so the
+        # UI can label "queue (dashboard)" vs "queue". The check runs BEFORE
+        # ``_supersede_placeholder`` (called by the drain handler after this), so
+        # the placeholder is still present here.
+        queue_origin = "control_plane" if placeholder_exists(correlation_id) else "external"
 
         ext_row = {
             "job_id": openapi_job_id,
@@ -1107,6 +1117,7 @@ def _persist_drain_row_and_trace(
             "db": payload.get("db"),
             "created_at": received_ts,
             "submission_source": "servicebus",
+            "queue_origin": queue_origin,
             "external_correlation_id": correlation_id,
             "cluster_name": getattr(cfg, "cluster_name", "") or "",
         }

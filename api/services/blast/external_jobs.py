@@ -348,6 +348,26 @@ def _stored_submission_source(state: Any) -> str:
     return str(payload.get("submission_source") or "").strip()
 
 
+def _stored_queue_origin(state: Any) -> str:
+    """Return the dashboard-recorded ``queue_origin`` on a stored job row.
+
+    Mirrors :func:`_stored_submission_source`: the drain stamps
+    ``queue_origin`` (``"control_plane"`` | ``"external"``) onto
+    ``payload.external``; the sibling ``/v1/jobs`` snapshot cannot report it, so
+    this recovers the durable value to relabel the freshly-projected row. Returns
+    ``""`` when the row carries no marker (older rows, or a non-queue origin).
+    """
+    payload = getattr(state, "payload", None)
+    if not isinstance(payload, dict):
+        return ""
+    external = payload.get("external")
+    if isinstance(external, dict):
+        nested = str(external.get("queue_origin") or "").strip()
+        if nested:
+            return nested
+    return str(payload.get("queue_origin") or "").strip()
+
+
 def _sync_external_jobs_to_table(
     external_jobs: list[dict[str, Any]],
     *,
@@ -426,6 +446,11 @@ def _sync_external_jobs_to_table(
             _stored_src = _stored_submission_source(_existing_for_source)
             if _stored_src and _stored_src != str(ext.get("submission_source") or ""):
                 ext["submission_source"] = _stored_src
+            # Recover the queue origin (control_plane | external) the same way:
+            # the sibling row cannot report it, the stored row preserves it.
+            _stored_qo = _stored_queue_origin(_existing_for_source)
+            if _stored_qo and _stored_qo != str(ext.get("queue_origin") or ""):
+                ext["queue_origin"] = _stored_qo
         try:
             # Inline-FASTA API submits carry no query identity from the sibling.
             # Inject the defline label remembered at submit time BEFORE projecting

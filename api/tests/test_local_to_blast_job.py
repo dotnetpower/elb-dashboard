@@ -151,6 +151,32 @@ def test_local_to_blast_job_submission_source_defaults_to_dashboard():
     assert out["submission_source"] == "dashboard"
 
 
+def test_local_to_blast_job_queue_origin_control_plane_from_placeholder():
+    # A send-time placeholder row is written only by the control-plane send
+    # route, so it surfaces queue_origin=control_plane even before the drain.
+    out = _local_to_blast_job(
+        _state(payload={"submission_source": "servicebus", "placeholder": True})
+    )
+    assert out["queue_origin"] == "control_plane"
+
+
+def test_local_to_blast_job_queue_origin_external_from_drained_row():
+    # A queue-drained shared row stamps queue_origin on payload.external.
+    out = _local_to_blast_job(
+        _state(
+            payload={
+                "external": {"submission_source": "servicebus", "queue_origin": "external"}
+            }
+        )
+    )
+    assert out["queue_origin"] == "external"
+
+
+def test_local_to_blast_job_queue_origin_empty_for_non_queue():
+    out = _local_to_blast_job(_state(payload={}))
+    assert out["queue_origin"] == ""
+
+
 
 def test_local_to_blast_job_can_include_database_metadata(monkeypatch):
     def fake_database_metadata(database: str, storage_account: str):

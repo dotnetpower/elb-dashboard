@@ -44,7 +44,17 @@ describe("jobSubmissionSource", () => {
 
   it("labels servicebus as queue", () => {
     expect(jobSourceLabel("servicebus")).toBe("queue");
-    expect(jobSourceLabel("api")).toBe("api");
+    expect(jobSourceLabel("api")).toBe("api (dashboard)");
     expect(jobSourceLabel("ui")).toBe("ui");
+  });
+
+  it("distinguishes control-plane queue sends from external ones", () => {
+    expect(jobSourceLabel("servicebus", "control_plane")).toBe("queue (dashboard)");
+    expect(jobSourceLabel("servicebus", "external")).toBe("queue");
+    expect(jobSourceLabel("servicebus", "")).toBe("queue");
+    expect(jobSourceLabel("servicebus", undefined)).toBe("queue");
+    // queue_origin never upgrades a non-queue source.
+    expect(jobSourceLabel("api", "control_plane")).toBe("api (dashboard)");
+    expect(jobSourceLabel("ui", "control_plane")).toBe("ui");
   });
 });

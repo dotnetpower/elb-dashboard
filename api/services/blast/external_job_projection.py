@@ -564,6 +564,7 @@ def _external_to_blast_job(
         "updated_at": updated_at,
         "source": source,
         "submission_source": source,
+        "queue_origin": str(job.get("queue_origin") or ""),
         "external_correlation_id": job.get("external_correlation_id") or "",
         "query_label": metadata["query_label"] or "query.fa",
         "owner_upn": "api",

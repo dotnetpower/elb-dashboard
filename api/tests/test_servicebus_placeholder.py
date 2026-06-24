@@ -129,6 +129,23 @@ def test_create_placeholder_blank_correlation_id_is_noop() -> None:
     assert ph.create_queued_placeholder(correlation_id="", program="blastn", db="d") is False
 
 
+def test_placeholder_exists_true_after_create() -> None:
+    ph.create_queued_placeholder(correlation_id="corr-exist", program="blastn", db="d")
+    assert ph.placeholder_exists("corr-exist") is True
+
+
+def test_placeholder_exists_false_for_unknown() -> None:
+    assert ph.placeholder_exists("never-sent") is False
+    assert ph.placeholder_exists("") is False
+
+
+def test_placeholder_exists_true_after_supersede() -> None:
+    # A soft-deleted (superseded) placeholder still proves control-plane origin.
+    ph.create_queued_placeholder(correlation_id="corr-sup", program="blastn", db="d")
+    ph.supersede_placeholder("corr-sup")
+    assert ph.placeholder_exists("corr-sup") is True
+
+
 def test_supersede_soft_deletes_placeholder() -> None:
     ph.create_queued_placeholder(correlation_id="corr-4", program="blastn", db="core_nt")
     ph.supersede_placeholder("corr-4")

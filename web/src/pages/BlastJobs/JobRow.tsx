@@ -13,7 +13,7 @@ import { summariseNote } from "@/components/cards/ClusterPulse/helpers";
 import { queueReasonText, statusColor } from "@/constants";
 
 import { timeAgo } from "./dateGroup";
-import { jobSubmissionSource } from "./jobSource";
+import { jobSourceLabel, jobSubmissionSource } from "./jobSource";
 
 export interface JobRowProps {
   job: BlastJobSummary;
@@ -74,8 +74,15 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
   // filter always agree on the same truth.
   const source = jobSubmissionSource(job);
   const isApiSubmit = source === "api";
+  // servicebus / api rows show the source label (with the control-plane
+  // distinction: "queue (dashboard)" vs "queue", and "api (dashboard)"); ui
+  // rows show the submitter's upn local-part.
   const shortUser =
-    source === "servicebus" ? "queue" : isApiSubmit ? "api" : upn ? upn.split("@")[0] : null;
+    source === "servicebus" || isApiSubmit
+      ? jobSourceLabel(source, job.queue_origin)
+      : upn
+        ? upn.split("@")[0]
+        : null;
   const splitChildren = job.split_children;
   const splitLabel = splitChildren ? `${splitChildren.child_count} child jobs` : null;
   // A failed job's `note` carries the raw (often multi-line, 700+ char) BLAST
