@@ -648,15 +648,20 @@ def _resolve_local_submission_source(
     return "external_api" if is_external_origin else "dashboard"
 
 
-def _resolve_local_queue_origin(payload: dict[str, Any]) -> str:
+def _resolve_local_queue_origin(payload: dict[str, Any], *, column: str | None = None) -> str:
     """Resolve queue_origin (``control_plane`` | ``external`` | "") for a local row.
 
-    A send-time placeholder row is written ONLY by the control-plane send route,
-    so a row carrying ``payload.placeholder`` is control-plane even before the
-    drain stamps the durable value. Otherwise prefer the nested
+    Prefers the durable ``queue_origin`` column (populated for queue rows so the
+    list view, which reads columns only with ``include_payload=False``, surfaces
+    the origin). A send-time placeholder row is written ONLY by the control-plane
+    send route, so a row carrying ``payload.placeholder`` is control-plane even
+    before the drain stamps the durable value. Otherwise prefer the nested
     ``payload.external.queue_origin`` (drained shared rows) then the payload top
     level. Empty string for rows with no queue origin (UI/API submits).
     """
+    col = str(column or "").strip()
+    if col:
+        return col
     if not isinstance(payload, dict):
         return ""
     external = payload.get("external")
@@ -751,7 +756,9 @@ def _local_to_blast_job(
     _row_submission_source = _resolve_local_submission_source(
         payload, is_external_origin, column=getattr(state, "submission_source", None)
     )
-    _row_queue_origin = _resolve_local_queue_origin(payload)
+    _row_queue_origin = _resolve_local_queue_origin(
+        payload, column=getattr(state, "queue_origin", None)
+    )
     _row_correlation_id = (
         str(getattr(state, "external_correlation_id", "") or "")
         or _resolve_external_correlation_id(payload)

@@ -48,6 +48,7 @@ _JOBSTATE_SUMMARY_SELECT = [
     "storage_account",
     "external_correlation_id",
     "submission_source",
+    "queue_origin",
 ]
 
 
@@ -88,6 +89,29 @@ def _resolve_payload_submission_source(payload: dict[str, Any] | None) -> str:
         if nested:
             return nested
     return str(payload.get("submission_source") or "").strip()
+
+
+def _resolve_payload_queue_origin(payload: dict[str, Any] | None) -> str:
+    """Extract queue_origin (control_plane | external | "") from a job payload.
+
+    A send-time placeholder row implies ``control_plane`` (only the control-plane
+    send route writes one). Otherwise prefer the nested
+    ``payload.external.queue_origin`` (queue-drained rows) then the top level.
+    Returns "" when absent so the column is left empty for non-queue rows.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    external = payload.get("external")
+    if isinstance(external, dict):
+        nested = str(external.get("queue_origin") or "").strip()
+        if nested:
+            return nested
+    top = str(payload.get("queue_origin") or "").strip()
+    if top:
+        return top
+    if payload.get("placeholder"):
+        return "control_plane"
+    return ""
 
 
 def _basename(value: Any) -> str:
@@ -170,6 +194,11 @@ class JobState:
     # and let an operator trace a request from the Service Bus queue to its job.
     external_correlation_id: str | None = None
     submission_source: str | None = None
+    # Queue origin for a Service Bus job: "control_plane" (dashboard send route)
+    # | "external" (external producer enqueued straight to the namespace) |
+    # None. Persisted as a durable column (derived from payload in ``to_entity``)
+    # so the list view (``include_payload=False``) can label "queue (dashboard)".
+    queue_origin: str | None = None
     # JSON array of ``{file_id, blob_path}`` for an external job's result files,
     # captured at the succeeded transition (cluster up) so the download route
     # can stream the result straight from Storage when the elb-openapi proxy is
@@ -221,6 +250,8 @@ class JobState:
             or _resolve_external_correlation_id(self.payload),
             "submission_source": self.submission_source
             or _resolve_payload_submission_source(self.payload),
+            "queue_origin": self.queue_origin
+            or _resolve_payload_queue_origin(self.payload),
             "result_manifest": self.result_manifest or "",
             # Persist the canonical results prefix on every row so readers can
             # resolve it without reconstructing ``{job_id}/``. Defaults to the
@@ -274,6 +305,7 @@ class JobState:
             storage_account=e.get("storage_account") or canonical["storage_account"],
             external_correlation_id=e.get("external_correlation_id") or None,
             submission_source=e.get("submission_source") or None,
+            queue_origin=e.get("queue_origin") or None,
             result_manifest=e.get("result_manifest") or None,
             results_prefix=e.get("results_prefix") or None,
         )
