@@ -573,6 +573,12 @@ def _external_to_blast_job(
         "run_seconds": job.get("run_seconds"),
         "queue_wait_seconds": job.get("queue_wait_seconds"),
         "elapsed_seconds": job.get("elapsed_seconds"),
+        "query_length": (job.get("query_meta") or {}).get("length")
+        if isinstance(job.get("query_meta"), dict)
+        else None,
+        "molecule": (job.get("query_meta") or {}).get("molecule")
+        if isinstance(job.get("query_meta"), dict)
+        else None,
         "external_correlation_id": job.get("external_correlation_id") or "",
         "query_label": metadata["query_label"] or "query.fa",
         "owner_upn": "api",

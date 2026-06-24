@@ -494,6 +494,19 @@ def _sync_external_jobs_to_table(
                     )
                     if _stored_region:
                         ext["region"] = _stored_region
+            # Recover the query identity (length + molecule) the drain captured
+            # from the submitted FASTA so the detail shows it without a blob read.
+            if not isinstance(ext.get("query_meta"), dict) or not ext.get("query_meta"):
+                _payload = getattr(_existing_for_source, "payload", None)
+                if isinstance(_payload, dict):
+                    _ext_payload = _payload.get("external")
+                    _stored_qm = (
+                        _ext_payload.get("query_meta")
+                        if isinstance(_ext_payload, dict)
+                        else None
+                    )
+                    if isinstance(_stored_qm, dict) and _stored_qm:
+                        ext["query_meta"] = _stored_qm
         # Direct API submits create no durable row at submit time, so fall back
         # to the ephemeral remember store keyed by the openapi job id.
         if not isinstance(ext.get("config_snapshot"), dict) or not ext.get("config_snapshot"):

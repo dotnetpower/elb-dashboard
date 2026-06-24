@@ -772,6 +772,19 @@ def _local_to_blast_job(
         _ext_cfg = _external_snapshot.get("config_snapshot")
         if isinstance(_ext_cfg, dict) and _ext_cfg:
             _row_config_snapshot = _ext_cfg
+    # Query identity (length + molecule) captured by the drain on
+    # ``payload.external.query_meta`` for an external-origin stored row.
+    _row_query_length: int | None = None
+    _row_molecule: str | None = None
+    if isinstance(_external_snapshot, dict):
+        _ext_qm = _external_snapshot.get("query_meta")
+        if isinstance(_ext_qm, dict):
+            _qm_len = _ext_qm.get("length")
+            if isinstance(_qm_len, int):
+                _row_query_length = _qm_len
+            _qm_mol = str(_ext_qm.get("molecule") or "").strip()
+            if _qm_mol:
+                _row_molecule = _qm_mol
     # Region: external-origin rows do not store it; resolve from the cluster
     # (1h cached, best-effort) so the detail shows it instead of "—".
     if is_external_origin and not str(infrastructure.get("region") or "").strip():
@@ -805,6 +818,8 @@ def _local_to_blast_job(
         "error": response_error,
         "payload": payload,
         "config_snapshot": _row_config_snapshot,
+        "query_length": _row_query_length,
+        "molecule": _row_molecule,
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
         "source": "dashboard" if _row_submission_source == "dashboard" else "external_api",
         "submission_source": _row_submission_source,

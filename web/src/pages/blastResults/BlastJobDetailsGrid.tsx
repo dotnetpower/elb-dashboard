@@ -5,6 +5,7 @@ import { ElapsedTimer } from "@/components/BlastFilePreview";
 import { phaseLabel, queueReasonText } from "@/constants";
 import type { BlastJobSummary } from "@/api/endpoints";
 import {
+  buildBlastCommandPreview,
   formatOutfmt,
   formatRunSeconds,
   isExternalJob,
@@ -37,6 +38,7 @@ function BlastJobDetailsGridComponent({
 }: BlastJobDetailsGridProps) {
   const config = job.config_snapshot as Record<string, unknown> | undefined;
   const infra = job.infrastructure as Record<string, unknown> | undefined;
+  const command = buildBlastCommandPreview(job.program, job.db, config ?? null);
   // When the job is waiting in line, explain why beneath the status label so
   // the details view matches the job list's QUEUED secondary line.
   const queueReason =
@@ -179,6 +181,20 @@ function BlastJobDetailsGridComponent({
           )}
         </>
       )}
+      {job.query_length != null && (
+        <>
+          <span className="muted">Query length</span>
+          <span>{`${Number(job.query_length).toLocaleString()} ${
+            job.molecule === "protein" ? "aa" : "nt"
+          }`}</span>
+        </>
+      )}
+      {job.molecule && (
+        <>
+          <span className="muted">Molecule</span>
+          <span>{String(job.molecule)}</span>
+        </>
+      )}
       {infra && (
         <>
           <span className="muted">Cluster</span>
@@ -192,6 +208,43 @@ function BlastJobDetailsGridComponent({
           <span className="muted">Storage</span>
           <span>{String(infra.storage_account ?? "—")}</span>
         </>
+      )}
+      {command && (
+        <div style={{ gridColumn: "1 / -1", marginTop: 4 }}>
+          <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
+            BLAST command
+          </div>
+          <code
+            style={{
+              display: "block",
+              fontSize: 11,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              padding: "6px 8px",
+              borderRadius: 6,
+              background: "var(--surface-2, rgba(255,255,255,0.04))",
+            }}
+          >
+            {command}
+          </code>
+        </div>
+      )}
+      {config && (
+        <details style={{ gridColumn: "1 / -1", marginTop: 2 }}>
+          <summary className="muted" style={{ fontSize: 11, cursor: "pointer" }}>
+            Raw parameters
+          </summary>
+          <pre
+            style={{
+              fontSize: 11,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              marginTop: 4,
+            }}
+          >
+            {JSON.stringify(config, null, 2)}
+          </pre>
+        </details>
       )}
     </div>
   );

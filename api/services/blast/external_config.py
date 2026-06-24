@@ -213,3 +213,61 @@ def recall_config_snapshot(job_id: str) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+# --- remember a completed external job's sibling stats (detail enrichment) ---
+
+_STATS_KEY_PREFIX = "elb:extstats:"
+_STATS_TTL_SECONDS = 7 * 24 * 3600
+
+
+def remember_sibling_stats(job_id: str, stats: dict[str, Any] | None) -> None:
+    """Best-effort: cache a completed external job's sibling stats in OPS Redis.
+
+    The detail view fetches ``db_version`` / ``blast_version`` / ``run_seconds``
+    from the live sibling for a completed external job that has none stored.
+    Caching the result bounds that fetch to once per TTL (so a stopped-cluster
+    job's detail does not re-pay a 10 s timeout on every open). Never raises.
+    """
+    if not job_id or not isinstance(stats, dict) or not stats:
+        return
+    try:
+        blob = json.dumps(stats, default=str)
+        if len(blob) > _REMEMBER_MAX_BYTES:
+            return
+        from api.services.redis_clients import get_ops_redis_client
+
+        get_ops_redis_client().set(
+            _STATS_KEY_PREFIX + job_id, blob, ex=_STATS_TTL_SECONDS
+        )
+    except Exception as exc:  # pragma: no cover - best-effort, Redis optional
+        LOGGER.debug(
+            "remember_sibling_stats skipped job_id=%s: %s", job_id, type(exc).__name__
+        )
+
+
+def recall_sibling_stats(job_id: str) -> dict[str, Any]:
+    """Best-effort: return the cached sibling stats for ``job_id`` (``{}`` if none)."""
+    if not job_id:
+        return {}
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        value = get_ops_redis_client().get(_STATS_KEY_PREFIX + job_id)
+    except Exception as exc:  # pragma: no cover - best-effort, Redis optional
+        LOGGER.debug(
+            "recall_sibling_stats skipped job_id=%s: %s", job_id, type(exc).__name__
+        )
+        return {}
+    if value is None:
+        return {}
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}

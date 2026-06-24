@@ -746,6 +746,71 @@ def blast_job_get(
                             job_id,
                             type(exc).__name__,
                         )
+            # Task 1: merge live sibling stats (db_version / blast_version /
+            # run_seconds) for a COMPLETED external job whose stored row predates
+            # capture — the sibling /v1/jobs record carries them but the
+            # dashboard row does not. One best-effort call on the detail view
+            # (never the list); gated to terminal-success so it never
+            # double-fetches a failed job (whose error path already fetched it)
+            # and only when the stats are actually missing.
+            if (
+                str(out.get("submission_source") or "")
+                in ("servicebus", "external_api")
+                and str(out.get("status") or "").lower() in ("completed", "succeeded")
+                and not out.get("db_version")
+            ):
+                from api.services.blast.external_config import (
+                    recall_sibling_stats,
+                    remember_sibling_stats,
+                )
+
+                _stat_keys = (
+                    "db_version",
+                    "blast_version",
+                    "run_seconds",
+                    "queue_wait_seconds",
+                    "elapsed_seconds",
+                )
+                # Hardening: serve from the OPS-Redis cache first so a stopped-
+                # cluster job's detail does not re-pay a 10 s sibling timeout on
+                # every open. Only fetch live on a cache miss.
+                _cached = recall_sibling_stats(job_id)
+                if _cached:
+                    for _k in _stat_keys:
+                        if out.get(_k) in (None, "") and _cached.get(_k) not in (None, ""):
+                            out[_k] = _cached.get(_k)
+                if not out.get("db_version"):
+                    try:
+                        from api.services import external_blast
+
+                        _openapi_id = str(out.get("openapi_job_id") or "") or job_id
+                        _sib = external_blast.get_job(
+                            _openapi_id,
+                            **{
+                                k: v
+                                for k, v in {
+                                    "subscription_id": subscription_id,
+                                    "resource_group": resource_group,
+                                    "cluster_name": cluster_name,
+                                }.items()
+                                if v
+                            },
+                        )
+                        if isinstance(_sib, dict):
+                            _fetched: dict[str, Any] = {}
+                            for _k in _stat_keys:
+                                if _sib.get(_k) not in (None, ""):
+                                    _fetched[_k] = _sib.get(_k)
+                                    if out.get(_k) in (None, ""):
+                                        out[_k] = _sib.get(_k)
+                            if _fetched:
+                                remember_sibling_stats(job_id, _fetched)
+                    except Exception as exc:
+                        LOGGER.debug(
+                            "sibling stats merge skipped job_id=%s: %s",
+                            job_id,
+                            type(exc).__name__,
+                        )
             if history:
                 hist = repo.get_history(job_id, limit=200)
                 out["history"] = hist

@@ -269,6 +269,13 @@ export interface BlastJobSummary {
   queue_wait_seconds?: number | null;
   elapsed_seconds?: number | null;
   /**
+   * Query identity captured from the submitted FASTA for queue/API jobs (the
+   * sibling never echoes them back): total residue length and molecule type
+   * ("nucleotide" | "protein"). Surfaced on the Run-details view.
+   */
+  query_length?: number | null;
+  molecule?: string | null;
+  /**
    * True when the server could not refresh this active row's live state
    * because its AKS cluster is stopped/missing. The status/phase shown is the
    * last-known value and is frozen until the cluster restarts. See

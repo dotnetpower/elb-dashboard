@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildBlastCommandPreview,
   formatOutfmt,
   formatRunSeconds,
   isExternalJob,
@@ -73,5 +74,29 @@ describe("isExternalJob", () => {
     expect(isExternalJob("external_api")).toBe(true);
     expect(isExternalJob("dashboard")).toBe(false);
     expect(isExternalJob(undefined)).toBe(false);
+  });
+});
+
+describe("buildBlastCommandPreview", () => {
+  it("builds a command from the captured options", () => {
+    const cmd = buildBlastCommandPreview("blastn", "core_nt", {
+      additional_options: '-outfmt "7 std staxids"',
+      evalue: 0.01,
+      word_size: 28,
+      max_target_seqs: 50,
+      taxid: 3431483,
+      is_inclusive: false,
+    });
+    expect(cmd).toContain("blastn");
+    expect(cmd).toContain("-db core_nt");
+    expect(cmd).toContain('-outfmt "7 std staxids"');
+    expect(cmd).toContain("-evalue 0.01");
+    expect(cmd).toContain("-word_size 28");
+    expect(cmd).toContain("-max_target_seqs 50");
+    expect(cmd).toContain("-negative_taxids 3431483");
+  });
+  it("returns empty when there is nothing to render", () => {
+    expect(buildBlastCommandPreview("", "core_nt", {})).toBe("");
+    expect(buildBlastCommandPreview("blastn", "", null)).toBe("");
   });
 });

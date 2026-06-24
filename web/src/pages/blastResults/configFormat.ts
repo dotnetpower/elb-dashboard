@@ -55,3 +55,40 @@ export function formatRunSeconds(value: unknown): string {
 export function isExternalJob(submissionSource: string | undefined): boolean {
   return !!submissionSource && submissionSource !== "dashboard";
 }
+
+/**
+ * A compact, copy-friendly BLAST command preview built from the captured
+ * options — the most compact way to show every parameter at once. Returns "" when
+ * there is nothing to render (no program / db / options).
+ */
+export function buildBlastCommandPreview(
+  program: string | undefined,
+  db: string | undefined,
+  config: Config,
+): string {
+  const prog = String(program || "").trim();
+  if (!prog) return "";
+  const parts: string[] = [prog];
+  const dbName = String(db || "").trim();
+  if (dbName) parts.push(`-db ${dbName}`);
+  if (config) {
+    const outfmt = formatOutfmt(config);
+    if (outfmt && outfmt !== "—") parts.push(`-outfmt "${outfmt}"`);
+    const flag = (key: string, name: string) => {
+      const v = config[key];
+      if (v != null && v !== "") parts.push(`-${name} ${String(v)}`);
+    };
+    flag("evalue", "evalue");
+    flag("word_size", "word_size");
+    flag("max_target_seqs", "max_target_seqs");
+    flag("perc_identity", "perc_identity");
+    const tax = taxonomyFilterLabel(config);
+    if (tax) {
+      const m = tax.match(/^(include|exclude) taxid (.+)$/);
+      if (m) parts.push(`-${m[1] === "exclude" ? "negative_taxids" : "taxids"} ${m[2]}`);
+    }
+    const extra = String(config.extra ?? "").trim();
+    if (extra) parts.push(extra);
+  }
+  return parts.length > 1 ? parts.join(" ") : "";
+}

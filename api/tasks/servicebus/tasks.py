@@ -523,6 +523,44 @@ def _openapi_kwargs(cfg: ServiceBusConfig) -> dict[str, str]:
         return {}
 
 
+def _resolve_drain_cluster_context(cfg: ServiceBusConfig) -> tuple[str, str, str]:
+    """Resolve ``(subscription_id, resource_group, cluster_name)`` for a drained job.
+
+    The SB config routing is often blank (the integration falls back to the
+    runtime cache to find the OpenAPI endpoint), which left the durable job row
+    with no cluster scope, so the detail showed "Region —" until the periodic
+    scope-backfill poll ran. Prefer the explicit SB config routing; otherwise
+    discover the single ElasticBLAST cluster in the dashboard's subscription
+    (cached ARM call, shared with the jobs-list discovery). Returns blanks for
+    the ambiguous (multi-cluster) / unresolvable case so the existing
+    scope-backfill still fills it later — never raises.
+    """
+    sub = str(getattr(cfg, "subscription_id", "") or "").strip()
+    rg = str(getattr(cfg, "resource_group", "") or "").strip()
+    cluster = str(getattr(cfg, "cluster_name", "") or "").strip()
+    if sub and rg and cluster:
+        return (sub, rg, cluster)
+    if not sub:
+        import os
+
+        sub = str(os.environ.get("AZURE_SUBSCRIPTION_ID", "") or "").strip()
+    if not sub:
+        return (sub, rg, cluster)
+    try:
+        from api.services.blast.external_jobs import _discover_subscription_clusters
+
+        pairs = _discover_subscription_clusters(sub)
+        # Only stamp when the subscription has exactly ONE running ElasticBLAST
+        # cluster — otherwise we cannot know which one this job ran on, so leave
+        # it for the scope-backfill (which uses the per-target poll context).
+        if len(pairs) == 1:
+            _rg, _cluster = pairs[0]
+            return (sub, rg or _rg, cluster or _cluster)
+    except Exception:
+        LOGGER.debug("drain cluster context discovery failed", exc_info=True)
+    return (sub, rg, cluster)
+
+
 def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[str, Any] | None:
     """Map a queue message body to a validated OpenAPI submit payload.
 
@@ -1121,6 +1159,11 @@ def _persist_drain_row_and_trace(
             _submitted_options if isinstance(_submitted_options, dict) else {}
         )
 
+        # Resolve the cluster context (sub/rg/cluster) so region + cluster-scoped
+        # analytics populate immediately on the durable row instead of waiting
+        # for the scope-backfill poll. Blanks fall through to that backfill.
+        _sub, _rg, _cluster = _resolve_drain_cluster_context(cfg)
+
         ext_row = {
             "job_id": openapi_job_id,
             "status": _STATUS_QUEUED,
@@ -1130,22 +1173,32 @@ def _persist_drain_row_and_trace(
             "submission_source": "servicebus",
             "queue_origin": queue_origin,
             "external_correlation_id": correlation_id,
-            "cluster_name": getattr(cfg, "cluster_name", "") or "",
+            "cluster_name": _cluster,
         }
+        if _sub:
+            ext_row["subscription_id"] = _sub
+        if _rg:
+            ext_row["resource_group"] = _rg
         if config_snapshot:
             ext_row["config_snapshot"] = config_snapshot
-        # Hardening round 5: resolve + stamp the region durably in the worker so
-        # the jobs-list projection reads it from the row instead of making an
-        # ARM call on the request hot path. Best-effort (cached): an unresolved
-        # region just leaves the projection to try once later.
+        # Capture the query identity (length + molecule) from the submitted FASTA
+        # so the detail header shows them instead of "—" without an extra blob
+        # read. Best-effort and durable on the row.
+        try:
+            from api.services.blast.external_query_meta import query_meta_from_fasta
+
+            _query_meta = query_meta_from_fasta(payload.get("query_fasta"))
+            if _query_meta:
+                ext_row["query_meta"] = _query_meta
+        except Exception:
+            LOGGER.debug("drain query meta capture skipped corr=%s", correlation_id, exc_info=True)
+        # Resolve + stamp the region durably in the worker so the jobs-list
+        # projection reads it from the row instead of making an ARM call on the
+        # request hot path. Best-effort (cached).
         try:
             from api.services.blast.external_config import resolve_cluster_region
 
-            _region = resolve_cluster_region(
-                getattr(cfg, "subscription_id", "") or "",
-                getattr(cfg, "resource_group", "") or "",
-                getattr(cfg, "cluster_name", "") or "",
-            )
+            _region = resolve_cluster_region(_sub, _rg, _cluster)
             if _region:
                 ext_row["region"] = _region
         except Exception:
