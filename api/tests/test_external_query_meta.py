@@ -38,3 +38,18 @@ def test_empty_and_invalid_inputs() -> None:
 def test_whitespace_in_sequence_is_stripped() -> None:
     meta = query_meta_from_fasta(">q\nACG TAC GT")
     assert meta["length"] == 8
+
+
+def test_length_counts_only_alpha_residues() -> None:
+    # Gaps, stop markers and digits must not inflate the query length.
+    meta = query_meta_from_fasta(">q\nACGT--ACGT*\nACGT123")
+    assert meta["length"] == 12
+    assert meta["molecule"] == "nucleotide"
+
+
+def test_short_sequence_below_min_scan_has_no_molecule() -> None:
+    # A 1-2 residue stub is too short to classify confidently -> molecule absent,
+    # but the length is still reported.
+    meta = query_meta_from_fasta(">q\nAC")
+    assert meta["length"] == 2
+    assert "molecule" not in meta

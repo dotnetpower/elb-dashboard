@@ -219,6 +219,20 @@ def recall_config_snapshot(job_id: str) -> dict[str, Any]:
 
 _STATS_KEY_PREFIX = "elb:extstats:"
 _STATS_TTL_SECONDS = 7 * 24 * 3600
+# Hardening: a short-lived "fetch attempted, nothing usable" marker. A completed
+# external job whose sibling reports no ``db_version`` (or whose cluster is
+# Stopped, so ``get_job`` raises after a 10 s timeout) would otherwise re-pay the
+# live fetch on EVERY detail open — the positive cache never fills, so a
+# db_version-keyed gate would loop forever. Caching a negative marker bounds the
+# re-fetch to once per this TTL, while staying short enough that a transient
+# AKS/RBAC blip recovers within minutes (the sibling stats of a completed job are
+# terminal, so a slightly stale negative is harmless).
+_STATS_NEGATIVE_TTL_SECONDS = 300.0
+# Sentinel key inside the cached dict that marks a negative (no-usable-stats)
+# attempt. The stat-key fill loop ignores it; ``recall_sibling_stats`` returning
+# a dict containing only this key still counts as a cache HIT so the caller skips
+# the live fetch.
+_STATS_ATTEMPT_MARKER = "_attempted"
 
 
 def remember_sibling_stats(job_id: str, stats: dict[str, Any] | None) -> None:
@@ -243,6 +257,32 @@ def remember_sibling_stats(job_id: str, stats: dict[str, Any] | None) -> None:
     except Exception as exc:  # pragma: no cover - best-effort, Redis optional
         LOGGER.debug(
             "remember_sibling_stats skipped job_id=%s: %s", job_id, type(exc).__name__
+        )
+
+
+def remember_sibling_stats_miss(job_id: str) -> None:
+    """Best-effort: cache a short-lived "no usable sibling stats" marker.
+
+    Written when the live sibling fetch returned nothing usable OR raised (e.g.
+    a Stopped cluster's 10 s timeout). Bounds the live re-fetch to once per
+    ``_STATS_NEGATIVE_TTL_SECONDS`` so the detail view stops re-paying the
+    timeout on every open, yet recovers after the short TTL. Never raises.
+    """
+    if not job_id:
+        return
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        get_ops_redis_client().set(
+            _STATS_KEY_PREFIX + job_id,
+            json.dumps({_STATS_ATTEMPT_MARKER: int(time.time())}),
+            ex=int(_STATS_NEGATIVE_TTL_SECONDS),
+        )
+    except Exception as exc:  # pragma: no cover - best-effort, Redis optional
+        LOGGER.debug(
+            "remember_sibling_stats_miss skipped job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
         )
 
 

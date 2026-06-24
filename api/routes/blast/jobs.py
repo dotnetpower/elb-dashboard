@@ -762,6 +762,7 @@ def blast_job_get(
                 from api.services.blast.external_config import (
                     recall_sibling_stats,
                     remember_sibling_stats,
+                    remember_sibling_stats_miss,
                 )
 
                 _stat_keys = (
@@ -771,15 +772,19 @@ def blast_job_get(
                     "queue_wait_seconds",
                     "elapsed_seconds",
                 )
-                # Hardening: serve from the OPS-Redis cache first so a stopped-
-                # cluster job's detail does not re-pay a 10 s sibling timeout on
-                # every open. Only fetch live on a cache miss.
+                # Hardening: gate the live fetch on a cache MISS, not on
+                # db_version presence. A completed sibling that reports no
+                # db_version (or a Stopped cluster whose get_job times out) would
+                # otherwise never fill the positive cache, so a db_version-keyed
+                # gate re-paid the 10 s timeout on every open. Any cache hit
+                # (positive stats OR the short-lived negative marker) means we
+                # already attempted within the TTL -> fill what we have and skip.
                 _cached = recall_sibling_stats(job_id)
                 if _cached:
                     for _k in _stat_keys:
                         if out.get(_k) in (None, "") and _cached.get(_k) not in (None, ""):
                             out[_k] = _cached.get(_k)
-                if not out.get("db_version"):
+                else:
                     try:
                         from api.services import external_blast
 
@@ -796,16 +801,24 @@ def blast_job_get(
                                 if v
                             },
                         )
+                        _fetched: dict[str, Any] = {}
                         if isinstance(_sib, dict):
-                            _fetched: dict[str, Any] = {}
                             for _k in _stat_keys:
                                 if _sib.get(_k) not in (None, ""):
                                     _fetched[_k] = _sib.get(_k)
                                     if out.get(_k) in (None, ""):
                                         out[_k] = _sib.get(_k)
-                            if _fetched:
-                                remember_sibling_stats(job_id, _fetched)
+                        if _fetched:
+                            remember_sibling_stats(job_id, _fetched)
+                        else:
+                            # Sibling reachable but reported nothing usable ->
+                            # bound the re-fetch with the short negative marker.
+                            remember_sibling_stats_miss(job_id)
                     except Exception as exc:
+                        # Unreachable sibling (e.g. Stopped cluster 10 s timeout)
+                        # -> cache the negative marker so the next opens within
+                        # the short TTL do not re-pay the timeout.
+                        remember_sibling_stats_miss(job_id)
                         LOGGER.debug(
                             "sibling stats merge skipped job_id=%s: %s",
                             job_id,

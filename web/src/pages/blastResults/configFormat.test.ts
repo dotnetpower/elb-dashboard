@@ -99,4 +99,12 @@ describe("buildBlastCommandPreview", () => {
     expect(buildBlastCommandPreview("", "core_nt", {})).toBe("");
     expect(buildBlastCommandPreview("blastn", "", null)).toBe("");
   });
+  it("does not duplicate -outfmt when extra already carries one", () => {
+    const cmd = buildBlastCommandPreview("blastn", "core_nt", {
+      additional_options: '-outfmt "7 std staxids"',
+      extra: '-outfmt "6 qseqid sseqid"',
+    });
+    expect(cmd.match(/-outfmt/g)?.length).toBe(1);
+    expect(cmd).toContain('-outfmt "6 qseqid sseqid"');
+  });
 });

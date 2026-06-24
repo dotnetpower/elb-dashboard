@@ -178,3 +178,61 @@ def test_remember_skips_empty_and_oversized(monkeypatch: pytest.MonkeyPatch) -> 
     ec.remember_config_snapshot("job", {})
     ec.remember_config_snapshot("job", {"x": "y" * 5000})  # over the cap
     assert fake.store == {}
+
+
+class _TtlRedis:
+    """Fake OPS Redis that records the ``ex`` (TTL) passed to ``set``."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+        self.ttl: dict[str, int | None] = {}
+
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.store[key] = value
+        self.ttl[key] = ex
+
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
+
+def test_sibling_stats_remember_and_recall(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _TtlRedis()
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client", lambda: fake, raising=False
+    )
+    ec.remember_sibling_stats("job-9", {"db_version": "2026-06-06", "run_seconds": 95})
+    assert ec.recall_sibling_stats("job-9") == {
+        "db_version": "2026-06-06",
+        "run_seconds": 95,
+    }
+    # Positive stats use the long TTL.
+    assert fake.ttl[ec._STATS_KEY_PREFIX + "job-9"] == ec._STATS_TTL_SECONDS
+
+
+def test_sibling_stats_miss_marker_is_short_lived(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _TtlRedis()
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client", lambda: fake, raising=False
+    )
+    ec.remember_sibling_stats_miss("job-miss")
+    # The negative marker counts as a cache HIT (truthy) so the caller skips the
+    # live re-fetch, and it carries the short negative TTL so it recovers soon.
+    cached = ec.recall_sibling_stats("job-miss")
+    assert cached and ec._STATS_ATTEMPT_MARKER in cached
+    assert fake.ttl[ec._STATS_KEY_PREFIX + "job-miss"] == int(
+        ec._STATS_NEGATIVE_TTL_SECONDS
+    )
+    assert ec._STATS_NEGATIVE_TTL_SECONDS < ec._STATS_TTL_SECONDS
+
+
+def test_sibling_stats_recall_missing_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _TtlRedis()
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client", lambda: fake, raising=False
+    )
+    assert ec.recall_sibling_stats("nope") == {}
+    assert ec.recall_sibling_stats("") == {}

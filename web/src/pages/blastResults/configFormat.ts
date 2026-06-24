@@ -72,8 +72,12 @@ export function buildBlastCommandPreview(
   const dbName = String(db || "").trim();
   if (dbName) parts.push(`-db ${dbName}`);
   if (config) {
+    // Hardening: if the free-form extra already carries an -outfmt, don't emit a
+    // second one (the spec from additional_options would otherwise duplicate it).
+    const extra = String(config.extra ?? "").trim();
+    const extraHasOutfmt = /-outfmt\b/.test(extra);
     const outfmt = formatOutfmt(config);
-    if (outfmt && outfmt !== "—") parts.push(`-outfmt "${outfmt}"`);
+    if (!extraHasOutfmt && outfmt && outfmt !== "—") parts.push(`-outfmt "${outfmt}"`);
     const flag = (key: string, name: string) => {
       const v = config[key];
       if (v != null && v !== "") parts.push(`-${name} ${String(v)}`);
@@ -87,7 +91,6 @@ export function buildBlastCommandPreview(
       const m = tax.match(/^(include|exclude) taxid (.+)$/);
       if (m) parts.push(`-${m[1] === "exclude" ? "negative_taxids" : "taxids"} ${m[2]}`);
     }
-    const extra = String(config.extra ?? "").trim();
     if (extra) parts.push(extra);
   }
   return parts.length > 1 ? parts.join(" ") : "";

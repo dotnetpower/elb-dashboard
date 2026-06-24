@@ -23,15 +23,22 @@ from typing import Any
 _NUCLEOTIDE_LETTERS = frozenset("ACGTUNRYSWKMBDHV")
 _NUCLEOTIDE_FRACTION = 0.9
 _MAX_SCAN_CHARS = 2_000_000  # cap the molecule-heuristic scan on a huge FASTA
+# Hardening round 3: require a minimum number of scanned residues before
+# committing to a molecule call, so a degenerate / near-empty sequence (e.g. a
+# 1-2 residue stub or a line of gaps) stays "" (unknown) instead of a confident
+# wrong guess.
+_MIN_SCAN_FOR_MOLECULE = 4
 
 
 def query_meta_from_fasta(query_fasta: Any) -> dict[str, Any]:
     """Return ``{length, molecule, records}`` derived from inline FASTA text.
 
-    ``length`` is the total residue count across all records (excluding headers
-    and whitespace), ``records`` the number of ``>`` headers, and ``molecule`` is
-    ``"nucleotide"`` / ``"protein"`` / ``""`` (unknown). Returns ``{}`` for
-    empty / non-string input so the caller stamps nothing.
+    ``length`` is the total residue count across all records (counting only
+    alphabetic residues — gaps ``-``, stops ``*``, digits and whitespace are
+    excluded so the figure matches BLAST's notion of query length), ``records``
+    the number of ``>`` headers, and ``molecule`` is ``"nucleotide"`` /
+    ``"protein"`` / ``""`` (unknown). Returns ``{}`` for empty / non-string
+    input so the caller stamps nothing.
     """
     if not isinstance(query_fasta, str) or not query_fasta.strip():
         return {}
@@ -46,20 +53,20 @@ def query_meta_from_fasta(query_fasta: Any) -> dict[str, Any]:
         if line.startswith(">"):
             records += 1
             continue
-        seq = line.replace(" ", "")
-        total_len += len(seq)
-        if scanned < _MAX_SCAN_CHARS:
-            for ch in seq.upper():
-                if ch.isalpha():
-                    scanned += 1
-                    if ch in _NUCLEOTIDE_LETTERS:
-                        nucleotide_hits += 1
-                    if scanned >= _MAX_SCAN_CHARS:
-                        break
+        for ch in line:
+            # Count only alphabetic residues toward the query length; this skips
+            # interior spaces, alignment gaps, stop markers and digits.
+            if not ch.isalpha():
+                continue
+            total_len += 1
+            if scanned < _MAX_SCAN_CHARS:
+                scanned += 1
+                if ch.upper() in _NUCLEOTIDE_LETTERS:
+                    nucleotide_hits += 1
     if total_len == 0:
         return {}
     molecule = ""
-    if scanned > 0:
+    if scanned >= _MIN_SCAN_FOR_MOLECULE:
         molecule = (
             "nucleotide"
             if nucleotide_hits / scanned >= _NUCLEOTIDE_FRACTION
