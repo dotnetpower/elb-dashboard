@@ -182,13 +182,23 @@ The scenarios below close the integration / live / UI gaps.
 
 ### UI (Run details tab)
 
+> Automated in `scripts/e2e/scenarios/blast-run-details.ui.spec.ts` (ui-mock
+> lane, part of `e2e:all-safe`). The detail API is fully stubbed; the spec opens
+> the job detail URL directly (bypassing the responsive "More" nav grouping) and
+> scopes every assertion to the `blast-run-details-grid` test id so the
+> Database-metadata card cannot trip strict mode. Stub jobs use a non-terminal
+> phase on purpose — BlastResults auto-switches a COMPLETED job off the Run
+> details tab to Descriptions, which would unmount the grid mid-assertion.
+
 12. Metadata rows render: open a queue/API job's Run details tab and assert the
     Output format, E-value, Max targets, Word size, Dust, Taxonomy filter,
     Machine, Nodes, BLAST/DB version, Run time, Query length, and Molecule rows
     appear, with the "not recorded for this job" hint on a legacy job.
 13. Command + raw panel: assert the full-span **BLAST command** code block is
     copy-friendly and the collapsible **Raw parameters** `<details>` panel shows
-    the `config_snapshot` JSON.
+    the `config_snapshot` JSON. (Note: the command preview renders the bare
+    `blastn -db <db>` from program + db even when no options were captured; only
+    the Raw parameters panel is absent for a legacy job.)
 
 ## Evidence To Capture
 

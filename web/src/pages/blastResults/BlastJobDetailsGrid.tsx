@@ -64,7 +64,7 @@ function BlastJobDetailsGridComponent({
   );
 
   return (
-    <div style={gridStyle}>
+    <div style={gridStyle} data-testid="blast-run-details-grid">
       <span className="muted">Job ID</span>
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <code className="code-val">{job.job_id}</code>
