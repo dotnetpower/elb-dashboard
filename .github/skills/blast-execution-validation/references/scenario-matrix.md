@@ -99,6 +99,97 @@ When the lifecycle smoke passes with time remaining, use the remaining budget in
 4. Jobs page: active job chip, status transitions, events, queue state, external OpenAPI jobs, deletion/cancel mocked mutations.
 5. Failure display: 401, 403, 409/503 cluster-not-ready, 422 validation, 429 rate limit, upstream 5xx, and degraded monitoring states.
 
+## Job Detail Metadata & Cache Scenarios
+
+Background: a queue (Service Bus) or external-API job is submitted to the sibling
+`/v1/jobs`, which does NOT echo back the BLAST options (outfmt, evalue, …), the
+AKS region, or the query identity. The dashboard therefore captures them itself
+at drain time (durable stamp on the JobState row), merges live sibling execution
+stats on the detail view, and caches both in OPS Redis. These scenarios validate
+the completeness, accuracy, and resilience of that enrichment. They exercise the
+detail route `GET /api/blast/jobs/{job_id}` and the Run details UI tab
+(`BlastJobDetailsGrid`), not the submit/queue paths above.
+
+Unit coverage already exists for the pure pieces (`test_external_query_meta.py`,
+`test_external_config.py`, `test_blast_jobs_routes.py`, `configFormat.test.ts`).
+The scenarios below close the integration / live / UI gaps.
+
+### Local-safe (mocked / integration)
+
+1. Config-snapshot projection round-trip:
+   - Seed a JobState row with `payload.external.config_snapshot` (outfmt, evalue,
+     word_size, taxid + is_inclusive, extra).
+   - `GET /api/blast/jobs/{job_id}` and assert the response `config_snapshot`
+     mirrors every captured key; assert a row WITHOUT a snapshot returns
+     `config_snapshot: null` (UI shows "—"), never a fabricated default.
+2. Query-identity accuracy (drive `query_meta_from_fasta` through the drain path):
+   - Nucleotide 16S fragment → `query_length` equals the residue count and
+     `molecule="nucleotide"`.
+   - Protein query → `molecule="protein"`.
+   - Length counts only alphabetic residues: a FASTA with gaps `-`, stops `*`,
+     digits, and interior spaces must not inflate `query_length`.
+   - A <4-residue stub → `query_length` present but `molecule` absent (min-scan
+     guard), never a confident wrong call.
+3. Sibling-stats cache markers:
+   - Cold detail load on a completed external job missing `db_version` → one
+     live `get_job`, positive stats cached with the 7-day TTL.
+   - Warm load → served from cache, NO second `get_job`.
+   - Sibling reachable but reports no `db_version` (or `get_job` raises) → a
+     short-lived negative marker (5-min TTL) is written so the next loads within
+     the TTL do NOT re-fetch; assert the negative TTL < positive TTL.
+4. BLAST command preview:
+   - Build the command from a captured snapshot and assert the flags
+     (`-db`, `-outfmt`, `-evalue`, `-word_size`, `-max_target_seqs`,
+     `-negative_taxids/-taxids`, trailing `extra`).
+   - De-dup guard: when `extra` already carries a `-outfmt`, the preview must
+     contain exactly one `-outfmt`.
+
+### Live-submit
+
+5. Region immediacy on drain (single-cluster subscription):
+   - Enqueue one small job; after the ~30 s drain, `GET /api/blast/jobs/{job_id}`
+     and assert `infrastructure.region` is populated immediately (no wait for the
+     periodic scope-backfill poll).
+6. Sibling-stats merge on a completed external job (cache effect):
+   - Open the detail of a completed queue/API job whose stored row lacks
+     `db_version`. First load fills `db_version` / `blast_version` / `run_seconds`
+     from the sibling; record the wall time. Second load returns the same values
+     materially faster (cache hit). Capture both `time_total` values as evidence.
+7. Query identity on a real submit:
+   - Submit the 16S nucleotide fragment; assert the detail shows the expected
+     `query_length` + `molecule="nucleotide"` without a Storage blob read.
+8. Multi-cluster subscription backfill:
+   - In a subscription with >1 ElasticBLAST cluster, a freshly-drained job's
+     `region` is blank at drain (ambiguous) and is filled later by the
+     scope-backfill poll — assert the eventual non-blank value, and that the
+     detail never errors in the interim.
+
+### Resilience / degradation
+
+9. Stopped-cluster sibling fetch:
+   - Detail of a completed job whose cluster is Stopped → the first `get_job`
+     burns its 10 s timeout once, the negative marker is written, and subsequent
+     opens within the TTL render fast. The detail always renders (region/stats
+     show "—"), never 500.
+10. OPS Redis unavailable:
+    - With the cache backend down, every detail load still works (cache no-ops,
+      live fetch each time) and never raises; assert HTTP 200 with the merged
+      stats still present.
+11. Legacy row without captured payload:
+    - A pre-feature external job (no `config_snapshot` / `query_meta` / stamped
+      region) renders the detail gracefully with "—" / "not recorded for this
+      job", no 500, and the optional summary fields are `null`.
+
+### UI (Run details tab)
+
+12. Metadata rows render: open a queue/API job's Run details tab and assert the
+    Output format, E-value, Max targets, Word size, Dust, Taxonomy filter,
+    Machine, Nodes, BLAST/DB version, Run time, Query length, and Molecule rows
+    appear, with the "not recorded for this job" hint on a legacy job.
+13. Command + raw panel: assert the full-span **BLAST command** code block is
+    copy-friendly and the collapsible **Raw parameters** `<details>` panel shows
+    the `config_snapshot` JSON.
+
 ## Evidence To Capture
 
 - Commands run and exact scope variables.
