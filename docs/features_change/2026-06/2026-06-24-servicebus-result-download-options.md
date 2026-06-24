@@ -96,6 +96,29 @@ New env knobs (all default-safe, no redeploy needed to tune):
 `DOWNLOAD_DECOMPRESS_MAX_BYTES`, `DOWNLOAD_TRANSFORM_CONCURRENCY`. New error code:
 `transform_busy` (503). Full affected sweep after hardening: 254 passed.
 
+## Live E2E (deployed gateway)
+
+Validated end-to-end against a deployed Container App revision serving the
+hardened image, using a real succeeded sharded `core_nt` job (10 `*.out.gz`
+shard results) through the public download gateway:
+
+* **Happy paths** (one shard file, real BLAST tabular mislabeled `blast_xml`):
+  * default → `200 application/gzip`, stored bytes unchanged.
+  * `?decompress=1` → `200 text/plain`, gzip inflated on the fly (3.5 KB → 36 KB),
+    `.gz` dropped from the filename, body starts `# BLASTN 2.17.0+`.
+  * `?format=json|csv|tsv` → correct content types + extensions; **all three agree
+    on 43 hits** (json `total` == csv rows == tsv rows), CSV header is the BLAST
+    tabular column set.
+* **Error paths return a JSON body, never a partial file**:
+  * `?format=pdf` → `422` (query-pattern validation detail).
+  * unknown `file_id` → `404 {code: openapi_http_404}`.
+  * no bearer / no token → `401 {detail: "missing bearer token"}`.
+
+Also validated locally against real captured BLAST output (`e2e_out/`, a 546 KB
+500-hit XML + 25 KB gzip): XML/gz → json/csv/tsv parse to 500 hits, streaming
+gunzip is byte-identical, and binary / leftover-gzip / non-BLAST inputs are all
+rejected with `ResultParseError`.
+
 ## Out of scope (tracked separately)
 
 Producing a format-agnostic archive (BLAST `outfmt 11` ASN.1) at job time so the
