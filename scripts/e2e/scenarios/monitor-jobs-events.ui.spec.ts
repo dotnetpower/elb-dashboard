@@ -15,7 +15,9 @@ test("Live Wall filter, global pause, and tile pause events are covered", async 
 
 test("Recent searches filter, search, refresh, group collapse, and navigation events are covered", async ({ uiPage }) => {
   await uiPage.goto("/blast/jobs");
-  await expect(uiPage.getByText("Recent BLAST searches")).toBeVisible();
+  await expect(
+    uiPage.locator(".page-header__title", { hasText: "BLAST Jobs" }),
+  ).toBeVisible();
 
   await uiPage.getByRole("button", { name: /completed/i }).click();
   await uiPage.getByPlaceholder("Search jobs…").fill("fixture");
