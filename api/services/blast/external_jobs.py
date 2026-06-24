@@ -368,6 +368,26 @@ def _stored_queue_origin(state: Any) -> str:
     return str(payload.get("queue_origin") or "").strip()
 
 
+def _stored_config_snapshot(state: Any) -> dict[str, Any]:
+    """Return the dashboard-recorded ``config_snapshot`` on a stored job row.
+
+    The drain stamps the submitted BLAST options under
+    ``payload.external.config_snapshot``; the sibling cannot report them, so this
+    recovers the durable value to re-attach to the freshly-projected row.
+    Returns ``{}`` when absent.
+    """
+    payload = getattr(state, "payload", None)
+    if not isinstance(payload, dict):
+        return {}
+    external = payload.get("external")
+    if isinstance(external, dict):
+        snap = external.get("config_snapshot")
+        if isinstance(snap, dict) and snap:
+            return snap
+    snap = payload.get("config_snapshot")
+    return snap if isinstance(snap, dict) and snap else {}
+
+
 def _sync_external_jobs_to_table(
     external_jobs: list[dict[str, Any]],
     *,
@@ -451,6 +471,37 @@ def _sync_external_jobs_to_table(
             _stored_qo = _stored_queue_origin(_existing_for_source)
             if _stored_qo and _stored_qo != str(ext.get("queue_origin") or ""):
                 ext["queue_origin"] = _stored_qo
+            # Recover the config_snapshot (submitted BLAST options) so the job
+            # detail can show outfmt / evalue / etc. The sibling never echoes
+            # these back; they live only on the durable row (drain) or the
+            # remember store (direct API submit).
+            if not isinstance(ext.get("config_snapshot"), dict) or not ext.get(
+                "config_snapshot"
+            ):
+                _stored_cfg = _stored_config_snapshot(_existing_for_source)
+                if _stored_cfg:
+                    ext["config_snapshot"] = _stored_cfg
+            # Recover the region the drain stamped durably (hardening round 5) so
+            # the list projection reads it from the row instead of an ARM call.
+            if not str(ext.get("region") or "").strip():
+                _payload = getattr(_existing_for_source, "payload", None)
+                if isinstance(_payload, dict):
+                    _ext_payload = _payload.get("external")
+                    _stored_region = (
+                        str((_ext_payload or {}).get("region") or "").strip()
+                        if isinstance(_ext_payload, dict)
+                        else ""
+                    )
+                    if _stored_region:
+                        ext["region"] = _stored_region
+        # Direct API submits create no durable row at submit time, so fall back
+        # to the ephemeral remember store keyed by the openapi job id.
+        if not isinstance(ext.get("config_snapshot"), dict) or not ext.get("config_snapshot"):
+            from api.services.blast.external_config import recall_config_snapshot
+
+            _remembered = recall_config_snapshot(job_id)
+            if _remembered:
+                ext["config_snapshot"] = _remembered
         try:
             # Inline-FASTA API submits carry no query identity from the sibling.
             # Inject the defline label remembered at submit time BEFORE projecting

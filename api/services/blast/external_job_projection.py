@@ -565,6 +565,14 @@ def _external_to_blast_job(
         "source": source,
         "submission_source": source,
         "queue_origin": str(job.get("queue_origin") or ""),
+        "config_snapshot": job.get("config_snapshot")
+        if isinstance(job.get("config_snapshot"), dict) and job.get("config_snapshot")
+        else None,
+        "db_version": str(job.get("db_version") or "") or None,
+        "blast_version": str(job.get("blast_version") or "") or None,
+        "run_seconds": job.get("run_seconds"),
+        "queue_wait_seconds": job.get("queue_wait_seconds"),
+        "elapsed_seconds": job.get("elapsed_seconds"),
         "external_correlation_id": job.get("external_correlation_id") or "",
         "query_label": metadata["query_label"] or "query.fa",
         "owner_upn": "api",
@@ -611,6 +619,27 @@ def _external_to_blast_job(
         "cluster_name": metadata["cluster_name"],
         "storage_account": metadata["storage_account"] or derived_storage_account,
     }
+    # Resolve the AKS region (best-effort) so the detail shows it instead of
+    # "—". Prefer a value the drain already stamped on the row (hardening round
+    # 5 — keeps the ARM call off the list hot path); only resolve live (1h
+    # cached) when the row carries none. The sibling /v1/jobs record never
+    # carries a region; it is constant per cluster.
+    _stamped_region = str(job.get("region") or "").strip()
+    if _stamped_region:
+        infrastructure["region"] = _stamped_region
+    else:
+        try:
+            from api.services.blast.external_config import resolve_cluster_region
+
+            _region = resolve_cluster_region(
+                str(metadata["subscription_id"] or ""),
+                str(metadata["resource_group"] or ""),
+                str(metadata["cluster_name"] or ""),
+            )
+            if _region:
+                infrastructure["region"] = _region
+        except Exception:  # pragma: no cover - best-effort, region just stays "—"
+            LOGGER.debug("external job region resolve skipped", exc_info=True)
     if any(infrastructure.values()):
         out["infrastructure"] = {k: v for k, v in infrastructure.items() if v}
     if include_database_metadata:

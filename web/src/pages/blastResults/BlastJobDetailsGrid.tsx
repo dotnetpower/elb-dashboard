@@ -4,6 +4,12 @@ import { CheckCircle2, Clock, Copy } from "lucide-react";
 import { ElapsedTimer } from "@/components/BlastFilePreview";
 import { phaseLabel, queueReasonText } from "@/constants";
 import type { BlastJobSummary } from "@/api/endpoints";
+import {
+  formatOutfmt,
+  formatRunSeconds,
+  isExternalJob,
+  taxonomyFilterLabel,
+} from "@/pages/blastResults/configFormat";
 
 interface BlastJobDetailsGridProps {
   job: BlastJobSummary;
@@ -104,16 +110,73 @@ function BlastJobDetailsGridComponent({
           "—"
         )}
       </span>
-      {config && (
+      {config ? (
         <>
+          <span className="muted">Output format</span>
+          <span style={{ wordBreak: "break-all" }}>{formatOutfmt(config)}</span>
           <span className="muted">E-value</span>
           <span>{String(config.evalue ?? "—")}</span>
           <span className="muted">Max targets</span>
           <span>{String(config.max_target_seqs ?? "—")}</span>
-          <span className="muted">Machine</span>
-          <span>{String(config.machine_type ?? "—")}</span>
-          <span className="muted">Nodes</span>
-          <span>{String(config.num_nodes ?? "—")}</span>
+          {config.word_size != null && config.word_size !== "" && (
+            <>
+              <span className="muted">Word size</span>
+              <span>{String(config.word_size)}</span>
+            </>
+          )}
+          {config.dust != null && config.dust !== "" && (
+            <>
+              <span className="muted">Dust</span>
+              <span>{String(config.dust)}</span>
+            </>
+          )}
+          {taxonomyFilterLabel(config) && (
+            <>
+              <span className="muted">Taxonomy filter</span>
+              <span>{taxonomyFilterLabel(config)}</span>
+            </>
+          )}
+          {config.machine_type != null && config.machine_type !== "" && (
+            <>
+              <span className="muted">Machine</span>
+              <span>{String(config.machine_type)}</span>
+            </>
+          )}
+          {config.num_nodes != null && config.num_nodes !== "" && (
+            <>
+              <span className="muted">Nodes</span>
+              <span>{String(config.num_nodes)}</span>
+            </>
+          )}
+        </>
+      ) : isExternalJob(job.submission_source) ? (
+        <>
+          <span className="muted">Parameters</span>
+          <span className="muted" style={{ fontStyle: "italic" }}>
+            not recorded for this job
+          </span>
+        </>
+      ) : null}
+      {(job.blast_version || job.db_version || job.run_seconds != null) && (
+        <>
+          {job.blast_version && (
+            <>
+              <span className="muted">BLAST version</span>
+              <span>{String(job.blast_version)}</span>
+            </>
+          )}
+          {job.db_version && (
+            <>
+              <span className="muted">DB version</span>
+              <span>{String(job.db_version)}</span>
+            </>
+          )}
+          {job.run_seconds != null && (
+            <>
+              <span className="muted">Run time</span>
+              <span>{formatRunSeconds(job.run_seconds)}</span>
+            </>
+          )}
         </>
       )}
       {infra && (

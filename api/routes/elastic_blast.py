@@ -463,6 +463,18 @@ def submit_external_blast_job(
             # Key the remembered label by the correlation id; the consumer
             # re-remembers under the OpenAPI id once it knows it.
             remember_inline_query_label(correlation_id, request.query_fasta)
+            from api.services.blast.external_config import (
+                build_external_config_snapshot,
+                remember_config_snapshot,
+            )
+
+            # Remember the submitted options so the job detail can show
+            # outfmt / evalue / etc. (the sibling never echoes them back). The
+            # SB drain ALSO stamps these durably; this covers the early /
+            # placeholder display before the first drain.
+            remember_config_snapshot(
+                correlation_id, build_external_config_snapshot(payload.get("options"))
+            )
             try:
                 from api.routes.blast.submit import _invalidate_message_flow_caches
 
@@ -506,6 +518,18 @@ def submit_external_blast_job(
     from api.services.blast.external_query_labels import remember_inline_query_label
 
     remember_inline_query_label(str(normalised.get("job_id") or ""), request.query_fasta)
+    from api.services.blast.external_config import (
+        build_external_config_snapshot,
+        remember_config_snapshot,
+    )
+
+    # Remember the submitted options keyed by the upstream job id so the jobs
+    # sync can attach a config_snapshot to the durable row (the sibling /v1/jobs
+    # record never echoes the BLAST options back).
+    remember_config_snapshot(
+        str(normalised.get("job_id") or ""),
+        build_external_config_snapshot(payload.get("options")),
+    )
     # Surface the new external job on the Message Flow card without waiting out
     # the external-jobs (~70 s) + monitor (~30 s) read caches. Lazy import keeps
     # this route free of an import-time dependency on the blast submit module.

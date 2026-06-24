@@ -259,6 +259,16 @@ export interface BlastJobSummary {
   error_code?: string;
   error?: string;
   /**
+   * Sibling-reported execution metadata for external/queue jobs (the dashboard
+   * never computes these). Surfaced on the Run-details view so an operator sees
+   * the BLAST + database versions and the actual run time the sibling recorded.
+   */
+  blast_version?: string | null;
+  db_version?: string | null;
+  run_seconds?: number | null;
+  queue_wait_seconds?: number | null;
+  elapsed_seconds?: number | null;
+  /**
    * True when the server could not refresh this active row's live state
    * because its AKS cluster is stopped/missing. The status/phase shown is the
    * last-known value and is frozen until the cluster restarts. See

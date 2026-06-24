@@ -763,6 +763,30 @@ def _local_to_blast_job(
         str(getattr(state, "external_correlation_id", "") or "")
         or _resolve_external_correlation_id(payload)
     )
+    # config_snapshot for an external-origin stored row lives under
+    # ``payload.external.config_snapshot`` (stamped by the drain); a local
+    # dashboard job keeps it at the payload top level.
+    _row_config_snapshot = payload.get("config_snapshot") if isinstance(payload, dict) else None
+    _external_snapshot = payload.get("external") if isinstance(payload, dict) else None
+    if (not _row_config_snapshot) and isinstance(_external_snapshot, dict):
+        _ext_cfg = _external_snapshot.get("config_snapshot")
+        if isinstance(_ext_cfg, dict) and _ext_cfg:
+            _row_config_snapshot = _ext_cfg
+    # Region: external-origin rows do not store it; resolve from the cluster
+    # (1h cached, best-effort) so the detail shows it instead of "—".
+    if is_external_origin and not str(infrastructure.get("region") or "").strip():
+        try:
+            from api.services.blast.external_config import resolve_cluster_region
+
+            _region = resolve_cluster_region(
+                str(infrastructure.get("subscription_id") or ""),
+                str(infrastructure.get("resource_group") or ""),
+                str(infrastructure.get("cluster_name") or ""),
+            )
+            if _region:
+                infrastructure["region"] = _region
+        except Exception:  # pragma: no cover - best-effort
+            LOGGER.debug("local external job region resolve skipped", exc_info=True)
     out = {
         "job_id": state.job_id,
         "job_id_kind": "dashboard",
@@ -780,7 +804,7 @@ def _local_to_blast_job(
         "error_code": response_error_code,
         "error": response_error,
         "payload": payload,
-        "config_snapshot": payload.get("config_snapshot") if isinstance(payload, dict) else None,
+        "config_snapshot": _row_config_snapshot,
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
         "source": "dashboard" if _row_submission_source == "dashboard" else "external_api",
         "submission_source": _row_submission_source,

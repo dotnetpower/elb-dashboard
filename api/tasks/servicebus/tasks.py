@@ -1098,6 +1098,7 @@ def _persist_drain_row_and_trace(
     if not openapi_job_id:
         return
     try:
+        from api.services.blast.external_config import build_external_config_snapshot
         from api.services.blast.external_jobs import _sync_external_jobs_to_table
         from api.services.blast.servicebus_placeholder import placeholder_exists
 
@@ -1110,6 +1111,16 @@ def _persist_drain_row_and_trace(
         # the placeholder is still present here.
         queue_origin = "control_plane" if placeholder_exists(correlation_id) else "external"
 
+        # Capture the submitted BLAST options as a config_snapshot so the job
+        # detail can show outfmt / evalue / word_size / etc. The sibling /v1/jobs
+        # record never echoes these back, so this is the ONLY durable source. The
+        # XML path carries them under ``options``; the v1 path under
+        # ``blast_options``.
+        _submitted_options = payload.get("blast_options") or payload.get("options") or {}
+        config_snapshot = build_external_config_snapshot(
+            _submitted_options if isinstance(_submitted_options, dict) else {}
+        )
+
         ext_row = {
             "job_id": openapi_job_id,
             "status": _STATUS_QUEUED,
@@ -1121,6 +1132,24 @@ def _persist_drain_row_and_trace(
             "external_correlation_id": correlation_id,
             "cluster_name": getattr(cfg, "cluster_name", "") or "",
         }
+        if config_snapshot:
+            ext_row["config_snapshot"] = config_snapshot
+        # Hardening round 5: resolve + stamp the region durably in the worker so
+        # the jobs-list projection reads it from the row instead of making an
+        # ARM call on the request hot path. Best-effort (cached): an unresolved
+        # region just leaves the projection to try once later.
+        try:
+            from api.services.blast.external_config import resolve_cluster_region
+
+            _region = resolve_cluster_region(
+                getattr(cfg, "subscription_id", "") or "",
+                getattr(cfg, "resource_group", "") or "",
+                getattr(cfg, "cluster_name", "") or "",
+            )
+            if _region:
+                ext_row["region"] = _region
+        except Exception:
+            LOGGER.debug("drain region stamp skipped corr=%s", correlation_id, exc_info=True)
         # Date-tiered layout: the sibling wrote results under
         # results/<prefix><openapi_job_id>/, so record that exact prefix on the
         # durable row. Without it resolve_results_prefix(openapi_job_id) falls
