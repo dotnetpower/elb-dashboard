@@ -67,6 +67,35 @@ event, and download failures needed to surface a readable reason.
   `_apply_download_options` / `_adjust_filename` + `error_message` assertions).
 * Docs frontmatter guard — OK, 58 navigated pages.
 
+## Hardening (post-implementation critique → 5 rounds)
+
+A design self-critique surfaced 2 HIGH + 2 Medium findings, each fixed and tested:
+
+* **HIGH — silent empty download on `?format=`**: a non-BLAST / binary / mislabeled
+  gzip file parsed to zero hits and returned a misleading header-only CSV with
+  200. `transcode_result_bytes` now rejects leftover gzip (magic byte), binary
+  (NUL byte), and non-BLAST text (`_looks_like_blast_text` heuristic) with a
+  `422 result_unparseable` body, while still allowing a legitimately empty /
+  zero-hit result through.
+* **HIGH — unbounded `?decompress=1` output**: `gunzip_stream` now bounds total
+  output at `DOWNLOAD_DECOMPRESS_MAX_BYTES` (default 2 GiB) so a gzip bomb cannot
+  stream unbounded bytes to a token-only caller.
+* **Medium — transform concurrency**: the buffer+parse `?format=` path is gated
+  by a bounded `transform_slot` semaphore (`DOWNLOAD_TRANSFORM_CONCURRENCY`,
+  default 4, mirrors the §9 data-plane cap); exhaustion returns
+  `503 transform_busy` + `Retry-After`. The streaming `?decompress` path is
+  memory-bounded and intentionally ungated.
+* **Medium — gzip mislabel robustness**: the route sniffs the gzip magic so a
+  result whose filename/media-type did not advertise gzip is still decompressed
+  for `?format=`; `gunzip_stream` passes a non-gzip first chunk through unchanged
+  instead of truncating with a `zlib.error`.
+* **Low — example filename collision**: `consume.py --format` appends a unique
+  `file_id` suffix so two source files cannot overwrite each other.
+
+New env knobs (all default-safe, no redeploy needed to tune):
+`DOWNLOAD_DECOMPRESS_MAX_BYTES`, `DOWNLOAD_TRANSFORM_CONCURRENCY`. New error code:
+`transform_busy` (503). Full affected sweep after hardening: 254 passed.
+
 ## Out of scope (tracked separately)
 
 Producing a format-agnostic archive (BLAST `outfmt 11` ASN.1) at job time so the

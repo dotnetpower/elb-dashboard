@@ -196,7 +196,8 @@ def plan_downloads(event: dict[str, Any]) -> list[dict[str, str]]:
         if not url:
             continue
         name = str(item.get("name") or item.get("file_id") or "result").split("/")[-1]
-        out.append({"download_url": url, "filename": name})
+        file_id = str(item.get("file_id") or name)
+        out.append({"download_url": url, "filename": name, "file_id": file_id})
     return out
 
 
@@ -282,7 +283,9 @@ def download_result_files(
     results: list[dict[str, Any]] = []
     for target in plan_downloads(event):
         url = _apply_download_options(target["download_url"], decompress, download_format)
-        filename = _adjust_filename(target["filename"], decompress, download_format)
+        filename = _adjust_filename(
+            target["filename"], decompress, download_format, target.get("file_id", "")
+        )
         dest = os.path.join(download_dir, filename)
         record: dict[str, Any] = {"url": url, "dest": dest}
         request = urllib.request.Request(url)  # noqa: S310 — https dashboard URL
@@ -332,15 +335,26 @@ def _apply_download_options(url: str, decompress: bool, download_format: str) ->
     return url + sep + "&".join(params)
 
 
-def _adjust_filename(name: str, decompress: bool, download_format: str) -> str:
-    """Mirror the gateway's filename for a transformed download. Pure / offline."""
+def _adjust_filename(
+    name: str, decompress: bool, download_format: str, file_id: str = ""
+) -> str:
+    """Mirror the gateway's filename for a transformed download. Pure / offline.
+
+    When ``download_format`` is set the output extension changes, which can make
+    two source files collapse to the same stem (and overwrite each other), so a
+    short suffix of the unique ``file_id`` is appended to keep them distinct.
+    """
     if download_format:
         stem = name
         for suffix in (".gz", ".out", ".xml", ".tsv", ".txt", ".csv", ".json"):
             if stem.lower().endswith(suffix):
                 stem = stem[: -len(suffix)]
         ext = "tsv" if download_format == "tsv" else download_format
-        return f"{stem or 'result'}.{ext}"
+        uniq = ""
+        if file_id and file_id not in stem:
+            safe = "".join(c if c.isalnum() else "_" for c in file_id)[-12:]
+            uniq = f"-{safe}"
+        return f"{stem or 'result'}{uniq}.{ext}"
     if decompress and name.lower().endswith(".gz"):
         return name[:-3]
     return name
@@ -631,6 +645,12 @@ def _self_test() -> int:
     assert _adjust_filename("m.out.gz", False, "csv") == "m.csv"
     assert _adjust_filename("m.xml", False, "tsv") == "m.tsv"
     assert _adjust_filename("m.out.gz", False, "") == "m.out.gz"
+    # With a format change a unique file_id suffix prevents two source files
+    # collapsing to the same stem (and overwriting each other).
+    assert _adjust_filename("m.out.gz", False, "csv", "result-001") == "m-result_001.csv"
+    a = _adjust_filename("shared.out.gz", False, "json", "file-a")
+    b = _adjust_filename("shared.out.gz", False, "json", "file-b")
+    assert a != b
 
     # A failed event surfaces the human-readable reason in the summary body.
     failed = summarise_completion(

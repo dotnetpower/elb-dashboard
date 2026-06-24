@@ -845,25 +845,38 @@ def _transform_download(
         ResultParseError,
         ResultTooLargeError,
         ResultTranscodeError,
+        TransformBusyError,
         gunzip_bytes,
         gunzip_stream,
+        looks_like_gzip,
         result_media_type_for,
         strip_gzip_suffix,
         transcode_result_bytes,
+        transform_slot,
     )
 
     is_gzip = _is_gzip_download(downloaded)
 
     if target_format:
-        raw = _buffer_streamed(downloaded, cap=TRANSCODE_MAX_BYTES)
         try:
-            if is_gzip:
-                raw = gunzip_bytes(raw)
-            body, media_type, filename = transcode_result_bytes(
-                raw,
-                source_filename=downloaded.filename,
-                target_format=target_format,
-            )
+            with transform_slot():
+                raw = _buffer_streamed(downloaded, cap=TRANSCODE_MAX_BYTES)
+                # Sniff the magic bytes too: a result whose filename / upstream
+                # media type did not advertise gzip is still decompressed here
+                # instead of being decoded as garbage downstream.
+                if is_gzip or looks_like_gzip(raw):
+                    raw = gunzip_bytes(raw)
+                body, media_type, filename = transcode_result_bytes(
+                    raw,
+                    source_filename=downloaded.filename,
+                    target_format=target_format,
+                )
+        except TransformBusyError as exc:
+            raise HTTPException(
+                503,
+                detail={"code": "transform_busy", "message": str(exc)},
+                headers={"Retry-After": "5"},
+            ) from exc
         except ResultTooLargeError as exc:
             raise HTTPException(
                 413, detail={"code": "result_too_large", "message": str(exc)}

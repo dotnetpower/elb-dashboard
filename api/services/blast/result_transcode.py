@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import threading
 import zlib
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from api.services.blast.results_parser import (
@@ -49,8 +52,25 @@ TRANSCODE_MAX_BYTES = 16 * 1024 * 1024
 # one step in memory before the running-total cap is checked.
 _GUNZIP_STEP_BYTES = 1024 * 1024
 
+# Hard ceiling on the *output* of the streaming decompress path (``?decompress``).
+# Memory is already bounded (one inflated step at a time), but without an output
+# ceiling a tiny gzip bomb could stream unbounded bytes to a token-only caller.
+# Generous (real merged BLAST results are well under this) and env-tunable so an
+# operator can lower it without a redeploy. Exceeding it terminates the stream.
+_DECOMPRESS_STREAM_MAX_ENV = "DOWNLOAD_DECOMPRESS_MAX_BYTES"
+_DEFAULT_DECOMPRESS_STREAM_MAX = 2 * 1024 * 1024 * 1024  # 2 GiB
+
 # gzip (RFC 1952) wbits for zlib: 16 selects the gzip header/trailer.
 _GZIP_WBITS = zlib.MAX_WBITS | 16
+
+# gzip member magic (RFC 1952 §2.3.1). Used to sniff content whose filename /
+# upstream media type did not advertise gzip, so a mislabeled result is still
+# handled correctly instead of being decoded as garbage.
+_GZIP_MAGIC = b"\x1f\x8b"
+
+# Window of bytes inspected for a NUL byte to reject binary content before the
+# lenient tabular parser turns it into a misleading zero-hit (header-only) file.
+_BINARY_SNIFF_BYTES = 64 * 1024
 
 # Formats a caller may request via ``?format=``. XML/raw passthrough is the
 # default (no ``format``) so this set is only the re-rendered tabular/JSON ones.
@@ -69,9 +89,67 @@ class ResultParseError(ResultTranscodeError):
     """The bytes could not be parsed as BLAST XML or tabular output."""
 
 
+class TransformBusyError(Exception):
+    """Too many concurrent in-memory transforms — caller should retry (503).
+
+    Deliberately NOT a ``ResultTranscodeError`` so the route maps it to 503
+    (transient), never 422 (permanent parse failure).
+    """
+
+
+# Bound the number of concurrent ``?format=`` transforms. Each buffers the file
+# (capped at ``TRANSCODE_MAX_BYTES``) AND holds the parsed hits + rendered body
+# in memory at once, so unbounded concurrency on the token-authorised (no-RBAC)
+# download route is a memory-exhaustion vector. The streaming ``?decompress``
+# path is memory-bounded and intentionally NOT gated here. Env-tunable; mirrors
+# the §9 data-plane transfer cap of 4.
+_TRANSFORM_CONCURRENCY_ENV = "DOWNLOAD_TRANSFORM_CONCURRENCY"
+_DEFAULT_TRANSFORM_CONCURRENCY = 4
+_TRANSFORM_ACQUIRE_TIMEOUT_SEC = 30.0
+
+
+def _resolve_transform_concurrency() -> int:
+    raw = os.environ.get(_TRANSFORM_CONCURRENCY_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_TRANSFORM_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_TRANSFORM_CONCURRENCY
+    return value if value > 0 else _DEFAULT_TRANSFORM_CONCURRENCY
+
+
+_transform_semaphore = threading.BoundedSemaphore(_resolve_transform_concurrency())
+
+
+@contextmanager
+def transform_slot(*, timeout: float | None = None) -> Iterator[None]:
+    """Acquire a bounded transform slot or raise ``TransformBusyError``.
+
+    Wrap the buffer+parse+render block so peak memory is bounded by
+    ``concurrency × per-transform`` instead of the unbounded request fan-in.
+    """
+    wait = _TRANSFORM_ACQUIRE_TIMEOUT_SEC if timeout is None else timeout
+    if not _transform_semaphore.acquire(timeout=wait):
+        raise TransformBusyError("too many concurrent result transforms; retry shortly")
+    try:
+        yield
+    finally:
+        _transform_semaphore.release()
+
+
 def is_gzip_name(filename: str) -> bool:
     """True when the filename signals gzip content (``*.gz``)."""
     return filename.lower().endswith(".gz")
+
+
+def looks_like_gzip(raw: bytes) -> bool:
+    """True when the bytes start with the gzip member magic (RFC 1952).
+
+    Lets the route decompress a result whose filename / upstream media type did
+    not advertise gzip, instead of decoding the compressed bytes as garbage.
+    """
+    return raw[:2] == _GZIP_MAGIC
 
 
 def strip_gzip_suffix(filename: str) -> str:
@@ -97,17 +175,49 @@ def gunzip_stream(chunks: Iterator[bytes]) -> Iterator[bytes]:
     """Streaming gzip → plain bytes. Memory stays at one inflated chunk.
 
     Used by the decompress-only path so a large result is decompressed on the
-    fly without buffering the whole file. A truncated/corrupt stream surfaces as
-    a ``zlib.error`` from the iterator (the route closes the response).
+    fly without buffering the whole file. If the first non-empty chunk does not
+    carry the gzip magic the bytes are streamed **unchanged** (a mislabeled
+    ``.gz`` file is passed through instead of truncating with a ``zlib.error``).
+    The total output is bounded by ``_decompress_stream_max()`` so a gzip bomb
+    cannot stream unbounded bytes — exceeding it raises ``ResultTooLargeError``
+    (which terminates the already-started response rather than running forever).
     """
     decompressor = zlib.decompressobj(_GZIP_WBITS)
+    limit = _decompress_stream_max()
+    produced_total = 0
+    decided = False
+    passthrough = False
     for chunk in chunks:
+        if not decided and chunk:
+            decided = True
+            passthrough = chunk[:2] != _GZIP_MAGIC
+        if passthrough:
+            if chunk:
+                yield chunk
+            continue
         part = decompressor.decompress(chunk)
         if part:
+            produced_total += len(part)
+            if produced_total > limit:
+                raise ResultTooLargeError(
+                    "decompressed stream exceeds the decompress size limit"
+                )
             yield part
-    tail = decompressor.flush()
-    if tail:
-        yield tail
+    if not passthrough:
+        tail = decompressor.flush()
+        if tail:
+            yield tail
+
+
+def _decompress_stream_max() -> int:
+    raw = os.environ.get(_DECOMPRESS_STREAM_MAX_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_DECOMPRESS_STREAM_MAX
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_DECOMPRESS_STREAM_MAX
+    return value if value > 0 else _DEFAULT_DECOMPRESS_STREAM_MAX
 
 
 def gunzip_bytes(raw: bytes, *, max_output: int = TRANSCODE_MAX_BYTES) -> bytes:
@@ -158,6 +268,18 @@ def transcode_result_bytes(
     if len(raw) > TRANSCODE_MAX_BYTES:
         raise ResultTooLargeError("result exceeds the transcode size limit")
 
+    # Reject content that is clearly not BLAST text BEFORE the lenient tabular
+    # parser silently yields zero rows and we emit a misleading header-only
+    # file. Two cheap binary signals: a leftover gzip member (the route failed
+    # to decompress it) or a NUL byte (BLAST XML/tabular is NUL-free text).
+    if looks_like_gzip(raw):
+        raise ResultParseError(
+            "result is still gzip-compressed; cannot re-render — "
+            "download without ?format or with ?decompress=1"
+        )
+    if b"\x00" in raw[:_BINARY_SNIFF_BYTES]:
+        raise ResultParseError("result is binary, not BLAST XML or tabular output")
+
     text = raw.decode("utf-8", errors="replace")
     try:
         hits = parse_blast_result_content(text)
@@ -165,6 +287,15 @@ def transcode_result_bytes(
         raise ResultParseError(
             "could not parse the result file as BLAST XML or tabular output"
         ) from exc
+
+    # The tabular parser tolerates junk by skipping unrecognised lines, so a
+    # non-BLAST text file parses to zero hits. Distinguish a legitimately
+    # empty/zero-hit result (emit the header-only file — correct) from genuine
+    # garbage (fail loudly so the consumer is not handed a deceptive empty file).
+    if not hits and text.strip() and not _looks_like_blast_text(text):
+        raise ResultParseError(
+            "result does not look like BLAST XML or tabular output"
+        )
 
     stem = _filename_stem(strip_gzip_suffix(source_filename))
     if target_format == "json":
@@ -203,3 +334,25 @@ def _filename_stem(filename: str) -> str:
         if base.lower().endswith(suffix):
             return base[: -len(suffix)] or "blast_result"
     return base or "blast_result"
+
+
+def _looks_like_blast_text(text: str) -> bool:
+    """Heuristic: does this text plausibly hold BLAST XML or tabular output?
+
+    Used only to decide whether a zero-hit parse is a legitimate empty result
+    (header-only file is correct) or genuine garbage (fail loudly). True for
+    BLAST XML, an ``outfmt 7`` comment block, or an ``outfmt 6`` data row (>= 12
+    tab-separated fields). The first non-blank line decides — a leading
+    non-comment, non-tabular line is treated as non-BLAST.
+    """
+    stripped = text.lstrip("\ufeff \t\r\n")
+    if stripped.startswith(("<?xml", "<BlastOutput")):
+        return True
+    for line in text.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        if candidate.startswith("#"):
+            return True
+        return "\t" in candidate and len(candidate.split("\t")) >= 12
+    return False

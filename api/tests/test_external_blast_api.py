@@ -1381,6 +1381,63 @@ def test_download_format_csv_transcodes_gzip_tabular(monkeypatch):
     assert rows[0]["sseqid"] == "NR_1"
 
 
+def test_download_format_csv_transcodes_undetected_gzip(monkeypatch):
+    """A gz result whose filename/media-type did not advertise gzip is still
+    decompressed (magic-byte sniff) and transcoded, not decoded as garbage."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    import csv
+    import gzip
+    import io
+
+    from api.main import app
+    from api.services import external_blast
+
+    def _mislabeled_gzip(*_args, **_kwargs):
+        blob = gzip.compress(_DL_TABULAR.encode("utf-8"))
+        return external_blast.StreamedFile(
+            chunks=iter([blob]),
+            media_type="application/octet-stream",  # does NOT advertise gzip
+            filename="merged_results.out",  # no .gz suffix
+        )
+
+    monkeypatch.setattr(external_blast, "stream_file", _mislabeled_gzip)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/files/merged_results.out",
+        params={"format": "csv"},
+    )
+
+    assert response.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert rows[0]["sseqid"] == "NR_1"
+
+
+def test_download_format_non_blast_text_returns_422_body(monkeypatch):
+    """Non-BLAST text must 422 with a body, not a misleading empty CSV."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    def _plain_text(*_args, **_kwargs):
+        return external_blast.StreamedFile(
+            chunks=iter([b"hello world, not blast output at all\n"]),
+            media_type="text/plain",
+            filename="notes.txt",
+        )
+
+    monkeypatch.setattr(external_blast, "stream_file", _plain_text)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/files/notes.txt",
+        params={"format": "csv"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "result_unparseable"
+
+
 def test_download_format_unparseable_returns_422_body(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app

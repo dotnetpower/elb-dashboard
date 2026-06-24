@@ -78,6 +78,33 @@ def test_gunzip_bytes_rejects_non_gzip() -> None:
         rt.gunzip_bytes(b"not gzip at all")
 
 
+def test_gunzip_stream_rejects_oversize_output(monkeypatch) -> None:
+    """The streaming decompress path is output-bounded against a gzip bomb."""
+    monkeypatch.setenv("DOWNLOAD_DECOMPRESS_MAX_BYTES", "1024")
+    blob = gzip.compress(b"A" * (4 * 1024))
+    with pytest.raises(rt.ResultTooLargeError):
+        list(rt.gunzip_stream(iter([blob])))
+
+
+def test_gunzip_stream_under_limit_passes(monkeypatch) -> None:
+    monkeypatch.setenv("DOWNLOAD_DECOMPRESS_MAX_BYTES", "1048576")
+    raw = b"small payload"
+    assert b"".join(rt.gunzip_stream(iter([gzip.compress(raw)]))) == raw
+
+
+def test_gunzip_stream_passes_through_non_gzip() -> None:
+    """A mislabeled .gz whose content is not gzip is streamed unchanged, not
+    truncated with a zlib error."""
+    plain = b"q1\tNR_1\t99.5\n"
+    assert b"".join(rt.gunzip_stream(iter([plain]))) == plain
+
+
+def test_gunzip_stream_skips_leading_empty_chunk() -> None:
+    raw = b"payload bytes"
+    chunks = [b"", gzip.compress(raw)]
+    assert b"".join(rt.gunzip_stream(iter(chunks))) == raw
+
+
 def test_transcode_tabular_to_csv() -> None:
     body, media_type, filename = rt.transcode_result_bytes(
         _TABULAR.encode("utf-8"),
@@ -140,9 +167,83 @@ def test_transcode_rejects_oversize_input() -> None:
         rt.transcode_result_bytes(big, source_filename="m.out", target_format="json")
 
 
+def test_looks_like_gzip() -> None:
+    assert rt.looks_like_gzip(gzip.compress(b"hello"))
+    assert not rt.looks_like_gzip(b"plain text")
+    assert not rt.looks_like_gzip(b"")
+
+
+def test_transcode_rejects_leftover_gzip() -> None:
+    """Undecompressed gzip must fail loudly, not decode to a header-only file."""
+    with pytest.raises(rt.ResultParseError):
+        rt.transcode_result_bytes(
+            gzip.compress(_TABULAR.encode("utf-8")),
+            source_filename="m.out.gz",
+            target_format="csv",
+        )
+
+
+def test_transcode_rejects_binary_nul() -> None:
+    with pytest.raises(rt.ResultParseError):
+        rt.transcode_result_bytes(
+            b"PK\x03\x04\x00\x00binary", source_filename="m.bin", target_format="csv"
+        )
+
+
+def test_transcode_rejects_non_blast_text() -> None:
+    """Non-BLAST text would parse to zero hits — must 422, not emit empty file."""
+    with pytest.raises(rt.ResultParseError):
+        rt.transcode_result_bytes(
+            b"hello world\nthis is not blast output\n",
+            source_filename="readme.txt",
+            target_format="csv",
+        )
+
+
+def test_transcode_allows_empty_zero_hit_result() -> None:
+    """An empty outfmt6 result (no matches) is legitimate — header-only CSV."""
+    body, media_type, _ = rt.transcode_result_bytes(
+        b"", source_filename="m.out", target_format="csv"
+    )
+    assert media_type == "text/csv"
+    assert body.decode("utf-8").splitlines()[0].startswith("qseqid")
+
+
+def test_transcode_allows_outfmt7_zero_hits_comment_block() -> None:
+    """A valid outfmt7 with zero hits is comment-only — must not 422."""
+    content = (
+        b"# BLASTN 2.17.0+\n# Query: q1\n# Database: core_nt\n# 0 hits found\n"
+    )
+    body, _media, _name = rt.transcode_result_bytes(
+        content, source_filename="m.out", target_format="json"
+    )
+    assert json.loads(body)["total"] == 0
+
+
 def test_result_media_type_for() -> None:
     assert rt.result_media_type_for("a.xml") == "application/xml"
     assert rt.result_media_type_for("a.out") == "text/plain"
     assert rt.result_media_type_for("a.csv") == "text/csv"
     assert rt.result_media_type_for("a.json") == "application/json"
     assert rt.result_media_type_for("a.bin") == "application/octet-stream"
+
+
+def test_transform_slot_acquires_and_releases() -> None:
+    # Two sequential uses succeed (the slot is released each time).
+    for _ in range(2):
+        with rt.transform_slot(timeout=1.0):
+            pass
+
+
+def test_transform_slot_busy_raises(monkeypatch) -> None:
+    import threading
+
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(rt, "_transform_semaphore", sem)
+    assert sem.acquire(timeout=1.0)  # exhaust the only slot
+    try:
+        with pytest.raises(rt.TransformBusyError):
+            with rt.transform_slot(timeout=0.05):
+                pass
+    finally:
+        sem.release()

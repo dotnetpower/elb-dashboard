@@ -43,10 +43,20 @@ SAS):
 
 The `result_files[]` entries carry `compressed` and `media_type` so a consumer
 can decide up front. On a failure the gateway returns a **JSON error body**
-(`{"code", "message"}`) — e.g. `result_too_large` (over the transcode cap) or
-`result_unparseable` — never a partial file. The example
+(`{"code", "message"}`) — e.g. `result_too_large` (over the transcode cap),
+`result_unparseable` (not BLAST XML/tabular), or `transform_busy` (503 + a
+`Retry-After`, too many concurrent `?format=` transforms) — never a partial
+file. The example
 [`consume.py`](https://github.com/dotnetpower/elb-dashboard/blob/main/example/servicebus/consume.py)
 exposes these as `--decompress` / `--format` and records any error body.
+
+!!! note "Operator knobs (default-safe, env-tunable, no redeploy to change)"
+    `?format=` transforms buffer + parse in the `api` sidecar, so two limits
+    guard memory: `DOWNLOAD_TRANSFORM_CONCURRENCY` (default 4) bounds concurrent
+    transforms (`503 transform_busy` past it) and the input is capped at 16 MiB.
+    The streaming `?decompress=1` path is memory-bounded but its total output is
+    capped by `DOWNLOAD_DECOMPRESS_MAX_BYTES` (default 2 GiB) against a gzip
+    bomb.
 
 ## Symptom: download returns 401 (`AADSTS65001`)
 
