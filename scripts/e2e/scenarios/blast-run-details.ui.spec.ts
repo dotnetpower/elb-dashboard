@@ -238,3 +238,54 @@ test("Run details renders a failed queue job with its captured parameters", asyn
     uiPage.getByText(/BLAST database core_nt memory requirements/).first(),
   ).toBeVisible();
 });
+
+const FULL_JOB_ID = "ext-meta-full";
+const FULL_DETAIL = {
+  job_id: FULL_JOB_ID,
+  status: "running",
+  phase: "running",
+  submission_source: "servicebus",
+  program: "blastp",
+  db: "nr",
+  created_at: "2026-06-20T00:00:00Z",
+  updated_at: "2026-06-20T00:05:00Z",
+  // A protein query so the Query length unit renders "aa" (not "nt").
+  query_length: 350,
+  molecule: "protein",
+  config_snapshot: {
+    outfmt: "7 std staxids sscinames stitle qcovs",
+    evalue: 0.001,
+    max_target_seqs: 100,
+    word_size: 6,
+    dust: "no",
+    machine_type: "Standard_E16s_v5",
+    num_nodes: 4,
+    // taxid + is_inclusive:false renders the "exclude taxid …" filter label.
+    taxid: 9606,
+    is_inclusive: false,
+  },
+  meta: {},
+};
+
+test("Run details renders the conditional option rows + protein molecule unit", async ({
+  uiPage,
+}) => {
+  await stubDetail(uiPage, FULL_JOB_ID, FULL_DETAIL);
+  await uiPage.goto(`/blast/jobs/${FULL_JOB_ID}?tab=run`);
+
+  const grid = uiPage.getByTestId("blast-run-details-grid");
+  await expect(grid.getByText(FULL_JOB_ID, { exact: true })).toBeVisible();
+
+  // Conditional option rows only render when their key is present.
+  await expect(grid.getByText("Dust", { exact: true })).toBeVisible();
+  await expect(grid.getByText("Machine", { exact: true })).toBeVisible();
+  await expect(grid.getByText("Standard_E16s_v5", { exact: true })).toBeVisible();
+  await expect(grid.getByText("Nodes", { exact: true })).toBeVisible();
+  await expect(grid.getByText("Taxonomy filter", { exact: true })).toBeVisible();
+  await expect(grid.getByText(/exclude taxid 9606/)).toBeVisible();
+
+  // Protein query -> "aa" unit + Molecule row.
+  await expect(grid.getByText("Molecule", { exact: true })).toBeVisible();
+  await expect(grid.getByText("protein", { exact: true })).toBeVisible();
+  await expect(grid.getByText(/350\s+aa/)).toBeVisible();
+});
