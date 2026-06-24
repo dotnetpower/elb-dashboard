@@ -657,3 +657,78 @@ def test_patch_source_wires_finalizer_awk_fields_preservation() -> None:
     assert "awk '/^# Fields:/ || !/^#/'" in source
 
 
+_BATCH_JOB_TEMPLATES = (
+    ("blast-batch-job-aks.yaml.template", "  backoffLimit: 5\n"),
+    ("blast-batch-job-local-ssd-aks.yaml.template", "  backoffLimit: 3\n"),
+    ("blast-batch-job-shard-ssd-aks.yaml.template", "  backoffLimit: 3\n"),
+    ("elb-finalizer-aks.yaml.template", "  backoffLimit: 0\n"),
+)
+
+
+def _write_batch_job_templates(tmp_path: Path) -> Path:
+    templates_dir = tmp_path / "src" / "elastic_blast" / "templates"
+    templates_dir.mkdir(parents=True)
+    for name, backoff in _BATCH_JOB_TEMPLATES:
+        (templates_dir / name).write_text(
+            "---\n"
+            "apiVersion: batch/v1\n"
+            "kind: Job\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      restartPolicy: OnFailure\n"
+            f"{backoff}"
+        )
+    return templates_dir
+
+
+def test_patch_aks_job_ttl_injects_default_ttl(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("ELB_JOB_TTL_SECONDS", raising=False)
+    patch_module = _load_patch_module()
+    templates_dir = _write_batch_job_templates(tmp_path)
+
+    patch_module.patch_aks_job_ttl(tmp_path)
+
+    for name, _ in _BATCH_JOB_TEMPLATES:
+        text = (templates_dir / name).read_text()
+        # Injected at Job.spec level (2-space indent), before backoffLimit.
+        assert "\n  ttlSecondsAfterFinished: 1800\n" in text
+        assert text.index("ttlSecondsAfterFinished") < text.index("backoffLimit")
+
+
+def test_patch_aks_job_ttl_honors_env_override(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ELB_JOB_TTL_SECONDS", "600")
+    patch_module = _load_patch_module()
+    templates_dir = _write_batch_job_templates(tmp_path)
+
+    patch_module.patch_aks_job_ttl(tmp_path)
+
+    text = (templates_dir / "blast-batch-job-aks.yaml.template").read_text()
+    assert "  ttlSecondsAfterFinished: 600\n" in text
+
+
+def test_patch_aks_job_ttl_rejects_non_numeric_override(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ELB_JOB_TTL_SECONDS", "forever")
+    patch_module = _load_patch_module()
+    templates_dir = _write_batch_job_templates(tmp_path)
+
+    patch_module.patch_aks_job_ttl(tmp_path)
+
+    text = (templates_dir / "blast-batch-job-aks.yaml.template").read_text()
+    assert "  ttlSecondsAfterFinished: 1800\n" in text
+
+
+def test_patch_aks_job_ttl_is_idempotent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("ELB_JOB_TTL_SECONDS", raising=False)
+    patch_module = _load_patch_module()
+    templates_dir = _write_batch_job_templates(tmp_path)
+
+    patch_module.patch_aks_job_ttl(tmp_path)
+    once = (templates_dir / "blast-batch-job-aks.yaml.template").read_text()
+    patch_module.patch_aks_job_ttl(tmp_path)
+    twice = (templates_dir / "blast-batch-job-aks.yaml.template").read_text()
+
+    assert once == twice
+    assert once.count("ttlSecondsAfterFinished") == 1
+
+

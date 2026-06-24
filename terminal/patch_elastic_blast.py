@@ -15,6 +15,7 @@ api/tests/test_terminal_command_guard.py`.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -895,6 +896,62 @@ def patch_aks_workload_tolerations(root: Path) -> None:
             path.write_text(text)
 
 
+def patch_aks_job_ttl(root: Path) -> None:
+    """Auto-delete completed BLAST Jobs after a bounded TTL.
+
+    The pinned upstream ref predates upstream commit ba8075b1 (which added
+    ``ttlSecondsAfterFinished`` to the batch-job templates), so finished
+    ``blastn-batch-*`` Jobs are never garbage-collected on the persistent
+    dashboard cluster -- they accumulate by the thousand and hold node
+    ephemeral-storage. The per-job ``elb-finalizer-*`` Jobs accumulate the same
+    way (one per completed search). Inject a literal ``ttlSecondsAfterFinished``
+    at the Job.spec level into the three batch-job templates AND the finalizer
+    template so the Kubernetes TTL-after-finished controller deletes each
+    completed Job (and its pods) automatically.
+
+    Safe by construction: the dashboard derives job status from persisted
+    jobstate Table rows + the Storage ``SUCCESS.txt`` marker and reads results
+    straight from Storage blobs, so deleting the finished k8s Job does not
+    affect the Blast Jobs listing, job detail, or result retrieval. The TTL only
+    governs GC AFTER the Job reaches a terminal state -- it does not change
+    retry behaviour, so the finalizer's ``backoffLimit: 0`` (it is not safely
+    retryable) is preserved. The warmup (``warm-*``) and init-ssd Jobs back the
+    node-local DB cache and are managed by the dashboard warmup reconciler
+    (which relies on the Job objects existing), so they are intentionally
+    untouched.
+
+    A literal value (not the upstream ``${ELB_JOB_TTL_SECONDS}`` template
+    variable) is used on purpose: the pinned ref's ``azure.py`` builds batch-job
+    substitutions across two separate dicts that do not provide that key, so a
+    ``${...}`` placeholder would render unsubstituted and yield an invalid
+    integer. Build-time override via the ``ELB_JOB_TTL_SECONDS`` env var
+    (digits, seconds; default 1800 = 30 min).
+    """
+    raw = os.environ.get("ELB_JOB_TTL_SECONDS", "1800")
+    ttl = raw if raw.isdigit() else "1800"
+    ttl_line = f"  ttlSecondsAfterFinished: {ttl}\n"
+    templates = [
+        "blast-batch-job-aks.yaml.template",
+        "blast-batch-job-local-ssd-aks.yaml.template",
+        "blast-batch-job-shard-ssd-aks.yaml.template",
+        "elb-finalizer-aks.yaml.template",
+    ]
+    for name in templates:
+        path = root / "src/elastic_blast/templates" / name
+        text = path.read_text()
+        if "ttlSecondsAfterFinished" in text:
+            continue
+        anchor = "\n  backoffLimit:"
+        pos = text.rfind(anchor)
+        if pos == -1:
+            raise RuntimeError(
+                f"{name}: no Job.spec 'backoffLimit' anchor for "
+                "ttlSecondsAfterFinished insertion"
+            )
+        insert_at = pos + 1  # after the newline, before the backoffLimit line
+        path.write_text(text[:insert_at] + ttl_line + text[insert_at:])
+
+
 def patch_unique_init_ssd_job_names(root: Path) -> None:
     templates = [
         "job-init-local-ssd-aks.yaml.template",
@@ -1019,6 +1076,7 @@ def main() -> int:
     patch_init_shard_script(root)
     patch_blast_run_aks_script(root)
     patch_aks_workload_tolerations(root)
+    patch_aks_job_ttl(root)
     patch_unique_init_ssd_job_names(root)
     patch_create_workspace_daemonset_tolerations(root)
     patch_init_job_wait_filters(root)
