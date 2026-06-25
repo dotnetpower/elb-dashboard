@@ -689,6 +689,16 @@ def _resolve_external_correlation_id(payload: dict[str, Any] | None) -> str:
     return str(payload.get("external_correlation_id") or "").strip()
 
 
+def _failure_classification_for(error_code: str, phase: str) -> dict[str, Any] | None:
+    """Best-effort failure classification for the job projection (never raises)."""
+    try:
+        from api.services.blast.failure_classification import classify_failure
+
+        return classify_failure(error_code, phase).as_dict()
+    except Exception:
+        return None
+
+
 def _local_to_blast_job(
     state: Any,
     split_children: dict[str, Any] | None = None,
@@ -816,6 +826,12 @@ def _local_to_blast_job(
         "updated_at": state.updated_at,
         "error_code": response_error_code,
         "error": response_error,
+        "failure_classification": (
+            _failure_classification_for(str(response_error_code or ""), str(state.phase or ""))
+            if str(getattr(state, "status", "") or "") == "failed"
+            else None
+        ),
+        "auto_retry": payload.get("auto_retry") if isinstance(payload, dict) else None,
         "payload": payload,
         "config_snapshot": _row_config_snapshot,
         "query_length": _row_query_length,

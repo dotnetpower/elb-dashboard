@@ -169,6 +169,14 @@ celery_app.conf.update(
             "schedule": float(os.environ.get("CELERY_BEAT_BLAST_RECONCILE_SECONDS", "90")),
             "options": {"queue": "reconcile"},
         },
+        # Auto-resubmit transient-failed BLAST jobs. The task itself is a no-op
+        # unless BLAST_AUTO_RETRY_ENABLED is set, so scheduling it is harmless
+        # while the feature is dormant (charter section 12a Rule 4, default-OFF).
+        "blast-auto-retry-failed-jobs": {
+            "task": "api.tasks.blast.auto_retry_failed_jobs",
+            "schedule": float(os.environ.get("CELERY_BEAT_BLAST_AUTO_RETRY_SECONDS", "180")),
+            "options": {"queue": "reconcile"},
+        },
         "blast-backfill-completed-runtime-metrics": {
             "task": "api.tasks.blast.backfill_completed_runtime_metrics",
             "schedule": 300.0,

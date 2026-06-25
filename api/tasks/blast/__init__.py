@@ -122,6 +122,7 @@ def _storage_account_from_row(row: Any) -> str:
 # Re-import task entry points defined in dedicated submodules so Celery's
 # ``include=["api.tasks.blast"]`` discovery still picks them up and external
 # callers (``from api.tasks.blast import cancel``) continue to work.
+from api.tasks.blast.auto_retry_task import auto_retry_failed_jobs  # noqa: E402,F401
 from api.tasks.blast.backfill_task import backfill_completed_runtime_metrics  # noqa: E402,F401
 from api.tasks.blast.cancel_task import cancel  # noqa: E402
 from api.tasks.blast.cli_parsing import (  # noqa: E402,F401

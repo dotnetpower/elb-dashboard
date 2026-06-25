@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
@@ -1085,6 +1086,46 @@ class JobStateRepository:
                         break
             except ResourceNotFoundError:
                 self._ensure_table("jobstate")
+        return rows
+
+    def list_recent_failed(
+        self,
+        *,
+        job_type: str = "blast",
+        limit: int = 200,
+        since_seconds: int = 86_400,
+    ) -> list[JobState]:
+        """Return recent ``failed`` jobs (with payload) for the auto-retry sweep.
+
+        Bounded on purpose: unlike a user-facing "most recent N" listing this
+        does NOT scan the full failed set (which can be large and is read with
+        payloads). It applies an ``updated_at`` time window (default 24h) so old,
+        already-handled failures fall out of scope, and reads at most ``limit``
+        rows — the sweep only resubmits a handful per pass, and a stale transient
+        failure older than the window is intentionally left for an operator. Rows
+        are returned most-recently-failed first.
+        """
+        safe_type = _sanitise_odata_value(job_type)
+        clauses = [f"type eq '{safe_type}'", "status eq 'failed'"]
+        if since_seconds and since_seconds > 0:
+            cutoff = (datetime.now(UTC) - timedelta(seconds=since_seconds)).isoformat(
+                timespec="seconds"
+            )
+            clauses.append(f"updated_at gt '{_sanitise_odata_value(cutoff)}'")
+        filter_expr = " and ".join(clauses)
+        rows: list[JobState] = []
+        with self._state_client() as t:
+            try:
+                entities = t.query_entities(
+                    filter_expr, results_per_page=_clamp_page_size(limit)
+                )
+                for e in entities:
+                    rows.append(JobState.from_entity(dict(e)))
+                    if len(rows) >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+        rows.sort(key=lambda r: r.updated_at or "", reverse=True)
         return rows
 
     def list_completed(
