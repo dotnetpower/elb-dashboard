@@ -86,7 +86,10 @@ def test_bicep_references_every_guard_key() -> None:
     override var and its `controlPlaneEnv.api.<KEY>` fallback are present.
     """
     # key -> the override var that deploys it to all sidecars.
-    override_vars = {"SERVICEBUS_ENABLED": "effectiveServiceBusEnabled"}
+    override_vars = {
+        "SERVICEBUS_ENABLED": "effectiveServiceBusEnabled",
+        "STORAGE_DATE_LAYOUT_ENABLED": "effectiveStorageDateLayout",
+    }
     data = _load()
     bicep = _BICEP_PATH.read_text(encoding="utf-8")
     missing: list[str] = []
