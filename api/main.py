@@ -49,6 +49,7 @@ from api.routes import (
     audit,
     blast,
     client_log,
+    cost,
     diagnostics,
     elastic_blast,
     frontend_proxy,
@@ -387,6 +388,7 @@ def create_app() -> FastAPI:
     app.include_router(warmup.warmup_router)
     app.include_router(audit.audit_router)
     app.include_router(notifications.notifications_router)
+    app.include_router(cost.router)
     app.include_router(client_log.router)
     app.include_router(upgrade.router)
     app.include_router(settings.settings_router)
