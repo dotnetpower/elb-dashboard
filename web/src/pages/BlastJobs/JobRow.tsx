@@ -273,6 +273,26 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
               : "❄ frozen"}
           </div>
         )}
+        {phase === "Failed" &&
+          job.failure_classification &&
+          job.failure_classification.category !== "unknown" && (
+            <div
+              style={{
+                fontSize: 9,
+                marginTop: 3,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                color: job.failure_classification.auto_retryable
+                  ? "var(--accent)"
+                  : "var(--text-faint)",
+              }}
+              title={job.failure_classification.reason}
+            >
+              {job.failure_classification.auto_retryable
+                ? "↻ retryable"
+                : job.failure_classification.category.replace(/_/g, " ")}
+            </div>
+          )}
       </td>
       <td
         style={{
