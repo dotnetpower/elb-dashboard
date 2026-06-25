@@ -11,3 +11,4 @@ export * from "@/api/clientLog";
 export * from "@/api/tasks";
 export * from "@/api/settings";
 export * from "@/api/notifications";
+export * from "@/api/blastTemplates";

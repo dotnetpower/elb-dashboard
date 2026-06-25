@@ -37,6 +37,7 @@ from api.routes.blast import results_export as _results_export_routes
 from api.routes.blast import schedules as _schedules_routes
 from api.routes.blast import submit as _submit_routes
 from api.routes.blast import taxonomy as _taxonomy_routes
+from api.routes.blast import templates as _templates_routes
 from api.routes.blast.databases import (
     blast_database_preview as blast_database_preview,
 )
@@ -160,6 +161,7 @@ blast_router.include_router(_databases_shard_routes.router)
 blast_router.include_router(_databases_oracle_routes.router)
 blast_router.include_router(_taxonomy_routes.router)
 blast_router.include_router(_schedules_routes.router)
+blast_router.include_router(_templates_routes.router)
 blast_router.include_router(_result_analytics_routes.router)
 # results_export MUST be included before results so the specific
 # `/jobs/{job}/results/export` path wins over results' `/results/{file_id}`
