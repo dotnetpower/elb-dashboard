@@ -6,6 +6,7 @@ import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, HelpCircle, 
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { LatestJobChip } from "@/components/LatestJobChip";
+import { NotificationBell } from "@/components/NotificationBell";
 import { NavMoreDropdown } from "@/components/NavMoreDropdown";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { apiLoginRequest } from "@/auth/msal";
@@ -395,6 +396,9 @@ export function Layout({ children }: PropsWithChildren) {
         >
           <HelpCircle size={14} />
         </button>
+
+        {/* Job notifications — terminal BLAST jobs at a glance */}
+        <NotificationBell enabled={!!account} />
 
         {/* Settings */}
         <button

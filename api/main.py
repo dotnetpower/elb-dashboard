@@ -56,6 +56,7 @@ from api.routes import (
     me,
     monitor,
     ncbi,
+    notifications,
     operations,
     resources,
     settings,
@@ -385,6 +386,7 @@ def create_app() -> FastAPI:
     app.include_router(blast.blast_router)
     app.include_router(warmup.warmup_router)
     app.include_router(audit.audit_router)
+    app.include_router(notifications.notifications_router)
     app.include_router(client_log.router)
     app.include_router(upgrade.router)
     app.include_router(settings.settings_router)
