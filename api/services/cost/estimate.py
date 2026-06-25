@@ -52,8 +52,31 @@ _HOURS_PER_MONTH = 730.0  # Azure's billing convention (365*24/12)
 
 
 def hourly_price_usd(node_sku: str) -> float | None:
-    """Return the hourly USD price for a SKU, or ``None`` when unknown."""
+    """Return the static hourly USD price for a SKU, or ``None`` when unknown."""
     return _SKU_HOURLY_USD.get((node_sku or "").strip())
+
+
+def _resolve_price(node_sku: str, region: str) -> tuple[float | None, str | None]:
+    """Resolve the hourly price, preferring live Retail pricing over the static map.
+
+    Live pricing is gated + best-effort (``pricing.live_hourly_price_usd`` returns
+    ``None`` when the gate is off or the fetch fails), so this transparently falls
+    back to the static map and finally to ``(None, None)`` for an unknown SKU.
+    """
+    sku = (node_sku or "").strip()
+    if region:
+        try:
+            from api.services.cost.pricing import live_hourly_price_usd
+
+            live = live_hourly_price_usd(sku, region)
+        except Exception:
+            live = None
+        if live is not None:
+            return live, "live"
+    static = hourly_price_usd(sku)
+    if static is not None:
+        return static, "static"
+    return None, None
 
 
 @dataclass(frozen=True)
@@ -66,6 +89,7 @@ class CostEstimate:
     accrued_usd: float | None
     projected_monthly_usd: float
     priced_as_of: str
+    priced_source: str | None = None
     is_estimate: bool = True
 
     def as_dict(self) -> dict[str, object]:
@@ -78,6 +102,7 @@ class CostEstimate:
             "accrued_usd": None if self.accrued_usd is None else round(self.accrued_usd, 4),
             "projected_monthly_usd": round(self.projected_monthly_usd, 2),
             "priced_as_of": self.priced_as_of,
+            "priced_source": self.priced_source,
             "is_estimate": self.is_estimate,
         }
 
@@ -88,17 +113,19 @@ def estimate_cluster_cost(
     node_count: int,
     uptime_seconds: int | None = None,
     running: bool = True,
+    region: str = "",
 ) -> CostEstimate:
     """Estimate the running compute cost of a cluster's workload node pool.
 
     ``hourly_usd`` = node_count × SKU price when running and priced, else 0.
-    ``accrued_usd`` is computed only when ``uptime_seconds`` is known. The
-    estimate is intentionally coarse and labelled ``is_estimate`` so the UI never
-    presents it as a bill.
+    ``accrued_usd`` is computed only when ``uptime_seconds`` is known. Price is
+    live Retail pricing when ``region`` is given and the live gate is on, else the
+    static map; ``priced_source`` records which. The estimate is intentionally
+    coarse and labelled ``is_estimate`` so the UI never presents it as a bill.
     """
     sku = (node_sku or "").strip()
     count = max(0, int(node_count or 0))
-    unit = hourly_price_usd(sku)
+    unit, source = _resolve_price(sku, region)
     priced = unit is not None
     effective_unit = unit if priced else 0.0
 
@@ -117,4 +144,5 @@ def estimate_cluster_cost(
         accrued_usd=accrued,
         projected_monthly_usd=projected_monthly,
         priced_as_of=PRICED_AS_OF,
+        priced_source=source,
     )

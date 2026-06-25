@@ -15,6 +15,7 @@ export interface ClusterCostEstimate {
   accrued_usd: number | null;
   projected_monthly_usd: number;
   priced_as_of: string;
+  priced_source?: string | null;
   is_estimate: boolean;
 }
 

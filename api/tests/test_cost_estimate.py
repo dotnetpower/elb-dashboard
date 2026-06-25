@@ -48,3 +48,30 @@ def test_is_estimate_flag_and_priced_as_of() -> None:
     d = estimate_cluster_cost(node_sku="Standard_E16s_v5", node_count=1).as_dict()
     assert d["is_estimate"] is True
     assert d["priced_as_of"]
+
+
+def test_priced_source_static_by_default() -> None:
+    # No region => no live lookup => static map.
+    est = estimate_cluster_cost(node_sku="Standard_E16s_v5", node_count=1)
+    assert est.priced_source == "static"
+
+
+def test_priced_source_live(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "api.services.cost.pricing.live_hourly_price_usd", lambda _s, _r: 9.99
+    )
+    est = estimate_cluster_cost(
+        node_sku="Standard_E16s_v5", node_count=1, region="koreacentral"
+    )
+    assert est.priced_source == "live"
+    assert est.hourly_usd == 9.99
+
+
+def test_live_falls_back_to_static(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "api.services.cost.pricing.live_hourly_price_usd", lambda _s, _r: None
+    )
+    est = estimate_cluster_cost(
+        node_sku="Standard_E16s_v5", node_count=1, region="koreacentral"
+    )
+    assert est.priced_source == "static"

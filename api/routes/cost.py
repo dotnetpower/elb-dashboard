@@ -95,6 +95,7 @@ def get_cost(
         node_count=node_count,
         uptime_seconds=uptime,
         running=running,
+        region=str(snapshot.get("region") or ""),
     )
 
     budget = get_budget(subscription_id, resource_group, cluster_name)

@@ -187,9 +187,10 @@ export function CostCard({
           </div>
 
           <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
-            Approximate (priced as of {estimate?.priced_as_of ?? "—"}) — workload node pool only,
-            assumes 24/7 running; excludes Spot/reserved discounts, the system pool, storage, and
-            egress. Not a bill; see Azure Cost Management for actual spend.
+            Approximate (priced as of {estimate?.priced_as_of ?? "—"}
+            {estimate?.priced_source === "live" ? ", live Retail prices" : ", static price map"}) —
+            workload node pool only, assumes 24/7 running; excludes Spot/reserved discounts, the
+            system pool, storage, and egress. Not a bill; see Azure Cost Management for actual spend.
           </div>
         </>
       )}
