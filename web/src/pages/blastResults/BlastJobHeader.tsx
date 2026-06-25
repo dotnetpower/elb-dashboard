@@ -12,6 +12,7 @@ import {
   Link2,
   Loader2,
   StopCircle,
+  RotateCcw,
   Workflow,
 } from "lucide-react";
 
@@ -71,6 +72,16 @@ interface BlastJobHeaderProps {
   onExport: (format: BlastExportFormat) => void;
   hasExportTargets: boolean;
   resultFiles?: BlastResultFile[];
+  /** Manual one-click retry affordance for a transient-failed job. */
+  canRetry?: boolean;
+  onRetry?: () => void;
+  retryDisabled?: boolean;
+  failureClassification?: {
+    category: string;
+    auto_retryable: boolean;
+    reason: string;
+  } | null;
+  autoRetry?: { count: number; max?: number; quarantined: boolean } | null;
 }
 
 /**
@@ -107,6 +118,11 @@ export function BlastJobHeader({
   onExport,
   hasExportTargets,
   resultFiles = [],
+  canRetry = false,
+  onRetry,
+  retryDisabled = false,
+  failureClassification,
+  autoRetry,
 }: BlastJobHeaderProps) {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -371,6 +387,43 @@ export function BlastJobHeader({
           >
             <StopCircle size={14} strokeWidth={1.5} /> Cancel
           </button>
+        )}
+        {canRetry && onRetry && (
+          <button
+            className="glass-button"
+            onClick={onRetry}
+            disabled={retryDisabled}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              fontSize: 12,
+              color: "var(--accent)",
+            }}
+            title="Re-submit this job with the same parameters"
+          >
+            <RotateCcw size={14} strokeWidth={1.5} /> {retryDisabled ? "Retrying…" : "Retry"}
+          </button>
+        )}
+        {autoRetry && failureClassification && (autoRetry.count > 0 || autoRetry.quarantined) && (
+          <span
+            title={
+              failureClassification?.reason ??
+              (autoRetry.quarantined ? "Auto-retry budget exhausted" : "Auto-retried")
+            }
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              padding: "3px 8px",
+              borderRadius: 8,
+              color: autoRetry.quarantined ? "var(--danger, #f87171)" : "var(--text-muted)",
+              background: "var(--bg-tertiary)",
+            }}
+          >
+            {autoRetry.quarantined
+              ? "Quarantined"
+              : `Auto-retry ${autoRetry.count}/${autoRetry.max ?? 2}`}
+          </span>
         )}
         <button
           className="glass-button glass-button--primary"

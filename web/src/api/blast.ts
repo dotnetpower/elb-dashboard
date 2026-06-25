@@ -239,6 +239,12 @@ export const blastApi = {
       },
     ),
 
+  retryJob: (jobId: string) =>
+    api.post<{ job_id: string; task_id: string; status: string }>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/retry`,
+      {},
+    ),
+
   deleteJob: (jobId: string) =>
     api.del<{ job_id: string; status: string }>(
       `/blast/jobs/${encodeURIComponent(jobId)}`,

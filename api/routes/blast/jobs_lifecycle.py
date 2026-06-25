@@ -163,6 +163,129 @@ def blast_job_cancel(
     return {"job_id": job_id, "task_id": result.id, "status": "cancelling"}
 
 
+@router.post("/jobs/{job_id}/retry")
+def blast_job_retry(
+    job_id: str = Path(..., min_length=1, max_length=128),
+    body: dict[str, Any] | None = Body(default=None),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Re-submit a transient-failed job with its original parameters (one-click).
+
+    Only ``failure_classification.auto_retryable`` (transient submit-phase)
+    failures are accepted — a one-click resubmit of a K8s runtime failure would
+    orphan a cluster job and re-stage the database, so those are steered to the
+    Duplicate flow (which lets the researcher review + re-enter the query). The
+    enqueue happens before the state flip so a broker outage leaves the job in
+    its terminal ``failed`` state.
+    """
+    del body  # context is reconstructed from the stored row, not the request
+    try:
+        from api.services.state_repo import get_state_repo
+
+        state = get_state_repo().get(job_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("manual retry state read failed job_id=%s: %s", job_id, type(exc).__name__)
+        raise HTTPException(
+            503,
+            detail={"code": "state_unavailable", "message": "job state is temporarily unavailable"},
+        ) from exc
+
+    if state is None:
+        raise HTTPException(404, detail={"code": "not_found", "message": "job not found"})
+    _assert_job_owner(state.owner_oid, caller)
+
+    if _state_is_external(state):
+        raise HTTPException(
+            400,
+            detail={
+                "code": "external_not_retryable",
+                "message": "external (OpenAPI) jobs are managed by the producing service",
+            },
+        )
+
+    if str(getattr(state, "status", "") or "") != "failed":
+        raise HTTPException(
+            409,
+            detail={"code": "not_failed", "message": "only a failed job can be retried"},
+        )
+
+    from api.services.blast.failure_classification import classify_failure
+
+    classification = classify_failure(
+        str(getattr(state, "error_code", "") or ""), str(getattr(state, "phase", "") or "")
+    )
+    if not classification.auto_retryable:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "not_retryable",
+                "message": (
+                    f"{classification.category} failures are not one-click retryable; "
+                    "use Duplicate to review and resubmit"
+                ),
+                "category": classification.category,
+            },
+        )
+
+    from api.services.blast.auto_retry import (
+        AutoRetryMeta,
+        max_auto_retries,
+        merge_meta_into_payload,
+        restore_submit_kwargs,
+    )
+
+    kwargs = restore_submit_kwargs(state)
+    if kwargs is None:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "unrestorable",
+                "message": "original submit parameters could not be reconstructed; use Duplicate",
+            },
+        )
+
+    from api.routes import blast as blast_package
+    from api.tasks.blast.submit_task import submit
+
+    result = blast_package._safe_delay(submit, **kwargs)
+    task_id = str(getattr(result, "id", "") or "")
+
+    # Manual retry clears the auto-retry counter + quarantine (the user is
+    # explicitly starting over) and drops the stale progress timeline so the
+    # resubmitted task rebuilds it. A failure here is non-fatal — the task is
+    # already enqueued and owns its own state transitions.
+    try:
+        from api.services.state_repo import get_state_repo
+
+        repo = get_state_repo()
+        reset_meta = AutoRetryMeta(count=0, max=max_auto_retries(), quarantined=False)
+        merged = merge_meta_into_payload(getattr(state, "payload", None), reset_meta)
+        merged.pop("_progress", None)
+        repo.update(
+            job_id,
+            status="queued",
+            phase="queued",
+            error_code="",
+            task_id=task_id,
+            payload=merged,
+        )
+        repo.append_history(
+            job_id,
+            "manual_retry",
+            {"by": caller.object_id, "auto_retry": reset_meta.as_dict()},
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "manual retry row flip failed (task already enqueued) job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+
+    return {"job_id": job_id, "task_id": task_id, "status": "queued"}
+
+
 @router.delete("/jobs/{job_id}")
 def blast_job_delete(
     job_id: str = Path(...),

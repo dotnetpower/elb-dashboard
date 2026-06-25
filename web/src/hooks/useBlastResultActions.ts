@@ -117,6 +117,15 @@ export function useBlastResultActions({
     onError: (e) => toast(`Cancel failed: ${(e as Error).message}`, "error"),
   });
 
+  const retryMutation = useMutation({
+    mutationFn: () => blastApi.retryJob(jobId!),
+    onSuccess: () => {
+      toast("Job resubmitted.", "success");
+      queryClient.invalidateQueries({ queryKey: ["blast-job", jobId] });
+    },
+    onError: (e) => toast(`Retry failed: ${(e as Error).message}`, "error"),
+  });
+
   const copyJobId = () => {
     if (jobId) copyText(jobId, "jobId");
   };
@@ -130,6 +139,7 @@ export function useBlastResultActions({
     handleDownload,
     handleExport,
     cancelMutation,
+    retryMutation,
   };
 }
 

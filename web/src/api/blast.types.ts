@@ -196,6 +196,20 @@ export interface BlastJobSummary {
    * pre-date payload persistence; callers must null-check.
    */
   payload?: Record<string, unknown>;
+  /** Server-derived failure classification for a failed job (error_code based). */
+  failure_classification?: {
+    category: string;
+    auto_retryable: boolean;
+    reason: string;
+  } | null;
+  /** Auto-retry bookkeeping; present once the auto-retry feature has touched the job. */
+  auto_retry?: {
+    count: number;
+    max?: number;
+    quarantined: boolean;
+    last_error_code?: string;
+    last_attempt_at?: string;
+  } | null;
   target?: ApiTarget;
   meta?: ApiResponseMeta;
   provenance?: BlastProvenanceBundle;

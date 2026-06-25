@@ -147,6 +147,15 @@ export function BlastResults() {
         onExport={actions.handleExport}
         hasExportTargets={state.showCompletedMetrics}
         resultFiles={state.resultFiles}
+        canRetry={
+          job?.status === "failed" &&
+          Boolean(job?.failure_classification?.auto_retryable) &&
+          Boolean((job?.payload as { query_file?: unknown } | undefined)?.query_file)
+        }
+        onRetry={() => actions.retryMutation.mutate()}
+        retryDisabled={actions.retryMutation.isPending}
+        failureClassification={job?.failure_classification ?? null}
+        autoRetry={job?.auto_retry ?? null}
       />
 
       {state.liveUpdatesStalled && (
