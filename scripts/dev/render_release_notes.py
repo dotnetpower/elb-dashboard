@@ -33,10 +33,18 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 FEATURES_GLOB = "docs/features_change/**/*.md"
 CC_RE = re.compile(r"^(?P<type>[a-zA-Z]+)(\([^)]+\))?(?P<bang>!?):\s*(?P<subj>.+)$")
 DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)\.md$")
+# Cap every `git` invocation so a wedged git process (stale lock file, an
+# NFS hiccup, a half-broken submodule) raises `TimeoutExpired` instead of
+# blocking the release-note rendering indefinitely. 30 s is generous for
+# the largest log walk we do (full history) and small enough that an
+# operator notices a stuck script in a single CI step.
+_GIT_TIMEOUT_SECONDS = 30
 
 
 def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=REPO_ROOT, text=True)
+    return subprocess.check_output(
+        ["git", *args], cwd=REPO_ROOT, text=True, timeout=_GIT_TIMEOUT_SECONDS
+    )
 
 
 def commits_in_range(range_arg: str | None) -> list[tuple[str, str]]:
