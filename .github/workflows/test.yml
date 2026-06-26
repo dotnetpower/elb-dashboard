@@ -55,24 +55,24 @@ jobs:
         run: uv run ruff check api
 
       - name: pytest (fast loop — slow/subprocess excluded)
-        # Run SERIALLY on CI (`-n0` overrides pytest.ini's `-n auto`). Under
-        # pytest-xdist a worker was intermittently SIGKILLed near the end of the
-        # suite ("[gwN] node down: Not properly terminated", no Python traceback,
-        # no faulthandler dump — the worker process is killed, not hung) and the
-        # controller then blocked forever on the dead node, running the step to
-        # its timeout. Serial execution removes the worker-process layer
-        # entirely: there is no controller waiting on a dead worker, peak memory
-        # is one interpreter instead of four (avoiding the OOM that triggers the
-        # kill), and if a test ever does crash the process it fails fast with the
-        # test named instead of deadlocking. Locally the serial fast loop is ~34 s
-        # (vs ~15 s parallel); on CI it stays well under a minute. Local dev keeps
-        # `-n auto` via pytest.ini for speed.
+        # Uses the default `-n auto` from pytest.ini (one xdist worker per
+        # GitHub-hosted runner vCPU, currently 4). The legacy CI workaround
+        # forced `-n0` (serial) because an xdist worker was intermittently
+        # SIGKILLed near the end of the suite ("[gwN] node down: Not properly
+        # terminated") and the controller then deadlocked on the dead node.
+        # Commit 5a9cef6 traced the kill back to its real root cause — five
+        # Redis-touching call sites (kombu probes + Celery result backend
+        # update_state) inheriting the OS-default 75-120 s TCP connect timeout
+        # — and capped them. With those bounded, the per-test 60 s
+        # `pytest-timeout` no longer fires on a hanging socket, no worker
+        # gets SIGKILLed, and parallel execution is safe again. Full suite
+        # now ~2 min locally with `-n auto` (vs ~4 min serial).
         #
         # Backstops still bound any stall: `--timeout=60` per test and
         # `--session-timeout=300` (pytest.ini), plus this step-level
-        # `timeout-minutes` as the final OS-level guard. Set CI=true so CI-aware
-        # code paths (logging, color, etc.) behave correctly.
+        # `timeout-minutes` as the final OS-level guard. Set CI=true so
+        # CI-aware code paths (logging, color, etc.) behave correctly.
         timeout-minutes: 6
         env:
           CI: "true"
-        run: uv run pytest -q api/tests -n0
+        run: uv run pytest -q api/tests
