@@ -43,6 +43,7 @@ from api.services.auto_stop import (
     save_auto_stop_preference,
 )
 from api.services.auto_stop_evaluator import evaluate_cluster
+from api.services.feature_events import record_feature_event
 from api.services.sanitise import (
     redact_oid,
     sanitise,
@@ -542,6 +543,23 @@ def put_autostop(
         saved.enabled,
         saved.idle_minutes,
         redact_oid(caller.object_id),
+    )
+    # Audit who toggled / re-tuned auto-stop. Records both the new state and
+    # the previous one so the App Insights customEvent answers "who turned it
+    # off?" / "who shortened the idle window?" directly.
+    prev_enabled = existing.enabled if existing is not None else None
+    prev_idle = existing.idle_minutes if existing is not None else None
+    record_feature_event(
+        "autostop_config",
+        status="updated",
+        actor="user",
+        actor_oid=caller.object_id,
+        cluster=saved.cluster_name,
+        resource_group=saved.resource_group,
+        enabled=saved.enabled,
+        idle_minutes=saved.idle_minutes,
+        prev_enabled=prev_enabled,
+        prev_idle_minutes=prev_idle,
     )
     return _pref_response(
         saved,

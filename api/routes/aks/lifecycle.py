@@ -20,6 +20,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _safe_delay
 from api.routes.aks.common import _invalidate_aks_monitor_cache
+from api.services.feature_events import record_feature_event
 
 router = APIRouter()
 
@@ -69,6 +70,16 @@ def aks_start(
         auto_openapi=auto_openapi,
     )
     _invalidate_aks_monitor_cache(body.get("subscription_id", ""), body.get("resource_group", ""))
+    record_feature_event(
+        "cluster_lifecycle",
+        status="requested",
+        action="start",
+        actor="user",
+        actor_oid=caller.object_id,
+        cluster=body.get("cluster_name", ""),
+        resource_group=body.get("resource_group", ""),
+        task_id=getattr(result, "id", None),
+    )
     return {"task_id": result.id, "status": "queued"}
 
 
@@ -118,6 +129,17 @@ def aks_scale(
         auto_warmup=auto_warmup,
     )
     _invalidate_aks_monitor_cache(body.get("subscription_id", ""), body.get("resource_group", ""))
+    record_feature_event(
+        "cluster_lifecycle",
+        status="requested",
+        action="scale",
+        actor="user",
+        actor_oid=caller.object_id,
+        cluster=body.get("cluster_name", ""),
+        resource_group=body.get("resource_group", ""),
+        node_count=node_count,
+        task_id=getattr(result, "id", None),
+    )
     return {"task_id": result.id, "status": "queued"}
 
 
@@ -135,6 +157,16 @@ def aks_stop(
         cluster_name=body.get("cluster_name", ""),
     )
     _invalidate_aks_monitor_cache(body.get("subscription_id", ""), body.get("resource_group", ""))
+    record_feature_event(
+        "cluster_lifecycle",
+        status="requested",
+        action="stop",
+        actor="user",
+        actor_oid=caller.object_id,
+        cluster=body.get("cluster_name", ""),
+        resource_group=body.get("resource_group", ""),
+        task_id=getattr(result, "id", None),
+    )
     return {"task_id": result.id, "status": "queued"}
 
 
@@ -152,4 +184,14 @@ def aks_delete(
         cluster_name=body.get("cluster_name", ""),
     )
     _invalidate_aks_monitor_cache(body.get("subscription_id", ""), body.get("resource_group", ""))
+    record_feature_event(
+        "cluster_lifecycle",
+        status="requested",
+        action="delete",
+        actor="user",
+        actor_oid=caller.object_id,
+        cluster=body.get("cluster_name", ""),
+        resource_group=body.get("resource_group", ""),
+        task_id=getattr(result, "id", None),
+    )
     return {"task_id": result.id, "status": "queued"}

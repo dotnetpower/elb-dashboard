@@ -34,6 +34,7 @@ from api.services.auto_stop import (
 )
 from api.services.auto_stop_evaluator import evaluate_cluster
 from api.services.auto_stop_live import probe_live_blast_activity
+from api.services.feature_events import record_feature_event
 
 LOGGER = logging.getLogger(__name__)
 
@@ -345,6 +346,15 @@ def auto_stop_aks(
         cluster_name=cluster_name,
     )
     mark_auto_stop_event(pref, stopped=True, reason=decision.reason)
+    record_feature_event(
+        "cluster_lifecycle",
+        status="completed",
+        action="stop",
+        actor="system:auto-stop",
+        cluster=cluster_name,
+        resource_group=resource_group,
+        reason=decision.reason,
+    )
     LOGGER.info("auto_stop_aks completed cluster=%s reason=%s", cluster_name, decision.reason)
     return {
         "cluster_name": cluster_name,
