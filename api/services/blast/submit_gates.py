@@ -242,14 +242,17 @@ def _gate_broker() -> GateResult:
     job row has been persisted; checking up front means we can reject before
     writing anything to the state repo."""
     try:
-        from api.celery_app import celery_app
+        from api.celery_app import fast_probe_connection
 
-        conn = celery_app.connection()
+        conn = fast_probe_connection()
         # Fail-fast: `max_retries=0` makes a single connect attempt and raises
         # immediately. `max_retries=1` would sleep the kombu retry interval
         # (~2 s) before one retry — pure latency for a fail-closed gate that
         # already returns a `fail` row when the broker is unreachable. Mirrors
         # the readiness probe and pre-flight broker check.
+        # `fast_probe_connection()` bounds the per-attempt TCP connect so the
+        # gate stays crisp even when the broker port is *filtered* — see the
+        # helper docstring.
         conn.ensure_connection(max_retries=0, timeout=2)
         conn.close()
     except Exception as exc:

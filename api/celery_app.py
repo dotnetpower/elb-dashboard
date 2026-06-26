@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from celery import Celery
 
@@ -122,6 +123,33 @@ celery_app.conf.update(
     task_time_limit=_TASK_TIME_LIMIT,
     result_expires=_RESULT_EXPIRES_SECONDS,
     broker_connection_retry_on_startup=True,
+    # Bound the per-attempt TCP connect for the result backend writes (PROGRESS
+    # state updates, task results). Default is the OS-level connect timeout
+    # (75-120 s on Linux), which on a host where the broker port is *filtered*
+    # (test environments without a Redis container, WSL2 mirrored networking,
+    # a stopped sidecar that left the LB rule in place) makes every
+    # `self.update_state(...)` block until the per-test 60 s `pytest-timeout`
+    # alarm fires. The same fail-fast philosophy applies to production: a
+    # genuinely-down result backend should surface in a few seconds, not
+    # tarpit every progress checkpoint. 5 s is generous for a healthy
+    # localhost Redis (sub-millisecond response) and matches the budget
+    # `_gate_broker` already uses for the broker probe.
+    result_backend_transport_options={
+        "socket_connect_timeout": float(
+            os.environ.get("CELERY_RESULT_BACKEND_CONNECT_TIMEOUT", "5")
+        )
+    },
+    # Belt-and-braces for the redis result backend: the keyword above is
+    # consumed by kombu-style backends, but Celery's redis backend reads
+    # these top-level keys directly (see celery.backends.redis). Without
+    # them every `self.update_state(state="PROGRESS", ...)` would block on
+    # the OS socket timeout when the result backend is unreachable.
+    # Both bounds are env-tunable so ops can relax them without a redeploy
+    # if a deployment ever puts the worker on a high-latency link.
+    redis_socket_connect_timeout=float(
+        os.environ.get("CELERY_REDIS_SOCKET_CONNECT_TIMEOUT", "5")
+    ),
+    redis_socket_timeout=float(os.environ.get("CELERY_REDIS_SOCKET_TIMEOUT", "30")),
     task_default_queue="default",
     task_routes={
         "api.tasks.azure.*": {"queue": "azure"},
@@ -306,8 +334,39 @@ _on_task_revoked = _signals._on_task_revoked
 _on_before_task_publish = _signals._on_before_task_publish
 _PRODUCER_ROLE = _signals._PRODUCER_ROLE
 
+
+def fast_probe_connection(socket_connect_timeout: float = 2.0) -> Any:
+    """Return a kombu broker connection with a bounded TCP connect timeout.
+
+    The default kombu/redis transport inherits the OS-level connect timeout
+    (75-120 s on Linux) for each connect attempt. ``ensure_connection(timeout=N)``
+    only bounds the overall *retry loop*, not the individual socket connect, so
+    on a host where the broker port is *filtered* rather than *refused* (WSL2
+    mirrored networking, a stopped sidecar that left the LB rule in place,
+    pytest with no Redis container) a single probe blocks past any caller
+    deadline. Readiness, pre-flight, and the BLAST submit gate all want a
+    crisp pass/fail in a few seconds — this helper bolts that contract on.
+
+    Use only for **probes**. Production workers/producers must keep the
+    long, retrying connect that lets the worker ride out a broker restart.
+    """
+    conn = celery_app.connection()
+    # Use getattr so test doubles that omit `transport_options` (the kombu
+    # `Connection` attribute) still work; the dict spread accepts the empty
+    # fallback unchanged.
+    existing = getattr(conn, "transport_options", None) or {}
+    try:
+        conn.transport_options = {**existing, "socket_connect_timeout": socket_connect_timeout}
+    except AttributeError:
+        # Test double exposes only the methods the probe needs; the timeout
+        # cap is best-effort here — the real broker connection always honours it.
+        pass
+    return conn
+
+
 __all__ = [
     "CELERY_BROKER_URL",
     "CELERY_RESULT_BACKEND",
     "celery_app",
+    "fast_probe_connection",
 ]

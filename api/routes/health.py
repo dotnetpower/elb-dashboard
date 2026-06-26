@@ -253,9 +253,8 @@ def readiness() -> Any:
 
     # 1. Redis (Celery broker)
     try:
-        from api.celery_app import celery_app
+        from api.celery_app import fast_probe_connection
 
-        conn = celery_app.connection()
         # Fail-fast on purpose: `max_retries=0` makes a single connect attempt
         # and raises immediately on failure instead of sleeping the kombu retry
         # interval (`interval_start`, ~2 s) before one retry. A readiness probe
@@ -264,6 +263,15 @@ def readiness() -> Any:
         # timeout, making a briefly-degraded broker look fully down). This
         # mirrors the Storage probe's documented `retry_total=0` philosophy
         # below and removes a ~2 s tarpit per readiness call when Redis is down.
+        #
+        # `fast_probe_connection()` also bounds the per-attempt TCP connect
+        # via the kombu redis transport's `socket_connect_timeout` so the probe
+        # genuinely fails fast when the broker port is *filtered* (WSL2 mirrored
+        # networking, a stopped sidecar that leaves the LB rule in place) rather
+        # than refused. Without it `ensure_connection(timeout=2)` would only time
+        # out the retry loop and the inner `sock.connect` would inherit the OS
+        # default (75-120 s).
+        conn = fast_probe_connection()
         conn.ensure_connection(max_retries=0, timeout=2)
         conn.close()
         components["redis"] = {"status": "ok"}

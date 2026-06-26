@@ -28,6 +28,15 @@ EXEC_UPSTREAM_ENV = "TERMINAL_EXEC_UPSTREAM"
 EXEC_TOKEN_ENV = "EXEC_TOKEN"  # noqa: S105 - env var NAME, not a value
 DEFAULT_UPSTREAM = "http://127.0.0.1:7682"
 DEFAULT_HTTP_TIMEOUT = 10.0  # connect / write timeout to the exec server itself
+# Readiness probe (`healthz()`) hits a loopback service that should respond in
+# milliseconds. The full 10 s budget is meant for `run()`-style writes of large
+# bodies, not for a single liveness GET. A 10 s connect timeout amplifies into
+# minutes when a caller (e.g. the `/health/ready` endpoint) probes repeatedly
+# while the sidecar is genuinely down, and pushes the readiness response past
+# the typical orchestrator deadline. 2 s is enough for the loopback hop with
+# a comfortable safety margin and matches the Redis probe budget used by
+# `api/routes/health.py::readiness`. Tunable for ops via env override.
+HEALTHZ_HTTP_TIMEOUT = float(os.environ.get("TERMINAL_EXEC_HEALTHZ_TIMEOUT", "2"))
 
 # Hard ceiling for execution time. The exec server enforces its own cap; this
 # is just the request-side timeout so the api sidecar doesn't dangle forever
@@ -242,7 +251,7 @@ def healthz() -> dict[str, Any]:
     """Probe the exec server's /healthz (no auth required). Returns the JSON
     body; raises ``TerminalExecError`` if the server is unreachable or
     returns non-200."""
-    client = get_pooled_client("terminal-exec-healthz", timeout=DEFAULT_HTTP_TIMEOUT)
+    client = get_pooled_client("terminal-exec-healthz", timeout=HEALTHZ_HTTP_TIMEOUT)
     try:
         resp = client.get(_upstream() + "/healthz")
     except httpx.HTTPError as exc:
