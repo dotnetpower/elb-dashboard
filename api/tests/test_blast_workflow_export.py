@@ -96,6 +96,15 @@ def test_render_contains_pinned_params_and_no_secrets(fmt: str) -> None:
     assert export.media_type.startswith("text/plain")
 
 
+@pytest.mark.parametrize("fmt", SUPPORTED_WORKFLOW_FORMATS)
+def test_render_submit_call_has_bounded_timeout(fmt: str) -> None:
+    """Generated workflow MUST bound the POST so a control-plane outage fails
+    the pipeline step in seconds, not hangs (urllib defaults to no timeout)."""
+    content = render_workflow_export(job_id="j", snapshot=_SNAPSHOT, fmt=fmt).content
+    assert "urlopen(req, timeout=" in content
+    assert "ELB_SUBMIT_TIMEOUT" in content
+
+
 def test_render_format_markers() -> None:
     assert "nextflow.enable.dsl=2" in render_workflow_export(
         job_id="j", snapshot=_SNAPSHOT, fmt="nextflow"

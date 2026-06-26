@@ -176,7 +176,11 @@ def _submit_script(pinned: dict) -> str:
         "    },\n"
         '    method="POST",\n'
         ")\n"
-        "with urllib.request.urlopen(req) as resp:\n"
+        '# Bound the POST so a control-plane outage surfaces as a pipeline\n'
+        '# error in ~60 s instead of hanging the workflow step indefinitely\n'
+        '# (urllib defaults to no socket timeout). Tunable via ELB_SUBMIT_TIMEOUT.\n'
+        '_t = float(os.environ.get("ELB_SUBMIT_TIMEOUT", "60"))\n'
+        "with urllib.request.urlopen(req, timeout=_t) as resp:\n"
         "    sys.stdout.write(resp.read().decode())\n"
     )
 
