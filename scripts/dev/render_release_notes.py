@@ -27,7 +27,6 @@ import re
 import subprocess
 import sys
 from collections import OrderedDict
-from typing import Iterable
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 FEATURES_GLOB = "docs/features_change/**/*.md"
@@ -42,8 +41,13 @@ _GIT_TIMEOUT_SECONDS = 30
 
 
 def git(*args: str) -> str:
-    return subprocess.check_output(
-        ["git", *args], cwd=REPO_ROOT, text=True, timeout=_GIT_TIMEOUT_SECONDS
+    # Trusted invocation: `git` is a system binary on every dev / CI host,
+    # `args` come from this script's own callers (no untrusted input).
+    return subprocess.check_output(  # noqa: S603 - trusted git CLI
+        ["git", *args],  # noqa: S607 - rely on PATH-resolved git
+        cwd=REPO_ROOT,
+        text=True,
+        timeout=_GIT_TIMEOUT_SECONDS,
     )
 
 
@@ -126,7 +130,7 @@ def doc_rel(rel: str) -> str:
 
 
 def render(version: str, range_desc: str, entries: list[dict], warnings: list[str]) -> str:
-    sections: "OrderedDict[str, list[dict]]" = OrderedDict()
+    sections: OrderedDict[str, list[dict]] = OrderedDict()
     for label in ("Breaking changes", "Features", "Fixes", "Other"):
         sections[label] = []
     for e in entries:
@@ -142,7 +146,10 @@ def render(version: str, range_desc: str, entries: list[dict], warnings: list[st
     lines = [
         "---",
         f"title: {version}",
-        f"description: ElasticBLAST Control Plane {version} release notes \u2014 feature-change notes that landed in this version.",
+        (
+            f"description: ElasticBLAST Control Plane {version} release notes \u2014 "
+            "feature-change notes that landed in this version."
+        ),
         "tags:",
         "  - release",
         "---",
@@ -155,7 +162,7 @@ def render(version: str, range_desc: str, entries: list[dict], warnings: list[st
     if warnings:
         lines.append("> **Warnings**")
         for w in warnings:
-            lines.append(f">")
+            lines.append(">")
             lines.append(f"> - {w}")
         lines.append("")
     if not entries:
@@ -196,7 +203,10 @@ def main() -> int:
     from_ref = args.from_ref
     if not from_ref and args.auto_from_last_tag:
         try:
-            from_ref = git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*.[0-9]*.[0-9]*").strip()
+            from_ref = git(
+                "describe", "--tags", "--abbrev=0",
+                "--match", "v[0-9]*.[0-9]*.[0-9]*",
+            ).strip()
         except subprocess.CalledProcessError:
             from_ref = ""  # no tags yet
 

@@ -33,18 +33,117 @@ PLACEHOLDER = "[CHANGELOG]"
 
 # Order matters: more specific prefixes first.
 CATEGORY_PREFIXES: list[tuple[str, tuple[str, ...]]] = [
-    ("Security", ("security-", "auth-", "msal-", "rbac-", "production-hardening", "production-feature-flags")),
-    ("BLAST", ("blast-", "web-blast-", "ncbi-", "taxonomy-", "primer-", "core-nt-", "e16-", "outfmt5-", "alignments-")),
+    (
+        "Security",
+        (
+            "security-",
+            "auth-",
+            "msal-",
+            "rbac-",
+            "production-hardening",
+            "production-feature-flags",
+        ),
+    ),
+    (
+        "BLAST",
+        (
+            "blast-",
+            "web-blast-",
+            "ncbi-",
+            "taxonomy-",
+            "primer-",
+            "core-nt-",
+            "e16-",
+            "outfmt5-",
+            "alignments-",
+        ),
+    ),
     ("AKS / Cluster", ("aks-", "cluster-", "k8s-", "cluster-")),
     ("Terminal", ("terminal-",)),
     ("Storage / DB", ("storage-", "db-", "warmup-", "auto-warmup-", "prepare-db-")),
-    ("OpenAPI", ("openapi-", "elb-openapi-", "external-elastic-blast", "api-endpoints-", "api-reference-", "api-submit-", "api-response-", "api-core-")),
-    ("Container Apps / Infra", ("container-app-", "container-apps-", "postprovision-", "infra-", "frontend-sidecar-", "sidecar-", "sidecars-", "lean-azd-", "cloud-init-", "azd-up-")),
-    ("Dashboard / UI", ("dashboard-", "ui-", "jobs-", "results-", "new-search-", "submit-", "wizard-", "resource-", "frontend-", "light-theme-", "ms-brand-", "mono-", "mock-", "ncbi-blast-ux-", "premium-", "completed-progress-", "command-preview-", "execution-steps-", "first-run-", "recent-search-", "step-log-")),
+    (
+        "OpenAPI",
+        (
+            "openapi-",
+            "elb-openapi-",
+            "external-elastic-blast",
+            "api-endpoints-",
+            "api-reference-",
+            "api-submit-",
+            "api-response-",
+            "api-core-",
+        ),
+    ),
+    (
+        "Container Apps / Infra",
+        (
+            "container-app-",
+            "container-apps-",
+            "postprovision-",
+            "infra-",
+            "frontend-sidecar-",
+            "sidecar-",
+            "sidecars-",
+            "lean-azd-",
+            "cloud-init-",
+            "azd-up-",
+        ),
+    ),
+    (
+        "Dashboard / UI",
+        (
+            "dashboard-",
+            "ui-",
+            "jobs-",
+            "results-",
+            "new-search-",
+            "submit-",
+            "wizard-",
+            "resource-",
+            "frontend-",
+            "light-theme-",
+            "ms-brand-",
+            "mono-",
+            "mock-",
+            "ncbi-blast-ux-",
+            "premium-",
+            "completed-progress-",
+            "command-preview-",
+            "execution-steps-",
+            "first-run-",
+            "recent-search-",
+            "step-log-",
+        ),
+    ),
     ("Self-upgrade", ("self-upgrade-",)),
-    ("Local dev", ("local-", "fast-debug-", "dev-compose-", "vscode-", "scripts-")),
-    ("Docs", ("docs-", "mkdocs-", "get-started-", "joining-", "user-guide-", "changelog-", "per-release-", "release-")),
-    ("Deploy", ("deploy-", "azure-deployment", "managed-identity-", "workload-", "release-build-", "release-notes-")),
+    (
+        "Local dev",
+        ("local-", "fast-debug-", "dev-compose-", "vscode-", "scripts-"),
+    ),
+    (
+        "Docs",
+        (
+            "docs-",
+            "mkdocs-",
+            "get-started-",
+            "joining-",
+            "user-guide-",
+            "changelog-",
+            "per-release-",
+            "release-",
+        ),
+    ),
+    (
+        "Deploy",
+        (
+            "deploy-",
+            "azure-deployment",
+            "managed-identity-",
+            "workload-",
+            "release-build-",
+            "release-notes-",
+        ),
+    ),
 ]
 
 
@@ -125,7 +224,7 @@ def _render(grouped) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def on_page_markdown(markdown, page, config, files):  # noqa: D401
+def on_page_markdown(markdown, page, config, files):
     """Replace `[CHANGELOG]` on changelog.md with grouped index."""
     src = getattr(page.file, "src_path", "") or ""
     if Path(src).as_posix() != "changelog.md":

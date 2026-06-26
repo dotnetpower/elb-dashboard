@@ -18,7 +18,9 @@ split_helpers = lines[275:1331]  # L276..L1331 inclusive
 merge_task = lines[2185:2231]  # L2186..L2231 inclusive
 
 assert split_helpers[0].startswith("def _upload_split_query_files"), split_helpers[0]
-assert merge_task[0].startswith('@shared_task(name="api.tasks.blast.merge_split_results"'), merge_task[0]
+assert merge_task[0].startswith(
+    '@shared_task(name="api.tasks.blast.merge_split_results"'
+), merge_task[0]
 
 stay_names = [
     "_build_config_content",

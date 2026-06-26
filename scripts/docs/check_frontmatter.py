@@ -112,7 +112,7 @@ def main() -> int:
                         f"(see scripts/docs/check_frontmatter.py and docs/tags.md)"
                     )
     if findings:
-        print("FAIL — frontmatter guard found {0} issue(s):".format(len(findings)))
+        print(f"FAIL — frontmatter guard found {len(findings)} issue(s):")
         for line in findings:
             print(f"  {line}")
         return 1

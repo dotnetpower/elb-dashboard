@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - api/**
+      - scripts/**/*.py
       - pyproject.toml
       - uv.lock
       - pytest.ini
@@ -13,6 +14,7 @@ on:
   pull_request:
     paths:
       - api/**
+      - scripts/**/*.py
       - pyproject.toml
       - uv.lock
       - pytest.ini
@@ -52,7 +54,9 @@ jobs:
         run: uv sync --all-groups
 
       - name: ruff check
-        run: uv run ruff check api
+        # No path arg — honours the `src = ["api", "scripts"]` list in
+        # pyproject.toml so both trees are linted in one pass.
+        run: uv run ruff check
 
       - name: pytest (fast loop — slow/subprocess excluded)
         # Uses the default `-n auto` from pytest.ini (one xdist worker per

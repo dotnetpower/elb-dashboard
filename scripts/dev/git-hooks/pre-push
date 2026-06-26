@@ -96,19 +96,25 @@ fi
 # Decide which gate sets to run from the aggregated change list (conservative:
 # if any pushed ref touched api/, run the api gates).
 run_api=0
+run_scripts=0
 run_docs=0
 if paths_touch_api "$changed"; then run_api=1; fi
+if paths_touch_scripts "$changed"; then run_scripts=1; fi
 if paths_touch_docs "$changed"; then run_docs=1; fi
 
-if [[ "$run_api" -eq 0 && "$run_docs" -eq 0 ]]; then
+if [[ "$run_api" -eq 0 && "$run_scripts" -eq 0 && "$run_docs" -eq 0 ]]; then
   exit 0
 fi
 
 # Run the relevant CI gates inside a given checkout directory.
 run_gates_in_dir() {
   local dir="$1" rc=0
+  if [[ "$run_api" -eq 1 || "$run_scripts" -eq 1 ]]; then
+    # `ruff check` (no path) honours the `src` list in pyproject.toml so it
+    # lints both api/ and scripts/ in one pass.
+    hook_run_in "$dir" "ruff check" uv run ruff check || rc=$?
+  fi
   if [[ "$run_api" -eq 1 ]]; then
-    hook_run_in "$dir" "ruff check api" uv run ruff check api || rc=$?
     CI=true hook_run_in "$dir" "pytest -q api/tests" uv run pytest -q api/tests || rc=$?
   fi
   if [[ "$run_docs" -eq 1 ]]; then

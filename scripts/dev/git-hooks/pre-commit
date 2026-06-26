@@ -30,8 +30,8 @@ fi
 
 rc=0
 
-if paths_touch_api "$staged"; then
-  hook_run "ruff check api" uv run ruff check api || rc=$?
+if paths_touch_api "$staged" || paths_touch_scripts "$staged"; then
+  hook_run "ruff check" uv run ruff check || rc=$?
 fi
 
 if paths_touch_docs "$staged"; then

@@ -61,6 +61,14 @@ paths_touch_api() {
   grep -qE '^(api/|pyproject\.toml$|uv\.lock$|pytest\.ini$)' <<<"$1"
 }
 
+# Does the list touch any Python source inside scripts/? Those are in the
+# ruff `src` config so we want the lint hook to fire even for a scripts-only
+# change (otherwise a regression in a release / docs helper would only be
+# caught at the next api/ commit).
+paths_touch_scripts() {
+  grep -qE '^scripts/.*\.py$' <<<"$1"
+}
+
 # Does the list contain anything the Publish Docs workflow gates on?
 # (mkdocs.yml, docs/**, scripts/docs/**) — web/** also triggers CI but the
 # heavy mock-preview build is skipped locally; the failure we actually guard

@@ -41,7 +41,6 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     rest = text[end + 5 :]
 
     meta: dict[str, object] = {}
-    current_key: str | None = None
     current_list: list[str] | None = None
     for raw in block.splitlines():
         if not raw.strip():
@@ -57,10 +56,8 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
         if not value:
             current_list = []
             meta[key] = current_list
-            current_key = key
         else:
             meta[key] = value
-            current_key = None
             current_list = None
     return meta, rest
 
@@ -106,7 +103,7 @@ def _render(grouped: dict[str, list[tuple[str, str]]]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def on_page_markdown(markdown, page, config, files):  # noqa: D401
+def on_page_markdown(markdown, page, config, files):
     """Replace `[TAGS]` on tags.md with the generated index."""
     src = getattr(page.file, "src_path", "") or ""
     if Path(src).as_posix() != "tags.md":
