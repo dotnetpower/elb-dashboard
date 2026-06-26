@@ -430,9 +430,25 @@ def start_external_consumer() -> bool:
         _stop_event = stop
         _thread = thread
         thread.start()
+        subs = completion_subscriptions()
         LOGGER.info(
-            "external completion consumer started (subs=%s)", completion_subscriptions()
+            "external completion consumer started (subs=%s)", subs
         )
+        # Footgun guard (#78): the demo observer joining the shared "default"
+        # subscription would compete-consume with a real external integrator on
+        # the same subscription, producing a 50/50 abandon storm whose blame
+        # looks like a dashboard bug. Surface the conflict at startup so an
+        # operator sees it immediately instead of weeks later in DLQ growth.
+        if any(s.lower() == "default" for s in subs):
+            LOGGER.warning(
+                "external completion consumer is draining the shared 'default' "
+                "subscription — if a real external integrator also subscribes to "
+                "it, the dashboard and the integrator will compete for messages "
+                "and abandons will spike. Set SERVICEBUS_COMPLETION_SUBSCRIPTION "
+                "to a dedicated demo subscription, or keep SERVICEBUS_EXTERNAL_CONSUMER "
+                "OFF in environments with a real 'default' subscriber. See "
+                "docs/operate/feature-gates.md."
+            )
         return True
 
 
