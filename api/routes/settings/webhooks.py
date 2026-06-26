@@ -76,18 +76,31 @@ def put_webhooks(
 
 @router.post("/test")
 def test_webhook(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
-    """Send a test message to the configured webhook (does not require the gate)."""
+    """Send a test message to the configured webhook (does not require the gate).
+
+    Uses the same provider-aware rich payload as the real notification path, so
+    the operator sees the actual rendered shape (Slack Block Kit / Teams
+    MessageCard / Discord embed / generic).
+    """
+    from types import SimpleNamespace
+
     from api.services.webhooks_pref import get_config
-    from api.tasks.webhooks import post_webhook
+    from api.tasks.webhooks import build_message, post_webhook
 
     config = get_config()
     if config is None or not config.url:
         raise HTTPException(
             400, detail={"code": "not_configured", "message": "no webhook URL configured"}
         )
-    test_message = {
-        "text": "\u2705 elb-dashboard webhook test",
-        "content": "\u2705 elb-dashboard webhook test",
-    }
+    sample_state = SimpleNamespace(
+        job_id="test-job",
+        status="completed",
+        job_title="elb-dashboard webhook test",
+        program="blastn",
+        db="nt",
+        error_code="",
+        payload={},
+    )
+    test_message = build_message(sample_state, url=config.url)
     delivered = post_webhook(config.url, test_message)
     return {"delivered": delivered}
