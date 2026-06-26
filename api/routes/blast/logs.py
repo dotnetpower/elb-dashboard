@@ -172,6 +172,9 @@ async def blast_job_logs_events(
         frame = _sse_frame(event_name, payload, event_id=event_id)
         try:
             if queue.full():
+                # Drop oldest to keep the latest frame current; INFO log so a
+                # slow live-log consumer is observable rather than silently lossy.
+                LOGGER.info("blast log SSE drop-oldest on overflow job_id=%s", job_id)
                 queue.get_nowait()
             queue.put_nowait(frame)
         except asyncio.QueueFull:

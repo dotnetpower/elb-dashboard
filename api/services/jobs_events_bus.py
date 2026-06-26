@@ -83,7 +83,10 @@ def _offer(queue: asyncio.Queue[dict[str, str]], event: dict[str, str]) -> None:
         queue.put_nowait(event)
     except asyncio.QueueFull:
         # Coalesce: discard the stalest event and keep the newest. "jobs-changed"
-        # is idempotent so the client loses nothing by collapsing a burst.
+        # is idempotent so the client loses nothing by collapsing a burst. Log at
+        # INFO so a chronically backed-up subscriber is observable without
+        # spamming default WARNING-filtered prod logs.
+        LOGGER.info("jobs_events_bus drop-oldest on overflow")
         try:
             queue.get_nowait()
         except Exception:

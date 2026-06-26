@@ -235,13 +235,26 @@ def stream_k8s_log_lines(
             stream=True,
             timeout=(10, 65),
         )
-        response.raise_for_status()
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if stop_event.is_set():
-                break
-            line = str(raw_line or "").strip("\r")
-            if line:
-                yield sanitise(line)[:_LINE_MAX_CHARS]
+        # Release the underlying socket even when the generator is closed
+        # mid-stream (browser disconnect, ``stop_event``, follower task
+        # cancellation). Without this the connection is held until GC, which
+        # under streaming load leaves the K8s API session pool exhausted.
+        # Some test doubles return a plain object so guard the close() call.
+        try:
+            response.raise_for_status()
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if stop_event.is_set():
+                    break
+                line = str(raw_line or "").strip("\r")
+                if line:
+                    yield sanitise(line)[:_LINE_MAX_CHARS]
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: S110 - best-effort socket release
+                    pass
     finally:
         session.close()
 

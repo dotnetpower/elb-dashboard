@@ -99,9 +99,19 @@ def _reconcile_row_k8s_status(
         error_code="",
         details={"k8s": k8s, "source": "k8s_reconcile"},
     )
-    repo.update(row.job_id, status=status, phase=phase, payload=merged_payload)
-    if status in {"completed", "failed"}:
-        _blast._enqueue_artifact_finalizer(row.job_id, phase, status)
+    # Funnel through ``_update_state`` so a terminal status emits the ``blast``
+    # customEvent and the progress sweep + artifact finalize hook fire once,
+    # consistently with the submit/cancel paths (#22 reconcile bypass). For a
+    # non-terminal sync this still de-dupes on the no-op shortcut.
+    _blast._update_state(
+        row.job_id,
+        phase,
+        status=status,
+        event="k8s_reconcile",
+        k8s=k8s,
+        source="k8s_reconcile",
+        payload=merged_payload,
+    )
     return outcome
 
 
@@ -280,11 +290,25 @@ def reconcile_stale_jobs(
                 status, phase = _celery_success_row_status(row, celery_result)
                 if status == "completed":
                     if row.status != status or row.phase != phase:
-                        repo.update(row.job_id, status=status, phase=phase)
-                    _blast._enqueue_artifact_finalizer(row.job_id, phase, status)
+                        # Funnel through ``_update_state`` so a terminal flip
+                        # emits the ``blast`` customEvent + progress sweep +
+                        # artifact finalizer once (#22). The no-op shortcut
+                        # inside ``_update_state`` covers the unchanged case.
+                        _blast._update_state(
+                            row.job_id,
+                            phase,
+                            status=status,
+                            event="reconcile_celery_terminal",
+                        )
+                    else:
+                        _blast._enqueue_artifact_finalizer(row.job_id, phase, status)
                     summary["completed"] += 1
                     continue
                 if row.status != status or row.phase != phase:
+                    # Non-terminal nudge from the Celery submit task. No state
+                    # machine ceremony needed (no terminal flip → no event,
+                    # no progress sweep, no finalizer); a direct repo.update
+                    # keeps the contract the dashboard tests assert on.
                     repo.update(row.job_id, status=status, phase=phase)
                 submit_task_completed_active = True
             if celery_status in {"FAILURE", "REVOKED"}:

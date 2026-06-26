@@ -390,6 +390,25 @@ confirm_deploy_target() {
 }
 
 # ---------------------------------------------------------------------------
+# Audit: list every active deploy-time override gate so the operator (and
+# anyone reading `deploy.log`) can see at a glance which safety nets were
+# bypassed for this run. Active set is computed once and emitted on a single
+# line so a `grep deploy-override` over the log is enough.
+# ---------------------------------------------------------------------------
+log_active_overrides() {
+  local active=()
+  [[ "${ELB_SKIP_ACR_PRUNE:-0}" == "1" ]] && active+=("ELB_SKIP_ACR_PRUNE")
+  [[ "${ELB_SKIP_WORKSPACE_TAGS:-0}" == "1" ]] && active+=("ELB_SKIP_WORKSPACE_TAGS")
+  [[ "${ELB_ALLOW_SUB_MISMATCH:-0}" == "1" ]] && active+=("ELB_ALLOW_SUB_MISMATCH")
+  [[ "${ELB_ALLOW_AUTH_BYPASS_IN_CLOUD:-0}" == "1" ]] && active+=("ELB_ALLOW_AUTH_BYPASS_IN_CLOUD")
+  [[ "${ELB_QUICK_DEPLOY_SKIP_CONFIRM:-0}" == "1" ]] && active+=("ELB_QUICK_DEPLOY_SKIP_CONFIRM")
+  [[ "${ELB_SKIP_HOOKS:-0}" == "1" ]] && active+=("ELB_SKIP_HOOKS")
+  if [[ ${#active[@]} -gt 0 ]]; then
+    ts "deploy-override active: ${active[*]}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # preflight_permission_check (critique #8) — fail fast with a clear
 # remediation message when the caller lacks the four ARM read permissions
 # the script will need a few seconds later: read on the resource group,
@@ -701,6 +720,7 @@ if [[ "$SIDECAR" == "all" ]]; then
     [[ -n "${!v:-}" ]] || die "$v is unset and az-context discovery could not populate it (run: az login + verify the active sub has an elb-dashboard RG)"
   done
   confirm_deploy_target
+  log_active_overrides
   preflight_permission_check
   ensure_provider_registration_once
   ensure_workspace_tags
@@ -1032,6 +1052,7 @@ for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME; do
   [[ -n "${!v:-}" ]] || die "$v is unset and az-context discovery could not populate it (run: az login + verify the active sub has an elb-dashboard RG)"
 done
 confirm_deploy_target
+log_active_overrides
 preflight_permission_check
 ensure_provider_registration_once
 ensure_workspace_tags

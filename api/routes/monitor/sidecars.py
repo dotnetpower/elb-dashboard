@@ -335,7 +335,9 @@ class _SidecarBroadcaster:
                         # Slow consumer: drop the oldest queued frame so
                         # the latest snapshot still gets through. This is
                         # the right policy for a monitoring UI — we want
-                        # currentness over completeness.
+                        # currentness over completeness. Log at INFO so a
+                        # chronically backed-up subscriber is observable.
+                        LOGGER.info("sidecar SSE drop-oldest on overflow")
                         try:
                             q.get_nowait()
                         except asyncio.QueueEmpty:

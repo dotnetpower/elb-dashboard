@@ -56,6 +56,21 @@ _TERMINAL_WS_ALLOW_ANY_ORIGIN = (
     and not os.environ.get("CONTAINER_APP_NAME")
 )
 
+# Hard cap on the size of a single WebSocket frame we accept from the upstream
+# ttyd. A bursty screen redraw can be ~MBs, so the default is generous, but
+# leaving it ``None`` (unbounded) lets a malformed or hostile peer push the
+# api sidecar into OOM with one frame. Set ``TERMINAL_WS_MAX_MESSAGE_BYTES=0``
+# to disable the cap explicitly (matches the historical behaviour).
+def _ws_max_message_bytes() -> int | None:
+    raw = os.environ.get("TERMINAL_WS_MAX_MESSAGE_BYTES", "").strip()
+    if not raw:
+        return 8 * 1024 * 1024  # 8 MiB default
+    try:
+        value = int(raw)
+    except ValueError:
+        return 8 * 1024 * 1024
+    return None if value <= 0 else value
+
 
 def _origin_allowed(websocket: WebSocket) -> bool:
     """Return True if the WebSocket's Origin header passes the CSWSH check."""
@@ -414,7 +429,10 @@ async def ws_terminal(
                 ping_interval=20,
                 ping_timeout=20,
                 open_timeout=4,
-                max_size=None,  # ttyd may send large frames for screen redraws.
+                # Generous default cap to absorb large screen redraws, but
+                # bounded so a malformed peer can't OOM the sidecar; override
+                # with ``TERMINAL_WS_MAX_MESSAGE_BYTES=0`` to disable.
+                max_size=_ws_max_message_bytes(),
             )
             break
         except (OSError, TimeoutError, websockets.InvalidHandshake) as exc:
