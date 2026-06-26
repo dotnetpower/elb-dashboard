@@ -108,7 +108,7 @@ def _cancel_external_job(
 
 @router.post("/jobs/{job_id}/cancel")
 def blast_job_cancel(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     body: dict[str, Any] | None = Body(default=None),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
@@ -288,7 +288,7 @@ def blast_job_retry(
 
 @router.delete("/jobs/{job_id}")
 def blast_job_delete(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Delete a job record from the state repository."""

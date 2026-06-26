@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections.abc import AsyncIterator
 
 import httpx
@@ -70,17 +71,26 @@ _FRONTEND_ALLOWED_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "O
 
 # Module-level client so connection pool is reused across requests.
 _client: httpx.AsyncClient | None = None
+# Single-flight guard on the lazy init. Without this, two coroutines that hit
+# `_get_client` in the first 100ms after startup can both pass the `is None`
+# check, both construct an AsyncClient, and one of them is silently dropped —
+# leaking its connection pool past process exit because `close_client` only
+# closes the last assignment.
+_client_lock = threading.Lock()
 
 
 def _get_client() -> httpx.AsyncClient:
     global _client
-    if _client is None:
-        _client = httpx.AsyncClient(
-            base_url=FRONTEND_UPSTREAM,
-            timeout=httpx.Timeout(10.0, read=30.0),
-            follow_redirects=False,
-        )
-    return _client
+    if _client is not None:
+        return _client
+    with _client_lock:
+        if _client is None:
+            _client = httpx.AsyncClient(
+                base_url=FRONTEND_UPSTREAM,
+                timeout=httpx.Timeout(10.0, read=30.0),
+                follow_redirects=False,
+            )
+        return _client
 
 
 async def close_client() -> None:

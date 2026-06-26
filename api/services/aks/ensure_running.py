@@ -143,7 +143,8 @@ def _evaluate_warmup_phase(
             reason="cluster snapshot unavailable; warmup readiness unconfirmed",
         )
 
-    assert pref is not None  # narrowed by warmup_required
+    if pref is None:  # narrowed by warmup_required; defensive against ``-O``
+        raise RuntimeError("warmup_required returned True but pref is None")
     gate = auto_warmup_ready_gate(
         credential,
         subscription_id=subscription_id,

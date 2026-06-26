@@ -166,7 +166,8 @@ def build_compatibility_contract(
                 warnings=warnings,
             )
 
-        assert verified_default is not None  # guarded by blockers check above
+        if verified_default is None:  # guarded by blockers check above; survive ``-O``
+            raise RuntimeError("verified_default unexpectedly None after blockers check")
         if configured_searchsp is not None and configured_searchsp != effective_verified_value:
             return BlastCompatibilityContract(
                 mode="calibration_required",

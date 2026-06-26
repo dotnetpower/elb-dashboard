@@ -75,7 +75,7 @@ _tickets_lock = asyncio.Lock()
 
 @router.post("/logs/{job_id}/ticket")
 async def blast_job_logs_ticket(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     request: BlastLogTicketRequest | None = Body(default=None),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, object]:
@@ -134,7 +134,7 @@ async def _consume_log_ticket(job_id: str, token: str | None) -> _LogTicket | No
 
 @router.get("/logs/{job_id}/events")
 async def blast_job_logs_events(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     ticket: str | None = Query(default=None),
 ) -> Response:
     """Server-Sent Events stream of live BLAST job logs.

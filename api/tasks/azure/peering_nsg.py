@@ -138,8 +138,10 @@ def _retry_arm[T](
             )
             sleep(delay)
     # Defensive: loop above either returns or re-raises; this should be
-    # unreachable but keeps mypy happy.
-    assert last is not None
+    # unreachable but keeps mypy happy. Use ``if/raise`` rather than ``assert``
+    # so the guard survives Python ``-O``.
+    if last is None:  # pragma: no cover
+        raise RuntimeError("peering_nsg retry loop exited without recording an exception")
     raise last  # pragma: no cover
 
 

@@ -685,7 +685,7 @@ def _maybe_recover_external_failure_error(repo: Any, state: Any) -> Any:
 @router.get("/jobs/{job_id}")
 def blast_job_get(
     request: Request,
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     history: int = Query(default=0),
     include_database_metadata: bool = Query(default=True),
     subscription_id: str = Query(default=""),

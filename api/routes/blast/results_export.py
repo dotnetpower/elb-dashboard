@@ -50,7 +50,7 @@ router = APIRouter()
 
 @router.get("/jobs/{job_id}/results/export")
 def blast_job_results_export(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     storage_account: str = Query(...),

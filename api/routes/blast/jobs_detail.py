@@ -36,7 +36,7 @@ router = APIRouter()
 
 @router.get("/jobs/{job_id}/execution-steps")
 def blast_job_execution_steps(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Return the lightweight Execution Steps snapshot for a job.
@@ -117,7 +117,7 @@ def blast_job_execution_steps(
 
 @router.get("/jobs/{job_id}/citation")
 def blast_job_citation(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     format: str = Query(default="text", pattern="^(text|markdown|bibtex)$"),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
@@ -176,7 +176,7 @@ def blast_job_citation(
 
 @router.get("/jobs/{job_id}/export")
 def blast_job_export(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     format: str = Query(default="nextflow", pattern="^(nextflow|snakemake|cwl|wdl)$"),
     caller: CallerIdentity = Depends(require_caller),
 ) -> Response:
@@ -239,7 +239,7 @@ def blast_job_export(
 
 @router.get("/jobs/{job_id}/events")
 def blast_job_events(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     limit: int = Query(default=200, ge=1, le=500),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
@@ -279,7 +279,7 @@ _QUERY_EDIT_MAX_BYTES = 5 * 1024 * 1024
 
 @router.get("/jobs/{job_id}/query")
 def blast_job_query(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Return the original FASTA submitted with this job.
@@ -446,7 +446,7 @@ def blast_job_query(
 
 @router.get("/jobs/{job_id}/queue")
 def blast_job_queue(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     try:

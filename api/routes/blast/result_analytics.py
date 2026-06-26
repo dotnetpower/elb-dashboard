@@ -53,7 +53,7 @@ router = APIRouter()
 
 @router.get("/jobs/{job_id}/results/alignments")
 def blast_job_results_alignments(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     storage_account: str = Query(...),
@@ -263,7 +263,7 @@ def blast_job_results_alignments(
 
 @router.get("/jobs/{job_id}/results/taxonomy")
 def blast_job_results_taxonomy(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     storage_account: str = Query(...),

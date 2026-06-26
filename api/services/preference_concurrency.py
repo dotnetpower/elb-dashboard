@@ -80,7 +80,10 @@ def cas_retry[T](
         operation,
         max_attempts,
     )
-    assert last_exc is not None  # cas_retry returns or raises; loop always sets it
+    # ``cas_retry`` returns or raises; the loop above always sets ``last_exc``.
+    # ``if/raise`` instead of ``assert`` so the guard survives Python ``-O``.
+    if last_exc is None:  # pragma: no cover
+        raise RuntimeError("cas_retry exhausted without recording an exception")
     raise last_exc
 
 

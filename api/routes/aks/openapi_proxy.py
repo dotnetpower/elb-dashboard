@@ -503,11 +503,16 @@ async def aks_openapi_proxy(
             response_headers[header_name] = value
 
     async def _body_iter() -> AsyncIterator[bytes]:
+        # Nested try/finally so a failure in ``upstream.aclose()`` does NOT
+        # short-circuit the ``client.aclose()`` cleanup — leaking the upstream
+        # AsyncClient leaks its whole connection pool past request lifetime.
         try:
-            async for chunk in upstream.aiter_raw():
-                yield chunk
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await upstream.aclose()
         finally:
-            await upstream.aclose()
             await client.aclose()
 
     return StreamingResponse(

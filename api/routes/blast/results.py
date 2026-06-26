@@ -50,7 +50,7 @@ router = APIRouter()
 # --- Result download / aggregate / export ---
 @router.get("/jobs/{job_id}/file")
 def blast_job_file(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     name: str = Query(...),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
@@ -187,7 +187,7 @@ def blast_job_file(
 
 @router.get("/jobs/{job_id}/results")
 def blast_job_results(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     subscription_id: str = Query(default=""),
     storage_account: str = Query(default=""),
     resource_group: str = Query(default=""),
@@ -295,7 +295,7 @@ def blast_job_results(
 
 @router.get("/jobs/{job_id}/results/aggregate")
 def blast_job_results_aggregate(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     storage_account: str = Query(...),
@@ -367,7 +367,7 @@ def blast_job_results_aggregate(
 
 @router.get("/jobs/{job_id}/results/download")
 def blast_job_results_download(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     storage_account: str = Query(...),
@@ -403,7 +403,7 @@ def blast_job_results_download(
 
 @router.get("/jobs/{job_id}/results/{file_id}")
 def blast_job_result_file(
-    job_id: str = Path(...),
+    job_id: str = Path(..., min_length=1, max_length=128),
     file_id: str = Path(..., min_length=1, max_length=512, pattern=r"^[A-Za-z0-9._-]+$"),
     subscription_id: str = Query(default=""),
     storage_account: str = Query(default=""),
