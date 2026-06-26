@@ -1128,6 +1128,46 @@ class JobStateRepository:
         rows.sort(key=lambda r: r.updated_at or "", reverse=True)
         return rows
 
+    def list_recent_terminal(
+        self,
+        *,
+        job_type: str = "blast",
+        limit: int = 200,
+        since_seconds: int = 86_400,
+    ) -> list[JobState]:
+        """Return recent terminal jobs (with payload) for the webhook sweep.
+
+        Terminal = ``completed`` / ``failed`` / ``cancelled``. Same bounded,
+        time-windowed, capped scan as :meth:`list_recent_failed` (payload is
+        included so the sweep can read the per-job ``_webhook_sent`` marker and
+        build the message). Most-recently-terminal first.
+        """
+        safe_type = _sanitise_odata_value(job_type)
+        clauses = [
+            f"type eq '{safe_type}'",
+            "(status eq 'completed' or status eq 'failed' or status eq 'cancelled')",
+        ]
+        if since_seconds and since_seconds > 0:
+            cutoff = (datetime.now(UTC) - timedelta(seconds=since_seconds)).isoformat(
+                timespec="seconds"
+            )
+            clauses.append(f"updated_at gt '{_sanitise_odata_value(cutoff)}'")
+        filter_expr = " and ".join(clauses)
+        rows: list[JobState] = []
+        with self._state_client() as t:
+            try:
+                entities = t.query_entities(
+                    filter_expr, results_per_page=_clamp_page_size(limit)
+                )
+                for e in entities:
+                    rows.append(JobState.from_entity(dict(e)))
+                    if len(rows) >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+        rows.sort(key=lambda r: r.updated_at or "", reverse=True)
+        return rows
+
     def list_completed(
         self,
         *,

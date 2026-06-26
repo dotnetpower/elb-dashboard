@@ -60,6 +60,7 @@ _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.storage._record_task_progress",
     "api.tasks.storage._update_state",
     "api.tasks.storage.get_credential",
+    "api.tasks.webhooks.post_webhook",
 )
 
 

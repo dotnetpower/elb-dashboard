@@ -66,6 +66,7 @@ celery_app = Celery(
         "api.tasks.openapi",
         "api.tasks.servicebus",
         "api.tasks.upgrade",
+        "api.tasks.webhooks",
     ],
 )
 # Belt-and-braces: force this Celery instance to be both `default_app`
@@ -175,6 +176,14 @@ celery_app.conf.update(
         "blast-auto-retry-failed-jobs": {
             "task": "api.tasks.blast.auto_retry_failed_jobs",
             "schedule": float(os.environ.get("CELERY_BEAT_BLAST_AUTO_RETRY_SECONDS", "180")),
+            "options": {"queue": "reconcile"},
+        },
+        # POST terminal-job notifications to a configured webhook. No-op unless
+        # WEBHOOK_NOTIFICATIONS_ENABLED is set AND a webhook is configured
+        # (charter section 12a Rule 4, default-OFF).
+        "dispatch-job-webhooks": {
+            "task": "api.tasks.webhooks.dispatch_job_webhooks",
+            "schedule": float(os.environ.get("CELERY_BEAT_WEBHOOK_SECONDS", "60")),
             "options": {"queue": "reconcile"},
         },
         "blast-backfill-completed-runtime-metrics": {
