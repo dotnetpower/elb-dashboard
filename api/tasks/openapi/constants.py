@@ -67,7 +67,18 @@ FED_CRED_NAME = "fc-elb-openapi"
 #       admit cap of 2 bottlenecked the sibling's intended 3-way concurrency
 #       (BLAST_MAX_RUN_CONCURRENCY) down to <=2; validated live 2026-06-19
 #       (3 distinct running jobs, 0 Pending).
-OPENAPI_MANIFEST_REVISION = 4
+#   5 — SB throughput Tier B (2026-06-27): admit cap default 3 -> 4. Live
+#       memory model openapi_mem ~ 268 + 70 * MAX_ACTIVE MiB; at MAX=4 peak is
+#       ~548 MiB on a 2 Gi limit (~73% headroom). Combined with dashboard
+#       SERVICEBUS_DRAIN_CONCURRENCY=4 + SERVICEBUS_RESIDENT_CONSUMER=true, the
+#       N=10 warmed E2E SLO measured p95=7.2 min (SLO <=10 min) on customer
+#       dev. Below MAX=4 the resident long-poll cannot fill OpenAPI's dispatch
+#       queue and throughput stays at the legacy ~2 sub/min ceiling. Above
+#       MAX=4 the peak memory crosses 600 MiB which is fine on 2 Gi but the
+#       BLAST shard-pod fan-out per E16 node (3-way co-schedule under
+#       ELB_OPENAPI_NUM_CPUS=7) caps useful run-parallelism at 3 distinct jobs
+#       so further admit-cap bumps do not raise sustained throughput.
+OPENAPI_MANIFEST_REVISION = 5
 OPENAPI_MANIFEST_REVISION_ANNOTATION = "elb-dashboard/manifest-revision"
 
 

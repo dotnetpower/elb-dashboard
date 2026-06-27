@@ -42,10 +42,12 @@ def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
 
     assert env["ELB_NUM_NODES"] == "10"
     assert env["ELB_CORE_NT_SHARDS"] == "10"
-    # Concurrency cap defaults to 3 (matching the sibling OpenAPI's
-    # BLAST_MAX_RUN_CONCURRENCY), with ELB_OPENAPI_NUM_CPUS=7 so 3 shard pods
-    # (request=num-cpus-2=5) fit per E16 node (floor(15.74/5)=3, 0 Pending).
-    assert env["ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS"] == "3"
+    # Concurrency cap defaults to 4 (issue #54 / SB throughput Tier B, 2026-06-27):
+    # OpenAPI dispatch queue is the bottleneck under sustained SB drain bursts;
+    # MAX_ACTIVE=4 with the 2 Gi memory limit keeps peak ~548 MiB (model
+    # 268 + 70 * MAX) while letting resident-consumer drain (concurrency=4)
+    # fill the dispatcher. Live N=10 warmed E2E p95 measured at 7.2 min (SLO <=10).
+    assert env["ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS"] == "4"
     assert env["ELB_OPENAPI_NUM_CPUS"] == "7"
     # Escape hatch baked into the manifest so it survives cluster restarts /
     # redeploys: the split-versioned elb-openapi image emits a config key its

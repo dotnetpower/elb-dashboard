@@ -64,8 +64,9 @@ def build_manifests(
     acr_name: str,
     acr_resource_group: str,
     num_nodes: int = 10,
-    max_active_submissions: int = 3,
+    max_active_submissions: int = 4,
     api_token: str = "",
+
     control_plane_url: str = "",
     pls: PlsConfig | None = None,
 ) -> str:
