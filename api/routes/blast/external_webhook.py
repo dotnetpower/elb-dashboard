@@ -67,6 +67,16 @@ class ExternalJobEvent(BaseModel):
     event: str | None = None
     status: str | None = None
     error: str | None = None
+    # Sibling-derived runtime stats on the terminal flip. Optional so older
+    # sibling builds (and the submit/cancel notify paths that do not yet attach
+    # them) keep working. The handler caches whatever is present so the
+    # BlastJobs list view's "Elapsed" / "Duration" timer reads accurate values
+    # immediately, instead of waiting up to one /v1/jobs sync cycle (~70 s)
+    # for ``_sync_external_jobs_to_table`` to pull the same stats.
+    started_at: str | None = None
+    run_seconds: int | None = None
+    queue_wait_seconds: int | None = None
+    elapsed_seconds: int | None = None
 
 
 def _expected_token() -> str:
@@ -248,6 +258,30 @@ async def register_external_job(request: Request, body: ExternalJobEvent) -> dic
         return {"status": "accepted", "synced": False, "reason": "unknown_status"}
 
     outcome = _apply_to_jobstate(job_id, ext_status, body.error)
+    # Cache sibling-derived runtime stats on the terminal fast path so the
+    # BlastJobs list view's "Elapsed" / "Duration" timer reads accurate values
+    # the instant the webhook lands -- rather than waiting up to one
+    # /v1/jobs sync cycle (~70 s) for ``_sync_external_jobs_to_table`` to
+    # pull the same numbers. The list-view merge in ``_local_to_blast_job``
+    # then surfaces whichever fields the sibling supplied. Best-effort:
+    # a cache write failure must never fail the webhook ACK.
+    if ext_status in _TERMINAL_STATUSES:
+        try:
+            from api.services.blast.external_config import remember_sibling_stats
+
+            stats_payload = {
+                k: getattr(body, k)
+                for k in ("started_at", "run_seconds", "queue_wait_seconds", "elapsed_seconds")
+                if getattr(body, k, None) not in (None, "")
+            }
+            if stats_payload:
+                remember_sibling_stats(job_id, stats_payload)
+        except Exception:
+            LOGGER.debug(
+                "openapi webhook: sibling stats cache populate skipped job_id=%s",
+                job_id,
+                exc_info=True,
+            )
     LOGGER.info(
         "openapi webhook: job_id=%s status=%s event=%s outcome=%s",
         job_id,

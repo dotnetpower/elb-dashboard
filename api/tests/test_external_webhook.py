@@ -395,3 +395,116 @@ def test_register_external_job_unknown_status_returns_202(
     assert r.status_code == 202
     assert r.json()["reason"] == "unknown_status"
     assert fake_repo.updates == []
+
+
+# ---------------------------------------------------------------------------
+# Sibling-stats cache populate on the terminal fast path
+# ---------------------------------------------------------------------------
+# Regression guard: when the sibling webhook delivers a terminal-status event
+# carrying derived runtime stats (started_at / run_seconds / queue_wait_seconds
+# / elapsed_seconds), the dashboard MUST cache them so the BlastJobs list view
+# surfaces accurate Elapsed/Duration numbers immediately, instead of waiting
+# up to one /v1/jobs sync cycle (~70 s) for the slow path to discover them.
+
+
+def test_register_external_job_caches_sibling_stats_on_terminal_event(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch
+) -> None:
+    fake_repo.rows["job-stats-1"] = _FakeRow(
+        job_id="job-stats-1", status="running", phase="running"
+    )
+    recorded: list[tuple[str, dict]] = []
+
+    from api.services.blast import external_config
+
+    monkeypatch.setattr(
+        external_config,
+        "remember_sibling_stats",
+        lambda jid, payload: recorded.append((jid, dict(payload))),
+    )
+
+    r = client.post(
+        _WEBHOOK_PATH,
+        json={
+            "job_id": "job-stats-1",
+            "event": "completed",
+            "status": "completed",
+            "started_at": "2026-06-27T07:49:01.565699+00:00",
+            "run_seconds": 280,
+            "queue_wait_seconds": 591,
+            "elapsed_seconds": 871,
+        },
+        headers=_headers(),
+    )
+    assert r.status_code == 202
+    assert r.json()["synced"] is True
+    assert len(recorded) == 1
+    cached_id, cached_payload = recorded[0]
+    assert cached_id == "job-stats-1"
+    assert cached_payload == {
+        "started_at": "2026-06-27T07:49:01.565699+00:00",
+        "run_seconds": 280,
+        "queue_wait_seconds": 591,
+        "elapsed_seconds": 871,
+    }
+
+
+def test_register_external_job_does_not_cache_stats_on_non_terminal_event(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch
+) -> None:
+    """A running/submitted webhook MUST NOT touch the sibling-stats cache.
+
+    Caching a stale snapshot from an in-flight row would let the list view
+    freeze on the first observation rather than tracking the live job.
+    """
+    fake_repo.rows["job-stats-2"] = _FakeRow(job_id="job-stats-2", status="queued", phase="queued")
+    recorded: list[tuple[str, dict]] = []
+
+    from api.services.blast import external_config
+
+    monkeypatch.setattr(
+        external_config,
+        "remember_sibling_stats",
+        lambda jid, payload: recorded.append((jid, dict(payload))),
+    )
+
+    r = client.post(
+        _WEBHOOK_PATH,
+        json={
+            "job_id": "job-stats-2",
+            "event": "running",
+            "status": "running",
+            "started_at": "2026-06-27T07:49:01.565699+00:00",
+            "run_seconds": 60,
+        },
+        headers=_headers(),
+    )
+    assert r.status_code == 202
+    assert recorded == []
+
+
+def test_register_external_job_terminal_without_stats_does_not_call_cache(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch
+) -> None:
+    """Older sibling builds post a terminal event with no stat fields. The
+    handler must noop instead of caching an all-None payload."""
+    fake_repo.rows["job-stats-3"] = _FakeRow(
+        job_id="job-stats-3", status="running", phase="running"
+    )
+    recorded: list[tuple[str, dict]] = []
+
+    from api.services.blast import external_config
+
+    monkeypatch.setattr(
+        external_config,
+        "remember_sibling_stats",
+        lambda jid, payload: recorded.append((jid, dict(payload))),
+    )
+
+    r = client.post(
+        _WEBHOOK_PATH,
+        json={"job_id": "job-stats-3", "event": "completed", "status": "completed"},
+        headers=_headers(),
+    )
+    assert r.status_code == 202
+    assert recorded == []
