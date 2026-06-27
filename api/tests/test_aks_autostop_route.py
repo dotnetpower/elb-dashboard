@@ -516,6 +516,72 @@ def test_put_rejects_cross_owner_modification(
     assert resp.status_code == 403
 
 
+def test_put_same_tenant_cross_user_transfers_ownership(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A pref owned by a different user IN THE SAME AZURE TENANT must accept
+    the modification (charter §14: dashboard is single-tenant per deployment).
+    The previous owner_oid is overwritten by the caller's oid and an audit
+    log line is emitted so the transfer is auditable in App Insights.
+    """
+    import logging
+
+    from api.services.auto_stop import (
+        AutoStopPreference,
+        get_auto_stop_preference,
+        save_auto_stop_preference,
+    )
+
+    save_auto_stop_preference(
+        AutoStopPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            enabled=True,
+            idle_minutes=60,
+            owner_oid="colleague-oid",
+            # Same tenant as the test caller (AUTH_DEV_BYPASS synthesises
+            # tenant_id from AZURE_TENANT_ID env, defaulting to "dev-bypass").
+            tenant_id="dev-bypass",
+        )
+    )
+    # Force the production cross-owner path (skip the dev-bypass shortcut)
+    # so we are sure the same-tenant rule -- not the dev-bypass exemption --
+    # is what allows the write.
+    import api.routes.aks.autostop as route
+
+    monkeypatch.setattr(route, "is_dev_bypass_caller", lambda _caller: False)
+
+    caplog.set_level(logging.INFO, logger="api.routes.aks.autostop")
+
+    resp = client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": False,
+            "idle_minutes": 60,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Persisted row was actually rewritten under the caller's identity.
+    after = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
+    assert after is not None
+    assert after.owner_oid != "colleague-oid"
+    assert after.enabled is False
+
+    # Audit log carries the transfer trail (hashes only).
+    transfer_msgs = [
+        rec for rec in caplog.records if "autostop ownership transfer" in rec.getMessage()
+    ]
+    assert len(transfer_msgs) == 1
+    msg = transfer_msgs[0].getMessage()
+    # Never log raw oids -- only the redacted 12-char sha256 prefix.
+    assert "colleague-oid" not in msg
+
+
 def test_get_redacts_foreign_owner_row(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """`GET /autostop` returns the empty/default shape (not the foreign
     bookkeeping fields) when the row is owned by a different user.

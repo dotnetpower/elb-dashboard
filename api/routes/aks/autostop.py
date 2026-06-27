@@ -351,6 +351,13 @@ def _caller_owns(pref: AutoStopPreference, caller: CallerIdentity | None) -> boo
     * Owner matches → yes.
     * Dev-bypass identity → yes (local-only escape so a developer can
       always inspect/repair any row).
+    * Same Azure tenant → yes (charter §14: the dashboard is
+      single-tenant per deployment; every authenticated caller from
+      that tenant has already cleared Azure RBAC on the AKS cluster
+      itself, so refusing the auto-stop preference just because a
+      colleague set it first is theatre, not safety. The PUT path
+      logs the implicit ownership transfer so the audit trail still
+      attributes the change to the right oid).
     """
     if pref is None or not pref.owner_oid:
         return True
@@ -358,7 +365,13 @@ def _caller_owns(pref: AutoStopPreference, caller: CallerIdentity | None) -> boo
         return False
     if pref.owner_oid == caller.object_id:
         return True
-    return is_dev_bypass_caller(caller)
+    if is_dev_bypass_caller(caller):
+        return True
+    pref_tenant = (pref.tenant_id or "").strip()
+    caller_tenant = (caller.tenant_id or "").strip()
+    if pref_tenant and caller_tenant and pref_tenant == caller_tenant:
+        return True
+    return False
 
 
 def _redact_for_foreign_caller(
@@ -491,6 +504,21 @@ def put_autostop(
         body.subscription_id, body.resource_group, body.cluster_name
     )
     _check_ownership(existing, caller)
+    # Audit-log a cross-oid same-tenant transfer so the trail still attributes
+    # the change to the right oid even after ``_caller_owns`` allowed it.
+    # Hashes only (never raw oids) -- matches the §12a logging contract.
+    if (
+        existing is not None
+        and existing.owner_oid
+        and existing.owner_oid != caller.object_id
+        and not is_dev_bypass_caller(caller)
+    ):
+        LOGGER.info(
+            "autostop ownership transfer cluster=%s prev_owner=%s new_owner=%s",
+            existing.cluster_name,
+            redact_oid(existing.owner_oid) or "?",
+            redact_oid(caller.object_id) or "?",
+        )
     payload = body.model_dump()
     payload["owner_oid"] = caller.object_id
     payload["tenant_id"] = caller.tenant_id
