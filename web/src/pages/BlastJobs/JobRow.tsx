@@ -42,7 +42,7 @@ function formatDuration(seconds: number): string {
   return `${secs}s`;
 }
 
-function runtimeLabel(job: BlastJobSummary, state: DisplayJobState, now: number) {
+export function runtimeLabel(job: BlastJobSummary, state: DisplayJobState, now: number) {
   const created = Date.parse(job.created_at || "");
   if (!Number.isFinite(created)) return null;
   const active = isActiveJobState(state);

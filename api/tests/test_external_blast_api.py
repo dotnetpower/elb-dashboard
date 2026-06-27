@@ -4617,3 +4617,195 @@ def test_download_file_rejects_token_scoped_to_other_file(monkeypatch):
     )
 
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Sibling-stats cache populate — regression coverage for commit 833f4b1
+# ---------------------------------------------------------------------------
+# Background: the sibling /v1/jobs list now carries started_at +
+# run_seconds + queue_wait_seconds + elapsed_seconds. The sync loop caches
+# them via remember_sibling_stats so _local_to_blast_job can surface them
+# on the BlastJobs list view without a per-row detail fetch. The original
+# commit placed the populate at the bottom of the loop body, AFTER the
+# update branch's ``if existing is not None: continue`` -- so update-path
+# rows (the bulk of a steady-state deployment) silently skipped the cache
+# write and the list view only filled stats for ~1% of completed external
+# rows. Commit 833f4b1 moved the populate to the top of the loop. These
+# tests pin that contract so the regression cannot reappear.
+
+
+def _make_completed_ext_with_runtime(job_id: str, status: str = "completed") -> dict:
+    return {
+        "job_id": job_id,
+        "status": status,
+        "created_at": "2026-06-27T05:18:35.118590+00:00",
+        "started_at": "2026-06-27T05:18:38.118590+00:00",
+        "updated_at": "2026-06-27T05:23:41.118590+00:00",
+        "run_seconds": 303,
+        "queue_wait_seconds": 187,
+        "elapsed_seconds": 490,
+        "db_version": "core_nt_v5",
+        "blast_version": "2.17.0",
+        "program": "blastn",
+        "db": "core_nt",
+        "cluster_name": "elb-cluster",
+    }
+
+
+def test_sync_external_caches_sibling_stats_on_update_path(monkeypatch):
+    """Regression: a completed sibling row whose Table entry already exists
+    (the update path) MUST refresh the sibling-stats Redis cache. The original
+    commit placed the populate after ``if existing is not None: continue`` so
+    update-path rows skipped it silently -- list view fill rate fell to ~1%
+    on a production-scale deployment until 833f4b1 moved the populate up."""
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+    from api.services.blast import external_config
+
+    class FakeExisting:
+        job_id = "upd-1"
+        status = "running"
+        phase = "running"
+        error_code = ""
+        subscription_id = "sub-1"
+        resource_group = "rg-1"
+        cluster_name = "elb-cluster"
+        storage_account = ""
+        program = "blastn"
+        db = "core_nt"
+        job_title = "blastn core_nt"
+        query_label = "q.fa"
+        results_prefix = "2026/06/27/upd-1/"
+        payload: ClassVar[dict] = {"external": {"submission_source": "external_api"}}
+
+    class FakeRepo:
+        def get_many(self, _ids):
+            return {"upd-1": FakeExisting()}
+
+        def create(self, _state):
+            raise AssertionError("existing row must update, not create")
+
+        def update(self, *_a, **_kw):
+            return None
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", object)
+
+    recorded: list[tuple[str, dict]] = []
+
+    def fake_remember(job_id, payload):
+        recorded.append((job_id, dict(payload)))
+
+    monkeypatch.setattr(external_config, "remember_sibling_stats", fake_remember)
+
+    ext = _make_completed_ext_with_runtime("upd-1")
+    shared._sync_external_jobs_to_table([ext], caller_oid="oid-1")
+
+    # The update-path row MUST have triggered the cache populate.
+    assert len(recorded) == 1
+    cached_id, cached_payload = recorded[0]
+    assert cached_id == "upd-1"
+    # All six wire fields land in the cache when present.
+    assert cached_payload == {
+        "started_at": "2026-06-27T05:18:38.118590+00:00",
+        "run_seconds": 303,
+        "queue_wait_seconds": 187,
+        "elapsed_seconds": 490,
+        "db_version": "core_nt_v5",
+        "blast_version": "2.17.0",
+    }
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "succeeded", "failed", "cancelled"])
+def test_sync_external_caches_sibling_stats_for_every_terminal_status(
+    monkeypatch, terminal_status
+):
+    """All four terminal statuses populate the cache. The live verification
+    after 833f4b1 only exercised ``completed`` (no failed jobs in the dev env
+    at the time); this test pins the remaining three so the populate guard
+    cannot regress on a status string typo."""
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+    from api.services.blast import external_config
+
+    class FakeRepo:
+        def get_many(self, _ids):
+            return {}
+
+        def create(self, _state):
+            return None
+
+        def update(self, *_a, **_kw):
+            return None
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.job_id = kwargs.get("job_id")
+            self.status = kwargs.get("status")
+            self.phase = kwargs.get("phase")
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    recorded: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        external_config,
+        "remember_sibling_stats",
+        lambda jid, payload: recorded.append((jid, dict(payload))),
+    )
+
+    ext = _make_completed_ext_with_runtime(f"term-{terminal_status}", status=terminal_status)
+    shared._sync_external_jobs_to_table([ext], caller_oid="oid-1")
+
+    assert len(recorded) == 1
+    assert recorded[0][0] == f"term-{terminal_status}"
+    assert recorded[0][1]["run_seconds"] == 303
+
+
+@pytest.mark.parametrize(
+    "non_terminal_status", ["running", "queued", "submitted", "submitting", "pending"]
+)
+def test_sync_external_does_not_cache_stats_for_non_terminal_status(
+    monkeypatch, non_terminal_status
+):
+    """Negative case: a still-running job must NOT populate the cache. The
+    populate guard keys on the four terminal statuses; broadening it to
+    include in-flight rows would let a stale snapshot pin the cache and the
+    list view would freeze on the first observation rather than tracking the
+    live row."""
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+    from api.services.blast import external_config
+
+    class FakeRepo:
+        def get_many(self, _ids):
+            return {}
+
+        def create(self, _state):
+            return None
+
+        def update(self, *_a, **_kw):
+            return None
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.job_id = kwargs.get("job_id")
+            self.status = kwargs.get("status")
+            self.phase = kwargs.get("phase")
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    recorded: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        external_config,
+        "remember_sibling_stats",
+        lambda jid, payload: recorded.append((jid, dict(payload))),
+    )
+
+    ext = _make_completed_ext_with_runtime(f"nt-{non_terminal_status}", status=non_terminal_status)
+    shared._sync_external_jobs_to_table([ext], caller_oid="oid-1")
+
+    assert recorded == []
