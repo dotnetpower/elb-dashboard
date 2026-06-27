@@ -192,14 +192,23 @@ def consume_completions(
     dead_subscriptions: set[str] = set()
 
     def _client() -> ServiceBusClient:
+        # Share the api-side retry caps (SERVICEBUS_RETRY_TOTAL /
+        # SERVICEBUS_RETRY_BACKOFF_MAX) so the external consumer's drain loop
+        # cannot tarpit on a transient broker hiccup either — the loop's own
+        # tick-level backoff (``backoff``, ``_BACKOFF_START_SECONDS``) handles
+        # the retry cadence; the SDK's default ~6-min internal retry only
+        # delays the tick's failure surfacing.
+        from api.services.service_bus import _sb_client_kwargs
+
+        kwargs = _sb_client_kwargs()
         if connection_string:
-            return ServiceBusClient.from_connection_string(connection_string)
+            return ServiceBusClient.from_connection_string(connection_string, **kwargs)
         cred = credential
         if cred is None:
             from api.services import get_credential
 
             cred = get_credential()
-        return ServiceBusClient(namespace_fqdn, cred)
+        return ServiceBusClient(namespace_fqdn, cred, **kwargs)
 
     def _drain_one(client: ServiceBusClient, sub_name: str | None) -> bool:
         """Drain one subscription (or the queue). Returns True if it progressed.

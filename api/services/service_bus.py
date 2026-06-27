@@ -72,6 +72,30 @@ _PEEK_DEFAULT = 5
 _PEEK_BODY_MAX_CHARS = 4000
 
 
+def _sb_client_kwargs() -> dict[str, Any]:
+    """Return the retry kwargs every ``ServiceBusClient`` /
+    ``ServiceBusAdministrationClient`` in this module is constructed with.
+
+    The SDK default is ``retry_total=3, retry_backoff_factor=0.8,
+    retry_backoff_max=120`` — i.e. up to ~6 minutes of internal retry on a
+    transient broker hiccup. For dashboard-triggered operations (peek, drain,
+    entity counts) the orchestrator already re-fires on its own cadence, so
+    the long internal retry only stretches a user-visible call past every
+    reasonable deadline. Capping ``retry_backoff_max`` at 30 s (and keeping
+    ``retry_total=3`` for genuine resilience) keeps the worst-case bounded to
+    ~90 s while still riding out a single short-lived hiccup.
+
+    Tunable via env so an operator can relax these without a redeploy if a
+    deployment ever puts the api sidecar on a high-latency link.
+    """
+    return {
+        "retry_total": int(os.environ.get("SERVICEBUS_RETRY_TOTAL", "3")),
+        "retry_backoff_max": float(
+            os.environ.get("SERVICEBUS_RETRY_BACKOFF_MAX", "30")
+        ),
+    }
+
+
 class ServiceBusUnavailable(RuntimeError):
     """Config is disabled/incomplete, or the SAS secret could not be resolved."""
 
@@ -166,11 +190,12 @@ def _client(cfg: ServiceBusConfig) -> Iterator[ServiceBusClient]:
     not have to import the SDK exception hierarchy.
     """
     try:
+        kwargs = _sb_client_kwargs()
         if cfg.auth_mode == AUTH_MODE_SAS:
             conn = _resolve_sas_connection_string(cfg)
-            client = ServiceBusClient.from_connection_string(conn)
+            client = ServiceBusClient.from_connection_string(conn, **kwargs)
         else:
-            client = ServiceBusClient(cfg.namespace_fqdn, get_credential())
+            client = ServiceBusClient(cfg.namespace_fqdn, get_credential(), **kwargs)
     except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
         raise ServiceBusAuthError(str(exc)) from exc
     try:
@@ -182,11 +207,14 @@ def _client(cfg: ServiceBusConfig) -> Iterator[ServiceBusClient]:
 @contextmanager
 def _admin_client(cfg: ServiceBusConfig) -> Iterator[ServiceBusAdministrationClient]:
     try:
+        kwargs = _sb_client_kwargs()
         if cfg.auth_mode == AUTH_MODE_SAS:
             conn = _resolve_sas_connection_string(cfg)
-            admin = ServiceBusAdministrationClient.from_connection_string(conn)
+            admin = ServiceBusAdministrationClient.from_connection_string(conn, **kwargs)
         else:
-            admin = ServiceBusAdministrationClient(cfg.namespace_fqdn, get_credential())
+            admin = ServiceBusAdministrationClient(
+                cfg.namespace_fqdn, get_credential(), **kwargs
+            )
     except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
         raise ServiceBusAuthError(str(exc)) from exc
     try:

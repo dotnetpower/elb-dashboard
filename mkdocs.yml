@@ -139,6 +139,7 @@ nav:
           - Web BLAST Compatibility Plan: research/web-blast-compatibility-plan.md
           - AKS Capacity Gate: research/aks-capacity-gate.md
           - Cross-Path Submit Coordination: research/blast-submit-coordination.md
+          - Unbounded Socket Timeouts: research/unbounded-socket-timeouts.md
   - Contributor:
       - contributor-guide/index.md
       - Screenshot Workflow: contributor-guide/screenshot-workflow.md
