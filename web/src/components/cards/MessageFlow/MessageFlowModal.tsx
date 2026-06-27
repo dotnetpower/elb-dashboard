@@ -578,6 +578,7 @@ export function MessageFlowModal({ snapshot, onClose, updatedAt, onRefresh, refr
                     height: 9,
                     borderRadius: "50%",
                     border: "1.5px dashed var(--text-muted)",
+                    background: "rgba(168, 173, 188, 0.18)",
                   }}
                 />
                 queued

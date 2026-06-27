@@ -3,8 +3,8 @@
  * footer shown at the bottom of the Message Flow modal.
  *
  * Responsibility: render the queue/topic *raw* metrics (counts, size %, DLQ,
- * scheduled/transfer counters, queue status, rolling DLQ-growth delta) over
- * a {@link MessageFlowSnapshot}. SRP: it does no fetching, no polling, no
+ * scheduled/transfer counters, queue status) over a {@link MessageFlowSnapshot}.
+ * SRP: it does no fetching, no polling, no
  * caching — the parent modal owns the data and just hands it down. Replaces
  * the inline footer that used to live inside MessageFlowModal.tsx.
  *
@@ -18,7 +18,6 @@ import type { CSSProperties } from "react";
 import type { MessageFlowSnapshot } from "@/api/messageFlow";
 
 import {
-  dlqDeltaSummary,
   fillTone,
   formatBytes,
   formatPct,
@@ -53,7 +52,6 @@ export function ServiceBusTelemetryPanel({ snapshot }: ServiceBusTelemetryPanelP
   const counts = snapshot.sb_counts;
   const queue = counts?.queue ?? null;
   const telemetry = queue?.telemetry ?? null;
-  const dlqDelta = snapshot.dlq_delta ?? null;
 
   // Sum of forwarded / DLQ-of-transfer messages across the completion topic's
   // subscriptions — a non-zero value means the auto-forward path is in use,
@@ -103,9 +101,9 @@ export function ServiceBusTelemetryPanel({ snapshot }: ServiceBusTelemetryPanelP
                     ? "var(--warning)"
                     : "var(--text-muted)",
               }}
-              title="Dead-letter queue depth. Persists until manually drained."
+              title="Request-queue dead-letter depth (separate from the completion topic's DLQ shown on the right). Persists until manually drained."
             >
-              DLQ {queue?.dead_letter_message_count ?? 0}
+              queue DLQ {queue?.dead_letter_message_count ?? 0}
             </span>
             {telemetry ? (
               <>
@@ -182,32 +180,6 @@ export function ServiceBusTelemetryPanel({ snapshot }: ServiceBusTelemetryPanelP
           </span>
         ) : null}
       </div>
-
-      {dlqDelta ? (
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            fontSize: 11,
-          }}
-          data-testid="sb-dlq-delta"
-        >
-          <span style={{ color: "var(--text-faint)" }}>DLQ growth</span>
-          {(() => {
-            const summary = dlqDeltaSummary(dlqDelta);
-            return (
-              <span style={{ color: summary.tone, fontWeight: 600 }}>
-                {summary.text}
-              </span>
-            );
-          })()}
-          <span style={{ color: "var(--text-faint)" }}>
-            ({dlqDelta.samples} sample{dlqDelta.samples === 1 ? "" : "s"} in last{" "}
-            {Math.round(dlqDelta.window_seconds / 60)}m window)
-          </span>
-        </div>
-      ) : null}
     </div>
   );
 }

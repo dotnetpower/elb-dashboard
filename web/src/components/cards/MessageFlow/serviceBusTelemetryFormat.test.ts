@@ -11,7 +11,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  dlqDeltaSummary,
   fillTone,
   formatBytes,
   formatPct,
@@ -80,73 +79,5 @@ describe("statusTone", () => {
     expect(statusTone("Disabled")).toBe("var(--danger)");
     expect(statusTone("SendDisabled")).toBe("var(--warning)");
     expect(statusTone("ReceiveDisabled")).toBe("var(--warning)");
-  });
-});
-
-describe("dlqDeltaSummary", () => {
-  it("renders 'since first sample' when only one sample is in the window", () => {
-    const summary = dlqDeltaSummary({
-      window_seconds: 3600,
-      samples: 1,
-      baseline_dlq: 4,
-      current_dlq: 4,
-      delta: 0,
-      elapsed_seconds: 0,
-    });
-    expect(summary.text).toBe("4 since first sample");
-    expect(summary.tone).toBe("var(--warning)");
-  });
-
-  it("renders 'no growth' when delta is 0 with multiple samples", () => {
-    const summary = dlqDeltaSummary({
-      window_seconds: 3600,
-      samples: 12,
-      baseline_dlq: 0,
-      current_dlq: 0,
-      delta: 0,
-      elapsed_seconds: 600,
-    });
-    expect(summary.text).toBe("no growth in last 600s");
-    expect(summary.tone).toBe("var(--text-muted)");
-  });
-
-  it("renders a positive delta tinted warning", () => {
-    const summary = dlqDeltaSummary({
-      window_seconds: 3600,
-      samples: 6,
-      baseline_dlq: 4,
-      current_dlq: 9,
-      delta: 5,
-      elapsed_seconds: 90,
-    });
-    expect(summary.text).toBe("+5 in last 90s");
-    expect(summary.tone).toBe("var(--warning)");
-  });
-
-  it("never reports negative growth even if the queue heals mid-window", () => {
-    // Backend clamps delta at 0 already, but the SPA must stay honest if a
-    // future contract loosens that. Test by simulating a "healing" delta = 0
-    // with samples > 1.
-    const summary = dlqDeltaSummary({
-      window_seconds: 3600,
-      samples: 5,
-      baseline_dlq: 10,
-      current_dlq: 0,
-      delta: 0,
-      elapsed_seconds: 300,
-    });
-    expect(summary.text).toBe("no growth in last 300s");
-  });
-
-  it("rounds elapsed seconds to the nearest integer in the summary", () => {
-    const summary = dlqDeltaSummary({
-      window_seconds: 3600,
-      samples: 3,
-      baseline_dlq: 0,
-      current_dlq: 0,
-      delta: 0,
-      elapsed_seconds: 47.7,
-    });
-    expect(summary.text).toBe("no growth in last 48s");
   });
 });

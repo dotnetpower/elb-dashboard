@@ -172,6 +172,18 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     const broker = snapshot.broker ?? [];
     const clusters = snapshot.consumers?.clusters ?? [];
 
+    // Live queued/running tallies (active boxes only) drive the Queue/Workers
+    // column sub-labels so the operator can tell waiting work from in-flight
+    // work at a glance instead of decoding the dot styling alone.
+    const queuedCount = broker.filter(
+      (b) =>
+        b.lifecycle !== "settling" && (b.status === "queued" || b.status === "pending"),
+    ).length;
+    const runningCount = broker.filter(
+      (b) =>
+        b.lifecycle !== "settling" && (b.status === "running" || b.status === "reducing"),
+    ).length;
+
     // ----- geometry: four stages — Actors | Queue box | Workers | Topic box.
     // A submitter is both a producer and a completion subscriber, so the flow
     // is a closed loop: the completion sweeps back over the top (headroom in
@@ -188,7 +200,11 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     const cx = (bx0 + bx1) / 2;
     const cy = (by0 + by1) / 2;
     const mid = (by0 + by1) / 2;
-    const prodX = w * 0.1; // actors
+    // Actors sit on a fixed minimum left gutter so their left-anchored labels
+    // never run off the SVG edge on a narrower modal (the fractional position
+    // dominates on a wide modal); the upper clamp keeps the actors from
+    // crowding the Queue box on a very narrow viewport.
+    const prodX = Math.min(Math.max(w * 0.12, 128), w * 0.2); // actors
     const clusX = w * 0.63; // workers (queue consumers)
     const tx0 = w * 0.8; // topic box left
     const tx1 = w * 0.96; // topic box right
@@ -331,8 +347,8 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
     (
       [
         [prodX, "Actors", "produce + subscribe"],
-        [cx, "Queue", "requests"],
-        [clusX, "Workers", "queue consumers"],
+        [cx, "Queue", queuedCount > 0 ? `${queuedCount} queued` : "requests"],
+        [clusX, "Workers", runningCount > 0 ? `${runningCount} running` : "queue consumers"],
         [tcx, "Topic", "completions"],
       ] as [number, string, string][]
     ).forEach(([x, t, sub]) => {
@@ -557,7 +573,10 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
             .attr("text-anchor", "end")
             .attr("font-size", 11)
             .attr("fill", "var(--text-primary)")
-            .text(`${truncate(d.alias, 22)}${d.pkind === "api" ? " ·api" : ""} (${d.count})`);
+            // The glyph shape already encodes api (square) vs user (circle), so
+            // the redundant " ·api" suffix is dropped to keep the label narrow
+            // enough to fit the left gutter without clipping off the SVG edge.
+            .text(`${truncate(d.alias, 18)} (${d.count})`);
           // Dual role: a submitter that has completed jobs is BOTH a producer
           // and a completion subscriber (the loop arc returns to it).
           if (hasCompleted) {
@@ -634,7 +653,11 @@ export function MessageFlowConstellation({ snapshot, onSelectBox, selectedJobId 
             .append("circle")
             .attr("class", "mf-job-core")
             .attr("r", r)
-            .attr("fill", waiting ? "transparent" : tone.fill)
+            // Queued/pending jobs keep a soft submitter-tone fill (instead of a
+            // fully hollow transparent dot) so the swarm of waiting work in the
+            // Queue box is actually visible; the dashed ring plus the absence of
+            // the running halo is what marks them as "waiting", not "in flight".
+            .attr("fill", tone.fill)
             .attr("stroke", tone.accent)
             .attr("stroke-width", 1.2)
             .attr(

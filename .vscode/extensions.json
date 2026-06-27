@@ -3,6 +3,8 @@
     "charliermarsh.ruff"
   ],
   "unwantedRecommendations": [
-    "ms-python.isort"
+    "ms-python.isort",
+    "cweijan.vscode-office",
+    "ms-azuretools.vscode-azurefunctions"
   ]
 }

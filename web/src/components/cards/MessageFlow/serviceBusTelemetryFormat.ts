@@ -8,7 +8,7 @@
  * importantly the `size_pct` scale (backend ships percent on the 0..100
  * scale, e.g. `0.05` = 0.05 %, not a 0..1 fraction).
  */
-import type { MessageFlowDlqDelta } from "@/api/messageFlow";
+
 
 export function formatBytes(bytes: number | null): string {
   if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return "—";
@@ -41,35 +41,4 @@ export function statusTone(status: string | null | undefined): string {
   if (status === "Active") return "var(--success, var(--accent))";
   if (status === "Disabled") return "var(--danger)";
   return "var(--warning)";
-}
-
-export interface DlqDeltaSummary {
-  text: string;
-  tone: string;
-}
-
-/** Human label for the DLQ growth row. We never imply a higher resolution than
- *  the in-process rolling window actually gives us:
- *
- *  - `samples == 1` → baseline equals current; render "since first sample".
- *  - `delta == 0`  → quiet queue, render "no growth in last Ns".
- *  - `delta > 0`   → render "+N in last Ns" with the warning tone. */
-export function dlqDeltaSummary(delta: MessageFlowDlqDelta): DlqDeltaSummary {
-  const elapsed = Math.max(0, Math.round(delta.elapsed_seconds));
-  if (delta.samples <= 1) {
-    return {
-      text: `${delta.current_dlq} since first sample`,
-      tone: delta.current_dlq > 0 ? "var(--warning)" : "var(--text-muted)",
-    };
-  }
-  if (delta.delta <= 0) {
-    return {
-      text: `no growth in last ${elapsed}s`,
-      tone: "var(--text-muted)",
-    };
-  }
-  return {
-    text: `+${delta.delta} in last ${elapsed}s`,
-    tone: "var(--warning)",
-  };
 }
