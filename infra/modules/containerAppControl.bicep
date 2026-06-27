@@ -549,6 +549,12 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // runs a resident long-polling drain loop (~1s) instead of waiting
             // the 30s beat; the beat drain stays as the fallback reconcile.
             { name: 'SERVICEBUS_RESIDENT_CONSUMER', value: controlPlaneEnv.worker.SERVICEBUS_RESIDENT_CONSUMER }
+            // Drain handler parallelism (issue #36 Tier 2). One drain tick runs
+            // up to this many handler bodies (the slow sibling /v1/jobs submit)
+            // in a bounded ThreadPool while message receive + settle stay on
+            // the main thread. The atomic claim_bridge gate makes >1 safe
+            // against duplicate BLAST runs. 1 = legacy serial.
+            { name: 'SERVICEBUS_DRAIN_CONCURRENCY', value: controlPlaneEnv.worker.SERVICEBUS_DRAIN_CONCURRENCY }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // worker-run pipeline/rollback tasks branch identically. Default
             // OFF (Charter §12a Rule 4).
@@ -603,6 +609,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // sidecars so the beat scheduler only emits drain/publish/cleanup
             // ticks when the integration is on. Default OFF (Charter §12a Rule 4).
             { name: 'SERVICEBUS_ENABLED', value: effectiveServiceBusEnabled }
+            // Beat schedule interval for the Service Bus drain reconcile.
+            // Drives celery_app.py `servicebus-drain-and-resubmit`. Default
+            // 10s in code; 5s here gives the fallback drain a tighter pace
+            // when the resident long-poll consumer is off or stuck restarting.
+            { name: 'CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS', value: controlPlaneEnv.beat.CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // beat-driven reconciler drives validating→confirming→succeeded
             // identically. Default OFF (Charter §12a Rule 4).
