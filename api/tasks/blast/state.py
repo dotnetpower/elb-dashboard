@@ -109,12 +109,25 @@ def _update_state(
         )
         _blast._enqueue_artifact_finalizer(job_id, phase, status)
         if status in TERMINAL_STATUSES:
+            # Recover submission_source so App Insights customEvents can split
+            # blast outcomes by origin (`servicebus` / `dashboard` / `external_api`)
+            # for SB throughput KQL queries. Best-effort — a parse failure leaves
+            # the dimension out, never blocks the terminal write.
+            source: str | None = None
+            try:
+                from api.services.blast.external_jobs import _stored_submission_source
+
+                stored = _stored_submission_source(state) if state is not None else ""
+                source = stored or None
+            except Exception:
+                source = None
             record_feature_event(
                 "blast",
                 status=status,
                 job_id=job_id,
                 phase=phase,
                 error_code=stored_error_code or None,
+                source=source,
             )
     except Exception as exc:
         LOGGER.warning("blast state update failed job_id=%s phase=%s: %s", job_id, phase, exc)
