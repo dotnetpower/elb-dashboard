@@ -681,6 +681,40 @@ def _sync_external_jobs_to_table(
                 job_id,
                 type(exc).__name__,
             )
+        # Cache the sibling-reported stats whenever they are present on the
+        # response, regardless of create/update path. The sibling /v1/jobs
+        # list now carries started_at + run_seconds + queue_wait_seconds +
+        # elapsed_seconds (issue: BlastJobs "Elapsed" / "Duration" timer
+        # folded queue-wait into runtime). _local_to_blast_job's cache merge
+        # then surfaces them on every list+detail projection without paying
+        # the per-row detail fetch we added back in 2026-06-13 for the
+        # db_version / blast_version backfill. Best-effort — a cache write
+        # failure must never break the table sync.
+        try:
+            _ext_status_lower = str(ext.get("status") or "").lower()
+            if _ext_status_lower in ("completed", "succeeded", "failed", "cancelled"):
+                from api.services.blast.external_config import remember_sibling_stats
+
+                _stats_payload = {
+                    k: ext.get(k)
+                    for k in (
+                        "started_at",
+                        "run_seconds",
+                        "queue_wait_seconds",
+                        "elapsed_seconds",
+                        "db_version",
+                        "blast_version",
+                    )
+                    if ext.get(k) not in (None, "")
+                }
+                if _stats_payload:
+                    remember_sibling_stats(job_id, _stats_payload)
+        except Exception as _exc:
+            LOGGER.debug(
+                "remember_sibling_stats skipped from sync job_id=%s: %s",
+                job_id,
+                type(_exc).__name__,
+            )
     if created or updated:
         LOGGER.info("external job sync: created=%d updated=%d", created, updated)
     with _EXTERNAL_JOBS_CACHE_LOCK:

@@ -894,6 +894,36 @@ def _local_to_blast_job(
         "external_correlation_id": _row_correlation_id or None,
         "owner_upn": getattr(state, "owner_upn", None) or None,
     }
+    # Surface sibling-reported stats (started_at / run_seconds /
+    # queue_wait_seconds / elapsed_seconds) on EVERY external row, list +
+    # detail. The detail endpoint also re-fetches on a cache miss
+    # (api/routes/blast/jobs.py L745+), but for the list view the cache is
+    # the only fill path — sync_external_jobs_to_table populates it whenever
+    # the sibling /v1/jobs list reports terminal stats, so the BlastJobs
+    # "Elapsed" / "Duration" timer reads accurate runtime without paying a
+    # per-row detail fetch. Cache miss = fields stay None and the SPA falls
+    # back to created_at (the legacy behaviour).
+    if str(out.get("submission_source") or "") in ("servicebus", "external_api"):
+        try:
+            from api.services.blast.external_config import recall_sibling_stats
+
+            _cached_stats = recall_sibling_stats(str(state.job_id))
+            if _cached_stats:
+                for _stat_key in (
+                    "started_at",
+                    "run_seconds",
+                    "queue_wait_seconds",
+                    "elapsed_seconds",
+                ):
+                    if (
+                        out.get(_stat_key) in (None, "")
+                        and _cached_stats.get(_stat_key) not in (None, "")
+                    ):
+                        out[_stat_key] = _cached_stats[_stat_key]
+        except Exception:
+            LOGGER.debug(
+                "sibling stats cache merge skipped job_id=%s", state.job_id, exc_info=True
+            )
     out["target"] = build_target(
         resource_type="blast_job",
         job_id=str(state.job_id),
