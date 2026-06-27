@@ -555,6 +555,16 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // the main thread. The atomic claim_bridge gate makes >1 safe
             // against duplicate BLAST runs. 1 = legacy serial.
             { name: 'SERVICEBUS_DRAIN_CONCURRENCY', value: controlPlaneEnv.worker.SERVICEBUS_DRAIN_CONCURRENCY }
+            // Queue-arrival cluster auto-start (issue #52 follow-up). When a
+            // request lands on the SB queue and the AKS cluster is Stopped,
+            // worker takes a single-flight lease and triggers `az aks start`
+            // so cold-start no longer requires operator action. Pairs with
+            // `AKS_AUTOSTOP_RESPECT_SB_QUEUE` (already default-ON in code) so
+            // the start/stop pair is self-consistent: queue arrival starts,
+            // pending depth keeps running. Default-ON for this deployment
+            // because the operator already runs auto-stop and expects the
+            // pair to be symmetrical.
+            { name: 'SERVICEBUS_QUEUE_AUTOSTART', value: controlPlaneEnv.worker.SERVICEBUS_QUEUE_AUTOSTART }
             // Blue/green self-upgrade flag — must match the api sidecar so the
             // worker-run pipeline/rollback tasks branch identically. Default
             // OFF (Charter §12a Rule 4).
