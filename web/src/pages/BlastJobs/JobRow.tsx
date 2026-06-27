@@ -47,12 +47,23 @@ function runtimeLabel(job: BlastJobSummary, state: DisplayJobState, now: number)
   if (!Number.isFinite(created)) return null;
   const active = isActiveJobState(state);
   const finished = Date.parse(job.updated_at || "");
+  const started = Date.parse(job.started_at || "");
+  const queued = isQueuedJobState(state);
+  // A queued job's "Queued for" timer counts wall-clock since enqueue
+  // (`created_at`). Once the job leaves the queue, switch the anchor to
+  // `started_at` — the moment the cluster started executing — so the
+  // "Elapsed" / "Duration" counter never folds queue-wait into runtime.
+  // External (Service Bus / OpenAPI) jobs carry the authoritative
+  // `started_at` from the sibling snapshot; dashboard-native jobs get it
+  // from `_progress.steps.{submitted|running|submitting}`. Fall back to
+  // `created_at` only when the backend has not stamped `started_at` yet
+  // (legacy rows or a job that flipped terminal before any progress write).
+  const runtimeAnchor = Number.isFinite(started) ? started : created;
+  const begin = queued ? created : runtimeAnchor;
   const end = active ? now : finished;
-  if (!Number.isFinite(end) || end < created) return null;
-  const seconds = Math.floor((end - created) / 1000);
-  // A queued job is "active" but has not started running on the cluster, so
-  // "Elapsed" reads wrong. Show how long it has been waiting in line instead.
-  const label = isQueuedJobState(state) ? "Queued for" : active ? "Elapsed" : "Duration";
+  if (!Number.isFinite(end) || end < begin) return null;
+  const seconds = Math.floor((end - begin) / 1000);
+  const label = queued ? "Queued for" : active ? "Elapsed" : "Duration";
   return {
     label,
     value: formatDuration(seconds),

@@ -699,6 +699,56 @@ def _failure_classification_for(error_code: str, phase: str) -> dict[str, Any] |
         return None
 
 
+def _resolve_job_started_at(
+    payload: dict[str, Any] | None,
+    progress: dict[str, Any] | None,
+) -> str | None:
+    """Best-effort wall-clock when the job entered the running pipeline.
+
+    For external (OpenAPI / Service Bus drained) jobs the authoritative value
+    comes from the sibling ``/v1/jobs`` snapshot embedded under
+    ``payload.external.started_at``. For dashboard-native jobs the
+    ``_progress`` map carries per-step ``started_at`` stamps written by
+    :func:`_merge_progress_payload`; we prefer ``submitted`` (the moment
+    ``elastic-blast submit`` finished and the cluster started executing) and
+    fall back to ``running``/``submitting`` so the SPA "Elapsed" timer never
+    counts the ``queued``/``waiting_for_*`` waits as runtime.
+
+    Returns ``None`` for a job that has never left the queued state, in which
+    case the caller should keep showing the ``created_at`` based "Queued for"
+    label. Never raises — a parse failure on a malformed payload silently
+    returns ``None`` (cheap projection, must not break the list endpoint).
+    """
+    # 1) External-origin sibling snapshot (authoritative for SB / external_api).
+    try:
+        if isinstance(payload, dict):
+            ext = payload.get("external")
+            if isinstance(ext, dict):
+                started = str(ext.get("started_at") or "").strip()
+                if started:
+                    return started
+    except Exception:
+        LOGGER.debug("started_at: external snapshot read failed", exc_info=True)
+    # 2) Dashboard-native progress steps. Order matches the BLAST lifecycle:
+    #    submitted (post-submit, cluster running) → running (poll tick saw
+    #    pods Running) → submitting (submit subprocess started). The first
+    #    populated stamp wins.
+    try:
+        if isinstance(progress, dict):
+            steps = progress.get("steps")
+            if isinstance(steps, dict):
+                for key in ("submitted", "running", "submitting"):
+                    step = steps.get(key)
+                    if not isinstance(step, dict):
+                        continue
+                    started = str(step.get("started_at") or "").strip()
+                    if started:
+                        return started
+    except Exception:
+        LOGGER.debug("started_at: progress steps read failed", exc_info=True)
+    return None
+
+
 def _local_to_blast_job(
     state: Any,
     split_children: dict[str, Any] | None = None,
@@ -824,6 +874,7 @@ def _local_to_blast_job(
         "task_id": state.task_id,
         "created_at": state.created_at,
         "updated_at": state.updated_at,
+        "started_at": _resolve_job_started_at(payload, progress),
         "error_code": response_error_code,
         "error": response_error,
         "failure_classification": (

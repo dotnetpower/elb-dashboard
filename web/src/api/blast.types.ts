@@ -186,6 +186,18 @@ export interface BlastJobSummary {
   phase: string;
   created_at: string;
   updated_at: string;
+  /**
+   * Best-effort wall-clock when the job entered the running pipeline (post-
+   * submit, after any `queued` / `waiting_for_*` wait). Resolved by the
+   * backend's `_resolve_job_started_at`:
+   *   external (SB / OpenAPI) → `payload.external.started_at` (sibling
+   *     `/v1/jobs` snapshot);
+   *   dashboard-native → `_progress.steps.{submitted|running|submitting}.started_at`.
+   * `null` while the job is still queued; the SPA falls back to
+   * `created_at` for the "Queued for" label so the timer never reads as
+   * runtime.
+   */
+  started_at?: string | null;
   runtime_status?: string;
   custom_status?: unknown;
   output?: unknown;

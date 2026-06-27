@@ -1365,3 +1365,81 @@ def test_blocked_refresh_reasons_skips_when_no_active_rows(monkeypatch):
     rows = [_state(job_id="job-done", status="completed", phase="completed")]
     assert blast_job_state._blocked_refresh_reasons(rows) == {}
 
+
+
+def test_started_at_from_external_sibling_snapshot():
+    """SB / OpenAPI jobs carry started_at from payload.external (sibling /v1/jobs)."""
+    out = _local_to_blast_job(
+        _state(
+            payload={
+                "external": {
+                    "submission_source": "servicebus",
+                    "started_at": "2026-06-27T04:10:54.315480+00:00",
+                }
+            }
+        )
+    )
+    assert out["started_at"] == "2026-06-27T04:10:54.315480+00:00"
+
+
+def test_started_at_from_dashboard_progress_steps_submitted():
+    """Dashboard-native jobs derive started_at from _progress.steps.submitted."""
+    out = _local_to_blast_job(
+        _state(
+            payload={
+                "_progress": {
+                    "steps": {
+                        "submitted": {"started_at": "2026-06-27T05:00:00Z"},
+                    }
+                }
+            }
+        )
+    )
+    assert out["started_at"] == "2026-06-27T05:00:00Z"
+
+
+def test_started_at_falls_back_to_running_step():
+    """When `submitted` step is absent, fall back to the next runtime step."""
+    out = _local_to_blast_job(
+        _state(
+            payload={
+                "_progress": {
+                    "steps": {
+                        "running": {"started_at": "2026-06-27T05:01:00Z"},
+                    }
+                }
+            }
+        )
+    )
+    assert out["started_at"] == "2026-06-27T05:01:00Z"
+
+
+def test_started_at_null_when_only_queued():
+    """A still-queued job has no runtime anchor — keep started_at None so the
+    SPA shows "Queued for" against created_at."""
+    out = _local_to_blast_job(
+        _state(
+            status="queued",
+            phase="queued",
+            payload={"_progress": {"steps": {"queued": {"updated_at": "2026-06-27T04:00:00Z"}}}},
+        )
+    )
+    assert out["started_at"] is None
+
+
+def test_started_at_external_wins_over_progress():
+    """External-origin rows ignore stale _progress (per the existing comment in
+    _local_to_blast_job), so the external started_at must still surface even
+    when a stale recovery write left a _progress step behind."""
+    out = _local_to_blast_job(
+        _state(
+            payload={
+                "external": {
+                    "submission_source": "external_api",
+                    "started_at": "2026-06-27T06:00:00Z",
+                },
+                "_progress": {"steps": {"running": {"started_at": "2026-06-27T05:00:00Z"}}},
+            }
+        )
+    )
+    assert out["started_at"] == "2026-06-27T06:00:00Z"
