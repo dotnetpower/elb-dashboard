@@ -3545,61 +3545,87 @@ def test_canonical_result_fallback_threads_scope_query(monkeypatch):
     assert captured["stream_file"]["cluster_name"] == "aks-a"
 
 
-def test_download_route_falls_back_to_storage_when_openapi_unreachable(monkeypatch):
-    """The download route serves results from Storage when the openapi is down.
+def test_download_route_serves_from_storage_first(monkeypatch):
+    """The download route serves results from Storage without touching openapi.
 
-    Wires the cluster-auto-stopped path end to end. A stopped cluster surfaces as
-    either ``openapi_unreachable`` (cached endpoint, connect failed) or
-    ``openapi_not_configured`` (no cached endpoint to even attempt — raised in
-    ``_base_url`` right after a redeploy while the cluster is down); BOTH must
-    trigger the Storage fallback.
+    Storage-first: the result bytes are durable, so a job with a captured
+    manifest streams straight from Storage regardless of cluster power state —
+    the elb-openapi proxy is never called and a stopped cluster causes no delay.
     """
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
     from api.services import external_blast
 
-    for down_code in ("openapi_unreachable", "openapi_not_configured"):
+    def fake_storage(job_id: str, file_id: str) -> external_blast.StreamedFile:
+        assert job_id == "abc123" and file_id == "result-001"
+        return external_blast.StreamedFile(
+            chunks=iter([b"STORAGE-", b"RESULT"]),
+            media_type="application/gzip",
+            filename="batch_000.out.gz",
+        )
 
-        def boom(*_a, _code=down_code, **_k):
-            raise HTTPException(503, detail={"code": _code, "message": "down"})
+    def must_not_run(*_a, **_k):
+        raise AssertionError("openapi proxy must not run when Storage has the file")
 
-        def fake_storage(job_id: str, file_id: str) -> external_blast.StreamedFile:
-            assert job_id == "abc123" and file_id == "result-001"
-            return external_blast.StreamedFile(
-                chunks=iter([b"OFFLINE-", b"RESULT"]),
-                media_type="application/gzip",
-                filename="batch_000.out.gz",
-            )
-
-        monkeypatch.setattr(external_blast, "stream_file", boom)
-        monkeypatch.setattr(external_blast, "stream_result_file_from_storage", fake_storage)
-        client = TestClient(app)
-        resp = client.get("/api/v1/elastic-blast/jobs/abc123/files/result-001")
-        assert resp.status_code == 200, down_code
-        assert resp.content == b"OFFLINE-RESULT", down_code
+    monkeypatch.setattr(external_blast, "stream_result_file_from_storage", fake_storage)
+    monkeypatch.setattr(external_blast, "stream_file", must_not_run)
+    client = TestClient(app)
+    resp = client.get("/api/v1/elastic-blast/jobs/abc123/files/result-001")
+    assert resp.status_code == 200
+    assert resp.content == b"STORAGE-RESULT"
 
 
-def test_download_route_propagates_non_openapi_errors(monkeypatch):
-    """A non-openapi-unreachable error is NOT masked by the Storage fallback."""
+def test_download_route_falls_back_to_openapi_without_manifest(monkeypatch):
+    """A job that predates manifest capture falls back to the openapi proxy.
+
+    Storage raises ``result_unavailable_offline`` (no stored mapping) → the
+    route serves the file from the elb-openapi proxy instead.
+    """
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
     from api.services import external_blast
 
-    reached = {"storage": False}
+    def offline(*_a, **_k):
+        raise HTTPException(404, detail={"code": "result_unavailable_offline", "message": "no"})
 
-    def boom(*_a, **_k):
-        raise HTTPException(404, detail={"code": "not_found", "message": "nope"})
+    def fake_proxy(job_id: str, file_id: str, **_k) -> external_blast.StreamedFile:
+        assert job_id == "abc123" and file_id == "result-001"
+        return external_blast.StreamedFile(
+            chunks=iter([b"PROXY-", b"RESULT"]),
+            media_type="application/xml",
+            filename="batch_000.xml",
+        )
 
-    def fake_storage(job_id: str, file_id: str) -> external_blast.StreamedFile:
-        reached["storage"] = True
-        raise AssertionError("storage fallback must not run for a non-503 error")
-
-    monkeypatch.setattr(external_blast, "stream_file", boom)
-    monkeypatch.setattr(external_blast, "stream_result_file_from_storage", fake_storage)
+    monkeypatch.setattr(external_blast, "stream_result_file_from_storage", offline)
+    monkeypatch.setattr(external_blast, "stream_file", fake_proxy)
     client = TestClient(app)
     resp = client.get("/api/v1/elastic-blast/jobs/abc123/files/result-001")
-    assert resp.status_code == 404
-    assert reached["storage"] is False
+    assert resp.status_code == 200
+    assert resp.content == b"PROXY-RESULT"
+
+
+def test_download_route_propagates_non_offline_storage_errors(monkeypatch):
+    """A non-offline Storage error is NOT masked by the openapi fallback."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    reached = {"proxy": False}
+
+    def boom(*_a, **_k):
+        raise HTTPException(403, detail={"code": "forbidden", "message": "nope"})
+
+    def fake_proxy(*_a, **_k):
+        reached["proxy"] = True
+        raise AssertionError("openapi fallback must not run for a non-offline error")
+
+    monkeypatch.setattr(external_blast, "stream_result_file_from_storage", boom)
+    monkeypatch.setattr(external_blast, "stream_file", fake_proxy)
+    client = TestClient(app)
+    resp = client.get("/api/v1/elastic-blast/jobs/abc123/files/result-001")
+    assert resp.status_code == 403
+    assert reached["proxy"] is False
+
 
 
 def test_canonical_local_result_file_id_must_match_job_prefix(monkeypatch):

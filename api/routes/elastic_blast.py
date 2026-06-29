@@ -692,24 +692,17 @@ def get_external_blast_job_manifest(
     return build_result_manifest(job_id=job_id, files=files, source="external")
 
 
-def _is_openapi_unreachable(exc: HTTPException) -> bool:
-    """True when the error means the elb-openapi proxy can't serve the file.
+def _is_offline_unavailable(exc: HTTPException) -> bool:
+    """True when Storage cannot serve the file (no captured manifest/account).
 
-    Used to decide whether to fall back to streaming the result file straight
-    from Storage. A stopped cluster surfaces as either ``openapi_unreachable``
-    (a cached endpoint exists but the connection failed/timed out) OR
-    ``openapi_not_configured`` (the api sidecar has no cached endpoint to even
-    attempt — typical right after a redeploy while the cluster is down, raised
-    in ``_base_url`` before any HTTP call). Both mean "proxy unavailable → try
-    Storage".
+    Means "fall back to the elb-openapi proxy": the result predates manifest
+    capture, or the storage account is not recorded. Any other Storage error
+    (RBAC, traversal) propagates instead of being masked by the proxy attempt.
     """
-    if exc.status_code != 503:
+    if exc.status_code != 404:
         return False
     detail = exc.detail
-    return isinstance(detail, dict) and detail.get("code") in {
-        "openapi_unreachable",
-        "openapi_not_configured",
-    }
+    return isinstance(detail, dict) and detail.get("code") == "result_unavailable_offline"
 
 
 @router.get("/jobs/{job_id}/files/{file_id}")
@@ -760,24 +753,23 @@ def download_external_blast_file(
     )
     del caller, token
     try:
-        downloaded = external_blast.stream_file(
-            job_id,
-            file_id,
-            **_openapi_scope_kwargs(
-                subscription_id=subscription_id,
-                resource_group=resource_group,
-                cluster_name=cluster_name,
-            ),
-        )
+        # Storage-first: the result bytes are durably in the workload Storage
+        # account, so serve them straight from there (via the manifest captured
+        # at completion) regardless of cluster power state — no waiting on the
+        # AKS-hosted elb-openapi proxy. Falls back to the proxy only for jobs
+        # that predate manifest capture (no stored mapping to resolve).
+        downloaded = external_blast.stream_result_file_from_storage(job_id, file_id)
     except HTTPException as exc:
-        # When the elb-openapi proxy is unreachable (the AKS cluster
-        # auto-stopped), the result bytes are still durably in Storage. Fall back
-        # to streaming them directly via the manifest captured at completion so a
-        # consumer following the completion-event download_url after auto-stop
-        # still gets its file. Any other error (incl. the fallback's own
-        # "unavailable offline" 404 for a job with no stored manifest) propagates.
-        if _is_openapi_unreachable(exc):
-            downloaded = external_blast.stream_result_file_from_storage(job_id, file_id)
+        if _is_offline_unavailable(exc):
+            downloaded = external_blast.stream_file(
+                job_id,
+                file_id,
+                **_openapi_scope_kwargs(
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                ),
+            )
         else:
             raise
 
