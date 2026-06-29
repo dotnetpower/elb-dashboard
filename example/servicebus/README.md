@@ -7,7 +7,7 @@ and mirrors a real code path in `api/`.
 | File | Mirrors | What it does |
 | --- | --- | --- |
 | [`send_request.py`](send_request.py) | `api.services.service_bus.send_request` | Producer — put one BLAST request on the `elastic-blast-requests` queue. |
-| [`consume.py`](consume.py) | `api.services.service_bus.drain_requests` | Consumer — receive request messages and settle them (complete / abandon / dead-letter). |
+| [`consume.py`](consume.py) | `api.services.service_bus.drain_requests` | Consumer — receive request-queue or completion-topic messages; with `--download`, also fetch every `result_files[].download_url` (no auth). |
 | [`monitor.py`](monitor.py) | `api.services.service_bus.entity_counts` + `peek_requests` | Monitoring — read queue counts and non-destructively peek messages. |
 | [`load_test.py`](load_test.py) | — | Burst tool (not a basic example) — enqueue many requests for a load test. |
 
@@ -47,6 +47,8 @@ to the XML-locked `/api/v1/elastic-blast/submit`.
 | --- | --- |
 | `SERVICEBUS_NAMESPACE_FQDN` | `sb-elb-dashboard-krc.servicebus.windows.net` |
 | `SERVICEBUS_REQUEST_QUEUE` | `elastic-blast-requests` |
+| `SERVICEBUS_COMPLETIONS_TOPIC` | `elastic-blast-completions` |
+| `SERVICEBUS_COMPLETIONS_SUBSCRIPTION` | `default` |
 
 ## Auth
 
@@ -100,22 +102,41 @@ A succeeded job lands on the **completion topic** `elastic-blast-completions`
 ```
 
 The `download_url` points at the dashboard authenticated gateway (NEVER a
-SAS URL — charter §9 holds). To download:
+SAS URL — charter §9 holds). With URL signing enabled (the default) the
+gateway has minted a scoped HMAC `?token=v1.<exp>.<sig>` onto the link, so a
+consumer that already received the event can fetch the file by **URL alone —
+no bearer, no `az login`, no extra headers**. The token is scoped to one
+`(job_id, file_id)` and expires after 7 days (operator-tunable via
+`DOWNLOAD_URL_TTL_SECONDS`).
+
+Download is just an HTTP GET — anything works:
+
+```bash
+curl -o result-001.gz "<download_url>"
+wget -O result-001.gz "<download_url>"
+```
 
 ```python
-# bearer for the API audience (resource = $ELB_API_CLIENT_ID)
-import urllib.request, os
-req = urllib.request.Request(
-    file["download_url"],
-    headers={"Authorization": f"Bearer {bearer}"},
-)
-with urllib.request.urlopen(req, timeout=60) as r:
+import urllib.request
+with urllib.request.urlopen(file["download_url"], timeout=120) as r:
     open(file["name"], "wb").write(r.read())
 ```
 
-See [`consume.py`](consume.py) `--source completions --download` for a working
-end-to-end consumer (bearer via `ELB_BEARER_TOKEN` or
-`az account get-access-token --resource $ELB_API_CLIENT_ID`).
+For an end-to-end flow that receives the completion event itself and then
+GETs every `result_files[].download_url` with no auth headers, use
+[`consume.py`](consume.py):
+
+```bash
+python consume.py --source completions --max 5 --download --out-dir ./out
+```
+
+The SB receive still needs the **Azure Service Bus Data Receiver** role on
+the namespace; the file download adds nothing on top.
+
+If the operator turns signing off (`DOWNLOAD_URL_SIGNED_TOKENS=false`) or
+`EXEC_TOKEN` is missing, the URL ships bearer-only. The example scripts do
+**not** paper over that — the gateway returns 401 and the per-file stat
+records it, so the misconfiguration is visible instead of silently retried.
 
 ### Operational guarantees for external consumers
 
@@ -124,25 +145,30 @@ end-to-end consumer (bearer via `ELB_BEARER_TOKEN` or
 | Outage tolerance | Service Bus Standard topic retention = **14 days**. A consumer that stays disconnected for ≤14 days catches up on reconnect without loss. Longer → tail messages roll off. |
 | At-least-once | Both the request queue and the completion topic are at-least-once. The producer side dedups via `external_correlation_id` (`claim_bridge` atomic gate). Consumers MUST be idempotent on `event_id` (the deterministic hash) — see `consume.py` for the pattern. |
 | Out-of-order | Transitions are NOT strictly ordered (`queued` / `running` / `succeeded` can arrive in any order on a fast cluster). Trust `status` + `event_id`, not delivery order. |
-| Retry on `download_url` | A transient 401 self-heals once via internal token resync (the gateway reopens the upstream stream). A 5xx from the gateway is also transient — retry with exponential backoff (2s, 8s, 30s). A 404 means the file is gone — stop retrying. |
-| `download_url` validity | The URL itself is durable (gateway path); the access token in the `Authorization` header is the only expiring piece. Re-mint the bearer just before each session. |
+| Retry on `download_url` | A 5xx from the gateway is transient — retry with exponential backoff (2s, 8s, 30s). A 404 means the file is gone — stop retrying. A 401 means the signed token is missing/expired (signing turned off, or the event is older than `DOWNLOAD_URL_TTL_SECONDS`) — re-fetch the event from the topic to get a fresh URL; do not retry the dead URL. |
+| `download_url` validity | The path is durable, but the `?token=…` expires after 7 days by default (`DOWNLOAD_URL_TTL_SECONDS`). Download soon after receiving the event, or re-pull the event from the topic to re-mint. |
 | DLQ on the topic subscription | The dashboard does NOT consume the `default` subscription; if the external consumer falls behind, messages accumulate (and eventually DLQ after default delivery-count exhaustion under your subscription's policy). Operators monitor this via the Message Flow card. |
 
 ### Recommended consumer skeleton
 
 ```python
+import json, urllib.request
+
 seen = set()              # event_id de-dup (e.g. Redis SET in production)
 while True:
-    msg = receiver.receive_messages(max_count=1, max_wait_time=30)
+    msg = receiver.receive_messages(max_message_count=1, max_wait_time=30)
     if not msg:
         continue
-    body = json.loads(msg[0].body)
+    body = json.loads(msg[0].body if isinstance(msg[0].body, (bytes, str))
+                       else b"".join(msg[0].body))
     if body["event_id"] in seen:
         receiver.complete_message(msg[0])
         continue
     try:
         for f in body.get("result_files", []):
-            download_with_retry(f["download_url"], bearer)
+            # signed ?token= on the URL → no auth headers needed
+            with urllib.request.urlopen(f["download_url"], timeout=120) as r:
+                open(f["name"], "wb").write(r.read())
         seen.add(body["event_id"])
         receiver.complete_message(msg[0])
     except TransientError:
