@@ -1,6 +1,5 @@
 import { AcrCard } from "@/components/cards/AcrCard";
 import { ClusterCard } from "@/components/cards/ClusterCard";
-import { CostCard } from "@/components/cards/CostCard";
 import { MessageFlowCard } from "@/components/cards/MessageFlow";
 import { SidecarsCard } from "@/components/cards/SidecarsCard";
 import { StorageCard } from "@/components/cards/StorageCard";
@@ -76,10 +75,6 @@ export function DashboardGrid({ config }: DashboardGridProps) {
             accountName={config.storageAccountName}
             clusterName="elb-cluster"
             acrName={config.acrName}
-          />
-          <CostCard
-            subscriptionId={config.subscriptionId}
-            resourceGroup={config.workloadResourceGroup}
           />
           {terminalEnabled && (
             <div className="dashboard-hide-mobile">

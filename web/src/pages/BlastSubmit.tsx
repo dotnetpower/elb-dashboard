@@ -15,7 +15,6 @@ import { QuerySection } from "@/pages/blastSubmit/QuerySection";
 import { SubmitStepper } from "@/pages/blastSubmit/SubmitStepper";
 import { SubmitSummaryRail } from "@/pages/blastSubmit/SubmitSummaryRail";
 import { TaxonomyFilterSection } from "@/pages/blastSubmit/TaxonomyFilterSection";
-import { BlastTemplatesControl } from "@/pages/blastSubmit/BlastTemplatesControl";
 import {
   PENDING_DUPLICATE_KEY,
   type ExportableFormFields,
@@ -560,10 +559,7 @@ export function BlastSubmit() {
 
         {/* ── Center: form sections with group dividers ────────── */}
         <main className="bsl-center">
-          <BlastTemplatesControl
-            form={form}
-            onApply={(fields) => setForm((current) => ({ ...current, ...fields }))}
-          />
+
           {/* ─ Input group (steps 1–4) ──────────────────────── */}
           <div className="bsl-divider">
             <span className="bsl-divider__label--input">
