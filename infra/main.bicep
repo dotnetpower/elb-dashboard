@@ -85,6 +85,9 @@ param openApiCustomDnsZoneResourceGroup string = ''
 @description('If true, create Application Insights. The default deployment creates only Log Analytics; Application Insights can be enabled later with ENABLE_APPLICATION_INSIGHTS=true.')
 param enableApplicationInsights bool = false
 
+@description('Optional Application Insights connection string used when this deployment does NOT create its own App Insights (enableApplicationInsights=false) but points telemetry at an external/shared component. Set via azd env APPLICATIONINSIGHTS_CONNECTION_STRING so a full provision keeps the value on the api/worker/beat sidecars instead of wiping it to empty. Empty keeps prior behaviour.')
+param applicationInsightsConnectionStringOverride string = ''
+
 @maxLength(6)
 @description('Optional generated resource name slot, for example slot01 when rg-elb-dashboard already exists and should be preserved. Bicep converts slot01 to the visible -01 resource-name suffix.')
 param resourceNameSlot string = ''
@@ -388,7 +391,7 @@ module controlApp 'modules/containerAppControl.bicep' = {
     featureTerminal: featureTerminal
     serviceBusEnabled: serviceBusEnabled
     storageDateLayoutEnabled: storageDateLayoutEnabled
-    applicationInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    applicationInsightsConnectionString: empty(monitoring.outputs.appInsightsConnectionString) ? applicationInsightsConnectionStringOverride : monitoring.outputs.appInsightsConnectionString
     logAnalyticsWorkspaceId: monitoring.outputs.workspaceCustomerId
     logAnalyticsWorkspaceResourceId: monitoring.outputs.workspaceResourceId
     platformStorageAccountName: storage.outputs.storageAccountName
@@ -418,7 +421,7 @@ output STORAGE_ACCOUNT_NAME string = storage.outputs.storageAccountName
 output KEY_VAULT_NAME string = keyvault.outputs.keyVaultName
 output KEY_VAULT_URI string = keyvault.outputs.keyVaultUri
 
-output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.appInsightsConnectionString
+output APPLICATIONINSIGHTS_CONNECTION_STRING string = empty(monitoring.outputs.appInsightsConnectionString) ? applicationInsightsConnectionStringOverride : monitoring.outputs.appInsightsConnectionString
 output LOG_ANALYTICS_WORKSPACE_ID string = monitoring.outputs.workspaceCustomerId
 
 output CONTAINER_ENV_NAME string = containerEnvName
