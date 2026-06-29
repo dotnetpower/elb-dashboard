@@ -532,6 +532,14 @@ def test_put_same_tenant_cross_user_transfers_ownership(
         save_auto_stop_preference,
     )
 
+    # Pin the tenant the AUTH_DEV_BYPASS identity reports so the pref row's
+    # tenant_id stays in lockstep with ``caller.tenant_id`` regardless of any
+    # ambient ``AZURE_TENANT_ID`` value on the host (CI runner, developer
+    # workstation with `azd env` loaded, etc.). Without this the test relied
+    # on the ``"dev-bypass"`` default in ``_dev_bypass_identity`` and would
+    # flake on hosts where ``AZURE_TENANT_ID`` was set to something else.
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-shared")
+
     save_auto_stop_preference(
         AutoStopPreference(
             subscription_id="sub-1",
@@ -540,9 +548,7 @@ def test_put_same_tenant_cross_user_transfers_ownership(
             enabled=True,
             idle_minutes=60,
             owner_oid="colleague-oid",
-            # Same tenant as the test caller (AUTH_DEV_BYPASS synthesises
-            # tenant_id from AZURE_TENANT_ID env, defaulting to "dev-bypass").
-            tenant_id="dev-bypass",
+            tenant_id="tenant-shared",
         )
     )
     # Force the production cross-owner path (skip the dev-bypass shortcut)
