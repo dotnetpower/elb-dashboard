@@ -184,6 +184,42 @@ describe("OpenAPI executor curl builder", () => {
     }
   });
 
+  it("inlines the real M2M token value when provided", () => {
+    const curl = buildCurl({
+      endpoint: { method: "get", path: "/v1/jobs", parameters: [] },
+      baseUrl: "",
+      dashboardApi: true,
+      paramValues: {},
+      bodyText: "",
+      apiBase: "",
+      origin: "https://dash.example",
+      m2mToken: "xTmEoreeMkkTzNqwLNZLFYglstWPQn29M44sBtmPm4Q",
+    });
+    expect(curl).toContain(
+      "'X-ELB-API-Token: xTmEoreeMkkTzNqwLNZLFYglstWPQn29M44sBtmPm4Q'",
+    );
+    // Real value replaces the placeholder — do NOT leak $ELB_API_TOKEN
+    // once the SPA has fetched the shared token.
+    expect(curl).not.toContain("$ELB_API_TOKEN");
+    expect(curl).not.toContain("Authorization");
+  });
+
+  it("falls back to the placeholder when m2mToken is undefined or empty", () => {
+    for (const tok of [undefined, ""]) {
+      const curl = buildCurl({
+        endpoint: { method: "get", path: "/v1/jobs", parameters: [] },
+        baseUrl: "",
+        proxyInfo: { sub: "s", rg: "r", clusterName: "c" },
+        paramValues: {},
+        bodyText: "",
+        apiBase: "",
+        origin: "https://dash.example",
+        m2mToken: tok,
+      });
+      expect(curl).toContain("'X-ELB-API-Token: $ELB_API_TOKEN'");
+    }
+  });
+
   it("escapes single quotes in body so the command stays POSIX-safe", () => {
     const curl = buildCurl({
       endpoint: {

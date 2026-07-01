@@ -93,6 +93,10 @@ param tags object = {}
 @description('Shared secret used by the api / worker sidecars to authenticate with the terminal exec server (loopback :7682). Auto-rotated on every deployment via newGuid(); both sidecars receive the same Container Apps secret reference so they always agree.')
 param execToken string = newGuid()
 
+@secure()
+@description('Shared M2M token for the ELB API (X-ELB-API-Token). When non-empty, it is stored as the Container App secret `elb-openapi-api-token` and injected into the api sidecar as `ELB_OPENAPI_API_TOKEN`. When empty (default), the secret and env are omitted entirely — the M2M path in `api/auth.py` then rejects every `X-ELB-API-Token` header even if the gate is on (fail-safe). Wire it once via `azd env set AZURE_OPENAPI_SHARED_TOKEN <value>` so the value survives every provision.')
+param openApiSharedToken string = ''
+
 var moduleTags = union(tags, {
   role: 'control-plane'
 })
@@ -192,16 +196,28 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
       //      operators must avoid `azd provision` mid-cutover.
       // See docs/features_change/2026-06 for the rollout runbook.
       activeRevisionsMode: 'Single'
-      secrets: [
-        // Shared secret for the loopback exec channel between the api/worker
-        // sidecars and the terminal sidecar's exec server. Container Apps
-        // stores secrets encrypted at rest; both sidecars receive it via
-        // `secretRef` below so the value never appears in env-var listings.
-        {
-          name: 'exec-token'
-          value: execToken
-        }
-      ]
+      secrets: concat(
+        [
+          // Shared secret for the loopback exec channel between the api/worker
+          // sidecars and the terminal sidecar's exec server. Container Apps
+          // stores secrets encrypted at rest; both sidecars receive it via
+          // `secretRef` below so the value never appears in env-var listings.
+          {
+            name: 'exec-token'
+            value: execToken
+          }
+        ],
+        !empty(openApiSharedToken) ? [
+          // Shared M2M token exposed to the api sidecar as
+          // ELB_OPENAPI_API_TOKEN (secretRef below). Populated from the
+          // azd env var AZURE_OPENAPI_SHARED_TOKEN; empty default omits
+          // the secret entirely so the M2M path stays fail-safe.
+          {
+            name: 'elb-openapi-api-token'
+            value: openApiSharedToken
+          }
+        ] : []
+      )
       ingress: {
         external: true
         targetPort: 8080
@@ -255,7 +271,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json('1.0')
             memory: '2.0Gi'
           }
-          env: [
+          env: concat([
             { name: 'SIDECAR_NAME', value: 'api' }
             { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
             { name: 'AZURE_TENANT_ID', value: tenantId }
@@ -339,14 +355,19 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Microsoft.Authorization/roleAssignments/read at the
             // subscription scope (the Reader built-in grants this).
             { name: 'ENFORCE_OPENAPI_EXEC_RBAC', value: controlPlaneEnv.api.ENFORCE_OPENAPI_EXEC_RBAC }
-            // Shared-token auth for the READ-ONLY OpenAPI database catalogue
-            // routes (GET /api/aks/openapi/databases[/{db_name}]). Default OFF
-            // preserves MSAL-bearer-only auth (Charter §12a Rule 4). Flip to
-            // 'true' to ALSO accept the shared elb-openapi `X-ELB-API-Token`
-            // on those two read-only routes, so a caller manages one
-            // credential instead of two. The shared token has no Azure RBAC
-            // gate, so this is deliberately limited to read-only routes;
-            // cost-bearing actions (ensure-running) stay MSAL-only.
+            // Universal M2M shared-token gate. When `true`, EVERY
+            // `require_caller`-gated route on the dashboard API accepts the
+            // shared `X-ELB-API-Token` header in addition to the MSAL bearer
+            // — read AND write. Default is `true` in this deployment because
+            // the shipping operator policy is that a peer-VNet automation
+            // caller uses one credential across the full API surface. The
+            // shared token has no Azure RBAC gate, so enable this gate only
+            // when the ingress surface is controlled (private ingress, IP
+            // allowlist, or VNet peering). Set `false` in
+            // `infra/control-plane-env.json` to revert to MSAL-bearer-only
+            // (existing behaviour preserved). Pairs with
+            // `openApiSharedToken` (secretRef below) — an empty token env
+            // makes the auth-time check fail-safe (reject).
             { name: 'ALLOW_OPENAPI_TOKEN_AUTH', value: controlPlaneEnv.api.ALLOW_OPENAPI_TOKEN_AUTH }
             // Dashboard entry RBAC gate (OWASP A01 follow-up). Enabled by
             // default: a signed-in tenant member must hold at least a read
@@ -408,7 +429,13 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             //   UPGRADE_REVISION_KEEP_N (default 2)
             { name: 'STRICT_BLUEGREEN', value: controlPlaneEnv.api.STRICT_BLUEGREEN }
             { name: 'LOG_LEVEL', value: 'INFO' }
-          ]
+          ], !empty(openApiSharedToken) ? [
+            // Universal M2M shared-token env — added only when the operator
+            // has wired a value via `azd env set AZURE_OPENAPI_SHARED_TOKEN`.
+            // Absent otherwise, so the auth-time reject stays fail-safe
+            // instead of trying to bind a non-existent secretRef.
+            { name: 'ELB_OPENAPI_API_TOKEN', secretRef: 'elb-openapi-api-token' }
+          ] : [])
           probes: [
             {
               type: 'Liveness'

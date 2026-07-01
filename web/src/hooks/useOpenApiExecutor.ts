@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchApiRawNoRedirect } from "@/api/client";
+import { settingsApi } from "@/api/settings";
 import { apiBaseUrl } from "@/config/runtime";
 import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
 
@@ -147,14 +148,27 @@ export function useOpenApiExecutor({
 
   const copyCurl = useCallback(async () => {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
-    // Copy curl is intentionally M2M-shaped: it emits an
-    // ``X-ELB-API-Token: $ELB_API_TOKEN`` header instead of the browser
-    // session's MSAL bearer, so the copied command is portable to a peer-VNet
-    // automation caller. The user substitutes ``$ELB_API_TOKEN`` for the real
-    // shared token on their own host. Requires the deploy operator to have
-    // set ``ALLOW_OPENAPI_TOKEN_AUTH=true`` on the api sidecar; otherwise the
-    // copied command 401s with "missing bearer token" — that failure is a
-    // signal to enable the gate, not to change what the button emits.
+    // Copy curl is M2M-shaped: it emits an ``X-ELB-API-Token`` header instead
+    // of the browser session's MSAL bearer, so the copied command is portable
+    // to a peer-VNet automation caller. The dashboard exposes the shared
+    // token value (when configured) via ``GET /api/settings/openapi-token`` so
+    // the copied command is ready to paste without any manual substitution.
+    // If that fetch fails (unauthenticated, gate off, or no token configured)
+    // we fall back to a ``$ELB_API_TOKEN`` placeholder — still useful as a
+    // template. Requires the deploy operator to have set
+    // ``ALLOW_OPENAPI_TOKEN_AUTH=true`` for the copied command to actually
+    // authenticate; the endpoint's ``gate_enabled`` flag surfaces that.
+    let m2mToken: string | undefined;
+    if (proxyInfo || dashboardApi) {
+      try {
+        const { token } = await settingsApi.getOpenApiToken();
+        if (token) m2mToken = token;
+      } catch {
+        // Silent fallback — the placeholder path still produces a valid
+        // curl template the operator can complete by hand.
+        m2mToken = undefined;
+      }
+    }
     const curl = buildCurl({
       endpoint,
       baseUrl,
@@ -164,6 +178,7 @@ export function useOpenApiExecutor({
       bodyText,
       apiBase: apiBaseUrl(),
       origin,
+      m2mToken,
     });
     copyText(curl, "openapi-curl");
   }, [baseUrl, bodyText, copyText, endpoint, paramValues, proxyInfo, dashboardApi]);
@@ -177,10 +192,13 @@ export function useOpenApiExecutor({
  *
  * Auth header:
  * - Proxy mode (cluster-scoped endpoints) and dashboard-api mode both emit
- *   ``X-ELB-API-Token: $ELB_API_TOKEN`` — the operator drops the real shared
- *   token in for ``$ELB_API_TOKEN`` on the calling host. This mirrors the
- *   universal ``require_caller`` shared-token path (see ``api/auth.py``) and
- *   requires the deploy operator to have set ``ALLOW_OPENAPI_TOKEN_AUTH=true``.
+ *   ``X-ELB-API-Token: <token>`` — when ``m2mToken`` is provided (the SPA
+ *   resolves it via ``GET /api/settings/openapi-token``) the actual shared
+ *   token is inlined so the copied command is paste-and-run. Otherwise a
+ *   ``$ELB_API_TOKEN`` placeholder is emitted so the command still functions
+ *   as a template. This mirrors the universal ``require_caller`` shared-token
+ *   path (see ``api/auth.py``) and requires the deploy operator to have set
+ *   ``ALLOW_OPENAPI_TOKEN_AUTH=true``.
  * - Direct mode (`baseUrl` set) → curls the upstream URL straight, no
  *   Authorization header (the upstream has its own auth posture).
  *
@@ -198,6 +216,7 @@ export function buildCurl({
   bodyText,
   apiBase,
   origin,
+  m2mToken,
 }: {
   endpoint: OpenApiEndpoint;
   baseUrl: string;
@@ -207,10 +226,15 @@ export function buildCurl({
   bodyText: string;
   apiBase: string;
   origin: string;
+  /** Real shared token value fetched from ``/api/settings/openapi-token``.
+   *  When omitted, the copied command uses a ``$ELB_API_TOKEN`` placeholder. */
+  m2mToken?: string;
 }): string {
   const method = endpoint.method.toUpperCase();
   const targetPath = buildTargetPath(endpoint.path, endpoint.parameters, paramValues);
   const hasBody = Boolean(endpoint.requestBody && bodyText);
+
+  const tokenValue = m2mToken || "$ELB_API_TOKEN";
 
   let url: string;
   const headers: Array<[string, string]> = [];
@@ -221,7 +245,7 @@ export function buildCurl({
     // target is just origin + path with the M2M shared-token header.
     const base = origin || apiBase;
     url = `${base}${targetPath}`;
-    headers.push(["X-ELB-API-Token", "$ELB_API_TOKEN"]);
+    headers.push(["X-ELB-API-Token", tokenValue]);
   } else if (proxyInfo) {
     const params = new URLSearchParams({
       subscription_id: proxyInfo.sub,
@@ -231,7 +255,7 @@ export function buildCurl({
     });
     const base = apiBase || origin;
     url = `${base}/api/aks/openapi/proxy?${params.toString()}`;
-    headers.push(["X-ELB-API-Token", "$ELB_API_TOKEN"]);
+    headers.push(["X-ELB-API-Token", tokenValue]);
   } else {
     url = `${baseUrl}${targetPath}`;
   }

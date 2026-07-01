@@ -17,6 +17,9 @@
     "apiClientId": {
       "value": "${API_CLIENT_ID=}"
     },
+    "openApiSharedToken": {
+      "value": "${AZURE_OPENAPI_SHARED_TOKEN=}"
+    },
     "allowedOrigins": {
       "value": "${ALLOWED_ORIGINS}"
     },

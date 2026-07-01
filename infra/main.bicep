@@ -40,6 +40,10 @@ param tenantId string = subscription().tenantId
 @description('Application (client) id of the App Registration used by the SPA + api. Set after the App Registration is created (or re-used from the legacy deployment).')
 param apiClientId string = ''
 
+@secure()
+@description('Shared M2M token exposed to the api sidecar as `ELB_OPENAPI_API_TOKEN`. When set (via `azd env set AZURE_OPENAPI_SHARED_TOKEN <value>`), enables the universal M2M `X-ELB-API-Token` path in the dashboard API. Empty (default) leaves the M2M path fail-safe (auth-time reject) — set this only for deployments that actually want the shared-token surface enabled.')
+param openApiSharedToken string = ''
+
 @description('Frontend feature flag for the custom database builder. Set to false for production deployments that should hide this surface.')
 param featureCustomDb string = 'true'
 
@@ -386,6 +390,7 @@ module controlApp 'modules/containerAppControl.bicep' = {
     sharedIdentityPrincipalId: identity.outputs.identityPrincipalId
     tenantId: tenantId
     apiClientId: apiClientId
+    openApiSharedToken: openApiSharedToken
     featureCustomDb: featureCustomDb
     featureLabTools: featureLabTools
     featureTerminal: featureTerminal

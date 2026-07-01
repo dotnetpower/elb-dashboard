@@ -3,7 +3,7 @@
   "api": {
     "OPENAPI_ALLOW_PUBLIC_LB": "true",
     "ENFORCE_OPENAPI_EXEC_RBAC": "false",
-    "ALLOW_OPENAPI_TOKEN_AUTH": "false",
+    "ALLOW_OPENAPI_TOKEN_AUTH": "true",
     "ENFORCE_DASHBOARD_RBAC": "true",
     "BLAST_GATE_ENABLED": "false",
     "BLAST_JOBS_SHARED_VISIBILITY": "true",

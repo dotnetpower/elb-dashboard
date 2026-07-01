@@ -795,7 +795,28 @@ export const settingsApi = {
    *  `NCBI_API_KEY` in env (`env_locked` true). */
   putNcbiKey: (apiKey: string) =>
     api.put<{ config: NcbiKeyStatus }>("/settings/ncbi", { api_key: apiKey }),
+
+  /** Read the shared M2M ``X-ELB-API-Token`` value so the SPA's "Copy curl"
+   *  surface can inline the real value instead of the `$ELB_API_TOKEN`
+   *  placeholder. Returns ``token: ""`` when the deployment has no shared
+   *  token configured; the SPA falls back to the placeholder in that case.
+   *  Requires an authenticated caller (any Reader/Contributor/Owner works). */
+  getOpenApiToken: () =>
+    api.get<SharedApiTokenStatus>("/settings/openapi-token"),
 };
+
+/** Response of `GET /api/settings/openapi-token`. Named `SharedApiTokenStatus`
+ *  (not `OpenApiTokenStatus`) to avoid clashing with the same-named type in
+ *  `@/api/aks` which describes the in-cluster elb-openapi admin token config.
+ *  Both concern OpenAPI-related tokens but are distinct concepts. */
+export interface SharedApiTokenStatus {
+  /** Shared M2M token, or "" when the deployment has none configured. */
+  token: string;
+  /** True when `ALLOW_OPENAPI_TOKEN_AUTH=true`. The SPA can render a hint
+   *  when a copied curl carries a token but the gate is off — that command
+   *  will 401 until an operator flips the gate. */
+  gate_enabled: boolean;
+}
 
 /** Masked NCBI API key status from `/api/settings/ncbi` (no plaintext key). */
 export interface NcbiKeyStatus {
