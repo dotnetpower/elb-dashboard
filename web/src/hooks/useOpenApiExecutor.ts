@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { fetchApiRawNoRedirect, getApiAccessToken } from "@/api/client";
+import { fetchApiRawNoRedirect } from "@/api/client";
 import { apiBaseUrl } from "@/config/runtime";
 import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
 
@@ -147,16 +147,14 @@ export function useOpenApiExecutor({
 
   const copyCurl = useCallback(async () => {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
-    let bearerToken: string | null = null;
-    if (proxyInfo || dashboardApi) {
-      try {
-        bearerToken = await getApiAccessToken();
-      } catch {
-        // Fall back to the placeholder if MSAL is unavailable (e.g. not signed
-        // in). The copied command is still useful as a template.
-        bearerToken = null;
-      }
-    }
+    // Copy curl is intentionally M2M-shaped: it emits an
+    // ``X-ELB-API-Token: $ELB_API_TOKEN`` header instead of the browser
+    // session's MSAL bearer, so the copied command is portable to a peer-VNet
+    // automation caller. The user substitutes ``$ELB_API_TOKEN`` for the real
+    // shared token on their own host. Requires the deploy operator to have
+    // set ``ALLOW_OPENAPI_TOKEN_AUTH=true`` on the api sidecar; otherwise the
+    // copied command 401s with "missing bearer token" — that failure is a
+    // signal to enable the gate, not to change what the button emits.
     const curl = buildCurl({
       endpoint,
       baseUrl,
@@ -166,7 +164,6 @@ export function useOpenApiExecutor({
       bodyText,
       apiBase: apiBaseUrl(),
       origin,
-      bearerToken,
     });
     copyText(curl, "openapi-curl");
   }, [baseUrl, bodyText, copyText, endpoint, paramValues, proxyInfo, dashboardApi]);
@@ -175,16 +172,22 @@ export function useOpenApiExecutor({
 }
 
 /**
- * Build a `curl` command equivalent to what `execute()` would send.
+ * Build a `curl` command equivalent to what `execute()` would send, shaped
+ * for **M2M peer-VNet automation** rather than the current browser session.
  *
- * - Proxy mode (cluster-scoped endpoints) → goes through the dashboard's
- *   `/api/aks/openapi/proxy` and needs an MSAL bearer token. When
- *   `bearerToken` is provided it is inlined as-is (caller's responsibility:
- *   the copied command then contains a live credential — handle accordingly).
- *   When omitted, a `$AAD_TOKEN` placeholder is emitted instead so the
- *   command can be pasted in chat / docs without leaking credentials.
+ * Auth header:
+ * - Proxy mode (cluster-scoped endpoints) and dashboard-api mode both emit
+ *   ``X-ELB-API-Token: $ELB_API_TOKEN`` — the operator drops the real shared
+ *   token in for ``$ELB_API_TOKEN`` on the calling host. This mirrors the
+ *   universal ``require_caller`` shared-token path (see ``api/auth.py``) and
+ *   requires the deploy operator to have set ``ALLOW_OPENAPI_TOKEN_AUTH=true``.
  * - Direct mode (`baseUrl` set) → curls the upstream URL straight, no
  *   Authorization header (the upstream has its own auth posture).
+ *
+ * The browser UI's own Send Request path is unaffected — that still uses the
+ * user's MSAL bearer via `getApiAccessToken()`. Only the copyable curl is
+ * M2M-shaped, so a copied command works when pasted onto a peer VM without
+ * needing a live 60-minute MSAL token.
  */
 export function buildCurl({
   endpoint,
@@ -195,7 +198,6 @@ export function buildCurl({
   bodyText,
   apiBase,
   origin,
-  bearerToken,
 }: {
   endpoint: OpenApiEndpoint;
   baseUrl: string;
@@ -205,7 +207,6 @@ export function buildCurl({
   bodyText: string;
   apiBase: string;
   origin: string;
-  bearerToken?: string | null;
 }): string {
   const method = endpoint.method.toUpperCase();
   const targetPath = buildTargetPath(endpoint.path, endpoint.parameters, paramValues);
@@ -217,10 +218,10 @@ export function buildCurl({
   if (dashboardApi) {
     // Same-origin call to the dashboard's own api sidecar. `targetPath`
     // already carries the public `/api/...` prefix for display, so the curl
-    // target is just origin + path with an MSAL bearer.
+    // target is just origin + path with the M2M shared-token header.
     const base = origin || apiBase;
     url = `${base}${targetPath}`;
-    headers.push(["Authorization", `Bearer ${bearerToken || "$AAD_TOKEN"}`]);
+    headers.push(["X-ELB-API-Token", "$ELB_API_TOKEN"]);
   } else if (proxyInfo) {
     const params = new URLSearchParams({
       subscription_id: proxyInfo.sub,
@@ -230,7 +231,7 @@ export function buildCurl({
     });
     const base = apiBase || origin;
     url = `${base}/api/aks/openapi/proxy?${params.toString()}`;
-    headers.push(["Authorization", `Bearer ${bearerToken || "$AAD_TOKEN"}`]);
+    headers.push(["X-ELB-API-Token", "$ELB_API_TOKEN"]);
   } else {
     url = `${baseUrl}${targetPath}`;
   }

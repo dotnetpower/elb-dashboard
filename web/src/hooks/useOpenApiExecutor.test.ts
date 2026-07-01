@@ -137,7 +137,7 @@ describe("OpenAPI executor curl builder", () => {
     expect(curl).not.toContain("--data-raw");
   });
 
-  it("builds a proxy curl with a $AAD_TOKEN placeholder when no bearer token is provided", () => {
+  it("builds a proxy curl with an X-ELB-API-Token placeholder (M2M)", () => {
     const curl = buildCurl({
       endpoint: {
         method: "post",
@@ -155,41 +155,32 @@ describe("OpenAPI executor curl builder", () => {
     expect(curl).toContain("curl -X POST");
     expect(curl).toContain("https://dash.example/api/aks/openapi/proxy?");
     expect(curl).toContain("path=%2Fv1%2Fjobs%2Fabc%252F123%2Fcancel");
-    expect(curl).toContain("'Authorization: Bearer $AAD_TOKEN'");
+    expect(curl).toContain("'X-ELB-API-Token: $ELB_API_TOKEN'");
+    // Never emit a Bearer header — the copy-curl surface is M2M-shaped so a
+    // copied command works on a peer VM without a live MSAL token.
+    expect(curl).not.toContain("Authorization");
+    expect(curl).not.toContain("$AAD_TOKEN");
     expect(curl).toContain("'Content-Type: application/json'");
     expect(curl).toContain(`--data-raw '{"reason":"user-cancel"}'`);
   });
 
-  it("inlines a real bearer token when explicitly provided", () => {
-    const curl = buildCurl({
-      endpoint: { method: "get", path: "/v1/jobs", parameters: [] },
-      baseUrl: "",
-      proxyInfo: { sub: "s", rg: "r", clusterName: "c" },
-      paramValues: {},
-      bodyText: "",
-      apiBase: "",
-      origin: "https://dash.example",
-      bearerToken: "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.payload.sig",
-    });
-    expect(curl).toContain(
-      "'Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.payload.sig'",
-    );
-    expect(curl).not.toContain("$AAD_TOKEN");
-  });
-
-  it("falls back to the placeholder when bearerToken is null or empty", () => {
-    for (const token of [null, ""]) {
+  it("emits the X-ELB-API-Token placeholder regardless of proxy vs dashboardApi", () => {
+    for (const cfg of [
+      { proxyInfo: { sub: "s", rg: "r", clusterName: "c" }, dashboardApi: false },
+      { proxyInfo: undefined, dashboardApi: true },
+    ]) {
       const curl = buildCurl({
         endpoint: { method: "get", path: "/v1/jobs", parameters: [] },
         baseUrl: "",
-        proxyInfo: { sub: "s", rg: "r", clusterName: "c" },
+        proxyInfo: cfg.proxyInfo,
+        dashboardApi: cfg.dashboardApi,
         paramValues: {},
         bodyText: "",
         apiBase: "",
         origin: "https://dash.example",
-        bearerToken: token,
       });
-      expect(curl).toContain("'Authorization: Bearer $AAD_TOKEN'");
+      expect(curl).toContain("'X-ELB-API-Token: $ELB_API_TOKEN'");
+      expect(curl).not.toContain("Authorization");
     }
   });
 
@@ -225,7 +216,7 @@ describe("OpenAPI executor curl builder", () => {
     expect(curl).not.toContain("http://localhost:8090/api/aks/openapi/proxy?");
   });
 
-  it("builds a same-origin curl with a bearer header in dashboardApi mode", () => {
+  it("builds a same-origin curl with the X-ELB-API-Token header in dashboardApi mode", () => {
     const curl = buildCurl({
       endpoint: {
         method: "post",
@@ -239,14 +230,14 @@ describe("OpenAPI executor curl builder", () => {
       bodyText: '{"resource_group":"rg","cluster_name":"c"}',
       apiBase: "",
       origin: "https://dash.example",
-      bearerToken: "live-token",
     });
     // Same-origin dashboard host (NOT the elb-openapi proxy path).
     expect(curl).toContain(
       "curl -X POST 'https://dash.example/api/aks/openapi/ensure-running'",
     );
     expect(curl).not.toContain("/api/aks/openapi/proxy");
-    expect(curl).toContain("'Authorization: Bearer live-token'");
+    expect(curl).toContain("'X-ELB-API-Token: $ELB_API_TOKEN'");
+    expect(curl).not.toContain("Authorization");
     expect(curl).toContain(
       `--data-raw '{"resource_group":"rg","cluster_name":"c"}'`,
     );
