@@ -114,6 +114,37 @@ for k, v in section.items():
     value = os.environ[k] if k in os.environ else v
     print(f"{k}={value}")
 PY
+  # Extra M2M wiring for the api sidecar only: when the operator has set
+  # AZURE_OPENAPI_SHARED_TOKEN (via `azd env set`), emit an extra pair that
+  # references the Container App secret `elb-openapi-api-token`. The secret
+  # itself is upserted separately by `sync_openapi_shared_token` right before
+  # the PATCH (Bicep also declares the same secret + env for full azd
+  # provision paths — quick-deploy just mirrors the same wiring so a fast
+  # deploy converges to the same runtime shape). Fail-safe: an unset env
+  # var means the pair is omitted entirely and the api container's
+  # existing secretRef (if any) is left untouched by the upsert-style
+  # `--set-env-vars`.
+  if [[ "$sidecar" == "api" && -n "${AZURE_OPENAPI_SHARED_TOKEN:-}" ]]; then
+    printf 'ELB_OPENAPI_API_TOKEN=secretref:elb-openapi-api-token\n'
+  fi
+}
+
+# Upsert the shared M2M token as the Container App secret
+# `elb-openapi-api-token`, mirroring the Bicep declaration for the same
+# secret name. Idempotent: unchanged value is a no-op from the caller's
+# perspective (Container Apps returns 200 either way). No-op when the
+# operator has not set AZURE_OPENAPI_SHARED_TOKEN so a deployment that
+# opts out of the M2M path never gets an empty / stale secret written.
+sync_openapi_shared_token() {
+  [[ -n "${AZURE_OPENAPI_SHARED_TOKEN:-}" ]] || return 0
+  [[ -n "${CONTAINER_APP_NAME:-}" && -n "${AZURE_RESOURCE_GROUP:-}" ]] || return 0
+  ts "    + upserting Container App secret 'elb-openapi-api-token' (M2M shared token)"
+  az containerapp secret set \
+    --name "$CONTAINER_APP_NAME" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --secrets "elb-openapi-api-token=$AZURE_OPENAPI_SHARED_TOKEN" \
+    -o none \
+    || ts "    ! failed to upsert 'elb-openapi-api-token' — the api PATCH may leave the M2M gate rejecting every request"
 }
 
 # ---------------------------------------------------------------------------
@@ -984,6 +1015,11 @@ fi
       # all other runtime env from the last full deploy / Bicep is preserved.
       mapfile -t _cp_pairs < <(control_plane_env_pairs "$tgt")
       case "$tgt" in api | worker | beat) servicebus_gate_notice ;; esac
+      # api sidecar only: make sure the Container App secret backing the
+      # M2M shared token exists BEFORE the PATCH references it via
+      # secretRef. Idempotent + no-op when AZURE_OPENAPI_SHARED_TOKEN is
+      # unset (M2M path opt-out).
+      [[ "$tgt" == "api" ]] && sync_openapi_shared_token
       if [[ ${#_cp_pairs[@]} -gt 0 ]]; then
         ts "    + applying ${#_cp_pairs[@]} control-plane guard env var(s) for '$tgt'"
         az containerapp update \
@@ -1224,6 +1260,12 @@ for tgt in "${TARGETS[@]}"; do
     # default instead of silently leaving the live env stale.
     mapfile -t _cp_pairs < <(control_plane_env_pairs "$tgt")
     case "$tgt" in api | worker | beat) servicebus_gate_notice ;; esac
+    # api sidecar only: make sure the Container App secret backing the
+    # M2M shared token exists BEFORE the PATCH references it via
+    # secretRef. Idempotent + no-op when AZURE_OPENAPI_SHARED_TOKEN is
+    # unset (M2M path opt-out). Mirrors the same guard in the `all` PATCH
+    # loop above.
+    [[ "$tgt" == "api" ]] && sync_openapi_shared_token
     if [[ ${#_cp_pairs[@]} -gt 0 ]]; then
       ts "    + applying ${#_cp_pairs[@]} control-plane guard env var(s) for '$tgt'"
       az containerapp update \
