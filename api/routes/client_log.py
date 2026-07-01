@@ -47,6 +47,7 @@ def _one_line(value: str | None, *, limit: int) -> str:
 
 async def _client_log_caller(
     authorization: str | None = Header(default=None),
+    x_elb_api_token: str | None = Header(default=None, alias="X-ELB-API-Token"),
 ) -> CallerIdentity | None:
     """Resolve the caller, optionally tolerating anonymous reports.
 
@@ -57,13 +58,21 @@ async def _client_log_caller(
     contract) the route accepts a missing/invalid token and logs the report as
     `caller=anonymous`. A valid token, when present, is still honoured so
     authenticated reports keep their caller label.
+
+    ``x_elb_api_token`` is forwarded so an M2M automation caller can post a
+    client-log entry with the shared token (universal M2M path — see
+    :func:`api.auth.require_caller`).
     """
     if os.environ.get("ALLOW_ANONYMOUS_CLIENT_LOG", "").lower() != "true":
-        return await require_caller(authorization)
-    if not authorization:
+        return await require_caller(
+            authorization=authorization, x_elb_api_token=x_elb_api_token
+        )
+    if not authorization and not x_elb_api_token:
         return None
     try:
-        return await require_caller(authorization)
+        return await require_caller(
+            authorization=authorization, x_elb_api_token=x_elb_api_token
+        )
     except AuthError:
         return None
 

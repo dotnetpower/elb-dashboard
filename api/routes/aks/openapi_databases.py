@@ -15,9 +15,12 @@ Key entry points: ``aks_openapi_databases``, ``aks_openapi_database``.
 Risky contracts: Both routes are READ-ONLY, so they authenticate via
 ``require_caller_or_openapi_token`` — the standard MSAL bearer, PLUS (only when
 the opt-in ``ALLOW_OPENAPI_TOKEN_AUTH`` gate is on) the shared ``elb-openapi``
-``X-ELB-API-Token``. The shared token has no Azure RBAC gate, so it must never be
-extended to a cost-bearing / mutating route (ensure-running stays MSAL-only). A
-missing Storage account yields HTTP 400 (never 500); a transient Storage outage
+``X-ELB-API-Token``. As of 2026-07 that alias resolves to :func:`require_caller`
+itself — the M2M shared-token path is now universal across every route that
+gates on ``require_caller`` (see the ``M2M shared-token path`` section of
+``api/auth.py``), so this decorator kept for clarity here does not restrict
+these two routes any more tightly than the rest of the API surface. A missing
+Storage account yields HTTP 400 (never 500); a transient Storage outage
 yields a degraded payload (503 / network_blocked) classified by
 ``classify_storage_failure``; a genuinely absent database yields HTTP 404.
 Validation: ``uv run pytest -q api/tests/test_aks_openapi_databases.py``.

@@ -371,6 +371,7 @@ def _dev_bypass_identity() -> CallerIdentity:
 
 async def require_caller(
     authorization: str | None = Header(default=None),
+    x_elb_api_token: str | None = Header(default=None, alias="X-ELB-API-Token"),
 ) -> CallerIdentity:
     """FastAPI dependency that returns a validated CallerIdentity or raises 401.
 
@@ -382,6 +383,20 @@ async def require_caller(
     With ``AUTH_DEV_BYPASS=true`` (development only) returns a synthetic
     identity without inspecting the Authorization header.
 
+    **M2M shared-token path (universal).** When the opt-in gate
+    ``ALLOW_OPENAPI_TOKEN_AUTH=true`` is set AND a non-empty
+    ``X-ELB-API-Token`` header is present, validate it (constant-time) against
+    the authoritative ``elb-openapi`` admin token. Match => synthetic M2M
+    identity (:data:`OPENAPI_TOKEN_OID`); present-but-wrong => 401 without
+    falling back to bearer. With the gate OFF (default) the header is ignored
+    entirely and only the MSAL bearer path runs — existing behaviour preserved
+    exactly per charter §12a Rule 4. This M2M path now applies to **every**
+    route that gates on ``require_caller`` (deliberate, per operator policy: a
+    peer-VNet automation caller uses one shared credential across the whole
+    surface — read AND write). Cost / mutating actions therefore no longer
+    require an MSAL bearer when the gate is ON. Do NOT enable this gate on a
+    deployment with public / uncontrolled ingress.
+
     Async so the JWT validation (cache miss → synchronous OIDC discovery
     + JWKS fetch via ``httpx.Client``) runs on ``asyncio.to_thread``
     instead of blocking one of FastAPI's threadpool slots for every
@@ -391,6 +406,31 @@ async def require_caller(
     """
     if os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true":
         return _dev_bypass_identity()
+    # Defensive normalize: :func:`require_caller` is *also* invoked as a
+    # plain async function from a few in-repo callers (e.g. the client-log
+    # route's conditional auth wrapper, ``require_caller_or_download_token``)
+    # that only pass ``authorization``. In that path the ``x_elb_api_token``
+    # default is the raw ``Header(default=None)`` marker rather than a real
+    # ``str | None``. Coerce it to ``None`` so ``.strip()`` below does not
+    # blow up with ``AttributeError``. FastAPI's dependency injection path
+    # (Depends -> solve_dependencies) always resolves the marker before
+    # invoking us, so this branch is a no-op for the hot path.
+    if not isinstance(x_elb_api_token, (str, type(None))):
+        x_elb_api_token = None
+    # M2M path — opt-in shared token. Runs BEFORE the bearer check so an
+    # automation caller that only sends X-ELB-API-Token (no Authorization
+    # header) is accepted. A present-but-wrong token 401s without falling
+    # back to bearer — otherwise a stale token would surface as a confusing
+    # "missing bearer token" error and mask the real problem.
+    provided_m2m = (x_elb_api_token or "").strip()
+    if _openapi_token_auth_enabled() and provided_m2m:
+        expected = _resolve_expected_openapi_token()
+        if expected and hmac.compare_digest(provided_m2m, expected):
+            return _openapi_token_identity()
+        LOGGER.warning(
+            "X-ELB-API-Token auth rejected (gate on; token mismatch or unavailable)"
+        )
+        raise AuthError(status.HTTP_401_UNAUTHORIZED, "invalid X-ELB-API-Token")
     if not authorization or not authorization.lower().startswith("bearer "):
         raise AuthError(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
@@ -407,16 +447,19 @@ async def require_caller(
 
 
 # --------------------------------------------------------------------------- #
-# Opt-in shared-token auth for READ-ONLY OpenAPI control-plane routes.
+# Opt-in shared-token auth (M2M) — universal across every ``require_caller``
+# route.
 #
-# The cluster-independent database catalogue routes
-# (``GET /api/aks/openapi/databases[/{db_name}]``) mirror the in-cluster
-# ``elb-openapi`` ``/v1/databases*`` reads. A caller that already holds the
-# ``elb-openapi`` admin token (``X-ELB-API-Token``) can, when this opt-in gate
-# is ON, use the SAME token to authenticate the dashboard's read-only mirror —
-# one credential instead of two. This is DELIBERATELY limited to read-only
-# routes; cost-bearing / mutating actions (e.g. ensure-running) stay MSAL-only
-# because the shared token has no Azure RBAC gate.
+# When the opt-in gate ``ALLOW_OPENAPI_TOKEN_AUTH=true`` is set, ANY request
+# that carries the shared ``elb-openapi`` admin token in the ``X-ELB-API-Token``
+# header is authenticated as an M2M caller — read AND write, across every
+# route that gates on :func:`require_caller`. This is the peer-VNet automation
+# path: one credential instead of an interactive ``az login`` bearer flow. The
+# admin token has no Azure RBAC gate, so the deployment operator is
+# responsible for ensuring only trusted callers reach the ingress when this
+# gate is on (e.g. private ingress, IP allowlist, or VNet peering) — the
+# charter's public-ingress default is not compatible with a wide-open M2M
+# gate.
 #
 # Charter §12a Rule 4: ships default-OFF behind ``ALLOW_OPENAPI_TOKEN_AUTH``.
 # Unset / falsey => existing behaviour (MSAL bearer only) preserved exactly.
@@ -461,11 +504,13 @@ def _resolve_expected_openapi_token() -> str:
 
 
 def _openapi_token_identity() -> CallerIdentity:
-    """Synthetic identity for a request authenticated by the shared token.
+    """Synthetic identity for a request authenticated by the shared M2M token.
 
     Carries a clearly non-UUID object id and an empty raw token so any code that
-    mistakes it for an Azure AD caller fails loudly instead of leaking a token.
-    Only the read-only OpenAPI database routes accept this identity.
+    mistakes it for an Azure AD caller (e.g. tries to reuse ``raw_token`` for an
+    OBO flow) fails loudly instead of leaking a token. Every ``require_caller``
+    route accepts this identity when the ``ALLOW_OPENAPI_TOKEN_AUTH`` gate is
+    on — see the module docstring above.
     """
     return CallerIdentity(
         object_id=OPENAPI_TOKEN_OID,
@@ -481,38 +526,13 @@ def is_openapi_token_caller(caller: CallerIdentity) -> bool:
     return bool(caller) and caller.claims.get("openapi_token_auth") is True
 
 
-async def require_caller_or_openapi_token(
-    authorization: str | None = Header(default=None),
-    x_elb_api_token: str | None = Header(default=None, alias="X-ELB-API-Token"),
-) -> CallerIdentity:
-    """Like :func:`require_caller` but ALSO accepts the shared ``X-ELB-API-Token``.
-
-    Auth precedence:
-
-    1. With the opt-in gate ON (``ALLOW_OPENAPI_TOKEN_AUTH=true``) AND a
-       non-empty ``X-ELB-API-Token`` header: validate it (constant-time) against
-       the authoritative token. Match => synthetic token identity;
-       present-but-wrong (or token unknown server-side) => 401. We do NOT
-       silently fall back to MSAL on a present-but-wrong token — that would mask
-       a bad token as a confusing "missing bearer" error.
-    2. Otherwise: the standard MSAL bearer path (:func:`require_caller`). With
-       the gate OFF the ``X-ELB-API-Token`` header is ignored entirely, so the
-       existing MSAL behaviour is preserved exactly.
-
-    SECURITY: only mount this on READ-ONLY routes. The shared token has no Azure
-    RBAC gate, so it must never reach a cost-bearing or mutating action.
-    """
-    provided = (x_elb_api_token or "").strip()
-    if _openapi_token_auth_enabled() and provided:
-        expected = _resolve_expected_openapi_token()
-        # ``expected`` empty => token auth unavailable => reject (never bypass).
-        if expected and hmac.compare_digest(provided, expected):
-            return _openapi_token_identity()
-        LOGGER.warning(
-            "X-ELB-API-Token auth rejected (gate on; token mismatch or unavailable)"
-        )
-        raise AuthError(status.HTTP_401_UNAUTHORIZED, "invalid X-ELB-API-Token")
-    return await require_caller(authorization=authorization)
+# Backward-compat alias. Historically ``require_caller_or_openapi_token`` was a
+# separate dependency mounted only on the read-only OpenAPI catalogue routes.
+# The shared-token path is now universal (folded into :func:`require_caller`),
+# so this alias exists purely so external imports and pre-existing route
+# decorators keep working. New code should depend on ``require_caller``
+# directly.
+require_caller_or_openapi_token = require_caller
 
 
 # Clearly non-UUID sentinel for a request authenticated by a signed download
@@ -571,7 +591,13 @@ async def require_caller_or_download_token(request: Request) -> CallerIdentity:
         if job_id and file_id and verify_download_token(token, job_id, file_id):
             return _download_token_identity()
     authorization = request.headers.get("authorization")
-    return await require_caller(authorization=authorization)
+    # Also forward any M2M shared-token header so a download route that
+    # missed its ``?token=`` still gets M2M-authenticated when the gate is
+    # on. Extracted from ``request.headers`` (case-insensitive) rather than
+    # relying on the direct-call default (which is a FastAPI ``Header``
+    # marker, not ``None``).
+    m2m = request.headers.get("x-elb-api-token")
+    return await require_caller(authorization=authorization, x_elb_api_token=m2m)
 
 
 def reset_caches() -> None:
