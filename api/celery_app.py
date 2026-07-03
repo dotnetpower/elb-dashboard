@@ -182,6 +182,19 @@ celery_app.conf.update(
             ),
             "options": {"queue": "reconcile"},
         },
+        # Self-heal DB volume/shard drift: prune ghost volumes left when NCBI
+        # shrinks a DB + regenerate the shard layout for the true volume set, so
+        # a DB can never rot into the 3-way generation mismatch that fails BLAST
+        # with "vol does not match lmdb vol". The task is a no-op unless
+        # DB_CONSISTENCY_RECONCILE_ENABLED is set (it DELETES Storage blobs), so
+        # scheduling it while dormant is harmless (charter §12a Rule 4).
+        "db-consistency-reconcile": {
+            "task": "api.tasks.storage.reconcile_db_consistency",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_DB_CONSISTENCY_SECONDS", "1800")
+            ),
+            "options": {"queue": "reconcile"},
+        },
         # Terminalise warmup / prepare_db_* / shard / oracle jobstate rows stuck
         # active after a worker crash (or a legacy synchronous audit row). The
         # orphan reconciler above only fixes {db}-metadata.json; this one fixes

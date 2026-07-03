@@ -81,7 +81,6 @@ def blast_database_shard(
     from api.services import get_credential
     from api.services.db.sharding import (
         DEFAULT_CONTAINER,
-        ensure_shard_sets,
     )
     from api.services.sanitise import sanitise
     from api.services.storage.data import _blob_service
@@ -220,7 +219,19 @@ def blast_database_shard(
 
         try:
             local_cred = _get_cred()
-            summary = ensure_shard_sets(local_cred, account_name, db_name)
+            # Full consistency reconcile: prune ghost volumes left from a
+            # previous (larger) NCBI generation, then regenerate the shard alias
+            # layout for the TRUE volume set. This makes the "shard" action also
+            # the manual repair for a drifted DB (the 3-way generation mismatch
+            # that fails BLAST with "vol does not match lmdb vol"). A healthy DB
+            # has no ghosts, so prune is a no-op and only the shard layout is
+            # (re)built — identical to the old ensure_shard_sets behaviour.
+            from api.services.db.consistency import reconcile_db_consistency
+
+            recon = reconcile_db_consistency(
+                local_cred, account_name, db_name, force_reshard=True
+            )
+            summary = recon.get("shard") or {}
         except Exception as exc:
             LOGGER.warning(
                 "blast_database_shard daemon failed db=%s: %s",

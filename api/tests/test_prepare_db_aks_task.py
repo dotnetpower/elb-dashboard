@@ -139,6 +139,18 @@ def patch_imports(monkeypatch: pytest.MonkeyPatch) -> None:
         upload_shard_set=lambda *_a, **_kw: None,
     )
     monkeypatch.setitem(_sys.modules, "api.services.db.sharding", fake_sharding)
+    # The promote path now runs the consistency reconcile (prune ghosts + regen
+    # shard layout) instead of the old upload_shard_set loop; stub it to report a
+    # clean heal so the metadata still promotes sharded=True.
+    fake_consistency = _types.SimpleNamespace(
+        reconcile_db_consistency=lambda *_a, **_kw: {
+            "status": "healed",
+            "resharded": True,
+            "shard": {"shard_sets": [1], "total_volumes": 1, "errors": []},
+            "prune": {"status": "clean"},
+        },
+    )
+    monkeypatch.setitem(_sys.modules, "api.services.db.consistency", fake_consistency)
     fake_catalogue = _types.SimpleNamespace(
         database_update_signature=lambda _db: {
             "signature_etag": "sig-aks-1",

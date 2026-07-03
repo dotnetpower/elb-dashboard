@@ -761,36 +761,30 @@ def _promote_success(
     """Run auto-shard + promote `source_version`, byte-shape identical to server-side."""
     # Deferred import keeps the import graph free of cycles (sharding
     # imports storage data helpers that pull in the route).
-    from api.services.db.sharding import (
-        PRESET_SHARD_SETS,
-        derive_volumes_from_keys,
-        upload_shard_set,
-    )
-
+    # Prune ghost volumes left from a previous (larger) NCBI generation and
+    # regenerate the shard alias layout for the TRUE volume set — atomically,
+    # right after the download. Prevents the 3-way generation mismatch
+    # (metadata / volume files / shard layout drifting apart) that made every
+    # BLAST job on a shrunk DB fail with "vol does not match lmdb vol".
+    # See api/services/db/consistency.py.
     shard_sets_created: list[int] = []
     try:
-        volumes = derive_volumes_from_keys(db_name, file_keys)
-        for n in PRESET_SHARD_SETS:
-            if n > len(volumes):
-                continue
-            try:
-                upload_shard_set(credential, storage_account, db_name, n, volumes)
-                shard_sets_created.append(n)
-            except Exception as exc:
-                LOGGER.warning(
-                    "AKS prepare-db shard set N=%d failed for %s: %s",
-                    n,
-                    db_name,
-                    type(exc).__name__,
-                )
-    except LookupError:
+        from api.services.db.consistency import reconcile_db_consistency
+
+        recon = reconcile_db_consistency(
+            credential, storage_account, db_name, force_reshard=True
+        )
+        if recon.get("resharded"):
+            shard_sets_created = list(recon.get("shard", {}).get("shard_sets") or [])
         LOGGER.info(
-            "AKS prepare-db auto-shard skipped for %s: no volumes detected",
+            "AKS prepare-db consistency for %s: status=%s prune=%s",
             db_name,
+            recon.get("status"),
+            (recon.get("prune") or {}).get("status"),
         )
     except Exception as exc:
         LOGGER.warning(
-            "AKS prepare-db auto-shard failed for %s: %s",
+            "AKS prepare-db consistency reconcile failed for %s: %s",
             db_name,
             type(exc).__name__,
         )
