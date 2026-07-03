@@ -622,6 +622,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Date-tiered results layout — must match the api sidecar so the
             // worker drain resolves the same results prefix. Default OFF.
             { name: 'STORAGE_DATE_LAYOUT_ENABLED', value: effectiveStorageDateLayout }
+            // DB volume/shard self-heal reconciler (Tier 2). When ON the beat
+            // task api.tasks.storage.reconcile_db_consistency runs on this
+            // worker to prune ghost volumes + rebuild stale shard layouts that
+            // drift when NCBI shrinks a DB; must match the beat sidecar.
+            { name: 'DB_CONSISTENCY_RECONCILE_ENABLED', value: controlPlaneEnv.worker.DB_CONSISTENCY_RECONCILE_ENABLED }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
@@ -683,6 +688,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Date-tiered results layout — match api/worker so the beat
             // reconcilers resolve the same results prefix. Default OFF.
             { name: 'STORAGE_DATE_LAYOUT_ENABLED', value: effectiveStorageDateLayout }
+            // DB volume/shard self-heal reconciler (Tier 2). Beat schedules
+            // api.tasks.storage.reconcile_db_consistency (interval
+            // CELERY_BEAT_DB_CONSISTENCY_SECONDS); the flag must match the
+            // worker so the scheduled tick and its executor gate identically.
+            { name: 'DB_CONSISTENCY_RECONCILE_ENABLED', value: controlPlaneEnv.beat.DB_CONSISTENCY_RECONCILE_ENABLED }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
