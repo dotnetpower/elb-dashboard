@@ -601,6 +601,19 @@ if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
     fi
 fi
 
+# Integrity gate (mirrors api/services/warmup/scripts.py): the file-presence and
+# taxonomy checks above miss a cache whose volumes exist but disagree with the
+# alias/LMDB metadata, which fails the search with "Input db vol does not match
+# lmdb vol". blastdbcmd -info reads that vol<->lmdb<->alias consistency; a
+# failing probe means the staged DB is corrupt, so invalidate the marker and
+# re-download rather than skip onto a broken cache.
+if [ -f .download-complete ]; then
+    if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
+        echo "CACHE_CORRUPT blastdbcmd integrity probe failed - invalidating"
+        rm -f .download-complete
+    fi
+fi
+
 if [ -f .download-complete ]; then
     echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
     write_volpaths

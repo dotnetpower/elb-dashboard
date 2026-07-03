@@ -51,6 +51,20 @@ if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
         rm -f .download-complete
     fi
 fi
+# Integrity gate: the file-presence checks above catch a MISSING volume, but a
+# cache whose volume files exist yet disagree with the alias/LMDB metadata
+# (a partially-overwritten or truncated prior download) passes them and then
+# fails the search with "Input db vol does not match lmdb vol". blastdbcmd -info
+# reads exactly that vol<->lmdb<->alias consistency, so a failing probe means
+# the staged DB is corrupt: invalidate the marker to force a clean re-download
+# instead of skipping onto a broken cache. A healthy cache probes in well under
+# a second (local metadata only).
+if [ -f .download-complete ]; then
+    if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
+        log "CACHE_CORRUPT blastdbcmd integrity probe failed - invalidating"
+        rm -f .download-complete
+    fi
+fi
 if [ ! -f .download-complete ]; then
   /scripts/init-db-shard-aks.sh
   partials=$(find . -maxdepth 1 -name '.azDownload-*' | wc -l)
@@ -104,6 +118,17 @@ if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
         rm -f .download-complete
     elif [ "$(cat .download-source-version)" != "$EXPECTED_SOURCE_VERSION" ]; then
         echo "CACHE_STALE source-version mismatch"
+        rm -f .download-complete
+    fi
+fi
+# Integrity gate (see the warmup entrypoint): file-presence checks miss a cache
+# whose volumes exist but disagree with the alias/LMDB metadata, which fails the
+# search with "Input db vol does not match lmdb vol". blastdbcmd -info reads that
+# vol<->lmdb<->alias consistency; a failing probe means the staged DB is corrupt,
+# so invalidate the marker and re-download rather than skip onto a broken cache.
+if [ -f .download-complete ]; then
+    if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
+        echo "CACHE_CORRUPT blastdbcmd integrity probe failed - invalidating"
         rm -f .download-complete
     fi
 fi

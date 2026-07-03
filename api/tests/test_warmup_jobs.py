@@ -74,6 +74,11 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         assert "CACHE_STALE missing source-version marker" in container["args"][0]
         assert "TAXDB_SKIP taxdb files not present in DB prefix" in container["args"][0]
         assert "valid_nsq_count=" in container["args"][0]
+        # A cache whose volumes exist but disagree with the alias/LMDB metadata
+        # ("Input db vol does not match lmdb vol") must be re-downloaded, not
+        # skipped: the blastdbcmd integrity probe gates the skip decision.
+        assert "CACHE_CORRUPT blastdbcmd integrity probe failed" in container["args"][0]
+        assert 'blastdbcmd -db "$ELB_DB" -info' in container["args"][0]
         assert "printf '%s' ok > .download-complete" in container["args"][0]
         # The warmup pod intentionally does NOT call blast-vmtouch-aks.sh any
         # more — `azcopy` already populates the OS page cache as a side effect

@@ -54,6 +54,10 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     assert "WARNING: DB metadata source-version lookup failed" in text
     assert "write_volpaths" in text
     assert "printf '%s' ok > .download-complete" in text
+    # The blastdbcmd integrity probe gates the skip so a vol/lmdb-mismatch cache
+    # is re-downloaded instead of skipped onto a broken DB.
+    assert "CACHE_CORRUPT blastdbcmd integrity probe failed" in skip_prefix
+    assert 'blastdbcmd -db "$ELB_DB" -info' in skip_prefix
     assert "printf '%s' \"$EXPECTED_SOURCE_VERSION\" > .download-source-version" in text
     assert "if [ -s .download-complete ]" not in text
     assert "touch .download-complete" not in text
