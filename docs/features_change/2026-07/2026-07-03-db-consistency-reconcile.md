@@ -80,10 +80,13 @@ ghost):
 
 ## Validation
 
-* `uv run pytest -q api/tests/test_db_consistency.py` — 15 new tests: authority
-  read, ghost detection, prune guards (no-authority skip, 50% abort, ghost-only
-  deletion), reconcile status machine, reconcile-all iteration.
-* `uv run pytest -q api/tests` — full suite **4746 passed, 3 skipped** (no
+* `uv run pytest -q api/tests/test_db_consistency.py` — 21 tests: authority
+  read (valid / missing / unparseable / non-positive), ghost detection, prune
+  guards (no-authority skip, 50% abort, ghost-only deletion), `delete_shard_layouts`,
+  `shard_layout_needs_rebuild` (in-range / out-of-range / no-layout), reconcile
+  status machine, reconcile-all iteration + live-prepare-db lock skip, and the
+  default-OFF beat gate (disabled by default, runs only when opted in).
+* `uv run pytest -q api/tests` — full suite **4754 passed, 3 skipped** (no
   regression; AKS task test fixture updated for the new reconcile flow).
 * `uv run ruff check` — clean.
 * Live: the same heal (run manually this session) recovered the drifted customer
