@@ -750,6 +750,73 @@ def test_error_message_for_event_sanitises_and_bounds() -> None:
     assert len(sb_tasks._error_message_for_event(long_job)) == sb_tasks._ERROR_MESSAGE_MAX_LEN
 
 
+def test_enrich_failure_message_recovers_cluster_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A coarse sibling error is replaced by the authoritative cluster-side
+    blastn detail (metadata/FAILURE.txt + BLAST_RUNTIME exit code)."""
+    from api.services.blast import db_metadata, runtime_failure
+
+    monkeypatch.setattr(db_metadata, "extract_trusted_storage_account", lambda db: "stelb")
+    monkeypatch.setattr(
+        runtime_failure,
+        "read_blast_runtime_failure",
+        lambda account, job_id: (
+            "BLAST search exited with code 2: Input db vol does not match lmdb vol"
+        ),
+    )
+    job = {
+        "status": "failed",
+        "db": "https://stelb.blob.core.windows.net/blast-db/core_nt",
+        "error": {"code": "failed", "message": "one or more BLAST jobs failed"},
+    }
+    detail = sb_tasks._enrich_failure_message_for_event(
+        job, "op-fail", "one or more BLAST jobs failed"
+    )
+    assert detail is not None
+    assert "Input db vol does not match lmdb vol" in detail
+
+
+def test_enrich_failure_message_keeps_specific_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely specific sibling error is left untouched and never triggers a
+    Storage read (``_enrich_external_failure_detail`` returns None)."""
+    from api.services.blast import db_metadata, runtime_failure
+
+    monkeypatch.setattr(db_metadata, "extract_trusted_storage_account", lambda db: "stelb")
+    called = {"n": 0}
+
+    def _should_not_run(account, job_id):
+        called["n"] += 1
+        return "cluster detail"
+
+    monkeypatch.setattr(runtime_failure, "read_blast_runtime_failure", _should_not_run)
+    detail = sb_tasks._enrich_failure_message_for_event(
+        {"db": "https://stelb.blob.core.windows.net/blast-db/x"},
+        "op-x",
+        "blastn segfaulted at query 42",
+    )
+    assert detail is None
+    assert called["n"] == 0
+
+
+def test_enrich_failure_message_untrusted_account_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An untrusted/unresolvable db account skips enrichment (no MI Storage token
+    is ever sent to a foreign account) and leaves the coarse message unchanged."""
+    from api.services.blast import db_metadata
+
+    monkeypatch.setattr(db_metadata, "extract_trusted_storage_account", lambda db: "")
+    detail = sb_tasks._enrich_failure_message_for_event(
+        {"db": "https://evil.blob.core.windows.net/x"},
+        "op-evil",
+        "one or more BLAST jobs failed",
+    )
+    assert detail is None
+
+
 def test_drain_publishes_failure_event_on_permanent_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -988,6 +1055,52 @@ def test_publish_transitions_succeeded_attaches_download_urls(
     assert files[0]["download_url"].endswith(
         "/api/v1/elastic-blast/jobs/op-dl/files/merged_results.out.gz"
     )
+
+
+def test_publish_transitions_failed_enriches_coarse_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed transition whose sibling error is coarse (``one or more BLAST
+    jobs failed``) carries the recovered cluster-side blastn detail on the
+    completion event, so a topic subscriber sees WHY the job failed."""
+    _enable(monkeypatch)
+    from api.services.blast import db_metadata, runtime_failure
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-ef", openapi_job_id="op-ef", last_status="running"
+        )
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda jid, **k: {
+            "status": "failed",
+            "db": "https://stelb.blob.core.windows.net/blast-db/core_nt",
+            "error": {"code": "failed", "message": "one or more BLAST jobs failed"},
+        },
+    )
+    monkeypatch.setattr(db_metadata, "extract_trusted_storage_account", lambda db: "stelb")
+    monkeypatch.setattr(
+        runtime_failure,
+        "read_blast_runtime_failure",
+        lambda account, job_id: (
+            "BLAST search exited with code 2: Input db vol does not match lmdb vol"
+        ),
+    )
+
+    out = sb_tasks.publish_transitions()
+    assert out["finished"] == 1
+    failed = [e for e in events if e.get("status") == "failed"]
+    assert failed
+    ev = failed[0]
+    # error_code stays the machine-readable reason; error_message now carries WHY.
+    assert ev["error_code"] == "failed"
+    assert "Input db vol does not match lmdb vol" in ev["error_message"]
+    assert ev["error_message"] != "one or more BLAST jobs failed"
 
 
 def test_drain_propagates_request_id_to_bridge_and_queued_event(

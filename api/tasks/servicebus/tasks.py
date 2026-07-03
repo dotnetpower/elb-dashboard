@@ -484,6 +484,56 @@ def _error_message_for_event(job: dict[str, Any]) -> str:
     return str(sanitise(raw))[:_ERROR_MESSAGE_MAX_LEN]
 
 
+def _enrich_failure_message_for_event(
+    job: dict[str, Any], openapi_job_id: str, current_error: str | None
+) -> str | None:
+    """Recover the authoritative cluster-side blastn failure detail for an event.
+
+    The sibling OpenAPI service stamps only a coarse/generic ``error`` on a
+    failed job (``one or more BLAST jobs failed``, a bare Kubernetes
+    ``CrashLoopBackOff``, or nothing at all) — that tells a completion-topic
+    subscriber THAT the job failed, not WHY. The real diagnostics live in the
+    workload results container (``metadata/FAILURE.txt`` +
+    ``logs/BLAST_RUNTIME-NNN.out``); the dashboard detail view already recovers
+    them via ``_enrich_external_failure_detail``. Reuse that same helper here so
+    the failure event carries an actionable cause instead of a placeholder.
+
+    The workload Storage account is resolved from the sibling job's ``db`` blob
+    URL through ``extract_trusted_storage_account`` — the same trust gate the
+    dashboard uses, so an attacker-influenced ``db`` URL can never redirect the
+    shared MI Storage token to a foreign account. Best-effort and side-effect
+    free: returns the sanitised, length-bounded detail, or ``None`` when the
+    account cannot be trusted-resolved or no better detail is readable (the
+    caller then keeps the coarse message). Only fires for a genuinely
+    coarse/generic ``current_error`` — ``_enrich_external_failure_detail``
+    leaves a specific sibling error untouched.
+    """
+    if not openapi_job_id:
+        return None
+    try:
+        from api.services.blast.db_metadata import extract_trusted_storage_account
+        from api.services.blast.external_job_projection import (
+            _enrich_external_failure_detail,
+        )
+
+        storage_account = extract_trusted_storage_account(str(job.get("db") or ""))
+        if not storage_account:
+            return None
+        return _enrich_external_failure_detail(
+            status="failed",
+            current_error=current_error,
+            storage_account=storage_account,
+            results_job_id=openapi_job_id,
+        )
+    except Exception:
+        LOGGER.debug(
+            "completion failure-detail enrichment skipped job=%s",
+            openapi_job_id,
+            exc_info=True,
+        )
+        return None
+
+
 def _record_transition_trace(openapi_job_id: str, status: str) -> None:
     """Record the status stage + ``completion_published`` on a transition.
 
@@ -1395,6 +1445,17 @@ def _publish_one_bridge(
         err = job.get("error") if isinstance(job.get("error"), dict) else {}
         error_code = str((err or {}).get("code") or "failed")
         error_message = _error_message_for_event(job) or None
+        # A coarse/generic sibling error (``one or more BLAST jobs failed``, a
+        # bare K8s CrashLoopBackOff, or none) names THAT the job failed, not
+        # WHY. Recover the authoritative cluster-side blastn detail
+        # (metadata/FAILURE.txt + BLAST_RUNTIME exit code) — the same enrichment
+        # the dashboard detail view applies — so a completion-topic subscriber
+        # sees an actionable cause. Best-effort + sanitised (charter §12).
+        enriched = _enrich_failure_message_for_event(
+            job, rec.openapi_job_id, error_message
+        )
+        if enriched:
+            error_message = enriched
     # On a succeeded transition, attach the result-file download links so a
     # topic subscriber can pull the results directly (via the dashboard's
     # authenticated streaming gateway — never a SAS URL). Best-effort: if the
