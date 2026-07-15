@@ -31,6 +31,14 @@ from api.tasks.storage import reconcile_auto_warmup, warmup_database
 from api.tests._fakes import make_send_task_recorder
 
 
+def test_auto_warmup_reconcile_time_limit_matches_overlap_lock() -> None:
+    from api.tasks.storage import reconcile as reconcile_module
+
+    assert reconcile_auto_warmup.soft_time_limit == 100
+    assert reconcile_auto_warmup.time_limit == 110
+    assert reconcile_module._RECONCILE_SOFT_TIME_LIMIT < reconcile_module._RECONCILE_HARD_TIME_LIMIT
+
+
 @pytest.fixture(autouse=True)
 def _execution_admission_stubs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     from api.services.state_repo import reset_state_repo_cache

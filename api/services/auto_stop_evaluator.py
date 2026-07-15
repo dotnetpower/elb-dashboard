@@ -70,32 +70,24 @@ def _row_type_blocks_autostop(row_type: str) -> bool:
     return row_type.startswith("prepare_db")
 
 
-_ACTIVE_ROW_STALE_SECONDS = int(
-    os.environ.get("AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", "7200")
+# A worker-lost row must eventually stop pinning the cluster, but the timeout
+# must outlive that task family's legitimate execution envelope. Warmup and
+# ordinary work use 2 h; prepare-db/shard/oracle use 6 h because AKS prepare-db
+# has a per-task hard limit of roughly 4 h 45 m. Rows with no parseable
+# timestamp still fail safe and count as active.
+_ACTIVE_ROW_STALE_SECONDS = int(os.environ.get("AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", "7200"))
+_LONG_DBOPS_ACTIVE_ROW_STALE_SECONDS = int(
+    os.environ.get("STALE_DBOPS_PREPARE_DB_SECONDS", "21600")
 )
-"""Max age (seconds) for a jobstate row in an active status to still count
-as "cluster in use".
 
-A crashed / ``worker_lost`` task can leave its jobstate row pinned in
-``running`` / ``queued`` forever (never writing a terminal status). Without
-this cap a single zombie row keeps the cluster alive indefinitely — the
-auto-stop never fires (cost leak) AND the SPA countdown / Extend controls
-disappear because the evaluator reports ``active_jobs:N`` with no
-``next_stop_at``.
 
-Default 2 h. The hard floor is Celery's ``CELERY_TASK_TIME_LIMIT`` (default
-3600 s): no task attempt can hold a row ``running`` longer than that before
-the worker is SIGKILLed and the row freezes, so a row untouched for 2 h is
-provably from a dead task (2x the hard limit, leaving margin for retry
-backoff up to 300 s). The ``warmup`` orchestrator declares
-``warmup_timeout_seconds=4h`` but is still bound by the 1 h Celery limit, and
-its node-warm K8s Jobs are short (~10-15 min), so 2 h never ages out a live
-warmup. **If an operator raises ``CELERY_TASK_TIME_LIMIT`` to allow genuinely
-long tasks, raise this above that limit too.** Genuinely-running BLAST is
-covered separately by the live K8s ``app=blast`` probe
-(`auto_stop_live.probe_live_blast_activity`); ``warmup`` / ``prepare_db`` are
-NOT, so this cap is their only over-stay guard. Rows with no parseable
-timestamp fail safe (still counted as active)."""
+def _active_row_stale_seconds(row_type: str) -> int:
+    """Return the execution-envelope-aware zombie threshold for a row type."""
+
+    if row_type in {"prepare_db", "prepare_db_aks", "shard", "oracle"}:
+        return _LONG_DBOPS_ACTIVE_ROW_STALE_SECONDS
+    return _ACTIVE_ROW_STALE_SECONDS
+
 
 Verdict = Literal["stop", "keep", "warn"]
 
@@ -199,11 +191,6 @@ def _scan_cluster_jobs(
         ok: False when the Table query raised — caller must fail safe.
     """
     current = now or datetime.now(UTC)
-    cap = (
-        stale_after_seconds
-        if stale_after_seconds is not None
-        else _ACTIVE_ROW_STALE_SECONDS
-    )
     try:
         rows = list(
             repo.list_for_scope(
@@ -239,6 +226,11 @@ def _scan_cluster_jobs(
             # fresh active row counts. A row untouched for longer than the
             # cap is a zombie (crashed worker) and is dropped so it cannot
             # keep the cluster alive forever.
+            cap = (
+                stale_after_seconds
+                if stale_after_seconds is not None
+                else _active_row_stale_seconds(row_type)
+            )
             if row_latest is None or (current - row_latest).total_seconds() <= cap:
                 active += 1
     return active, latest, True
@@ -302,8 +294,8 @@ def evaluate_cluster(
             permanent livelock — the cluster never stops). The beat
             ``decide`` pass and the SPA countdown keep cooldown enforced
             (default False) so a real recent stop still blocks a re-stop.
-        live_active_jobs: Live ElasticBLAST ``app=blast`` job count observed
-            directly on the Kubernetes cluster (via
+        live_active_jobs: Live BLAST / DB warmup / prepare-db workload count
+            observed directly on the Kubernetes cluster (via
             `auto_stop_live.probe_live_blast_activity`), or ``None`` when the
             K8s probe could not run. This is the key fix for
             OpenAPI-submitted runs that never write a dashboard jobstate
@@ -313,8 +305,8 @@ def evaluate_cluster(
             ignored — the probe only ever ADDS protection, it can never
             force a stop, so an unreachable K8s API can never strand a
             cluster running forever.
-        live_latest_activity: Most recent live ``app=blast`` start/finish
-            timestamp, or ``None``. Folded into the idle-clock anchor exactly
+        live_latest_activity: Most recent live workload observation timestamp,
+            or ``None``. Folded into the idle-clock anchor exactly
             like ``last_started_at`` so a just-finished live burst still gets
             the full ``idle_minutes`` grace before a stop. Never advances the
             deadline beyond a real observed activity time, so it cannot push
@@ -414,7 +406,7 @@ def evaluate_cluster(
             reason="state_repo_unreachable",
             cluster_power_state=power_state,
         )
-    # Fold the live K8s ``app=blast`` count into the Table-derived count.
+    # Fold the live K8s workload count into the Table-derived count.
     # ``live_active_jobs`` is ``None`` when the probe could not run (K8s
     # unreachable) — in that case we silently degrade to the state_repo
     # signal alone. A negative value is treated as 0 defensively.
@@ -558,6 +550,7 @@ __all__ = [
     "IdleDecision",
     "StateRepoProtocol",
     "Verdict",
+    "_active_row_stale_seconds",
     "_row_type_blocks_autostop",
     "evaluate_cluster",
 ]

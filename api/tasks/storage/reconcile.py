@@ -21,8 +21,16 @@ from celery import shared_task
 
 import api.tasks.storage as _facade
 
+_RECONCILE_SOFT_TIME_LIMIT = 100
+_RECONCILE_HARD_TIME_LIMIT = 110
 
-@shared_task(name="api.tasks.storage.reconcile_auto_warmup", bind=True)
+
+@shared_task(
+    name="api.tasks.storage.reconcile_auto_warmup",
+    bind=True,
+    soft_time_limit=_RECONCILE_SOFT_TIME_LIMIT,
+    time_limit=_RECONCILE_HARD_TIME_LIMIT,
+)
 def reconcile_auto_warmup(
     self: Any,
     *,

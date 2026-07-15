@@ -201,6 +201,28 @@ def test_prepare_db_aks_row_blocks_stop_via_prefix_match() -> None:
     assert decision.active_job_count == 1
 
 
+def test_prepare_db_aks_uses_long_execution_stale_window() -> None:
+    """A legitimate multi-hour AKS prepare must not age out at the 2h warmup cap."""
+
+    three_hours_old = (_NOW - timedelta(hours=3)).isoformat(timespec="seconds")
+    jobs = [_FakeJob(type="prepare_db_aks", status="running", updated_at=three_hours_old)]
+    decision = evaluate_cluster(_pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running")
+    assert decision.reason == "active_jobs:1"
+
+
+def test_prepare_db_aks_zombie_ages_out_after_long_execution_window() -> None:
+    seven_hours_old = (_NOW - timedelta(hours=7)).isoformat(timespec="seconds")
+    jobs = [_FakeJob(type="prepare_db_aks", status="running", updated_at=seven_hours_old)]
+    decision = evaluate_cluster(
+        _pref(idle_minutes=60),
+        repo=_FakeRepo(jobs),
+        now=_NOW,
+        power_state="Running",
+    )
+    assert decision.verdict == "stop"
+    assert decision.active_job_count == 0
+
+
 def test_row_type_blocks_autostop_prefix_helper() -> None:
     """Unit-level guard on the prefix matcher: exact members and the
     ``prepare_db`` family count; an unrelated type does not."""

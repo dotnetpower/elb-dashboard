@@ -70,3 +70,13 @@ def test_servicebus_periodic_ticks_expire_before_stale_backlog_replays() -> None
         options = schedule[entry_name]["options"]
         assert options["queue"] == "reconcile"
         assert 0 < float(options["expires"]) <= 30
+
+
+def test_cost_and_warmup_ticks_expire_before_next_schedule() -> None:
+    schedule = celery_app.conf.beat_schedule
+
+    for entry_name in ("auto-warmup-reconcile", "aks-idle-autostop-evaluate"):
+        entry = schedule[entry_name]
+        options = entry["options"]
+        assert options["queue"] == "reconcile"
+        assert 0 < float(options["expires"]) < float(entry["schedule"])

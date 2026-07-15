@@ -1,23 +1,19 @@
-"""Live Kubernetes BLAST activity probe for AKS auto-stop.
+"""Live Kubernetes workload activity probe for AKS auto-stop.
 
-Responsibility: Best-effort, read-only probe that reports whether a Running
-    AKS cluster currently has live ElasticBLAST (``app=blast``) activity —
-    including OpenAPI-submitted runs that never touch the dashboard's
-    jobstate Table — so the auto-stop evaluator can keep a busy cluster
-    alive and reset its idle clock.
-Edit boundaries: Read-only K8s probe via `k8s_check_blast_status`. No ARM
-    stop calls, no Celery, no state writes. Returns ``None`` on ANY failure
+Responsibility: Best-effort, read-only probe that reports whether a Running AKS
+    cluster has nonterminal BLAST, DB warmup, or prepare-db Kubernetes work.
+Edit boundaries: Direct, filtered Kubernetes list calls only. No ARM stop calls,
+    no Celery, no state writes. Returns ``None`` on ANY failure
     so callers degrade to the state_repo-only decision — a permanently
     unreachable cluster must still be stoppable. This is an *additive*
     protection signal only, never a hard "keep forever".
-Key entry points: `probe_live_blast_activity`.
+Key entry points: `probe_live_cluster_activity`, `probe_live_blast_activity`.
 Risky contracts: The ``(live_active_jobs, live_latest_activity)`` tuple is
     injected into `auto_stop_evaluator.evaluate_cluster` as
     ``live_active_jobs`` / ``live_latest_activity``. Over-reporting activity
-    would strand a cluster running forever, so only genuinely in-flight
-    runs (K8s ``status.active`` > 0, or a scheduled-but-unstarted job in the
-    ``creating``/``running`` phase) count as active; ``completed``/``failed``
-    runs whose pods merely linger do NOT.
+    would strand a cluster running forever, so only Jobs without a terminal
+    Complete/Failed condition (or nonterminal Pods in a narrow race) count;
+    completed/failed objects that linger do NOT.
 Validation: `uv run pytest -q api/tests/test_auto_stop_live.py`.
 """
 
@@ -25,10 +21,17 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from api.services.auto_stop import AutoStopPreference
 
 LOGGER = logging.getLogger(__name__)
+
+_WORKLOAD_JOB_SELECTORS = (
+    "app=blast",
+    "app=elb-db-warmup",
+    "app=elb-prepare-db",
+)
 
 
 def _parse_k8s_ts(value: object) -> datetime | None:
@@ -46,12 +49,141 @@ def _parse_k8s_ts(value: object) -> datetime | None:
         return None
 
 
-def probe_live_blast_activity(
+def _job_is_terminal(job: dict[str, Any]) -> bool:
+    status = job.get("status", {}) or {}
+    try:
+        if int(status.get("succeeded") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        return False
+    if status.get("completionTime"):
+        return True
+    return any(
+        isinstance(condition, dict)
+        and condition.get("type") in {"Complete", "Failed"}
+        and str(condition.get("status") or "").lower() == "true"
+        for condition in status.get("conditions", []) or []
+    )
+
+
+def _latest_object_timestamp(items: list[dict[str, Any]]) -> datetime | None:
+    latest: datetime | None = None
+    for item in items:
+        metadata = item.get("metadata", {}) or {}
+        status = item.get("status", {}) or {}
+        values = [
+            metadata.get("creationTimestamp"),
+            status.get("startTime"),
+            status.get("completionTime"),
+        ]
+        values.extend(
+            condition.get("lastTransitionTime")
+            for condition in status.get("conditions", []) or []
+            if isinstance(condition, dict)
+        )
+        for value in values:
+            parsed = _parse_k8s_ts(value)
+            if parsed is not None and (latest is None or parsed > latest):
+                latest = parsed
+    return latest
+
+
+def _probe_cluster_workload_status(
+    pref: AutoStopPreference,
+    namespace: str,
+) -> dict[str, Any] | None:
+    """Fetch only nonterminal workload objects from Kubernetes.
+
+    The cluster can retain tens of thousands of completed ``app=blast`` Jobs.
+    Listing all of them made one auto-stop status probe download nearly 1 GB
+    and take 36-88 seconds. Kubernetes supports ``status.successful=0`` for
+    Jobs and phase inequality selectors for Pods, reducing the live read to the
+    small set that can still be running or failed-without-success.
+    """
+
+    from api.services import get_credential
+    from api.services.k8s.fanout import _k8s_fanout_pool
+    from api.services.k8s.monitoring import _get_k8s_session, _namespace_or_default
+
+    session, server = _get_k8s_session(
+        get_credential(),
+        pref.subscription_id,
+        pref.resource_group,
+        pref.cluster_name,
+    )
+    try:
+        target_ns = _namespace_or_default(session, server, namespace)
+
+        def _get(path: str, params: dict[str, str]) -> Any:
+            return session.get(f"{server}{path}", params=params, timeout=10)
+
+        pool = _k8s_fanout_pool()
+        jobs_path = f"/apis/batch/v1/namespaces/{target_ns}/jobs"
+        job_futures = [
+            pool.submit(
+                _get,
+                jobs_path,
+                {
+                    "labelSelector": selector,
+                    "fieldSelector": "status.successful=0",
+                },
+            )
+            for selector in _WORKLOAD_JOB_SELECTORS
+        ]
+        pods_path = f"/api/v1/namespaces/{target_ns}/pods"
+        pod_futures = [
+            pool.submit(
+                _get,
+                pods_path,
+                {
+                    "labelSelector": selector,
+                    "fieldSelector": "status.phase!=Succeeded,status.phase!=Failed",
+                },
+            )
+            for selector in _WORKLOAD_JOB_SELECTORS
+        ]
+
+        jobs: list[dict[str, Any]] = []
+        for future in job_futures:
+            response = future.result()
+            if response.status_code != 200:
+                return None
+            jobs.extend(response.json().get("items", []))
+        live_pods: list[dict[str, Any]] = []
+        for future in pod_futures:
+            pod_response = future.result()
+            if pod_response.status_code != 200:
+                return None
+            live_pods.extend(pod_response.json().get("items", []))
+
+        active_jobs = [job for job in jobs if not _job_is_terminal(job)]
+        active = len(active_jobs)
+        if live_pods and active == 0:
+            active = 1
+
+        latest = _latest_object_timestamp(jobs + live_pods)
+        if active > 0:
+            # Observation heartbeat: a long job that completes between ticks
+            # retains almost the full idle grace from its last observed work.
+            latest = datetime.now(UTC)
+        return {
+            "status": "running" if active > 0 else ("completed" if latest else "creating"),
+            "active": active,
+            "pods": len(live_pods),
+            "jobs": len(jobs),
+            "completed_at": latest.isoformat() if latest and active == 0 else None,
+            "started_at": latest.isoformat() if latest and active > 0 else None,
+        }
+    finally:
+        session.close()
+
+
+def probe_live_cluster_activity(
     pref: AutoStopPreference,
     *,
     namespace: str = "",
 ) -> tuple[int, datetime | None] | None:
-    """Probe live ``app=blast`` activity for one cluster.
+    """Probe live BLAST / warmup / prepare-db activity for one cluster.
 
     Returns ``(live_active_jobs, live_latest_activity)`` or ``None``.
 
@@ -60,31 +192,18 @@ def probe_live_blast_activity(
     fall back to the state_repo-only decision so an unreachable cluster is
     not stranded running forever.
 
-    ``live_active_jobs > 0`` means the cluster has an in-flight BLAST run (a
-    genuinely running pod OR a scheduled-but-unstarted job) and must be kept
-    alive. ``live_latest_activity`` is the most recent start/finish
-    timestamp across all ``app=blast`` jobs/pods, used to reset the idle
-    clock so a just-finished burst still gets the full idle grace before a
-    stop.
+    ``live_active_jobs > 0`` means the cluster has in-flight BLAST, warmup, or
+    prepare-db work and must be kept alive. ``live_latest_activity`` is the
+    most recent observed workload timestamp used to reset the idle clock.
 
     Only call this for a cluster whose ARM ``power_state == 'Running'`` — a
     stopped cluster has no API server to query.
     """
     try:
-        from api.services import get_credential
-        from api.services.k8s.blast_status import k8s_check_blast_status
-
-        status = k8s_check_blast_status(
-            get_credential(),
-            pref.subscription_id,
-            pref.resource_group,
-            pref.cluster_name,
-            namespace,
-            job_id=None,
-        )
+        status = _probe_cluster_workload_status(pref, namespace)
     except Exception as exc:
         LOGGER.debug(
-            "auto_stop live blast probe failed cluster=%s: %s",
+            "auto_stop live workload probe failed cluster=%s: %s",
             pref.cluster_name,
             exc,
         )
@@ -95,10 +214,8 @@ def probe_live_blast_activity(
 
     state = str(status.get("status") or "")
     if state == "unknown":
-        # ``k8s_check_blast_status`` swallows K8s/API errors and returns
-        # ``{"status": "unknown", ...}``. Treat that as "could not
-        # determine" → fall back to the state_repo decision rather than
-        # blocking the stop forever on a transient probe failure.
+        # Treat unknown as "could not determine" → fall back to durable state
+        # rather than blocking forever on a transient probe failure.
         return None
 
     active = int(status.get("active") or 0)
@@ -125,4 +242,14 @@ def probe_live_blast_activity(
     return live_active, latest
 
 
-__all__ = ["probe_live_blast_activity"]
+def probe_live_blast_activity(
+    pref: AutoStopPreference,
+    *,
+    namespace: str = "",
+) -> tuple[int, datetime | None] | None:
+    """Backward-compatible alias for the broadened cluster workload probe."""
+
+    return probe_live_cluster_activity(pref, namespace=namespace)
+
+
+__all__ = ["probe_live_blast_activity", "probe_live_cluster_activity"]

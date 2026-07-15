@@ -844,9 +844,8 @@ def _compute_status(
     try:
         from api.services.state_repo import get_state_repo
 
-        # Probe live K8s ``app=blast`` activity for Running clusters so the
-        # SPA countdown reflects OpenAPI-submitted runs (which never write a
-        # dashboard jobstate row) and agrees with the auto-stop beat driver.
+        # Probe live K8s BLAST / warmup / prepare-db activity for Running
+        # clusters so the SPA countdown agrees with the beat driver.
         # Degrades to (None, None) on any failure — additive protection only.
         live_active_jobs: int | None = None
         live_latest_activity = None

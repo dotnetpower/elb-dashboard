@@ -42,7 +42,7 @@ LOGGER = logging.getLogger(__name__)
 def _live_blast_signal(
     pref: AutoStopPreference, power_state: str
 ) -> tuple[int | None, Any]:
-    """Best-effort live K8s ``app=blast`` activity for the evaluator.
+    """Best-effort live K8s BLAST / warmup / prepare-db activity.
 
     Returns ``(live_active_jobs, live_latest_activity)`` ready to splat into
     `evaluate_cluster`. Only probes when ARM reports ``power_state ==
@@ -436,11 +436,10 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
                 (pref.subscription_id, pref.resource_group, pref.cluster_name),
                 "",
             )
-            # Probe live K8s ``app=blast`` activity only for Running
-            # candidates (a stopped cluster has no API server). This catches
-            # OpenAPI-submitted BLAST runs that never write a dashboard
-            # jobstate row; the probe degrades to (None, None) on any K8s
-            # failure so it can only ever ADD protection, never force a stop.
+            # Probe live Kubernetes work only for Running candidates. This
+            # catches OpenAPI BLAST, warmup, and prepare-db operations even
+            # when their durable row is absent/stale; probe failure remains
+            # additive-only and falls back to the Table signal.
             live_active_jobs, live_latest_activity = _live_blast_signal(
                 pref, cluster_power_state
             )

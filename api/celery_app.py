@@ -174,7 +174,7 @@ celery_app.conf.update(
         "auto-warmup-reconcile": {
             "task": "api.tasks.storage.reconcile_auto_warmup",
             "schedule": float(os.environ.get("CELERY_BEAT_AUTO_WARMUP_SECONDS", "120")),
-            "options": {"queue": "reconcile"},
+            "options": {"queue": "reconcile", "expires": 110.0},
         },
         "prepare-db-orphan-reconcile": {
             "task": "api.tasks.storage.reconcile_orphaned_prepare_db",
@@ -274,7 +274,7 @@ celery_app.conf.update(
         "aks-idle-autostop-evaluate": {
             "task": "api.tasks.azure.evaluate_idle_clusters",
             "schedule": float(os.environ.get("CELERY_BEAT_AKS_IDLE_AUTOSTOP_SECONDS", "300")),
-            "options": {"queue": "reconcile"},
+            "options": {"queue": "reconcile", "expires": 240.0},
         },
         "openapi-public-https-reconcile": {
             "task": "api.tasks.openapi.reconcile_public_https",

@@ -15,6 +15,7 @@ Validation: `uv run pytest -q api/tests/test_auto_stop_live.py`.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import api.services.auto_stop_live as live_mod
 from api.services.auto_stop import AutoStopPreference
@@ -33,17 +34,14 @@ def _pref() -> AutoStopPreference:
 
 
 def _patch_status(monkeypatch, status: object) -> None:
-    """Make `k8s_check_blast_status` return ``status`` and stub the credential."""
+    """Make the optimized cluster workload read return ``status``."""
 
     def _fake_status(*_args, **_kwargs):
         if isinstance(status, Exception):
             raise status
         return status
 
-    monkeypatch.setattr(
-        "api.services.k8s.blast_status.k8s_check_blast_status", _fake_status
-    )
-    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(live_mod, "_probe_cluster_workload_status", _fake_status)
 
 
 def test_running_active_jobs_reported(monkeypatch) -> None:
@@ -156,3 +154,93 @@ def test_parse_k8s_ts_handles_naive_and_invalid() -> None:
     aware = live_mod._parse_k8s_ts("2026-05-29T11:55:00")
     assert aware is not None
     assert aware.tzinfo is not None
+
+
+def test_filtered_probe_counts_only_nonterminal_workloads(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self, items: list[dict[str, Any]]) -> None:
+            self._items = items
+
+        def json(self) -> dict[str, Any]:
+            return {"items": self._items}
+
+    class _Session:
+        def get(
+            self,
+            url: str,
+            *,
+            params: dict[str, str],
+            timeout: int,
+        ) -> _Response:
+            assert timeout == 10
+            calls.append((url, params))
+            selector = params.get("labelSelector")
+            if selector == "app=blast":
+                return _Response(
+                    [
+                        {
+                            "metadata": {"creationTimestamp": "2026-05-29T11:00:00Z"},
+                            "status": {
+                                "failed": 1,
+                                "conditions": [{"type": "Failed", "status": "True"}],
+                            },
+                        }
+                    ]
+                    if url.endswith("/jobs")
+                    else []
+                )
+            if selector == "app=elb-db-warmup":
+                return _Response([{"metadata": {}, "status": {"active": 1}}])
+            return _Response([])
+
+        def close(self) -> None:
+            return None
+
+    class _Future:
+        def __init__(self, value: Any) -> None:
+            self._value = value
+
+        def result(self) -> Any:
+            return self._value
+
+    class _Pool:
+        def submit(self, fn: Any, *args: Any) -> _Future:
+            return _Future(fn(*args))
+
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring._get_k8s_session",
+        lambda *_args, **_kwargs: (_Session(), "https://k8s"),
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring._namespace_or_default",
+        lambda *_args, **_kwargs: "default",
+    )
+    monkeypatch.setattr("api.services.k8s.fanout._k8s_fanout_pool", lambda: _Pool())
+
+    result = live_mod._probe_cluster_workload_status(_pref(), "")
+
+    assert result is not None
+    assert result["status"] == "running"
+    assert result["active"] == 1
+    job_calls = [params for url, params in calls if url.endswith("/jobs")]
+    assert {params["labelSelector"] for params in job_calls} == {
+        "app=blast",
+        "app=elb-db-warmup",
+        "app=elb-prepare-db",
+    }
+    assert all(params["fieldSelector"] == "status.successful=0" for params in job_calls)
+    pod_calls = [params for url, params in calls if url.endswith("/pods")]
+    assert {params["labelSelector"] for params in pod_calls} == {
+        "app=blast",
+        "app=elb-db-warmup",
+        "app=elb-prepare-db",
+    }
+    assert all(
+        params["fieldSelector"] == "status.phase!=Succeeded,status.phase!=Failed"
+        for params in pod_calls
+    )
