@@ -50,3 +50,11 @@ SPA adopted the newest stale task ID and kept polling it as `Pending` forever.
 - Design self-review found no unresolved Critical or High issues across state
   transitions, bounded liveness, idempotency, security, failure handling, or
   backward compatibility.
+- Deployed backend image `elb-api:20260715084521` at digest
+  `sha256:7b67fdfda4d9f737a8fd211626209e2d78e01d9247e5f557ba6c9da59a9c3278`.
+  Container App revision `ca-elb-dashboard--0000240` reached `Healthy` /
+  `RunningAtMaxScale`; all six sidecars were Ready with zero restarts.
+- Live verification on the new revision returned `active=false`,
+  `core_nt Ready · 10/10`, and mapped the legacy Redis-lost task
+  `59a659a4-1b28-425e-a817-109b14a54cda` to terminal `Failed / worker_lost`
+  instead of perpetual `Pending`.
