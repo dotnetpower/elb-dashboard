@@ -34,8 +34,8 @@ def _file_backend(
     monkeypatch.setattr(
         "api.services.state_repo.get_state_repo", lambda: object()
     )
-    # The driver probes live K8s ``app=blast`` activity for Running
-    # clusters; stub it to "unavailable" by default so the task tests stay
+    # The driver probes live K8s workload activity for Running clusters;
+    # stub it to "unavailable" by default so the task tests stay
     # hermetic (no Azure/K8s call). Wiring tests below override this.
     monkeypatch.setattr(
         "api.tasks.azure.idle_autostop._live_blast_signal",
@@ -77,6 +77,14 @@ def _pref(**overrides: object) -> AutoStopPreference:
     for k, v in overrides.items():
         setattr(base, k, v)
     return base
+
+
+def test_evaluate_task_limit_finishes_before_next_beat() -> None:
+    from api.tasks.azure import idle_autostop
+
+    assert idle_autostop.evaluate_idle_clusters.soft_time_limit == 210
+    assert idle_autostop.evaluate_idle_clusters.time_limit == 240
+    assert idle_autostop.evaluate_idle_clusters.time_limit < 300
 
 
 def test_auto_stop_aks_aborts_when_preference_missing(

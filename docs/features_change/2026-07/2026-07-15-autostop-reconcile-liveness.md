@@ -30,6 +30,9 @@ miss, even though auto-stop only needs nonterminal work.
 - A wedged full-list auto-warmup reconcile can no longer occupy the periodic
   worker beyond its 110-second overlap-lock budget, and stale beat messages
   expire instead of replaying obsolete decisions.
+- The 5-minute auto-stop evaluator now runs on the `azure` lifecycle queue with
+  a 210/240-second soft/hard limit. It therefore remains available even when
+  Service Bus or maintenance work occupies the single reconcile worker.
 
 ## API and infrastructure diff summary
 
@@ -46,9 +49,9 @@ miss, even though auto-stop only needs nonterminal work.
 ## Validation evidence
 
 - Focused evaluator, live-probe, auto-warmup, route, driver, and Celery schedule
-  tests: `129 passed`; coverage includes filtered status shapes, type-aware
+  tests: `131 passed`; coverage includes filtered status shapes, type-aware
   stale thresholds, time limits, and expiry.
-- Full backend suite: `4814 passed, 4 skipped`; Ruff lint passed.
+- Full backend suite: `4816 passed, 4 skipped`; Ruff lint passed.
 - The optimized live workload probe completed against the existing AKS cluster
   in 1.23 seconds and returned zero active Kubernetes workloads, versus the
   previous 64–88-second status computation.

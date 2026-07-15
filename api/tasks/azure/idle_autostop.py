@@ -37,6 +37,8 @@ from api.services.auto_stop_live import probe_live_blast_activity
 from api.services.feature_events import record_feature_event
 
 LOGGER = logging.getLogger(__name__)
+_EVALUATE_SOFT_TIME_LIMIT = 210
+_EVALUATE_HARD_TIME_LIMIT = 240
 
 
 def _live_blast_signal(
@@ -368,6 +370,8 @@ def auto_stop_aks(
     name="api.tasks.azure.evaluate_idle_clusters",
     bind=True,
     max_retries=0,
+    soft_time_limit=_EVALUATE_SOFT_TIME_LIMIT,
+    time_limit=_EVALUATE_HARD_TIME_LIMIT,
 )
 def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     """Beat-driven idle scan across every persisted preference.
