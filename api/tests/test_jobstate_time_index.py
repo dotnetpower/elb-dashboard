@@ -338,9 +338,7 @@ def test_list_owner_page_paginates_without_overlap(
 ) -> None:
     monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
     for i in range(5):
-        repo.create(
-            _job(f"job-{i}", owner="owner-a", created_at=f"2026-06-18T10:00:0{i}+00:00")
-        )
+        repo.create(_job(f"job-{i}", owner="owner-a", created_at=f"2026-06-18T10:00:0{i}+00:00"))
 
     page1, cursor1 = repo.list_owner_page("owner-a", limit=2)
     assert [s.job_id for s in page1] == ["job-4", "job-3"]  # newest first
@@ -412,9 +410,7 @@ def test_idempotent_create_keeps_single_index_row(
     repo.create(_job("job-1", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
     # A re-create with the same job_id (concurrent-create race) upserts the
     # SAME index RowKey, so there is never a duplicate index row.
-    repo._index_put(
-        _job("job-1", owner="owner-a", created_at="2026-06-18T10:00:00+00:00")
-    )
+    repo._index_put(_job("job-1", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
     index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     assert len([k for k in index.rows if k[0] == "owner-a"]) == 1
 
@@ -424,9 +420,7 @@ def test_list_for_owner_uses_index_when_enabled(
 ) -> None:
     monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
     for i in range(3):
-        repo.create(
-            _job(f"job-{i}", owner="owner-a", created_at=f"2026-06-18T10:00:0{i}+00:00")
-        )
+        repo.create(_job(f"job-{i}", owner="owner-a", created_at=f"2026-06-18T10:00:0{i}+00:00"))
     rows = repo.list_for_owner("owner-a", limit=2)
     assert [s.job_id for s in rows] == ["job-2", "job-1"]
 
@@ -500,9 +494,7 @@ def test_list_all_page_bounded_scan(
     (the AC1 'scan size is bounded' guarantee for list_all)."""
     monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
     for i in range(8):
-        repo.create(
-            _job(f"job-{i}", owner="owner-a", created_at=f"2026-06-18T10:00:0{i}+00:00")
-        )
+        repo.create(_job(f"job-{i}", owner="owner-a", created_at=f"2026-06-18T10:00:0{i}+00:00"))
     index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     index.query_count = 0  # type: ignore[attr-defined]
     rows, _cursor = repo.list_all_page(limit=2)
@@ -533,20 +525,52 @@ def test_list_all_falls_back_when_index_empty(
     assert [s.job_id for s in rows] == ["job-legacy"]
 
 
-def test_list_for_scope_stays_on_scan_with_flag_on(
+def test_list_for_scope_filters_mutable_scope_over_global_index(
     repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """list_for_scope is intentionally NOT indexed (mutable cluster_name) and
-    must keep working via the legacy scan even with the index flag ON."""
+    """Mutable scope values are filtered from current rows over the global index."""
     monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
-    repo.create(
-        _job("scoped", owner="owner-a", created_at="2026-06-18T10:00:00+00:00")
-    )
+    repo.create(_job("scoped", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
     # cluster_name is backfilled AFTER create (mutable) — exactly why a scope
     # index can't use the immutable key.
     repo.update("scoped", cluster_name="elb-cluster-01")
     rows = repo.list_for_scope(cluster_name="elb-cluster-01", limit=10)
     assert [s.job_id for s in rows] == ["scoped"]
+
+
+def test_list_for_scope_index_walks_past_newer_nonmatching_rows(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    repo.create(_job("matching-old", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    repo.update("matching-old", subscription_id="sub-target")
+    for i in range(150):
+        job_id = f"other-{i:03d}"
+        repo.create(
+            _job(
+                job_id,
+                owner="owner-b",
+                created_at=f"2026-06-19T10:{i // 60:02d}:{i % 60:02d}+00:00",
+            )
+        )
+        repo.update(job_id, subscription_id="sub-other")
+
+    rows = repo.list_for_scope(subscription_id="sub-target", limit=10)
+
+    assert [s.job_id for s in rows] == ["matching-old"]
+
+
+def test_list_for_scope_empty_index_preserves_legacy_fallback(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
+    repo.create(_job("legacy", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    repo.update("legacy", subscription_id="sub-target")
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+
+    rows = repo.list_for_scope(subscription_id="sub-target", limit=10)
+
+    assert [s.job_id for s in rows] == ["legacy"]
 
 
 # ---------------------------------------------------------------------------
@@ -559,10 +583,7 @@ def _load_backfill_module() -> Any:
     from pathlib import Path
 
     path = (
-        Path(__file__).resolve().parents[2]
-        / "scripts"
-        / "dev"
-        / "backfill_jobstate_time_index.py"
+        Path(__file__).resolve().parents[2] / "scripts" / "dev" / "backfill_jobstate_time_index.py"
     )
     spec = importlib.util.spec_from_file_location("backfill_jobstate_time_index", path)
     assert spec and spec.loader
@@ -698,5 +719,3 @@ def test_reconcile_time_index_task_heals_missing_rows_when_flag_on(
     result2 = reconcile_time_index.run()
     assert result2 == {"scanned": 2, "written": 2}
     assert set(repo._test_tables[time_index.INDEX_TABLE_NAME].rows.keys()) == keys  # type: ignore[attr-defined]
-
-

@@ -121,18 +121,20 @@ def _list_scan_hard_cap() -> int:
 # exact equality so e.g. `caller_oid`, `owner_oid`, `actor_oid`, and a
 # bare `oid` key all qualify, but unrelated keys (`void`, `paranoid`,
 # `cosmosdb_resource_id`) don't.
-_PII_KEY_EXACT = frozenset({
-    "oid",
-    "upn",
-    "email",
-    "actor",
-    "principal",
-    "principal_id",
-    "object_id",
-    "preferred_username",
-    "user_id",
-    "userid",
-})
+_PII_KEY_EXACT = frozenset(
+    {
+        "oid",
+        "upn",
+        "email",
+        "actor",
+        "principal",
+        "principal_id",
+        "object_id",
+        "preferred_username",
+        "user_id",
+        "userid",
+    }
+)
 _PII_KEY_SUFFIXES = ("_oid", "_upn", "_email", "_actor")
 
 
@@ -157,7 +159,8 @@ def _redact_audit_payload(payload: Any) -> Any:
     if isinstance(payload, dict):
         return {
             k: (
-                redact_oid(str(v)) if _is_pii_key(k) and v is not None and v != ""
+                redact_oid(str(v))
+                if _is_pii_key(k) and v is not None and v != ""
                 else _redact_audit_payload(v)
             )
             for k, v in payload.items()
@@ -523,9 +526,7 @@ class JobStateRepository:
                     for jid in chunk
                 ]
                 filter_expr = " or ".join(parts)
-                query_kwargs: dict[str, Any] = {
-                    "results_per_page": _clamp_page_size(len(chunk))
-                }
+                query_kwargs: dict[str, Any] = {"results_per_page": _clamp_page_size(len(chunk))}
                 if select is not None:
                     query_kwargs["select"] = select
                 try:
@@ -779,9 +780,7 @@ class JobStateRepository:
             # un-backfilled index. Fall back to the legacy scan so jobs are
             # never hidden; the scan returns [] too when the owner truly has
             # none, so this only costs one extra read in the empty case.
-            LOGGER.info(
-                "jobstate time-index returned no rows (owner); falling back to legacy scan"
-            )
+            LOGGER.info("jobstate time-index returned no rows (owner); falling back to legacy scan")
         safe_oid = _sanitise_odata_value(owner_oid)
         return self._list_recent_sorted(
             f"(owner_oid eq '{safe_oid}' or owner_oid eq '') and status ne 'deleted'",
@@ -871,7 +870,6 @@ class JobStateRepository:
 
         next_cursor = encode_cursor(window[-1][0]) if (has_more and window) else None
         return rows, next_cursor
-
 
     def list_all_page(
         self,
@@ -968,9 +966,7 @@ class JobStateRepository:
         """
         if time_index_enabled():
             try:
-                rows, _cursor = self.list_all_page(
-                    limit=limit, include_payload=include_payload
-                )
+                rows, _cursor = self.list_all_page(limit=limit, include_payload=include_payload)
             except Exception as exc:
                 LOGGER.warning(
                     "jobstate time-index read failed (all); using legacy scan: %s",
@@ -979,9 +975,7 @@ class JobStateRepository:
                 rows = []
             if rows:
                 return rows
-            LOGGER.info(
-                "jobstate time-index returned no rows (all); falling back to legacy scan"
-            )
+            LOGGER.info("jobstate time-index returned no rows (all); falling back to legacy scan")
         return self._list_recent_sorted(
             "status ne 'deleted'",
             limit=limit,
@@ -1034,20 +1028,99 @@ class JobStateRepository:
             # Refuse an owner-agnostic global scan by accident.
             return []
 
-        # #50 note: this path intentionally stays on the bounded legacy scan and
-        # is NOT served by the time-ordered index. The index key is immutable
-        # (owner_oid + created_at), but ``cluster_name`` / ``subscription_id`` /
-        # ``resource_group`` are MUTABLE — ``update()`` backfills them after
-        # create — so a scope-keyed index row would have to MOVE when the scope
-        # is filled in, breaking the add-on-create / remove-on-delete invariant
-        # the index relies on. ``list_for_scope`` is also an operator surface
-        # (explicit cluster scope from a route), not the hot per-owner default
-        # path, so the scan is acceptable here.
+        if time_index_enabled():
+            try:
+                rows, index_seen = self._list_for_scope_from_time_index(
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                    limit=limit,
+                    include_payload=include_payload,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "jobstate time-index read failed (scope); using legacy scan: %s",
+                    type(exc).__name__,
+                )
+            else:
+                # Any global index row proves the index exists/backfill ran.
+                # Returning [] is then an honest empty scope, not an index miss.
+                if rows or index_seen:
+                    return rows
+                LOGGER.info(
+                    "jobstate time-index returned no rows (scope); falling back to legacy scan"
+                )
         return self._list_recent_sorted(
             " and ".join(clauses),
             limit=limit,
             include_payload=include_payload,
         )
+
+    def _list_for_scope_from_time_index(
+        self,
+        *,
+        subscription_id: str,
+        resource_group: str,
+        cluster_name: str,
+        limit: int,
+        include_payload: bool,
+    ) -> tuple[list[JobState], bool]:
+        """Filter current scope fields over the immutable global time index.
+
+        Scope fields are mutable, so they cannot safely be part of the index
+        key. The global ``__all__`` partition still provides exact newest-first
+        traversal: fetch bounded pages of current JobState rows, filter their
+        latest scope values, and stop once ``limit`` matches are found. Sparse
+        scopes are capped by ``JOBSTATE_LIST_SCAN_CAP``; unlike the legacy path
+        this never materialises every matching Table row in memory.
+
+        Returns ``(rows, index_seen)`` so a genuinely empty indexed scope does
+        not fall back to the expensive legacy scan. ``index_seen=False`` means
+        the global index itself was empty/unavailable and the caller should
+        preserve the pre-backfill fallback contract.
+        """
+        scan_cap = _list_scan_hard_cap()
+        batch_size = min(1000, max(100, min(scan_cap, limit * 2)))
+        cursor = ""
+        scanned = 0
+        index_seen = False
+        rows: list[JobState] = []
+
+        while scanned < scan_cap and len(rows) < limit:
+            page_limit = min(batch_size, scan_cap - scanned)
+            page, next_cursor = self.list_all_page(
+                limit=page_limit,
+                include_payload=include_payload,
+                cursor=cursor,
+            )
+            if page:
+                index_seen = True
+            scanned += page_limit
+            for row in page:
+                if subscription_id and row.subscription_id != subscription_id:
+                    continue
+                if cluster_name:
+                    if row.cluster_name != cluster_name:
+                        continue
+                elif resource_group and row.resource_group != resource_group:
+                    continue
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
+            if not next_cursor:
+                break
+            cursor = next_cursor
+
+        if scanned >= scan_cap and len(rows) < limit:
+            LOGGER.warning(
+                "jobstate indexed scope scan hit hard cap=%d "
+                "subscription=%s cluster=%s resource_group=%s",
+                scan_cap,
+                bool(subscription_id),
+                bool(cluster_name),
+                bool(resource_group),
+            )
+        return rows[:limit], index_seen
 
     def list_children(self, parent_job_id: str, limit: int = 100) -> list[JobState]:
         safe_parent = _sanitise_odata_value(parent_job_id)
@@ -1088,9 +1161,7 @@ class JobStateRepository:
         rows: list[JobState] = []
         with self._state_client() as t:
             try:
-                entities = t.query_entities(
-                    filter_expr, results_per_page=_clamp_page_size(limit)
-                )
+                entities = t.query_entities(filter_expr, results_per_page=_clamp_page_size(limit))
                 for e in entities:
                     rows.append(JobState.from_entity(dict(e)))
                     if len(rows) >= limit:
@@ -1127,9 +1198,7 @@ class JobStateRepository:
         rows: list[JobState] = []
         with self._state_client() as t:
             try:
-                entities = t.query_entities(
-                    filter_expr, results_per_page=_clamp_page_size(limit)
-                )
+                entities = t.query_entities(filter_expr, results_per_page=_clamp_page_size(limit))
                 for e in entities:
                     rows.append(JobState.from_entity(dict(e)))
                     if len(rows) >= limit:
@@ -1167,9 +1236,7 @@ class JobStateRepository:
         rows: list[JobState] = []
         with self._state_client() as t:
             try:
-                entities = t.query_entities(
-                    filter_expr, results_per_page=_clamp_page_size(limit)
-                )
+                entities = t.query_entities(filter_expr, results_per_page=_clamp_page_size(limit))
                 for e in entities:
                     rows.append(JobState.from_entity(dict(e)))
                     if len(rows) >= limit:
