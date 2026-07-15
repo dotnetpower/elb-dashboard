@@ -8,7 +8,7 @@ Edit boundaries: Signal handlers and their direct helpers only. Celery
 app instantiation, queue routing, and beat schedule live in
 `api.celery_app`. JobState row schema lives in
 `api.services.state_repo`.
-Key entry points: `_start_reporter`, `_on_worker_init`,
+Key entry points: `_start_reporter`, `_is_background_consumer_worker`, `_on_worker_init`,
 `_on_worker_process_init`, `_on_beat_init`, `_on_task_failure`,
 `_on_task_internal_error`, `_on_task_revoked`, `_on_before_task_publish`,
 `_record_task_terminal_state`.
@@ -16,7 +16,8 @@ Risky contracts: Failure signal handlers must never raise; task crashes
 must still leave a log entry and, when a JobState row can be found, a
 user-visible failed/cancelled state. Module is imported for its
 import-time side effect (signal registration); never lazy-load it from a
-worker task.
+worker task. Resident background consumers must start only in the dedicated
+`worker-reconcile` parent, never once per Celery worker parent.
 Validation: `uv run pytest -q api/tests/test_celery_failure_visibility.py
 api/tests/test_telemetry_init.py`.
 """
@@ -129,11 +130,27 @@ def _record_task_terminal_state(
         )
 
 
+def _is_background_consumer_worker(sender: object | None) -> bool:
+    """Return whether this Celery parent owns sidecar-level daemon consumers.
+
+    `worker_init` fires once per parent. The worker sidecar now has three
+    parents, so process-local singleton guards alone would start three Service
+    Bus consumers. Unknown senders preserve the historical fail-open behaviour
+    for direct test/dev invocation; named production workers are strict.
+    """
+    hostname = str(getattr(sender, "hostname", "") or "")
+    if not hostname:
+        return True
+    return hostname.split("@", 1)[0] == "worker-reconcile"
+
+
 @worker_init.connect  # type: ignore[untyped-decorator]
-def _on_worker_init(**_kwargs: object) -> None:
+def _on_worker_init(sender: object | None = None, **_kwargs: object) -> None:
     _start_reporter("worker")
+    if not _is_background_consumer_worker(sender):
+        return
     # Optional resident Service Bus consumer (issue #36 Tier 3, default-OFF).
-    # Starts a single daemon loop on the worker main process when
+    # Starts a single daemon loop on the worker-reconcile parent when
     # SERVICEBUS_RESIDENT_CONSUMER is enabled, so SB-submitted jobs drain within
     # ~1 s instead of waiting the 30 s beat. No-op when the gate is off; the beat
     # drain task stays registered as the fallback either way.

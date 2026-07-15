@@ -490,10 +490,13 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             'python3'
             '/app/api/run_celery_workers.py'
           ]
-          // The worker sidecar runs run_celery_workers.py, which spawns TWO
-          // celery parents (worker-main @ concurrency 4 + worker-artifacts @
-          // concurrency 2) = 2 parents + 6 prefork children = 8 Python
-          // processes. At 0.5 vCPU / 1.0Gi that pool is heavily
+          // The worker sidecar runs run_celery_workers.py, which spawns THREE
+          // isolated celery parents (worker-main @ concurrency 3,
+          // worker-reconcile @ concurrency 1, worker-artifacts @ concurrency 1)
+          // = 3 parents + 5 prefork children = 8 Python processes. Keeping
+          // reconcile out of worker-main guarantees periodic maintenance cannot
+          // consume every interactive AKS/BLAST slot. At 0.5 vCPU / 1.0Gi the
+          // earlier pool was heavily
           // over-subscribed; bump to 1.0 vCPU / 2.0Gi so the prefork children
           // are not starved when several azure / blast / storage tasks run at
           // once. Per-replica total = 3.25 vCPU / 6.5Gi (api 1.0/2.0,

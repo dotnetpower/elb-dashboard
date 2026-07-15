@@ -1319,6 +1319,22 @@ def _openapi_ready_for_drain(cfg: ServiceBusConfig) -> bool:
         return False
 
 
+def _openapi_ready_for_transition_poll(openapi_kwargs: dict[str, str]) -> bool:
+    """Return whether transition polling can reach a ready OpenAPI plane.
+
+    A stopped AKS cluster cannot change sibling job status, so polling every
+    active bridge only multiplies transport timeouts. The readiness endpoint
+    has a five-second bound and short cache; deferring preserves every active
+    bridge for the next tick after AKS starts. Never raises because this is a
+    periodic availability gate, not a terminal job-state decision.
+    """
+    try:
+        payload = external_blast.ready(**openapi_kwargs)
+        return bool(payload.get("ready"))
+    except Exception:
+        return False
+
+
 @shared_task(name="api.tasks.servicebus.drain_and_resubmit")
 @skip_tick_on_transient_infra
 def drain_and_resubmit() -> dict[str, Any]:
@@ -1516,11 +1532,20 @@ def publish_transitions() -> dict[str, Any]:
     bridges = list_active_bridges(limit=_PUBLISH_MAX_ROWS)
     if not bridges:
         return {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
+    openapi_kwargs = _openapi_kwargs(cfg)
+    if not _openapi_ready_for_transition_poll(openapi_kwargs):
+        LOGGER.info(
+            "servicebus publish tick deferred: OpenAPI plane not ready active_bridges=%d",
+            len(bridges),
+        )
+        return {
+            "skipped": "cluster_not_ready",
+            "active_bridges": len(bridges),
+        }
     published = 0
     finished = 0
     scanned = 0
     errors = 0
-    openapi_kwargs = _openapi_kwargs(cfg)
     for rec in bridges:
         scanned += 1
         try:

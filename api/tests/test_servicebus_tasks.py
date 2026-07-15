@@ -22,12 +22,22 @@ from api.services.service_bus_pref import ServiceBusConfig
 from api.services.service_bus_tracking import BridgeRecord
 from api.tasks.servicebus import tasks as sb_tasks
 
+_REAL_OPENAPI_READY_FOR_TRANSITION_POLL = sb_tasks._openapi_ready_for_transition_poll
+
 
 @pytest.fixture(autouse=True)
 def _file_backend(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    # Most transition tests exercise event/state behaviour, not availability.
+    # Make their ready-plane premise explicit; focused tests below cover the
+    # real readiness helper and the deferred-tick branch.
+    monkeypatch.setattr(
+        sb_tasks,
+        "_openapi_ready_for_transition_poll",
+        lambda _kwargs: True,
+    )
 
 
 def _enabled_cfg() -> ServiceBusConfig:
@@ -139,6 +149,28 @@ def test_openapi_ready_for_drain_false_on_probe_error(monkeypatch: pytest.Monkey
     monkeypatch.setattr(external_blast, "ready", _boom)
     # Never raises: an unreachable plane defers the tick rather than crashing it.
     assert sb_tasks._openapi_ready_for_drain(cfg) is False
+
+
+def test_openapi_ready_for_transition_poll_is_bounded_and_fail_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        external_blast,
+        "ready",
+        lambda **kwargs: calls.append(kwargs) or {"ready": True},
+    )
+    assert _REAL_OPENAPI_READY_FOR_TRANSITION_POLL({"base_url": "http://openapi"}) is True
+    assert calls == [{"base_url": "http://openapi"}]
+
+    monkeypatch.setattr(external_blast, "ready", lambda **_kwargs: {"ready": False})
+    assert _REAL_OPENAPI_READY_FOR_TRANSITION_POLL({}) is False
+
+    def _unreachable(**_kwargs: str) -> object:
+        raise RuntimeError("openapi_unreachable")
+
+    monkeypatch.setattr(external_blast, "ready", _unreachable)
+    assert _REAL_OPENAPI_READY_FOR_TRANSITION_POLL({}) is False
 
 
 def test_drain_skips_tick_on_transient_infra_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1231,6 +1263,37 @@ def test_publish_transitions_idle_skips_openapi_resolution(
 
     assert calls == [], "idle tick must not resolve OpenAPI kwargs"
     assert out == {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
+
+
+def test_publish_transitions_defers_all_bridge_polls_when_openapi_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-stopped",
+            openapi_job_id="op-stopped",
+            last_status="running",
+        )
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "_openapi_ready_for_transition_poll",
+        lambda _kwargs: False,
+    )
+    polled: list[str] = []
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda job_id, **_kwargs: polled.append(job_id) or {"status": "running"},
+    )
+
+    out = sb_tasks.publish_transitions()
+
+    assert out == {"skipped": "cluster_not_ready", "active_bridges": 1}
+    assert polled == []
 
 
 def test_publish_transitions_gives_up_on_stuck_bridge(monkeypatch: pytest.MonkeyPatch) -> None:

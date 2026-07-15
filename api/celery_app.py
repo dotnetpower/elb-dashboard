@@ -165,10 +165,8 @@ celery_app.conf.update(
     # operator-triggered `.delay()` keeps its current routing. The periodic
     # beat-scheduled maintenance/reconcile tasks below are instead pinned to a
     # dedicated `reconcile` queue so a slow reconcile pass cannot queue behind
-    # — or starve — an interactive BLAST submit. worker-main subscribes to
-    # `reconcile` (see CELERY_MAIN_QUEUES in run_celery_workers.py), so the
-    # isolation is logical today and lets a future deployment peel `reconcile`
-    # onto a dedicated low-priority worker without code changes.
+    # — or starve — an interactive BLAST submit. worker-reconcile exclusively
+    # consumes it (see run_celery_workers.py); worker-main never subscribes.
     beat_schedule={
         "auto-warmup-reconcile": {
             "task": "api.tasks.storage.reconcile_auto_warmup",
@@ -297,12 +295,25 @@ celery_app.conf.update(
         "servicebus-drain-and-resubmit": {
             "task": "api.tasks.servicebus.drain_and_resubmit",
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS", "10")),
-            "options": {"queue": "reconcile"},
+            # A tick older than 30 s is obsolete: the next periodic tick will
+            # inspect the same queue/bridge state. Expiry sheds stale backlog
+            # after a slow upstream call instead of replaying every missed tick.
+            "options": {
+                "queue": "reconcile",
+                "expires": float(
+                    os.environ.get("CELERY_BEAT_SERVICEBUS_EXPIRES_SECONDS", "30")
+                ),
+            },
         },
         "servicebus-publish-transitions": {
             "task": "api.tasks.servicebus.publish_transitions",
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_SECONDS", "10")),
-            "options": {"queue": "reconcile"},
+            "options": {
+                "queue": "reconcile",
+                "expires": float(
+                    os.environ.get("CELERY_BEAT_SERVICEBUS_EXPIRES_SECONDS", "30")
+                ),
+            },
         },
         "servicebus-dlq-cleanup": {
             "task": "api.tasks.servicebus.dlq_cleanup",

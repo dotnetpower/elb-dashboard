@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run latency-critical and artifact Celery workers as isolated processes.
+"""Run interactive, reconcile, and artifact Celery workers as isolated processes.
 
-Responsibility: Run latency-critical and artifact Celery workers as isolated processes
+Responsibility: Isolate Celery queue classes into bounded worker processes.
 Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
-Key entry points: `_validated`, `_worker_command`, `_terminate`, `main`
-Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Key entry points: `_validated`, `_worker_command`, `_worker_specs`, `_terminate`, `main`
+Risky contracts: Interactive queues must never share a worker pool with periodic reconcile work;
+    total default prefork concurrency must stay within the worker sidecar memory budget.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -17,20 +18,24 @@ import subprocess
 import sys
 import time
 
-# The `reconcile` queue carries the beat-scheduled maintenance tasks
-# (auto-warmup reconcile, stale-job sweep, upgrade reconcile, AKS autostop,
-# …). Routing them off the latency-critical interactive queues keeps a slow
-# reconcile pass from queueing behind an operator-triggered BLAST submit. The
-# same worker-main process still consumes it, so the isolation is logical
-# today and lets a future deployment peel it onto a dedicated low-priority
-# worker without code changes.
+# The `reconcile` queue carries beat-scheduled maintenance tasks (auto-warmup,
+# stale-job sweeps, Service Bus transition polling, AKS autostop, …). It MUST
+# use a separate worker process: queue routing alone is not isolation when one
+# prefork pool consumes every queue. A stopped OpenAPI plane once left four
+# long transition-publisher tasks occupying all worker-main slots while an AKS
+# start sat PENDING on the `azure` queue.
 MAIN_QUEUES = os.environ.get(
     "CELERY_MAIN_QUEUES",
-    "default,acr,azure,blast,storage,reconcile",
+    "default,acr,azure,blast,storage",
 )
+RECONCILE_QUEUES = os.environ.get("CELERY_RECONCILE_QUEUES", "reconcile")
 ARTIFACT_QUEUES = os.environ.get("CELERY_ARTIFACT_QUEUES", "blast-artifacts")
-MAIN_CONCURRENCY = os.environ.get("CELERY_MAIN_CONCURRENCY", "4")
-ARTIFACT_CONCURRENCY = os.environ.get("CELERY_ARTIFACT_CONCURRENCY", "2")
+# Five prefork children across three parents (3 + 1 + 1) replace the previous
+# six children across two parents (4 + 2). The extra parent therefore does not
+# increase the process count or exceed the 2 GiB worker-sidecar budget.
+MAIN_CONCURRENCY = os.environ.get("CELERY_MAIN_CONCURRENCY", "3")
+RECONCILE_CONCURRENCY = os.environ.get("CELERY_RECONCILE_CONCURRENCY", "1")
+ARTIFACT_CONCURRENCY = os.environ.get("CELERY_ARTIFACT_CONCURRENCY", "1")
 # Pool implementation. Default `prefork` is intentional: the ARM long-running
 # pollers in api/tasks/azure/* call `poller.result()` without a per-call
 # timeout and rely on Celery's prefork signal-based hard time limit
@@ -97,6 +102,32 @@ def _worker_command(
     return command
 
 
+def _worker_specs() -> tuple[tuple[str, str, str], ...]:
+    """Return the queue-isolated worker topology.
+
+    Keeping this as data makes the non-overlap contract directly testable and
+    ensures `main` cannot accidentally omit the dedicated reconcile worker.
+    """
+    specs = (
+        ("worker-main", MAIN_QUEUES, MAIN_CONCURRENCY),
+        ("worker-reconcile", RECONCILE_QUEUES, RECONCILE_CONCURRENCY),
+        ("worker-artifacts", ARTIFACT_QUEUES, ARTIFACT_CONCURRENCY),
+    )
+    queue_sets = {
+        name: {queue for queue in queues.split(",") if queue}
+        for name, queues, _concurrency in specs
+    }
+    for index, (left_name, left_queues) in enumerate(queue_sets.items()):
+        for right_name, right_queues in list(queue_sets.items())[index + 1 :]:
+            overlap = left_queues & right_queues
+            if overlap:
+                raise ValueError(
+                    "worker queues must be isolated: "
+                    f"{left_name} and {right_name} both consume {sorted(overlap)}"
+                )
+    return specs
+
+
 def _terminate(processes: list[subprocess.Popen[bytes]]) -> None:
     for process in processes:
         if process.poll() is None:
@@ -113,11 +144,9 @@ def _terminate(processes: list[subprocess.Popen[bytes]]) -> None:
 def main() -> int:
     processes = [
         subprocess.Popen(  # noqa: S603 -- argv is static except validated env values.
-            _worker_command("worker-main", MAIN_QUEUES, MAIN_CONCURRENCY)
-        ),
-        subprocess.Popen(  # noqa: S603 -- argv is static except validated env values.
-            _worker_command("worker-artifacts", ARTIFACT_QUEUES, ARTIFACT_CONCURRENCY)
-        ),
+            _worker_command(name, queues, concurrency)
+        )
+        for name, queues, concurrency in _worker_specs()
     ]
     stopping = False
 

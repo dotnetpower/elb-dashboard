@@ -103,9 +103,9 @@ Both races are fixable in code; neither is an AKS-side limitation.
   cluster and one hard-coded namespace this gives us **zero** intra-cluster
   parallelism today.
 * The Celery worker is sized for parallelism: `worker-main` runs
-  `--concurrency=4` over the `blast` queue
+  `--concurrency=3` over the `blast` queue
   ([run_celery_workers.py L25](../../api/run_celery_workers.py)), so the
-  process can dispatch 4 BLAST tasks simultaneously. The lock is the
+  process can dispatch 3 BLAST tasks simultaneously. The lock is the
   binding constraint, not Celery.
 * `task_acks_late=True` + `task_reject_on_worker_lost=True` make a
   crashed task return to the broker — safe for the new gate.
@@ -703,7 +703,7 @@ image.
 * [api/services/k8s/node_pressure.py](../../api/services/k8s/node_pressure.py) — per-pool request pressure helper.
 * [api/services/k8s/metrics.py](../../api/services/k8s/metrics.py) — `k8s_top_nodes` / `k8s_top_pods`.
 * [scripts/research/blast_capacity_probe.py](../../scripts/research/blast_capacity_probe.py) — single-query CPU/mem probe; demand-model bootstrap.
-* [api/run_celery_workers.py](../../api/run_celery_workers.py) — `worker-main --concurrency=4 --queues=default,acr,azure,blast,storage`.
+* [api/run_celery_workers.py](../../api/run_celery_workers.py) — `worker-main --concurrency=3 --queues=default,acr,azure,blast,storage`; periodic work uses the isolated `worker-reconcile` process.
 * [api/celery_app.py](../../api/celery_app.py) — `task_acks_late=True`, retry semantics.
 * [.github/copilot-instructions.md §12a](../../.github/copilot-instructions.md) — phased rollout discipline + default-OFF guard rule.
 * [docs/features_change/2026-05/2026-05-22-submit-parallelism-and-fast-poll.md](../features_change/2026-05/2026-05-22-submit-parallelism-and-fast-poll.md) — the historical PR that lifted the lock from single-key to per-(cluster, namespace).
