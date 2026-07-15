@@ -34,6 +34,6 @@ export interface MarkSeenResponse {
 
 export const notificationsApi = {
   list: (limit = 50) =>
-    api.get<NotificationsResponse>(`/api/notifications?limit=${encodeURIComponent(limit)}`),
-  markSeen: () => api.post<MarkSeenResponse>("/api/notifications/seen", {}),
+    api.get<NotificationsResponse>(`/notifications?limit=${encodeURIComponent(limit)}`),
+  markSeen: () => api.post<MarkSeenResponse>("/notifications/seen", {}),
 };

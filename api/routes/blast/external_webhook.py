@@ -238,7 +238,7 @@ def _apply_to_jobstate(job_id: str, ext_status: str, error_msg: str | None) -> d
     status_code=status.HTTP_202_ACCEPTED,
     include_in_schema=False,
 )
-async def register_external_job(request: Request, body: ExternalJobEvent) -> dict[str, Any]:
+async def register_external_job(request: Request) -> dict[str, Any]:
     """Receive a terminal-transition / lifecycle webhook from the sibling elb-openapi pod.
 
     Always returns 202 on auth success — even when the job is unknown or the write fails —
@@ -246,6 +246,23 @@ async def register_external_job(request: Request, body: ExternalJobEvent) -> dic
     """
 
     _verify_token(request)
+    try:
+        raw_body = await request.json()
+        body = ExternalJobEvent.model_validate(raw_body)
+    except Exception as exc:
+        # Authenticated sibling notifications must never retry-storm because a
+        # payload was truncated or from a forward-incompatible build. Do not
+        # log the body: it may contain query/result metadata.
+        LOGGER.warning(
+            "openapi webhook: invalid body error=%s content_length=%s",
+            type(exc).__name__,
+            request.headers.get("content-length", ""),
+        )
+        return {
+            "status": "accepted",
+            "synced": False,
+            "reason": "invalid_body",
+        }
     job_id = body.job_id.strip()
     ext_status = _normalise_status(body)
     if ext_status not in _ACCEPTED_STATUSES:

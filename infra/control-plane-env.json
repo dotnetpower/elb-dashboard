@@ -1,5 +1,5 @@
 {
-  "_comment": "Single source of truth for control-plane GUARD/POLICY env toggles. Read by BOTH infra/modules/containerAppControl.bicep (loadJsonContent, applied on full azd/postprovision deploys) AND scripts/dev/quick-deploy.sh (applied as --set-env-vars on every api/worker/beat PATCH, including the GitHub Actions deploy.yml path). Without this shared source, a fast/GHA deploy patches images only and never applies a Bicep env-default change (e.g. ENFORCE_DASHBOARD_RBAC), so a no-RBAC user could still load the dashboard after an apparent redeploy. Keep values as strings. Per-sidecar maps mirror the env arrays in containerAppControl.bicep; only the policy/guard toggles live here (operational vars like LOG_LEVEL and param-derived vars stay inline in Bicep).",
+  "_comment": "Single source of truth for control-plane guard, policy, and crash-safety env values. Read by BOTH infra/modules/containerAppControl.bicep (loadJsonContent, applied on full azd/postprovision deploys) AND scripts/dev/quick-deploy.sh (applied as --set-env-vars on every api/worker/beat PATCH, including the GitHub Actions deploy.yml path). Without this shared source, a fast/GHA deploy patches images only and silently drops safety values such as worker memory recycling or the time-ordered state index. Keep values as strings and never place secrets here.",
   "api": {
     "OPENAPI_ALLOW_PUBLIC_LB": "true",
     "ENFORCE_OPENAPI_EXEC_RBAC": "false",
@@ -10,7 +10,10 @@
     "STRICT_BLUEGREEN": "false",
     "SERVICEBUS_ENABLED": "",
     "ENABLE_SB_SUBMIT_INGRESS": "false",
-    "STORAGE_DATE_LAYOUT_ENABLED": "true"
+    "STORAGE_DATE_LAYOUT_ENABLED": "true",
+    "JOBSTATE_TIME_INDEX_ENABLED": "true",
+    "PYTHONFAULTHANDLER": "1",
+    "STRICT_CLIENT_LOG_REDACTION": "false"
   },
   "worker": {
     "BLAST_GATE_ENABLED": "false",
@@ -18,14 +21,22 @@
     "SERVICEBUS_ENABLED": "",
     "SERVICEBUS_RESIDENT_CONSUMER": "true",
     "SERVICEBUS_DRAIN_CONCURRENCY": "4",
+    "SERVICEBUS_ATOMIC_CLAIM": "true",
+    "SERVICEBUS_DRAIN_SINGLEFLIGHT": "true",
     "SERVICEBUS_QUEUE_AUTOSTART": "true",
-    "STORAGE_DATE_LAYOUT_ENABLED": "true"
+    "STORAGE_DATE_LAYOUT_ENABLED": "true",
+    "CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB": "250000",
+    "CELERY_WORKER_PREFETCH_MULTIPLIER": "1",
+    "JOBSTATE_TIME_INDEX_ENABLED": "true",
+    "PYTHONFAULTHANDLER": "1"
   },
   "beat": {
     "BLAST_GATE_ENABLED": "false",
     "STRICT_BLUEGREEN": "false",
     "SERVICEBUS_ENABLED": "",
     "CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS": "5",
-    "STORAGE_DATE_LAYOUT_ENABLED": "true"
+    "STORAGE_DATE_LAYOUT_ENABLED": "true",
+    "JOBSTATE_TIME_INDEX_ENABLED": "true",
+    "PYTHONFAULTHANDLER": "1"
   }
 }

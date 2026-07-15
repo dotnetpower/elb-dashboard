@@ -15,12 +15,13 @@ from __future__ import annotations
 import logging
 import os
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field
 
 from api.auth import AuthError, CallerIdentity, require_caller
-from api.services.sanitise import sanitise
+from api.services.sanitise import redact_oid, sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +44,34 @@ class ClientLogPayload(BaseModel):
 def _one_line(value: str | None, *, limit: int) -> str:
     cleaned = sanitise(value or "")[:limit]
     return " ".join(cleaned.split())
+
+
+def _strict_redaction_enabled() -> bool:
+    return os.environ.get("STRICT_CLIENT_LOG_REDACTION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _caller_label(caller: CallerIdentity | None) -> str:
+    if caller is None:
+        return "anonymous"
+    if _strict_redaction_enabled():
+        return redact_oid(caller.object_id) or "anonymous"
+    return caller.upn or caller.object_id
+
+
+def _safe_client_url(value: str | None) -> str:
+    if not value or not _strict_redaction_enabled():
+        return _one_line(value, limit=512)
+    try:
+        parsed = urlsplit(value)
+        origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        return _one_line(f"{origin}{parsed.path}", limit=512)
+    except ValueError:
+        return _one_line(value.split("?", 1)[0].split("#", 1)[0], limit=512)
 
 
 async def _client_log_caller(
@@ -90,7 +119,7 @@ def client_log(
         "warning": logging.WARNING,
         "info": logging.INFO,
     }[payload.level]
-    caller_label = (caller.upn or caller.object_id) if caller else "anonymous"
+    caller_label = _caller_label(caller)
     LOGGER.log(
         log_level,
         "client_app_%s source=%s caller=%s url=%s client_request_id=%s "
@@ -98,7 +127,7 @@ def client_log(
         payload.level,
         _one_line(payload.source, limit=64),
         _one_line(caller_label, limit=128),
-        _one_line(payload.url, limit=512),
+        _safe_client_url(payload.url),
         _one_line(payload.request_id, limit=64),
         _one_line(payload.message, limit=1000),
         _one_line(payload.stack, limit=2000),

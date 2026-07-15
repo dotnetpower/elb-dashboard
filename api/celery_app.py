@@ -44,6 +44,9 @@ for _name in (
     "azure.identity",
     "azure.identity._internal.decorators",
     "azure.identity._credentials.default",
+    "azure.monitor.opentelemetry.exporter.export._base",
+    "azure.servicebus",
+    "azure.servicebus._pyamqp",
     "urllib3.connectionpool",
     "httpx",
 ):

@@ -378,9 +378,37 @@ def test_register_external_job_terminal_correction_still_applies(
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
-def test_register_external_job_rejects_missing_job_id(client: TestClient) -> None:
+def test_register_external_job_acks_missing_job_id_without_retry_storm(
+    client: TestClient,
+) -> None:
     r = client.post(_WEBHOOK_PATH, json={"event": "completed"}, headers=_headers())
-    assert r.status_code == 422
+    assert r.status_code == 202
+    assert r.json()["reason"] == "invalid_body"
+
+
+def test_register_external_job_acks_malformed_json_without_retry_storm(
+    client: TestClient,
+) -> None:
+    r = client.post(
+        _WEBHOOK_PATH,
+        content=b'{"job_id":"job-1",',
+        headers=_headers(),
+    )
+    assert r.status_code == 202
+    assert r.json() == {
+        "status": "accepted",
+        "synced": False,
+        "reason": "invalid_body",
+    }
+
+
+def test_register_external_job_auth_precedes_malformed_body(client: TestClient) -> None:
+    r = client.post(
+        _WEBHOOK_PATH,
+        content=b'{"job_id":',
+        headers=_headers("wrong-token"),
+    )
+    assert r.status_code == 401
 
 
 def test_register_external_job_unknown_status_returns_202(

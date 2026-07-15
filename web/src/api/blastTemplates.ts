@@ -22,11 +22,11 @@ export interface BlastTemplateList {
 }
 
 export const blastTemplatesApi = {
-  list: () => api.get<BlastTemplateList>("/api/blast/templates"),
+  list: () => api.get<BlastTemplateList>("/blast/templates"),
   create: (name: string, fields: ExportableFormFields) =>
-    api.post<BlastTemplate>("/api/blast/templates", { name, fields }),
+    api.post<BlastTemplate>("/blast/templates", { name, fields }),
   update: (id: string, body: { name?: string; fields?: ExportableFormFields }) =>
-    api.put<BlastTemplate>(`/api/blast/templates/${encodeURIComponent(id)}`, body),
+    api.put<BlastTemplate>(`/blast/templates/${encodeURIComponent(id)}`, body),
   remove: (id: string) =>
-    api.del<{ deleted: boolean }>(`/api/blast/templates/${encodeURIComponent(id)}`),
+    api.del<{ deleted: boolean }>(`/blast/templates/${encodeURIComponent(id)}`),
 };

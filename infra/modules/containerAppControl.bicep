@@ -406,6 +406,15 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Date-tiered results layout (native + external/SB jobs write under
             // results/YYYY/MM/DD/<job_id>/). Default OFF (flat). Charter §12a Rule 4.
             { name: 'STORAGE_DATE_LAYOUT_ENABLED', value: effectiveStorageDateLayout }
+            // Live backfill/parity is complete. Keep the bounded time-ordered
+            // read path enabled across both full and fast deployments.
+            { name: 'JOBSTATE_TIME_INDEX_ENABLED', value: controlPlaneEnv.api.JOBSTATE_TIME_INDEX_ENABLED }
+            // Emit native Python crash stacks (SIGSEGV/SIGABRT) before ACA
+            // restarts the sidecar; no behaviour change on healthy requests.
+            { name: 'PYTHONFAULTHANDLER', value: controlPlaneEnv.api.PYTHONFAULTHANDLER }
+            // Default-OFF hardening: hash caller identity and strip query /
+            // fragment data from browser-originated error telemetry.
+            { name: 'STRICT_CLIENT_LOG_REDACTION', value: controlPlaneEnv.api.STRICT_CLIENT_LOG_REDACTION }
             // Dev-stage job visibility (issue: recent searches only showed
             // API-submitted jobs). Default ON for the single-tenant
             // development phase: every authenticated tenant member can see and
@@ -496,16 +505,17 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           // = 3 parents + 5 prefork children = 8 Python processes. Keeping
           // reconcile out of worker-main guarantees periodic maintenance cannot
           // consume every interactive AKS/BLAST slot. At 0.5 vCPU / 1.0Gi the
-          // earlier pool was heavily
-          // over-subscribed; bump to 1.0 vCPU / 2.0Gi so the prefork children
-          // are not starved when several azure / blast / storage tasks run at
-          // once. Per-replica total = 3.25 vCPU / 6.5Gi (api 1.0/2.0,
-          // frontend 0.25/0.5, worker 1.0/2.0, beat 0.25/0.5, redis 0.25/0.5,
+          // earlier pool was heavily over-subscribed. A live 2.0Gi soak still
+          // OOM-killed prefork children during reconcile bursts even with the
+          // 250000 KiB post-task recycle cap, because the cap cannot interrupt
+          // an in-flight allocation. Use 1.5 vCPU / 3.0Gi for process-level
+          // headroom. Per-replica total = 3.75 vCPU / 7.5Gi (api 1.0/2.0,
+          // frontend 0.25/0.5, worker 1.5/3.0, beat 0.25/0.5, redis 0.25/0.5,
           // terminal 0.5/1.0), still under the Consumption 4 vCPU / 8Gi cap
-          // and keeping the 1 vCPU : 2 GiB ratio.
+          // and keeping the required 1 vCPU : 2 GiB ratio.
           resources: {
-            cpu: json('1.0')
-            memory: '2.0Gi'
+            cpu: json('1.5')
+            memory: '3.0Gi'
           }
           env: [
             { name: 'SIDECAR_NAME', value: 'worker' }
@@ -542,7 +552,12 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // for the two MainProcess parents. Without this the children grew
             // unbounded and the kernel SIGKILL'd them at the 1.0Gi limit
             // (signal 9 WorkerLostError, ~250/24h before the 2.0Gi bump).
-            { name: 'CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB', value: '250000' }
+            { name: 'CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB', value: controlPlaneEnv.worker.CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB }
+            // Fair dispatch avoids reserving four late-ack tasks per child;
+            // a killed child then requeues at most its one active task.
+            { name: 'CELERY_WORKER_PREFETCH_MULTIPLIER', value: controlPlaneEnv.worker.CELERY_WORKER_PREFETCH_MULTIPLIER }
+            { name: 'JOBSTATE_TIME_INDEX_ENABLED', value: controlPlaneEnv.worker.JOBSTATE_TIME_INDEX_ENABLED }
+            { name: 'PYTHONFAULTHANDLER', value: controlPlaneEnv.worker.PYTHONFAULTHANDLER }
             // Worker calls api.services.terminal_exec which needs the same
             // shared secret as the api sidecar.
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
@@ -585,6 +600,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // the main thread. The atomic claim_bridge gate makes >1 safe
             // against duplicate BLAST runs. 1 = legacy serial.
             { name: 'SERVICEBUS_DRAIN_CONCURRENCY', value: controlPlaneEnv.worker.SERVICEBUS_DRAIN_CONCURRENCY }
+            // Multi-consumer safety: resident + beat fallback may overlap, but
+            // only one drain owns the distributed lease and every request has
+            // one durable bridge claim before OpenAPI submission.
+            { name: 'SERVICEBUS_ATOMIC_CLAIM', value: controlPlaneEnv.worker.SERVICEBUS_ATOMIC_CLAIM }
+            { name: 'SERVICEBUS_DRAIN_SINGLEFLIGHT', value: controlPlaneEnv.worker.SERVICEBUS_DRAIN_SINGLEFLIGHT }
             // Queue-arrival cluster auto-start (issue #52 follow-up). When a
             // request lands on the SB queue and the AKS cluster is Stopped,
             // worker takes a single-flight lease and triggers `az aks start`
@@ -638,6 +658,8 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_MONITOR_DISABLE_LIVE_METRICS', value: 'true' }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
+            { name: 'JOBSTATE_TIME_INDEX_ENABLED', value: controlPlaneEnv.beat.JOBSTATE_TIME_INDEX_ENABLED }
+            { name: 'PYTHONFAULTHANDLER', value: controlPlaneEnv.beat.PYTHONFAULTHANDLER }
             // Platform ACR name. The beat reconciler revision GC
             // (api.tasks.upgrade.revision_gc) resolves image tags against this
             // registry; keep it in sync with the api/worker sidecars.

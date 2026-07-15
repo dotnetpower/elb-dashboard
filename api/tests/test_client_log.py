@@ -13,6 +13,10 @@ from __future__ import annotations
 import logging
 
 import pytest
+from api.auth import CallerIdentity
+from api.routes.client_log import ClientLogPayload, client_log
+from api.services.sanitise import redact_oid
+from fastapi import Response
 from fastapi.testclient import TestClient
 
 
@@ -51,3 +55,51 @@ def test_client_log_writes_sanitised_error_record(
     assert "Bearer <redacted>" in log_text
     assert "abcdefghijklmnopqrstuvwxyz0123456789" not in log_text
     assert "at Widget at App" in log_text
+
+
+def test_strict_client_log_redacts_identity_and_url_query(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("STRICT_CLIENT_LOG_REDACTION", "true")
+    caller = CallerIdentity(
+        object_id="11111111-2222-3333-4444-555555555555",
+        tenant_id="tenant",
+        upn="researcher@example.com",
+        raw_token="",
+        claims={},
+    )
+    caplog.set_level(logging.ERROR, logger="api.routes.client_log")
+
+    client_log(
+        ClientLogPayload(
+            message="failed",
+            url="https://example.test/blast/jobs?sample=patient-1#private",
+        ),
+        Response(),
+        caller,
+    )
+
+    assert f"caller={redact_oid(caller.object_id)}" in caplog.text
+    assert "researcher@example.com" not in caplog.text
+    assert "url=https://example.test/blast/jobs" in caplog.text
+    assert "sample=patient-1" not in caplog.text
+
+
+def test_client_log_redaction_gate_off_preserves_legacy_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("STRICT_CLIENT_LOG_REDACTION", raising=False)
+    caller = CallerIdentity(
+        object_id="11111111-2222-3333-4444-555555555555",
+        tenant_id="tenant",
+        upn="researcher@example.com",
+        raw_token="",
+        claims={},
+    )
+    caplog.set_level(logging.ERROR, logger="api.routes.client_log")
+
+    client_log(ClientLogPayload(message="failed"), Response(), caller)
+
+    assert "caller=researcher@example.com" in caplog.text

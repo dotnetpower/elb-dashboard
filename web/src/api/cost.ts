@@ -43,14 +43,14 @@ function q(subscriptionId: string, resourceGroup: string, clusterName: string): 
 
 export const clusterCostApi = {
   get: (subscriptionId: string, resourceGroup: string, clusterName: string) =>
-    api.get<CostResponse>(`/api/cost?${q(subscriptionId, resourceGroup, clusterName)}`),
+    api.get<CostResponse>(`/cost?${q(subscriptionId, resourceGroup, clusterName)}`),
   putBudget: (
     subscriptionId: string,
     resourceGroup: string,
     clusterName: string,
     monthlyBudgetUsd: number,
   ) =>
-    api.put<{ monthly_budget_usd: number }>("/api/cost/budget", {
+    api.put<{ monthly_budget_usd: number }>("/cost/budget", {
       subscription_id: subscriptionId,
       resource_group: resourceGroup,
       cluster_name: clusterName,

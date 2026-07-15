@@ -261,10 +261,23 @@ def stream_blob_bytes(
             "storage download semaphore exhausted: too many concurrent transfers"
         )
     try:
+        # ``download_blob`` performs the initial Storage request. Keep it in
+        # this non-generator frame so a missing blob / auth / network failure
+        # is raised before FastAPI commits the StreamingResponse's HTTP 200.
+        # The old generator executed this lazily on first body iteration,
+        # producing misleading 200/success=false requests and ExceptionGroup.
         downloader = blob.download_blob()
-        yield from downloader.chunks()
-    finally:
+    except Exception:
         _STREAM_DOWNLOAD_SEMAPHORE.release()
+        raise
+
+    def _chunks() -> Iterator[bytes]:
+        try:
+            yield from downloader.chunks()
+        finally:
+            _STREAM_DOWNLOAD_SEMAPHORE.release()
+
+    return _chunks()
 
 
 _STREAM_DOWNLOAD_MAX_CONCURRENCY = max(

@@ -44,6 +44,7 @@ from typing import Any
 
 from azure.core.exceptions import ClientAuthenticationError
 from azure.servicebus import (
+    AutoLockRenewer,
     ServiceBusClient,
     ServiceBusMessage,
     ServiceBusReceiveMode,
@@ -70,6 +71,10 @@ _PEEK_DEFAULT = 5
 # bloat the response or the dashboard. A content preview never needs the full
 # payload; the truncation is flagged via ``body_truncated``.
 _PEEK_BODY_MAX_CHARS = 4000
+_MAX_LOCK_RENEWAL_SECONDS = max(
+    30,
+    min(int(os.environ.get("SERVICEBUS_MAX_LOCK_RENEWAL_SECONDS", "300")), 900),
+)
 
 
 def _sb_client_kwargs() -> dict[str, Any]:
@@ -90,9 +95,7 @@ def _sb_client_kwargs() -> dict[str, Any]:
     """
     return {
         "retry_total": int(os.environ.get("SERVICEBUS_RETRY_TOTAL", "3")),
-        "retry_backoff_max": float(
-            os.environ.get("SERVICEBUS_RETRY_BACKOFF_MAX", "30")
-        ),
+        "retry_backoff_max": float(os.environ.get("SERVICEBUS_RETRY_BACKOFF_MAX", "30")),
     }
 
 
@@ -212,9 +215,7 @@ def _admin_client(cfg: ServiceBusConfig) -> Iterator[ServiceBusAdministrationCli
             conn = _resolve_sas_connection_string(cfg)
             admin = ServiceBusAdministrationClient.from_connection_string(conn, **kwargs)
         else:
-            admin = ServiceBusAdministrationClient(
-                cfg.namespace_fqdn, get_credential(), **kwargs
-            )
+            admin = ServiceBusAdministrationClient(cfg.namespace_fqdn, get_credential(), **kwargs)
     except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
         raise ServiceBusAuthError(str(exc)) from exc
     try:
@@ -353,10 +354,13 @@ def peek_dead_letter(
     """
     cfg = _require_enabled_config(cfg)
     out: list[ParsedMessage] = []
-    with _client(cfg) as client, client.get_queue_receiver(
-        cfg.request_queue,
-        sub_queue=ServiceBusSubQueue.DEAD_LETTER,
-    ) as receiver:
+    with (
+        _client(cfg) as client,
+        client.get_queue_receiver(
+            cfg.request_queue,
+            sub_queue=ServiceBusSubQueue.DEAD_LETTER,
+        ) as receiver,
+    ):
         for message in receiver.peek_messages(max_message_count=max(1, min(max_count, 100))):
             out.append(_parse(message))
     return out
@@ -494,12 +498,15 @@ def delete_dead_letter_messages(
     wanted = set(sequence_numbers)
     budget = max(1, max_messages)
     seen: set[int] = set()
-    with _client(cfg) as client, client.get_queue_receiver(
-        cfg.request_queue,
-        sub_queue=ServiceBusSubQueue.DEAD_LETTER,
-        receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
-        max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
-    ) as receiver:
+    with (
+        _client(cfg) as client,
+        client.get_queue_receiver(
+            cfg.request_queue,
+            sub_queue=ServiceBusSubQueue.DEAD_LETTER,
+            receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
+            max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+        ) as receiver,
+    ):
         while budget > 0 and wanted:
             batch = receiver.receive_messages(
                 max_message_count=min(budget, 32),
@@ -561,12 +568,16 @@ def promote_dead_letter_messages(
     wanted = set(sequence_numbers)
     budget = max(1, max_messages)
     seen: set[int] = set()
-    with _client(cfg) as client, client.get_queue_receiver(
-        cfg.request_queue,
-        sub_queue=ServiceBusSubQueue.DEAD_LETTER,
-        receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
-        max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
-    ) as receiver, client.get_queue_sender(cfg.request_queue) as sender:
+    with (
+        _client(cfg) as client,
+        client.get_queue_receiver(
+            cfg.request_queue,
+            sub_queue=ServiceBusSubQueue.DEAD_LETTER,
+            receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
+            max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+        ) as receiver,
+        client.get_queue_sender(cfg.request_queue) as sender,
+    ):
         while budget > 0 and wanted:
             batch = receiver.receive_messages(
                 max_message_count=min(budget, 32),
@@ -623,7 +634,6 @@ def promote_dead_letter_messages(
             if wrapped:
                 break
     return stats
-
 
 
 def _safe_drain_handler(
@@ -714,10 +724,14 @@ def drain_requests(
         else None
     )
     try:
-        with _client(cfg) as client, client.get_queue_receiver(
-            cfg.request_queue,
-            max_wait_time=max_wait_seconds,
-        ) as receiver:
+        with (
+            _client(cfg) as client,
+            AutoLockRenewer(max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS) as lock_renewer,
+            client.get_queue_receiver(
+                cfg.request_queue,
+                max_wait_time=max_wait_seconds,
+            ) as receiver,
+        ):
             while budget > 0:
                 batch = receiver.receive_messages(
                     max_message_count=min(budget, 32),
@@ -741,12 +755,28 @@ def drain_requests(
                         seen.add(ident)
                     stats.received += 1
                     budget -= 1
+                    try:
+                        lock_renewer.register(
+                            receiver,
+                            message,
+                            max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
+                        )
+                    except Exception as exc:
+                        # Continue fail-safe: settlement remains authoritative
+                        # and the broker redelivers if the lock expires. Keep
+                        # this at WARNING because an SDK/protocol regression
+                        # here recreates the MaxDeliveryCount/DLQ incident and
+                        # must not disappear in production DEBUG noise.
+                        LOGGER.warning(
+                            "service bus lock renewal registration failed "
+                            "seq=%s error=%s; settlement may be redelivered",
+                            parsed.sequence_number,
+                            type(exc).__name__,
+                        )
                     claimed.append((message, parsed))
                 # Phase 2 (worker threads when concurrency>1): run handler bodies.
                 # NEVER settles a message here — only computes the action.
-                actions = _run_drain_handlers(
-                    handler, [parsed for _m, parsed in claimed], pool
-                )
+                actions = _run_drain_handlers(handler, [parsed for _m, parsed in claimed], pool)
                 # Phase 3 (main thread): settle in receiver order.
                 for (message, _parsed), action in zip(claimed, actions, strict=True):
                     _settle(receiver, message, action, stats)
@@ -919,9 +949,7 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                             "name": cfg.completion_topic,
                             "active_message_count": cq.active_message_count,
                             "dead_letter_message_count": cq.dead_letter_message_count,
-                            "transfer_message_count": getattr(
-                                cq, "transfer_message_count", None
-                            ),
+                            "transfer_message_count": getattr(cq, "transfer_message_count", None),
                             "transfer_dead_letter_message_count": getattr(
                                 cq, "transfer_dead_letter_message_count", None
                             ),
@@ -1004,12 +1032,15 @@ def purge_dead_letter(
     cfg = _require_enabled_config(cfg)
     stats = PurgeStats()
     budget = max(1, max_messages)
-    with _client(cfg) as client, client.get_queue_receiver(
-        cfg.request_queue,
-        sub_queue=ServiceBusSubQueue.DEAD_LETTER,
-        receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
-        max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
-    ) as receiver:
+    with (
+        _client(cfg) as client,
+        client.get_queue_receiver(
+            cfg.request_queue,
+            sub_queue=ServiceBusSubQueue.DEAD_LETTER,
+            receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
+            max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+        ) as receiver,
+    ):
         while budget > 0:
             batch = receiver.receive_messages(
                 max_message_count=min(budget, 32),
@@ -1055,12 +1086,15 @@ def purge_queue(cfg: ServiceBusConfig | None, *, dead_letter: bool, max_messages
     removed = 0
     budget = max(1, max_messages)
     sub_queue = ServiceBusSubQueue.DEAD_LETTER if dead_letter else None
-    with _client(cfg) as client, client.get_queue_receiver(
-        cfg.request_queue,
-        sub_queue=sub_queue,
-        receive_mode=ServiceBusReceiveMode.RECEIVE_AND_DELETE,
-        max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
-    ) as receiver:
+    with (
+        _client(cfg) as client,
+        client.get_queue_receiver(
+            cfg.request_queue,
+            sub_queue=sub_queue,
+            receive_mode=ServiceBusReceiveMode.RECEIVE_AND_DELETE,
+            max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+        ) as receiver,
+    ):
         while budget > 0:
             batch = receiver.receive_messages(
                 max_message_count=min(budget, 64),

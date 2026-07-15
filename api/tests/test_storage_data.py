@@ -5,7 +5,7 @@ Edit boundaries: Keep assertions focused on the behavior under test; prefer fake
 Azure calls.
 Key entry points: `FakeBlobClient`, `FakeBlobService`,
 `test_upload_group_fasta_writes_queries_blob`, `test_upload_group_fasta_rejects_unsafe_paths`,
-`FakeChunkDownload`, `FakeChunkBlobClient`
+`FakeChunkDownload`, `FakeChunkBlobClient`, `test_stream_blob_bytes_*`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_storage_data.py`.
@@ -77,6 +77,26 @@ class FakeResultBlobService:
         return FakeResultContainerClient(self.blobs)
 
 
+class _StreamBlobClient:
+    def __init__(self, result: object) -> None:
+        self.result = result
+        self.download_calls = 0
+
+    def download_blob(self) -> object:
+        self.download_calls += 1
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+class _StreamBlobService:
+    def __init__(self, blob: _StreamBlobClient) -> None:
+        self.blob = blob
+
+    def get_blob_client(self, _container: str, _blob_path: str) -> _StreamBlobClient:
+        return self.blob
+
+
 def test_upload_group_fasta_writes_queries_blob(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_service = FakeBlobService()
     monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: fake_service)
@@ -108,6 +128,31 @@ def test_list_result_blobs_caps_results(monkeypatch: pytest.MonkeyPatch) -> None
     )
 
     assert [blob["name"] for blob in blobs] == ["job-1/a.out", "job-1/b.out"]
+
+
+def test_stream_blob_bytes_opens_download_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = SimpleNamespace(chunks=lambda: iter((b"one", b"two")))
+    blob = _StreamBlobClient(downloader)
+    monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: _StreamBlobService(blob))
+
+    stream = storage_data.stream_blob_bytes(object(), "elbstg01", "results", "job/out")
+
+    assert blob.download_calls == 1
+    assert list(stream) == [b"one", b"two"]
+
+
+def test_stream_blob_bytes_raises_initial_failure_eagerly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob = _StreamBlobClient(RuntimeError("missing"))
+    monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: _StreamBlobService(blob))
+
+    with pytest.raises(RuntimeError, match="missing"):
+        storage_data.stream_blob_bytes(object(), "elbstg01", "results", "job/out")
+
+    assert blob.download_calls == 1
 
 
 def test_container_usage_summaries_caps_large_containers(

@@ -8,7 +8,8 @@ Edit boundaries: Exercises the loop with a fake SDK client/receiver injected via
     ``service_bus._client``; no live Service Bus.
 Key entry points: the ``test_*`` functions.
 Risky contracts: one settle per message per tick; an abandoned message is
-    deferred to the next tick instead of hot-looping.
+deferred to the next tick instead of hot-looping; claimed messages register
+automatic lock renewal before any handler runs.
 Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py``.
 """
 
@@ -102,9 +103,7 @@ def test_abandoned_message_not_reabandoned_same_tick(monkeypatch: pytest.MonkeyP
     receiver = _FakeReceiver([_FakeMessage("m1", {"db": "core_nt"})])
     _patch_client(monkeypatch, receiver)
 
-    stats = service_bus.drain_requests(
-        _cfg(), lambda _m: MessageAction.ABANDON, max_messages=50
-    )
+    stats = service_bus.drain_requests(_cfg(), lambda _m: MessageAction.ABANDON, max_messages=50)
     # Despite the message reappearing after abandon, it is abandoned at most
     # twice (once handled, once as the deferred re-delivery guard) — NOT 50x.
     assert stats.abandoned <= 2
@@ -116,12 +115,77 @@ def test_complete_settles_once(monkeypatch: pytest.MonkeyPatch) -> None:
     receiver = _FakeReceiver([_FakeMessage("m1", {"db": "core_nt"})])
     _patch_client(monkeypatch, receiver)
 
-    stats = service_bus.drain_requests(
-        _cfg(), lambda _m: MessageAction.COMPLETE, max_messages=50
-    )
+    stats = service_bus.drain_requests(_cfg(), lambda _m: MessageAction.COMPLETE, max_messages=50)
     assert stats.completed == 1
     assert receiver.completed == ["m1"]
     assert receiver.abandoned == []
+
+
+def test_claimed_message_registers_lock_renewal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receiver = _FakeReceiver([_FakeMessage("m1", {"db": "core_nt"})])
+    _patch_client(monkeypatch, receiver)
+    registrations: list[tuple[Any, Any, int]] = []
+
+    class _Renewer:
+        def __init__(self, *, max_lock_renewal_duration: int) -> None:
+            self.duration = max_lock_renewal_duration
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+        def register(
+            self,
+            registered_receiver: Any,
+            message: Any,
+            *,
+            max_lock_renewal_duration: int,
+        ) -> None:
+            registrations.append((registered_receiver, message, max_lock_renewal_duration))
+
+    monkeypatch.setattr(service_bus, "AutoLockRenewer", _Renewer)
+
+    stats = service_bus.drain_requests(_cfg(), lambda _m: MessageAction.COMPLETE, max_messages=1)
+
+    assert stats.completed == 1
+    assert len(registrations) == 1
+    assert registrations[0][0] is receiver
+    assert registrations[0][1].message_id == "m1"
+    assert registrations[0][2] == service_bus._MAX_LOCK_RENEWAL_SECONDS
+
+
+def test_lock_renewal_registration_failure_is_visible_and_still_settles(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    receiver = _FakeReceiver([_FakeMessage("m1", {"db": "core_nt"})])
+    _patch_client(monkeypatch, receiver)
+
+    class _BrokenRenewer:
+        def __init__(self, *, max_lock_renewal_duration: int) -> None:
+            del max_lock_renewal_duration
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+        def register(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("protocol mismatch")
+
+    monkeypatch.setattr(service_bus, "AutoLockRenewer", _BrokenRenewer)
+
+    stats = service_bus.drain_requests(_cfg(), lambda _m: MessageAction.COMPLETE, max_messages=1)
+
+    assert stats.completed == 1
+    assert receiver.completed == ["m1"]
+    assert "lock renewal registration failed" in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_dead_letter_settles_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,9 +204,7 @@ def test_multiple_distinct_messages_all_processed(monkeypatch: pytest.MonkeyPatc
     receiver = _FakeReceiver(msgs)
     _patch_client(monkeypatch, receiver)
 
-    stats = service_bus.drain_requests(
-        _cfg(), lambda _m: MessageAction.COMPLETE, max_messages=50
-    )
+    stats = service_bus.drain_requests(_cfg(), lambda _m: MessageAction.COMPLETE, max_messages=50)
     assert stats.completed == 5
     assert sorted(receiver.completed) == ["m0", "m1", "m2", "m3", "m4"]
 
@@ -294,9 +356,7 @@ def test_parallel_drain_maps_each_action_and_settles_once(
         n = int(m.correlation_id[1:])
         return MessageAction.COMPLETE if n % 2 == 0 else MessageAction.DEAD_LETTER
 
-    stats = service_bus.drain_requests(
-        _cfg(), handler, max_messages=50, max_concurrency=8
-    )
+    stats = service_bus.drain_requests(_cfg(), handler, max_messages=50, max_concurrency=8)
     assert set(receiver.completed) == {"p0", "p2", "p4"}
     assert set(receiver.dead_lettered) == {"p1", "p3", "p5"}
     assert stats.completed == 3
@@ -318,9 +378,7 @@ def test_parallel_drain_isolates_one_handler_exception(
             raise RuntimeError("boom")
         return MessageAction.COMPLETE
 
-    stats = service_bus.drain_requests(
-        _cfg(), handler, max_messages=4, max_concurrency=4
-    )
+    stats = service_bus.drain_requests(_cfg(), handler, max_messages=4, max_concurrency=4)
     assert set(receiver.completed) == {"e0", "e1", "e3"}
     assert "e2" in receiver.abandoned
     assert stats.completed == 3
@@ -341,9 +399,7 @@ def test_parallel_drain_actually_runs_handlers_concurrently(
         barrier.wait()  # all 4 must be in-flight together or this raises
         return MessageAction.COMPLETE
 
-    stats = service_bus.drain_requests(
-        _cfg(), handler, max_messages=4, max_concurrency=4
-    )
+    stats = service_bus.drain_requests(_cfg(), handler, max_messages=4, max_concurrency=4)
     assert stats.completed == 4
     assert set(receiver.completed) == {"c0", "c1", "c2", "c3"}
 
@@ -362,9 +418,7 @@ def test_serial_default_creates_no_thread_pool(monkeypatch: pytest.MonkeyPatch) 
     receiver = _FakeReceiver([_FakeMessage("s1", {"db": "core_nt"})])
     _patch_client(monkeypatch, receiver)
 
-    stats = service_bus.drain_requests(
-        _cfg(), lambda _m: MessageAction.COMPLETE, max_messages=50
-    )
+    stats = service_bus.drain_requests(_cfg(), lambda _m: MessageAction.COMPLETE, max_messages=50)
     assert created == []  # no pool created for the serial default
     assert stats.completed == 1
 
@@ -383,4 +437,3 @@ def test_parallel_drain_handles_multiple_batches(
     assert stats.completed == 70
     assert stats.received == 70
     assert len(receiver.completed) == 70
-

@@ -220,6 +220,17 @@ class JobStateRepository:
                     self._history_pool = pool
         return pool
 
+    def _reset_history_client(self) -> None:
+        """Discard a broken pooled history client before one bounded retry."""
+        with self._pool_lock:
+            pool = self._history_pool
+            self._history_pool = None
+        if pool is not None:
+            try:
+                pool.close()
+            except Exception as exc:
+                LOGGER.debug("jobhistory client close failed: %s", type(exc).__name__)
+
     def _index_client(self) -> _PooledTableClient:
         """Pooled client for the optional time-ordered index table (#50).
 
@@ -1272,15 +1283,15 @@ class JobStateRepository:
     def append_history(
         self, job_id: str, event: str, payload: dict[str, Any] | None = None
     ) -> None:
+        entity: dict[str, Any] = {
+            "PartitionKey": job_id,
+            "RowKey": _ulid_like(),
+            "event": event,
+            "ts": _now_iso(),
+        }
         try:
             import json
 
-            entity = {
-                "PartitionKey": job_id,
-                "RowKey": _ulid_like(),
-                "event": event,
-                "ts": _now_iso(),
-            }
             if payload is not None:
                 # Audit P2 #13 #14: when STRICT_AUDIT_HASH=true, replace
                 # GUID-shaped values under PII-bearing keys (caller_oid,
@@ -1297,8 +1308,21 @@ class JobStateRepository:
                 )
                 entity["payload_json"] = json.dumps(effective_payload, default=str)
             self._ensure_table("jobhistory")
-            with self._history_client() as t:
-                t.create_entity(entity)
+            for attempt in range(2):
+                try:
+                    with self._history_client() as t:
+                        t.create_entity(entity)
+                    return
+                except ResourceExistsError:
+                    # The first request may have reached Storage before its
+                    # response connection dropped. Reusing the immutable RowKey
+                    # turns the retry's 409 into idempotent success.
+                    return
+                except Exception:
+                    if attempt == 0:
+                        self._reset_history_client()
+                        continue
+                    raise
         except Exception as exc:
             # History is best-effort — never fail the parent write because
             # the audit append failed.

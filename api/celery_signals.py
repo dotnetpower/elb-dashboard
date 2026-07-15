@@ -144,6 +144,30 @@ def _is_background_consumer_worker(sender: object | None) -> bool:
     return hostname.split("@", 1)[0] == "worker-reconcile"
 
 
+def _reset_inherited_client_pools() -> None:
+    """Drop network clients inherited across the Celery prefork boundary.
+
+    ``requests.Session`` / urllib3 pools, Azure SDK pipelines, and credential
+    token caches are process-local objects. Reusing a copy created before
+    ``fork()`` produced corrupt TLS state under load (random X509/decrypt
+    errors) and stale keep-alive sockets. Each reset is best-effort; a child
+    must still boot when an optional client module is unavailable.
+    """
+    resets = (
+        ("api.services", "reset_credential"),
+        ("api.services.azure_clients", "reset_mgmt_client_pool"),
+        ("api.services.k8s.monitoring", "reset_k8s_credential_cache"),
+        ("api.services.k8s.monitoring", "reset_k8s_session_pool"),
+        ("api.services.state_repo", "reset_state_repo_cache"),
+    )
+    for module_name, attr in resets:
+        try:
+            module = __import__(module_name, fromlist=[attr])
+            getattr(module, attr)()
+        except Exception as exc:
+            LOGGER.debug("worker child %s reset skipped: %s", attr, type(exc).__name__)
+
+
 @worker_init.connect  # type: ignore[untyped-decorator]
 def _on_worker_init(sender: object | None = None, **_kwargs: object) -> None:
     _start_reporter("worker")
@@ -189,6 +213,7 @@ def _on_worker_shutdown(**_kwargs: object) -> None:
 
 @worker_process_init.connect  # type: ignore[untyped-decorator]
 def _on_worker_process_init(**_kwargs: object) -> None:
+    _reset_inherited_client_pools()
     try:
         from api.app.telemetry import init_telemetry
 

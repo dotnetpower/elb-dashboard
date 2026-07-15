@@ -7,7 +7,7 @@ Key entry points: `test_job_state_round_trips_parent_job_id`,
 `test_job_state_writes_canonical_v2_job_metadata`, `test_job_state_honours_explicit_job_title`,
 `test_list_for_owner_ensures_missing_jobstate_table`,
 `test_list_children_for_owner_groups_parent_rows`,
-`test_create_ensures_state_and_history_tables`
+`test_create_ensures_state_and_history_tables`, `test_append_history_retries_with_same_row_key`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_state_repo.py`.
@@ -18,6 +18,42 @@ from __future__ import annotations
 from api.services.state import repository as state_repo
 from api.services.state.repository import JobState, JobStateRepository
 from azure.core.exceptions import ResourceNotFoundError
+
+
+class _HistoryClientContext:
+    def __init__(self, create) -> None:
+        self.create_entity = create
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+
+def test_append_history_retries_with_same_row_key(monkeypatch) -> None:
+    repo = object.__new__(JobStateRepository)
+    attempts: list[dict] = []
+    resets: list[int] = []
+
+    def _first(entity):
+        attempts.append(dict(entity))
+        raise ConnectionError("pooled connection dropped")
+
+    def _second(entity):
+        attempts.append(dict(entity))
+
+    clients = iter((_HistoryClientContext(_first), _HistoryClientContext(_second)))
+    monkeypatch.setattr(repo, "_ensure_table", lambda _name: None)
+    monkeypatch.setattr(repo, "_history_client", lambda: next(clients))
+    monkeypatch.setattr(repo, "_reset_history_client", lambda: resets.append(1))
+
+    repo.append_history("job-1", "running", {"status": "running"})
+
+    assert resets == [1]
+    assert len(attempts) == 2
+    assert attempts[0]["RowKey"] == attempts[1]["RowKey"]
+    assert attempts[0]["payload_json"] == attempts[1]["payload_json"]
 
 
 def test_job_state_round_trips_parent_job_id() -> None:

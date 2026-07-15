@@ -16,8 +16,8 @@ export interface WebhookConfigPublic {
 }
 
 export const webhooksApi = {
-  get: () => api.get<WebhookConfigPublic>("/api/settings/webhooks"),
+  get: () => api.get<WebhookConfigPublic>("/settings/webhooks"),
   put: (body: { url: string; enabled: boolean; events: string }) =>
-    api.put<WebhookConfigPublic>("/api/settings/webhooks", body),
-  test: () => api.post<{ delivered: boolean }>("/api/settings/webhooks/test", {}),
+    api.put<WebhookConfigPublic>("/settings/webhooks", body),
+  test: () => api.post<{ delivered: boolean }>("/settings/webhooks/test", {}),
 };

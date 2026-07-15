@@ -184,9 +184,16 @@ def test_worker_process_init_initializes_worker_telemetry(
 
     monkeypatch.setitem(sys.modules, "api.app.telemetry", _TelemetryModule)
     import api.celery_app as celery_app
+    import api.celery_signals as celery_signals
+
+    monkeypatch.setattr(
+        celery_signals,
+        "_reset_inherited_client_pools",
+        lambda: calls.append("reset"),
+    )
 
     celery_app._on_worker_process_init()
-    assert calls == ["worker"]
+    assert calls == ["reset", "worker"]
 
 
 def test_init_never_raises_when_distro_breaks(monkeypatch: pytest.MonkeyPatch) -> None:
