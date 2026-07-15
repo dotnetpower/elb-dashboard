@@ -73,3 +73,17 @@ limiting factor while ten unconstrained AzCopy processes ran concurrently.
 - Ruff lint and format checks passed on all touched Python files.
 - The generated warmup script passed `bash -n` syntax validation.
 - Documentation frontmatter guard and `mkdocs build --strict` passed.
+- Deployed the backend with `scripts/dev/quick-deploy.sh api --yes`. ACR build
+  `de4b` published `elb-api:20260715064756` at digest
+  `sha256:7aae857d0b8db9d8948396f6e59debb52aea58ba14f900df726c136e87510654`.
+- Container App revision `ca-elb-dashboard--0000237` reached `Healthy` /
+  `RunningAtMaxScale`; all six sidecars were Ready with zero restarts. The
+  public health endpoint returned HTTP 200 and identified revision `0000237`.
+- All three Celery parents (`worker-main`, `worker-reconcile`, and
+  `worker-artifacts`) answered ping. Runtime inspection confirmed concurrency
+  `64` and the ordered deadlines `(3600, 3720, 3900, 4020)` for Kubernetes
+  Job, poller, Celery soft limit, and Celery hard limit.
+- The live warmup endpoint now reports the terminal source of truth:
+  `core_nt` is `Failed`, `nodes_ready=7`, `nodes_failed=3`,
+  `nodes_active=0`, and `progress_pct=100` instead of the previous stuck
+  `7/10 · Loading` state.
