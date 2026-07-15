@@ -87,3 +87,10 @@ limiting factor while ten unconstrained AzCopy processes ran concurrently.
   `core_nt` is `Failed`, `nodes_ready=7`, `nodes_failed=3`,
   `nodes_active=0`, and `progress_pct=100` instead of the previous stuck
   `7/10 · Loading` state.
+- Post-deploy inspection found the workload Storage account in a pre-existing
+  `Enabled/Allow` public-network state. The local helper could not start because
+  this host lacks `jq`, so its documented `off` ARM operations were applied
+  directly: all IP rules were removed and the account was restored to
+  `publicNetworkAccess=Disabled`, `defaultAction=Deny`. The deployed API then
+  returned HTTP 200 from the Storage monitor through the private endpoint and
+  reported `public_network_access=Disabled`.
