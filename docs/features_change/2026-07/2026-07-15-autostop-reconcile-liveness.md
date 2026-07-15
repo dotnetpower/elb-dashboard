@@ -67,3 +67,14 @@ miss, even though auto-stop only needs nonterminal work.
 - Design self-review found no unresolved Critical or High issue across
   beat/act parity, bounded liveness, idempotency, fan-out failure, security, or
   backward compatibility.
+- Deployed backend image `elb-api:20260715105010` at digest
+  `sha256:cd8fb36c4327dd4ceef9d1a96a36e3696f0006d50bf84c62f6a68f2c57fe5479`.
+  Container App revision `ca-elb-dashboard--0000246` reached `Healthy` /
+  `RunningAtMaxScale`; all six sidecars were Ready with zero restarts.
+- Runtime inspection confirmed the beat entry routes to `azure` with
+  `expires=240`, the evaluator task limits are `210/240`, and the `azure`
+  queue was empty even while the maintenance `reconcile` queue had backlog.
+- A direct deployed evaluator run completed with `evaluated=1`,
+  `kept_running=1`, `queued_stops=0`, and `errors=0`. The authenticated status
+  API returned in 0.92 seconds and correctly reported `keep / active_jobs:3`
+  while BLAST/Service Bus work was active.
