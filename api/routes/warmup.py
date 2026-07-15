@@ -3,7 +3,8 @@
 Responsibility: /api/warmup/*`` - auto-preference + start/release/status endpoints
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `_resolve_warmup_db_name`, `warmup_auto_preference_put`,
+Key entry points: `_resolve_warmup_db_name`, `_jobstate_terminal_snapshot`,
+`warmup_auto_preference_put`,
 `warmup_auto_preference_get`, `warmup_start`, `warmup_release`, `warmup_status`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
@@ -14,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -42,6 +43,59 @@ def _resolve_warmup_db_name(body: dict[str, Any]) -> str:
     if isinstance(raw, str) and "/" in raw:
         raw = raw.rsplit("/", 1)[-1]
     return str(raw or "").strip()
+
+
+def _jobstate_terminal_snapshot(
+    row: Any,
+    *,
+    now: datetime | None = None,
+) -> tuple[str, str, str, str] | None:
+    """Return terminal orchestrator fields for a terminal or aged-out row.
+
+    Redis is ephemeral across Container App revisions, while JobState is
+    durable. After a rollout Celery therefore reports ``PENDING`` for a task
+    that no longer exists even though its JobState row is terminal or old
+    enough to be a proven worker-lost zombie. Reuse the canonical dbops stale
+    policy so status polling and active discovery stop pinning the SPA's Warm /
+    Rewarm actions on that phantom task.
+
+    The tuple is ``(runtime_status, phase, output_status, error_code)``. ``None``
+    means the row is still legitimately active and must continue blocking.
+    """
+
+    row_status = str(getattr(row, "status", "") or "").lower()
+    if row_status == "completed":
+        return ("Completed", "completed", "succeeded", "")
+    if row_status == "failed":
+        return (
+            "Failed",
+            "failed",
+            "failed",
+            str(getattr(row, "error_code", "") or "task_failed")[:500],
+        )
+    if row_status == "cancelled":
+        return ("Terminated", "cancelled", "failed", "task_cancelled")
+
+    from api.services.db.stale_dbops import classify_dbops_row
+
+    task_id = str(getattr(row, "task_id", "") or "").strip()
+    decision = classify_dbops_row(
+        row_type=str(getattr(row, "type", "") or "warmup"),
+        status=row_status,
+        updated_at=getattr(row, "updated_at", None),
+        created_at=getattr(row, "created_at", None),
+        has_task_id=bool(task_id),
+        # This helper is used only after Celery itself returned PENDING (status
+        # route) or when active discovery has no reliable Redis state. PENDING
+        # keeps a recent row active; only the bounded age policy terminalises.
+        celery_state="PENDING" if task_id else None,
+        now=now or datetime.now(UTC),
+    )
+    if decision.action != "terminalize":
+        return None
+    runtime_status = "Completed" if decision.status == "completed" else "Failed"
+    output_status = "succeeded" if decision.status == "completed" else "failed"
+    return (runtime_status, decision.phase, output_status, decision.error_code)
 
 
 @warmup_router.put("/auto-preference")
@@ -170,8 +224,6 @@ def warmup_start(
         "statusQueryGetUri": f"/api/tasks/{result.id}",
         "status": "queued",
     }
-
-
 @warmup_router.post("/release")
 def warmup_release(
     body: dict[str, Any] = _WARMUP_RELEASE_BODY,
@@ -261,9 +313,15 @@ def warmup_active(
         return row_sub.lower(), row_rg.lower(), row_cluster.lower()
 
     matches = []
+    now = datetime.now(UTC)
     for row in rows:
         row_sub, row_rg, row_cluster = _row_scope(row)
-        if row_rg == rg and row_cluster == cluster and (not sub or not row_sub or row_sub == sub):
+        if (
+            row_rg == rg
+            and row_cluster == cluster
+            and (not sub or not row_sub or row_sub == sub)
+            and _jobstate_terminal_snapshot(row, now=now) is None
+        ):
             matches.append(row)
 
     matches.sort(
@@ -317,6 +375,36 @@ def warmup_status(
 
     result = AsyncResult(instance_id, app=celery_app)
     status = (result.status or "PENDING").upper()
+
+    # Redis task results disappear on every bundled Container App revision.
+    # Recover terminal truth from durable JobState before translating a
+    # Redis-level PENDING into an endlessly polling orchestrator response.
+    if status == "PENDING":
+        try:
+            from api.services.state_repo import get_state_repo
+
+            row = get_state_repo().find_by_task_id(instance_id)
+            snapshot = _jobstate_terminal_snapshot(row) if row is not None else None
+        except Exception as exc:
+            LOGGER.warning(
+                "warmup_status JobState fallback failed task=%s: %s",
+                instance_id,
+                type(exc).__name__,
+            )
+            snapshot = None
+        if snapshot is not None:
+            runtime_status, phase, output_status, error_code = snapshot
+            db_name = str(getattr(row, "db", "") or "")
+            output = {"status": output_status, "db": db_name}
+            if error_code:
+                output["error"] = error_code
+            return {
+                "instance_id": instance_id,
+                "runtime_status": runtime_status,
+                "custom_status": {"phase": phase, "db": db_name},
+                "output": output,
+            }
+
     runtime_status = {
         "PENDING": "Pending",
         "RECEIVED": "Pending",
@@ -363,4 +451,5 @@ def warmup_status(
         "custom_status": custom_status,
         "output": output,
     }
+
 

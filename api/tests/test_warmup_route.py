@@ -14,6 +14,7 @@ Validation: `uv run pytest -q api/tests/test_warmup_route.py`.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -615,8 +616,8 @@ def _warmup_job_state(**overrides: Any) -> Any:
         "status": "running",
         "phase": "warming_nodes",
         "task_id": "task-auto-1",
-        "created_at": "2026-06-09T00:00:00+00:00",
-        "updated_at": "2026-06-09T00:01:00+00:00",
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "subscription_id": "00000000-0000-0000-0000-000000000001",
         "resource_group": "rg-elb",
         "cluster_name": "aks-elb",
@@ -656,6 +657,73 @@ def test_warmup_active_returns_in_flight_auto_warmup(
     assert body["warmup"]["phase"] == "warming_nodes"
     assert body["warmup"]["auto"] is True
     assert len(body["warmups"]) == 1
+
+
+def test_warmup_active_filters_aged_out_worker_lost_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    rows = [_warmup_job_state(created_at=stale, updated_at=stale)]
+
+    class FakeRepo:
+        def list_active(self, *, job_type: str = "blast", limit: int = 500) -> list[Any]:
+            assert job_type == "warmup"
+            return rows
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: FakeRepo())
+
+    response = client.get(
+        "/api/warmup/active",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "active": False,
+        "instance_id": None,
+        "warmup": None,
+        "warmups": [],
+    }
+
+
+def test_warmup_status_recovers_aged_out_pending_task_from_jobstate(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class PendingResult:
+        status = "PENDING"
+        info = None
+
+        def __init__(self, instance_id: str, app: object) -> None:
+            self.instance_id = instance_id
+            self.app = app
+
+        def ready(self) -> bool:
+            return False
+
+    stale = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    row = _warmup_job_state(created_at=stale, updated_at=stale)
+
+    class FakeRepo:
+        def find_by_task_id(self, task_id: str) -> Any:
+            assert task_id == "task-auto-1"
+            return row
+
+    monkeypatch.setattr("celery.result.AsyncResult", PendingResult)
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: FakeRepo())
+
+    response = client.get("/api/warmup/task-auto-1/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "instance_id": "task-auto-1",
+        "runtime_status": "Failed",
+        "custom_status": {"phase": "failed", "db": "core_nt"},
+        "output": {"status": "failed", "db": "core_nt", "error": "worker_lost"},
+    }
 
 
 def test_warmup_active_filters_by_cluster(
