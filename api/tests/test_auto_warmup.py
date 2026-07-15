@@ -16,9 +16,11 @@ Validation: `uv run pytest -q api/tests/test_auto_warmup.py`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import pytest
 from api.services import auto_warmup
 from api.services.auto_warmup import (
     AutoWarmupPreference,
@@ -27,6 +29,23 @@ from api.services.auto_warmup import (
 )
 from api.tasks.storage import reconcile_auto_warmup, warmup_database
 from api.tests._fakes import make_send_task_recorder
+
+
+@pytest.fixture(autouse=True)
+def _execution_admission_stubs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    from api.services.state_repo import reset_state_repo_cache
+
+    reset_state_repo_cache()
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.get_lifecycle_barrier",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_barrier_warmup_jobs",
+        lambda **_kwargs: False,
+    )
+    yield
+    reset_state_repo_cache()
 
 
 def _patch_ready_warmup_nodes(monkeypatch, count: int) -> None:
@@ -74,6 +93,15 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
     calls, fake_send_task = make_send_task_recorder("warmup-task-1")
 
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile._seed_auto_warmup_job_state",
+        lambda **_kwargs: True,
+    )
+    admission_records: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_barrier_warmup_jobs",
+        lambda **kwargs: admission_records.append(kwargs) or True,
+    )
 
     pref = AutoWarmupPreference(
         subscription_id="sub-1",
@@ -86,7 +114,9 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
         acr_name="elbacr01",
     )
 
-    result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
+    result = reconcile_auto_warmup.run(
+        preference=pref.to_dict(), force=True, admission_token="barrier-1"
+    )
 
     assert result["status"] == "completed"
     assert result["clusters"][0]["status"] == "triggered"
@@ -97,10 +127,122 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
     assert calls[0]["kwargs"]["machine_type"] == "Standard_E16s_v5"
     assert calls[0]["kwargs"]["num_nodes"] == 10
     assert calls[0]["kwargs"]["require_all_warmup_nodes"] is True
+    assert admission_records == [
+        {
+            "token": "barrier-1",
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "jobs": {"core_nt": calls[0]["kwargs"]["job_id"]},
+        }
+    ]
     # Regression: the Storage account's RG must be forwarded explicitly. The
     # reconciler historically omitted this kwarg, which made warmup_database
     # fall back to the AKS cluster RG and silently skip the RBAC ensure.
     assert calls[0]["kwargs"]["storage_resource_group"] == "rg-elb"
+
+    calls.clear()
+    released: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_barrier_warmup_jobs",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.autowarmup_inflight_release",
+        lambda *args: released.append(args),
+    )
+
+    superseded = reconcile_auto_warmup.run(
+        preference=pref.to_dict(), force=True, admission_token="superseded-barrier"
+    )
+
+    assert superseded["clusters"][0]["status"] == "failed"
+    assert "superseded" in superseded["clusters"][0]["error"]
+    assert calls == []
+    assert released == [("sub-1", "rg-elb", "elb-cluster", "core_nt")]
+
+
+def test_reconcile_auto_warmup_rolls_back_correlation_when_enqueue_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_args, **_kwargs: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 1,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 1)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *_args, **_kwargs: {"databases": []},
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda *_args, **_kwargs: [{"name": "core_nt"}],
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_barrier_warmup_jobs",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile._seed_auto_warmup_job_state",
+        lambda **_kwargs: True,
+    )
+    cleared: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.clear_barrier_warmup_job",
+        lambda **kwargs: cleared.append(kwargs) or True,
+    )
+    released: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.autowarmup_inflight_release",
+        lambda *args: released.append(args),
+    )
+
+    def _fail_send(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("broker unavailable")
+
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", _fail_send)
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-storage",
+        databases=["core_nt"],
+        programs={"core_nt": "blastn"},
+        acr_name="elbacr01",
+    )
+
+    result = reconcile_auto_warmup.run(
+        preference=pref.to_dict(), force=True, admission_token="barrier-1"
+    )
+
+    assert result["clusters"][0]["status"] == "failed"
+    assert cleared == [
+        {
+            "token": "barrier-1",
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "database": "core_nt",
+        }
+    ]
+    assert released == [("sub-1", "rg-elb", "elb-cluster", "core_nt")]
 
 
 def test_reconcile_auto_warmup_seeds_job_state_before_enqueue(
@@ -198,9 +340,6 @@ def test_reconcile_auto_warmup_seeds_job_state_before_enqueue(
     assert any(
         u["job_id"] == job_id and u.get("task_id") == "warmup-task-seeded" for u in updates
     ), f"task_id must be attached to seeded JobState; updates={updates}"
-
-
-
 
 
 def test_reconcile_auto_warmup_waits_for_all_ready_workload_nodes(
@@ -496,9 +635,7 @@ def _patch_ready_db_warm_status(
     )
     monkeypatch.setattr(
         "api.services.storage.data.list_databases",
-        lambda credential, storage_account: [
-            {"name": "core_nt", "source_version": source_version}
-        ],
+        lambda credential, storage_account: [{"name": "core_nt", "source_version": source_version}],
     )
     monkeypatch.setattr(
         "api.routes.storage.common._resolve_latest_dir",
@@ -907,9 +1044,7 @@ def test_warmup_database_force_rewarm_drops_existing_jobs(monkeypatch, tmp_path)
         release_calls.append((cluster, db_name))
         return {"status": "released", "database": db_name}
 
-    monkeypatch.setattr(
-        "api.services.k8s.monitoring.k8s_release_warmup_cache", _record_release
-    )
+    monkeypatch.setattr("api.services.k8s.monitoring.k8s_release_warmup_cache", _record_release)
     monkeypatch.setattr(
         "api.services.k8s.monitoring.k8s_release_stale_warmup_jobs",
         lambda *a, **k: {"status": "released", "deleted": []},
@@ -1014,9 +1149,7 @@ def test_warmup_database_force_rewarm_defaults_off(monkeypatch, tmp_path) -> Non
     assert release_calls == [], "k8s_release_warmup_cache must not run without force_rewarm"
 
 
-def test_warmup_database_force_rewarm_partial_release_fails_loudly(
-    monkeypatch, tmp_path
-) -> None:
+def test_warmup_database_force_rewarm_partial_release_fails_loudly(monkeypatch, tmp_path) -> None:
     """A partial forced release must abort before ensure (no silent subset warm).
 
     If `k8s_release_warmup_cache` returns ``status="partial"`` a stale Job
@@ -1229,9 +1362,7 @@ def test_auto_warmup_table_store_uses_dedicated_table(monkeypatch) -> None:
     assert writes[0]["type"] == "auto_warmup"
 
 
-def test_auto_warmup_file_backend_save_does_not_create_lock_sentinel(
-    monkeypatch, tmp_path
-) -> None:
+def test_auto_warmup_file_backend_save_does_not_create_lock_sentinel(monkeypatch, tmp_path) -> None:
     """Critique #14 (auto_warmup mirror): the file backend used to leave
     an orphan ``auto_warmup.json.lock`` sentinel after every save. The
     fix replaces the sibling-file ``fcntl.flock`` with an in-process
@@ -1405,9 +1536,7 @@ def test_autowarmup_inflight_release_deletes_key(monkeypatch) -> None:
             deleted.append(key)
             return 1
 
-    monkeypatch.setattr(
-        auto_warmup_reconcile, "autowarmup_inflight_redis", lambda: _FakeRedis()
-    )
+    monkeypatch.setattr(auto_warmup_reconcile, "autowarmup_inflight_redis", lambda: _FakeRedis())
 
     auto_warmup_reconcile.autowarmup_inflight_release("sub-1", "rg-elb", "elb-cluster", "core_nt")
 
@@ -1720,9 +1849,7 @@ def test_reconcile_memoises_cluster_list_per_subscription_rg(monkeypatch, tmp_pa
             databases=["nt"],
         ),
     ]
-    monkeypatch.setattr(
-        mod, "list_auto_warmup_preferences", lambda limit=100: prefs
-    )
+    monkeypatch.setattr(mod, "list_auto_warmup_preferences", lambda limit=100: prefs)
     monkeypatch.setattr(mod, "autowarmup_inflight_acquire", lambda *a, **k: True)
 
     mod.reconcile_auto_warmup_preferences(

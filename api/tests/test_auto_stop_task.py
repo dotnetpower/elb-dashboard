@@ -449,14 +449,25 @@ def test_evaluate_idle_clusters_queue_autostart_starts_stopped(
         "api.services.aks.queue_autostart.acquire_autostart_lease", lambda *_a: True
     )
 
+    events: list[str] = []
+    monkeypatch.setattr(lifecycle, "_saved_auto_warmup", lambda *_args: None)
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.create_lifecycle_barrier",
+        lambda **_kwargs: events.append("barrier")
+        or type("_Barrier", (), {"token": "autostart-barrier"})(),
+    )
     started: list[dict[str, Any]] = []
     monkeypatch.setattr(
-        lifecycle.start_aks, "delay", lambda **kw: started.append(kw) or object()
+        lifecycle.start_aks,
+        "delay",
+        lambda **kw: events.append("enqueue") or started.append(kw) or object(),
     )
 
     summary = idle_autostop.evaluate_idle_clusters.run()
     assert summary["queued_starts"] == 1
     assert started and started[0]["cluster_name"] == "cluster-stopped"
+    assert started[0]["execution_admission_token"] == "autostart-barrier"
+    assert events == ["barrier", "enqueue"]
 
 
 def test_evaluate_idle_clusters_autostart_off_by_default(
@@ -519,6 +530,16 @@ def test_evaluate_idle_clusters_autostart_releases_lease_on_enqueue_failure(
         "api.services.aks.queue_autostart.release_autostart_lease",
         lambda *a: released.append(a),
     )
+    cancelled: list[tuple[str, str]] = []
+    monkeypatch.setattr(lifecycle, "_saved_auto_warmup", lambda *_args: None)
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.create_lifecycle_barrier",
+        lambda **_kwargs: type("_Barrier", (), {"token": "failed-barrier"})(),
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.cancel_lifecycle_barrier",
+        lambda token, *, reason: cancelled.append((token, reason)),
+    )
 
     def _boom(**_kw: Any) -> object:
         raise RuntimeError("broker down")
@@ -529,6 +550,7 @@ def test_evaluate_idle_clusters_autostart_releases_lease_on_enqueue_failure(
     assert summary["queued_starts"] == 0
     assert summary["errors"] >= 1
     assert released and released[0][2] == "cluster-stopped"
+    assert cancelled == [("failed-barrier", "queue_autostart_enqueue_failed")]
 
 
 def test_batch_power_states_groups_by_rg(monkeypatch: pytest.MonkeyPatch) -> None:

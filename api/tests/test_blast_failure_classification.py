@@ -41,6 +41,7 @@ def test_transient_infra_is_auto_retryable(code: str) -> None:
         ("worker_lost", FailureCategory.CLUSTER_STATE),
         ("cluster_stopped", FailureCategory.CLUSTER_STATE),
         ("cluster_not_found", FailureCategory.CLUSTER_STATE),
+        ("cluster_lifecycle_interrupted", FailureCategory.CLUSTER_STATE),
         ("database_not_ready", FailureCategory.DATABASE_WAIT),
         ("database_updating", FailureCategory.DATABASE_WAIT),
         ("blast_capacity_full", FailureCategory.CAPACITY),

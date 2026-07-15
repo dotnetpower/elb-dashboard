@@ -22,6 +22,10 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     with an exception Celery cannot pickle. The drain handler is
     idempotent on ``external_correlation_id`` (Service Bus is at-least-once);
     a duplicate completes the message without a second submit. All three tasks
+    share strict AKS lifecycle/database-warmup admission with the resident
+    consumer; blocked drains must not open a receiver, and the handler must
+    re-check immediately before submit to close the receive/barrier race.
+    Parallel drain requires the atomic correlation-id claim. All three tasks
     are BOUNDED per tick (drain/publish/cleanup caps) so a backlog drains over
     several ticks instead of spinning one tick forever. Transition events are
     emitted only on an actual status change (``last_status`` marker) so the
@@ -97,19 +101,28 @@ def _drain_concurrency_from_env() -> int:
 
 _DRAIN_CONCURRENCY = _drain_concurrency_from_env()
 
-# Atomic single-writer claim gate (charter §12a Rule 4, default-OFF). When ON the
+# Atomic single-writer claim gate. It shipped default-OFF, completed its June
+# soak/load validation, and now defaults ON. When ON the
 # drain reserves each correlation id with an atomic insert BEFORE submitting, so
 # a parallel / multi-worker drain can never submit the same request twice (the
 # get_bridge → upsert_bridge read-modify-write is otherwise racy). OFF keeps the
 # legacy "any existing bridge row dedups" behaviour unchanged. Pair this ON with
 # SERVICEBUS_DRAIN_CONCURRENCY>1 — parallel submit is only safe with the claim.
-_ATOMIC_CLAIM = os.environ.get("SERVICEBUS_ATOMIC_CLAIM", "").strip().lower() in {
+_ATOMIC_CLAIM = os.environ.get("SERVICEBUS_ATOMIC_CLAIM", "true").strip().lower() in {
     "1",
     "true",
     "yes",
 }
+if _DRAIN_CONCURRENCY > 1 and not _ATOMIC_CLAIM:
+    LOGGER.error(
+        "SERVICEBUS_DRAIN_CONCURRENCY=%d requires SERVICEBUS_ATOMIC_CLAIM=true; "
+        "forcing serial drain",
+        _DRAIN_CONCURRENCY,
+    )
+    _DRAIN_CONCURRENCY = 1
 
-# Single-flight drain gate (charter §12a Rule 4, default-OFF). When ON, a drain
+# Single-flight drain gate. It shipped default-OFF, completed the same June
+# soak/load validation, and now defaults ON. When ON, a drain
 # tick takes a short-lived Redis lease before draining so two overlapping beat
 # ticks (a tick that ran longer than the 10s interval) or two workers cannot
 # drain the same queue at once. The atomic claim (#2) already prevents duplicate
@@ -118,7 +131,7 @@ _ATOMIC_CLAIM = os.environ.get("SERVICEBUS_ATOMIC_CLAIM", "").strip().lower() in
 # blocks a drain (the lease is an optimisation, not a correctness gate), so a
 # broker blip degrades to the legacy every-tick drain instead of stalling.
 _DRAIN_SINGLEFLIGHT = os.environ.get(
-    "SERVICEBUS_DRAIN_SINGLEFLIGHT", ""
+    "SERVICEBUS_DRAIN_SINGLEFLIGHT", "true"
 ).strip().lower() in {"1", "true", "yes"}
 _DRAIN_LOCK_KEY = "servicebus:drain:singleflight"
 
@@ -197,6 +210,9 @@ _PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "200"))
 # and be polled every tick, growing the active set without bound (liveness).
 _BRIDGE_MAX_AGE_SECONDS = int(
     os.environ.get("SERVICEBUS_BRIDGE_MAX_AGE_SECONDS", str(7 * 24 * 3600))
+)
+_LIFECYCLE_INTERRUPTION_SECONDS = max(
+    60, int(os.environ.get("SERVICEBUS_LIFECYCLE_INTERRUPTION_SECONDS", "600"))
 )
 
 # External status vocabulary published to subscribers.
@@ -626,6 +642,31 @@ def _resolve_drain_cluster_context(cfg: ServiceBusConfig) -> tuple[str, str, str
     return (sub, rg, cluster)
 
 
+def _execution_admission_for_drain(cfg: ServiceBusConfig) -> dict[str, Any]:
+    """Return the shared pre-receive/pre-submit execution admission decision.
+
+    Both the beat task and the resident consumer call this helper before opening
+    a receiver. ``_drain_handler`` calls it again immediately before the sibling
+    submit, closing the race where a lifecycle barrier is created while a
+    long-poll receiver already holds messages.
+    """
+    from api.services.aks.execution_admission import evaluate_execution_admission
+
+    subscription_id, resource_group, cluster_name = _resolve_drain_cluster_context(cfg)
+    decision = evaluate_execution_admission(
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    if decision.get("allowed") and not _openapi_ready_for_drain(cfg):
+        return {
+            "allowed": False,
+            "reason": "openapi_not_ready",
+            "retry_after_seconds": 10,
+        }
+    return dict(decision)
+
+
 def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[str, Any] | None:
     """Map a queue message body to a validated OpenAPI submit payload.
 
@@ -1013,6 +1054,14 @@ def _publish_jobs_cache_invalidate(reason: str) -> None:
 
 
 def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
+    admission = _execution_admission_for_drain(cfg)
+    if not admission.get("allowed"):
+        LOGGER.info(
+            "servicebus message deferred before submit reason=%s message_id=%s",
+            admission.get("reason", "not_ready"),
+            msg.message_id or "",
+        )
+        return MessageAction.ABANDON
     body = dict(msg.body or {})
     if _is_v1_jobs_message(body):
         # Multi-token / tabular outfmt path: forward the producer's
@@ -1313,8 +1362,8 @@ def _openapi_ready_for_drain(cfg: ServiceBusConfig) -> bool:
     False so an unreadable plane defers rather than crashes the tick.
     """
     try:
-        external_blast.ready(**_openapi_kwargs(cfg))
-        return True
+        payload = external_blast.ready(**_openapi_kwargs(cfg))
+        return bool(payload.get("ready"))
     except Exception:
         return False
 
@@ -1342,20 +1391,36 @@ def drain_and_resubmit() -> dict[str, Any]:
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
-    # Queue-arrival auto-start readiness guard (default-OFF). When the gate is
-    # on, a Stopped cluster may be mid-warmup after an auto-start enqueue; pulling
-    # messages now would abandon-loop them toward the DLQ. Defer the tick so the
-    # backlog (and thus the pending-depth start trigger) is preserved until the
-    # OpenAPI plane is ready. No-op when the gate is off — the legacy every-tick
-    # drain is unchanged.
-    from api.services.aks.queue_autostart import queue_autostart_enabled
+    return _drain_once(
+        cfg,
+        max_messages=_DRAIN_MAX_MESSAGES,
+        max_wait_seconds=1,
+        max_concurrency=_DRAIN_CONCURRENCY,
+    )
 
-    if queue_autostart_enabled() and not _openapi_ready_for_drain(cfg):
+
+def _drain_once(
+    cfg: ServiceBusConfig,
+    *,
+    max_messages: int,
+    max_wait_seconds: int,
+    max_concurrency: int,
+) -> dict[str, Any]:
+    """Run one admission-gated, queue-scoped, bounded drain pass."""
+    admission = _execution_admission_for_drain(cfg)
+    if not admission.get("allowed"):
+        reason = str(admission.get("reason") or "cluster_not_ready")
         LOGGER.info(
-            "servicebus drain tick deferred: cluster not ready (queue-autostart warmup) queue=%s",
+            "servicebus drain deferred queue=%s reason=%s action=%s target_nodes=%s",
             cfg.request_queue,
+            reason,
+            admission.get("lifecycle_action", ""),
+            admission.get("target_node_count", ""),
         )
-        return {"skipped": "cluster_not_ready"}
+        return {
+            "skipped": reason,
+            "retry_after_seconds": int(admission.get("retry_after_seconds") or 10),
+        }
     proceed, lock_token = _acquire_drain_lock(cfg.request_queue)
     if not proceed:
         # Another drain holds the single-flight lease — skip this overlapping
@@ -1370,8 +1435,9 @@ def drain_and_resubmit() -> dict[str, Any]:
         stats = service_bus.drain_requests(
             cfg,
             lambda m: _drain_handler(m, cfg),
-            max_messages=_DRAIN_MAX_MESSAGES,
-            max_concurrency=_DRAIN_CONCURRENCY,
+            max_messages=max_messages,
+            max_wait_seconds=max_wait_seconds,
+            max_concurrency=max_concurrency,
         )
         # Observability (self-critique #6): one structured line per non-empty tick
         # so drain throughput / fan-out effectiveness is visible in App Insights
@@ -1385,14 +1451,14 @@ def drain_and_resubmit() -> dict[str, Any]:
                 stats.completed,
                 stats.abandoned,
                 stats.dead_lettered,
-                _DRAIN_CONCURRENCY,
+                max_concurrency,
             )
         return {
             "received": stats.received,
             "completed": stats.completed,
             "abandoned": stats.abandoned,
             "dead_lettered": stats.dead_lettered,
-            "concurrency": _DRAIN_CONCURRENCY,
+            "concurrency": max_concurrency,
         }
     finally:
         _release_drain_lock(lock_token, cfg.request_queue)
@@ -1418,9 +1484,15 @@ def _publish_one_bridge(
             mark_done(rec.correlation_id, _STATUS_FAILED)
             return (0, 1)
         return (0, 0)
+    if _finish_lifecycle_interrupted_bridge(cfg, rec):
+        return (1, 1)
     try:
         job = external_blast.get_job(rec.openapi_job_id, **openapi_kwargs)
-    except Exception:  # transient; retry next tick
+    except Exception as exc:  # transient unless a recovered plane confirms 404
+        if int(getattr(exc, "status_code", 0) or 0) == 404 and (
+            _finish_lifecycle_interrupted_bridge(cfg, rec, confirmed_missing=True)
+        ):
+            return (1, 1)
         LOGGER.debug("status poll failed corr=%s", rec.correlation_id, exc_info=True)
         return (0, 0)
     status = _classify(str(job.get("status") or ""))
@@ -1513,6 +1585,80 @@ def _publish_one_bridge(
     return (1, 0)
 
 
+def _finish_lifecycle_interrupted_bridge(
+    cfg: ServiceBusConfig,
+    rec: BridgeRecord,
+    *,
+    confirmed_missing: bool = False,
+) -> bool:
+    """Publish one bounded failure when a newer AKS lifecycle lost the job."""
+    if not rec.openapi_job_id:
+        return False
+    subscription_id, resource_group, cluster_name = _resolve_drain_cluster_context(cfg)
+    try:
+        from api.services.aks.execution_admission import (
+            lifecycle_barrier_interrupts_job,
+        )
+
+        barrier = lifecycle_barrier_interrupts_job(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            job_created_at=rec.created_at,
+        )
+        if barrier is None:
+            return False
+        # A start/scale barrier can keep OpenAPI unavailable throughout node
+        # convergence and DB warmup. Offline is not proof that an accepted job
+        # was lost; the recovered per-job poll must first return 404 (handled
+        # by ``_publish_one_bridge``). Stop/delete intentionally remove the
+        # execution plane, so their sustained outage is positive evidence.
+        if barrier.action in {"start", "scale"} and not confirmed_missing:
+            try:
+                from api.services.state_repo import get_state_repo
+
+                row = get_state_repo().get(rec.openapi_job_id)
+                payload = getattr(row, "payload", None)
+                payload = payload if isinstance(payload, dict) else {}
+                error_code = str(
+                    getattr(row, "error_code", "") or payload.get("error_code") or ""
+                )
+                local_interrupted = (
+                    str(getattr(row, "status", "") or "").lower() == "failed"
+                    and error_code == "cluster_lifecycle_interrupted"
+                )
+            except Exception:
+                local_interrupted = False
+            if not local_interrupted:
+                return False
+        barrier_at = datetime.fromisoformat(barrier.created_at.replace("Z", "+00:00"))
+        if (datetime.now(UTC) - barrier_at).total_seconds() < _LIFECYCLE_INTERRUPTION_SECONDS:
+            return False
+        event = _transition_event(
+            correlation_id=rec.correlation_id,
+            openapi_job_id=rec.openapi_job_id,
+            status=_STATUS_FAILED,
+            attempt=1,
+            error_code="cluster_lifecycle_interrupted",
+            error_message=(
+                f"AKS {barrier.action} interrupted the execution plane. Retry after "
+                "the cluster and database warmup are ready."
+            ),
+            request_id=rec.request_id,
+        )
+        service_bus.publish_event(cfg, event)
+        _record_transition_trace(rec.openapi_job_id, _STATUS_FAILED)
+        mark_done(rec.correlation_id, _STATUS_FAILED)
+        return True
+    except Exception:
+        LOGGER.warning(
+            "lifecycle interruption publish failed corr=%s",
+            rec.correlation_id,
+            exc_info=True,
+        )
+        return False
+
+
 @shared_task(name="api.tasks.servicebus.publish_transitions")
 @skip_tick_on_transient_infra
 def publish_transitions() -> dict[str, Any]:
@@ -1534,13 +1680,19 @@ def publish_transitions() -> dict[str, Any]:
         return {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
     openapi_kwargs = _openapi_kwargs(cfg)
     if not _openapi_ready_for_transition_poll(openapi_kwargs):
+        finished = sum(
+            1 for rec in bridges if _finish_lifecycle_interrupted_bridge(cfg, rec)
+        )
         LOGGER.info(
-            "servicebus publish tick deferred: OpenAPI plane not ready active_bridges=%d",
+            "servicebus publish tick deferred: OpenAPI plane not ready active_bridges=%d "
+            "lifecycle_finished=%d",
             len(bridges),
+            finished,
         )
         return {
             "skipped": "cluster_not_ready",
             "active_bridges": len(bridges),
+            "finished": finished,
         }
     published = 0
     finished = 0

@@ -14,9 +14,9 @@ Responsibility: Own the resident drain loop lifecycle (start/stop, bounded
     ``api.tasks.servicebus.tasks._drain_handler`` — this module must NOT
     duplicate it.
 Edit boundaries: No per-message business logic here. Service Bus access goes
-    through ``api.services.service_bus.drain_requests``. Keep the loop bounded
-    and interruptible (a stuck loop must be stoppable and must back off on
-    repeated failure rather than hot-spin).
+    through the shared admission-gated ``api.tasks.servicebus.tasks._drain_once``.
+    Keep the loop bounded and interruptible (a stuck loop must be stoppable and
+    must back off on repeated failure rather than hot-spin).
 Key entry points: ``resident_consumer_enabled``, ``run_resident_consumer``,
     ``start_resident_consumer``, ``stop_resident_consumer``,
     ``RESIDENT_CONSUMER_ENV``.
@@ -24,7 +24,8 @@ Risky contracts: ``run_resident_consumer`` MUST exit promptly when the stop
     event is set, MUST back off (capped) after a drain error instead of
     hot-looping, and MUST never raise out of the loop body (an unhandled error
     would kill the consumer thread silently). The beat fallback MUST remain
-    registered so a crashed loop still drains on the next beat tick.
+    registered so a crashed loop still drains on the next beat tick. A blocked
+    admission decision waits interruptibly and never opens a Service Bus receiver.
 Validation: ``uv run pytest -q api/tests/test_resident_consumer.py``.
 """
 
@@ -81,9 +82,8 @@ def run_resident_consumer(
     the loop for tests; production passes ``None`` (run until stopped). Never
     raises out of the loop body — a drain error backs off (capped) and retries.
     """
-    from api.services import service_bus
     from api.services.service_bus_pref import get_service_bus_config
-    from api.tasks.servicebus.tasks import _drain_handler
+    from api.tasks.servicebus.tasks import _drain_once
 
     totals = {"iterations": 0, "received": 0, "completed": 0, "abandoned": 0, "dead_lettered": 0}
     backoff = _BACKOFF_START_SECONDS
@@ -95,19 +95,21 @@ def run_resident_consumer(
         totals["iterations"] = iterations
         try:
             cfg = get_service_bus_config()
-            stats = service_bus.drain_requests(
+            outcome = _drain_once(
                 cfg,
-                # Bind cfg as a default arg so the closure captures THIS
-                # iteration's value (ruff B023), even though cfg is rebound each
-                # loop — defensive against a future refactor moving the lambda.
-                lambda m, _cfg=cfg: _drain_handler(m, _cfg),
                 max_messages=drain_batch,
                 max_wait_seconds=poll_wait_seconds,
+                max_concurrency=1,
             )
-            totals["received"] += stats.received
-            totals["completed"] += stats.completed
-            totals["abandoned"] += stats.abandoned
-            totals["dead_lettered"] += stats.dead_lettered
+            if outcome.get("skipped"):
+                stop_event.wait(
+                    timeout=max(1, int(outcome.get("retry_after_seconds") or 1))
+                )
+                continue
+            totals["received"] += int(outcome.get("received") or 0)
+            totals["completed"] += int(outcome.get("completed") or 0)
+            totals["abandoned"] += int(outcome.get("abandoned") or 0)
+            totals["dead_lettered"] += int(outcome.get("dead_lettered") or 0)
             backoff = _BACKOFF_START_SECONDS  # success resets the backoff
         except Exception as exc:
             LOGGER.warning(

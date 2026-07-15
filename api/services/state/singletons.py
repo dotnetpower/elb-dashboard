@@ -8,19 +8,17 @@ restarts (which wipe the in-revision Redis sidecar) so the SPA's
 "Exposed / Not exposed" badge stays accurate across deploys without
 needing the operator to click Enable again.
 
-Responsibility: Provide ``save_singleton`` / ``load_singleton`` /
-    ``clear_singleton`` helpers backed by a dedicated `dashboardsingletons`
-    Azure Table. Best-effort by design — every operation catches Azure
-    SDK errors and returns ``False`` / ``None`` so callers can fall back
-    to the ephemeral Redis cache without raising.
+Responsibility: Provide best-effort and strict singleton payload operations
+    backed by the dedicated `dashboardsingletons` Azure Table.
 Edit boundaries: Pure storage primitive — no Azure-management or
     domain-specific logic. New singletons live in their own caller modules
     and just pass a unique ``key`` string.
-Key entry points: ``save_singleton``, ``load_singleton``, ``clear_singleton``.
+Key entry points: ``save_singleton``, ``load_singleton``,
+    ``load_singleton_strict``, ``clear_singleton``.
 Risky contracts: ``key`` must be ASCII-safe (Azure RowKey forbids ``/ \\ # ?``
-    and control chars). ``payload`` must be JSON-serialisable. Table name
-    `dashboardsingletons` is share-noisy — the operator must not delete it
-    out of band.
+    and control chars). ``payload`` must be JSON-serialisable. Best-effort
+    reads collapse SDK failures to missing; safety callers must use the strict
+    read, which propagates every error except a confirmed missing row.
 Validation: ``uv run pytest -q api/tests/test_state_singletons.py``.
 """
 
@@ -33,6 +31,7 @@ import re
 import threading
 from typing import Any
 
+from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import TableClient, TableServiceClient
 
 from api.services import get_credential
@@ -162,6 +161,34 @@ def load_singleton(key: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def load_singleton_strict(key: str) -> dict[str, Any] | None:
+    """Return one payload while distinguishing absence from storage failure.
+
+    Most singleton consumers are informational and deliberately use the
+    best-effort :func:`load_singleton`. Safety state such as AKS execution
+    admission must fail closed instead: a transient Table error cannot be
+    interpreted as "no lifecycle barrier". Missing rows still return ``None``;
+    every other SDK or payload error propagates to the caller.
+    """
+    if not key:
+        return None
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("singleton Table Storage is not configured")
+    row_key = _sanitise_row_key(key)
+    try:
+        entity = client.get_entity(_SINGLETON_PARTITION_KEY, row_key)
+    except ResourceNotFoundError:
+        return None
+    raw = entity.get("payload")
+    if not isinstance(raw, str):
+        raise ValueError(f"singleton payload is missing for {key}")
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"singleton payload is not an object for {key}")
+    return parsed
+
+
 def clear_singleton(key: str) -> bool:
     """Delete ``key``. Returns True even when the row was already absent."""
     if not key:
@@ -266,6 +293,7 @@ __all__ = [
     "clear_singleton",
     "list_singletons_by_prefix",
     "load_singleton",
+    "load_singleton_strict",
     "reset_singleton_cache_for_tests",
     "save_singleton",
 ]

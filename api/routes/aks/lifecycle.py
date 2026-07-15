@@ -5,8 +5,9 @@ Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data
 services or tasks.
 Key entry points: `aks_start`, `aks_scale`, `aks_stop`, `aks_delete`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
-auth gate.
-Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
+auth gate. Lifecycle admission must be persisted before task enqueue; an enqueue failure cancels
+only the token created by that request.
+Validation: `uv run pytest -q api/tests/test_warmup_route.py
 api/tests/test_route_contracts.py`.
 """
 
@@ -31,6 +32,75 @@ router = APIRouter()
 _MAX_SCALE_NODE_COUNT = int(os.environ.get("AKS_MAX_SCALE_NODE_COUNT", "100"))
 
 
+def _lifecycle_scope(body: dict[str, Any]) -> tuple[str, str, str]:
+    subscription_id = str(body.get("subscription_id") or "").strip()
+    resource_group = str(body.get("resource_group") or "").strip()
+    cluster_name = str(body.get("cluster_name") or "").strip()
+    if not all((subscription_id, resource_group, cluster_name)):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "invalid_cluster_scope",
+                "message": "subscription_id, resource_group, and cluster_name are required",
+            },
+        )
+    return subscription_id, resource_group, cluster_name
+
+
+def _create_barrier(
+    *,
+    action: str,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    target_node_count: int = 0,
+    auto_warmup: dict[str, Any] | None = None,
+) -> str:
+    from api.services.aks.execution_admission import (
+        ExecutionAdmissionPersistenceError,
+        create_lifecycle_barrier,
+    )
+
+    databases = auto_warmup.get("databases", []) if auto_warmup else []
+    try:
+        barrier = create_lifecycle_barrier(
+            action=action,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            target_node_count=target_node_count,
+            databases=databases if isinstance(databases, list) else [],
+        )
+    except ExecutionAdmissionPersistenceError as exc:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "execution_admission_unavailable",
+                "message": "Cluster lifecycle safety state could not be persisted.",
+                "retryable": True,
+                "retry_after_seconds": 30,
+            },
+        ) from exc
+    return barrier.token
+
+
+def _cancel_barrier(token: str, *, reason: str) -> None:
+    from api.services.aks.execution_admission import cancel_lifecycle_barrier
+
+    try:
+        cancel_lifecycle_barrier(token, reason=reason)
+    except Exception as exc:
+        # The durable barrier remains in the safe direction. Its cancellation
+        # can be retried by the next lifecycle request, which creates a new token.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "lifecycle barrier cancellation failed token=%s error=%s",
+            token[:12],
+            type(exc).__name__,
+        )
+
+
 
 @router.post("/start")
 def aks_start(
@@ -39,6 +109,7 @@ def aks_start(
 ) -> dict[str, Any]:
     from api.tasks.azure import start_aks
 
+    subscription_id, resource_group, cluster_name = _lifecycle_scope(body)
     auto_warmup = body.get("auto_warmup") if isinstance(body.get("auto_warmup"), dict) else None
     auto_openapi = body.get("auto_openapi") if isinstance(body.get("auto_openapi"), dict) else None
     if auto_openapi is None:
@@ -61,15 +132,32 @@ def aks_start(
         }
         if not auto_openapi["acr_name"]:
             auto_openapi = None
-    result = _safe_delay(
-        start_aks,
-        subscription_id=body.get("subscription_id", ""),
-        resource_group=body.get("resource_group", ""),
-        cluster_name=body.get("cluster_name", ""),
+    try:
+        target_node_count = int((auto_warmup or {}).get("num_nodes") or 0)
+    except (TypeError, ValueError):
+        target_node_count = 0
+    barrier_token = _create_barrier(
+        action="start",
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        target_node_count=target_node_count,
         auto_warmup=auto_warmup,
-        auto_openapi=auto_openapi,
     )
-    _invalidate_aks_monitor_cache(body.get("subscription_id", ""), body.get("resource_group", ""))
+    try:
+        result = _safe_delay(
+            start_aks,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            auto_warmup=auto_warmup,
+            auto_openapi=auto_openapi,
+            execution_admission_token=barrier_token,
+        )
+    except Exception:
+        _cancel_barrier(barrier_token, reason="start_enqueue_failed")
+        raise
+    _invalidate_aks_monitor_cache(subscription_id, resource_group)
     record_feature_event(
         "cluster_lifecycle",
         status="requested",
@@ -98,6 +186,7 @@ def aks_scale(
     """
     from api.tasks.azure import scale_aks
 
+    subscription_id, resource_group, cluster_name = _lifecycle_scope(body)
     try:
         node_count = int(body.get("node_count"))
     except (TypeError, ValueError):
@@ -119,16 +208,29 @@ def aks_scale(
             },
         )
     auto_warmup = body.get("auto_warmup") if isinstance(body.get("auto_warmup"), dict) else None
-    result = _safe_delay(
-        scale_aks,
-        subscription_id=body.get("subscription_id", ""),
-        resource_group=body.get("resource_group", ""),
-        cluster_name=body.get("cluster_name", ""),
-        node_count=node_count,
-        pool_name=body.get("pool_name", "") or "",
+    barrier_token = _create_barrier(
+        action="scale",
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        target_node_count=node_count,
         auto_warmup=auto_warmup,
     )
-    _invalidate_aks_monitor_cache(body.get("subscription_id", ""), body.get("resource_group", ""))
+    try:
+        result = _safe_delay(
+            scale_aks,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            node_count=node_count,
+            pool_name=body.get("pool_name", "") or "",
+            auto_warmup=auto_warmup,
+            execution_admission_token=barrier_token,
+        )
+    except Exception:
+        _cancel_barrier(barrier_token, reason="scale_enqueue_failed")
+        raise
+    _invalidate_aks_monitor_cache(subscription_id, resource_group)
     record_feature_event(
         "cluster_lifecycle",
         status="requested",
@@ -150,13 +252,25 @@ def aks_stop(
 ) -> dict[str, Any]:
     from api.tasks.azure import stop_aks
 
-    result = _safe_delay(
-        stop_aks,
-        subscription_id=body.get("subscription_id", ""),
-        resource_group=body.get("resource_group", ""),
-        cluster_name=body.get("cluster_name", ""),
+    subscription_id, resource_group, cluster_name = _lifecycle_scope(body)
+    barrier_token = _create_barrier(
+        action="stop",
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
     )
-    _invalidate_aks_monitor_cache(body.get("subscription_id", ""), body.get("resource_group", ""))
+    try:
+        result = _safe_delay(
+            stop_aks,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            execution_admission_token=barrier_token,
+        )
+    except Exception:
+        _cancel_barrier(barrier_token, reason="stop_enqueue_failed")
+        raise
+    _invalidate_aks_monitor_cache(subscription_id, resource_group)
     record_feature_event(
         "cluster_lifecycle",
         status="requested",
@@ -177,13 +291,25 @@ def aks_delete(
 ) -> dict[str, Any]:
     from api.tasks.azure import delete_aks
 
-    result = _safe_delay(
-        delete_aks,
-        subscription_id=body.get("subscription_id", ""),
-        resource_group=body.get("resource_group", ""),
-        cluster_name=body.get("cluster_name", ""),
+    subscription_id, resource_group, cluster_name = _lifecycle_scope(body)
+    barrier_token = _create_barrier(
+        action="delete",
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
     )
-    _invalidate_aks_monitor_cache(body.get("subscription_id", ""), body.get("resource_group", ""))
+    try:
+        result = _safe_delay(
+            delete_aks,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            execution_admission_token=barrier_token,
+        )
+    except Exception:
+        _cancel_barrier(barrier_token, reason="delete_enqueue_failed")
+        raise
+    _invalidate_aks_monitor_cache(subscription_id, resource_group)
     record_feature_event(
         "cluster_lifecycle",
         status="requested",

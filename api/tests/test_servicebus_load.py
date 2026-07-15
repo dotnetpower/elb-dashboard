@@ -38,6 +38,13 @@ def _file_backend(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _cfg: {"allowed": True, "reason": "ready"},
+    )
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "test"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
 
 
 # --------------------------------------------------------------------------- #

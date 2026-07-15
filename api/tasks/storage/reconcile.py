@@ -29,6 +29,7 @@ def reconcile_auto_warmup(
     preference: dict[str, Any] | None = None,
     force: bool = False,
     limit: int = 100,
+    admission_token: str = "",
 ) -> dict[str, Any]:
     """Reconcile server-side Auto warm preferences against AKS readiness.
 
@@ -61,14 +62,16 @@ def reconcile_auto_warmup(
                 lock = None
 
     try:
-        return reconcile_auto_warmup_preferences(
+        result = reconcile_auto_warmup_preferences(
             credential=_facade.get_credential(),
             send_task=celery_app.send_task,
             preference=preference,
             force=force,
             limit=limit,
+            admission_token=admission_token,
             inflight_acquire=_facade._autowarmup_inflight_acquire,
         )
+        return dict(result)
     finally:
         if lock is not None:
             try:

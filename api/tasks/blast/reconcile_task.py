@@ -87,6 +87,15 @@ def _reconcile_row_k8s_status(
     elif k8s_status == "running":
         status, phase, outcome = "running", "running", "running"
     elif k8s_status == "creating":
+        # An explicitly-scoped job with zero Jobs and zero Pods is absence, not
+        # positive evidence that it is still creating. After a node-pool
+        # replacement, treating this as running refreshed ``updated_at`` every
+        # reconcile tick and prevented the lifecycle-interruption deadline from
+        # ever firing. Let OpenAPI (and then the bounded lifecycle branch)
+        # decide instead. Fresh native submits remain protected by their active
+        # Celery task result.
+        if int(k8s.get("jobs") or 0) == 0 and int(k8s.get("pods") or 0) == 0:
+            return "missing"
         status, phase, outcome = "running", "submitted", "running"
     else:
         return ""
@@ -240,6 +249,7 @@ def reconcile_stale_jobs(
         "k8s_refreshed": 0,
         "results_pending": 0,
         "external_refreshed": 0,
+        "lifecycle_interrupted": 0,
         "untouched": 0,
         "errors": 0,
     }
@@ -343,6 +353,8 @@ def reconcile_stale_jobs(
                 or ""
             )
             refreshed = False
+            external_missing = False
+            external_active = False
             external_job_id = _blast._external_reconcile_job_id(row)
             k8s_outcome = _reconcile_row_k8s_status(
                 repo,
@@ -352,7 +364,8 @@ def reconcile_stale_jobs(
                 cluster_name=str(cluster),
                 elastic_blast_job_id=external_job_id,
             )
-            if k8s_outcome:
+            k8s_missing = k8s_outcome == "missing"
+            if k8s_outcome and not k8s_missing:
                 summary["k8s_refreshed"] += 1
                 if k8s_outcome == "completed":
                     summary["completed"] += 1
@@ -377,6 +390,7 @@ def reconcile_stale_jobs(
                         converted = _external_to_blast_job(detail)
                         ext_status = str(converted.get("status") or "")
                         ext_phase = str(converted.get("phase") or ext_status)
+                        external_active = ext_status not in {"completed", "failed"}
                         if ext_status and (ext_status != row.status or ext_phase != row.phase):
                             repo.update(
                                 row.job_id,
@@ -393,6 +407,7 @@ def reconcile_stale_jobs(
                                 # double-count under completed/failed.
                                 pass
                 except Exception as exc:
+                    external_missing = int(getattr(exc, "status_code", 0) or 0) == 404
                     LOGGER.warning(
                         "reconcile_stale_jobs: external refresh failed job_id=%s "
                         "subscription_id=%s resource_group=%s cluster=%s error_type=%s "
@@ -438,13 +453,6 @@ def reconcile_stale_jobs(
             # still queued and the placeholder is legitimately ``queued``;
             # marking it worker_lost would show a false "failed" until the
             # worker recovers and drains. Leave it untouched.
-            if not task_id:
-                payload = row.payload or {}
-                if isinstance(payload, dict) and (
-                    isinstance(payload.get("external"), dict) or payload.get("placeholder")
-                ):
-                    summary["untouched"] += 1
-                    continue
             try:
                 updated_at = datetime.fromisoformat(
                     (row.updated_at or row.created_at or "").replace("Z", "+00:00")
@@ -452,6 +460,76 @@ def reconcile_stale_jobs(
             except Exception:
                 updated_at = now  # never mark recently-created rows lost
             quiet_seconds = (now - updated_at).total_seconds()
+            if not task_id:
+                payload = row.payload or {}
+                if isinstance(payload, dict) and payload.get("placeholder"):
+                    # The Service Bus message still exists while its placeholder
+                    # is queued; never convert that legitimate wait to failure.
+                    summary["untouched"] += 1
+                    continue
+                if isinstance(payload, dict) and isinstance(payload.get("external"), dict):
+                    from api.services.aks.execution_admission import (
+                        lifecycle_barrier_interrupts_job,
+                    )
+
+                    barrier = lifecycle_barrier_interrupts_job(
+                        subscription_id=str(sub),
+                        resource_group=str(rg),
+                        cluster_name=str(cluster),
+                        job_created_at=str(row.created_at or row.updated_at or ""),
+                    )
+                    if barrier is None or quiet_seconds < stale_threshold_seconds:
+                        summary["untouched"] += 1
+                        continue
+                    if barrier.action in {"start", "scale"}:
+                        # During node convergence/warmup, K8s and OpenAPI are
+                        # expected to be incomplete. Fail only after admission
+                        # is open again AND the recovered OpenAPI plane has
+                        # definitively returned 404 for this job. Transport
+                        # errors remain unknown and are retried next tick.
+                        from api.services.aks.execution_admission import (
+                            evaluate_execution_admission,
+                        )
+
+                        admission = evaluate_execution_admission(
+                            subscription_id=str(sub),
+                            resource_group=str(rg),
+                            cluster_name=str(cluster),
+                        )
+                        lost_after_recovery = external_missing or (
+                            k8s_missing and external_active
+                        )
+                        if not admission.get("allowed") or not lost_after_recovery:
+                            summary["untouched"] += 1
+                            continue
+                    storage_account = _blast._storage_account_from_row(row)
+                    if _blast._has_blast_success_marker(
+                        storage_account, str(row.job_id)
+                    ):
+                        _blast._update_state(
+                            row.job_id,
+                            "completed",
+                            status="completed",
+                            event="reconcile_results_recovered",
+                            error_code="",
+                        )
+                        summary["completed"] += 1
+                        continue
+                    _blast._update_state(
+                        row.job_id,
+                        "lifecycle_interrupted",
+                        status="failed",
+                        event="reconcile_lifecycle_interrupted",
+                        error_code="cluster_lifecycle_interrupted",
+                        error=(
+                            f"AKS {barrier.action} began while this job was active; "
+                            "the execution plane no longer reports the job. Retry after "
+                            "the cluster and database warmup are ready."
+                        ),
+                    )
+                    summary["failed"] += 1
+                    summary["lifecycle_interrupted"] += 1
+                    continue
             if quiet_seconds >= stale_threshold_seconds:
                 # Ground-truth completion check BEFORE declaring the job lost.
                 # The cluster-side finalizer writes ``metadata/SUCCESS.txt``
@@ -521,6 +599,7 @@ def reconcile_stale_jobs(
             "reconcile_stale_jobs: scanned=%(scanned)d completed=%(completed)d "
             "failed=%(failed)d worker_lost=%(worker_lost)d k8s_refreshed=%(k8s_refreshed)d "
             "results_pending=%(results_pending)d external_refreshed=%(external_refreshed)d "
+            "lifecycle_interrupted=%(lifecycle_interrupted)d "
             "errors=%(errors)d",
             summary,
         )

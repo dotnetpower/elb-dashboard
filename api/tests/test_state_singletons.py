@@ -103,6 +103,17 @@ def test_load_missing_returns_none(_reset_singleton_cache_and_table: _FakeTableC
     assert singletons.load_singleton("nope") is None
 
 
+def test_strict_load_propagates_table_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _UnavailableClient:
+        def get_entity(self, _partition_key: str, _row_key: str) -> dict[str, Any]:
+            raise RuntimeError("table unavailable")
+
+    monkeypatch.setattr(singletons, "_CLIENT", _UnavailableClient())
+
+    with pytest.raises(RuntimeError, match="table unavailable"):
+        singletons.load_singleton_strict("execution-admission")
+
+
 def test_clear_removes_row(_reset_singleton_cache_and_table: _FakeTableClient) -> None:
     singletons.save_singleton("k1", {"a": 1})
     assert singletons.clear_singleton("k1") is True

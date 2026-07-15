@@ -408,6 +408,7 @@ def _seed_auto_warmup_job_state(
     expected_node_count: int,
     force_rewarm: bool = False,
     require_all_warmup_nodes: bool = True,
+    admission_token: str = "",
 ) -> bool:
     """Create the `JobState` row for an auto-warmup task before enqueue.
 
@@ -444,6 +445,7 @@ def _seed_auto_warmup_job_state(
         "auto_warmup": True,
         "expected_node_count": expected_node_count,
         "force_rewarm": force_rewarm,
+        "execution_admission_token": admission_token,
     }
     state = JobState(
         job_id=job_id,
@@ -492,6 +494,25 @@ def _attach_auto_warmup_task_id(*, job_id: str, task_id: str) -> None:
         )
 
 
+def _mark_auto_warmup_enqueue_failed(*, job_id: str, error_code: str) -> None:
+    """Best-effort terminalise a seeded row whose task was never enqueued."""
+    try:
+        from api.services.state_repo import get_state_repo
+
+        get_state_repo().update(
+            job_id,
+            status="failed",
+            phase="enqueue_failed",
+            error_code=error_code,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "auto warm enqueue failure marker failed job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+
+
 def reconcile_auto_warmup_preferences(
     *,
     credential: Any,
@@ -499,6 +520,7 @@ def reconcile_auto_warmup_preferences(
     preference: dict[str, Any] | None = None,
     force: bool = False,
     limit: int = 100,
+    admission_token: str = "",
     inflight_acquire: InflightAcquire = autowarmup_inflight_acquire,
 ) -> dict[str, Any]:
     """Reconcile Auto warm preferences and enqueue strict warmup tasks."""
@@ -558,6 +580,24 @@ def reconcile_auto_warmup_preferences(
             # until the cluster is workload-ready, then clears it once the
             # warmup is actually enqueued (see ``clear_force_pending`` below).
             effective_force = bool(force) or bool(pref.force_rewarm_pending)
+            barrier_token = admission_token.strip()
+            if not barrier_token:
+                try:
+                    from api.services.aks.execution_admission import (
+                        get_lifecycle_barrier,
+                    )
+
+                    barrier = get_lifecycle_barrier(
+                        pref.subscription_id, pref.resource_group, pref.cluster_name
+                    )
+                    if barrier is not None and barrier.action in {"start", "scale"}:
+                        barrier_token = barrier.token
+                except Exception:
+                    LOGGER.debug(
+                        "execution admission barrier lookup skipped cluster=%s",
+                        pref.cluster_name,
+                        exc_info=True,
+                    )
 
             clusters = _clusters_for(pref.subscription_id, pref.resource_group)
             cluster = next(
@@ -770,7 +810,7 @@ def reconcile_auto_warmup_preferences(
                 machine_type = pref.machine_type or str((cluster or {}).get("node_sku") or "")
                 num_nodes = int(ready_gate.get("expected_node_count") or 0)
                 program = pref.programs.get(db_name, "blastn")
-                _seed_auto_warmup_job_state(
+                seeded = _seed_auto_warmup_job_state(
                     job_id=job_id,
                     pref=pref,
                     db_name=db_name,
@@ -780,50 +820,113 @@ def reconcile_auto_warmup_preferences(
                     expected_node_count=num_nodes,
                     force_rewarm=forced_rewarm,
                     require_all_warmup_nodes=not partial_warm,
+                    admission_token=barrier_token,
                 )
-                task = send_task(
-                    "api.tasks.storage.warmup_database",
-                    kwargs={
-                        "job_id": job_id,
-                        "subscription_id": pref.subscription_id,
-                        "resource_group": pref.resource_group,
-                        "storage_account": pref.storage_account,
-                        # The storage account may live in a different RG
-                        # than the AKS cluster. Forwarding the preference's
-                        # storage_resource_group is required so the warmup
-                        # task's RBAC ensure (ARM lookup) targets the right
-                        # RG. Omitting it falls back to the cluster RG and
-                        # produces a ResourceNotFound that silently skips
-                        # the role assignment.
-                        "storage_resource_group": pref.storage_resource_group,
-                        "database_name": db_name,
-                        "cluster_name": pref.cluster_name,
-                        "machine_type": machine_type,
-                        "num_nodes": num_nodes,
-                        "acr_resource_group": pref.acr_resource_group,
-                        "acr_name": pref.acr_name,
-                        "program": program,
-                        "caller_oid": pref.owner_oid,
-                        # Strict (all-nodes) warmup by default. After the gate's
-                        # bounded-wait fallback fires (``partial_warm``) we warm
-                        # whatever subset is Ready, so the task must NOT defer on
-                        # a missing node — pass False to let it warm the subset.
-                        "require_all_warmup_nodes": not partial_warm,
-                        # When a forced (post stop/start) reconcile re-enqueues a
-                        # DB that still reports "Ready", the warmup task must drop
-                        # the pre-stop Jobs before it recreates them — otherwise
-                        # `k8s_ensure_job_manifests` sees the existing names and
-                        # no-ops, leaving the RAM cache cold on node_disk.
-                        "force_rewarm": forced_rewarm,
-                        # The reconcile claimed the in-flight slot via
-                        # ``inflight_acquire`` (Redis SET NX EX). Tell the task
-                        # to drop that key in its ``finally`` so a deferred or
-                        # failed warmup is retried on the next beat tick instead
-                        # of waiting out the full TTL.
-                        "release_inflight_on_done": True,
-                    },
-                    queue="storage",
-                )
+                if barrier_token and not seeded:
+                    autowarmup_inflight_release(
+                        pref.subscription_id,
+                        pref.resource_group,
+                        pref.cluster_name,
+                        db_name,
+                    )
+                    raise RuntimeError("post-lifecycle warmup JobState could not be persisted")
+                if barrier_token:
+                    # Persist the correlation BEFORE enqueueing the side effect.
+                    # A durable-write failure prevents send_task via the outer
+                    # exception path, keeping request messages safely queued.
+                    from api.services.aks.execution_admission import (
+                        record_barrier_warmup_jobs,
+                    )
+
+                    correlated = record_barrier_warmup_jobs(
+                        token=barrier_token,
+                        subscription_id=pref.subscription_id,
+                        resource_group=pref.resource_group,
+                        cluster_name=pref.cluster_name,
+                        jobs={db_name: job_id},
+                    )
+                    if not correlated:
+                        _mark_auto_warmup_enqueue_failed(
+                            job_id=job_id,
+                            error_code="execution_admission_superseded",
+                        )
+                        autowarmup_inflight_release(
+                            pref.subscription_id,
+                            pref.resource_group,
+                            pref.cluster_name,
+                            db_name,
+                        )
+                        raise RuntimeError(
+                            "post-lifecycle warmup barrier was superseded before enqueue"
+                        )
+                try:
+                    task = send_task(
+                        "api.tasks.storage.warmup_database",
+                        kwargs={
+                            "job_id": job_id,
+                            "subscription_id": pref.subscription_id,
+                            "resource_group": pref.resource_group,
+                            "storage_account": pref.storage_account,
+                            # The storage account may live in a different RG
+                            # than the AKS cluster. Forwarding the preference's
+                            # storage_resource_group is required so the warmup
+                            # task's RBAC ensure (ARM lookup) targets the right
+                            # RG. Omitting it falls back to the cluster RG and
+                            # produces a ResourceNotFound that silently skips
+                            # the role assignment.
+                            "storage_resource_group": pref.storage_resource_group,
+                            "database_name": db_name,
+                            "cluster_name": pref.cluster_name,
+                            "machine_type": machine_type,
+                            "num_nodes": num_nodes,
+                            "acr_resource_group": pref.acr_resource_group,
+                            "acr_name": pref.acr_name,
+                            "program": program,
+                            "caller_oid": pref.owner_oid,
+                            # Strict (all-nodes) warmup by default. After the gate's
+                            # bounded-wait fallback fires (``partial_warm``) we warm
+                            # whatever subset is Ready, so the task must NOT defer on
+                            # a missing node — pass False to let it warm the subset.
+                            "require_all_warmup_nodes": not partial_warm,
+                            # When a forced (post stop/start) reconcile re-enqueues a
+                            # DB that still reports "Ready", the warmup task must drop
+                            # the pre-stop Jobs before it recreates them — otherwise
+                            # `k8s_ensure_job_manifests` sees the existing names and
+                            # no-ops, leaving the RAM cache cold on node_disk.
+                            "force_rewarm": forced_rewarm,
+                            # The reconcile claimed the in-flight slot via
+                            # ``inflight_acquire`` (Redis SET NX EX). Tell the task
+                            # to drop that key in its ``finally`` so a deferred or
+                            # failed warmup is retried on the next beat tick instead
+                            # of waiting out the full TTL.
+                            "release_inflight_on_done": True,
+                        },
+                        queue="storage",
+                    )
+                except Exception:
+                    if barrier_token:
+                        from api.services.aks.execution_admission import (
+                            clear_barrier_warmup_job,
+                        )
+
+                        clear_barrier_warmup_job(
+                            token=barrier_token,
+                            subscription_id=pref.subscription_id,
+                            resource_group=pref.resource_group,
+                            cluster_name=pref.cluster_name,
+                            database=db_name,
+                        )
+                    _mark_auto_warmup_enqueue_failed(
+                        job_id=job_id,
+                        error_code="warmup_enqueue_failed",
+                    )
+                    autowarmup_inflight_release(
+                        pref.subscription_id,
+                        pref.resource_group,
+                        pref.cluster_name,
+                        db_name,
+                    )
+                    raise
                 _attach_auto_warmup_task_id(job_id=job_id, task_id=getattr(task, "id", ""))
                 result["enqueued"].append({"db": db_name, "task_id": task.id})
 

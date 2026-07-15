@@ -18,8 +18,29 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from api.tasks import azure
+from api.tasks.azure import lifecycle as lifecycle_tasks
 from api.tests._fakes import AsyncResultStub
+
+
+@pytest.fixture(autouse=True)
+def _execution_admission_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        lifecycle_tasks,
+        "_ensure_lifecycle_barrier",
+        lambda **kwargs: str(kwargs.get("execution_admission_token") or "test-barrier"),
+    )
+    monkeypatch.setattr(
+        lifecycle_tasks,
+        "_saved_auto_warmup",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        lifecycle_tasks,
+        "_record_lifecycle_completed",
+        lambda **_kwargs: None,
+    )
 
 
 def test_attach_acr_uses_subscription_scoped_role_definition(monkeypatch) -> None:
@@ -776,6 +797,66 @@ def test_start_aks_reraises_transient_error(monkeypatch) -> None:
         )
 
 
+def test_start_aks_retries_conflicting_scale_operation(monkeypatch) -> None:
+    conflict = _arm_already_in_state_error(
+        "Operation is not allowed because there's an in-progress scale node pool "
+        "operation on agent pool blastpool"
+    )
+    retry_kwargs: list[dict[str, Any]] = []
+
+    class FakeManagedClusters:
+        def begin_start(self, *_args: Any) -> None:
+            raise conflict
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    def _retry(**kwargs: Any) -> RuntimeError:
+        retry_kwargs.append(kwargs)
+        return RuntimeError("retry requested")
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setattr(azure.start_aks, "retry", _retry)
+    monkeypatch.setenv("ELB_AUTO_OPENAPI_DEPLOY", "false")
+
+    with pytest.raises(RuntimeError, match="retry requested"):
+        azure.start_aks.run(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+        )
+
+    assert retry_kwargs[0]["max_retries"] == 12
+    assert retry_kwargs[0]["countdown"] <= 120
+    assert retry_kwargs[0]["exc"] is conflict
+
+
+def test_lifecycle_task_final_failure_marks_execution_admission(monkeypatch) -> None:
+    recorded: list[tuple[dict[str, Any], str]] = []
+    monkeypatch.setattr(
+        lifecycle_tasks,
+        "_record_lifecycle_task_failure",
+        lambda kwargs, *, error_code: recorded.append((kwargs, error_code)),
+    )
+    kwargs = {
+        "execution_admission_token": "barrier-1",
+        "subscription_id": "sub-1",
+        "resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+    }
+
+    azure.scale_aks.on_failure(
+        RuntimeError("scale failed"),
+        "task-scale",
+        (),
+        kwargs,
+        None,
+    )
+
+    assert recorded == [(kwargs, "RuntimeError")]
+
+
 def test_stop_aks_treats_already_stopped_as_noop(monkeypatch) -> None:
     """Stopping an already Stopped/Stopping cluster (duplicate Stop, autoretry,
     or a manual Stop racing the idle auto-stop) is a no-op success."""
@@ -1347,6 +1428,7 @@ def test_scale_aks_resizes_blastpool_and_rewarms(monkeypatch) -> None:
     assert sent[0]["task_name"] == "api.tasks.storage.reconcile_auto_warmup"
     assert sent[0]["queue"] == "reconcile"
     assert sent[0]["kwargs"]["force"] is True
+    assert sent[0]["kwargs"]["admission_token"] == "test-barrier"
     assert saved["pref"].num_nodes == 5
     assert saved["pref"].force_rewarm_pending is True
 

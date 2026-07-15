@@ -30,6 +30,14 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.setenv("AZURE_TENANT_ID", "common")
     monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.setattr(
+        "api.routes.aks.lifecycle._create_barrier",
+        lambda **_kwargs: "barrier-test-token",
+    )
+    monkeypatch.setattr(
+        "api.routes.aks.lifecycle._cancel_barrier",
+        lambda *_args, **_kwargs: None,
+    )
     from api.main import app
 
     return TestClient(app)
@@ -97,6 +105,7 @@ def test_aks_start_forwards_auto_warmup_payload(
     assert response.json()["task_id"] == "task-start-aks"
     assert calls[0]["auto_warmup"]["databases"] == ["core_nt"]
     assert calls[0]["auto_warmup"]["storage_account"] == "elbstg01"
+    assert calls[0]["execution_admission_token"] == "barrier-test-token"
     assert calls[0]["auto_openapi"] == {
         "acr_name": "elbacr01",
         "acr_resource_group": "rg-elbacr",
@@ -134,6 +143,68 @@ def test_aks_scale_forwards_node_count_and_warmup(
     assert calls[0]["node_count"] == 5
     assert calls[0]["cluster_name"] == "elb-cluster"
     assert calls[0]["auto_warmup"]["databases"] == ["core_nt"]
+    assert calls[0]["execution_admission_token"] == "barrier-test-token"
+
+
+def test_aks_scale_persists_barrier_before_enqueue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+
+    def _barrier(**kwargs: Any) -> str:
+        events.append(f"barrier:{kwargs['target_node_count']}")
+        return "ordered-token"
+
+    def _delay(**kwargs: Any) -> AsyncResultStub:
+        events.append(f"enqueue:{kwargs['execution_admission_token']}")
+        return AsyncResultStub("task-scale-ordered")
+
+    monkeypatch.setattr("api.routes.aks.lifecycle._create_barrier", _barrier)
+    monkeypatch.setattr("api.tasks.azure.scale_aks.delay", _delay)
+
+    response = client.post(
+        "/api/aks/scale",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "node_count": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    assert events == ["barrier:7", "enqueue:ordered-token"]
+
+
+def test_aks_scale_cancels_barrier_when_enqueue_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancelled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "api.routes.aks.lifecycle._create_barrier", lambda **_kwargs: "failed-token"
+    )
+    monkeypatch.setattr(
+        "api.routes.aks.lifecycle._cancel_barrier",
+        lambda token, *, reason: cancelled.append((token, reason)),
+    )
+
+    def _boom(**_kwargs: Any) -> AsyncResultStub:
+        raise RuntimeError("enqueue failed")
+
+    monkeypatch.setattr("api.tasks.azure.scale_aks.delay", _boom)
+
+    with pytest.raises(RuntimeError, match="enqueue failed"):
+        client.post(
+            "/api/aks/scale",
+            json={
+                "subscription_id": "sub-1",
+                "resource_group": "rg-elb",
+                "cluster_name": "elb-cluster",
+                "node_count": 7,
+            },
+        )
+
+    assert cancelled == [("failed-token", "scale_enqueue_failed")]
 
 
 @pytest.mark.parametrize("bad_count", [0, -1, 9999, "abc", None])

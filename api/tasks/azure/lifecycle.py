@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 from azure.core.exceptions import HttpResponseError
-from celery import shared_task
+from celery import Task, shared_task
 
 import api.tasks.azure as _facade
 
@@ -43,6 +43,95 @@ _ALREADY_IN_TARGET_STATE_MARKERS = (
     "already being started",
     "already being stopped",
 )
+
+_CONFLICTING_LIFECYCLE_MARKERS = (
+    "in-progress scale node pool operation",
+    "in progress scale node pool operation",
+    "in-progress start managed cluster operation",
+    "in progress start managed cluster operation",
+    "in-progress stop managed cluster operation",
+    "in progress stop managed cluster operation",
+    "another operation on the managed cluster is in progress",
+)
+_CONFLICT_MAX_RETRIES = 12
+
+
+def _record_lifecycle_task_failure(
+    kwargs: dict[str, Any], *, error_code: str
+) -> None:
+    """Best-effort mark the matching admission generation terminally failed."""
+    token = str(kwargs.get("execution_admission_token") or "").strip()
+    if not token:
+        return
+    try:
+        from api.services.aks.execution_admission import record_lifecycle_failed
+
+        recorded = record_lifecycle_failed(
+            token=token,
+            subscription_id=str(kwargs.get("subscription_id") or ""),
+            resource_group=str(kwargs.get("resource_group") or ""),
+            cluster_name=str(kwargs.get("cluster_name") or ""),
+            error_code=error_code,
+        )
+        if not recorded:
+            LOGGER.info(
+                "lifecycle failure ignored for superseded barrier token=%s",
+                token[:12],
+            )
+    except Exception as exc:
+        LOGGER.warning(
+            "lifecycle failure marker failed token=%s error=%s",
+            token[:12],
+            type(exc).__name__,
+        )
+
+
+class _LifecycleAdmissionTask(Task):
+    """Celery base that records only final lifecycle failures, after retries."""
+
+    abstract = True
+
+    def on_failure(
+        self,
+        exc: BaseException,
+        task_id: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        einfo: Any,
+    ) -> None:
+        _record_lifecycle_task_failure(kwargs, error_code=type(exc).__name__)
+        super().on_failure(exc, task_id, args, kwargs, einfo)
+
+
+def _is_conflicting_lifecycle_operation(exc: BaseException) -> bool:
+    if not isinstance(exc, HttpResponseError):
+        return False
+    err = getattr(exc, "error", None)
+    message = " ".join(
+        (
+            str(getattr(exc, "message", "") or ""),
+            str(getattr(err, "message", "") or ""),
+        )
+    ).lower()
+    return any(marker in message for marker in _CONFLICTING_LIFECYCLE_MARKERS)
+
+
+def _retry_lifecycle_conflict(task: Any, exc: BaseException, *, cluster_name: str) -> NoReturn:
+    """Release the worker slot and retry a conflicting ARM operation, bounded."""
+    retries = int(getattr(getattr(task, "request", None), "retries", 0) or 0)
+    countdown = min(30 * (2 ** min(retries, 2)), 120)
+    LOGGER.warning(
+        "AKS lifecycle conflict cluster=%s retry=%d/%d countdown=%ds",
+        cluster_name,
+        retries + 1,
+        _CONFLICT_MAX_RETRIES,
+        countdown,
+    )
+    raise task.retry(
+        exc=exc,
+        countdown=countdown,
+        max_retries=_CONFLICT_MAX_RETRIES,
+    )
 
 
 def _is_already_in_target_power_state(exc: BaseException) -> bool:
@@ -108,6 +197,7 @@ def _enqueue_forced_rewarm(
     auto_warmup: dict[str, Any] | None,
     num_nodes_override: int | None = None,
     log_context: str = "AKS lifecycle",
+    admission_token: str = "",
 ) -> str:
     """Persist the Auto warm preference with ``force_rewarm_pending`` and enqueue
     a forced ``reconcile_auto_warmup``. Returns the reconcile task id, or ``""``
@@ -146,14 +236,18 @@ def _enqueue_forced_rewarm(
         pref = save_auto_warmup_preference(normalise_preference(pref_payload))
         task = celery_app.send_task(
             "api.tasks.storage.reconcile_auto_warmup",
-            kwargs={"preference": pref.to_dict(), "force": True},
+            kwargs={
+                "preference": pref.to_dict(),
+                "force": True,
+                "admission_token": admission_token,
+            },
             # Route to the dedicated `reconcile` queue (same as the beat
             # reconcile) so this post-lifecycle reconcile is not delayed behind
             # — or competing with — interactive BLAST submits backed up on the
             # `storage` queue.
             queue="reconcile",
         )
-        return task.id
+        return str(task.id or "")
     except Exception as exc:
         LOGGER.warning(
             "forced re-warm reconcile enqueue failed (%s): %s",
@@ -161,6 +255,102 @@ def _enqueue_forced_rewarm(
             type(exc).__name__,
         )
         return ""
+
+
+def _ensure_lifecycle_barrier(
+    *,
+    action: str,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    execution_admission_token: str,
+    target_node_count: int = 0,
+    auto_warmup: dict[str, Any] | None = None,
+) -> str:
+    """Create the lifecycle barrier for non-route callers, or verify its token."""
+    from api.services.aks.execution_admission import (
+        create_lifecycle_barrier,
+        get_lifecycle_barrier,
+    )
+
+    token = execution_admission_token.strip()
+    current = get_lifecycle_barrier(subscription_id, resource_group, cluster_name)
+    if token:
+        if current is not None and current.token == token:
+            raw_databases = auto_warmup.get("databases", []) if auto_warmup else []
+            databases = raw_databases if isinstance(raw_databases, list) else []
+            expected_databases = {str(item).strip() for item in databases if str(item).strip()}
+            expected_target = max(0, int(target_node_count or 0))
+            if expected_databases != set(current.databases) or (
+                expected_target > 0 and expected_target != current.target_node_count
+            ):
+                enriched = create_lifecycle_barrier(
+                    action=action,
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                    target_node_count=expected_target or current.target_node_count,
+                    databases=sorted(expected_databases),
+                    token=token,
+                )
+                return enriched.token
+            return token
+        raise RuntimeError(
+            "lifecycle request was superseded by a newer execution-admission barrier"
+        )
+    databases = auto_warmup.get("databases", []) if auto_warmup else []
+    barrier = create_lifecycle_barrier(
+        action=action,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        target_node_count=target_node_count,
+        databases=databases if isinstance(databases, list) else [],
+        token=token,
+    )
+    return barrier.token
+
+
+def _saved_auto_warmup(
+    subscription_id: str, resource_group: str, cluster_name: str
+) -> dict[str, Any] | None:
+    """Load an enabled saved preference for queue-autostart/direct task callers."""
+    try:
+        from api.services.auto_warmup import get_auto_warmup_preference
+
+        pref = get_auto_warmup_preference(subscription_id, resource_group, cluster_name)
+        if pref is not None and pref.enabled and pref.databases:
+            return dict(pref.to_dict())
+    except Exception as exc:
+        LOGGER.warning(
+            "saved auto-warmup lookup failed cluster=%s: %s",
+            cluster_name,
+            type(exc).__name__,
+        )
+    return None
+
+
+def _record_lifecycle_completed(
+    *,
+    token: str,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> None:
+    """Persist ARM convergence before any post-lifecycle warmup is queued."""
+    from api.services.aks.execution_admission import record_lifecycle_completed
+
+    if not record_lifecycle_completed(
+        token=token,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    ):
+        LOGGER.info(
+            "lifecycle completion ignored for superseded barrier cluster=%s token=%s",
+            cluster_name,
+            token[:12],
+        )
 
 
 def _resolve_workload_pool_name(
@@ -200,6 +390,7 @@ def _resolve_workload_pool_name(
 
 @shared_task(
     name="api.tasks.azure.start_aks",
+    base=_LifecycleAdmissionTask,
     bind=True,
     max_retries=3,
     autoretry_for=(Exception,),
@@ -215,6 +406,7 @@ def start_aks(
     cluster_name: str,
     auto_warmup: dict[str, Any] | None = None,
     auto_openapi: dict[str, Any] | None = None,
+    execution_admission_token: str = "",
 ) -> dict[str, Any]:
     """Start a stopped AKS cluster.
 
@@ -224,6 +416,17 @@ def start_aks(
     OpenAPI deployment preference is supplied, queues the idempotent OpenAPI
     service deployment after the cluster is reachable.
     """
+    if auto_warmup is None:
+        auto_warmup = _saved_auto_warmup(subscription_id, resource_group, cluster_name)
+    execution_admission_token = _ensure_lifecycle_barrier(
+        action="start",
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        execution_admission_token=execution_admission_token,
+        target_node_count=int((auto_warmup or {}).get("num_nodes") or 0),
+        auto_warmup=auto_warmup,
+    )
     cred = _facade.get_credential()
     aks = _facade.aks_client(cred, subscription_id)
     _started_at = time.monotonic()
@@ -243,12 +446,14 @@ def start_aks(
             cluster_name,
             exc,
         )
-    poller = aks.managed_clusters.begin_start(resource_group, cluster_name)
     started_now = True
     try:
+        poller = aks.managed_clusters.begin_start(resource_group, cluster_name)
         poller.result()
         LOGGER.info("AKS cluster %s started", cluster_name)
     except Exception as exc:
+        if _is_conflicting_lifecycle_operation(exc):
+            _retry_lifecycle_conflict(self, exc, cluster_name=cluster_name)
         if not _is_already_in_target_power_state(exc):
             raise
         # Idempotent no-op: the cluster is already Running/Starting (duplicate
@@ -261,6 +466,12 @@ def start_aks(
             "AKS cluster %s already running/starting; treating start as no-op",
             cluster_name,
         )
+    _record_lifecycle_completed(
+        token=execution_admission_token,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
     if started_now:
         _record_lifecycle_timing(
             "aks_start",
@@ -277,6 +488,7 @@ def start_aks(
             cluster_name=cluster_name,
             auto_warmup=auto_warmup,
             log_context="aks_start",
+            admission_token=execution_admission_token,
         )
     openapi_task_id = ""
     try:
@@ -292,9 +504,7 @@ def start_aks(
             trigger="aks_start",
         )
     except Exception as exc:
-        LOGGER.warning(
-            "openapi deploy enqueue failed after AKS start: %s", type(exc).__name__
-        )
+        LOGGER.warning("openapi deploy enqueue failed after AKS start: %s", type(exc).__name__)
     return {
         "cluster_name": cluster_name,
         "action": "start",
@@ -307,6 +517,7 @@ def start_aks(
 
 @shared_task(
     name="api.tasks.azure.scale_aks",
+    base=_LifecycleAdmissionTask,
     bind=True,
     max_retries=3,
     autoretry_for=(Exception,),
@@ -323,6 +534,7 @@ def scale_aks(
     node_count: int,
     pool_name: str = "",
     auto_warmup: dict[str, Any] | None = None,
+    execution_admission_token: str = "",
 ) -> dict[str, Any]:
     """Scale the workload (blastpool) node pool to ``node_count`` nodes.
 
@@ -351,15 +563,24 @@ def scale_aks(
     retries — both of which want the re-warm.
     """
     target = int(node_count)
+    if auto_warmup is None:
+        auto_warmup = _saved_auto_warmup(subscription_id, resource_group, cluster_name)
+        if auto_warmup is not None:
+            auto_warmup["num_nodes"] = target
+    execution_admission_token = _ensure_lifecycle_barrier(
+        action="scale",
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        execution_admission_token=execution_admission_token,
+        target_node_count=target,
+        auto_warmup=auto_warmup,
+    )
     cred = _facade.get_credential()
     aks = _facade.aks_client(cred, subscription_id)
-    resolved_pool_name = _resolve_workload_pool_name(
-        aks, resource_group, cluster_name, pool_name
-    )
+    resolved_pool_name = _resolve_workload_pool_name(aks, resource_group, cluster_name, pool_name)
     if not resolved_pool_name:
-        raise RuntimeError(
-            f"no workload node pool found on cluster '{cluster_name}' to scale"
-        )
+        raise RuntimeError(f"no workload node pool found on cluster '{cluster_name}' to scale")
     pool = aks.agent_pools.get(resource_group, cluster_name, resolved_pool_name)
     previous_count = int(getattr(pool, "count", 0) or 0)
     if previous_count == target:
@@ -368,6 +589,12 @@ def scale_aks(
             cluster_name,
             resolved_pool_name,
             target,
+        )
+        _record_lifecycle_completed(
+            token=execution_admission_token,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
         )
         # Still ensure the re-warm: a no-op here is reachable via an autoretry
         # that races ARM's own convergence after a successful PUT, where the
@@ -379,6 +606,7 @@ def scale_aks(
             auto_warmup=auto_warmup,
             num_nodes_override=target,
             log_context="aks_scale_noop",
+            admission_token=execution_admission_token,
         )
         return {
             "cluster_name": cluster_name,
@@ -392,10 +620,21 @@ def scale_aks(
         }
     _scaled_at = time.monotonic()
     pool.count = target
-    poller = aks.agent_pools.begin_create_or_update(
-        resource_group, cluster_name, resolved_pool_name, pool
+    try:
+        poller = aks.agent_pools.begin_create_or_update(
+            resource_group, cluster_name, resolved_pool_name, pool
+        )
+        poller.result()
+    except Exception as exc:
+        if _is_conflicting_lifecycle_operation(exc):
+            _retry_lifecycle_conflict(self, exc, cluster_name=cluster_name)
+        raise
+    _record_lifecycle_completed(
+        token=execution_admission_token,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
     )
-    poller.result()
     LOGGER.info(
         "scale_aks cluster=%s pool=%s %d->%d",
         cluster_name,
@@ -421,6 +660,7 @@ def scale_aks(
         auto_warmup=auto_warmup,
         num_nodes_override=target,
         log_context="aks_scale",
+        admission_token=execution_admission_token,
     )
     return {
         "cluster_name": cluster_name,
@@ -436,6 +676,7 @@ def scale_aks(
 
 @shared_task(
     name="api.tasks.azure.stop_aks",
+    base=_LifecycleAdmissionTask,
     bind=True,
     max_retries=3,
     autoretry_for=(Exception,),
@@ -449,17 +690,27 @@ def stop_aks(
     subscription_id: str,
     resource_group: str,
     cluster_name: str,
+    execution_admission_token: str = "",
 ) -> dict[str, Any]:
     """Stop a running AKS cluster."""
+    _ensure_lifecycle_barrier(
+        action="stop",
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        execution_admission_token=execution_admission_token,
+    )
     cred = _facade.get_credential()
     aks = _facade.aks_client(cred, subscription_id)
     _started_at = time.monotonic()
-    poller = aks.managed_clusters.begin_stop(resource_group, cluster_name)
     stopped_now = True
     try:
+        poller = aks.managed_clusters.begin_stop(resource_group, cluster_name)
         poller.result()
         LOGGER.info("AKS cluster %s stopped", cluster_name)
     except Exception as exc:
+        if _is_conflicting_lifecycle_operation(exc):
+            _retry_lifecycle_conflict(self, exc, cluster_name=cluster_name)
         if not _is_already_in_target_power_state(exc):
             raise
         # Idempotent no-op: already Stopped/Stopping (duplicate Stop, an
@@ -489,6 +740,7 @@ def stop_aks(
 
 @shared_task(
     name="api.tasks.azure.delete_aks",
+    base=_LifecycleAdmissionTask,
     bind=True,
     max_retries=2,
     autoretry_for=(Exception,),
@@ -502,6 +754,7 @@ def delete_aks(
     subscription_id: str,
     resource_group: str,
     cluster_name: str,
+    execution_admission_token: str = "",
 ) -> dict[str, Any]:
     """Delete an AKS cluster, and the enclosing resource group if it becomes empty.
 
@@ -516,10 +769,22 @@ def delete_aks(
     `list_by_resource_group` and `begin_delete`. RG cleanup failures are logged
     but do not fail the task — the AKS delete already succeeded.
     """
+    _ensure_lifecycle_barrier(
+        action="delete",
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        execution_admission_token=execution_admission_token,
+    )
     cred = _facade.get_credential()
     aks = _facade.aks_client(cred, subscription_id)
-    poller = aks.managed_clusters.begin_delete(resource_group, cluster_name)
-    poller.result()
+    try:
+        poller = aks.managed_clusters.begin_delete(resource_group, cluster_name)
+        poller.result()
+    except Exception as exc:
+        if _is_conflicting_lifecycle_operation(exc):
+            _retry_lifecycle_conflict(self, exc, cluster_name=cluster_name)
+        raise
     LOGGER.info("AKS cluster %s deleted", cluster_name)
 
     rg_status = "retained"
@@ -545,9 +810,7 @@ def delete_aks(
                 resource_group,
             )
         else:
-            remaining = [
-                r.name for r in rc.resources.list_by_resource_group(resource_group)
-            ]
+            remaining = [r.name for r in rc.resources.list_by_resource_group(resource_group)]
             rg_remaining = len(remaining)
             if rg_remaining == 0:
                 rc.resource_groups.begin_delete(resource_group).result()

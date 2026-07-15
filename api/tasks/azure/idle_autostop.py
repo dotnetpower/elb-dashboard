@@ -567,13 +567,40 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
                 pref.subscription_id, pref.resource_group, pref.cluster_name
             ):
                 try:
-                    from api.tasks.azure.lifecycle import start_aks
+                    from api.services.aks.execution_admission import (
+                        cancel_lifecycle_barrier,
+                        create_lifecycle_barrier,
+                    )
+                    from api.tasks.azure.lifecycle import _saved_auto_warmup, start_aks
 
-                    start_aks.delay(  # type: ignore[attr-defined]
+                    auto_warmup = _saved_auto_warmup(
+                        pref.subscription_id,
+                        pref.resource_group,
+                        pref.cluster_name,
+                    )
+                    barrier = create_lifecycle_barrier(
+                        action="start",
                         subscription_id=pref.subscription_id,
                         resource_group=pref.resource_group,
                         cluster_name=pref.cluster_name,
+                        target_node_count=int((auto_warmup or {}).get("num_nodes") or 0),
+                        databases=(auto_warmup or {}).get("databases", []),
                     )
+
+                    try:
+                        start_aks.delay(
+                            subscription_id=pref.subscription_id,
+                            resource_group=pref.resource_group,
+                            cluster_name=pref.cluster_name,
+                            auto_warmup=auto_warmup,
+                            execution_admission_token=barrier.token,
+                        )
+                    except Exception:
+                        cancel_lifecycle_barrier(
+                            barrier.token,
+                            reason="queue_autostart_enqueue_failed",
+                        )
+                        raise
                     summary["queued_starts"] += 1
                     LOGGER.info(
                         "queue_autostart queued start cluster=%s pending=%s",

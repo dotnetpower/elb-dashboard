@@ -15,12 +15,15 @@ Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py``.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from api.services import external_blast, service_bus
 from api.services.service_bus import MessageAction, ParsedMessage
 from api.services.service_bus_pref import ServiceBusConfig
 from api.services.service_bus_tracking import BridgeRecord
 from api.tasks.servicebus import tasks as sb_tasks
+from fastapi import HTTPException
 
 _REAL_OPENAPI_READY_FOR_TRANSITION_POLL = sb_tasks._openapi_ready_for_transition_poll
 
@@ -37,6 +40,11 @@ def _file_backend(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         sb_tasks,
         "_openapi_ready_for_transition_poll",
         lambda _kwargs: True,
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _cfg: {"allowed": True, "reason": "ready"},
     )
 
 
@@ -88,8 +96,11 @@ def test_drain_defers_when_gate_on_and_cluster_not_ready(
 ) -> None:
     """R1: gate ON + plane not ready → defer the tick, do NOT pull messages."""
     _enable(monkeypatch)
-    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
-    monkeypatch.setattr(sb_tasks, "_openapi_ready_for_drain", lambda _c: False)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _c: {"allowed": False, "reason": "cluster_not_ready"},
+    )
     pulled: list[int] = []
     monkeypatch.setattr(
         service_bus, "drain_requests", lambda *a, **k: pulled.append(1) or _DrainStats()
@@ -104,8 +115,9 @@ def test_drain_proceeds_when_gate_on_and_cluster_ready(
 ) -> None:
     """R1: gate ON + plane ready → the readiness guard is transparent."""
     _enable(monkeypatch)
-    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
-    monkeypatch.setattr(sb_tasks, "_openapi_ready_for_drain", lambda _c: True)
+    monkeypatch.setattr(
+        sb_tasks, "_execution_admission_for_drain", lambda _c: {"allowed": True}
+    )
     monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda q="": (True, "tok"))
     monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda t, q="": None)
     monkeypatch.setattr(service_bus, "drain_requests", lambda *a, **k: _DrainStats())
@@ -114,22 +126,27 @@ def test_drain_proceeds_when_gate_on_and_cluster_ready(
     assert out["received"] == 0
 
 
-def test_drain_skips_readiness_probe_when_gate_off(
+def test_drain_always_enforces_execution_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R1: gate OFF (default) → no readiness probe; the legacy drain is unchanged."""
+    """Lifecycle/warmup safety cannot be bypassed by disabling queue autostart."""
     _enable(monkeypatch)
     monkeypatch.delenv("SERVICEBUS_QUEUE_AUTOSTART", raising=False)
     probed: list[int] = []
     monkeypatch.setattr(
-        sb_tasks, "_openapi_ready_for_drain", lambda _c: probed.append(1) or False
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _c: probed.append(1)
+        or {"allowed": False, "reason": "database_warmup_in_progress"},
     )
-    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda q="": (True, "tok"))
-    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda t, q="": None)
-    monkeypatch.setattr(service_bus, "drain_requests", lambda *a, **k: _DrainStats())
+    pulled: list[int] = []
+    monkeypatch.setattr(
+        service_bus, "drain_requests", lambda *a, **k: pulled.append(1) or _DrainStats()
+    )
     out = sb_tasks.drain_and_resubmit()
-    assert probed == []  # gate off → never probe readiness
-    assert "skipped" not in out
+    assert probed == [1]
+    assert out["skipped"] == "database_warmup_in_progress"
+    assert pulled == []
 
 
 def test_openapi_ready_for_drain_true_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,6 +166,39 @@ def test_openapi_ready_for_drain_false_on_probe_error(monkeypatch: pytest.Monkey
     monkeypatch.setattr(external_blast, "ready", _boom)
     # Never raises: an unreachable plane defers the tick rather than crashing it.
     assert sb_tasks._openapi_ready_for_drain(cfg) is False
+
+
+def test_drain_handler_abandons_if_lifecycle_starts_after_receive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A barrier created during receive must prevent submit and preserve the message."""
+    cfg = _enabled_cfg()
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _cfg: {"allowed": False, "reason": "aks_scaling"},
+    )
+    submitted: list[int] = []
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda *_a, **_k: submitted.append(1) or {"job_id": "unexpected"},
+    )
+
+    action = sb_tasks._drain_handler(
+        _msg(
+            {
+                "query_fasta": ">q\nACTG",
+                "db": "core_nt",
+                "program": "blastn",
+                "external_correlation_id": "corr-blocked",
+            }
+        ),
+        cfg,
+    )
+
+    assert action is MessageAction.ABANDON
+    assert submitted == []
 
 
 def test_openapi_ready_for_transition_poll_is_bounded_and_fail_safe(
@@ -1292,8 +1342,120 @@ def test_publish_transitions_defers_all_bridge_polls_when_openapi_is_not_ready(
 
     out = sb_tasks.publish_transitions()
 
-    assert out == {"skipped": "cluster_not_ready", "active_bridges": 1}
+    assert out == {
+        "skipped": "cluster_not_ready",
+        "active_bridges": 1,
+        "finished": 0,
+    }
     assert polled == []
+
+
+def test_publish_transitions_finishes_lifecycle_interrupted_bridge_when_offline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-lifecycle",
+            openapi_job_id="op-lifecycle",
+            last_status="running",
+            created_at="2025-01-01T00:00:00+00:00",
+        )
+    )
+    monkeypatch.setattr(sb_tasks, "_openapi_ready_for_transition_poll", lambda _k: False)
+    monkeypatch.setattr(sb_tasks, "_LIFECYCLE_INTERRUPTION_SECONDS", 0)
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.lifecycle_barrier_interrupts_job",
+        lambda **_kwargs: SimpleNamespace(
+            action="stop", created_at="2025-01-01T01:00:00Z"
+        ),
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
+
+    out = sb_tasks.publish_transitions()
+
+    assert out["finished"] == 1
+    assert events[0]["status"] == "failed"
+    assert events[0]["error_code"] == "cluster_lifecycle_interrupted"
+
+
+def test_publish_transition_finishes_scaled_job_after_recovered_openapi_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    rec = BridgeRecord(
+        correlation_id="corr-scale-lost",
+        openapi_job_id="op-scale-lost",
+        last_status="running",
+        created_at="2025-01-01T00:00:00+00:00",
+    )
+    monkeypatch.setattr(sb_tasks, "_LIFECYCLE_INTERRUPTION_SECONDS", 0)
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(HTTPException(404)),
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.lifecycle_barrier_interrupts_job",
+        lambda **_kwargs: SimpleNamespace(
+            action="scale", created_at="2025-01-01T01:00:00Z"
+        ),
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
+    monkeypatch.setattr(sb_tasks, "mark_done", lambda *_args: None)
+
+    published, finished = sb_tasks._publish_one_bridge(cfg, rec, {})
+
+    assert (published, finished) == (1, 1)
+    assert events[0]["error_code"] == "cluster_lifecycle_interrupted"
+
+
+def test_publish_transition_follows_local_lifecycle_interrupted_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    rec = BridgeRecord(
+        correlation_id="corr-local-interrupted",
+        openapi_job_id="op-local-interrupted",
+        last_status="running",
+        created_at="2025-01-01T00:00:00+00:00",
+    )
+    monkeypatch.setattr(sb_tasks, "_LIFECYCLE_INTERRUPTION_SECONDS", 0)
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.lifecycle_barrier_interrupts_job",
+        lambda **_kwargs: SimpleNamespace(
+            action="scale", created_at="2025-01-01T01:00:00Z"
+        ),
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(
+            get=lambda _job_id: SimpleNamespace(
+                status="failed",
+                error_code="cluster_lifecycle_interrupted",
+                payload={},
+            )
+        ),
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
+    monkeypatch.setattr(sb_tasks, "mark_done", lambda *_args: None)
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local terminal state should win")
+        ),
+    )
+
+    published, finished = sb_tasks._publish_one_bridge(cfg, rec, {})
+
+    assert (published, finished) == (1, 1)
+    assert events[0]["error_code"] == "cluster_lifecycle_interrupted"
 
 
 def test_publish_transitions_gives_up_on_stuck_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1458,8 +1620,8 @@ def test_persist_result_manifest_noop_without_blob_paths(monkeypatch: pytest.Mon
 
 
 # --------------------------------------------------------------------------- #
-# Atomic single-writer claim gate (SERVICEBUS_ATOMIC_CLAIM). Default OFF keeps
-# the legacy "any existing row dedups" behaviour; ON reserves before submitting.
+# Atomic single-writer claim gate (SERVICEBUS_ATOMIC_CLAIM). Default ON after
+# soak; explicit OFF preserves the legacy "any existing row dedups" behaviour.
 # --------------------------------------------------------------------------- #
 
 
@@ -1555,8 +1717,8 @@ def test_gate_on_unconfirmed_row_falls_through_to_claim(
 
 
 # --------------------------------------------------------------------------- #
-# Single-flight drain lease (SERVICEBUS_DRAIN_SINGLEFLIGHT). Default OFF never
-# touches Redis; ON skips an overlapping tick and is fail-open on a Redis error.
+# Single-flight drain lease (SERVICEBUS_DRAIN_SINGLEFLIGHT). Default ON after
+# soak; explicit OFF never touches Redis. Redis errors remain fail-open.
 # --------------------------------------------------------------------------- #
 
 

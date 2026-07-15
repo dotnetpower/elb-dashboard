@@ -88,6 +88,7 @@ _CLUSTER_STATE_CODES = frozenset(
         "worker_lost",
         "cluster_stopped",
         "cluster_not_found",
+        "cluster_lifecycle_interrupted",
     }
 )
 

@@ -301,7 +301,34 @@ so the live contract only changes by explicit opt-in:
 - `SERVICEBUS_RESIDENT_CONSUMER` — a resident long-polling consumer drains the
   queue within ~1 s instead of waiting the 30 s beat. The beat drain task stays
   registered as the fallback reconcile, so the resident loop is an accelerator,
-  never a single point of failure.
+  never a single point of failure. The resident and beat paths share the same
+  execution-admission decision and queue-scoped single-flight lease.
+
+### AKS lifecycle and database warmup admission
+
+The request queue is the durable wait boundary while AKS is not safe to execute
+new work. Start, scale, stop, and delete actions write a per-cluster lifecycle
+barrier before enqueueing their Celery task. Both consumers check that barrier
+before opening a receiver, and the per-message handler checks it again before
+submitting to OpenAPI so a barrier created during a long-poll cannot leak one
+request through.
+
+Start/scale admission requires all of the following:
+
+1. The ARM lifecycle operation has reported convergence.
+2. The workload pool reports the exact requested node count.
+3. Every target workload node is Kubernetes Ready.
+4. Every configured post-lifecycle database warmup Job correlated to that
+   lifecycle token is complete and the live database warmup state is `Ready`.
+
+An active manual warmup Job closes the same gate even when Auto warm is not
+configured. This keeps the queue as the durable wait boundary for every database
+cache transition, not only lifecycle-triggered warmups.
+
+Until then, request messages are not received and dashboard placeholders remain
+`queued`. A terminal warmup failure keeps admission closed instead of allowing a
+cold submit. Stop/delete barriers remain closed until a later start creates a
+new lifecycle generation.
 
 ## Result return for external services (pull first, optional push)
 
@@ -352,6 +379,9 @@ Rules a subscriber must follow:
 | `SERVICEBUS_ENABLED` | _(empty)_ | api, worker, beat | Three-state deploy-time override of the saved config. **Empty/unset (default)** defers to the Settings config row, so the toggle is a runtime feature flag that survives redeploys. **Truthy** (`true`/`1`/`yes`/`on`) pins the capability on, but activation still requires the config (enabled + namespace). **Falsy** (`false`/`0`/`no`/`off`) is a deployment kill switch that forces the integration OFF regardless of the config. When OFF the drain/publish/cleanup beat tasks no-op and the submit routes do not enqueue. |
 | `ENABLE_SB_SUBMIT_INGRESS` | `false` | api | When true (and Service Bus enabled) the dashboard submit API enqueues to Service Bus instead of calling `/v1/jobs` directly; a publish failure falls back to the direct path. |
 | `SERVICEBUS_RESIDENT_CONSUMER` | `false` | worker | When true (and Service Bus enabled) a resident long-polling consumer drains the queue continuously (~1 s) instead of waiting the 30 s beat; the beat stays as the fallback. |
+| `SERVICEBUS_ATOMIC_CLAIM` | `true` | worker | Required when drain concurrency is greater than 1. Atomically reserves each correlation id before OpenAPI submit; code falls back to serial drain if explicitly disabled. |
+| `SERVICEBUS_DRAIN_SINGLEFLIGHT` | `true` | worker | Takes a queue-scoped Redis lease so the resident consumer and beat fallback do not compete for the same request queue. |
+| `SERVICEBUS_LIFECYCLE_INTERRUPTION_SECONDS` | `600` | worker | After a newer AKS lifecycle generation and sustained OpenAPI/Kubernetes absence, terminalise an already-accepted bridge as `cluster_lifecycle_interrupted` instead of leaving it active indefinitely. |
 | `CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS` | `30` | beat | Drain + transition-publish cadence. |
 | `CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS` | `3600` | beat | DLQ cleanup cadence. |
 

@@ -20,6 +20,7 @@ import io
 import json
 import xml.etree.ElementTree as ET
 from datetime import UTC
+from types import SimpleNamespace
 
 import pytest
 from api._http_utils import BlastSubmitRequest
@@ -4445,6 +4446,68 @@ def test_reconcile_does_not_mark_external_origin_row_worker_lost(
     assert summary["worker_lost"] == 0
     assert summary["untouched"] >= 1
     assert repo.updates == []
+
+
+def test_reconcile_fails_external_row_lost_after_newer_cluster_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer scale/stop generation is positive evidence for bounded failure."""
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="ext-lifecycle-lost",
+                task_id="",
+                updated_at="2025-01-01T00:00:00+00:00",
+                created_at="2025-01-01T00:00:00+00:00",
+                payload={
+                    "external": {"job_id": "job-ext-lifecycle-lost"},
+                    "elastic_blast_job_id": "job-ext-lifecycle-lost",
+                },
+                subscription_id="sub-1",
+                resource_group="rg-elb",
+                cluster_name="aks-elb",
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {
+            "status": "creating",
+            "jobs": 0,
+            "pods": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "api.routes._blast_shared._openapi_client_kwargs_from_cluster",
+        lambda *_args: {"base_url": "https://openapi.test"},
+    )
+    monkeypatch.setattr(
+        "api.services.external_blast.get_job",
+        lambda *_args, **_kwargs: {
+            "job_id": "job-ext-lifecycle-lost",
+            "status": "running",
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.lifecycle_barrier_interrupts_job",
+        lambda **_kwargs: SimpleNamespace(action="scale"),
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.evaluate_execution_admission",
+        lambda **_kwargs: {"allowed": True, "reason": "ready"},
+    )
+    monkeypatch.setattr(blast, "_has_blast_success_marker", lambda *_args: False)
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=60)
+
+    assert summary["lifecycle_interrupted"] == 1
+    assert summary["failed"] == 1
+    assert summary["worker_lost"] == 0
+    assert repo.updates[0][1]["status"] == "failed"
+    assert repo.updates[0][1]["phase"] == "lifecycle_interrupted"
+    assert repo.updates[0][1]["error_code"] == "cluster_lifecycle_interrupted"
 
 
 def test_reconcile_does_not_mark_servicebus_placeholder_worker_lost(
