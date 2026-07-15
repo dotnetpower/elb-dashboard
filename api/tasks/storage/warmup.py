@@ -22,6 +22,7 @@ from typing import Any
 from celery import shared_task
 
 import api.tasks.storage as _facade
+from api.services.env import env_int
 from api.services.feature_events import TERMINAL_STATUSES, record_feature_event
 from api.tasks.storage.helpers import (
     publish_db_metadata_invalidate as _publish_db_metadata_invalidate,
@@ -31,6 +32,52 @@ from api.tasks.storage.helpers import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# A ten-node E16 warmup fans out ten azcopy processes at once. Letting each
+# process auto-select 16*vCPU (=256) connections benchmarked well in isolation,
+# but the aggregate run saturated the managed OS disks, produced transfer
+# errors, and retried terabytes for a ~350 GiB cache. 64 connections still
+# provides ample queue depth for a Premium disk while bounding the aggregate at
+# 640. Operators can override this with WARMUP_AZCOPY_CONCURRENCY.
+_DEFAULT_AZCOPY_CONCURRENCY = 64
+
+# Keep the three warmup clocks ordered. The Kubernetes Job gets the primary
+# deadline; the poller gets a short observation grace so it can see the
+# DeadlineExceeded condition; Celery soft/hard limits sit above the poller so
+# they remain backstops rather than killing a healthy status loop first.
+_WARMUP_JOB_DEADLINE_SECONDS = env_int(
+    "BLAST_WARMUP_JOB_DEADLINE_SECONDS", 3600, minimum=300, maximum=24 * 60 * 60
+)
+_WARMUP_WAIT_GRACE_SECONDS = env_int(
+    "BLAST_WARMUP_WAIT_GRACE_SECONDS", 120, minimum=30, maximum=15 * 60
+)
+_WARMUP_POLL_MAX_SECONDS = _WARMUP_JOB_DEADLINE_SECONDS + _WARMUP_WAIT_GRACE_SECONDS
+_TASK_SOFT_TIME_LIMIT = int(
+    os.environ.get("WARMUP_TASK_SOFT_TIME_LIMIT", str(_WARMUP_POLL_MAX_SECONDS + 180))
+)
+_TASK_HARD_TIME_LIMIT = int(
+    os.environ.get("WARMUP_TASK_TIME_LIMIT", str(_WARMUP_POLL_MAX_SECONDS + 300))
+)
+_STALE_DBOPS_WARMUP_SECONDS = env_int("STALE_DBOPS_WARMUP_SECONDS", 7200, minimum=300)
+_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS = env_int(
+    "AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", 7200, minimum=300
+)
+if _TASK_SOFT_TIME_LIMIT >= _TASK_HARD_TIME_LIMIT:
+    raise ValueError("WARMUP_TASK_SOFT_TIME_LIMIT must be < WARMUP_TASK_TIME_LIMIT")
+if _TASK_SOFT_TIME_LIMIT <= _WARMUP_POLL_MAX_SECONDS:
+    raise ValueError("WARMUP_TASK_SOFT_TIME_LIMIT must exceed the warmup poll ceiling")
+if _TASK_HARD_TIME_LIMIT >= min(
+    _STALE_DBOPS_WARMUP_SECONDS,
+    _AUTOSTOP_ACTIVE_ROW_STALE_SECONDS,
+):
+    raise ValueError(
+        "warmup stale-row thresholds must exceed WARMUP_TASK_TIME_LIMIT; "
+        f"got STALE_DBOPS_WARMUP_SECONDS={_STALE_DBOPS_WARMUP_SECONDS}, "
+        "AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS="
+        f"{_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS}, "
+        f"WARMUP_TASK_TIME_LIMIT={_TASK_HARD_TIME_LIMIT}; raise both stale-row "
+        f"thresholds above {_TASK_HARD_TIME_LIMIT}"
+    )
 
 
 # Indirect through the package so tests can monkeypatch
@@ -75,11 +122,11 @@ def _env_int_override(name: str, *, lo: int, hi: int) -> int | None:
     """Read a positive, in-range integer ops override from the environment.
 
     Lets operators tune the warmup azcopy concurrency / buffer on the worker
-    sidecar without a code change. Returns ``None`` (meaning "use the default
-    behaviour" — i.e. let azcopy auto-tune) when the variable is unset, empty,
-    unparseable, non-positive, OR outside ``[lo, hi]``. A bad value therefore
-    degrades gracefully to the default instead of failing the warmup in the
-    downstream ``build_warmup_job_plan`` range check.
+    sidecar without a code change. Returns ``None`` when the variable is unset,
+    empty, unparseable, non-positive, OR outside ``[lo, hi]``; the caller then
+    chooses its documented default (bounded 64 for concurrency, unset for the
+    optional buffer). A bad value therefore degrades gracefully instead of
+    failing the warmup in the downstream plan range check.
     """
     raw = os.environ.get(name)
     if not raw:
@@ -90,7 +137,7 @@ def _env_int_override(name: str, *, lo: int, hi: int) -> int | None:
         return None
     if value < lo or value > hi:
         LOGGER.warning(
-            "ignoring out-of-range %s=%s (allowed [%s, %s]); using azcopy auto-tune",
+            "ignoring out-of-range %s=%s (allowed [%s, %s]); using caller default",
             name,
             value,
             lo,
@@ -98,6 +145,13 @@ def _env_int_override(name: str, *, lo: int, hi: int) -> int | None:
         )
         return None
     return value
+
+
+def _warmup_azcopy_concurrency() -> int:
+    """Return the bounded fan-out default or an explicit valid override."""
+
+    override = _env_int_override("WARMUP_AZCOPY_CONCURRENCY", lo=1, hi=512)
+    return override if override is not None else _DEFAULT_AZCOPY_CONCURRENCY
 
 
 @shared_task(
@@ -108,6 +162,8 @@ def _env_int_override(name: str, *, lo: int, hi: int) -> int | None:
     retry_backoff=True,
     retry_backoff_max=300,
     retry_jitter=True,
+    soft_time_limit=_TASK_SOFT_TIME_LIMIT,
+    time_limit=_TASK_HARD_TIME_LIMIT,
 )
 def warmup_database(
     self: Any,
@@ -124,7 +180,7 @@ def warmup_database(
     acr_resource_group: str = "",
     acr_name: str = "",
     program: str = "blastn",
-    warmup_timeout_seconds: int = 4 * 60 * 60,
+    warmup_timeout_seconds: int = _WARMUP_POLL_MAX_SECONDS,
     caller_oid: str = "",
     require_all_warmup_nodes: bool = False,
     force_rewarm: bool = False,
@@ -442,14 +498,11 @@ def warmup_database(
                     node_count=actual_node_count,
                     machine_type=machine_type or "Standard_E16s_v5",
                 )
-                # Leave azcopy concurrency / buffer UNSET by default so the
-                # warmup pod uses azcopy's own CPU-based auto-tuning (16 * vCPU,
-                # capped at 300) — a live benchmark measured that ~1.78x faster
-                # than the old hard-coded concurrency=16. Operators can still
-                # pin them on the worker via WARMUP_AZCOPY_CONCURRENCY /
-                # WARMUP_AZCOPY_BUFFER_GB; when set, those values are injected as
-                # Job env vars (None means "let azcopy auto-tune").
-                azcopy_concurrency = _env_int_override("WARMUP_AZCOPY_CONCURRENCY", lo=1, hi=512)
+                # Bound per-pod concurrency for the aggregate node fan-out.
+                # Operators can still tune it without code changes; invalid
+                # values fall back to the safe default instead of re-enabling
+                # unbounded CPU-derived auto-tuning.
+                azcopy_concurrency = _warmup_azcopy_concurrency()
                 azcopy_buffer_gb = _env_int_override("WARMUP_AZCOPY_BUFFER_GB", lo=1, hi=64)
                 plan = build_warmup_job_plan(
                     db_name=database_name,
@@ -611,7 +664,10 @@ def warmup_database(
                     cluster_name=cluster_name,
                     database_name=database_name,
                     expected_jobs=expected_warm_jobs,
-                    timeout_seconds=max(60, min(int(warmup_timeout_seconds), 24 * 60 * 60)),
+                    timeout_seconds=max(
+                        60,
+                        min(int(warmup_timeout_seconds), _WARMUP_POLL_MAX_SECONDS),
+                    ),
                 )
                 if wait_summary.get("status") != "completed":
                     raise RuntimeError(f"node warmup {wait_summary.get('status')}: {wait_summary}")

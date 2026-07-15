@@ -993,6 +993,18 @@ def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
     assert any(progress["phase"] == "waiting_for_warmup_nodes" for progress in task_progress)
 
 
+def test_warmup_task_time_limits_outlive_job_polling() -> None:
+    from api.tasks.storage import warmup as task_module
+
+    assert task_module._WARMUP_POLL_MAX_SECONDS > task_module._WARMUP_JOB_DEADLINE_SECONDS
+    assert task_module._TASK_SOFT_TIME_LIMIT > task_module._WARMUP_POLL_MAX_SECONDS
+    assert task_module._TASK_HARD_TIME_LIMIT > task_module._TASK_SOFT_TIME_LIMIT
+    assert task_module._STALE_DBOPS_WARMUP_SECONDS > task_module._TASK_HARD_TIME_LIMIT
+    assert task_module._AUTOSTOP_ACTIVE_ROW_STALE_SECONDS > task_module._TASK_HARD_TIME_LIMIT
+    assert warmup_database.soft_time_limit == task_module._TASK_SOFT_TIME_LIMIT
+    assert warmup_database.time_limit == task_module._TASK_HARD_TIME_LIMIT
+
+
 def test_warmup_database_force_rewarm_drops_existing_jobs(monkeypatch, tmp_path) -> None:
     """A forced re-warm must drop the database's existing warmup Jobs first.
 

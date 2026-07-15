@@ -37,17 +37,13 @@ DEFAULT_NODE_DB_PATH = "/workspace/blast"
 DEFAULT_CONTAINER_DB_PATH = "/blast/blastdb"
 
 # azcopy tuning for the node-local warmup download (blob -> node disk over the
-# private endpoint). The download script intentionally does NOT pin
-# ``AZCOPY_CONCURRENCY_VALUE``: azcopy's own default is ``16 * vCPU`` (capped at
-# 300) and it dynamically tunes against CPU usage, which a fixed value defeats.
-# A live throwaway-pod benchmark on cluster-02 (Standard_E16s_v5, core_nt,
-# 256 MiB blocks) measured the old hard-coded ``concurrency=16`` at 158 MB/s vs
-# azcopy's CPU-based auto (256 connections) at 281 MB/s — a 1.78x speedup just
-# from letting azcopy choose. We therefore inject the azcopy env vars ONLY when
-# an operator override is supplied (``None`` means "let azcopy auto-tune"); the
-# buffer constraint that actually matters is just ``max block size <= 0.75 *
-# AZCOPY_BUFFER_GB`` (256 MiB needs ~0.34 GiB), so the script's small default
-# buffer was never the bottleneck.
+# private endpoint). This manifest builder injects tuning only when its caller
+# supplies it (``None`` remains useful for experiments that deliberately test
+# azcopy auto-tuning). The production warmup task supplies a bounded default:
+# a single-pod benchmark favoured azcopy's 16*vCPU auto value, but a ten-node
+# fan-out drove every managed OS disk to its limit and amplified failed
+# transfers. Keep the policy in the task, while this reusable builder remains
+# explicit and side-effect free.
 
 WARMUP_PHASE_LABELS: dict[str, str] = {
     "waiting": "Waiting for container",
@@ -240,11 +236,11 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
             },
         )
         succeeded = int(status.get("succeeded") or 0)
-        failed = int(status.get("failed") or 0)
+        failed = _job_terminal_failed(status)
         active = int(status.get("active") or 0)
         info["total_jobs"] += 1
         info["nodes_ready"] += 1 if succeeded > 0 else 0
-        info["nodes_failed"] += 1 if failed > 0 and succeeded == 0 else 0
+        info["nodes_failed"] += 1 if failed and succeeded == 0 else 0
         info["nodes_active"] += 1 if active > 0 else 0
         shard = label_shard or derived_shard
         if shard:
@@ -296,6 +292,21 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
                 info["active_message"] = "Warmup jobs belong to multiple DB source versions."
         _attach_timing_estimate(info)
     return list(by_db.values())
+
+
+def _job_terminal_failed(status: dict[str, Any]) -> bool:
+    """Return true only when the Kubernetes Job reached terminal Failed.
+
+    ``status.failed`` counts failed Pods, including a first attempt while the
+    Job controller is creating its allowed retry. Treating that counter as a
+    terminal Job result aborts the warmup before ``backoffLimit`` can recover.
+    The Job ``Failed=True`` condition is the authoritative terminal signal.
+    """
+
+    return any(
+        condition.get("type") == "Failed" and str(condition.get("status")) == "True"
+        for condition in status.get("conditions", []) or []
+    )
 
 
 def _logical_db_name_and_shard(raw_db_name: str, label_shard: str = "") -> tuple[str, str]:
@@ -396,24 +407,46 @@ def attach_pod_progress_to_database_status(
         info["phase_counts"] = phase_counts
         total = max(int(info.get("total_jobs") or 0), sum(phase_counts.values()))
         if total > 0:
-            completed = int(phase_counts.get("completed") or 0)
-            failed = int(phase_counts.get("failed") or 0)
-            active = max(0, total - completed - failed)
+            # Job status is authoritative for terminal counts. Kubernetes may
+            # delete a DeadlineExceeded pod before this log-enrichment pass;
+            # in that case the pod list contains only the successful shards.
+            # Replacing the Job counts with pod counts turned a real
+            # 7-ready/3-failed result into 7-ready/0-failed/3-active forever.
+            # Pod phases can move a lagging Job status forward, but can never
+            # erase a terminal Job result.
+            job_completed = int(info.get("nodes_ready") or 0)
+            job_failed = int(info.get("nodes_failed") or 0)
+            job_active = int(info.get("nodes_active") or 0)
+            pod_completed = int(phase_counts.get("completed") or 0)
+            pod_failed = int(phase_counts.get("failed") or 0)
+            pod_active = max(0, sum(phase_counts.values()) - pod_completed - pod_failed)
+            completed = min(total, max(job_completed, pod_completed))
+            failed = min(total - completed, max(job_failed, pod_failed))
+            remaining = max(0, total - completed - failed)
+            active = min(remaining, max(job_active, pod_active))
             info["nodes_ready"] = completed
             info["nodes_failed"] = failed
             info["nodes_active"] = active
             log_progress = _aggregate_pod_progress_pct(pod_details, total=total)
-            info["progress_pct"] = (
-                log_progress
-                if log_progress is not None
-                else round(((completed + failed) / total) * 100, 1)
+            terminal_progress = round(((completed + failed) / total) * 100, 1)
+            info["progress_pct"] = max(
+                terminal_progress,
+                log_progress if log_progress is not None else 0.0,
             )
             if completed == total:
                 info["status"] = "Ready"
             elif failed > 0:
                 info["status"] = "Failed"
+                if failed > pod_failed:
+                    info["active_phase"] = "failed"
+                    info["active_phase_label"] = WARMUP_PHASE_LABELS["failed"]
+                    info["active_message"] = (
+                        f"{failed} warmup Job(s) failed; pod details are no longer available."
+                    )
             elif active > 0:
                 info["status"] = "Loading"
+            else:
+                info["status"] = "Unknown"
             _attach_timing_estimate(info)
         info["pod_statuses"] = sorted(
             pod_details,
@@ -541,9 +574,7 @@ def _warmup_log_message(log_text: str) -> str:
 # treating them like an in-flight copy would fall back to 0 and make the DB
 # progress bar saw-tooth down from ~100% the instant copying completes. They
 # represent "copy done" and must therefore count as 100.
-_POST_COPY_PROGRESS_PHASES = frozenset(
-    {"completed", "failed", "verifying_db", "touching_memory"}
-)
+_POST_COPY_PROGRESS_PHASES = frozenset({"completed", "failed", "verifying_db", "touching_memory"})
 
 
 def _aggregate_pod_progress_pct(
@@ -678,10 +709,9 @@ def _build_job(
     host_path = node_db_path.rstrip("/")
     command = _warmup_shell_command()
     annotations = {SOURCE_VERSION_ANNOTATION: source_version} if source_version else {}
-    # azcopy concurrency / buffer are injected ONLY when an operator override is
-    # supplied. When omitted (the default) the env vars stay unset so azcopy
-    # uses its own CPU-based auto-tuning (16 * vCPU, capped at 300), which a
-    # benchmark showed is ~1.78x faster than the old hard-coded 16.
+    # Inject tuning only when the caller supplies it. The production warmup
+    # task passes its bounded concurrency default; direct builder callers can
+    # still pass None for an explicit azcopy auto-tuning experiment.
     env = [
         {"name": "ELB_SHARD_IDX", "value": content_shard},
         {"name": "ELB_PARTITION_PREFIX", "value": partition_prefix},

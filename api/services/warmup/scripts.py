@@ -145,14 +145,12 @@ log_runtime() {
 }
 
 azcopy login --identity || { echo "ERROR: azcopy login failed"; exit 1; }
-# Do NOT pin AZCOPY_CONCURRENCY_VALUE / AZCOPY_BUFFER_GB here. When the warmup
-# Job does not inject them (the default), leaving them unset lets azcopy use its
-# own CPU-based auto-tuning (16 * vCPU, capped at 300, with dynamic CPU
-# feedback). A live benchmark (Standard_E16s_v5, core_nt, 256 MiB blocks)
-# measured the old hard-coded concurrency=16 at 158 MB/s vs azcopy auto (256
-# connections) at 281 MB/s — a 1.78x speedup. Operators can still override via
-# the Job env (WARMUP_AZCOPY_CONCURRENCY / WARMUP_AZCOPY_BUFFER_GB on the
-# worker), which the Job injects as these env vars and azcopy honours.
+# Do not pin AZCOPY_CONCURRENCY_VALUE / AZCOPY_BUFFER_GB inside the script. The
+# production warmup task injects a bounded concurrency default through the Job
+# environment, while operators can override it with WARMUP_AZCOPY_CONCURRENCY.
+# Keeping policy at Job creation also leaves this reusable script compatible
+# with direct benchmark plans that intentionally omit the env vars and let
+# azcopy auto-tune.
 
 retry_azcopy() {
     local max_attempts=3 attempt=1 wait_sec=5
@@ -195,6 +193,7 @@ echo "Downloading with pattern: ${PATTERN}"
 retry_azcopy cp "${DB_URL}*" . \
     --include-pattern "${PATTERN}" \
     --block-size-mb=256 \
+    --overwrite=ifSourceNewer \
     --log-level=WARNING
 
 find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +

@@ -162,6 +162,19 @@ def test_env_int_override_falls_back_to_default(monkeypatch) -> None:
     assert _env_int_override(name, lo=1, hi=512) == 256
 
 
+def test_warmup_azcopy_concurrency_uses_bounded_default_and_override(monkeypatch) -> None:
+    from api.tasks.storage.warmup import _warmup_azcopy_concurrency
+
+    monkeypatch.delenv("WARMUP_AZCOPY_CONCURRENCY", raising=False)
+    assert _warmup_azcopy_concurrency() == 64
+
+    monkeypatch.setenv("WARMUP_AZCOPY_CONCURRENCY", "32")
+    assert _warmup_azcopy_concurrency() == 32
+
+    monkeypatch.setenv("WARMUP_AZCOPY_CONCURRENCY", "invalid")
+    assert _warmup_azcopy_concurrency() == 64
+
+
 def test_single_shard_db_is_broadcast_to_every_node() -> None:
     # A single-shard DB is the full database. The search batch can land on any
     # workload=blast node, so the full DB must be staged on every Ready node —
@@ -276,13 +289,16 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
     assert "init-db-shard-aks.sh" in manifest["data"]
     assert "blast-vmtouch-aks.sh" in manifest["data"]
     assert "azcopy login --identity" in manifest["data"]["init-db-shard-aks.sh"]
-    # The script must NOT pin a concurrency default any more — leaving
-    # AZCOPY_CONCURRENCY_VALUE unset lets azcopy auto-tune (16 * vCPU).
-    assert "AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}" not in (
-        manifest["data"]["init-db-shard-aks.sh"]
+    assert "--overwrite=ifSourceNewer" in manifest["data"]["init-db-shard-aks.sh"]
+    # The reusable script must not pin policy itself. The production task
+    # injects bounded concurrency through the Job environment; direct builder
+    # benchmarks can still omit it to exercise azcopy auto-tuning.
+    assert (
+        "AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}"
+        not in (manifest["data"]["init-db-shard-aks.sh"])
     )
-    assert "AZCOPY_BUFFER_GB=${AZCOPY_BUFFER_GB:-2}" not in (
-        manifest["data"]["init-db-shard-aks.sh"]
+    assert (
+        "AZCOPY_BUFFER_GB=${AZCOPY_BUFFER_GB:-2}" not in (manifest["data"]["init-db-shard-aks.sh"])
     )
     assert "taxdb.btd;taxdb.bti" in manifest["data"]["init-db-shard-aks.sh"]
     assert 'cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"' in manifest["data"]["init-db-shard-aks.sh"]
@@ -353,10 +369,12 @@ def test_database_status_from_warmup_jobs_aggregates_shards() -> None:
         },
         {
             "metadata": {"labels": {"db": "core_nt", "shard": "02"}},
-            "status": {"failed": 1},
+            "status": {
+                "failed": 1,
+                "conditions": [{"type": "Failed", "status": "True"}],
+            },
         },
     ]
-
     status = database_status_from_warmup_jobs(jobs)
 
     assert status == [
@@ -375,6 +393,21 @@ def test_database_status_from_warmup_jobs_aggregates_shards() -> None:
             "sources": ["warmup"],
         }
     ]
+
+
+def test_database_status_does_not_fail_while_job_retry_is_active() -> None:
+    status = database_status_from_warmup_jobs(
+        [
+            {
+                "metadata": {"labels": {"db": "core_nt", "shard": "00"}},
+                "status": {"failed": 1, "active": 1, "conditions": []},
+            }
+        ]
+    )
+
+    assert status[0]["status"] == "Loading"
+    assert status[0]["nodes_failed"] == 0
+    assert status[0]["nodes_active"] == 1
 
 
 def test_database_status_from_warmup_jobs_marks_mixed_generations_stale() -> None:
@@ -712,6 +745,61 @@ def test_attach_pod_progress_to_database_status_adds_phase_counts() -> None:
     # the source of the progress-bar saw-tooth).
     assert databases[0]["progress_pct"] == 50.0
     assert len(databases[0]["pod_statuses"]) == 2
+
+
+def test_attach_pod_progress_preserves_failed_jobs_when_failed_pods_are_gone() -> None:
+    jobs = []
+    pods = []
+    logs: dict[str, str] = {}
+    for index in range(10):
+        labels = {"db": "core_nt", "shard": f"{index:02d}"}
+        jobs.append(
+            {
+                "metadata": {"name": f"warm-core-nt-{index:02d}", "labels": labels},
+                "status": (
+                    {"succeeded": 1}
+                    if index < 7
+                    else {
+                        "failed": 1,
+                        "conditions": [
+                            {
+                                "type": "Failed",
+                                "status": "True",
+                                "reason": "DeadlineExceeded",
+                            }
+                        ],
+                    }
+                ),
+            }
+        )
+        if index < 7:
+            pod_name = f"warm-core-nt-{index:02d}-pod"
+            pods.append(
+                {
+                    "metadata": {"name": pod_name, "labels": labels},
+                    "status": {
+                        "phase": "Succeeded",
+                        "containerStatuses": [
+                            {
+                                "name": "warmup",
+                                "state": {"terminated": {"exitCode": 0, "reason": "Completed"}},
+                            }
+                        ],
+                    },
+                }
+            )
+            logs[pod_name] = f"DONE shard={index:02d}"
+
+    databases = database_status_from_warmup_jobs(jobs)
+    attach_pod_progress_to_database_status(databases, pods, logs)
+
+    assert databases[0]["status"] == "Failed"
+    assert databases[0]["nodes_ready"] == 7
+    assert databases[0]["nodes_failed"] == 3
+    assert databases[0]["nodes_active"] == 0
+    assert databases[0]["progress_pct"] == 100.0
+    assert databases[0]["active_phase"] == "failed"
+    assert "pod details are no longer available" in databases[0]["active_message"]
 
 
 def test_new_staging_complete_log_resolves_to_completed_phase() -> None:
