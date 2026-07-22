@@ -30,6 +30,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import ValidationError
 
 from api.auth import CallerIdentity, require_caller
 from api.services import service_bus
@@ -60,6 +61,11 @@ _PURGE_MAX_CAP = 5000
 # best-effort ceiling (a brief admin/counts outage fails open, see
 # ``_assert_send_capacity``), not a security control.
 _SEND_MAX_QUEUE_DEPTH = max(1, int(os.environ.get("SERVICEBUS_SEND_MAX_QUEUE_DEPTH", "2000")))
+
+# Cap the number of per-field validation errors echoed on a rejected send so a
+# pathological body cannot balloon the 400 response. 20 covers every real
+# multi-field failure; the summary string still reflects the same set.
+_MAX_VALIDATION_ERRORS = 20
 
 # Fail-closed backpressure (charter §12a Rule 4, default-OFF). The capacity check
 # normally fails OPEN: if the queue depth cannot be read (no Manage claim, a
@@ -286,6 +292,35 @@ def purge(
     return {"status": "purged", "dead_letter": dead_letter, "removed": removed}
 
 
+def _format_validation_errors(exc: ValidationError) -> tuple[str, list[dict[str, Any]]]:
+    """Turn a Pydantic ``ValidationError`` into ``(summary, per-field errors)``.
+
+    Mirrors the app-level ``RequestValidationError`` handler in ``api.main`` so a
+    rejected Playground/OpenAPI send returns the same diagnosable shape the
+    native FastAPI submit route already emits. Exposes only ``loc``/``msg``/
+    ``type`` \u2014 never ``input``/``ctx`` values, which can carry the submitted FASTA
+    or other user content. ``loc`` drops the leading ``body`` segment (there is
+    no request-body wrapper here) so it reads as the bare field path.
+    """
+    errors: list[dict[str, Any]] = []
+    for err in exc.errors()[:_MAX_VALIDATION_ERRORS]:
+        loc = ".".join(str(part) for part in (err.get("loc") or ()) if part != "body")
+        errors.append(
+            {
+                "loc": loc,
+                "msg": str(err.get("msg") or "")[:300],
+                "type": str(err.get("type") or ""),
+            }
+        )
+    if errors:
+        summary = "; ".join(
+            f"{item['loc']}: {item['msg']}" if item["loc"] else item["msg"] for item in errors
+        )[:600]
+    else:  # pragma: no cover - ValidationError always carries at least one error
+        summary = str(exc)[:400]
+    return summary, errors
+
+
 def _validate_send_body(body: dict[str, Any]) -> Any:
     """Validate a Playground send body against the matching submit contract.
 
@@ -317,6 +352,18 @@ def _validate_send_body(body: dict[str, Any]) -> Any:
         return model(**body)
     except HTTPException:
         raise
+    except ValidationError as exc:
+        # Return the SAME per-field detail shape the app-level
+        # RequestValidationError handler produces for the native FastAPI submit
+        # route, instead of a single 400-char-truncated ``str(exc)`` blob. The
+        # caller (Playground or an OpenAPI producer) can now see WHICH field
+        # failed and why. ``loc``/``msg``/``type`` only — never the submitted
+        # input, which can carry FASTA or other user content.
+        summary, errors = _format_validation_errors(exc)
+        raise HTTPException(
+            400,
+            detail={"code": "invalid_request", "message": summary, "errors": errors},
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             400,

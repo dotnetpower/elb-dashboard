@@ -426,7 +426,38 @@ def test_send_invalid_body_returns_400(client: TestClient, monkeypatch: pytest.M
         json={"db": "core_nt"},  # missing query_fasta
     )
     assert r.status_code == 400
-    assert r.json()["code"] == "invalid_request"
+    body = r.json()
+    assert body["code"] == "invalid_request"
+    # The 400 now carries the same per-field detail the native FastAPI submit
+    # route emits: a structured ``errors`` list (loc/msg/type) plus a summary
+    # ``message`` that names the offending field instead of a truncated blob.
+    errors = body["errors"]
+    assert isinstance(errors, list) and errors
+    assert any("query_fasta" in item["loc"] for item in errors)
+    assert all({"loc", "msg", "type"} <= set(item) for item in errors)
+    # No submitted input / ctx values leak into the field detail.
+    assert all("input" not in item and "ctx" not in item for item in errors)
+    assert "query_fasta" in body["message"]
+
+
+def test_send_invalid_body_reports_every_failing_field(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multiple field failures each surface in ``errors`` and the summary, so a
+    caller is not left guessing after fixing only the first one."""
+    _enable_service_bus(client, monkeypatch)
+    r = client.post(
+        "/api/settings/service-bus/send",
+        # program is not a valid literal AND query_fasta is missing.
+        json={"db": "core_nt", "program": "not-a-program"},
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == "invalid_request"
+    locs = {item["loc"] for item in body["errors"]}
+    assert "query_fasta" in locs
+    assert "program" in locs
+
 
 
 def test_send_enqueues_and_returns_message_id(
