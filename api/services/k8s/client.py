@@ -6,9 +6,9 @@ instead of duplicating SDK code.
 Key entry points: `_K8sCredentialMaterial`, `reset_k8s_credential_cache`,
 `_k8s_credential_cache_ttl`, `reset_k8s_session_pool`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
-The cluster CA is trusted via an in-memory SSLContext (`_build_k8s_https_adapter`),
-never a temp file, so pool eviction cannot delete a CA bundle a borrowed session
-still references.
+The cluster CA and any mTLS client cert / key are trusted via an in-memory
+SSLContext (`_build_k8s_https_adapter`), never a temp file, so pool eviction
+cannot delete credential material a borrowed session still references.
 Validation: `uv run pytest -q api/tests/test_k8s_list_events.py api/tests/test_k8s_session_pool.py`.
 """
 
@@ -206,7 +206,56 @@ def _build_k8s_retry() -> Any:
     )
 
 
-def _build_k8s_https_adapter(ca_data: bytes, pool_size: int) -> Any:
+def _load_client_cert_into_context(
+    context: Any, client_cert: bytes, client_key: bytes
+) -> None:
+    """Load an mTLS client cert / key into ``context`` without leaving them on disk.
+
+    ``ssl.SSLContext.load_cert_chain`` only accepts file paths, but it parses
+    and retains the certificate and private key in memory the moment it
+    returns — so the backing files exist only for the duration of this call.
+    We write them to ``mkstemp`` files, load the chain, then unlink both
+    immediately in a ``finally`` block. This extends the issue #47 in-memory
+    fix to the client cert / key of admin / local-account kubeconfigs: pooled
+    sessions previously carried a ``session.cert = (cert_path, key_path)``
+    tuple, and pool eviction / atexit unlinked those temp files at TTL expiry
+    — so a request still holding a borrowed session could read a cert path
+    that had already been deleted, raising ``OSError: Could not find the TLS
+    certificate file, invalid path: /tmp/elb-k8s-*.crt``. With the material
+    parsed into the SSLContext there is no on-disk file for eviction to race
+    on.
+    """
+    cert_fd, cert_path = tempfile.mkstemp(prefix="elb-k8s-", suffix=".crt")
+    key_fd, key_path = tempfile.mkstemp(prefix="elb-k8s-", suffix=".key")
+    try:
+        os.write(cert_fd, client_cert)
+        os.close(cert_fd)
+        cert_fd = -1
+        os.write(key_fd, client_key)
+        os.close(key_fd)
+        key_fd = -1
+        # Parses cert + key into the context; the files are no longer needed
+        # once this returns.
+        context.load_cert_chain(cert_path, key_path)
+    finally:
+        if cert_fd != -1:
+            os.close(cert_fd)
+        if key_fd != -1:
+            os.close(key_fd)
+        for path in (cert_path, key_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _build_k8s_https_adapter(
+    ca_data: bytes | None,
+    pool_size: int,
+    *,
+    client_cert: bytes | None = None,
+    client_key: bytes | None = None,
+) -> Any:
     """Build an HTTPS adapter that trusts the AKS cluster CA in-memory.
 
     Why this exists: the previous implementation wrote ``ca_data`` to a
@@ -219,6 +268,11 @@ def _build_k8s_https_adapter(ca_data: bytes, pool_size: int) -> Any:
     ``ssl.SSLContext`` removes the on-disk CA bundle entirely, so there is no
     file for eviction to delete out from under an in-flight GET.
 
+    The same in-memory treatment now covers the mTLS client cert / key of
+    admin / local-account kubeconfigs (see ``_load_client_cert_into_context``)
+    so ``session.cert`` no longer points at a temp file that eviction could
+    unlink mid-request.
+
     The context still performs full verification (hostname check + required
     cert) against the cluster CA; system roots remain available so client-cert
     (admin) sessions and any future proxy paths keep working.
@@ -230,7 +284,10 @@ def _build_k8s_https_adapter(ca_data: bytes, pool_size: int) -> Any:
     context = ssl.create_default_context()
     context.check_hostname = True
     context.verify_mode = ssl.CERT_REQUIRED
-    context.load_verify_locations(cadata=ca_data.decode("utf-8"))
+    if ca_data:
+        context.load_verify_locations(cadata=ca_data.decode("utf-8"))
+    if client_cert and client_key:
+        _load_client_cert_into_context(context, client_cert, client_key)
 
     class _CADataAdapter(_requests.adapters.HTTPAdapter):
         """HTTPAdapter that injects the in-memory CA SSLContext into the pool."""
@@ -401,20 +458,11 @@ def _get_k8s_session(
     # so a brief burst does not stall behind the pool — at the cost of
     # extra short-lived sockets which urllib3 then closes.
     _k8s_pool_size = _k8s_session_http_pool_size()
+    # No credential material is written to disk anymore: the cluster CA and any
+    # mTLS client cert / key are parsed into an in-memory SSLContext (issue #47
+    # and its client-cert extension), so a pooled entry owns no temp files and
+    # pool eviction cannot unlink a bundle a borrowed session still references.
     temp_files: list[str] = []
-
-    def write_secret_file(suffix: str, content: bytes) -> str:
-        handle = tempfile.NamedTemporaryFile(
-            prefix="elb-k8s-", suffix=suffix, delete=False
-        )
-        try:
-            handle.write(content)
-            handle.flush()
-        finally:
-            handle.close()
-        os.chmod(handle.name, 0o600)
-        temp_files.append(handle.name)
-        return handle.name
 
     # Default to the configured pool TTL, then clamp tighter as we discover
     # auth-material lifetimes that are shorter than it.
@@ -425,13 +473,20 @@ def _get_k8s_session(
     # credential cache already noticed.
     entry_expires_at = min(entry_expires_at, material.expires_at)
     try:
-        # Trust the cluster CA via an in-memory SSLContext (issue #47) rather
-        # than a temp file on disk. Pooled sessions outlive a single request,
-        # so a CA file unlinked by pool eviction could be read by an in-flight
-        # GET -> OSError. The HTTPS adapter below carries the CA in memory, so
-        # ``session.verify`` stays True and there is no file to evict.
-        if material.ca_data:
-            https_adapter = _build_k8s_https_adapter(material.ca_data, _k8s_pool_size)
+        # Trust the cluster CA — and carry any mTLS client cert / key — via an
+        # in-memory SSLContext (issue #47) rather than temp files on disk.
+        # Pooled sessions outlive a single request, so a cert file unlinked by
+        # pool eviction could be read by an in-flight GET -> OSError. The HTTPS
+        # adapter below carries all credential material in memory, so
+        # ``session.verify`` stays True, ``session.cert`` is never set, and
+        # there is no file to evict.
+        if material.ca_data or (material.client_cert and material.client_key):
+            https_adapter = _build_k8s_https_adapter(
+                material.ca_data,
+                _k8s_pool_size,
+                client_cert=material.client_cert,
+                client_key=material.client_key,
+            )
         else:
             https_adapter = _requests.adapters.HTTPAdapter(
                 pool_connections=_k8s_pool_size,
@@ -450,11 +505,7 @@ def _get_k8s_session(
         session.verify = True
         _install_cluster_breaker(session, breaker_key)
 
-        if material.client_cert and material.client_key:
-            cert_path = write_secret_file(".crt", material.client_cert)
-            key_path = write_secret_file(".key", material.client_key)
-            session.cert = (cert_path, key_path)
-        else:
+        if not (material.client_cert and material.client_key):
             token = credential.get_token(f"{_AKS_SERVER_APP_ID}/.default")
             session.headers["Authorization"] = f"Bearer {token.token}"
             # Token-authed sessions must be retired before the AAD token

@@ -7,15 +7,15 @@ Edit boundaries: Keep assertions focused on pool behaviour — networking is
 fully mocked.
 Key entry points: `test_pool_reuses_session`, `test_pool_ttl_clamped_to_material_expiry`,
 `test_pool_ttl_clamped_to_token_expiry`, `test_pool_max_entries_evicts_soonest_expiring`,
-`test_throwaway_path_unlinks_temp_files`,
-`test_ca_in_memory_survives_pool_eviction_during_inflight_get`
+`test_throwaway_path_leaves_no_client_cert_on_disk`,
+`test_ca_in_memory_survives_pool_eviction_during_inflight_get`,
+`test_client_cert_in_memory_survives_pool_eviction`
 Risky contracts: Do not require network access or real Azure credentials.
 Validation: `uv run pytest -q api/tests/test_k8s_session_pool.py`.
 """
 
 from __future__ import annotations
 
-import os
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -55,7 +55,47 @@ def _make_test_ca_pem() -> bytes:
     return cert.public_bytes(Encoding.PEM)
 
 
+def _make_test_client_cert() -> tuple[bytes, bytes]:
+    """A real self-signed client cert + unencrypted private key PEM pair.
+
+    `ssl.SSLContext.load_cert_chain` (used by the in-memory client-cert path)
+    parses these, so the old `b"client-cert-bytes"` placeholder no longer
+    works now that the mTLS material is loaded into an SSLContext instead of
+    written to `session.cert`."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+    )
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "elb-test-client")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(Encoding.PEM)
+    key_pem = key.private_bytes(
+        Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption()
+    )
+    return cert_pem, key_pem
+
+
 _TEST_CA_PEM = _make_test_ca_pem()
+_TEST_CLIENT_CERT_PEM, _TEST_CLIENT_KEY_PEM = _make_test_client_cert()
 
 
 @pytest.fixture(autouse=True)
@@ -75,9 +115,9 @@ def _material(
 
     Default (no client_cert) exercises the Bearer token path so
     `_get_k8s_session` calls `credential.get_token`. Passing client_cert /
-    client_key exercises the admin mTLS path, which is the only path that
-    still writes temp files (the CA is now loaded into an in-memory
-    SSLContext, see issue #47)."""
+    client_key exercises the admin mTLS path, which now loads the cert / key
+    into an in-memory SSLContext (issue #47 extended to the client cert) —
+    no credential material lands on disk in either path."""
     return SimpleNamespace(
         server=server,
         ca_data=_TEST_CA_PEM,
@@ -148,18 +188,20 @@ def test_pool_ttl_clamped_to_token_expiry() -> None:
     assert remaining < 60.0, f"expected token-clamped TTL < 60s, got {remaining}"
 
 
-def test_throwaway_path_unlinks_temp_files() -> None:
-    """When the effective TTL collapses to <= 0 we must hand out a non-pooled
-    session whose close() actually deletes the on-disk credential files.
+def test_throwaway_path_leaves_no_client_cert_on_disk() -> None:
+    """When the effective TTL collapses to <= 0 we hand out a non-pooled
+    session. The admin mTLS client cert / key are now parsed into an in-memory
+    SSLContext (issue #47 extended to the client cert), so NO cert file is left
+    on disk and `session.cert` is never set — the race that produced
+    `Could not find the TLS certificate file, invalid path: /tmp/elb-k8s-*.crt`
+    is gone."""
+    import ssl
 
-    The CA no longer lands on disk (issue #47 — it is loaded into an in-memory
-    SSLContext), so this exercises the admin mTLS path whose client cert / key
-    are the only remaining temp files."""
     # Material already expired -> entry_expires_at <= now -> throwaway path.
     material = _material(
         expires_in=-1.0,
-        client_cert=b"client-cert-bytes",
-        client_key=b"client-key-bytes",
+        client_cert=_TEST_CLIENT_CERT_PEM,
+        client_key=_TEST_CLIENT_KEY_PEM,
     )
     cred = _credential()
     with patch.object(k8s_client_mod, "_get_k8s_credential_material", return_value=material):
@@ -167,15 +209,16 @@ def test_throwaway_path_unlinks_temp_files() -> None:
     # Throwaway sessions are NOT pooled.
     with k8s_client_mod._K8S_SESSION_POOL_LOCK:
         assert ("s", "rg", "aks", False) not in k8s_client_mod._K8S_SESSION_POOL
-    # The CA is in-memory now; verify is a bool, not a path.
+    # mTLS is handled by the in-memory context; no cert path is exposed and
+    # verify stays True.
+    assert not session.cert
     assert session.verify is True
-    # The client cert / key files written by write_secret_file must exist
-    # before close() and be unlinked after close().
-    cert_path, key_path = session.cert
-    assert os.path.exists(cert_path) and os.path.exists(key_path)
+    https_adapter = session.get_adapter("https://aks.example")
+    ctx = https_adapter.poolmanager.connection_pool_kw.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext)
+    # close() is a clean teardown with nothing on disk to unlink.
     session.close()
-    assert not os.path.exists(cert_path)
-    assert not os.path.exists(key_path)
+    assert not session.cert
 
 
 def test_pool_max_entries_evicts_soonest_expiring(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,23 +291,21 @@ def test_pool_lock_released_during_retire_io(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_throwaway_close_is_idempotent() -> None:
-    """A double `session.close()` on a throwaway session must not crash —
-    the second unlink finds the file already gone."""
+    """A double `session.close()` on a throwaway session must not crash — with
+    the client cert now in-memory there are no temp files to unlink, so both
+    closes are clean teardowns."""
     material = _material(
         expires_in=-1.0,
-        client_cert=b"client-cert-bytes",
-        client_key=b"client-key-bytes",
+        client_cert=_TEST_CLIENT_CERT_PEM,
+        client_key=_TEST_CLIENT_KEY_PEM,
     )
     cred = _credential()
     with patch.object(k8s_client_mod, "_get_k8s_credential_material", return_value=material):
         session, _ = k8s_client_mod._get_k8s_session(cred, "s", "rg", "aks")
-    cert_path, key_path = session.cert
-    # First close unlinks the client cert/key files; second close must be a
-    # no-op error path.
+    # No client cert files on disk; both closes are clean teardowns.
     session.close()
     session.close()
-    assert not os.path.exists(cert_path)
-    assert not os.path.exists(key_path)
+    assert not session.cert
 
 
 def test_ca_in_memory_survives_pool_eviction_during_inflight_get() -> None:
@@ -316,6 +357,70 @@ def test_ca_in_memory_survives_pool_eviction_during_inflight_get() -> None:
         result = borrowed.get("https://aks.example/healthz", timeout=1)
 
     assert result.status_code == 200
+    assert captured["verify"] is True
+
+
+def test_client_cert_in_memory_survives_pool_eviction() -> None:
+    """Regression for the sharded-BLAST warm-up incident: the mTLS client cert
+    / key must be in-memory so pool eviction cannot delete a bundle a borrowed
+    admin session still references.
+
+    Before the fix, ``_get_k8s_session`` wrote the client cert / key to
+    ``/tmp/elb-k8s-*.crt|.key`` and set ``session.cert = (cert, key)``. Pooled
+    sessions outlive a request, so ``reset_k8s_session_pool`` / atexit unlinked
+    those files while a warm-readiness poll still held the session — the next
+    GET raised ``Could not find the TLS certificate file, invalid path:
+    /tmp/elb-k8s-*.crt``, which gated the Service Bus drain indefinitely. The
+    client cert now lands in an in-memory SSLContext, so eviction has nothing
+    to unlink.
+    """
+    import ssl
+
+    import requests
+
+    material = _material(
+        client_cert=_TEST_CLIENT_CERT_PEM,
+        client_key=_TEST_CLIENT_KEY_PEM,
+    )
+    cred = _credential()
+    with patch.object(k8s_client_mod, "_get_k8s_credential_material", return_value=material):
+        session, _ = k8s_client_mod._get_k8s_session(cred, "s", "rg", "aks", admin=True)
+
+    with k8s_client_mod._K8S_SESSION_POOL_LOCK:
+        entry = k8s_client_mod._K8S_SESSION_POOL[("s", "rg", "aks", True)]
+    # No credential material on disk -> eviction cannot delete a borrowed cert.
+    assert entry.temp_files == []
+    assert not session.cert
+    assert session.verify is True
+    # The client cert lives in the adapter's in-memory SSLContext, not a file.
+    https_adapter = session.get_adapter("https://aks.example")
+    ctx = https_adapter.poolmanager.connection_pool_kw.get("ssl_context")
+    assert isinstance(ctx, ssl.SSLContext)
+    # The admin path must NOT fall back to a Bearer token.
+    assert "Authorization" not in session.headers
+    assert cred.get_token.call_count == 0
+
+    # A borrower still holds `session`. Drain the pool (eviction / atexit path
+    # that previously unlinked the client cert temp files).
+    borrowed = session
+    k8s_client_mod.reset_k8s_session_pool()
+
+    captured: dict[str, Any] = {}
+
+    def fake_send(self: Any, request: Any, **kwargs: Any) -> Any:
+        captured["cert"] = kwargs.get("cert")
+        captured["verify"] = kwargs.get("verify")
+        response = requests.models.Response()
+        response.status_code = 200
+        response.url = request.url
+        return response
+
+    with patch.object(requests.adapters.HTTPAdapter, "send", fake_send):
+        result = borrowed.get("https://aks.example/healthz", timeout=1)
+
+    assert result.status_code == 200
+    # Never a now-deleted filesystem cert path — mTLS is in the SSLContext.
+    assert not captured["cert"]
     assert captured["verify"] is True
 
 
