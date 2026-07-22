@@ -526,7 +526,7 @@ def _phase_from_warmup_log(log_text: str) -> str:
         return "copying_files"
     if "error" in text and "azcopy" in text:
         return "failed"
-    if "vmtouch memory limit" in text or "cache-blastdbs-to-ram" in text:
+    if "vmtouch memory limit" in text or "cache-blastdbs-to-ram" in text or "vmtouch_warm" in text:
         return "touching_memory"
     if "blastdbcmd" in text or "database:" in text or "db files downloaded" in text:
         return "verifying_db"

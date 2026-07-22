@@ -16,10 +16,16 @@ Risky contracts: The scripts reference the ConfigMap mount path
 those paths in lock-step with `build_warmup_scripts_configmap()`.
 The warmup Job entrypoint deliberately does NOT call `blast-vmtouch-aks.sh`
 any more (kept in ConfigMap only for the equivalence-experiment shell
-scripts that exec it directly): pages staged by ``azcopy`` already sit in
-the OS page cache as a side effect of the download, and with no mmap
-holder process in the warmup pod the vmtouch step was a 1-second noop on
-already-cached pages — see [docs/features_change/2026-06/].
+scripts that exec it directly): on the DOWNLOAD path, pages staged by
+``azcopy`` already sit in the OS page cache as a side effect of the
+download, so an extra vmtouch is a noop. On the DOWNLOAD_SKIP path
+(node_disk / data_disk restart where the shard survived on the node disk
+and azcopy was skipped) that side effect never happened, so RAM is cold —
+there the entrypoint runs an inline ``blastdb_path | vmtouch -t`` step to
+read the shard into the node page cache off the first search's critical
+path (opt out with ``ELB_WARMUP_VMTOUCH_DISABLE=1``). See
+[docs/features_change/2026-06/2026-06-06-warmup-drop-fake-vmtouch.md] and
+the 2026-07 node_disk warm-on-skip change.
 Validation: `uv run pytest -q api/tests/test_warmup_*.py`.
 """
 
@@ -86,6 +92,45 @@ if [ ! -f .download-complete ]; then
     fi
 else
   log "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
+  # Persistent-cache (node_disk / data_disk) restart path. The shard survived
+  # an `az aks stop`/`start` on the node disk, so azcopy was skipped — which
+  # means the download's page-cache side effect did NOT happen and node RAM is
+  # cold. Read the shard volumes into the node page cache HERE, off the first
+  # BLAST search's critical path, so the first query does not pay the full
+  # disk->RAM fault cost inside the search pod. This is self-adapting: on a
+  # genuinely cold cache (node_disk restart) vmtouch does real work; on an
+  # already-warm cache (a re-run in the same node lifecycle) it is a fast noop.
+  # Best-effort — a vmtouch failure never fails staging. Opt out with
+  # ELB_WARMUP_VMTOUCH_DISABLE=1.
+  if [ "${ELB_WARMUP_VMTOUCH_DISABLE:-0}" = "1" ]; then
+    log "VMTOUCH_SKIP disabled via ELB_WARMUP_VMTOUCH_DISABLE"
+  elif ! command -v vmtouch >/dev/null 2>&1 || ! command -v blastdb_path >/dev/null 2>&1; then
+    # Without vmtouch/blastdb_path this warm is impossible; log it so a silent
+    # no-op on an image that lacks the tools is visible to operators instead of
+    # leaving them to wonder why the first search is still cold.
+    log "VMTOUCH_SKIP vmtouch/blastdb_path not available in warmup image"
+  else
+    vm_start=$(date +%s)
+    # vmtouch -m caps the per-FILE size it will touch (skips any single volume
+    # larger than the cap), not a cumulative budget; 60% of MemAvailable leaves
+    # any realistic GB-scale volume well under the cap. Floor at >=1G and fall
+    # back to a fixed budget when MemAvailable is absent/zero so the warm never
+    # degrades to a silent `-m 0G` / `-m ''` noop. Mirrors the search-pod
+    # vmtouch step in terminal/patch_elastic_blast.py.
+    vm_gib=$(awk '/MemAvailable/ {print int($2/1024/1024*0.6)}' /proc/meminfo)
+    [ "${vm_gib:-0}" -ge 1 ] 2>/dev/null || vm_gib=4
+    vm_budget="${vm_gib}G"
+    vm_mol="${ELB_DB_MOL_TYPE:-nucl}"
+    vm_paths=$(blastdb_path -dbtype "$vm_mol" -db "$ELB_DB" -getvolumespath 2>/dev/null || true)
+    if [ -n "$vm_paths" ]; then
+      log "VMTOUCH_WARM shard=${ELB_SHARD_IDX} db=${ELB_DB} budget=${vm_budget}"
+      printf '%s' "$vm_paths" | tr ' ' '\n' | xargs -r -n1 vmtouch -tqm "$vm_budget" || true
+      vm_end=$(date +%s)
+      log "RUNTIME vmtouch-warm-shard-${ELB_SHARD_IDX} $((vm_end - vm_start)) seconds"
+    else
+      log "VMTOUCH_SKIP could not resolve volume paths for ${ELB_DB}"
+    fi
+  fi
 fi
 blastdbcmd -db "$ELB_DB" -info | tee warmup-db-info.txt
 log "STAGING_COMPLETE shard=${ELB_SHARD_IDX}"

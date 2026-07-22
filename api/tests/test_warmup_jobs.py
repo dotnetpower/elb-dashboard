@@ -850,6 +850,76 @@ def test_new_staging_complete_log_resolves_to_completed_phase() -> None:
     assert databases[0]["active_phase"] == "completed"
 
 
+def test_warmup_skip_path_warms_page_cache_with_vmtouch() -> None:
+    """On the DOWNLOAD_SKIP path (node_disk / data_disk restart where the shard
+    survived on the node disk and azcopy was skipped), the warmup entrypoint
+    must read the shard into the node page cache so the first search does not
+    pay the full disk->RAM fault cost. The vmtouch must live ONLY in the skip
+    branch (the download branch already warms the cache as a side effect)."""
+    from api.services.warmup.scripts import warmup_shell_command
+
+    script = warmup_shell_command()
+    # The skip-path warm step is present and opt-out-able.
+    assert "VMTOUCH_WARM shard=" in script
+    assert "vmtouch -tqm" in script
+    assert "ELB_WARMUP_VMTOUCH_DISABLE" in script
+    assert "-getvolumespath" in script
+    # It is inside the DOWNLOAD_SKIP branch (after the skip marker), not the
+    # download branch — a warm cache must not pay a redundant vmtouch.
+    assert script.index("DOWNLOAD_SKIP existing") < script.index("VMTOUCH_WARM shard=")
+    # It is best-effort so a vmtouch failure never fails staging.
+    assert "|| true" in script.split("VMTOUCH_WARM shard=")[1].split("RUNTIME vmtouch-warm")[0]
+    # The container entrypoint still does not call the retired ConfigMap script.
+    assert "blast-vmtouch-aks.sh" not in script
+
+
+def test_warmup_skip_path_logs_when_vmtouch_unavailable() -> None:
+    """If the warmup image lacks vmtouch/blastdb_path the warm is impossible;
+    the entrypoint must LOG that (observable no-op) rather than skip silently,
+    and must also log when disabled or when volume paths cannot be resolved."""
+    from api.services.warmup.scripts import warmup_shell_command
+
+    script = warmup_shell_command()
+    assert "VMTOUCH_SKIP vmtouch/blastdb_path not available" in script
+    assert "VMTOUCH_SKIP disabled via ELB_WARMUP_VMTOUCH_DISABLE" in script
+    assert "VMTOUCH_SKIP could not resolve volume paths" in script
+
+
+def test_warmup_skip_path_budget_has_floor_and_fallback() -> None:
+    """The vmtouch budget must never degrade to a silent `-m 0G` / `-m ''` noop:
+    the awk floors to >=1G and there is a fixed fallback when MemAvailable is
+    absent."""
+    from api.services.warmup.scripts import warmup_shell_command
+
+    script = warmup_shell_command()
+    assert "if (mb<1) mb=1" in script or "-ge 1" in script
+    assert "vm_gib=4" in script
+    # The path resolution is guarded so an empty volume list does not run
+    # vmtouch with no args and is logged instead.
+    assert 'if [ -n "$vm_paths" ]; then' in script
+
+
+def test_vmtouch_warm_log_maps_to_touching_memory_phase() -> None:
+    """A warmup pod still reading the shard into RAM (VMTOUCH_WARM emitted, no
+    DONE yet) reports the `touching_memory` phase, and a completed pod that also
+    emitted VMTOUCH_WARM still resolves to `completed` (the `done shard=`
+    matcher has priority)."""
+    from api.services.warmup.jobs import _phase_from_warmup_log
+
+    in_flight = (
+        "2026-07-22T00:00:00Z DOWNLOAD_SKIP existing shard=00\n"
+        "2026-07-22T00:00:00Z VMTOUCH_WARM shard=00 db=core_nt budget=98G\n"
+    )
+    assert _phase_from_warmup_log(in_flight) == "touching_memory"
+
+    completed = in_flight + (
+        "2026-07-22T00:01:30Z RUNTIME vmtouch-warm-shard-00 90 seconds\n"
+        "2026-07-22T00:01:31Z STAGING_COMPLETE shard=00\n"
+        "2026-07-22T00:01:31Z DONE shard=00 size=36G\n"
+    )
+    assert _phase_from_warmup_log(completed) == "completed"
+
+
 def test_attach_pod_progress_uses_latest_non_deleting_pod_per_shard() -> None:
     databases = [
         {
