@@ -193,9 +193,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         start_catalog_warmer(app)
     except Exception as exc:
         LOGGER.debug("catalog warmer scheduling skipped: %s", type(exc).__name__)
+    # Opt-in memory diagnostics sampler (default OFF). When
+    # API_MEMTRACE_INTERVAL_SECONDS is set it periodically logs RSS + GC stats
+    # (and optionally tracemalloc top-N / malloc_trim) so a suspected leak on
+    # the single long-lived api process can be confirmed as unbounded growth vs
+    # a bounded plateau. No-op and zero cost when unset.
+    app.state._memtrace_stop = None
+    try:
+        from api.app.memory_diagnostics import start_memory_sampler
+
+        app.state._memtrace_stop = start_memory_sampler()
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.debug("memory sampler scheduling skipped: %s", type(exc).__name__)
     try:
         yield
     finally:
+        stop_event = getattr(app.state, "_memtrace_stop", None)
+        if stop_event is not None:
+            stop_event.set()
         try:
             from api.services.storage.catalog_warmer import stop_catalog_warmer
 
