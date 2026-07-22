@@ -9,6 +9,10 @@ Key entry points: `provision_app_insights` (Celery task name
 `api.tasks.azure.provision_app_insights`), `apply_app_insights_to_deployment`.
 Risky contracts: Must be idempotent — the SPA may retry on transient failure.
 The underlying service helpers already short-circuit when the resource exists.
+The apply/clear tasks also mirror the connection string into the durable
+`appinsightspref` store (`api.services.app_insights_pref`) so a later full
+`azd provision` cannot silently drop the override; that mirroring is
+best-effort and never masks the deployment apply/clear result.
 Validation: `uv run pytest -q api/tests/test_settings_app_insights.py
 api/tests/test_upgrade_aca_template.py`.
 """
@@ -22,6 +26,10 @@ from typing import Any
 from celery import shared_task
 
 from api.services import get_credential
+from api.services.app_insights_pref import (
+    clear_persisted_connection_string,
+    save_persisted_connection_string,
+)
 from api.services.app_insights_provisioning import (
     ensure_application_insights,
     ensure_log_analytics_workspace,
@@ -215,6 +223,13 @@ def clear_app_insights_from_deployment(self: Any) -> dict[str, Any]:
         "latest_revision_name",
         getattr(result, "latest_revision_name", None),
     )
+    # Also drop the durable override so the Table fallback stops resurfacing it
+    # (otherwise `deployment_connection_string()` would heal the value straight
+    # back after the env var is removed). Best-effort: never mask the clear.
+    try:
+        clear_persisted_connection_string()
+    except Exception as exc:
+        LOGGER.warning("failed to clear persisted app insights connection string: %s", exc)
     return {
         "deployment_clear": {
             "status": "cleared" if removed else "no_change",
@@ -253,6 +268,15 @@ def _apply_connection_string_to_deployment(
         "latest_revision_name",
         getattr(result, "latest_revision_name", None),
     )
+    # Persist as the durable source of truth so a later full `azd provision`
+    # (which re-applies the Bicep template and wipes the env var) does not lose
+    # the override — `deployment_connection_string()` and backend OTel init both
+    # fall back to this row. Never fatal: a persistence failure must not mask a
+    # successful deployment apply, so log and continue.
+    try:
+        save_persisted_connection_string(connection_string)
+    except Exception as exc:
+        LOGGER.warning("failed to persist applied app insights connection string: %s", exc)
     return {
         "status": "applied",
         "containers": ["api", "worker", "beat"],

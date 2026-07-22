@@ -97,6 +97,29 @@ def _instrument_fastapi(app: FastAPI | None) -> None:
         LOGGER.debug("fastapi instrumentor skipped: %s", type(exc).__name__)
 
 
+def _resolve_connection_string() -> str:
+    """Resolve the connection string, healing from the durable store if wiped.
+
+    Prefers the ``APPLICATIONINSIGHTS_CONNECTION_STRING`` env var; when empty
+    (e.g. a full ``azd provision`` re-applied the Bicep template and reset the
+    env to the empty azd value), falls back to the applied override persisted in
+    the ``appinsightspref`` Table. This lets backend OpenTelemetry export
+    self-heal on the next sidecar restart without a revision swap. The import is
+    lazy and the lookup never raises — any failure degrades to the env value so
+    telemetry init stays non-fatal at startup.
+    """
+    env_value = (os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING") or "").strip()
+    if env_value:
+        return env_value
+    try:
+        from api.services.app_insights_provisioning import deployment_connection_string
+
+        return deployment_connection_string()
+    except Exception as exc:
+        LOGGER.debug("app insights persisted fallback skipped: %s", type(exc).__name__)
+        return ""
+
+
 def init_telemetry(role: str, app: FastAPI | None = None) -> bool:
     """Initialize Azure Monitor OpenTelemetry for the given sidecar role.
 
@@ -110,7 +133,7 @@ def init_telemetry(role: str, app: FastAPI | None = None) -> bool:
     provided for the api sidecar, FastAPI request instrumentation is attached
     directly to that application instance.
     """
-    connection_string = (os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING") or "").strip()
+    connection_string = _resolve_connection_string()
     if not connection_string:
         return False
 

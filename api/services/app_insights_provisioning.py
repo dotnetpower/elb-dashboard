@@ -46,8 +46,28 @@ def _validate_name(value: str, label: str) -> None:
 
 
 def deployment_connection_string() -> str:
-    """Return the connection string injected at deploy-time, or empty string."""
-    return (os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING") or "").strip()
+    """Return the effective server-side connection string, or empty string.
+
+    Resolution order:
+
+    1. The ``APPLICATIONINSIGHTS_CONNECTION_STRING`` env var on the running
+       sidecar (set by Bicep at deploy time, or by the imperative apply task).
+    2. The durable applied override persisted in the ``appinsightspref`` Table
+       row. A full ``azd provision`` re-applies the Bicep template with the
+       (usually empty) azd env value and wipes the env var; the persisted row
+       survives, so telemetry self-heals after a redeploy without the operator
+       re-entering the connection string.
+
+    Reading the Table only happens when the env var is empty (the post-provision
+    heal path), so the common case stays a zero-I/O env lookup. The fallback
+    never raises — a Table/RBAC failure degrades to an empty string.
+    """
+    env_value = (os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING") or "").strip()
+    if env_value:
+        return env_value
+    from api.services.app_insights_pref import get_persisted_connection_string
+
+    return get_persisted_connection_string()
 
 
 def _log_analytics_client(credential: TokenCredential, subscription_id: str) -> Any:
