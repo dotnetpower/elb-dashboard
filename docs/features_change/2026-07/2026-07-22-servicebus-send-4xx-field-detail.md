@@ -51,6 +51,20 @@ field detail exposes only `loc`/`msg`/`type` — never the submitted `input`/`ct
 values, which can carry the query FASTA or other user content. The error list is
 capped at 20 entries.
 
+## Hardening (post-critique)
+
+A 10-round design critique + 3-round hardening pass added the following, since a
+custom validator's `ValueError` text is the one place caller-supplied field
+content can flow back into the 400 body:
+
+* Every field `msg` and the summary are run through the shared secret masker
+  `api.services.sanitise.sanitise` (SAS / bearer / key / GUID redaction) before
+  returning — matching the sibling `_validated_submit_contracts` convention.
+* `loc` is length-bounded (`[:200]`) alongside the existing `msg` (`[:300]`),
+  summary (`[:600]`), and 20-entry caps, so the 400 body is fully bounded.
+* The generic `except Exception` fallback message is sanitised too.
+
+
 ## API / IaC diff summary
 
 * [api/routes/settings/service_bus.py](../../../api/routes/settings/service_bus.py)

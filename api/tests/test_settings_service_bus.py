@@ -459,6 +459,39 @@ def test_send_invalid_body_reports_every_failing_field(
     assert "program" in locs
 
 
+def test_format_validation_errors_masks_secrets_in_msg() -> None:
+    """A validator error message that echoes a GUID/token is masked before it
+    reaches the caller (defense-in-depth via the shared sanitiser). Guards the
+    hardening pass: a custom validator's ValueError text is the one place caller
+    field content can flow back into the 400 body."""
+    from api.routes.settings.service_bus import _format_validation_errors
+    from pydantic import BaseModel, ValidationError, field_validator
+
+    secret = "11111111-2222-3333-4444-555555555555"
+
+    class _Model(BaseModel):
+        x: str
+
+        @field_validator("x")
+        @classmethod
+        def _reject(cls, value: str) -> str:
+            raise ValueError(f"bad value carrying subscription {secret}")
+
+    summary = ""
+    errors: list[dict[str, object]] = []
+    try:
+        _Model(x="anything")
+    except ValidationError as exc:
+        summary, errors = _format_validation_errors(exc)
+
+    # The full GUID is abbreviated (first 8 chars + ellipsis), never echoed whole.
+    assert secret not in summary
+    assert errors
+    assert all(secret not in str(item["msg"]) for item in errors)
+    assert errors[0]["loc"] == "x"
+
+
+
 
 def test_send_enqueues_and_returns_message_id(
     client: TestClient, monkeypatch: pytest.MonkeyPatch

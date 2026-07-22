@@ -35,7 +35,7 @@ from pydantic import ValidationError
 from api.auth import CallerIdentity, require_caller
 from api.services import service_bus
 from api.services.blast.request_subject import build_request_subject
-from api.services.sanitise import redact_oid
+from api.services.sanitise import redact_oid, sanitise
 from api.services.service_bus_pref import (
     ServiceBusConfig,
     get_service_bus_config,
@@ -304,11 +304,17 @@ def _format_validation_errors(exc: ValidationError) -> tuple[str, list[dict[str,
     """
     errors: list[dict[str, Any]] = []
     for err in exc.errors()[:_MAX_VALIDATION_ERRORS]:
-        loc = ".".join(str(part) for part in (err.get("loc") or ()) if part != "body")
+        loc = ".".join(str(part) for part in (err.get("loc") or ()) if part != "body")[:200]
+        # Defense-in-depth (charter security checklist): a custom validator's
+        # ValueError text can echo caller-supplied field content, so mask any
+        # SAS/token/key/GUID before returning — same convention as the sibling
+        # _validated_submit_contracts. Cap AFTER sanitising so the bound holds
+        # even if masking lengthens the string.
+        msg = sanitise(str(err.get("msg") or ""))[:300]
         errors.append(
             {
                 "loc": loc,
-                "msg": str(err.get("msg") or "")[:300],
+                "msg": msg,
                 "type": str(err.get("type") or ""),
             }
         )
@@ -317,7 +323,7 @@ def _format_validation_errors(exc: ValidationError) -> tuple[str, list[dict[str,
             f"{item['loc']}: {item['msg']}" if item["loc"] else item["msg"] for item in errors
         )[:600]
     else:  # pragma: no cover - ValidationError always carries at least one error
-        summary = str(exc)[:400]
+        summary = sanitise(str(exc))[:400]
     return summary, errors
 
 
@@ -367,7 +373,7 @@ def _validate_send_body(body: dict[str, Any]) -> Any:
     except Exception as exc:
         raise HTTPException(
             400,
-            detail={"code": "invalid_request", "message": str(exc)[:400]},
+            detail={"code": "invalid_request", "message": sanitise(str(exc))[:400]},
         ) from exc
 
 
