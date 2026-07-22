@@ -3,6 +3,7 @@ import { Server } from "lucide-react";
 import type { SidecarMetric } from "@/hooks/useSidecarMetrics";
 
 import { HEALTH_LABEL, ICONS, NODE_W } from "./constants";
+import { memLabel } from "./helpers";
 import { StatusDot } from "./StatusDot";
 
 export interface TopoNodeProps {
@@ -38,7 +39,7 @@ function nodeChrome(health: SidecarMetric["health"], loading: boolean) {
 
 export function TopoNode({ s, width = NODE_W, loading = false }: TopoNodeProps) {
   const cpu = s.cpu_pct ?? null;
-  const mem = s.mem_pct ?? null;
+  const mem = memLabel(s.mem_pct, s.mem_bytes);
   const chrome = nodeChrome(s.health, loading);
   return (
     <div
@@ -78,7 +79,7 @@ export function TopoNode({ s, width = NODE_W, loading = false }: TopoNodeProps) 
         }}
       >
         <span>cpu {cpu == null ? "—" : `${cpu}%`}</span>
-        <span>mem {mem == null ? "—" : `${mem}%`}</span>
+        <span>mem {mem}</span>
       </div>
     </div>
   );
