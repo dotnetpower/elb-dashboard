@@ -36,6 +36,34 @@ _HTTP_PAGE_CAP = 200  # never read more than this many line items
 # before interpolating into the OData filter so a malformed value cannot inject.
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
+
+def _int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Parse a positive-int env override, clamped to ``[minimum, maximum]``.
+
+    Falls back to ``default`` on a missing or malformed value (and clamps an
+    out-of-range one) so a bad operator override can never crash the api
+    sidecar at import time or re-open unbounded growth.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning("invalid %s=%r; using default %d", name, raw, default)
+        return default
+    return max(minimum, min(maximum, value))
+
+
+# Hard size cap so the per-process cache can never grow without bound. The key
+# cardinality (region × SKU) is finite and small in practice, but this is the
+# only unbounded module-level cache in the api sidecar; the cap makes a leak
+# structurally impossible even if a future caller enumerates many regions/SKUs.
+# Clamped so a malformed/huge override cannot crash import or defeat the cap.
+_CACHE_MAX_ENTRIES = _int_env(
+    "COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000
+)
+
 _CACHE: dict[tuple[str, str], tuple[float | None, float]] = {}
 _CACHE_LOCK = Lock()
 
@@ -61,9 +89,35 @@ def _cache_get(key: tuple[str, str]) -> tuple[bool, float | None]:
     return True, value
 
 
+def _evict_over_cap_locked() -> None:
+    """Keep ``_CACHE`` at or below the size cap. Caller holds ``_CACHE_LOCK``.
+
+    Reclaim already-expired entries first (respecting each entry's own TTL —
+    24h for a real price, 1h for a miss), which is free and usually enough. If
+    still over cap, drop the oldest-fetched entries in a single sorted pass
+    (O(n log n), not the O(n^2) of a repeated min-scan). A dropped-but-still-
+    valid entry is benign: the next lookup simply re-fetches.
+    """
+    if len(_CACHE) <= _CACHE_MAX_ENTRIES:
+        return
+    now = _now()
+    expired = [
+        key
+        for key, (value, fetched_at) in _CACHE.items()
+        if now - fetched_at >= (_CACHE_TTL_SECONDS if value is not None else _NEG_CACHE_TTL_SECONDS)
+    ]
+    for key in expired:
+        _CACHE.pop(key, None)
+    overflow = len(_CACHE) - _CACHE_MAX_ENTRIES
+    if overflow > 0:
+        for key, _entry in sorted(_CACHE.items(), key=lambda kv: kv[1][1])[:overflow]:
+            _CACHE.pop(key, None)
+
+
 def _cache_put(key: tuple[str, str], value: float | None) -> None:
     with _CACHE_LOCK:
         _CACHE[key] = (value, _now())
+        _evict_over_cap_locked()
 
 
 def reset_cache() -> None:
