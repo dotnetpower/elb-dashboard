@@ -2,7 +2,7 @@
  * useNotifications — polling hook for the header notification bell.
  *
  * Polls `/api/notifications` (terminal-job feed + unread count) and exposes a
- * `markSeen` mutation that advances the server-side seen marker. Polling is
+ * mutations that mark the feed read or clear its current contents. Polling is
  * gated by `enabled` so an unauthenticated shell never spams 401s.
  */
 import { useCallback } from "react";
@@ -45,10 +45,31 @@ export function useNotifications(enabled: boolean) {
     },
   });
 
+  const clearMutation = useMutation({
+    mutationFn: () => notificationsApi.clear(),
+    onSuccess: () => {
+      queryClient.setQueryData<NotificationsResponse>(QUERY_KEY, (prev) =>
+        prev
+          ? {
+              ...prev,
+              items: [],
+              unread_count: 0,
+            }
+          : prev,
+      );
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
+    },
+  });
+
   const markSeen = useCallback(() => {
     if (markSeenMutation.isPending) return;
     markSeenMutation.mutate();
   }, [markSeenMutation]);
+
+  const clear = useCallback(() => {
+    if (clearMutation.isPending) return;
+    clearMutation.mutate();
+  }, [clearMutation]);
 
   const data = query.data ?? EMPTY;
 
@@ -58,5 +79,8 @@ export function useNotifications(enabled: boolean) {
     isLoading: query.isLoading,
     isError: query.isError,
     markSeen,
+    clear,
+    isUpdating: markSeenMutation.isPending || clearMutation.isPending,
+    actionError: markSeenMutation.isError || clearMutation.isError,
   };
 }

@@ -1,20 +1,22 @@
-"""In-app job notifications — a derived view over jobstate plus a per-user seen marker.
+"""In-app job notifications — a derived view over jobstate plus per-user markers.
 
 Responsibility: Build the notification feed for a caller from terminal BLAST jobs
-already stored in ``jobstate`` and track a single per-user ``last_seen_at`` marker
-so unread counts can be computed without a dedicated notification table or any
-terminal-transition write hook.
+already stored in ``jobstate`` and track per-user seen/cleared markers without a
+dedicated notification table or any terminal-transition write hook.
 Edit boundaries: Azure-Tables access for the marker row lives here; job listing is
 delegated to ``JobStateRepository`` (never queried directly with the SDK). No HTTP
 or response shaping — that belongs to ``api/routes/notifications.py``.
-Key entry points: ``build_notifications``, ``mark_all_seen``, ``get_last_seen``.
+Key entry points: ``build_notifications``, ``mark_all_seen``,
+``clear_all_notifications``, ``get_notification_marker``.
 Risky contracts: ``updated_at`` is the "became terminal at" anchor and relies on the
 fact that terminal jobstate rows are not re-written (``_update_state`` no-op shortcut +
 reconcile skips terminal rows + finalizers do not bump the row). Unread comparison is a
 lexicographic string compare, which is correct only because every writer uses the same
 fixed-offset ``isoformat(timespec="seconds")`` UTC format. ``build_notifications`` seeds
 the marker to "now" on first read so a brand-new user starts at zero unread instead of a
-flood of historical completions.
+flood of historical completions. Seen and clear actions update independent fields with
+MERGE so concurrent requests cannot erase or reorder each other's state. Failure detail
+is sanitised before it crosses the HTTP boundary.
 Validation: ``uv run pytest -q api/tests/test_notifications.py``.
 """
 
@@ -51,6 +53,8 @@ _MARKER_ROW_KEY = "current"
 # cheap while still surfacing enough rows after the terminal/parent filter.
 _SCAN_LIMIT = 200
 _MAX_FEED_LIMIT = 100
+_MAX_ERROR_DETAIL_LENGTH = 500
+_ERROR_DETAIL_SELECT = ["PartitionKey", "RowKey", "payload_json"]
 
 _TABLE_POOL: _PooledTableClient | None = None
 _TABLE_POOL_LOCK = Lock()
@@ -117,8 +121,18 @@ def _ensure_table() -> None:
         _ENSURED_TABLES.add(cache_key)
 
 
-def get_last_seen(owner_oid: str) -> str:
-    """Return the caller's ``last_seen_at`` marker, or "" when none is stored.
+@dataclass(frozen=True)
+class NotificationMarker:
+    last_seen_at: str = ""
+    cleared_before_at: str = ""
+
+
+class NotificationMarkerWriteError(RuntimeError):
+    """Raised when an explicit notification marker action cannot be persisted."""
+
+
+def get_notification_marker(owner_oid: str) -> NotificationMarker:
+    """Return the caller's seen/cleared marker, or empty values when unavailable.
 
     Best-effort: any storage fault degrades to "" (everything reads as already
     seen) so the feed never fails because the marker is unavailable.
@@ -131,18 +145,33 @@ def get_last_seen(owner_oid: str) -> str:
                     partition_key=_marker_key(owner_oid), row_key=_MARKER_ROW_KEY
                 )
             except ResourceNotFoundError:
-                return ""
-            return str(dict(entity).get("last_seen_at") or "")
+                return NotificationMarker()
+            values = dict(entity)
+            return NotificationMarker(
+                last_seen_at=str(values.get("last_seen_at") or ""),
+                cleared_before_at=str(values.get("cleared_before_at") or ""),
+            )
     except Exception as exc:
         LOGGER.warning("notif marker read failed: %s", type(exc).__name__)
-        return ""
+        return NotificationMarker()
 
 
-def set_last_seen(owner_oid: str, last_seen_at: str) -> None:
-    """Upsert the caller's ``last_seen_at`` marker (last-writer-wins).
+def get_last_seen(owner_oid: str) -> str:
+    """Backward-compatible accessor for the caller's ``last_seen_at`` value."""
+    return get_notification_marker(owner_oid).last_seen_at
 
-    The marker only ever moves forward in normal use; concurrent writes from two
-    tabs are harmless, so no optimistic-concurrency token is needed.
+
+def _set_notification_marker(
+    owner_oid: str,
+    *,
+    last_seen_at: str | None = None,
+    cleared_before_at: str | None = None,
+) -> bool:
+    """Merge selected marker fields and report whether persistence succeeded.
+
+    ``MERGE`` is intentional: a mark-seen request racing a clear request must not
+    erase ``cleared_before_at``. Marker timestamps only move forward in normal
+    use, so last-writer-wins remains safe for writes to the same field.
     """
     try:
         _ensure_table()
@@ -150,13 +179,23 @@ def set_last_seen(owner_oid: str, last_seen_at: str) -> None:
             "PartitionKey": _marker_key(owner_oid),
             "RowKey": _MARKER_ROW_KEY,
             "owner_oid": owner_oid or "",
-            "last_seen_at": last_seen_at,
             "updated_at": _now_iso(),
         }
+        if last_seen_at is not None:
+            entity["last_seen_at"] = last_seen_at
+        if cleared_before_at is not None:
+            entity["cleared_before_at"] = cleared_before_at
         with _table_client() as table:
-            table.upsert_entity(entity, mode=UpdateMode.REPLACE)
+            table.upsert_entity(entity, mode=UpdateMode.MERGE)
+        return True
     except Exception as exc:
         LOGGER.warning("notif marker write failed: %s", type(exc).__name__)
+        return False
+
+
+def set_last_seen(owner_oid: str, last_seen_at: str) -> bool:
+    """Merge the caller's ``last_seen_at`` marker and return success."""
+    return _set_notification_marker(owner_oid, last_seen_at=last_seen_at)
 
 
 @dataclass(frozen=True)
@@ -168,6 +207,7 @@ class NotificationItem:
     db: str
     updated_at: str
     error_code: str
+    error_detail: str
     unread: bool
 
     def as_dict(self) -> dict[str, Any]:
@@ -179,6 +219,7 @@ class NotificationItem:
             "db": self.db,
             "updated_at": self.updated_at,
             "error_code": self.error_code,
+            "error_detail": self.error_detail,
             "unread": self.unread,
         }
 
@@ -197,6 +238,34 @@ def _terminal_jobs(jobs: list[Any]) -> list[Any]:
     ]
     selected.sort(key=lambda job: str(getattr(job, "updated_at", "") or ""), reverse=True)
     return selected
+
+
+def _load_error_details(repo: Any, jobs: list[Any]) -> dict[str, str]:
+    """Batch-load and sanitise human failure details for visible failed jobs."""
+    failed_ids = [
+        str(getattr(job, "job_id", "") or "")
+        for job in jobs
+        if str(getattr(job, "status", "") or "") == "failed"
+    ]
+    if not failed_ids:
+        return {}
+    try:
+        detail_rows = repo.get_many(failed_ids, select=_ERROR_DETAIL_SELECT)
+    except Exception as exc:
+        LOGGER.warning("notif error-detail lookup failed: %s", type(exc).__name__)
+        return {}
+
+    from api.services.sanitise import sanitise
+
+    details: dict[str, str] = {}
+    for job_id, row in detail_rows.items():
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        raw = str(payload.get("error") or "").strip()
+        if raw:
+            details[job_id] = sanitise(raw)[:_MAX_ERROR_DETAIL_LENGTH]
+    return details
 
 
 def build_notifications(
@@ -218,7 +287,8 @@ def build_notifications(
     Best-effort: a storage fault on the job listing degrades to an empty feed.
     """
     feed_limit = max(1, min(limit, _MAX_FEED_LIMIT))
-    last_seen = get_last_seen(owner_oid)
+    marker = get_notification_marker(owner_oid)
+    last_seen = marker.last_seen_at
     if not last_seen and seed_if_missing:
         last_seen = _now_iso()
         set_last_seen(owner_oid, last_seen)
@@ -233,22 +303,32 @@ def build_notifications(
         return {"items": [], "unread_count": 0, "last_seen_at": last_seen}
 
     terminal = _terminal_jobs(jobs)
+    if marker.cleared_before_at:
+        terminal = [
+            job
+            for job in terminal
+            if str(getattr(job, "updated_at", "") or "") > marker.cleared_before_at
+        ]
+    visible_jobs = terminal[:feed_limit]
+    error_details = _load_error_details(repo, visible_jobs)
     items: list[NotificationItem] = []
     unread_count = 0
-    for job in terminal[:feed_limit]:
+    for job in visible_jobs:
+        job_id = str(getattr(job, "job_id", "") or "")
         updated_at = str(getattr(job, "updated_at", "") or "")
         unread = bool(last_seen) and updated_at > last_seen
         if unread:
             unread_count += 1
         items.append(
             NotificationItem(
-                job_id=str(getattr(job, "job_id", "") or ""),
+                job_id=job_id,
                 status=str(getattr(job, "status", "") or ""),
                 title=str(getattr(job, "job_title", "") or ""),
                 program=str(getattr(job, "program", "") or ""),
                 db=str(getattr(job, "db", "") or ""),
                 updated_at=updated_at,
                 error_code=str(getattr(job, "error_code", "") or ""),
+                error_detail=error_details.get(job_id, ""),
                 unread=unread,
             )
         )
@@ -263,5 +343,17 @@ def build_notifications(
 def mark_all_seen(owner_oid: str) -> dict[str, Any]:
     """Advance the caller's marker to "now" so every current job reads as seen."""
     now = _now_iso()
-    set_last_seen(owner_oid, now)
+    if not set_last_seen(owner_oid, now):
+        raise NotificationMarkerWriteError("failed to persist last_seen_at")
     return {"last_seen_at": now, "unread_count": 0}
+
+
+def clear_all_notifications(owner_oid: str) -> dict[str, Any]:
+    """Hide current notifications without deleting their underlying job history."""
+    now = _now_iso()
+    if not _set_notification_marker(owner_oid, cleared_before_at=now):
+        raise NotificationMarkerWriteError("failed to persist cleared_before_at")
+    return {
+        "cleared_before_at": now,
+        "unread_count": 0,
+    }

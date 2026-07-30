@@ -5,7 +5,7 @@ delegates feed assembly and marker writes to ``api.services.notifications``, and
 shapes the JSON response.
 Edit boundaries: Keep HTTP validation and response shaping here; all jobstate
 reads and marker storage live in ``api.services.notifications``.
-Key entry points: ``list_notifications``, ``mark_seen``.
+Key entry points: ``list_notifications``, ``mark_seen``, ``clear_notifications``.
 Risky contracts: Every non-health ``/api/*`` route must enforce ``require_caller``.
 Validation: ``uv run pytest -q api/tests/test_notifications.py``.
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.auth import CallerIdentity, require_caller
 
@@ -40,6 +40,31 @@ def mark_seen(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Mark every current notification as seen (advance the seen marker)."""
-    from api.services.notifications import mark_all_seen
+    from api.services.notifications import NotificationMarkerWriteError, mark_all_seen
 
-    return mark_all_seen(caller.object_id)
+    try:
+        return mark_all_seen(caller.object_id)
+    except NotificationMarkerWriteError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Notification preferences are temporarily unavailable.",
+        ) from exc
+
+
+@notifications_router.post("/clear")
+def clear_notifications(
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Hide every current notification while preserving job history."""
+    from api.services.notifications import (
+        NotificationMarkerWriteError,
+        clear_all_notifications,
+    )
+
+    try:
+        return clear_all_notifications(caller.object_id)
+    except NotificationMarkerWriteError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Notification preferences are temporarily unavailable.",
+        ) from exc

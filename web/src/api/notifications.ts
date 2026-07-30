@@ -3,8 +3,8 @@
  *
  * Backs the header notification bell. The feed is a derived view over terminal
  * BLAST jobs (completed/failed/cancelled); `unread` is computed server-side from
- * a per-user "last seen" marker. `markSeen` advances that marker so the unread
- * badge clears.
+ * per-user "last seen" and "cleared before" markers. `markSeen` advances the
+ * seen marker; `clear` hides the current feed without deleting job history.
  */
 import { api } from "@/api/client";
 
@@ -18,6 +18,7 @@ export interface NotificationItem {
   db: string;
   updated_at: string;
   error_code: string;
+  error_detail?: string;
   unread: boolean;
 }
 
@@ -32,8 +33,14 @@ export interface MarkSeenResponse {
   unread_count: number;
 }
 
+export interface ClearNotificationsResponse {
+  cleared_before_at: string;
+  unread_count: number;
+}
+
 export const notificationsApi = {
   list: (limit = 50) =>
     api.get<NotificationsResponse>(`/notifications?limit=${encodeURIComponent(limit)}`),
   markSeen: () => api.post<MarkSeenResponse>("/notifications/seen", {}),
+  clear: () => api.post<ClearNotificationsResponse>("/notifications/clear", {}),
 };

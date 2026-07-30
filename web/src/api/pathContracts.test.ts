@@ -22,9 +22,11 @@ describe("typed client path contracts", () => {
   it("keeps notifications relative to the shared /api prefix", () => {
     notificationsApi.list(25);
     notificationsApi.markSeen();
+    notificationsApi.clear();
 
     expect(apiMocks.get).toHaveBeenCalledWith("/notifications?limit=25");
     expect(apiMocks.post).toHaveBeenCalledWith("/notifications/seen", {});
+    expect(apiMocks.post).toHaveBeenCalledWith("/notifications/clear", {});
   });
 
   it("keeps cost endpoints relative to the shared /api prefix", () => {

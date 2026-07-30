@@ -2,9 +2,10 @@
  * NotificationBell — header bell with an unread badge and a dropdown feed.
  *
  * Renders recent terminal BLAST jobs (completed / failed / cancelled) from the
- * `useNotifications` hook. Opening the dropdown shows the feed; "Mark all read"
- * advances the server-side seen marker and clears the badge. Mirrors the
- * outside-click / Escape dismissal pattern used by `UserMenuDropdown`.
+ * `useNotifications` hook. "Mark all read" clears the badge, while "Clear all"
+ * hides current notifications without deleting job history. Failed rows show a
+ * sanitised human detail when available. Mirrors the outside-click / Escape
+ * dismissal pattern used by `UserMenuDropdown`.
  */
 import { useEffect, useRef, useState } from "react";
 import { Bell, CheckCircle2, XCircle, Ban } from "lucide-react";
@@ -63,9 +64,18 @@ function NotificationRow({ item }: { item: NotificationItem }) {
           {visual.label}
           {subtitle ? ` — ${subtitle}` : ""}
         </div>
-        {item.status === "failed" && item.error_code && (
-          <div style={{ fontSize: 11, color: "var(--danger, #f87171)", marginTop: 2, wordBreak: "break-word" }}>
-            {item.error_code}
+        {item.status === "failed" && (item.error_code || item.error_detail) && (
+          <div style={{ marginTop: 4, color: "var(--danger, #f87171)", wordBreak: "break-word" }}>
+            {item.error_code && (
+              <div style={{ fontSize: 10, fontFamily: "var(--font-mono)", opacity: 0.9 }}>
+                {item.error_code}
+              </div>
+            )}
+            {item.error_detail && item.error_detail !== item.error_code && (
+              <div style={{ fontSize: 11, lineHeight: 1.4, marginTop: 2 }}>
+                {item.error_detail}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -76,7 +86,7 @@ function NotificationRow({ item }: { item: NotificationItem }) {
 export function NotificationBell({ enabled }: { enabled: boolean }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const { items, unreadCount, isLoading, markSeen } = useNotifications(enabled);
+  const { items, unreadCount, isLoading, markSeen, clear, isUpdating, actionError } = useNotifications(enabled);
 
   useEffect(() => {
     if (!open) return;
@@ -155,17 +165,35 @@ export function NotificationBell({ enabled }: { enabled: boolean }) {
             }}
           >
             <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Notifications</span>
-            {unreadCount > 0 && (
-              <button
-                onClick={() => markSeen()}
-                style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11, padding: 0 }}
-              >
-                Mark all read
-              </button>
-            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {unreadCount > 0 && (
+                <button
+                  onClick={() => markSeen()}
+                  disabled={isUpdating}
+                  style={{ background: "none", border: "none", color: "var(--accent)", cursor: isUpdating ? "default" : "pointer", fontSize: 11, padding: 0, opacity: isUpdating ? 0.55 : 1 }}
+                >
+                  Mark all read
+                </button>
+              )}
+              {items.length > 0 && (
+                <button
+                  onClick={() => clear()}
+                  disabled={isUpdating}
+                  title="Hide current notifications without deleting job history"
+                  style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: isUpdating ? "default" : "pointer", fontSize: 11, padding: 0, opacity: isUpdating ? 0.55 : 1 }}
+                >
+                  Clear all
+                </button>
+              )}
+            </div>
           </div>
 
           <div style={{ overflowY: "auto" }}>
+            {actionError && (
+              <div role="alert" style={{ padding: "8px 16px", fontSize: 11, color: "var(--danger, #f87171)", borderBottom: "1px solid var(--border-weak)" }}>
+                Could not update notifications. Try again.
+              </div>
+            )}
             {isLoading && items.length === 0 ? (
               <div style={{ padding: "24px 16px", textAlign: "center", fontSize: 12, color: "var(--text-muted)" }}>
                 Loading…

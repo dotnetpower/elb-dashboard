@@ -2,7 +2,8 @@
 
 Responsibility: Cover ``api.services.notifications`` feed/marker logic and the
 ``/api/notifications`` routes (terminal/child filtering, unread accounting,
-first-read seeding, mark-seen, and graceful degradation).
+first-read seeding, mark-seen, clear cutoff, error detail, and graceful
+degradation).
 Edit boundaries: Test-only; monkeypatches the job listing and marker storage so
 no Azure Table is touched.
 Key entry points: pytest test functions.
@@ -39,6 +40,7 @@ class FakeJob:
     program: str = ""
     db: str = ""
     error_code: str = ""
+    payload: dict[str, object] | None = None
 
 
 class FakeRepo:
@@ -51,6 +53,13 @@ class FakeRepo:
         del limit, include_payload
         return list(self._jobs)
 
+    def get_many(
+        self, job_ids: list[str], *, select: list[str] | None = None
+    ) -> dict[str, FakeJob]:
+        del select
+        wanted = set(job_ids)
+        return {job.job_id: job for job in self._jobs if job.job_id in wanted}
+
 
 def _patch_repo(monkeypatch: pytest.MonkeyPatch, jobs: list[FakeJob]) -> None:
     monkeypatch.setattr(
@@ -60,11 +69,40 @@ def _patch_repo(monkeypatch: pytest.MonkeyPatch, jobs: list[FakeJob]) -> None:
     )
 
 
-def _patch_marker(monkeypatch: pytest.MonkeyPatch, last_seen: str) -> list[str]:
-    """Patch the marker helpers; return a list that captures set_last_seen writes."""
-    writes: list[str] = []
-    monkeypatch.setattr(notif, "get_last_seen", lambda _oid: last_seen)
-    monkeypatch.setattr(notif, "set_last_seen", lambda _oid, ts: writes.append(ts))
+def _patch_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    last_seen: str,
+    *,
+    cleared_before: str = "",
+) -> list[dict[str, str | None]]:
+    """Patch marker helpers and capture successful marker writes."""
+    writes: list[dict[str, str | None]] = []
+    monkeypatch.setattr(
+        notif,
+        "get_notification_marker",
+        lambda _oid: notif.NotificationMarker(last_seen, cleared_before),
+    )
+
+    def set_marker(
+        _oid: str,
+        *,
+        last_seen_at: str | None = None,
+        cleared_before_at: str | None = None,
+    ) -> bool:
+        writes.append(
+            {
+                "last_seen_at": last_seen_at,
+                "cleared_before_at": cleared_before_at,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(notif, "_set_notification_marker", set_marker)
+    monkeypatch.setattr(
+        notif,
+        "set_last_seen",
+        lambda oid, ts: set_marker(oid, last_seen_at=ts),
+    )
     return writes
 
 
@@ -113,6 +151,7 @@ def test_first_read_seeds_marker_and_reports_zero_unread(
     result = notif.build_notifications("oid-1", seed_if_missing=True)
 
     assert writes, "first read must seed the marker"
+    assert writes[0]["last_seen_at"]
     assert result["unread_count"] == 0
     assert result["items"][0]["unread"] is False
 
@@ -138,7 +177,75 @@ def test_mark_all_seen_advances_marker(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result["unread_count"] == 0
     assert result["last_seen_at"]
-    assert writes == [result["last_seen_at"]]
+    assert writes == [
+        {"last_seen_at": result["last_seen_at"], "cleared_before_at": None}
+    ]
+
+
+def test_clear_hides_current_jobs_but_keeps_newer_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs = [
+        FakeJob("j-new", "completed", "2026-06-25T00:00:09+00:00"),
+        FakeJob("j-cleared", "failed", "2026-06-25T00:00:05+00:00"),
+    ]
+    _patch_repo(monkeypatch, jobs)
+    _patch_marker(
+        monkeypatch,
+        "2026-06-25T00:00:05+00:00",
+        cleared_before="2026-06-25T00:00:05+00:00",
+    )
+
+    result = notif.build_notifications("oid-1", seed_if_missing=False)
+
+    assert [item["job_id"] for item in result["items"]] == ["j-new"]
+    assert result["unread_count"] == 1
+
+
+def test_failed_notification_includes_sanitised_error_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs = [
+        FakeJob(
+            "j-fail",
+            "failed",
+            "2026-06-25T00:00:09+00:00",
+            error_code="terminal_az_login_failed",
+            payload={"error": "az failed with Bearer abcdefghijklmnopqrstuvwxyz123456"},
+        )
+    ]
+    _patch_repo(monkeypatch, jobs)
+    _patch_marker(monkeypatch, "2026-06-25T00:00:00+00:00")
+
+    result = notif.build_notifications("oid-1", seed_if_missing=False)
+
+    item = result["items"][0]
+    assert item["error_code"] == "terminal_az_login_failed"
+    assert item["error_detail"] == "az failed with Bearer <redacted>"
+
+
+def test_clear_all_persists_only_the_independent_clear_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes = _patch_marker(monkeypatch, "")
+
+    result = notif.clear_all_notifications("oid-1")
+
+    assert writes == [
+        {
+            "last_seen_at": None,
+            "cleared_before_at": result["cleared_before_at"],
+        }
+    ]
+
+
+def test_explicit_marker_action_reports_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notif, "set_last_seen", lambda _oid, _ts: False)
+
+    with pytest.raises(notif.NotificationMarkerWriteError):
+        notif.mark_all_seen("oid-1")
 
 
 def test_listing_failure_degrades_to_empty_feed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,6 +296,7 @@ def test_get_notifications_route(
                     "db": "nt",
                     "updated_at": "2026-06-25T00:00:04+00:00",
                     "error_code": "",
+                    "error_detail": "",
                     "unread": True,
                 }
             ],
@@ -215,3 +323,39 @@ def test_seen_route_marks_all(client: TestClient, monkeypatch: pytest.MonkeyPatc
     r = client.post("/api/notifications/seen")
     assert r.status_code == 200
     assert r.json() == {"last_seen_at": "2026-06-25T01:00:00+00:00", "unread_count": 0}
+
+
+def test_clear_route_hides_current_feed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        notif,
+        "clear_all_notifications",
+        lambda _oid: {
+            "cleared_before_at": "2026-06-25T01:00:00+00:00",
+            "unread_count": 0,
+        },
+    )
+
+    r = client.post("/api/notifications/clear")
+
+    assert r.status_code == 200
+    assert r.json()["cleared_before_at"] == "2026-06-25T01:00:00+00:00"
+
+
+@pytest.mark.parametrize("path", ["/api/notifications/seen", "/api/notifications/clear"])
+def test_marker_action_returns_503_when_storage_write_fails(
+    path: str,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(_oid: str) -> dict[str, object]:
+        raise notif.NotificationMarkerWriteError("storage unavailable")
+
+    monkeypatch.setattr(notif, "mark_all_seen", fail)
+    monkeypatch.setattr(notif, "clear_all_notifications", fail)
+
+    r = client.post(path)
+
+    assert r.status_code == 503
+    assert r.json()["detail"] == "Notification preferences are temporarily unavailable."
