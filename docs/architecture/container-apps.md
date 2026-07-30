@@ -156,7 +156,7 @@ Reference: Microsoft Docs, "Containers in Azure Container Apps", under
 "Allocations" (sums across all containers in a replica must respect the
 ratio).
 
-### Initial allocation per sidecar
+### Current allocation per sidecar
 
 Sized for the steady-state operator workload (low concurrency, occasional
 BLAST submit / DB warmup). Revise after the first week of production
@@ -165,17 +165,17 @@ telemetry; resize is a revision swap with no downtime.
 | Sidecar | vCPU | Memory | Sizing reasoning |
 |---------|------|--------|------------------|
 | `frontend` (nginx:alpine) | 0.25 | 0.5 GiB | Static files; a few QPS at most. The minimum allocation is already overkill. |
-| `api` (FastAPI) | 0.5 | 1.0 GiB | Handles JSON requests, the WebSocket terminal proxy, and the streaming upload/download proxy (1 MiB chunks, 4 MiB block uploads, semaphore-capped to 4 concurrent transfers). 0.5 vCPU is sized for the proxy bursts; idle steady-state will be much lower. |
-| `worker` (Celery) | 0.5 | 1.0 GiB | Runs Azure SDK pollers, ARM/AKS calls, and `az acr build` orchestration. CPU spikes during ACR build dispatch and AKS provision but is mostly waiting on long-running Azure operations. |
+| `api` (FastAPI) | 1.0 | 2.0 GiB | Handles JSON requests, the WebSocket terminal proxy, and streaming upload/download traffic. The allocation provides headroom for overlapping monitor polls and result-analysis bursts. |
+| `worker` (Celery) | 1.75 | 3.5 GiB | Runs three isolated Celery parents with five prefork children plus the resident Service Bus consumer. This is the largest allocation that keeps the bundled replica on the Consumption profile and protects against in-flight memory spikes. |
 | `beat` (Celery beat) | 0.25 | 0.5 GiB | Scheduler thread + Storage poller for schedule definitions. Trivial. |
 | `redis` (redis:7-alpine) | 0.25 | 0.5 GiB | Single-node broker for control-plane traffic. Ephemeral (no AOF) — queue is rebuilt from the `jobstate` table by the `beat` reconciler on revision restart. Memory grows with queue depth; 0.5 GiB is enough for hundreds of thousands of pending tasks. |
 | `terminal` (Ubuntu + elastic-blast toolchain) | 0.5 | 1.0 GiB | Bash + tmux + `python` + occasional `kubectl`/`az`/`azcopy`. Carries the heaviest image, but at runtime it is mostly idle waiting for the operator to type. |
-| **Replica total** | **2.25** | **4.5 GiB** | Satisfies the 1 vCPU : 2 GiB ratio. Within Consumption-profile per-replica max (4 / 8). |
+| **Replica total** | **4.0** | **8.0 GiB** | Satisfies the 1 vCPU : 2 GiB ratio and exactly reaches the Consumption-profile per-replica maximum. |
 
 If any sidecar regularly hits its CPU limit (visible in App Insights as
-`Container CPU Usage Percent` saturating), bump that sidecar in 0.25 vCPU /
-0.5 GiB increments and bump another sidecar down by the same amount, or grow
-the replica total (still respecting the 1:2 ratio). The bundled topology has
+`Container CPU Usage Percent` saturating), move 0.25 vCPU / 0.5 GiB from
+another sidecar or move to a dedicated workload profile; the current bundle
+cannot grow further on Consumption. The bundled topology has
 no horizontal scale-out (`minReplicas: 1, maxReplicas: 1`); vertical resize
 is the only knob.
 

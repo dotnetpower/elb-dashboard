@@ -512,14 +512,15 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           // earlier pool was heavily over-subscribed. A live 2.0Gi soak still
           // OOM-killed prefork children during reconcile bursts even with the
           // 250000 KiB post-task recycle cap, because the cap cannot interrupt
-          // an in-flight allocation. Use 1.5 vCPU / 3.0Gi for process-level
-          // headroom. Per-replica total = 3.75 vCPU / 7.5Gi (api 1.0/2.0,
-          // frontend 0.25/0.5, worker 1.5/3.0, beat 0.25/0.5, redis 0.25/0.5,
-          // terminal 0.5/1.0), still under the Consumption 4 vCPU / 8Gi cap
-          // and keeping the required 1 vCPU : 2 GiB ratio.
+          // an in-flight allocation. Use the largest worker allocation that
+          // keeps the six-sidecar bundle on the Consumption profile:
+          // 1.75 vCPU / 3.5Gi. Per-replica total = 4 vCPU / 8Gi (api 1.0/2.0,
+          // frontend 0.25/0.5, worker 1.75/3.5, beat 0.25/0.5, redis 0.25/0.5,
+          // terminal 0.5/1.0), exactly at the Consumption cap and keeping the
+          // required 1 vCPU : 2 GiB ratio.
           resources: {
-            cpu: json('1.5')
-            memory: '3.0Gi'
+            cpu: json('1.75')
+            memory: '3.5Gi'
           }
           env: [
             { name: 'SIDECAR_NAME', value: 'worker' }
@@ -550,10 +551,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Recycle a prefork child once its resident set exceeds this many
             // KiB (run_celery_workers.py forwards it as --max-memory-per-child).
             // Backstop against a slow leak OOM-killing the shared worker cgroup:
-            // the two parents spawn 6 prefork children that share the 2.0Gi
+            // the three parents spawn 5 prefork children that share the 3.5Gi
             // limit, so cap each child at ~244 MiB (250000 KiB) to keep the
-            // worst-case child RSS sum (~1.4 GiB) under the limit with headroom
-            // for the two MainProcess parents. Without this the children grew
+            // post-task steady-state child RSS sum (~1.2 GiB) bounded with
+            // headroom for the three MainProcess parents and in-flight spikes.
+            // Without this the children grew
             // unbounded and the kernel SIGKILL'd them at the 1.0Gi limit
             // (signal 9 WorkerLostError, ~250/24h before the 2.0Gi bump).
             { name: 'CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB', value: controlPlaneEnv.worker.CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB }
