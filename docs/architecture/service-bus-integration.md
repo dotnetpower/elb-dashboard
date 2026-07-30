@@ -101,7 +101,13 @@ Field rules (consistent with `/v1/jobs`):
 - `external_correlation_id` is the **idempotency / dedup key**
   (`^[A-Za-z0-9._:-]+$`, ≤ 256). If omitted, the Service Bus message's
   `correlation_id` then `message_id` is used; if none exist the message is
-  dead-lettered. A correlation id already accepted is never run twice.
+  dead-lettered. It must be unique for every logical request. Reuse it only for
+  an exact retry of the same execution payload; requests with different
+  execution semantics (for example the inclusive and exclusive forms of the
+  same gene/taxon query) must use different correlation ids.
+- `request_id` is an optional, length-bounded tracking value echoed on completion
+  events. It is not an idempotency key and does not distinguish two executions
+  that reuse the same `external_correlation_id`.
 - **Options** may be sent either as an `options` object (preferred — matches
   `/v1/jobs`) or as flat convenience keys (`word_size`, `evalue`, `dust`,
   `max_target_seqs`, `outfmt`) which are merged into `options`. Only the keys
@@ -135,7 +141,7 @@ message). Each event:
 {
   "event": "blast.transition",
   "external_correlation_id": "caller-supplied-id",
-  "job_id": "internal-dashboard-job-id",
+  "openapi_job_id": "internal-dashboard-job-id",
   "status": "queued | running | succeeded | failed",
   "phase": "submitting | poll_running | completed | failed | ...",
   "error_code": "present only when status=failed",
@@ -164,11 +170,11 @@ sequenceDiagram
   participant T as optional completions topic
   P->>Q: send request message
   B->>Q: receive (peek-lock)
-  B->>B: dedup on correlation_id
+  B->>B: compare correlation + execution fingerprint
   B->>S: create JobState + enqueue submit
-  B->>Q: complete message (immediately)
-  B-->>T: optionally publish "queued"
-  Note over B,Q: message leaves the queue in < 1s,<br/>NOT held for the whole BLAST run
+  B-->>T: optionally publish "queued" acceptance
+  B->>Q: complete message promptly
+  Note over B,Q: message is not held for the whole BLAST run
   S->>S: run BLAST (minutes–hours)
   B-->>T: optionally publish "running" (on first observed transition)
   alt success
@@ -178,24 +184,38 @@ sequenceDiagram
   end
 ```
 
-### Critical rule — receive then **complete immediately**
+### Critical rule — receive, accept, then **complete promptly**
 
 The drain task does **not** hold the message lock for the duration of the BLAST
 run. Service Bus peek-lock is capped at **5 minutes**; a BLAST run takes
 minutes to hours. Holding the lock would cause `MessageLockLost`, redelivery,
 and **duplicate job execution**. Instead the task: receives → dedups → creates
-the `JobState` row → enqueues the existing Celery submit task → **completes the
-message right away**. The long-running work proceeds asynchronously; status is
-reported via the durable `jobstate` table and, when configured, optional topic
-events. It is never reported by mutating the queued message.
+the `JobState` row → enqueues the existing Celery submit task → publishes the
+queued acceptance event when configured → **completes the message promptly**.
+The message is not held for the BLAST run. If the initial queued-event publish
+fails, the durable bridge remains active and the transition publisher retries it
+on a later tick. Status is reported via the durable `jobstate` table and
+optional topic events, never by mutating the queued message.
 
 ### Idempotency
 
 Service Bus delivers **at-least-once**, so the same request can arrive twice
-(consumer crash before complete, lock expiry). The drain task keys on
-`external_correlation_id`: if a `JobState` row already exists for that
-correlation id, it re-completes the duplicate message without starting a second
-run.
+(consumer crash before complete, lock expiry). The drain stores a SHA-256
+fingerprint of the validated canonical execution payload. Tracking-only fields
+(`request_id`, correlation/idempotency metadata, submission source, and the
+date-derived result prefix) are excluded; the payload itself is never persisted
+or logged by collision handling.
+
+- **Same correlation + same fingerprint:** this is an idempotent retry. The
+  existing `openapi_job_id` is reused and a queued/accepted event is republished
+  with the retry message's `request_id`. The request message is completed only
+  after that ACK publish succeeds; a publish failure abandons it for safe
+  redelivery. No second BLAST execution is created.
+- **Same correlation + different fingerprint:** this is a correlation conflict,
+  not a retry. The dashboard publishes a terminal `failed` event with
+  `error_code=servicebus_correlation_conflict`, without embedding the new
+  request body, then dead-letters the conflicting message. The original BLAST
+  execution remains unchanged.
 
 ## Components
 
@@ -302,7 +322,16 @@ so the live contract only changes by explicit opt-in:
   queue within ~1 s instead of waiting the 30 s beat. The beat drain task stays
   registered as the fallback reconcile, so the resident loop is an accelerator,
   never a single point of failure. The resident and beat paths share the same
-  execution-admission decision and queue-scoped single-flight lease.
+  execution-admission decision, queue-scoped single-flight lease, and bounded
+  `SERVICEBUS_DRAIN_CONCURRENCY` resolver. Concurrency above one still requires
+  the atomic correlation claim.
+
+The optional in-deployment completion observer defaults to its dedicated
+`playground-observer` subscription only. It never joins the shared `default`
+subscription unless an operator explicitly includes `default` in
+`SERVICEBUS_COMPLETION_SUBSCRIPTION`; that explicit footgun emits a strong
+startup warning. In queue completion mode the observer remains disabled because
+it would compete with the external ACK consumer.
 
 ### AKS lifecycle and database warmup admission
 

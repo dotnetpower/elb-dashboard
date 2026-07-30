@@ -20,8 +20,11 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     transient connectivity/DNS error from a top-level Table / Service Bus read,
     so a brief platform blip self-heals on the next tick instead of crashing
     with an exception Celery cannot pickle. The drain handler is
-    idempotent on ``external_correlation_id`` (Service Bus is at-least-once);
-    a duplicate completes the message without a second submit. All three tasks
+    idempotent on ``external_correlation_id`` plus a canonical execution
+    fingerprint (Service Bus is at-least-once). An exact retry replays its
+    queued ACK before completing without a second submit; a correlation reused
+    for different execution semantics emits a terminal conflict and is
+    dead-lettered. All three tasks
     share strict AKS lifecycle/database-warmup admission with the resident
     consumer; blocked drains must not open a receiver, and the handler must
     re-check immediately before submit to close the receive/barrier race.
@@ -41,6 +44,8 @@ Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import uuid
@@ -414,11 +419,38 @@ def _event_id(correlation_id: str, status: str) -> str:
     transition twice (a publish that succeeded but whose ``mark_done`` write was
     retried, a re-poll after a worker restart, …). A stable ``event_id`` lets the
     external consumer dedupe idempotently without guessing. It is a short
-    hex digest of ``corr:status`` — same inputs always yield the same id.
+    hex digest of ``corr:status`` — same inputs always yield the same id. The
+    transition builder may additionally scope request-specific queued/conflict
+    acknowledgements so separate ``request_id`` values are not deduplicated.
     """
-    import hashlib
-
     return hashlib.sha256(f"{correlation_id}:{status}".encode()).hexdigest()[:32]
+
+
+_FINGERPRINT_EXCLUDED_FIELDS = frozenset(
+    {
+        "external_correlation_id",
+        "idempotency_key",
+        "request_id",
+        "results_prefix",
+        "submission_source",
+    }
+)
+
+
+def _request_fingerprint(payload: dict[str, Any]) -> str:
+    """Hash the canonical execution semantics without persisting request data."""
+    canonical = {
+        key: value
+        for key, value in payload.items()
+        if key not in _FINGERPRINT_EXCLUDED_FIELDS
+    }
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _transition_event(
@@ -431,6 +463,7 @@ def _transition_event(
     error_message: str | None = None,
     request_id: str = "",
     result_files: list[dict[str, Any]] | None = None,
+    event_id_scope: str = "",
 ) -> dict[str, Any]:
     """Build a completion-topic ``blast.transition`` event with idempotency keys.
 
@@ -440,7 +473,10 @@ def _transition_event(
     in practice is always 1 (the publish loop cannot distinguish a first publish
     from a re-publish using the bridge marker alone, so it does not try; see
     ``publish_transitions``); it is kept in the schema for stability and for the
-    explicit ``attempt=1`` timeout-failure event. ``result_ref`` points at the
+    explicit ``attempt=1`` timeout-failure event. Normal lifecycle events use
+    ``corr:status``; request-specific queued ACKs and correlation conflicts use
+    ``event_id_scope`` so an external event-id deduper preserves each caller's
+    acknowledgement without exposing the scope in the event body. ``result_ref`` points at the
     dashboard result API (pointers only — never result bytes; charter §9).
     ``result_files`` (succeeded events only) carries the per-file metadata plus a
     concrete ``download_url`` for the dashboard's authenticated streaming gateway
@@ -448,8 +484,6 @@ def _transition_event(
     or SAS URLs. ``request_id`` is the caller-supplied pass-through value from the
     request queue message; it is echoed onto the event (and the topic envelope)
     only when the producer set one, so a subscriber correlates on the SAME value.
-    It is NOT part of the ``event_id`` digest — it is constant per correlation
-    id, so including it would not change dedup semantics.
 
     On a failure event ``error_code`` is a short machine-readable reason and
     ``error_message`` is a human-readable detail (sanitised + length-bounded by
@@ -458,7 +492,11 @@ def _transition_event(
     """
     event: dict[str, Any] = {
         "event": "blast.transition",
-        "event_id": _event_id(correlation_id, status),
+        "event_id": hashlib.sha256(
+            f"{correlation_id}:{status}:{event_id_scope}".encode()
+        ).hexdigest()[:32]
+        if event_id_scope
+        else _event_id(correlation_id, status),
         "attempt": max(1, int(attempt)),
         "external_correlation_id": correlation_id,
         "openapi_job_id": openapi_job_id,
@@ -1026,6 +1064,49 @@ def _publish_drain_failure_event(
         )
 
 
+def _publish_duplicate_ack(
+    cfg: ServiceBusConfig,
+    existing: BridgeRecord,
+    *,
+    request_id: str,
+) -> None:
+    """Re-publish the accepted ACK for an idempotent request redelivery."""
+    service_bus.publish_event(
+        cfg,
+        _transition_event(
+            correlation_id=existing.correlation_id,
+            openapi_job_id=existing.openapi_job_id,
+            status=_STATUS_QUEUED,
+            attempt=1,
+            request_id=request_id,
+            event_id_scope=request_id,
+        ),
+    )
+
+
+def _publish_correlation_conflict(
+    cfg: ServiceBusConfig,
+    existing: BridgeRecord,
+    *,
+    request_id: str,
+    request_fingerprint: str,
+) -> None:
+    """Publish a sanitized terminal rejection for a reused correlation id."""
+    service_bus.publish_event(
+        cfg,
+        _transition_event(
+            correlation_id=existing.correlation_id,
+            openapi_job_id="",
+            status=_STATUS_FAILED,
+            attempt=1,
+            error_code="servicebus_correlation_conflict",
+            error_message="external_correlation_id is already bound to a different request",
+            request_id=request_id,
+            event_id_scope=request_id or request_fingerprint,
+        ),
+    )
+
+
 def _detail_text(exc: HTTPException) -> str:
     """Coerce an HTTPException detail (str or ``{code,message}`` dict) to text."""
     detail = getattr(exc, "detail", "")
@@ -1091,6 +1172,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     correlation_id = str(payload["external_correlation_id"])
     received_ts = _now_iso()
     request_id = _extract_request_id(msg)
+    request_fingerprint = _request_fingerprint(payload)
 
     # Date-tiered layout: stamp the YYYY/MM/DD/ prefix ONCE here (not inside the
     # submit_job choke point) so the SAME value reaches both the sibling (which
@@ -1114,7 +1196,25 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     # drains of the same correlation id can never both submit.
     existing = get_bridge(correlation_id)
     if existing is not None and (existing.openapi_job_id or not _ATOMIC_CLAIM):
-        LOGGER.info("service bus duplicate request corr=%s (already bridged)", correlation_id)
+        if (
+            existing.request_fingerprint
+            and existing.request_fingerprint != request_fingerprint
+        ):
+            LOGGER.warning("service bus correlation conflict corr=%s", correlation_id)
+            _publish_correlation_conflict(
+                cfg,
+                existing,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+            return MessageAction.DEAD_LETTER
+        if not existing.request_fingerprint:
+            LOGGER.warning(
+                "service bus duplicate request corr=%s has legacy bridge without fingerprint",
+                correlation_id,
+            )
+        _publish_duplicate_ack(cfg, existing, request_id=request_id)
+        LOGGER.info("service bus duplicate request ACK replayed corr=%s", correlation_id)
         return MessageAction.COMPLETE
 
     # Atomic single-writer reservation (gate-on). The winner submits; a contended
@@ -1123,7 +1223,9 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     # multi-worker drain safe against duplicate BLAST runs. A stale reservation
     # (a worker that crashed between claim and submit) is stolen inside
     # claim_bridge, so a contended claim never wedges the correlation id forever.
-    if _ATOMIC_CLAIM and not claim_bridge(correlation_id, request_id):
+    if _ATOMIC_CLAIM and not claim_bridge(
+        correlation_id, request_id, request_fingerprint
+    ):
         LOGGER.info(
             "service bus claim contended corr=%s — deferring to the in-flight submit",
             correlation_id,
@@ -1185,6 +1287,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             last_status="",
             done=False,
             request_id=request_id,
+            request_fingerprint=request_fingerprint,
         )
     )
     # Consumer is the writer: persist the durable jobstate row NOW (at drain
@@ -1223,6 +1326,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
                 status=_STATUS_QUEUED,
                 attempt=1,
                 request_id=request_id,
+                event_id_scope=request_id,
             ),
         )
         mark_published(correlation_id, _STATUS_QUEUED)

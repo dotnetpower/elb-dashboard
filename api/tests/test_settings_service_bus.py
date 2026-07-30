@@ -670,6 +670,6 @@ def test_observed_completions_empty_when_no_consumer(client: TestClient) -> None
     assert body["events"] == []
     assert body["consumer_enabled"] is False
     assert body["subscription"] == "playground-observer"
-    # The observer drains multiple subscriptions; the shared "default" is always
-    # in the set so completion events do not pile up unread on it.
-    assert body["subscriptions"] == ["playground-observer", "default"]
+    # The bundled observer owns only its dedicated subscription by default and
+    # never competes with an external consumer on shared "default".
+    assert body["subscriptions"] == ["playground-observer"]

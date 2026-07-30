@@ -32,7 +32,10 @@ def _local_state(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_first_claim_wins_and_fresh_reservation_blocks_second() -> None:
-    assert t.claim_bridge("corr-a", "req-1") is True
+    assert t.claim_bridge("corr-a", "req-1", "fingerprint-a") is True
+    record = t.get_bridge("corr-a")
+    assert record is not None
+    assert record.request_fingerprint == "fingerprint-a"
     # A fresh, unconfirmed reservation is held → a concurrent claim must lose so
     # only the winner submits.
     assert t.claim_bridge("corr-a") is False
@@ -93,3 +96,17 @@ def test_claim_stale_seconds_env_is_floored(monkeypatch: pytest.MonkeyPatch) -> 
     # Floored at 30s so a too-small override can never steal a still-submitting
     # reservation out from under a live worker.
     assert t._claim_stale_seconds_from_env() == 30
+
+
+def test_bridge_fingerprint_round_trips_without_request_payload() -> None:
+    t.upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-fingerprint",
+            openapi_job_id="job-fingerprint",
+            request_fingerprint="a" * 64,
+        )
+    )
+    record = t.get_bridge("corr-fingerprint")
+    assert record is not None
+    assert record.request_fingerprint == "a" * 64
+    assert "query_fasta" not in record.to_dict()

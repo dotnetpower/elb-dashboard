@@ -6,10 +6,10 @@ A long-running loop that subscribes to the Service Bus completion topic
 from. It models the *external* subscriber an integrating service would run on
 its own infrastructure: the dashboard publishes one transition per job status
 change to the topic, and any number of subscriptions fan that event out to
-independent consumers. The in-deployment observer drains the dedicated demo
-subscription AND the shared ``default`` subscription (comma-separated
-``SERVICEBUS_COMPLETION_SUBSCRIPTION`` override) so ``default`` does not pile up
-unread, and each observation is labelled so they can be told apart.
+independent consumers. The in-deployment observer drains only the dedicated
+``playground-observer`` subscription by default. A comma-separated
+``SERVICEBUS_COMPLETION_SUBSCRIPTION`` override may explicitly select other
+subscriptions; selecting shared ``default`` emits a strong startup warning.
 
 When the completion entity is a **queue** (``SERVICEBUS_COMPLETION_KIND=queue``)
 the model is point-to-point instead: there is no fan-out, so a single consumer
@@ -23,7 +23,8 @@ Two ways to run it:
   is enabled, the worker sidecar starts one daemon loop (see
   ``api/celery_signals.py``) that records observations into the shared Redis ring
   (``service_bus_completions``) so the Playground can show them. It uses the
-  shared managed identity and is purely observational — it NEVER executes BLAST,
+    dedicated ``playground-observer`` subscription by default, uses the shared
+    managed identity, and is purely observational — it NEVER executes BLAST,
   so it can never double-run a job (the request-queue consumer is the sole
   executor). This is a demonstration aid, not a third party.
 * **Standalone reference (external party).** ``python -m
@@ -69,12 +70,9 @@ EXTERNAL_CONSUMER_ENV = "SERVICEBUS_EXTERNAL_CONSUMER"
 SUBSCRIPTION_ENV = "SERVICEBUS_COMPLETION_SUBSCRIPTION"
 DEFAULT_SUBSCRIPTION = "playground-observer"
 # The completion topic is fan-out: every subscription gets its OWN copy of each
-# event. The in-deployment observer drains MULTIPLE subscriptions so both the
-# dedicated demo subscription AND the shared "default" subscription (which a real
-# external integrator would otherwise own, and which otherwise piles up unread)
-# are consumed. Each observed event is tagged with the subscription it came from
-# so the Playground can tell "default" apart from any other subscription.
-DEFAULT_SUBSCRIPTIONS: tuple[str, ...] = (DEFAULT_SUBSCRIPTION, "default")
+# event. The in-deployment observer defaults to its dedicated subscription only;
+# consuming a shared external subscription would compete with the real consumer.
+DEFAULT_SUBSCRIPTIONS: tuple[str, ...] = (DEFAULT_SUBSCRIPTION,)
 
 _POLL_WAIT_SECONDS = max(1, int(os.environ.get("SERVICEBUS_EXTERNAL_POLL_SECONDS", "5")))
 _RECEIVE_BATCH = max(1, int(os.environ.get("SERVICEBUS_EXTERNAL_BATCH", "16")))
@@ -91,8 +89,9 @@ def completion_subscriptions() -> list[str]:
 
     ``SERVICEBUS_COMPLETION_SUBSCRIPTION`` is a comma-separated list; blank
     entries are dropped and order-preserving de-duplication is applied. Falls
-    back to ``DEFAULT_SUBSCRIPTIONS`` when unset/blank so the shared ``default``
-    subscription is always drained alongside the dedicated demo one.
+    back to the dedicated ``DEFAULT_SUBSCRIPTIONS`` when unset/blank. Operators
+    may explicitly opt into another subscription; startup warns strongly when
+    that override includes the shared ``default`` subscription.
     """
     raw = os.environ.get(SUBSCRIPTION_ENV, "")
     names = [p.strip() for p in raw.split(",") if p.strip()]

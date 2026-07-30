@@ -96,7 +96,7 @@ All three scripts read these environment variables (defaults shown):
 | `SERVICEBUS_NAMESPACE_FQDN` | `sb-elb-dashboard-krc.servicebus.windows.net` |
 | `SERVICEBUS_REQUEST_QUEUE` | `elastic-blast-requests` |
 | `SERVICEBUS_RESPONSE_TOPIC` | `elastic-blast-completions` |
-| `SERVICEBUS_COMPLETION_SUBSCRIPTION` | `default` |
+| `SERVICEBUS_COMPLETION_SUBSCRIPTION` | `playground-observer` for the bundled observer (`default` in the standalone example script) |
 
 The completion-topic variables are used only by the optional push/subscribe
 example path. `SERVICEBUS_COMPLETION_TOPIC` is still accepted by the standalone
@@ -109,6 +109,14 @@ consumer/monitor scripts as a legacy alias. The required submit path uses
 
 Envelope: `content_type="application/json"`, `subject="blast.request"`,
 `correlation_id=<external_correlation_id>`.
+
+Use a unique `external_correlation_id` for every logical request. Reuse it only
+when retrying the exact same execution payload; inclusive and exclusive
+requests must not share it. `request_id` is a pass-through tracing value, not an
+idempotency key. Exact retries receive a replayed queued ACK carrying their own
+`request_id`; a correlation reused with a different payload receives a terminal
+`servicebus_correlation_conflict` event and is dead-lettered without a second
+BLAST submit.
 
 The XML-locked body targets `/api/v1/elastic-blast/submit` (`outfmt` fixed to
 `5`):

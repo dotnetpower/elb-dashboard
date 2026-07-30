@@ -543,6 +543,7 @@ def test_drain_dedups_duplicate_correlation(monkeypatch: pytest.MonkeyPatch) -> 
     from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
 
     upsert_bridge(BridgeRecord(correlation_id="corr-dup", openapi_job_id="op-existing"))
+    monkeypatch.setattr(service_bus, "publish_event", lambda *_a, **_k: None)
 
     calls: list[dict] = []
     monkeypatch.setattr(
@@ -556,6 +557,171 @@ def test_drain_dedups_duplicate_correlation(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert action == MessageAction.COMPLETE
     assert calls == []  # no second submit
+
+
+def test_same_correlation_payload_replays_ack_per_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    submitted: list[dict] = []
+    events: list[dict] = []
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kw: submitted.append(payload) or {"job_id": "op-retry"},
+    )
+    monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
+
+    base = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": ">s\nACGT",
+        "external_correlation_id": "corr-retry",
+    }
+    assert (
+        sb_tasks._drain_handler(_msg({**base, "request_id": "req-1"}), cfg)
+        == MessageAction.COMPLETE
+    )
+    assert (
+        sb_tasks._drain_handler(_msg({**base, "request_id": "req-2"}), cfg)
+        == MessageAction.COMPLETE
+    )
+
+    assert len(submitted) == 1
+    queued = [event for event in events if event["status"] == "queued"]
+    assert [event["request_id"] for event in queued] == ["req-1", "req-2"]
+    assert queued[0]["openapi_job_id"] == queued[1]["openapi_job_id"] == "op-retry"
+    assert queued[0]["event_id"] != queued[1]["event_id"]
+
+
+def test_same_correlation_different_execution_publishes_sanitized_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    submitted: list[dict] = []
+    events: list[dict] = []
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kw: submitted.append(payload) or {"job_id": "op-conflict"},
+    )
+    monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
+
+    base = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": ">s\nSENSITIVE-SEQUENCE",
+        "external_correlation_id": "corr-conflict",
+        "taxid": 884532,
+    }
+    assert (
+        sb_tasks._drain_handler(
+            _msg({**base, "is_inclusive": True, "request_id": "req-in"}), cfg
+        )
+        == MessageAction.COMPLETE
+    )
+    assert (
+        sb_tasks._drain_handler(
+            _msg({**base, "is_inclusive": False, "request_id": "req-ex"}), cfg
+        )
+        == MessageAction.DEAD_LETTER
+    )
+
+    assert len(submitted) == 1
+    conflict = events[-1]
+    assert conflict["status"] == "failed"
+    assert conflict["error_code"] == "servicebus_correlation_conflict"
+    assert conflict["request_id"] == "req-ex"
+    assert conflict["openapi_job_id"] == ""
+    assert "SENSITIVE-SEQUENCE" not in str(conflict)
+    assert "query_fasta" not in str(conflict)
+
+
+def test_duplicate_ack_publish_failure_abandons_for_redelivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    first = _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">s\nACGT",
+            "external_correlation_id": "corr-ack-fail",
+            "request_id": "req-1",
+        }
+    )
+    monkeypatch.setattr(external_blast, "submit_job", lambda *_a, **_k: {"job_id": "op-1"})
+    monkeypatch.setattr(service_bus, "publish_event", lambda *_a, **_k: None)
+    assert sb_tasks._drain_handler(first, cfg) == MessageAction.COMPLETE
+
+    def _publish_fails(*_a: object, **_k: object) -> None:
+        raise RuntimeError("topic unavailable")
+
+    monkeypatch.setattr(service_bus, "publish_event", _publish_fails)
+    retry = _msg({**first.body, "request_id": "req-2"}, sequence_number=42)
+    assert (
+        service_bus._safe_drain_handler(lambda msg: sb_tasks._drain_handler(msg, cfg), retry)
+        == MessageAction.ABANDON
+    )
+
+
+def test_conflict_publish_failure_abandons_instead_of_dead_lettering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(external_blast, "submit_job", lambda *_a, **_k: {"job_id": "op-1"})
+    monkeypatch.setattr(service_bus, "publish_event", lambda *_a, **_k: None)
+    first = _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">s\nACGT",
+            "external_correlation_id": "corr-conflict-publish",
+            "taxid": 1,
+            "is_inclusive": True,
+        }
+    )
+    assert sb_tasks._drain_handler(first, cfg) == MessageAction.COMPLETE
+
+    monkeypatch.setattr(
+        service_bus,
+        "publish_event",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("topic unavailable")),
+    )
+    conflicting = _msg({**first.body, "is_inclusive": False}, sequence_number=43)
+    assert (
+        service_bus._safe_drain_handler(
+            lambda msg: sb_tasks._drain_handler(msg, cfg), conflicting
+        )
+        == MessageAction.ABANDON
+    )
+
+
+def test_request_fingerprint_is_canonical_and_excludes_tracking_fields() -> None:
+    left = {
+        "db": "core_nt",
+        "options": {"word_size": 28, "dust": True},
+        "query_fasta": ">s\nACGT",
+        "external_correlation_id": "corr-a",
+        "request_id": "req-a",
+        "idempotency_key": "idem-a",
+        "submission_source": "servicebus",
+        "results_prefix": "2026/07/30/",
+    }
+    right = {
+        "results_prefix": "2026/07/31/",
+        "submission_source": "other",
+        "request_id": "req-b",
+        "external_correlation_id": "corr-b",
+        "idempotency_key": "idem-b",
+        "query_fasta": ">s\nACGT",
+        "options": {"dust": True, "word_size": 28},
+        "db": "core_nt",
+    }
+    fingerprint = sb_tasks._request_fingerprint(left)
+    assert fingerprint == sb_tasks._request_fingerprint(right)
+    assert len(fingerprint) == 64
+    assert "ACGT" not in fingerprint
 
 
 def test_drain_dead_letters_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1644,7 +1810,7 @@ def test_atomic_claim_contended_abandons_without_submit(
     cfg = _enable(monkeypatch)
     monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
     monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
-    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="": False)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": False)
     submitted: list[dict] = []
     monkeypatch.setattr(
         external_blast, "submit_job", lambda p, **_k: submitted.append(p) or {"job_id": "x"}
@@ -1661,7 +1827,7 @@ def test_atomic_claim_releases_on_submit_failure(
     cfg = _enable(monkeypatch)
     monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
     monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
-    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="": True)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": True)
     released: list[str] = []
     monkeypatch.setattr(sb_tasks, "release_bridge", lambda c: released.append(c))
 
@@ -1679,8 +1845,11 @@ def test_gate_off_keeps_legacy_any_row_dedup(monkeypatch: pytest.MonkeyPatch) ->
     cfg = _enable(monkeypatch)
     monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", False)
     monkeypatch.setattr(sb_tasks, "get_bridge", lambda c: BridgeRecord(correlation_id=c))
+    monkeypatch.setattr(service_bus, "publish_event", lambda *_a, **_k: None)
     claimed: list[str] = []
-    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda c, _r="": claimed.append(c) or True)
+    monkeypatch.setattr(
+        sb_tasks, "claim_bridge", lambda c, _r="", _f="": claimed.append(c) or True
+    )
     assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.COMPLETE
     assert claimed == []
 
@@ -1697,8 +1866,11 @@ def test_gate_on_confirmed_row_dedups_without_claim(
         "get_bridge",
         lambda c: BridgeRecord(correlation_id=c, openapi_job_id="job-1"),
     )
+    monkeypatch.setattr(service_bus, "publish_event", lambda *_a, **_k: None)
     claimed: list[str] = []
-    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda c, _r="": claimed.append(c) or True)
+    monkeypatch.setattr(
+        sb_tasks, "claim_bridge", lambda c, _r="", _f="": claimed.append(c) or True
+    )
     assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.COMPLETE
     assert claimed == []
 
@@ -1712,7 +1884,7 @@ def test_gate_on_unconfirmed_row_falls_through_to_claim(
     cfg = _enable(monkeypatch)
     monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
     monkeypatch.setattr(sb_tasks, "get_bridge", lambda c: BridgeRecord(correlation_id=c))
-    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="": False)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": False)
     assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.ABANDON
 
 

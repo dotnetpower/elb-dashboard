@@ -83,7 +83,7 @@ def run_resident_consumer(
     raises out of the loop body — a drain error backs off (capped) and retries.
     """
     from api.services.service_bus_pref import get_service_bus_config
-    from api.tasks.servicebus.tasks import _drain_once
+    from api.tasks.servicebus import tasks as servicebus_tasks
 
     totals = {"iterations": 0, "received": 0, "completed": 0, "abandoned": 0, "dead_lettered": 0}
     backoff = _BACKOFF_START_SECONDS
@@ -95,11 +95,19 @@ def run_resident_consumer(
         totals["iterations"] = iterations
         try:
             cfg = get_service_bus_config()
-            outcome = _drain_once(
+            drain_concurrency = servicebus_tasks._drain_concurrency_from_env()
+            if drain_concurrency > 1 and not servicebus_tasks._ATOMIC_CLAIM:
+                LOGGER.error(
+                    "SERVICEBUS_DRAIN_CONCURRENCY=%d requires "
+                    "SERVICEBUS_ATOMIC_CLAIM=true; forcing serial resident drain",
+                    drain_concurrency,
+                )
+                drain_concurrency = 1
+            outcome = servicebus_tasks._drain_once(
                 cfg,
                 max_messages=drain_batch,
                 max_wait_seconds=poll_wait_seconds,
-                max_concurrency=1,
+                max_concurrency=drain_concurrency,
             )
             if outcome.get("skipped"):
                 stop_event.wait(

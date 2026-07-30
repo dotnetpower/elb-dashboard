@@ -61,6 +61,48 @@ def test_run_loop_drains_and_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None
     assert totals["completed"] == 6
 
 
+def test_run_loop_uses_configured_bounded_drain_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[int] = []
+    monkeypatch.setenv("SERVICEBUS_DRAIN_CONCURRENCY", "7")
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_drain_once",
+        lambda _cfg, **kwargs: observed.append(kwargs["max_concurrency"])
+        or {"received": 0},
+    )
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.get_service_bus_config", lambda: object()
+    )
+
+    rc.run_resident_consumer(threading.Event(), max_iterations=1)
+
+    assert observed == [7]
+
+
+def test_run_loop_forces_serial_when_atomic_claim_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[int] = []
+    monkeypatch.setenv("SERVICEBUS_DRAIN_CONCURRENCY", "7")
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", False)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_drain_once",
+        lambda _cfg, **kwargs: observed.append(kwargs["max_concurrency"])
+        or {"received": 0},
+    )
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.get_service_bus_config", lambda: object()
+    )
+
+    rc.run_resident_consumer(threading.Event(), max_iterations=1)
+
+    assert observed == [1]
+
+
 def test_run_loop_stops_on_event(monkeypatch: pytest.MonkeyPatch) -> None:
     stop = threading.Event()
 

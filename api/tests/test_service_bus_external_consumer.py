@@ -275,15 +275,34 @@ def _patch_multi_client(
 
 
 def test_completion_subscriptions_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Default includes the shared "default" subscription so it is drained.
+    # Default is dedicated to the demo observer and never competes with the
+    # external consumer's shared subscription.
     monkeypatch.delenv(ec.SUBSCRIPTION_ENV, raising=False)
     assert ec.completion_subscriptions() == list(ec.DEFAULT_SUBSCRIPTIONS)
-    assert "default" in ec.completion_subscriptions()
+    assert ec.completion_subscriptions() == ["playground-observer"]
+    assert "default" not in ec.completion_subscriptions()
     # Comma-separated override, blank-trimmed and order-preserving de-duped.
     monkeypatch.setenv(ec.SUBSCRIPTION_ENV, " a , b ,a, , c ")
     assert ec.completion_subscriptions() == ["a", "b", "c"]
     # completion_subscription() returns the first (primary) one.
     assert ec.completion_subscription() == "a"
+
+
+def test_explicit_default_subscription_keeps_strong_startup_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(ec.EXTERNAL_CONSUMER_ENV, "true")
+    monkeypatch.setenv(ec.SUBSCRIPTION_ENV, "default")
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.service_bus_enabled", lambda: True
+    )
+    monkeypatch.setattr(ec, "run_external_consumer", lambda stop: stop.wait(0.01) or 0)
+
+    with caplog.at_level("WARNING"):
+        assert ec.start_external_consumer() is True
+        ec.stop_external_consumer(timeout=1.0)
+
+    assert "draining the shared 'default' subscription" in caplog.text
 
 
 def test_consume_multi_subscription_labels(monkeypatch: pytest.MonkeyPatch) -> None:

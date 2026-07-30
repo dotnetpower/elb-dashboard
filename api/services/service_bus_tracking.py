@@ -5,7 +5,9 @@ Responsibility: Persist the mapping a Service-Bus-originated BLAST request needs
     event per status change: ``external_correlation_id`` → sibling
     ``openapi_job_id`` plus the LAST published status (the de-dup marker that
     makes "publish every transition" emit each transition exactly once) and a
-    ``done`` terminal flag. Also carries the caller-supplied ``request_id``
+    ``done`` terminal flag. Also carries a canonical request fingerprint used
+    to distinguish an idempotent retry from a correlation-id collision, plus
+    the caller-supplied ``request_id``
     pass-through value so every published transition can echo it. Also the drain
     de-dup key: a correlation id that already has a row must not be submitted
     twice (Service Bus is at-least-once).
@@ -111,6 +113,10 @@ class BridgeRecord:
     # subscriber then correlates on the SAME value the producer set. Empty when
     # the producer did not supply one.
     request_id: str = ""
+    # SHA-256 of the canonical execution payload. Only the digest is persisted;
+    # query FASTA and other potentially large/sensitive request fields never
+    # enter the tracking row or collision logs/events.
+    request_fingerprint: str = ""
     # When this correlation id was reserved (atomic claim) before its sibling
     # submit ran. Empty for legacy rows written by the non-claim path. A row
     # with a ``claimed_at`` but no ``openapi_job_id`` is a reservation in
@@ -127,6 +133,7 @@ class BridgeRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "request_id": self.request_id,
+            "request_fingerprint": self.request_fingerprint,
             "claimed_at": self.claimed_at,
         }
 
@@ -140,6 +147,7 @@ class BridgeRecord:
             created_at=str(value.get("created_at") or ""),
             updated_at=str(value.get("updated_at") or ""),
             request_id=str(value.get("request_id") or ""),
+            request_fingerprint=str(value.get("request_fingerprint") or ""),
             claimed_at=str(value.get("claimed_at") or ""),
         )
 
@@ -187,7 +195,11 @@ def _claim_is_stale(rec: BridgeRecord) -> bool:
     return (datetime.now(UTC) - when).total_seconds() > _CLAIM_STALE_SECONDS
 
 
-def claim_bridge(correlation_id: str, request_id: str = "") -> bool:
+def claim_bridge(
+    correlation_id: str,
+    request_id: str = "",
+    request_fingerprint: str = "",
+) -> bool:
     """Atomically reserve a correlation id BEFORE its sibling submit runs.
 
     Returns True when THIS caller won the reservation (it must proceed to submit
@@ -202,8 +214,8 @@ def claim_bridge(correlation_id: str, request_id: str = "") -> bool:
     one caller ever submits a given correlation id.
     """
     if _use_table_backend():
-        return _claim_table(correlation_id, request_id)
-    return _claim_file(correlation_id, request_id)
+        return _claim_table(correlation_id, request_id, request_fingerprint)
+    return _claim_file(correlation_id, request_id, request_fingerprint)
 
 
 def release_bridge(correlation_id: str) -> None:
@@ -354,13 +366,16 @@ def _list_table(limit: int) -> list[BridgeRecord]:
     return out
 
 
-def _claim_table(correlation_id: str, request_id: str) -> bool:
+def _claim_table(
+    correlation_id: str, request_id: str, request_fingerprint: str
+) -> bool:
     """Table-backend atomic claim: insert-if-absent, else steal-if-stale."""
     _ensure_table()
     now = _now_iso()
     placeholder = BridgeRecord(
         correlation_id=correlation_id,
         request_id=request_id,
+        request_fingerprint=request_fingerprint,
         created_at=now,
         updated_at=now,
         claimed_at=now,
@@ -396,6 +411,7 @@ def _claim_table(correlation_id: str, request_id: str) -> bool:
         steal = BridgeRecord(
             correlation_id=correlation_id,
             request_id=request_id or rec.request_id,
+            request_fingerprint=request_fingerprint or rec.request_fingerprint,
             created_at=rec.created_at or now,
             updated_at=now,
             claimed_at=now,
@@ -517,7 +533,9 @@ def _list_file(limit: int) -> list[BridgeRecord]:
     return out
 
 
-def _claim_file(correlation_id: str, request_id: str) -> bool:
+def _claim_file(
+    correlation_id: str, request_id: str, request_fingerprint: str
+) -> bool:
     """File-backend atomic claim under the process file lock (single-writer)."""
     now = _now_iso()
     key = _row_key(correlation_id)
@@ -530,11 +548,13 @@ def _claim_file(correlation_id: str, request_id: str) -> bool:
                 return False
             created = rec.created_at or now
             request_id = request_id or rec.request_id
+            request_fingerprint = request_fingerprint or rec.request_fingerprint
         else:
             created = now
         data[key] = BridgeRecord(
             correlation_id=correlation_id,
             request_id=request_id,
+            request_fingerprint=request_fingerprint,
             created_at=created,
             updated_at=now,
             claimed_at=now,
