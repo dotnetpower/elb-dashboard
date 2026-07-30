@@ -318,6 +318,16 @@ celery_app.conf.update(
                 ),
             },
         },
+        "servicebus-reconcile-dead-letter-responses": {
+            "task": "api.tasks.servicebus.reconcile_dead_letter_responses",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_RESPONSE_SECONDS", "60")
+            ),
+            "options": {
+                "queue": "reconcile",
+                "expires": 55.0,
+            },
+        },
         "servicebus-dlq-cleanup": {
             "task": "api.tasks.servicebus.dlq_cleanup",
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS", "3600")),

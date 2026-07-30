@@ -21,7 +21,7 @@ Validation: `uv run pytest -q api/tests/test_auto_stop_task.py`.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from celery import shared_task
 
@@ -105,7 +105,7 @@ def _sb_pending_signal(power_state: str) -> int | None:
     """
     from api.services.auto_stop_sb_signal import pending_queue_signal
 
-    return pending_queue_signal(power_state, ttl_seconds=0.0)
+    return cast(int | None, pending_queue_signal(power_state, ttl_seconds=0.0))
 
 
 def _power_state(pref: AutoStopPreference) -> str:
@@ -333,6 +333,88 @@ def auto_stop_aks(
             "reason": decision.reason,
         }
 
+    drain_stop_intent_token: str | None = None
+    drain_queue_name = ""
+    try:
+        from api.services.service_bus_pref import (
+            get_service_bus_config,
+            service_bus_enabled,
+        )
+
+        if service_bus_enabled():
+            from api.tasks.servicebus.tasks import acquire_drain_stop_intent
+
+            drain_queue_name = get_service_bus_config().request_queue
+            acquired, drain_stop_intent_token = acquire_drain_stop_intent(
+                drain_queue_name
+            )
+            if not acquired:
+                reason = "servicebus_drain_in_progress"
+                mark_auto_stop_event(
+                    pref,
+                    stopped=False,
+                    reason=f"late_skip:{reason}",
+                    clear_preflight_stop=True,
+                )
+                return {
+                    "cluster_name": cluster_name,
+                    "action": "skip",
+                    "reason": reason,
+                }
+            # The intent now prevents a new drain lease. Re-read queue depth
+            # after fencing so a request that arrived during the decide→act
+            # window cancels the stop before the lifecycle barrier is created.
+            pending_after_fence = _sb_pending_signal(power_state)
+            if pending_after_fence and pending_after_fence > 0:
+                from api.tasks.servicebus.tasks import release_drain_stop_intent
+
+                release_drain_stop_intent(
+                    drain_queue_name,
+                    drain_stop_intent_token,
+                )
+                drain_stop_intent_token = None
+                reason = f"sb_queue_pending:{pending_after_fence}"
+                mark_auto_stop_event(
+                    pref,
+                    stopped=False,
+                    reason=f"late_skip:{reason}",
+                    clear_preflight_stop=True,
+                )
+                return {
+                    "cluster_name": cluster_name,
+                    "action": "skip",
+                    "reason": reason,
+                }
+    except Exception:
+        # Fail closed when the optional integration is enabled but its
+        # coordination state cannot be established. The next beat retries.
+        LOGGER.warning(
+            "auto_stop_aks Service Bus drain fence failed cluster=%s",
+            cluster_name,
+            exc_info=True,
+        )
+        if drain_stop_intent_token:
+            try:
+                from api.tasks.servicebus.tasks import release_drain_stop_intent
+
+                release_drain_stop_intent(
+                    drain_queue_name,
+                    drain_stop_intent_token,
+                )
+            except Exception:
+                LOGGER.debug("auto_stop_aks fence cleanup failed", exc_info=True)
+        mark_auto_stop_event(
+            pref,
+            stopped=False,
+            reason="late_skip:servicebus_coordination_unavailable",
+            clear_preflight_stop=True,
+        )
+        return {
+            "cluster_name": cluster_name,
+            "action": "skip",
+            "reason": "servicebus_coordination_unavailable",
+        }
+
     LOGGER.info(
         "auto_stop_aks invoking stop_aks cluster=%s reason=%s",
         cluster_name,
@@ -342,11 +424,20 @@ def auto_stop_aks(
     # so the auto-stop task itself becomes the unit of work the dashboard
     # surfaces in audit — there is no point fanning out to another Celery
     # message just to make the same SDK call.
-    result = stop_aks.run(  # type: ignore[attr-defined]
-        subscription_id=subscription_id,
-        resource_group=resource_group,
-        cluster_name=cluster_name,
-    )
+    try:
+        result = stop_aks.run(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+    finally:
+        if drain_stop_intent_token:
+            from api.tasks.servicebus.tasks import release_drain_stop_intent
+
+            release_drain_stop_intent(
+                drain_queue_name,
+                drain_stop_intent_token,
+            )
     mark_auto_stop_event(pref, stopped=True, reason=decision.reason)
     record_feature_event(
         "cluster_lifecycle",
@@ -486,7 +577,7 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
                     exc,
                 )
             try:
-                auto_stop_aks.delay(  # type: ignore[attr-defined]
+                auto_stop_aks.delay(
                     subscription_id=pref.subscription_id,
                     resource_group=pref.resource_group,
                     cluster_name=pref.cluster_name,

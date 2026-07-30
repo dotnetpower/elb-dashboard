@@ -56,6 +56,8 @@ _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.blast.submit_task.time.time",
     "api.tasks.blast.submit_task.upload_db_order_oracle_pointer_if_available",
     "api.tasks.blast.submit_task.upload_tie_order_oracle_if_present",
+    "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+    "api.tasks.servicebus.tasks.release_drain_stop_intent",
     "api.tasks.storage._autowarmup_inflight_acquire",
     "api.tasks.storage._record_task_progress",
     "api.tasks.storage._update_state",

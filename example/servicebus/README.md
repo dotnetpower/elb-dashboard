@@ -142,6 +142,9 @@ records it, so the misconfiguration is visible instead of silently retried.
 
 | Concern | Guarantee |
 | --- | --- |
+| Producer response | Every accepted logical request converges to an at-least-once `queued` acknowledgement and a terminal `succeeded` or `failed` response. Responses are durable in the dashboard outbox before request/DLQ settlement; completion-entity outages delay delivery rather than erase it. A request-only configuration with a blank completion entity retains responses in the outbox until an operator configures a destination. |
+| Long DB lifecycle | AKS start/scale, database update, and warmup admission happens before receive. Pending requests remain broker-owned without delivery-count burn for the full lifecycle. Broker TTL remains the outer retention boundary; expiry becomes a terminal `failed` response through DLQ reconciliation. |
+| Transient execution failure | HTTP 408/429/5xx and transport failures are delayed scheduled retries with bounded exponential backoff. Correlation and idempotency identity are preserved, so crash-window duplicate deliveries converge to one BLAST execution. Exhaustion emits `failed` with `error_code=servicebus_retry_exhausted`. |
 | Outage tolerance | Service Bus Standard topic retention = **14 days**. A consumer that stays disconnected for ≤14 days catches up on reconnect without loss. Longer → tail messages roll off. |
 | At-least-once | Both the request queue and the completion topic are at-least-once. The producer side dedups via `external_correlation_id` (`claim_bridge` atomic gate). Consumers MUST be idempotent on `event_id` (the deterministic hash) — see `consume.py` for the pattern. |
 | Out-of-order | Transitions are NOT strictly ordered (`queued` / `running` / `succeeded` can arrive in any order on a fast cluster). Trust `status` + `event_id`, not delivery order. |

@@ -266,8 +266,15 @@ def test_dlq_delete_route_invokes_service(
     monkeypatch.setattr(route, "service_bus_enabled", lambda: True)
     seen: dict[str, Any] = {}
 
-    def _delete(_cfg: Any, *, sequence_numbers: list[int], max_messages: int) -> Any:
+    def _delete(
+        _cfg: Any,
+        *,
+        sequence_numbers: list[int],
+        max_messages: int,
+        before_delete: Any,
+    ) -> Any:
         seen["sequence_numbers"] = sequence_numbers
+        seen["before_delete"] = before_delete
         return service_bus.DeadLetterActionStats(
             scanned=2, matched=1, deleted=1, kept=1, failed=0
         )
@@ -283,6 +290,7 @@ def test_dlq_delete_route_invokes_service(
     assert body["deleted"] == 1
     # Duplicates de-duped before reaching the service.
     assert seen["sequence_numbers"] == [101, 102]
+    assert callable(seen["before_delete"])
 
 
 def test_dlq_promote_route_invokes_service(

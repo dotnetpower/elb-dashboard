@@ -282,7 +282,22 @@ def purge(
     except (TypeError, ValueError):
         max_messages = _PURGE_MAX_CAP
     max_messages = max(1, min(max_messages, _PURGE_MAX_CAP))
-    removed = service_bus.purge_queue(cfg, dead_letter=dead_letter, max_messages=max_messages)
+    from api.tasks.servicebus.tasks import (
+        _stage_dead_letter_response_and_backup,
+        stage_operator_purge_response_and_backup,
+    )
+
+    before_delete = (
+        (lambda msg: _stage_dead_letter_response_and_backup(cfg, msg))
+        if dead_letter
+        else (lambda msg: stage_operator_purge_response_and_backup(cfg, msg))
+    )
+    removed = service_bus.purge_queue(
+        cfg,
+        dead_letter=dead_letter,
+        max_messages=max_messages,
+        before_delete=before_delete,
+    )
     LOGGER.info(
         "service bus manual purge by oid=%s dead_letter=%s removed=%s",
         redact_oid(caller.object_id),
@@ -731,8 +746,13 @@ def dlq_delete(
         raise HTTPException(400, detail={"code": "not_configured", "message": "namespace required"})
     sequence_numbers = _parse_sequence_numbers(body)
     try:
+        from api.tasks.servicebus.tasks import _stage_dead_letter_response_and_backup
+
         stats = service_bus.delete_dead_letter_messages(
-            cfg, sequence_numbers=sequence_numbers, max_messages=_DLQ_ACTION_MAX
+            cfg,
+            sequence_numbers=sequence_numbers,
+            max_messages=_DLQ_ACTION_MAX,
+            before_delete=lambda msg: _stage_dead_letter_response_and_backup(cfg, msg),
         )
     except service_bus.ServiceBusAuthError as exc:
         raise HTTPException(403, detail={"code": "auth_failed", "message": str(exc)[:200]}) from exc

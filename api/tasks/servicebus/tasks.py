@@ -1,4 +1,4 @@
-"""Service Bus integration Celery tasks — drain, publish transitions, DLQ cleanup.
+"""Service Bus integration Celery tasks — drain, responses, transitions, DLQ.
 
 Responsibility: The beat-driven side effects of the optional Service Bus BLAST
     integration. ``drain_and_resubmit`` receives request messages and bridges
@@ -6,14 +6,16 @@ Responsibility: The beat-driven side effects of the optional Service Bus BLAST
     message immediately (never holds the lock for the run).
     ``publish_transitions`` polls the sibling status for active bridge rows and
     emits one event per state change to the completion topic.
-    ``dlq_cleanup`` enforces the operator's dead-letter retention policy with a
-    mandatory audit backup before deletion.
+    ``reconcile_dead_letter_responses`` turns every DLQ outcome into a durable
+    producer failure response plus mandatory audit backup before deletion.
+    ``dlq_cleanup`` enforces the remaining operator retention policy.
 Edit boundaries: Long-running side effects only. Service Bus data-plane calls go
     through ``api.services.service_bus``; the OpenAPI submit/status calls go
     through ``api.services.external_blast``; persistence is
     ``service_bus_pref`` (config) + ``service_bus_tracking`` (bridge rows).
 Key entry points: ``drain_and_resubmit``, ``publish_transitions``,
-    ``dlq_cleanup`` (registered as ``api.tasks.servicebus.*``).
+    ``reconcile_dead_letter_responses``, ``dlq_cleanup`` (registered as
+    ``api.tasks.servicebus.*``).
 Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — the
     env gate plus the saved config must both opt in. All three beat tasks also
     skip the current tick (returning ``{"skipped": "transient"}``) on a
@@ -28,6 +30,10 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     share strict AKS lifecycle/database-warmup admission with the resident
     consumer; blocked drains must not open a receiver, and the handler must
     re-check immediately before submit to close the receive/barrier race.
+    Producer responses are persisted to the response outbox before terminal
+    request settlement or bridge terminalisation. Transient submit failures are
+    future-scheduled with stable execution identity; DB lifecycle admission
+    never receives messages and therefore never consumes retry attempts.
     Parallel drain requires the atomic correlation-id claim. All three tasks
     are BOUNDED per tick (drain/publish/cleanup caps) so a backlog drains over
     several ticks instead of spinning one tick forever. Transition events are
@@ -39,7 +45,8 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     carries ``result_files`` (per-file metadata + a dashboard ``download_url``
     for the authenticated streaming gateway — pointers only, never a SAS URL or
     result bytes; charter §9).
-Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py``.
+Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py
+    api/tests/test_service_bus_drain_loop.py api/tests/test_service_bus_outbox.py``.
 """
 
 from __future__ import annotations
@@ -49,8 +56,9 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from celery import shared_task
 from fastapi import HTTPException
@@ -58,6 +66,12 @@ from fastapi import HTTPException
 from api.services import external_blast, service_bus
 from api.services.service_bus import MessageAction, ParsedMessage
 from api.services.service_bus_observability import record_service_bus_request_event
+from api.services.service_bus_outbox import (
+    ResponseOutboxPersistenceError,
+    enqueue_response,
+    list_pending_responses,
+    mark_response_delivered,
+)
 from api.services.service_bus_pref import (
     ServiceBusConfig,
     get_service_bus_config,
@@ -140,11 +154,21 @@ _DRAIN_SINGLEFLIGHT = os.environ.get(
     "SERVICEBUS_DRAIN_SINGLEFLIGHT", "true"
 ).strip().lower() in {"1", "true", "yes"}
 _DRAIN_LOCK_KEY = "servicebus:drain:singleflight"
+_DRAIN_STOP_INTENT_KEY = "servicebus:drain:stop-intent"
+_DRAIN_STOP_INTENT_TTL_SECONDS = 300
 
 
 def _drain_lock_key(queue_name: str) -> str:
     """Queue-scoped lease key so distinct request queues never block each other."""
     return f"{_DRAIN_LOCK_KEY}:{queue_name}" if queue_name else _DRAIN_LOCK_KEY
+
+
+def _drain_stop_intent_key(queue_name: str) -> str:
+    return (
+        f"{_DRAIN_STOP_INTENT_KEY}:{queue_name}"
+        if queue_name
+        else _DRAIN_STOP_INTENT_KEY
+    )
 
 
 def _drain_lock_ttl_from_env() -> int:
@@ -155,14 +179,14 @@ def _drain_lock_ttl_from_env() -> int:
     release) frees the lease quickly. The release is best-effort; the TTL is the
     backstop.
     """
-    raw = os.environ.get("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "120")
+    raw = os.environ.get("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "900")
     try:
         value = int(raw)
     except (TypeError, ValueError):
         LOGGER.warning(
-            "invalid SERVICEBUS_DRAIN_LOCK_TTL_SECONDS=%r; defaulting to 120", raw
+            "invalid SERVICEBUS_DRAIN_LOCK_TTL_SECONDS=%r; defaulting to 900", raw
         )
-        value = 120
+        value = 900
     return max(10, value)
 
 
@@ -172,6 +196,11 @@ _DRAIN_LOCK_TTL = _drain_lock_ttl_from_env()
 _DRAIN_LOCK_RELEASE_LUA = (
     "if redis.call('get', KEYS[1]) == ARGV[1] "
     "then return redis.call('del', KEYS[1]) else return 0 end"
+)
+_DRAIN_LOCK_ACQUIRE_LUA = (
+    "if redis.call('exists', KEYS[2]) == 1 then return 0 end "
+    "if redis.call('set', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then return 1 end "
+    "return 0"
 )
 
 
@@ -191,7 +220,15 @@ def _acquire_drain_lock(queue_name: str = "") -> tuple[bool, str | None]:
 
         client = get_broker_redis_client(socket_timeout=2)
         token = uuid.uuid4().hex
-        if client.set(_drain_lock_key(queue_name), token, nx=True, ex=_DRAIN_LOCK_TTL):
+        acquired = client.eval(
+            _DRAIN_LOCK_ACQUIRE_LUA,
+            2,
+            _drain_lock_key(queue_name),
+            _drain_stop_intent_key(queue_name),
+            token,
+            _DRAIN_LOCK_TTL,
+        )
+        if acquired:
             return (True, token)
         return (False, None)
     except Exception:
@@ -210,12 +247,70 @@ def _release_drain_lock(token: str | None, queue_name: str = "") -> None:
         client.eval(_DRAIN_LOCK_RELEASE_LUA, 1, _drain_lock_key(queue_name), token)
     except Exception:
         LOGGER.debug("drain lock release failed (will expire via TTL)", exc_info=True)
+
+
+def acquire_drain_stop_intent(queue_name: str) -> tuple[bool, str | None]:
+    """Fence new drains before auto-stop checks the active drain lease."""
+    try:
+        from api.services.redis_clients import get_broker_redis_client
+
+        client = get_broker_redis_client(socket_timeout=2)
+        token = uuid.uuid4().hex
+        acquired = client.set(
+            _drain_stop_intent_key(queue_name),
+            token,
+            nx=True,
+            ex=_DRAIN_STOP_INTENT_TTL_SECONDS,
+        )
+        if not acquired:
+            return (False, None)
+        if client.exists(_drain_lock_key(queue_name)):
+            _release_drain_stop_intent(queue_name, token)
+            return (False, None)
+        return (True, token)
+    except Exception:
+        # Fail closed: an uncoordinated stop can interrupt a PEEK_LOCKed submit.
+        LOGGER.warning("drain stop-intent acquire failed; auto-stop must defer", exc_info=True)
+        return (False, None)
+
+
+def _release_drain_stop_intent(queue_name: str, token: str | None) -> None:
+    if not token:
+        return
+    try:
+        from api.services.redis_clients import get_broker_redis_client
+
+        get_broker_redis_client(socket_timeout=2).eval(
+            _DRAIN_LOCK_RELEASE_LUA,
+            1,
+            _drain_stop_intent_key(queue_name),
+            token,
+        )
+    except Exception:
+        LOGGER.debug("drain stop-intent release failed (TTL backstop)", exc_info=True)
+
+
+def release_drain_stop_intent(queue_name: str, token: str | None) -> None:
+    """Release an auto-stop drain fence after stop starts, skips, or fails."""
+    _release_drain_stop_intent(queue_name, token)
 _PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "200"))
+_OUTBOX_MAX_EVENTS = int(os.environ.get("SERVICEBUS_OUTBOX_MAX_EVENTS", "200"))
+_DLQ_RESPONSE_MAX_MESSAGES = int(
+    os.environ.get("SERVICEBUS_DLQ_RESPONSE_MAX_MESSAGES", "100")
+)
 # Give-up deadline for a bridge whose sibling job never reaches a terminal
 # status — without it a permanently-stuck job's row would stay "active" forever
 # and be polled every tick, growing the active set without bound (liveness).
 _BRIDGE_MAX_AGE_SECONDS = int(
     os.environ.get("SERVICEBUS_BRIDGE_MAX_AGE_SECONDS", str(7 * 24 * 3600))
+)
+_RETRY_MAX_ATTEMPTS = max(
+    1,
+    min(int(os.environ.get("SERVICEBUS_RETRY_MAX_ATTEMPTS", "24")), 100),
+)
+_RETRY_MAX_AGE_SECONDS = max(
+    3600,
+    min(int(os.environ.get("SERVICEBUS_RETRY_MAX_AGE_SECONDS", str(24 * 3600))), 7 * 24 * 3600),
 )
 _LIFECYCLE_INTERRUPTION_SECONDS = max(
     60, int(os.environ.get("SERVICEBUS_LIFECYCLE_INTERRUPTION_SECONDS", "600"))
@@ -253,6 +348,25 @@ def _bridge_expired(created_at: str) -> bool:
     if created.tzinfo is None:
         created = created.replace(tzinfo=UTC)
     return (datetime.now(UTC) - created).total_seconds() > _BRIDGE_MAX_AGE_SECONDS
+
+
+def _retry_exhausted(msg: ParsedMessage) -> bool:
+    """True when a transient request has consumed its bounded retry envelope."""
+    if msg.retry_attempt >= _RETRY_MAX_ATTEMPTS:
+        return True
+    raw = msg.first_enqueued_at
+    if not raw and msg.enqueued_time_utc is not None:
+        first = msg.enqueued_time_utc
+    elif raw:
+        try:
+            first = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    else:
+        return False
+    if first.tzinfo is None:
+        first = first.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - first).total_seconds() >= _RETRY_MAX_AGE_SECONDS
 
 
 def _classify(raw_status: str) -> str:
@@ -574,11 +688,14 @@ def _enrich_failure_message_for_event(
         storage_account = extract_trusted_storage_account(str(job.get("db") or ""))
         if not storage_account:
             return None
-        return _enrich_external_failure_detail(
-            status="failed",
-            current_error=current_error,
-            storage_account=storage_account,
-            results_job_id=openapi_job_id,
+        return cast(
+            str | None,
+            _enrich_external_failure_detail(
+                status="failed",
+                current_error=current_error,
+                storage_account=storage_account,
+                results_job_id=openapi_job_id,
+            ),
         )
     except Exception:
         LOGGER.debug(
@@ -635,8 +752,11 @@ def _openapi_kwargs(cfg: ServiceBusConfig) -> dict[str, str]:
     try:
         from api.services.blast.external_jobs import _openapi_client_kwargs_from_cluster
 
-        return _openapi_client_kwargs_from_cluster(
-            cfg.subscription_id, cfg.resource_group, cfg.cluster_name
+        return cast(
+            dict[str, str],
+            _openapi_client_kwargs_from_cluster(
+                cfg.subscription_id, cfg.resource_group, cfg.cluster_name
+            ),
         )
     except Exception:
         LOGGER.debug("openapi kwargs resolution failed", exc_info=True)
@@ -807,7 +927,7 @@ def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[st
             correlation_id=correlation_id,
         )
     )
-    return payload
+    return cast(dict[str, Any], payload)
 
 
 def _is_v1_jobs_message(body: dict[str, Any]) -> bool:
@@ -974,7 +1094,7 @@ def _build_v1_jobs_payload(
     # separately by ``_persist_drain_row_and_trace`` and is not derived from
     # this payload field.
     payload["submission_source"] = "external_api"
-    return payload
+    return cast(dict[str, Any], payload)
 
 
 def _supersede_placeholder(correlation_id: str) -> None:
@@ -1009,6 +1129,7 @@ def _correlation_id_from_message(msg: ParsedMessage) -> str:
         str(body.get("external_correlation_id") or "").strip()
         or (msg.correlation_id or "").strip()
         or (msg.message_id or "").strip()
+        or (f"sb-sequence-{msg.sequence_number}" if msg.sequence_number is not None else "")
     )
 
 
@@ -1026,7 +1147,7 @@ def _publish_drain_failure_event(
     request_id: str,
     error_code: str,
     error_message: str,
-) -> None:
+) -> bool:
     """Publish a terminal ``failed`` transition for a drain-time rejection.
 
     A message rejected BEFORE it bridges to a sibling job (malformed body, or a
@@ -1041,7 +1162,7 @@ def _publish_drain_failure_event(
     when no completion topic is configured.
     """
     if not correlation_id:
-        return
+        return False
     try:
         from api.services.sanitise import sanitise
 
@@ -1056,13 +1177,15 @@ def _publish_drain_failure_event(
             else None,
             request_id=request_id,
         )
-        service_bus.publish_event(cfg, event)
+        durable, _delivered = _stage_response_event(cfg, event)
+        return durable
     except Exception as exc:  # pragma: no cover - best-effort
-        LOGGER.debug(
-            "drain failure event publish skipped corr=%s: %s",
+        LOGGER.warning(
+            "drain failure response staging failed corr=%s: %s",
             correlation_id,
             type(exc).__name__,
         )
+        return False
 
 
 def _publish_duplicate_ack(
@@ -1070,9 +1193,9 @@ def _publish_duplicate_ack(
     existing: BridgeRecord,
     *,
     request_id: str,
-) -> None:
+) -> bool:
     """Re-publish the accepted ACK for an idempotent request redelivery."""
-    service_bus.publish_event(
+    durable, _delivered = _stage_response_event(
         cfg,
         _transition_event(
             correlation_id=existing.correlation_id,
@@ -1083,6 +1206,7 @@ def _publish_duplicate_ack(
             event_id_scope=request_id,
         ),
     )
+    return durable
 
 
 def _publish_correlation_conflict(
@@ -1091,9 +1215,9 @@ def _publish_correlation_conflict(
     *,
     request_id: str,
     request_fingerprint: str,
-) -> None:
+) -> bool:
     """Publish a sanitized terminal rejection for a reused correlation id."""
-    service_bus.publish_event(
+    durable, _delivered = _stage_response_event(
         cfg,
         _transition_event(
             correlation_id=existing.correlation_id,
@@ -1106,6 +1230,7 @@ def _publish_correlation_conflict(
             event_id_scope=request_id or request_fingerprint,
         ),
     )
+    return durable
 
 
 def _detail_text(exc: HTTPException) -> str:
@@ -1172,22 +1297,71 @@ def _record_drain_request_event(
 
 
 
+def _stage_response_event(
+    cfg: ServiceBusConfig,
+    event: dict[str, Any],
+    *,
+    deliver_immediately: bool = True,
+) -> tuple[bool, bool]:
+    """Persist one producer response, then attempt immediate delivery."""
+    event_id = str(event.get("event_id") or "")
+    try:
+        enqueue_response(event)
+    except (ResponseOutboxPersistenceError, ValueError) as exc:
+        LOGGER.error(
+            "producer response outbox persist failed event_id=%s error=%s",
+            event_id,
+            type(exc).__name__,
+        )
+        return (False, False)
+    if not cfg.completion_topic or not deliver_immediately:
+        return (True, False)
+    try:
+        service_bus.publish_event(cfg, event)
+    except Exception:
+        LOGGER.warning(
+            "producer response publish deferred to outbox event_id=%s",
+            event_id,
+        )
+        return (True, False)
+    try:
+        mark_response_delivered(event_id)
+    except Exception:
+        LOGGER.warning(
+            "producer response outbox confirm failed event_id=%s; may redeliver",
+            event_id,
+        )
+    return (True, True)
+
+
+def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
+    """Publish a bounded oldest-first pass of durable producer responses."""
+    stats = {"scanned": 0, "delivered": 0, "errors": 0}
+    if not cfg.completion_topic:
+        return stats
+    try:
+        pending = list_pending_responses(limit=_OUTBOX_MAX_EVENTS)
+    except Exception:
+        LOGGER.warning("producer response outbox list failed", exc_info=True)
+        stats["errors"] = 1
+        return stats
+    for item in pending:
+        stats["scanned"] += 1
+        try:
+            service_bus.publish_event(cfg, item.event)
+            mark_response_delivered(item.event_id)
+            stats["delivered"] += 1
+        except Exception:
+            LOGGER.warning(
+                "producer response outbox flush paused event_id=%s",
+                item.event_id,
+            )
+            stats["errors"] += 1
+            break
+    return stats
+
+
 def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
-    admission = _execution_admission_for_drain(cfg)
-    if not admission.get("allowed"):
-        LOGGER.info(
-            "servicebus message deferred before submit reason=%s message_id=%s",
-            admission.get("reason", "not_ready"),
-            msg.message_id or "",
-        )
-        _record_drain_request_event(
-            "deferred",
-            msg,
-            cfg,
-            action=MessageAction.ABANDON,
-            error_code=str(admission.get("reason") or "not_ready"),
-        )
-        return MessageAction.ABANDON
     body = dict(msg.body or {})
     if _is_v1_jobs_message(body):
         # Multi-token / tabular outfmt path: forward the producer's
@@ -1203,14 +1377,16 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         # send-time placeholder (if any) so it does not linger as ``queued``
         # forever even though the message is in the DLQ. The correlation id is
         # recovered from the raw body the same way the placeholder used it.
-        _fail_placeholder_for_message(msg, error_code="servicebus_malformed_request")
-        _publish_drain_failure_event(
+        response_durable = _publish_drain_failure_event(
             cfg,
             correlation_id=_correlation_id_from_message(msg),
             request_id=_extract_request_id(msg),
             error_code="servicebus_malformed_request",
             error_message="request message could not be parsed into a valid BLAST submit",
         )
+        if not response_durable:
+            return MessageAction.ABANDON
+        _fail_placeholder_for_message(msg, error_code="servicebus_malformed_request")
         _publish_jobs_cache_invalidate("servicebus_drain_malformed")
         _record_drain_request_event(
             "rejected",
@@ -1253,12 +1429,14 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             and existing.request_fingerprint != request_fingerprint
         ):
             LOGGER.warning("service bus correlation conflict corr=%s", correlation_id)
-            _publish_correlation_conflict(
+            response_durable = _publish_correlation_conflict(
                 cfg,
                 existing,
                 request_id=request_id,
                 request_fingerprint=request_fingerprint,
             )
+            if not response_durable:
+                return MessageAction.ABANDON
             _record_drain_request_event(
                 "correlation_conflict",
                 msg,
@@ -1274,7 +1452,8 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
                 "service bus duplicate request corr=%s has legacy bridge without fingerprint",
                 correlation_id,
             )
-        _publish_duplicate_ack(cfg, existing, request_id=request_id)
+        if not _publish_duplicate_ack(cfg, existing, request_id=request_id):
+            return MessageAction.ABANDON
         LOGGER.info("service bus duplicate request ACK replayed corr=%s", correlation_id)
         _record_drain_request_event(
             "retry_ack_replayed",
@@ -1310,6 +1489,31 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         )
         return MessageAction.ABANDON
 
+    # Close the final receive/build/claim → submit race. A lifecycle barrier can
+    # be created after the handler's entry check; never let that message leave
+    # the broker for execution while start/scale/stop/DB warmup admission has
+    # just closed. Roll back only our unconfirmed claim so redelivery retries
+    # after the lifecycle converges.
+    pre_submit_admission = _execution_admission_for_drain(cfg)
+    if not pre_submit_admission.get("allowed"):
+        if _ATOMIC_CLAIM:
+            release_bridge(correlation_id)
+        reason = str(pre_submit_admission.get("reason") or "not_ready")
+        _record_drain_request_event(
+            "deferred",
+            msg,
+            cfg,
+            payload=payload,
+            action=MessageAction.ABANDON,
+            error_code=reason,
+        )
+        LOGGER.info(
+            "servicebus message deferred at pre-submit admission reason=%s corr=%s",
+            reason,
+            correlation_id,
+        )
+        return MessageAction.ABANDON
+
     try:
         upstream = submit(payload, **_openapi_kwargs(cfg))
     except HTTPException as exc:
@@ -1323,6 +1527,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         # abandon it for redelivery. 408/429 are retryable 4xx exceptions.
         status = int(getattr(exc, "status_code", 0) or 0)
         permanent = 400 <= status < 500 and status not in (408, 429)
+        retry_exhausted = not permanent and _retry_exhausted(msg)
         LOGGER.warning(
             "service bus → OpenAPI submit %s corr=%s status=%s",
             "rejected (dead-letter)" if permanent else "failed (retry)",
@@ -1333,49 +1538,101 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             # Terminal rejection: turn the send-time placeholder into a failed
             # row instead of leaving it ``queued`` forever (the message is now
             # dead-lettered). A transient failure keeps the placeholder queued.
-            _fail_placeholder(correlation_id, error_code=f"servicebus_submit_rejected_{status}")
-            _publish_drain_failure_event(
+            response_durable = _publish_drain_failure_event(
                 cfg,
                 correlation_id=correlation_id,
                 request_id=request_id,
                 error_code=f"servicebus_submit_rejected_{status}",
                 error_message=_detail_text(exc),
             )
-            _publish_jobs_cache_invalidate("servicebus_drain_rejected")
+            if response_durable:
+                _fail_placeholder(
+                    correlation_id,
+                    error_code=f"servicebus_submit_rejected_{status}",
+                )
+                _publish_jobs_cache_invalidate("servicebus_drain_rejected")
+            else:
+                permanent = False
+        elif retry_exhausted:
+            response_durable = _publish_drain_failure_event(
+                cfg,
+                correlation_id=correlation_id,
+                request_id=request_id,
+                error_code="servicebus_retry_exhausted",
+                error_message=(
+                    "request could not reach the execution plane before the retry deadline"
+                ),
+            )
+            if response_durable:
+                permanent = True
+                _fail_placeholder(
+                    correlation_id,
+                    error_code="servicebus_retry_exhausted",
+                )
+                _publish_jobs_cache_invalidate("servicebus_retry_exhausted")
         if _ATOMIC_CLAIM:
             # Submit failed after we reserved the correlation id, so roll the
             # reservation back: a transient ABANDON can then re-claim + resubmit
             # on redelivery, and a permanent DEAD_LETTER leaves no phantom
             # ``claimed`` row behind.
             release_bridge(correlation_id)
+        action = (
+            MessageAction.DEAD_LETTER
+            if permanent
+            else (MessageAction.ABANDON if retry_exhausted else MessageAction.RETRY)
+        )
         _record_drain_request_event(
-            "rejected" if permanent else "abandoned",
+            "rejected" if permanent else "retry_scheduled",
             msg,
             cfg,
             payload=payload,
-            action=MessageAction.DEAD_LETTER if permanent else MessageAction.ABANDON,
+            action=action,
             error_code=(
                 f"servicebus_submit_rejected_{status}"
                 if permanent
                 else f"openapi_http_{status or 'unknown'}"
             ),
         )
-        return MessageAction.DEAD_LETTER if permanent else MessageAction.ABANDON
+        return action
     except Exception as exc:
-        # Unknown/unexpected error — treat as transient (abandon → redelivery)
-        # so a transient glitch never loses a submit.
+        # Unknown/unexpected error is transient until the bounded scheduled
+        # retry envelope expires. Admission-blocked messages never enter this
+        # branch, so multi-hour DB update/warmup does not consume attempts.
         LOGGER.exception("service bus → OpenAPI submit failed corr=%s", correlation_id)
         if _ATOMIC_CLAIM:
             release_bridge(correlation_id)
+        retry_exhausted = _retry_exhausted(msg)
+        action = MessageAction.ABANDON if retry_exhausted else MessageAction.RETRY
+        if retry_exhausted:
+            response_durable = _publish_drain_failure_event(
+                cfg,
+                correlation_id=correlation_id,
+                request_id=request_id,
+                error_code="servicebus_retry_exhausted",
+                error_message=(
+                    "request could not reach the execution plane before the retry deadline"
+                ),
+            )
+            if response_durable:
+                action = MessageAction.DEAD_LETTER
+                _fail_placeholder(
+                    correlation_id,
+                    error_code="servicebus_retry_exhausted",
+                )
+                _publish_jobs_cache_invalidate("servicebus_retry_exhausted")
         _record_drain_request_event(
-            "abandoned",
+            "rejected" if action == MessageAction.DEAD_LETTER else "retry_scheduled",
             msg,
             cfg,
             payload=payload,
-            action=MessageAction.ABANDON,
-            error_code=type(exc).__name__,
+            action=action,
+            error_code=(
+                "servicebus_retry_exhausted"
+                if action == MessageAction.DEAD_LETTER
+                else type(exc).__name__
+            ),
         )
-        return MessageAction.ABANDON
+        return action
 
     openapi_job_id = str(upstream.get("job_id") or "")
     upsert_bridge(
@@ -1413,11 +1670,12 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     # sidecar's jobs / message-flow caches cross-process so the job surfaces on
     # the next poll instead of waiting out the cache TTL.
     _publish_jobs_cache_invalidate("servicebus_drain_submitted")
-    # Publish the initial "queued" transition (best-effort; a publish failure
-    # is recovered by publish_transitions on the next tick).
+    # Stage the initial queued response durably before immediate publish. If the
+    # outbox write fails the confirmed bridge remains active with an empty
+    # marker, so publish_transitions retries without re-submitting the job.
     queued_ack_published = False
     try:
-        service_bus.publish_event(
+        queued_durable, queued_ack_published = _stage_response_event(
             cfg,
             _transition_event(
                 correlation_id=correlation_id,
@@ -1428,10 +1686,10 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
                 event_id_scope=request_id,
             ),
         )
-        mark_published(correlation_id, _STATUS_QUEUED)
-        queued_ack_published = True
+        if queued_durable:
+            mark_published(correlation_id, _STATUS_QUEUED)
     except Exception:
-        LOGGER.warning("queued-event publish failed corr=%s (will retry)", correlation_id)
+        LOGGER.warning("queued response staging failed corr=%s (bridge will retry)", correlation_id)
     _record_drain_request_event(
         "accepted",
         msg,
@@ -1623,6 +1881,21 @@ def _drain_once(
     admission = _execution_admission_for_drain(cfg)
     if not admission.get("allowed"):
         reason = str(admission.get("reason") or "cluster_not_ready")
+        if reason in {
+            "aks_stop_in_progress",
+            "cluster_stopped",
+            "cluster_starting",
+        }:
+            try:
+                from api.services.aks.queue_autostart import (
+                    request_autostart_for_pending_queue,
+                )
+
+                request_autostart_for_pending_queue(
+                    reason=f"servicebus_drain:{reason}"
+                )
+            except Exception:
+                LOGGER.debug("queue-demand auto-start trigger failed", exc_info=True)
         LOGGER.info(
             "servicebus drain deferred queue=%s reason=%s action=%s target_nodes=%s",
             cfg.request_queue,
@@ -1659,10 +1932,11 @@ def _drain_once(
         if stats.received:
             LOGGER.info(
                 "servicebus drain tick received=%d completed=%d abandoned=%d "
-                "dead_lettered=%d concurrency=%d",
+                    "retried=%d dead_lettered=%d concurrency=%d",
                 stats.received,
                 stats.completed,
                 stats.abandoned,
+                    getattr(stats, "retried", 0),
                 stats.dead_lettered,
                 max_concurrency,
             )
@@ -1670,8 +1944,18 @@ def _drain_once(
             "received": stats.received,
             "completed": stats.completed,
             "abandoned": stats.abandoned,
+            **(
+                {"retried": int(getattr(stats, "retried", 0))}
+                if getattr(stats, "retried", 0)
+                else {}
+            ),
             "dead_lettered": stats.dead_lettered,
             "concurrency": max_concurrency,
+            **(
+                {"budget_exhausted": True}
+                if getattr(stats, "budget_exhausted", False)
+                else {}
+            ),
         }
     finally:
         _release_drain_lock(lock_token, cfg.request_queue)
@@ -1692,11 +1976,40 @@ def _publish_one_bridge(
     """
     if not rec.openapi_job_id:
         # Never bridged to a job id (drain crashed mid-flight). Give up once it
-        # ages past the deadline so it cannot linger forever.
+        # ages past the deadline, but first stage a terminal producer response.
         if _bridge_expired(rec.created_at):
+            event = _transition_event(
+                correlation_id=rec.correlation_id,
+                openapi_job_id="",
+                status=_STATUS_FAILED,
+                attempt=1,
+                error_code="bridge_unconfirmed_timeout",
+                error_message="request could not be confirmed before the bridge deadline",
+                request_id=rec.request_id,
+            )
+            durable, delivered = _stage_response_event(cfg, event)
+            if not durable:
+                return (0, 0)
             mark_done(rec.correlation_id, _STATUS_FAILED)
-            return (0, 1)
+            return (int(delivered), 1)
         return (0, 0)
+    if not rec.last_status:
+        # Submit succeeded but the immediate queued outbox write failed. Recover
+        # the producer acknowledgement before observing later running/terminal
+        # states so every accepted request has a durable acceptance response.
+        queued_event = _transition_event(
+            correlation_id=rec.correlation_id,
+            openapi_job_id=rec.openapi_job_id,
+            status=_STATUS_QUEUED,
+            attempt=1,
+            request_id=rec.request_id,
+            event_id_scope=rec.request_id,
+        )
+        durable, delivered = _stage_response_event(cfg, queued_event)
+        if not durable:
+            return (0, 0)
+        mark_published(rec.correlation_id, _STATUS_QUEUED)
+        return (int(delivered), 0)
     if _finish_lifecycle_interrupted_bridge(cfg, rec):
         return (1, 1)
     try:
@@ -1723,14 +2036,12 @@ def _publish_one_bridge(
                 error_message="job did not reach a terminal state before the bridge deadline",
                 request_id=rec.request_id,
             )
-            try:
-                service_bus.publish_event(cfg, timeout_event)
-            except Exception:  # retry next tick (marker unchanged)
-                LOGGER.warning("timeout publish failed corr=%s", rec.correlation_id)
+            durable, delivered = _stage_response_event(cfg, timeout_event)
+            if not durable:
                 return (0, 0)
             _record_transition_trace(rec.openapi_job_id, _STATUS_FAILED)
             mark_done(rec.correlation_id, _STATUS_FAILED)
-            return (1, 1)
+            return (int(delivered), 1)
         return (0, 0)
     # Reaching here means status != rec.last_status (the equal case returned
     # above), so this is always the first publish of THIS status for THIS bridge
@@ -1785,17 +2096,15 @@ def _publish_one_bridge(
         request_id=rec.request_id,
         result_files=result_files,
     )
-    try:
-        service_bus.publish_event(cfg, event)
-    except Exception:
-        LOGGER.warning("transition publish failed corr=%s", rec.correlation_id)
+    durable, delivered = _stage_response_event(cfg, event)
+    if not durable:
         return (0, 0)
     _record_transition_trace(rec.openapi_job_id, status)
     if status in _TERMINAL:
         mark_done(rec.correlation_id, status)
-        return (1, 1)
+        return (int(delivered), 1)
     mark_published(rec.correlation_id, status)
-    return (1, 0)
+    return (int(delivered), 0)
 
 
 def _finish_lifecycle_interrupted_bridge(
@@ -1859,7 +2168,9 @@ def _finish_lifecycle_interrupted_bridge(
             ),
             request_id=rec.request_id,
         )
-        service_bus.publish_event(cfg, event)
+        durable, _delivered = _stage_response_event(cfg, event)
+        if not durable:
+            return False
         _record_transition_trace(rec.openapi_job_id, _STATUS_FAILED)
         mark_done(rec.correlation_id, _STATUS_FAILED)
         return True
@@ -1872,6 +2183,169 @@ def _finish_lifecycle_interrupted_bridge(
         return False
 
 
+def _stage_dead_letter_response_and_backup(
+    cfg: ServiceBusConfig,
+    msg: ParsedMessage,
+) -> bool:
+    """Durably stage terminal response + audit evidence for one DLQ request."""
+    correlation_id = _correlation_id_from_message(msg)
+    request_id = _extract_request_id(msg)
+    existing = get_bridge(correlation_id) if correlation_id else None
+    if existing is not None and existing.openapi_job_id:
+        # This DLQ entry is an at-least-once duplicate of a request that already
+        # has an accepted execution. Re-emit accepted, never a false terminal
+        # failure that would contradict the live bridge/job.
+        if not _publish_duplicate_ack(cfg, existing, request_id=request_id):
+            return False
+        return bool(backup_dead_letter_message(
+            {
+                "ts": _now_iso(),
+                "correlation_id": correlation_id,
+                "request_id": request_id,
+                "message_id": msg.message_id,
+                "sequence_number": msg.sequence_number,
+                "dead_letter_reason": msg.dead_letter_reason,
+                "delivery_count": msg.delivery_count,
+                "duplicate_of_openapi_job_id": existing.openapi_job_id,
+                "body": msg.body,
+            }
+        ))
+    raw_reason = str(msg.dead_letter_reason or "servicebus_dead_lettered")
+    reason_key = raw_reason.strip().lower().replace(" ", "_")
+    if "ttl" in reason_key or "expired" in reason_key:
+        error_code = "servicebus_request_expired"
+    elif "maxdelivery" in reason_key or "max_delivery" in reason_key:
+        error_code = "servicebus_max_delivery_exceeded"
+    else:
+        error_code = "servicebus_dead_lettered"
+    event = _transition_event(
+        correlation_id=correlation_id,
+        openapi_job_id="",
+        status=_STATUS_FAILED,
+        attempt=max(1, msg.retry_attempt + 1),
+        error_code=error_code,
+        error_message=f"request moved to the dead-letter queue: {raw_reason[:160]}",
+        request_id=request_id,
+    )
+    durable, _delivered = _stage_response_event(
+        cfg,
+        event,
+        deliver_immediately=False,
+    )
+    if not durable:
+        return False
+    backed_up = backup_dead_letter_message(
+        {
+            "ts": _now_iso(),
+            "correlation_id": correlation_id,
+            "request_id": request_id,
+            "message_id": msg.message_id,
+            "sequence_number": msg.sequence_number,
+            "enqueued_time_utc": (
+                msg.enqueued_time_utc.isoformat() if msg.enqueued_time_utc else None
+            ),
+            "dead_letter_reason": msg.dead_letter_reason,
+            "dead_letter_error_description": msg.dead_letter_error_description,
+            "delivery_count": msg.delivery_count,
+            "body": msg.body,
+        }
+    )
+    if not backed_up:
+        return False
+    _fail_placeholder(correlation_id, error_code=error_code)
+    _publish_jobs_cache_invalidate("servicebus_dlq_response")
+    return True
+
+
+def stage_operator_purge_response_and_backup(
+    cfg: ServiceBusConfig,
+    msg: ParsedMessage,
+) -> bool:
+    """Durably fail one operator-purged request before removing it from queue."""
+    correlation_id = _correlation_id_from_message(msg)
+    request_id = _extract_request_id(msg)
+    existing = get_bridge(correlation_id) if correlation_id else None
+    if existing is not None and existing.openapi_job_id:
+        if not _publish_duplicate_ack(cfg, existing, request_id=request_id):
+            return False
+        return bool(backup_dead_letter_message(
+            {
+                "ts": _now_iso(),
+                "correlation_id": correlation_id,
+                "request_id": request_id,
+                "message_id": msg.message_id,
+                "sequence_number": msg.sequence_number,
+                "dead_letter_reason": "operator_purged_duplicate",
+                "duplicate_of_openapi_job_id": existing.openapi_job_id,
+                "body": msg.body,
+            }
+        ))
+    event = _transition_event(
+        correlation_id=correlation_id,
+        openapi_job_id="",
+        status=_STATUS_FAILED,
+        attempt=max(1, msg.retry_attempt + 1),
+        error_code="servicebus_operator_purged",
+        error_message="request was cancelled by an operator before execution",
+        request_id=request_id,
+    )
+    durable, _delivered = _stage_response_event(
+        cfg,
+        event,
+        deliver_immediately=False,
+    )
+    if not durable:
+        return False
+    if not backup_dead_letter_message(
+        {
+            "ts": _now_iso(),
+            "correlation_id": correlation_id,
+            "request_id": request_id,
+            "message_id": msg.message_id,
+            "sequence_number": msg.sequence_number,
+            "enqueued_time_utc": (
+                msg.enqueued_time_utc.isoformat() if msg.enqueued_time_utc else None
+            ),
+            "dead_letter_reason": "operator_purged",
+            "delivery_count": msg.delivery_count,
+            "body": msg.body,
+        }
+    ):
+        return False
+    _fail_placeholder(correlation_id, error_code="servicebus_operator_purged")
+    _publish_jobs_cache_invalidate("servicebus_operator_purged")
+    return True
+
+
+def _reconcile_dead_letter_responses(cfg: ServiceBusConfig) -> dict[str, int]:
+    """Emit one terminal response and audit backup for every DLQ request."""
+
+    def handle(msg: ParsedMessage) -> MessageAction:
+        if not _stage_dead_letter_response_and_backup(cfg, msg):
+            return MessageAction.ABANDON
+        return MessageAction.COMPLETE
+
+    stats = service_bus.drain_dead_letter_messages(
+        cfg,
+        handle,
+        max_messages=_DLQ_RESPONSE_MAX_MESSAGES,
+    )
+    return {
+        "received": stats.received,
+        "completed": stats.completed,
+        "abandoned": stats.abandoned,
+    }
+
+
+@shared_task(name="api.tasks.servicebus.reconcile_dead_letter_responses")
+@skip_tick_on_transient_infra
+def reconcile_dead_letter_responses() -> dict[str, Any]:
+    """Turn every terminal DLQ request into a durable producer response."""
+    if not service_bus_enabled():
+        return {"skipped": "disabled"}
+    return _reconcile_dead_letter_responses(get_service_bus_config())
+
+
 @shared_task(name="api.tasks.servicebus.publish_transitions")
 @skip_tick_on_transient_infra
 def publish_transitions() -> dict[str, Any]:
@@ -1879,6 +2353,7 @@ def publish_transitions() -> dict[str, Any]:
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
+    outbox = _flush_response_outbox(cfg)
     # Fetch the work set BEFORE resolving the OpenAPI client kwargs. With zero
     # active bridges there is nothing to poll, and `_openapi_kwargs` reads the
     # configured cluster's `elb-openapi` Service IP from the Kubernetes API on
@@ -1890,7 +2365,12 @@ def publish_transitions() -> dict[str, Any]:
     # touch nothing but the local tracking store.
     bridges = list_active_bridges(limit=_PUBLISH_MAX_ROWS)
     if not bridges:
-        return {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
+        return {
+            "scanned": 0,
+            "published": outbox["delivered"],
+            "finished": 0,
+            "errors": outbox["errors"],
+        }
     openapi_kwargs = _openapi_kwargs(cfg)
     if not _openapi_ready_for_transition_poll(openapi_kwargs):
         finished = sum(
@@ -1907,10 +2387,10 @@ def publish_transitions() -> dict[str, Any]:
             "active_bridges": len(bridges),
             "finished": finished,
         }
-    published = 0
+    published = outbox["delivered"]
     finished = 0
     scanned = 0
-    errors = 0
+    errors = outbox["errors"]
     for rec in bridges:
         scanned += 1
         try:
@@ -1943,7 +2423,9 @@ def publish_transitions() -> dict[str, Any]:
     return {"scanned": scanned, "published": published, "finished": finished, "errors": errors}
 
 
-def _dlq_predicate(cfg: ServiceBusConfig, total_dlq: int) -> Any:
+def _dlq_predicate(
+    cfg: ServiceBusConfig, total_dlq: int
+) -> Callable[[ParsedMessage], bool]:
     """Return a predicate(ParsedMessage) -> bool for cleanup-eligible messages.
 
     Age-based: enqueued older than ``dlq_max_age_days``. Count-based: when the
@@ -1959,7 +2441,7 @@ def _dlq_predicate(cfg: ServiceBusConfig, total_dlq: int) -> Any:
         enq = msg.enqueued_time_utc
         if enq is None:
             return False
-        return enq.timestamp() <= cutoff
+        return bool(enq.timestamp() <= cutoff)
 
     return predicate
 
@@ -1987,19 +2469,7 @@ def dlq_cleanup() -> dict[str, Any]:
     predicate = _dlq_predicate(cfg, total_dlq)
 
     def backup(msg: ParsedMessage) -> bool:
-        return backup_dead_letter_message(
-            {
-                "ts": _now_iso(),
-                "correlation_id": msg.correlation_id,
-                "message_id": msg.message_id,
-                "sequence_number": msg.sequence_number,
-                "enqueued_time_utc": (
-                    msg.enqueued_time_utc.isoformat() if msg.enqueued_time_utc else None
-                ),
-                "dead_letter_reason": msg.dead_letter_reason,
-                "body": msg.body,
-            }
-        )
+        return _stage_dead_letter_response_and_backup(cfg, msg)
 
     stats = service_bus.purge_dead_letter(
         cfg,

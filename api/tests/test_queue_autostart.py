@@ -149,3 +149,41 @@ def test_request_autostart_evaluation_swallows_enqueue_error(
     monkeypatch.setattr(idle_autostop.evaluate_idle_clusters, "delay", _boom)
     # Best-effort: a broker hiccup must not raise into the producer.
     qa.request_autostart_evaluation()
+
+
+def test_pending_queue_trigger_is_noop_when_queue_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
+    monkeypatch.setattr(
+        "api.services.auto_stop_sb_signal.read_request_queue_depth",
+        lambda: 0,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        qa,
+        "request_autostart_evaluation",
+        lambda reason="": calls.append(reason) or True,
+    )
+
+    assert qa.request_autostart_for_pending_queue("drain") is False
+    assert calls == []
+
+
+def test_pending_queue_trigger_wakes_debounced_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SERVICEBUS_QUEUE_AUTOSTART", "true")
+    monkeypatch.setattr(
+        "api.services.auto_stop_sb_signal.read_request_queue_depth",
+        lambda: 7,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        qa,
+        "request_autostart_evaluation",
+        lambda reason="": calls.append(reason) or True,
+    )
+
+    assert qa.request_autostart_for_pending_queue("servicebus_drain:cluster_stopped") is True
+    assert calls == ["servicebus_drain:cluster_stopped"]

@@ -398,6 +398,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Service Bus and the beat tasks no-op until both this AND the saved
             // config row opt in. NOT the Celery broker — that stays Redis.
             { name: 'SERVICEBUS_ENABLED', value: effectiveServiceBusEnabled }
+            // Match the worker gate so dashboard/API-origin queue sends can
+            // wake the same debounced evaluator immediately. External
+            // producers remain covered by the worker's pending-queue reconcile.
+            { name: 'SERVICEBUS_QUEUE_AUTOSTART', value: controlPlaneEnv.api.SERVICEBUS_QUEUE_AUTOSTART }
             // Unified-ingress front door (issue #36 Tier 2). Default OFF
             // (Charter §12a Rule 4): when ON (and SERVICEBUS_ENABLED) the api
             // submit route enqueues to Service Bus instead of calling /v1/jobs
@@ -605,6 +609,17 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // one durable bridge claim before OpenAPI submission.
             { name: 'SERVICEBUS_ATOMIC_CLAIM', value: controlPlaneEnv.worker.SERVICEBUS_ATOMIC_CLAIM }
             { name: 'SERVICEBUS_DRAIN_SINGLEFLIGHT', value: controlPlaneEnv.worker.SERVICEBUS_DRAIN_SINGLEFLIGHT }
+            // Bounded drain/retry clocks: one active batch always finishes,
+            // untouched backlog remains in Service Bus for the next pass, and
+            // transient execution-plane failures become delayed retries rather
+            // than burning broker delivery count.
+            { name: 'SERVICEBUS_MAX_LOCK_RENEWAL_SECONDS', value: controlPlaneEnv.worker.SERVICEBUS_MAX_LOCK_RENEWAL_SECONDS }
+            { name: 'SERVICEBUS_DRAIN_LOCK_TTL_SECONDS', value: controlPlaneEnv.worker.SERVICEBUS_DRAIN_LOCK_TTL_SECONDS }
+            { name: 'SERVICEBUS_DRAIN_PASS_MAX_SECONDS', value: controlPlaneEnv.worker.SERVICEBUS_DRAIN_PASS_MAX_SECONDS }
+            { name: 'SERVICEBUS_RETRY_BASE_SECONDS', value: controlPlaneEnv.worker.SERVICEBUS_RETRY_BASE_SECONDS }
+            { name: 'SERVICEBUS_RETRY_MAX_DELAY_SECONDS', value: controlPlaneEnv.worker.SERVICEBUS_RETRY_MAX_DELAY_SECONDS }
+            { name: 'SERVICEBUS_RETRY_MAX_ATTEMPTS', value: controlPlaneEnv.worker.SERVICEBUS_RETRY_MAX_ATTEMPTS }
+            { name: 'SERVICEBUS_RETRY_MAX_AGE_SECONDS', value: controlPlaneEnv.worker.SERVICEBUS_RETRY_MAX_AGE_SECONDS }
             // Queue-arrival cluster auto-start (issue #52 follow-up). When a
             // request lands on the SB queue and the AKS cluster is Stopped,
             // worker takes a single-flight lease and triggers `az aks start`

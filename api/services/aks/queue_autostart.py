@@ -35,6 +35,8 @@ LOGGER = logging.getLogger(__name__)
 _GATE_ENV = "SERVICEBUS_QUEUE_AUTOSTART"
 _COOLDOWN_ENV = "SERVICEBUS_QUEUE_AUTOSTART_COOLDOWN_SECONDS"
 _LEASE_KEY_PREFIX = "aks:queue-autostart"
+_EVAL_TRIGGER_KEY = "aks:queue-autostart:evaluate"
+_EVAL_TRIGGER_TTL_SECONDS = 30
 _ON_VALUES = {"1", "true", "yes"}
 
 
@@ -118,7 +120,7 @@ def release_autostart_lease(
         LOGGER.debug("queue-autostart lease release failed (will expire via TTL): %s", exc)
 
 
-def request_autostart_evaluation(reason: str = "") -> None:
+def request_autostart_evaluation(reason: str = "") -> bool:
     """Trigger an immediate idle/auto-start evaluation the moment a request is
     enqueued — the event-driven counterpart to the 5-minute beat tick.
 
@@ -133,12 +135,58 @@ def request_autostart_evaluation(reason: str = "") -> None:
     de-dupes a burst of enqueues into at most one start per cooldown.
     """
     if not queue_autostart_enabled():
-        return
+        return False
+    trigger_reserved = False
+    try:
+        from api.services.redis_clients import get_broker_redis_client
+
+        client = get_broker_redis_client(socket_timeout=2)
+        trigger_reserved = bool(
+            client.set(
+                _EVAL_TRIGGER_KEY,
+                uuid.uuid4().hex,
+                nx=True,
+                ex=_EVAL_TRIGGER_TTL_SECONDS,
+            )
+        )
+        if not trigger_reserved:
+            return False
+    except Exception:
+        # Redis is also the Celery broker; still attempt enqueue so a transient
+        # debounce read cannot suppress the only wake-up signal.
+        trigger_reserved = False
     try:
         from api.tasks.azure.idle_autostop import evaluate_idle_clusters
 
-        evaluate_idle_clusters.delay()  # type: ignore[attr-defined]
+        evaluate_idle_clusters.delay()
         LOGGER.debug("queue-autostart eval triggered on enqueue (reason=%s)", reason or "")
+        return True
     except Exception as exc:
+        if trigger_reserved:
+            try:
+                from api.services.redis_clients import get_broker_redis_client
+
+                get_broker_redis_client(socket_timeout=2).delete(_EVAL_TRIGGER_KEY)
+            except Exception as cleanup_exc:
+                LOGGER.debug(
+                    "queue-autostart trigger cleanup failed: %s",
+                    cleanup_exc,
+                )
         LOGGER.debug("queue-autostart eval trigger skipped: %s", exc)
+        return False
+
+
+def request_autostart_for_pending_queue(reason: str = "") -> bool:
+    """Wake auto-start only when active or scheduled request work exists."""
+    if not queue_autostart_enabled():
+        return False
+    try:
+        from api.services.auto_stop_sb_signal import read_request_queue_depth
+
+        pending = read_request_queue_depth()
+    except Exception:
+        return False
+    if not pending or pending <= 0:
+        return False
+    return request_autostart_evaluation(reason=reason or "servicebus_queue_pending")
 

@@ -13,7 +13,8 @@ Edit boundaries: Reusable cloud/data-plane logic only. No HTTP shaping, no
     ``azure.servicebus``.
 Key entry points: ``send_request``, ``publish_event``, ``peek_requests``,
     ``peek_request_previews``, ``peek_dead_letter_previews``, ``drain_requests``,
-    ``entity_counts``, ``purge_dead_letter``, ``delete_dead_letter_messages``,
+    ``drain_dead_letter_messages``, ``entity_counts``, ``purge_dead_letter``,
+    ``delete_dead_letter_messages``,
     ``promote_dead_letter_messages``, ``test_connection``, ``MessageAction``.
 Risky contracts: Receivers settle EVERY message they receive (complete /
     abandon / dead-letter) — a leaked lock causes redelivery and duplicate BLAST
@@ -25,20 +26,27 @@ Risky contracts: Receivers settle EVERY message they receive (complete /
     duplicate on ``external_correlation_id``). The SAS connection string is read
     from an env secret or Key Vault and is NEVER logged or returned to a caller.
     All errors are normalised to ``ServiceBusUnavailable`` / ``ServiceBusAuthError``
-    so callers degrade instead of leaking SDK internals.
-Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py``.
+    so callers degrade instead of leaking SDK internals. Main-queue receives are
+    capped to handler concurrency and a pass wall-clock budget; untouched
+    backlog remains broker-owned. RETRY schedules a clone before completing the
+    original, preserving correlation/idempotency metadata and avoiding broker
+    delivery-count burn during transient execution-plane failures.
+Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py
+    api/tests/test_servicebus_load.py``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -72,9 +80,21 @@ _PEEK_DEFAULT = 5
 # bloat the response or the dashboard. A content preview never needs the full
 # payload; the truncation is flagged via ``body_truncated``.
 _PEEK_BODY_MAX_CHARS = 4000
-_MAX_LOCK_RENEWAL_SECONDS = max(
+_MAX_LOCK_RENEWAL_SECONDS: int = max(
     30,
-    min(int(os.environ.get("SERVICEBUS_MAX_LOCK_RENEWAL_SECONDS", "300")), 900),
+    min(int(os.environ.get("SERVICEBUS_MAX_LOCK_RENEWAL_SECONDS", "900")), 900),
+)
+_DRAIN_PASS_MAX_SECONDS = max(
+    30.0,
+    min(float(os.environ.get("SERVICEBUS_DRAIN_PASS_MAX_SECONDS", "240")), 540.0),
+)
+_RETRY_BASE_SECONDS: int = max(
+    5,
+    min(int(os.environ.get("SERVICEBUS_RETRY_BASE_SECONDS", "30")), 300),
+)
+_RETRY_MAX_DELAY_SECONDS: int = max(
+    _RETRY_BASE_SECONDS,
+    min(int(os.environ.get("SERVICEBUS_RETRY_MAX_DELAY_SECONDS", "900")), 3600),
 )
 
 
@@ -114,6 +134,7 @@ class MessageAction(StrEnum):
     COMPLETE = "complete"
     ABANDON = "abandon"
     DEAD_LETTER = "dead_letter"
+    RETRY = "retry"
 
 
 @dataclass
@@ -132,6 +153,8 @@ class ParsedMessage:
     dead_letter_reason: str | None = None
     dead_letter_error_description: str | None = None
     delivery_count: int | None = None
+    retry_attempt: int = 0
+    first_enqueued_at: str = ""
 
 
 @dataclass
@@ -140,6 +163,8 @@ class DrainStats:
     completed: int = 0
     abandoned: int = 0
     dead_lettered: int = 0
+    retried: int = 0
+    budget_exhausted: bool = False
 
 
 @dataclass
@@ -177,7 +202,7 @@ def _resolve_sas_connection_string(cfg: ServiceBusConfig) -> str:
     if vault_uri and cfg.sas_secret_name:
         from api.services.keyvault import get_secret
 
-        value = get_secret(get_credential(), vault_uri, cfg.sas_secret_name).strip()
+        value = str(get_secret(get_credential(), vault_uri, cfg.sas_secret_name)).strip()
         if value:
             return value
     raise ServiceBusUnavailable(
@@ -236,6 +261,11 @@ def _parse(message: Any) -> ParsedMessage:
             body = {"_value": body}
     except json.JSONDecodeError:
         body = {}
+    application_properties = dict(getattr(message, "application_properties", None) or {})
+    try:
+        retry_attempt = max(0, int(application_properties.get("elb_retry_attempt") or 0))
+    except (TypeError, ValueError):
+        retry_attempt = 0
     return ParsedMessage(
         body=body,
         raw_body=raw,
@@ -245,10 +275,12 @@ def _parse(message: Any) -> ParsedMessage:
         content_type=getattr(message, "content_type", None),
         enqueued_time_utc=getattr(message, "enqueued_time_utc", None),
         sequence_number=getattr(message, "sequence_number", None),
-        application_properties=dict(getattr(message, "application_properties", None) or {}),
+        application_properties=application_properties,
         dead_letter_reason=getattr(message, "dead_letter_reason", None),
         dead_letter_error_description=getattr(message, "dead_letter_error_description", None),
         delivery_count=getattr(message, "delivery_count", None),
+        retry_attempt=retry_attempt,
+        first_enqueued_at=str(application_properties.get("elb_first_enqueued_at") or ""),
     )
 
 
@@ -517,6 +549,7 @@ def delete_dead_letter_messages(
     *,
     sequence_numbers: list[int],
     max_messages: int = 100,
+    before_delete: Callable[[ParsedMessage], bool] | None = None,
 ) -> DeadLetterActionStats:
     """Delete specific DLQ messages by sequence number (operator action).
 
@@ -537,6 +570,7 @@ def delete_dead_letter_messages(
     seen: set[int] = set()
     with (
         _client(cfg) as client,
+        AutoLockRenewer(max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS) as lock_renewer,
         client.get_queue_receiver(
             cfg.request_queue,
             sub_queue=ServiceBusSubQueue.DEAD_LETTER,
@@ -569,6 +603,33 @@ def delete_dead_letter_messages(
                     continue
                 stats.matched += 1
                 wanted.discard(seq)
+                try:
+                    lock_renewer.register(
+                        receiver,
+                        message,
+                        max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "DLQ delete lock renewal registration failed seq=%s",
+                        seq,
+                        exc_info=True,
+                    )
+                if before_delete is not None:
+                    try:
+                        if not before_delete(parsed):
+                            _safe_abandon(receiver, message)
+                            stats.failed += 1
+                            continue
+                    except Exception:
+                        LOGGER.warning(
+                            "DLQ delete precondition failed seq=%s; keeping message",
+                            seq,
+                            exc_info=True,
+                        )
+                        _safe_abandon(receiver, message)
+                        stats.failed += 1
+                        continue
                 try:
                     receiver.complete_message(message)
                     stats.deleted += 1
@@ -607,6 +668,7 @@ def promote_dead_letter_messages(
     seen: set[int] = set()
     with (
         _client(cfg) as client,
+        AutoLockRenewer(max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS) as lock_renewer,
         client.get_queue_receiver(
             cfg.request_queue,
             sub_queue=ServiceBusSubQueue.DEAD_LETTER,
@@ -640,6 +702,18 @@ def promote_dead_letter_messages(
                     continue
                 stats.matched += 1
                 wanted.discard(seq)
+                try:
+                    lock_renewer.register(
+                        receiver,
+                        message,
+                        max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "DLQ promote lock renewal registration failed seq=%s",
+                        seq,
+                        exc_info=True,
+                    )
                 # Re-send to the main queue FIRST (preserve identity so the
                 # drain handler dedupes on correlation_id), then remove from DLQ.
                 requeued = ServiceBusMessage(
@@ -724,6 +798,8 @@ def drain_requests(
     max_messages: int,
     max_wait_seconds: int = _RECEIVE_MAX_WAIT_SECONDS,
     max_concurrency: int = 1,
+    max_pass_seconds: float = _DRAIN_PASS_MAX_SECONDS,
+    clock: Callable[[], float] | None = None,
 ) -> DrainStats:
     """Receive up to ``max_messages`` request messages and settle each one.
 
@@ -748,6 +824,9 @@ def drain_requests(
     stats = DrainStats()
     budget = max(1, max_messages)
     concurrency = max(1, max_concurrency)
+    monotonic = clock or time.monotonic
+    pass_started = monotonic()
+    pass_budget = max(1.0, float(max_pass_seconds))
     # An abandoned message becomes immediately receivable again, so without a
     # guard the same message can be re-received within THIS drain tick and burn
     # its whole delivery count (→ premature dead-letter) on a transient handler
@@ -770,8 +849,18 @@ def drain_requests(
             ) as receiver,
         ):
             while budget > 0:
+                # The backlog is intentionally NOT a task-sized unit of work.
+                # Finish an active batch, then yield before receiving another
+                # once this pass's wall-clock budget is spent. The resident
+                # loop / beat tick resumes with the untouched broker backlog.
+                if stats.received > 0 and monotonic() - pass_started >= pass_budget:
+                    stats.budget_exhausted = True
+                    break
                 batch = receiver.receive_messages(
-                    max_message_count=min(budget, 32),
+                    # Never lock more messages than can run concurrently. With
+                    # the old fixed batch of 32, the tail waited through up to
+                    # eight 4-way submit waves and could outlive lock renewal.
+                    max_message_count=min(budget, concurrency, 32),
                     max_wait_time=max_wait_seconds,
                 )
                 if not batch:
@@ -815,8 +904,31 @@ def drain_requests(
                 # NEVER settles a message here — only computes the action.
                 actions = _run_drain_handlers(handler, [parsed for _m, parsed in claimed], pool)
                 # Phase 3 (main thread): settle in receiver order.
-                for (message, _parsed), action in zip(claimed, actions, strict=True):
-                    _settle(receiver, message, action, stats)
+                retry_sender_context = (
+                    client.get_queue_sender(cfg.request_queue)
+                    if MessageAction.RETRY in actions
+                    else None
+                )
+                if retry_sender_context is None:
+                    for (message, parsed), action in zip(claimed, actions, strict=True):
+                        _settle(receiver, None, message, parsed, action, stats)
+                else:
+                    with retry_sender_context as retry_sender:
+                        for (message, parsed), action in zip(claimed, actions, strict=True):
+                            _settle(
+                                receiver,
+                                retry_sender,
+                                message,
+                                parsed,
+                                action,
+                                stats,
+                            )
+                if MessageAction.ABANDON in actions or MessageAction.RETRY in actions:
+                    # A shared transient dependency failure tends to affect the
+                    # whole backlog. Yield after this batch so the resident
+                    # consumer applies its backoff and, critically, never
+                    # re-receives + re-abandons the same message in one pass.
+                    break
                 if wrapped:
                     break
     finally:
@@ -825,7 +937,115 @@ def drain_requests(
     return stats
 
 
-def _settle(receiver: Any, message: Any, action: MessageAction, stats: DrainStats) -> None:
+def drain_dead_letter_messages(
+    cfg: ServiceBusConfig | None,
+    handler: Callable[[ParsedMessage], MessageAction],
+    *,
+    max_messages: int,
+) -> DrainStats:
+    """Process a bounded DLQ batch with explicit backup/response settlement.
+
+    The caller returns COMPLETE only after both the producer response and audit
+    backup are durable. Any exception or non-COMPLETE action abandons the DLQ
+    message, preserving it for the next reconcile tick.
+    """
+    cfg = _require_enabled_config(cfg)
+    stats = DrainStats()
+    budget = max(1, max_messages)
+    with (
+        _client(cfg) as client,
+        AutoLockRenewer(max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS) as lock_renewer,
+        client.get_queue_receiver(
+            cfg.request_queue,
+            sub_queue=ServiceBusSubQueue.DEAD_LETTER,
+            receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
+            max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+        ) as receiver,
+    ):
+        while budget > 0:
+            batch = receiver.receive_messages(
+                max_message_count=min(budget, 16),
+                max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
+            )
+            if not batch:
+                break
+            claimed: list[tuple[Any, ParsedMessage]] = []
+            for message in batch:
+                parsed = _parse(message)
+                stats.received += 1
+                budget -= 1
+                try:
+                    lock_renewer.register(
+                        receiver,
+                        message,
+                        max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "DLQ lock renewal registration failed seq=%s",
+                        parsed.sequence_number,
+                        exc_info=True,
+                    )
+                claimed.append((message, parsed))
+            actions = [_safe_drain_handler(handler, parsed) for _message, parsed in claimed]
+            for (message, parsed), action in zip(claimed, actions, strict=True):
+                # RETRY/DEAD_LETTER have no meaning inside the DLQ; preserve the
+                # message unless the caller explicitly confirms COMPLETE.
+                disposition = (
+                    MessageAction.COMPLETE
+                    if action == MessageAction.COMPLETE
+                    else MessageAction.ABANDON
+                )
+                _settle(receiver, None, message, parsed, disposition, stats)
+            if any(action != MessageAction.COMPLETE for action in actions):
+                break
+    return stats
+
+
+def _retry_delay_seconds(attempt: int) -> int:
+    exponent = max(0, min(attempt - 1, 10))
+    return int(min(_RETRY_MAX_DELAY_SECONDS, _RETRY_BASE_SECONDS * (2**exponent)))
+
+
+def _retry_message(parsed: ParsedMessage) -> ServiceBusMessage:
+    """Clone one request for delayed retry without changing execution identity."""
+    next_attempt = parsed.retry_attempt + 1
+    first_enqueued_at = parsed.first_enqueued_at
+    if not first_enqueued_at and parsed.enqueued_time_utc is not None:
+        first_enqueued_at = _iso_or_none(parsed.enqueued_time_utc) or ""
+    if not first_enqueued_at:
+        first_enqueued_at = _now().isoformat(timespec="seconds")
+    correlation_id = str(parsed.correlation_id or parsed.message_id or "")
+    retry_message_id = "retry-" + hashlib.sha256(
+        f"{correlation_id}:{next_attempt}".encode()
+    ).hexdigest()[:40]
+    properties = dict(parsed.application_properties)
+    properties.update(
+        {
+            "elb_retry_attempt": next_attempt,
+            "elb_first_enqueued_at": first_enqueued_at,
+        }
+    )
+    return ServiceBusMessage(
+        parsed.raw_body or json.dumps(parsed.body, default=str),
+        content_type=parsed.content_type or "application/json",
+        subject=parsed.subject or "blast.request",
+        message_id=retry_message_id,
+        correlation_id=parsed.correlation_id,
+        application_properties=properties,
+        scheduled_enqueue_time_utc=_now()
+        + timedelta(seconds=_retry_delay_seconds(next_attempt)),
+    )
+
+
+def _settle(
+    receiver: Any,
+    retry_sender: Any | None,
+    message: Any,
+    parsed: ParsedMessage,
+    action: MessageAction,
+    stats: DrainStats,
+) -> None:
     try:
         if action == MessageAction.COMPLETE:
             receiver.complete_message(message)
@@ -833,13 +1053,25 @@ def _settle(receiver: Any, message: Any, action: MessageAction, stats: DrainStat
         elif action == MessageAction.DEAD_LETTER:
             receiver.dead_letter_message(message, reason="handler_rejected")
             stats.dead_lettered += 1
+        elif action == MessageAction.RETRY:
+            if retry_sender is None:
+                raise RuntimeError("retry sender is unavailable")
+            # Schedule first, complete second. A crash between them can create
+            # an at-least-once duplicate, but stable correlation/idempotency and
+            # the atomic bridge claim converge both copies to one BLAST job.
+            retry_sender.send_messages(_retry_message(parsed))
+            receiver.complete_message(message)
+            stats.retried += 1
         else:
             receiver.abandon_message(message)
             stats.abandoned += 1
-    except ServiceBusError:
+    except Exception:
         # Lock already lost/expired — the broker will redeliver. Count as
-        # abandoned for observability; do not raise (best-effort settlement).
-        LOGGER.warning("service bus settle failed (lock lost?) action=%s", action)
+        # abandoned for observability; retry scheduling failures deliberately
+        # preserve the original message rather than completing it.
+        if action == MessageAction.RETRY:
+            _safe_abandon(receiver, message)
+        LOGGER.warning("service bus settle failed action=%s", action, exc_info=True)
         stats.abandoned += 1
 
 
@@ -857,17 +1089,19 @@ def _iso_or_none(value: Any) -> str | None:
     if value is None:
         return None
     try:
+        if not isinstance(value, datetime):
+            return None
         # Treat naive timestamps as UTC (matches the SDK's contract).
-        if getattr(value, "tzinfo", None) is None:
-            value = value.replace(tzinfo=UTC)  # type: ignore[union-attr]
-        return value.isoformat().replace("+00:00", "Z")  # type: ignore[union-attr]
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return str(value.isoformat().replace("+00:00", "Z"))
     except Exception:
         # Best-effort — a bad timestamp must never break the counts call.
         return None
 
 
 def pending_request_count(cfg: ServiceBusConfig | None) -> int | None:
-    """Active (deliverable) request-queue message count, or ``None``.
+    """Active plus scheduled request-queue message count, or ``None``.
 
     A lightweight, best-effort read of the request queue's
     ``active_message_count`` for the AKS auto-stop evaluator: a Running
@@ -877,11 +1111,10 @@ def pending_request_count(cfg: ServiceBusConfig | None) -> int | None:
     Service Bus is disabled, the credential lacks ``Manage`` / ``EntityRead``
     claims, or the runtime-properties call fails, so the caller degrades to
     the existing state_repo + live-K8s signals (an unreadable queue must
-    never strand a cluster running forever). ``scheduled_message_count`` is
-    intentionally excluded -- a future-dated message is not immediate work --
-    and dead-lettered messages are already excluded by
-    ``active_message_count``, so a poison message that exhausts its delivery
-    count drops out of this signal and the cluster can idle-stop normally.
+    never strand a cluster running forever). Scheduled transient retries are
+    included: they are accepted producer work that must keep or restart the
+    execution plane until their retry time arrives. Dead-lettered messages are
+    excluded, so terminal poison messages do not pin the cluster running.
     """
     try:
         cfg = _require_enabled_config(cfg)
@@ -890,7 +1123,9 @@ def pending_request_count(cfg: ServiceBusConfig | None) -> int | None:
     try:
         with _admin_client(cfg) as admin:
             q = admin.get_queue_runtime_properties(cfg.request_queue)
-            return max(0, int(getattr(q, "active_message_count", 0) or 0))
+            active = int(getattr(q, "active_message_count", 0) or 0)
+            scheduled = int(getattr(q, "scheduled_message_count", 0) or 0)
+            return max(0, active + scheduled)
     except Exception:
         LOGGER.debug("pending_request_count unavailable", exc_info=True)
         return None
@@ -1112,12 +1347,19 @@ def purge_dead_letter(
     return stats
 
 
-def purge_queue(cfg: ServiceBusConfig | None, *, dead_letter: bool, max_messages: int) -> int:
-    """Hard-delete messages from the main queue or its DLQ (manual action).
+def purge_queue(
+    cfg: ServiceBusConfig | None,
+    *,
+    dead_letter: bool,
+    max_messages: int,
+    before_delete: Callable[[ParsedMessage], bool],
+) -> int:
+    """Delete a bounded queue/DLQ batch only after a durable precondition.
 
-    Used by the Settings "Purge" buttons. The DLQ path here is the
-    unconditional variant; the automatic policy path uses ``purge_dead_letter``
-    with mandatory backup instead. Bounded by ``max_messages``.
+    Manual purge is PEEK_LOCK, never RECEIVE_AND_DELETE: the caller must first
+    persist the producer's terminal response (and any audit evidence). A False
+    return or exception abandons the message so an operator action cannot erase
+    the only copy before the producer outcome is durable.
     """
     cfg = _require_enabled_config(cfg)
     removed = 0
@@ -1125,10 +1367,11 @@ def purge_queue(cfg: ServiceBusConfig | None, *, dead_letter: bool, max_messages
     sub_queue = ServiceBusSubQueue.DEAD_LETTER if dead_letter else None
     with (
         _client(cfg) as client,
+        AutoLockRenewer(max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS) as lock_renewer,
         client.get_queue_receiver(
             cfg.request_queue,
             sub_queue=sub_queue,
-            receive_mode=ServiceBusReceiveMode.RECEIVE_AND_DELETE,
+            receive_mode=ServiceBusReceiveMode.PEEK_LOCK,
             max_wait_time=_RECEIVE_MAX_WAIT_SECONDS,
         ) as receiver,
     ):
@@ -1139,8 +1382,34 @@ def purge_queue(cfg: ServiceBusConfig | None, *, dead_letter: bool, max_messages
             )
             if not batch:
                 break
-            removed += len(batch)
-            budget -= len(batch)
+            for message in batch:
+                budget -= 1
+                parsed = _parse(message)
+                try:
+                    lock_renewer.register(
+                        receiver,
+                        message,
+                        max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "queue purge lock renewal registration failed seq=%s",
+                        parsed.sequence_number,
+                        exc_info=True,
+                    )
+                try:
+                    ready = before_delete(parsed)
+                except Exception:
+                    ready = False
+                    LOGGER.warning("queue purge precondition failed", exc_info=True)
+                if not ready:
+                    _safe_abandon(receiver, message)
+                    return removed
+                try:
+                    receiver.complete_message(message)
+                    removed += 1
+                except ServiceBusError:
+                    LOGGER.warning("queue purge complete failed (lock lost?)")
     return removed
 
 

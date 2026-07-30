@@ -104,10 +104,10 @@ def test_abandoned_message_not_reabandoned_same_tick(monkeypatch: pytest.MonkeyP
     _patch_client(monkeypatch, receiver)
 
     stats = service_bus.drain_requests(_cfg(), lambda _m: MessageAction.ABANDON, max_messages=50)
-    # Despite the message reappearing after abandon, it is abandoned at most
-    # twice (once handled, once as the deferred re-delivery guard) — NOT 50x.
-    assert stats.abandoned <= 2
-    assert receiver.abandoned.count("m1") <= 2
+    # The pass yields immediately after the transient batch, so the message is
+    # abandoned exactly once and cannot burn delivery count twice in one pass.
+    assert stats.abandoned == 1
+    assert receiver.abandoned.count("m1") == 1
     assert stats.received == 1  # only counted as handled once
 
 
@@ -236,6 +236,38 @@ class _FakeTopicClient:
     def get_topic_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
         return self._sender
 
+
+def test_retry_schedules_clone_before_completing_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receiver = _FakeReceiver([_FakeMessage("retry-source", {"db": "core_nt"})])
+    sender = _FakeTopicSender()
+
+    class _RetryClient(_FakeClient):
+        def get_queue_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
+            return sender
+
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield _RetryClient(receiver)
+
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+
+    stats = service_bus.drain_requests(
+        _cfg(),
+        lambda _m: MessageAction.RETRY,
+        max_messages=50,
+        max_concurrency=4,
+    )
+
+    assert stats.retried == 1
+    assert receiver.completed == ["retry-source"]
+    assert receiver.abandoned == []
+    assert len(sender.sent) == 1
+    retry = sender.sent[0]
+    assert str(retry.message_id).startswith("retry-")
+    assert retry.application_properties["elb_retry_attempt"] == 1
+    assert retry.scheduled_enqueue_time_utc is not None
 
 def _patch_topic_client(monkeypatch: pytest.MonkeyPatch, sender: _FakeTopicSender) -> None:
     @contextmanager
@@ -527,3 +559,53 @@ def test_parallel_drain_handles_multiple_batches(
     assert stats.completed == 70
     assert stats.received == 70
     assert len(receiver.completed) == 70
+
+
+def test_receive_batch_is_capped_to_handler_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    msgs = [_FakeMessage(f"cap-{i}", {"db": "core_nt"}) for i in range(12)]
+    receiver = _FakeReceiver(msgs)
+    requested: list[int] = []
+    original_receive = receiver.receive_messages
+
+    def receive(max_message_count: int, max_wait_time: int):
+        requested.append(max_message_count)
+        return original_receive(max_message_count, max_wait_time)
+
+    receiver.receive_messages = receive  # type: ignore[method-assign]
+    _patch_client(monkeypatch, receiver)
+
+    stats = service_bus.drain_requests(
+        _cfg(),
+        lambda _m: MessageAction.COMPLETE,
+        max_messages=12,
+        max_concurrency=4,
+    )
+
+    assert stats.completed == 12
+    assert requested
+    assert max(requested) <= 4
+
+
+def test_pass_budget_yields_without_locking_remaining_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receiver = _FakeReceiver(
+        [_FakeMessage(f"budget-{i}", {"db": "core_nt"}) for i in range(3)]
+    )
+    _patch_client(monkeypatch, receiver)
+    clock = iter((0.0, 241.0))
+
+    stats = service_bus.drain_requests(
+        _cfg(),
+        lambda _m: MessageAction.COMPLETE,
+        max_messages=3,
+        max_concurrency=1,
+        max_pass_seconds=240,
+        clock=lambda: next(clock),
+    )
+
+    assert stats.completed == 1
+    assert stats.budget_exhausted is True
+    assert len(receiver._available) == 2

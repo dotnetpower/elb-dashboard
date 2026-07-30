@@ -181,6 +181,127 @@ def test_auto_stop_aks_calls_stop_when_evaluator_returns_stop(
     assert stop_calls[0]["cluster_name"] == "elb-cluster"
 
 
+def test_auto_stop_aks_skips_while_servicebus_drain_holds_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.azure import idle_autostop
+
+    save_auto_stop_preference(_pref())
+    monkeypatch.setattr(idle_autostop, "_power_state", lambda _pref: "Running")
+    monkeypatch.setattr(idle_autostop, "_provisioning_state", lambda _pref: "Succeeded")
+    monkeypatch.setattr(
+        idle_autostop,
+        "evaluate_cluster",
+        lambda *_a, **_k: IdleDecision(verdict="stop", reason="idle:60m"),
+    )
+    monkeypatch.setattr("api.services.service_bus_pref.service_bus_enabled", lambda: True)
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.get_service_bus_config",
+        lambda: type("_Cfg", (), {"request_queue": "requests"})(),
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (False, None),
+    )
+    stop_calls: list[int] = []
+    monkeypatch.setattr(
+        "api.tasks.azure.stop_aks.run",
+        lambda **_kw: stop_calls.append(1),
+    )
+
+    result = idle_autostop.auto_stop_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+    )
+
+    assert result["reason"] == "servicebus_drain_in_progress"
+    assert stop_calls == []
+
+
+def test_auto_stop_aks_rechecks_queue_after_drain_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.azure import idle_autostop
+
+    save_auto_stop_preference(_pref())
+    monkeypatch.setattr(idle_autostop, "_power_state", lambda _pref: "Running")
+    monkeypatch.setattr(idle_autostop, "_provisioning_state", lambda _pref: "Succeeded")
+    monkeypatch.setattr(
+        idle_autostop,
+        "evaluate_cluster",
+        lambda *_a, **_k: IdleDecision(verdict="stop", reason="idle:60m"),
+    )
+    pending = iter((0, 3))
+    monkeypatch.setattr(idle_autostop, "_sb_pending_signal", lambda _state: next(pending))
+    monkeypatch.setattr("api.services.service_bus_pref.service_bus_enabled", lambda: True)
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.get_service_bus_config",
+        lambda: type("_Cfg", (), {"request_queue": "requests"})(),
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (True, "intent-token"),
+    )
+    released: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.release_drain_stop_intent",
+        lambda queue, token: released.append((queue, token)),
+    )
+
+    result = idle_autostop.auto_stop_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+    )
+
+    assert result["reason"] == "sb_queue_pending:3"
+    assert released == [("requests", "intent-token")]
+
+
+def test_auto_stop_aks_releases_drain_fence_after_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.azure import idle_autostop
+
+    save_auto_stop_preference(_pref())
+    monkeypatch.setattr(idle_autostop, "_power_state", lambda _pref: "Running")
+    monkeypatch.setattr(idle_autostop, "_provisioning_state", lambda _pref: "Succeeded")
+    monkeypatch.setattr(idle_autostop, "_sb_pending_signal", lambda _state: 0)
+    monkeypatch.setattr(
+        idle_autostop,
+        "evaluate_cluster",
+        lambda *_a, **_k: IdleDecision(verdict="stop", reason="idle:60m"),
+    )
+    monkeypatch.setattr("api.services.service_bus_pref.service_bus_enabled", lambda: True)
+    monkeypatch.setattr(
+        "api.services.service_bus_pref.get_service_bus_config",
+        lambda: type("_Cfg", (), {"request_queue": "requests"})(),
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (True, "intent-token"),
+    )
+    released: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.release_drain_stop_intent",
+        lambda queue, token: released.append((queue, token)),
+    )
+    monkeypatch.setattr(
+        "api.tasks.azure.stop_aks.run",
+        lambda **_kw: {"status": "completed"},
+    )
+
+    result = idle_autostop.auto_stop_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+    )
+
+    assert result["action"] == "stop"
+    assert released == [("requests", "intent-token")]
+
+
 def test_auto_stop_aks_stops_despite_preflight_cooldown_stamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

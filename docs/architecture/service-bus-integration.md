@@ -167,20 +167,24 @@ sequenceDiagram
   participant Q as requests queue
   participant B as beat drain task
   participant S as Celery submit pipeline
+  participant O as durable response outbox
   participant T as optional completions topic
   P->>Q: send request message
   B->>Q: receive (peek-lock)
   B->>B: compare correlation + execution fingerprint
   B->>S: create JobState + enqueue submit
-  B-->>T: optionally publish "queued" acceptance
+  B->>O: persist "queued" acceptance
+  O-->>T: publish at-least-once
   B->>Q: complete message promptly
   Note over B,Q: message is not held for the whole BLAST run
   S->>S: run BLAST (minutes–hours)
   B-->>T: optionally publish "running" (on first observed transition)
   alt success
-    S-->>T: optionally publish "succeeded" + result_ref
+    S->>O: persist "succeeded" + result_ref
+    O-->>T: publish at-least-once
   else failure
-    S-->>T: optionally publish "failed" + error_code
+    S->>O: persist "failed" + error_code
+    O-->>T: publish at-least-once
   end
 ```
 
@@ -191,11 +195,30 @@ run. Service Bus peek-lock is capped at **5 minutes**; a BLAST run takes
 minutes to hours. Holding the lock would cause `MessageLockLost`, redelivery,
 and **duplicate job execution**. Instead the task: receives → dedups → creates
 the `JobState` row → enqueues the existing Celery submit task → publishes the
-queued acceptance event when configured → **completes the message promptly**.
+queued acceptance response to the durable outbox → **completes the message promptly**.
 The message is not held for the BLAST run. If the initial queued-event publish
-fails, the durable bridge remains active and the transition publisher retries it
-on a later tick. Status is reported via the durable `jobstate` table and
-optional topic events, never by mutating the queued message.
+fails, the outbox retains it and the transition publisher retries it on a later
+tick. Status is reported via the durable `jobstate` table and optional topic
+events, never by mutating the queued message.
+
+While AKS starts, scales, updates databases, or warms node-local caches, strict
+execution admission runs **before receive**. A multi-hour lifecycle therefore
+does not lock, abandon, or increment delivery count on pending requests. Once
+admission opens, each drain pass locks at most the configured handler
+concurrency and yields after its wall-clock budget; any untouched backlog stays
+broker-owned for the next pass instead of timing out a Celery task.
+
+Each newly claimed request re-checks admission immediately before OpenAPI
+submit. Auto-stop also takes a Redis stop-intent fence that is mutually exclusive
+with the queue-scoped drain lease, then re-reads pending depth before creating
+the AKS stop barrier. A PEEK_LOCKed submit and an idle stop therefore cannot
+cross in the decide-to-act window.
+
+Transient OpenAPI transport, HTTP 408, 429, and 5xx failures are future-scheduled
+with exponential backoff. The retry clone preserves the original correlation
+and idempotency identity; only successful scheduling permits the original
+message to complete. When the bounded retry attempt/age envelope is exhausted,
+the dashboard persists a terminal `failed` response before dead-lettering.
 
 ### Idempotency
 
@@ -208,9 +231,9 @@ or logged by collision handling.
 
 - **Same correlation + same fingerprint:** this is an idempotent retry. The
   existing `openapi_job_id` is reused and a queued/accepted event is republished
-  with the retry message's `request_id`. The request message is completed only
-  after that ACK publish succeeds; a publish failure abandons it for safe
-  redelivery. No second BLAST execution is created.
+  with the retry message's `request_id`. The request message is completed after
+  that ACK is durable in the outbox; a completion-topic outage delays delivery
+  without causing another BLAST execution.
 - **Same correlation + different fingerprint:** this is a correlation conflict,
   not a retry. The dashboard publishes a terminal `failed` event with
   `error_code=servicebus_correlation_conflict`, without embedding the new
@@ -224,7 +247,8 @@ or logged by collision handling.
 | Config row (Table-backed) | `api/services/service_bus_pref.py` |
 | Client wrapper (Entra + SAS, send/recv/peek/counts/purge) | `api/services/service_bus.py` |
 | Settings routes | `api/routes/settings/service_bus.py` |
-| Drain / publish / cleanup tasks | `api/tasks/servicebus/` |
+| Drain / publish / DLQ response / cleanup tasks | `api/tasks/servicebus/` |
+| Durable producer response outbox | `api/services/service_bus_outbox.py` |
 | Settings UI | `web/src/components/settings/sections/ServiceBusSection.tsx` |
 
 ## Authentication — two modes
@@ -252,6 +276,13 @@ Service Bus mechanisms set on the entities:
 | Time-to-live | `default-message-time-to-live` (24h request queue / 1h completion subscription when configured) | Un-consumed messages expire automatically. |
 | Max delivery count | `max-delivery-count` = 10 | A poison message is moved to the **dead-letter queue (DLQ)** instead of blocking the main queue. |
 | Dead-letter on expiration | `dead-lettering-on-message-expiration` = true | Expired messages are preserved in the DLQ for investigation rather than vanishing. |
+
+A dedicated DLQ response reconciler converts TTL expiry, max-delivery
+exhaustion, and other terminal broker outcomes into a durable `failed` response.
+It removes a DLQ message only after both the response outbox write and audit
+backup succeed. Automatic cleanup and operator delete/purge use the same
+response-first contract, so no deletion path can silently erase a producer
+outcome.
 
 ### The DLQ is never auto-purged by Service Bus
 

@@ -16,6 +16,7 @@ Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py``.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from api.services import external_blast, service_bus
@@ -64,6 +65,7 @@ def _enable(monkeypatch: pytest.MonkeyPatch) -> ServiceBusConfig:
 
 
 def _msg(body: dict, **kw) -> ParsedMessage:
+    application_properties = kw.get("application_properties") or {}
     return ParsedMessage(
         body=body,
         raw_body="",
@@ -73,7 +75,12 @@ def _msg(body: dict, **kw) -> ParsedMessage:
         content_type="application/json",
         enqueued_time_utc=kw.get("enqueued_time_utc"),
         sequence_number=kw.get("sequence_number"),
-        application_properties=kw.get("application_properties") or {},
+        application_properties=application_properties,
+        dead_letter_reason=kw.get("dead_letter_reason"),
+        dead_letter_error_description=kw.get("dead_letter_error_description"),
+        delivery_count=kw.get("delivery_count"),
+        retry_attempt=int(application_properties.get("elb_retry_attempt") or 0),
+        first_enqueued_at=str(application_properties.get("elb_first_enqueued_at") or ""),
     )
 
 
@@ -81,6 +88,7 @@ def test_tasks_skip_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sb_tasks, "service_bus_enabled", lambda: False)
     assert sb_tasks.drain_and_resubmit()["skipped"] == "disabled"
     assert sb_tasks.publish_transitions()["skipped"] == "disabled"
+    assert sb_tasks.reconcile_dead_letter_responses()["skipped"] == "disabled"
     assert sb_tasks.dlq_cleanup()["skipped"] == "disabled"
 
 
@@ -146,6 +154,36 @@ def test_drain_always_enforces_execution_admission(
     out = sb_tasks.drain_and_resubmit()
     assert probed == [1]
     assert out["skipped"] == "database_warmup_in_progress"
+    assert pulled == []
+
+
+def test_multi_hour_database_warmup_never_opens_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated ticks during a long DB operation preserve broker messages untouched."""
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _cfg: {
+            "allowed": False,
+            "reason": "database_warmup_in_progress",
+            "retry_after_seconds": 10,
+        },
+    )
+    pulled: list[int] = []
+    monkeypatch.setattr(
+        service_bus,
+        "drain_requests",
+        lambda *_a, **_k: pulled.append(1),
+    )
+
+    # 720 ten-second ticks model two hours without receiving, settling, or
+    # incrementing delivery_count on any request message.
+    for _ in range(720):
+        out = sb_tasks.drain_and_resubmit()
+        assert out["skipped"] == "database_warmup_in_progress"
+
     assert pulled == []
 
 
@@ -663,7 +701,7 @@ def test_same_correlation_different_execution_publishes_sanitized_conflict(
     assert "query_fasta" not in str(telemetry)
 
 
-def test_duplicate_ack_publish_failure_abandons_for_redelivery(
+def test_duplicate_ack_publish_failure_completes_after_durable_outbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = _enable(monkeypatch)
@@ -687,11 +725,11 @@ def test_duplicate_ack_publish_failure_abandons_for_redelivery(
     retry = _msg({**first.body, "request_id": "req-2"}, sequence_number=42)
     assert (
         service_bus._safe_drain_handler(lambda msg: sb_tasks._drain_handler(msg, cfg), retry)
-        == MessageAction.ABANDON
+        == MessageAction.COMPLETE
     )
 
 
-def test_conflict_publish_failure_abandons_instead_of_dead_lettering(
+def test_conflict_publish_failure_dead_letters_after_durable_outbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = _enable(monkeypatch)
@@ -719,8 +757,30 @@ def test_conflict_publish_failure_abandons_instead_of_dead_lettering(
         service_bus._safe_drain_handler(
             lambda msg: sb_tasks._drain_handler(msg, cfg), conflicting
         )
-        == MessageAction.ABANDON
+        == MessageAction.DEAD_LETTER
     )
+
+
+def test_terminal_response_outbox_failure_keeps_original_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(
+        sb_tasks,
+        "enqueue_response",
+        lambda _event: (_ for _ in ()).throw(
+            sb_tasks.ResponseOutboxPersistenceError("table unavailable")
+        ),
+    )
+    malformed = _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "external_correlation_id": "corr-outbox-down",
+        }
+    )
+
+    assert sb_tasks._drain_handler(malformed, cfg) == MessageAction.ABANDON
 
 
 def test_request_fingerprint_is_canonical_and_excludes_tracking_fields() -> None:
@@ -786,8 +846,8 @@ def test_drain_dead_letters_on_permanent_4xx(monkeypatch: pytest.MonkeyPatch) ->
     assert action == MessageAction.DEAD_LETTER
 
 
-def test_drain_abandons_on_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A sibling 5xx / 503 transport error is transient → abandon for redelivery."""
+def test_drain_schedules_retry_on_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sibling 5xx / 503 transport error is transient → scheduled retry."""
     from fastapi import HTTPException
 
     _enable(monkeypatch)
@@ -807,11 +867,11 @@ def test_drain_abandons_on_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> Non
         ),
         _enabled_cfg(),
     )
-    assert action == MessageAction.ABANDON
+    assert action == MessageAction.RETRY
 
 
-def test_drain_abandons_on_retryable_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
-    """408/429 are retryable 4xx → abandon, not dead-letter."""
+def test_drain_schedules_retry_on_retryable_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """408/429 are retryable 4xx → scheduled retry, not dead-letter."""
     from fastapi import HTTPException
 
     _enable(monkeypatch)
@@ -831,7 +891,89 @@ def test_drain_abandons_on_retryable_4xx(monkeypatch: pytest.MonkeyPatch) -> Non
         ),
         _enabled_cfg(),
     )
-    assert action == MessageAction.ABANDON
+    assert action == MessageAction.RETRY
+
+
+def test_retry_exhaustion_stages_failed_response_before_dead_letter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, event, **_kwargs: events.append(event) or (True, False),
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            HTTPException(503, detail={"code": "openapi_unreachable"})
+        ),
+    )
+    msg = _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">s\nACGT",
+            "external_correlation_id": "corr-retry-exhausted",
+        },
+        application_properties={"elb_retry_attempt": sb_tasks._RETRY_MAX_ATTEMPTS},
+    )
+
+    assert sb_tasks._drain_handler(msg, cfg) == MessageAction.DEAD_LETTER
+    assert events and events[0]["status"] == "failed"
+    assert events[0]["error_code"] == "servicebus_retry_exhausted"
+
+
+def test_dlq_response_is_durable_and_backed_up_before_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    events: list[dict[str, Any]] = []
+    backups: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, event, **kwargs: (
+            events.append({**event, "_deliver_immediately": kwargs.get("deliver_immediately")})
+            or (True, False)
+        ),
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "backup_dead_letter_message",
+        lambda record: backups.append(record) or True,
+    )
+
+    def drain(_cfg: Any, handler: Any, *, max_messages: int) -> Any:
+        assert max_messages == sb_tasks._DLQ_RESPONSE_MAX_MESSAGES
+        action = handler(
+            _msg(
+                {
+                    "program": "blastn",
+                    "db": "core_nt",
+                    "external_correlation_id": "corr-expired",
+                },
+                message_id="expired-1",
+                dead_letter_reason="TTLExpiredException",
+            )
+        )
+        assert action == MessageAction.COMPLETE
+        return type(
+            "_Stats",
+            (),
+            {"received": 1, "completed": 1, "abandoned": 0},
+        )()
+
+    monkeypatch.setattr(service_bus, "drain_dead_letter_messages", drain)
+
+    result = sb_tasks._reconcile_dead_letter_responses(cfg)
+
+    assert result == {"received": 1, "completed": 1, "abandoned": 0}
+    assert events[0]["error_code"] == "servicebus_request_expired"
+    assert events[0]["_deliver_immediately"] is False
+    assert backups and backups[0]["correlation_id"] == "corr-expired"
 
 
 def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
@@ -1507,6 +1649,39 @@ def test_publish_transitions_idle_skips_openapi_resolution(
     assert out == {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
 
 
+def test_bridge_without_marker_recovers_queued_ack_before_status_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    rec = BridgeRecord(
+        correlation_id="corr-queued-recovery",
+        openapi_job_id="op-queued-recovery",
+        last_status="",
+        request_id="req-queued-recovery",
+    )
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, event: events.append(event) or (True, False),
+    )
+    markers: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "mark_published",
+        lambda correlation_id, status: markers.append((correlation_id, status)),
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not poll yet")),
+    )
+
+    assert sb_tasks._publish_one_bridge(cfg, rec, {}) == (0, 0)
+    assert events and events[0]["status"] == "queued"
+    assert markers == [("corr-queued-recovery", "queued")]
+
+
 def test_publish_transitions_defers_all_bridge_polls_when_openapi_is_not_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1861,7 +2036,7 @@ def test_atomic_claim_releases_on_submit_failure(
         raise RuntimeError("transient")
 
     monkeypatch.setattr(external_blast, "submit_job", _boom)
-    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.ABANDON
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.RETRY
     assert released == ["corr-z"]
 
 
@@ -1934,7 +2109,12 @@ class _FakeLockRedis:
     def eval(self, script: str, numkeys: int, *args: object) -> int:
         self.evaled.append(args)
         self.eval_keys.append(args[0])  # KEYS[1]
+        if numkeys == 2:
+            return 1 if self._set_result else 0
         return 1
+
+    def exists(self, _key: str) -> int:
+        return 0
 
 
 def _stats0() -> object:
@@ -1966,10 +2146,10 @@ def test_singleflight_acquires_then_releases(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(sb_tasks.service_bus, "drain_requests", lambda *a, **k: _stats0())
     out = sb_tasks.drain_and_resubmit()
     assert "skipped" not in out
-    assert len(fake.evaled) == 1  # released its own lease (compare-and-delete)
-    # The lease is queue-scoped and the release targets the SAME key it locked.
-    assert fake.set_keys[0] == sb_tasks._drain_lock_key(cfg.request_queue)
-    assert fake.eval_keys[0] == fake.set_keys[0]
+    assert len(fake.evaled) == 2  # atomic acquire + compare-and-delete release
+    # The lease is queue-scoped and release targets the SAME key it acquired.
+    assert fake.eval_keys[0] == sb_tasks._drain_lock_key(cfg.request_queue)
+    assert fake.eval_keys[1] == fake.eval_keys[0]
 
 
 def test_singleflight_contended_tick_skips(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1984,7 +2164,7 @@ def test_singleflight_contended_tick_skips(monkeypatch: pytest.MonkeyPatch) -> N
     out = sb_tasks.drain_and_resubmit()
     assert out["skipped"] == "locked"
     assert drained == []  # the held drain covers the backlog; we did not race it
-    assert fake.evaled == []  # never released a lease we did not own
+    assert len(fake.evaled) == 1  # atomic acquire attempt only; no release
 
 
 def test_singleflight_redis_error_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2012,7 +2192,7 @@ def test_drain_lock_key_is_queue_scoped() -> None:
 
 def test_drain_lock_ttl_env_invalid_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "nope")
-    assert sb_tasks._drain_lock_ttl_from_env() == 120
+    assert sb_tasks._drain_lock_ttl_from_env() == 900
 
 
 def test_drain_lock_ttl_env_is_floored(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -5,7 +5,8 @@ Responsibility: Aggregate and re-export the Service Bus Celery tasks so Celery
     callers/tests can import them from this package.
 Edit boundaries: Keep this a thin facade — real task bodies live in
     ``api.tasks.servicebus.tasks``.
-Key entry points: ``drain_and_resubmit``, ``publish_transitions``, ``dlq_cleanup``.
+Key entry points: ``drain_and_resubmit``, ``publish_transitions``,
+    ``reconcile_dead_letter_responses``, ``dlq_cleanup``.
 Risky contracts: Task names are byte-identical to the beat schedule / route
     callers; do not rename without updating ``api.celery_app`` and any enqueue
     sites.
@@ -18,6 +19,12 @@ from api.tasks.servicebus.tasks import (
     dlq_cleanup,
     drain_and_resubmit,
     publish_transitions,
+    reconcile_dead_letter_responses,
 )
 
-__all__ = ["dlq_cleanup", "drain_and_resubmit", "publish_transitions"]
+__all__ = [
+    "dlq_cleanup",
+    "drain_and_resubmit",
+    "publish_transitions",
+    "reconcile_dead_letter_responses",
+]

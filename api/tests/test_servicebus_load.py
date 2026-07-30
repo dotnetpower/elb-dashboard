@@ -79,6 +79,7 @@ class _LoadReceiver:
         self.completed: list[str] = []
         self.dead_lettered: list[str] = []
         self.abandoned: list[str] = []
+        self.scheduled: list[Any] = []
 
     def __enter__(self):
         return self
@@ -109,6 +110,21 @@ class _LoadClient:
 
     def get_queue_receiver(self, *_a: Any, **_k: Any) -> _LoadReceiver:
         return self._receiver
+
+    def get_queue_sender(self, *_a: Any, **_k: Any):
+        receiver = self._receiver
+
+        class _Sender:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc: Any) -> None:
+                return None
+
+            def send_messages(self, message: Any) -> None:
+                receiver.scheduled.append(message)
+
+        return _Sender()
 
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, receiver: _LoadReceiver) -> None:
@@ -266,10 +282,10 @@ def test_permanent_rejection_flood_dead_letters_without_retry_storm(
     assert len(per_tick) <= (n // sb_tasks._DRAIN_MAX_MESSAGES) + 2
 
 
-def test_transient_failure_is_abandoned_for_retry(
+def test_transient_failure_is_scheduled_for_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A 5xx from the sibling must ABANDON (retry), not dead-letter."""
+    """A 5xx schedules a retry and completes the original, never dead-lettering it."""
     _enable(monkeypatch)
     receiver = _LoadReceiver([_LoadMessage("m1", _request_body("corr-5xx"))])
     _patch_client(monkeypatch, receiver)
@@ -279,11 +295,13 @@ def test_transient_failure_is_abandoned_for_retry(
 
     monkeypatch.setattr(external_blast, "submit_job", overloaded)
 
-    # One tick: the message is abandoned (transient) — not dead-lettered.
+    # One tick: the original is completed only after a delayed clone is sent.
     out = sb_tasks.drain_and_resubmit()
     assert out["dead_lettered"] == 0
     assert receiver.dead_lettered == []
-    assert "m1" in receiver.abandoned
+    assert receiver.completed == ["m1"]
+    assert receiver.abandoned == []
+    assert len(receiver.scheduled) == 1
 
 
 # --------------------------------------------------------------------------- #
