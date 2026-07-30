@@ -1157,6 +1157,9 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
         "dead_letter": None,
         "subscriptions": [],
         "completion_kind": getattr(cfg, "completion_kind", "topic"),
+        "completion_configured": bool(cfg.completion_topic),
+        "completion_accessible": None if not cfg.completion_topic else False,
+        "completion_error": "",
     }
     with _admin_client(cfg) as admin:
         try:
@@ -1227,9 +1230,11 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                             ),
                         }
                     )
+                    result["completion_accessible"] = True
                 except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
                     raise ServiceBusAuthError(str(exc)) from exc
-                except ServiceBusError:
+                except ServiceBusError as exc:
+                    result["completion_error"] = type(exc).__name__
                     LOGGER.debug("completion queue counts unavailable", exc_info=True)
             else:
                 try:
@@ -1252,9 +1257,11 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                                 ),
                             }
                         )
+                    result["completion_accessible"] = True
                 except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
                     raise ServiceBusAuthError(str(exc)) from exc
-                except ServiceBusError:
+                except ServiceBusError as exc:
+                    result["completion_error"] = type(exc).__name__
                     LOGGER.debug("subscription listing unavailable", exc_info=True)
     return result
 

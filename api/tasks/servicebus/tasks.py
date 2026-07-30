@@ -6,6 +6,7 @@ Responsibility: The beat-driven side effects of the optional Service Bus BLAST
     message immediately (never holds the lock for the run).
     ``publish_transitions`` polls the sibling status for active bridge rows and
     emits one event per state change to the completion topic.
+    ``emit_service_bus_health`` records bounded queue/outbox/admission health.
     ``reconcile_dead_letter_responses`` turns every DLQ outcome into a durable
     producer failure response plus mandatory audit backup before deletion.
     ``dlq_cleanup`` enforces the remaining operator retention policy.
@@ -14,8 +15,8 @@ Edit boundaries: Long-running side effects only. Service Bus data-plane calls go
     through ``api.services.external_blast``; persistence is
     ``service_bus_pref`` (config) + ``service_bus_tracking`` (bridge rows).
 Key entry points: ``drain_and_resubmit``, ``publish_transitions``,
-    ``reconcile_dead_letter_responses``, ``dlq_cleanup`` (registered as
-    ``api.tasks.servicebus.*``).
+    ``emit_service_bus_health``, ``reconcile_dead_letter_responses``,
+    ``dlq_cleanup`` (registered as ``api.tasks.servicebus.*``).
 Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — the
     env gate plus the saved config must both opt in. All three beat tasks also
     skip the current tick (returning ``{"skipped": "transient"}``) on a
@@ -65,7 +66,14 @@ from fastapi import HTTPException
 
 from api.services import external_blast, service_bus
 from api.services.service_bus import MessageAction, ParsedMessage
-from api.services.service_bus_observability import record_service_bus_request_event
+from api.services.service_bus_health import (
+    collect_service_bus_health,
+    note_outbox_flush,
+)
+from api.services.service_bus_observability import (
+    record_service_bus_health_event,
+    record_service_bus_request_event,
+)
 from api.services.service_bus_outbox import (
     ResponseOutboxPersistenceError,
     enqueue_response,
@@ -91,6 +99,12 @@ from api.tasks.servicebus.dlq_backup import backup_dead_letter_message
 from api.tasks.transient import skip_tick_on_transient_infra
 
 LOGGER = logging.getLogger(__name__)
+# Warning-log dedup is intentionally process-local. The worker topology pins
+# every ``api.tasks.servicebus.*`` task to the isolated reconcile queue with one
+# prefork child (api/run_celery_workers.py); do not treat this as cross-replica
+# state if that topology ever changes. The App Insights event still emits every
+# five minutes regardless of this log-noise guard.
+_LAST_SERVICE_BUS_HEALTH_WARNING = ""
 
 # Per-tick bounds (self-critique: no unbounded loop). Tunable via env.
 _DRAIN_MAX_MESSAGES = int(os.environ.get("SERVICEBUS_DRAIN_MAX_MESSAGES", "50"))
@@ -1338,12 +1352,14 @@ def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
     """Publish a bounded oldest-first pass of durable producer responses."""
     stats = {"scanned": 0, "delivered": 0, "errors": 0}
     if not cfg.completion_topic:
+        note_outbox_flush(stats, attempted=False)
         return stats
     try:
         pending = list_pending_responses(limit=_OUTBOX_MAX_EVENTS)
     except Exception:
         LOGGER.warning("producer response outbox list failed", exc_info=True)
         stats["errors"] = 1
+        note_outbox_flush(stats)
         return stats
     for item in pending:
         stats["scanned"] += 1
@@ -1358,6 +1374,7 @@ def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
             )
             stats["errors"] += 1
             break
+    note_outbox_flush(stats)
     return stats
 
 
@@ -2344,6 +2361,79 @@ def reconcile_dead_letter_responses() -> dict[str, Any]:
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     return _reconcile_dead_letter_responses(get_service_bus_config())
+
+
+@shared_task(name="api.tasks.servicebus.emit_service_bus_health")
+@skip_tick_on_transient_infra
+def emit_service_bus_health() -> dict[str, Any]:
+    """Emit one payload-free queue/outbox/admission health snapshot."""
+    if not service_bus_enabled():
+        return {"skipped": "disabled"}
+    cfg = get_service_bus_config()
+    try:
+        admission: dict[str, Any] | None = _execution_admission_for_drain(cfg)
+    except Exception as exc:
+        admission = None
+        LOGGER.debug(
+            "servicebus health admission probe unavailable: %s",
+            type(exc).__name__,
+        )
+    snapshot = collect_service_bus_health(cfg, admission=admission)
+    queue = cast(dict[str, Any], snapshot["queue"])
+    outbox = cast(dict[str, Any], snapshot["outbox"])
+    warnings = tuple(str(value) for value in snapshot["warnings"])
+    record_service_bus_health_event(
+        status=str(snapshot["status"]),
+        warning_codes=",".join(warnings),
+        queue_counts_available=bool(queue["counts_available"]),
+        queue_counts_error=str(queue["counts_error"]),
+        queue_active=cast(int | None, queue["active"]),
+        queue_scheduled=cast(int | None, queue["scheduled"]),
+        queue_dead_letter=cast(int | None, queue["dead_letter"]),
+        queue_total=cast(int | None, queue["total"]),
+        completion_configured=bool(snapshot["completion_configured"]),
+        completion_kind=str(snapshot["completion_kind"]),
+        completion_accessible=cast(bool | None, queue["completion_accessible"]),
+        completion_error=str(queue["completion_error"]),
+        completion_subscription_count=cast(int | None, queue["completion_subscription_count"]),
+        completion_active=cast(int | None, queue["completion_active"]),
+        completion_dead_letter=cast(int | None, queue["completion_dead_letter"]),
+        outbox_available=bool(outbox["available"]),
+        outbox_error=str(outbox["error"]),
+        outbox_pending=cast(int | None, outbox["pending"]),
+        outbox_pending_truncated=bool(outbox["pending_truncated"]),
+        outbox_oldest_age_seconds=cast(int | None, outbox["oldest_age_seconds"]),
+        outbox_last_attempt_at=str(outbox["last_attempt_at"]),
+        outbox_last_success_at=str(outbox["last_success_at"]),
+        outbox_last_error_at=str(outbox["last_error_at"]),
+        outbox_last_scanned=int(outbox["last_scanned"]),
+        outbox_last_delivered=int(outbox["last_delivered"]),
+        outbox_last_errors=int(outbox["last_errors"]),
+        admission_available=bool(snapshot["admission_available"]),
+        admission_allowed=cast(bool | None, snapshot["admission_allowed"]),
+        admission_reason=str(snapshot["admission_reason"]),
+        resident_consumer_enabled=bool(snapshot["resident_consumer_enabled"]),
+        drain_concurrency=int(snapshot["drain_concurrency"]),
+    )
+
+    global _LAST_SERVICE_BUS_HEALTH_WARNING
+    warning_key = ",".join(warnings)
+    if warning_key != _LAST_SERVICE_BUS_HEALTH_WARNING:
+        if warning_key:
+            LOGGER.warning(
+                "servicebus health warning codes=%s active=%s dlq=%s "
+                "outbox_pending=%s completion_configured=%s admission_reason=%s",
+                warning_key,
+                queue["active"],
+                queue["dead_letter"],
+                outbox["pending"],
+                snapshot["completion_configured"],
+                snapshot["admission_reason"],
+            )
+        elif _LAST_SERVICE_BUS_HEALTH_WARNING:
+            LOGGER.info("servicebus health recovered")
+        _LAST_SERVICE_BUS_HEALTH_WARNING = warning_key
+    return snapshot
 
 
 @shared_task(name="api.tasks.servicebus.publish_transitions")

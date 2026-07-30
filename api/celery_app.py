@@ -318,6 +318,19 @@ celery_app.conf.update(
                 ),
             },
         },
+        # Low-cardinality operational snapshot for direct external producers:
+        # queue/DLQ depth, drain admission, completion wiring, and durable
+        # response-outbox liveness. No-op unless Service Bus is enabled.
+        "servicebus-health-telemetry": {
+            "task": "api.tasks.servicebus.emit_service_bus_health",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_SERVICEBUS_HEALTH_SECONDS", "300")
+            ),
+            "options": {
+                "queue": "reconcile",
+                "expires": 240.0,
+            },
+        },
         "servicebus-reconcile-dead-letter-responses": {
             "task": "api.tasks.servicebus.reconcile_dead_letter_responses",
             "schedule": float(

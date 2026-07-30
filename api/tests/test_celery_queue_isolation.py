@@ -72,6 +72,15 @@ def test_servicebus_periodic_ticks_expire_before_stale_backlog_replays() -> None
         assert 0 < float(options["expires"]) <= 30
 
 
+def test_servicebus_health_tick_is_bounded_and_isolated() -> None:
+    entry = celery_app.conf.beat_schedule["servicebus-health-telemetry"]
+    options = entry["options"]
+
+    assert entry["task"] == "api.tasks.servicebus.emit_service_bus_health"
+    assert options["queue"] == "reconcile"
+    assert 0 < float(options["expires"]) < float(entry["schedule"])
+
+
 def test_warmup_tick_expires_before_next_schedule() -> None:
     schedule = celery_app.conf.beat_schedule
 

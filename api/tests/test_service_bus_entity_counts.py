@@ -114,6 +114,9 @@ def test_entity_counts_includes_telemetry_block(monkeypatch: pytest.MonkeyPatch)
     assert tele["status"] == "Active"
     # ISO suffix is ``Z`` (not ``+00:00``) so the SPA can render it directly.
     assert tele["accessed_at"] == "2026-06-14T05:00:00Z"
+    assert result["completion_configured"] is True
+    assert result["completion_accessible"] is True
+    assert result["completion_error"] == ""
 
 
 def test_entity_counts_degrades_when_static_props_unavailable(
@@ -189,6 +192,43 @@ def test_entity_counts_subscription_transfer_counters(
     assert subs[0]["dead_letter_message_count"] == 1
     assert subs[0]["transfer_message_count"] == 0
     assert subs[0]["transfer_dead_letter_message_count"] == 4
+    assert result["completion_accessible"] is True
+
+
+def test_entity_counts_marks_completion_topic_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing/unreadable completion topic stays additive diagnostics; the
+    request queue counters remain available for request-only operation."""
+    from azure.servicebus.exceptions import ServiceBusError
+
+    q_runtime = SimpleNamespace(
+        active_message_count=4,
+        dead_letter_message_count=0,
+        scheduled_message_count=0,
+        total_message_count=4,
+        size_in_bytes=0,
+        transfer_message_count=0,
+        transfer_dead_letter_message_count=0,
+        created_at_utc=None,
+        updated_at_utc=None,
+        accessed_at_utc=None,
+    )
+
+    class _MissingTopicAdmin(_FakeAdmin):
+        def list_subscriptions(self, _topic: str):
+            raise ServiceBusError("topic missing")
+
+    admin = _MissingTopicAdmin(
+        q_runtime=q_runtime,
+        q_props=SimpleNamespace(max_size_in_megabytes=1024, status="Active"),
+    )
+    with _patched_admin(monkeypatch, admin):
+        result = service_bus.entity_counts(_cfg())
+
+    assert result["queue"]["active_message_count"] == 4
+    assert result["completion_accessible"] is False
+    assert result["completion_error"] == "ServiceBusError"
 
 
 def test_entity_counts_queue_completion_kind(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,6 +273,7 @@ def test_entity_counts_queue_completion_kind(monkeypatch: pytest.MonkeyPatch) ->
     assert subs[0]["active_message_count"] == 5
     assert subs[0]["dead_letter_message_count"] == 2
     assert subs[0]["transfer_message_count"] == 1
+    assert result["completion_accessible"] is True
 
 
 def test_pending_request_count_returns_active(monkeypatch: pytest.MonkeyPatch) -> None:

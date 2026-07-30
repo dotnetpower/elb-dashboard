@@ -195,6 +195,40 @@ Queue depth and DLQ backlog remain namespace metrics (`ActiveMessages` and
 `DeadletteredMessages`) rather than one event per poll, avoiding telemetry noise
 while preserving historical alerting through Azure Monitor metrics.
 
+For deployments that accept direct external producers, the reconcile worker
+also emits one payload-free `servicebus_health` event every five minutes. It
+captures the request/completion queue counts, drain admission, durable response
+outbox backlog, latest in-process flush outcome, and completion configuration.
+This distinguishes "not received yet" from "admission blocked", "retrying",
+"dead-lettered", and "response waiting to publish" without changing the
+customer message contract.
+
+The `outbox_last_*` fields describe the current isolated reconcile worker
+process and reset after a worker restart or child recycle. Durable truth is the
+outbox `pending` count and `oldest_age_seconds`; avoid alerting on an empty
+last-attempt timestamp during the first health interval after deployment.
+
+```kusto
+AppEvents
+| where TimeGenerated > ago(24h)
+| where Name == "servicebus_health"
+| extend status = tostring(Properties.event_status),
+         warnings = tostring(Properties.warning_codes),
+         active = toint(Properties.queue_active),
+         scheduled = toint(Properties.queue_scheduled),
+         request_dlq = toint(Properties.queue_dead_letter),
+         outbox_pending = toint(Properties.outbox_pending),
+         outbox_oldest_s = toint(Properties.outbox_oldest_age_seconds),
+         completion_configured = tobool(Properties.completion_configured),
+         completion_accessible = tobool(Properties.completion_accessible),
+         admission_allowed = tobool(Properties.admission_allowed),
+         admission_reason = tostring(Properties.admission_reason)
+| project TimeGenerated, status, warnings, active, scheduled, request_dlq,
+          outbox_pending, outbox_oldest_s, completion_configured,
+          completion_accessible, admission_allowed, admission_reason, AppRoleName
+| order by TimeGenerated desc
+```
+
 To see only failures across every feature in one query:
 
 ```kusto
