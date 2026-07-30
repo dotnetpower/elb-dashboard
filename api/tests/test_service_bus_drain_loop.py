@@ -223,6 +223,12 @@ class _FakeTopicSender:
         self.sent.append(message)
 
 
+class _FailingQueueSender(_FakeTopicSender):
+    def send_messages(self, message: Any) -> None:
+        del message
+        raise RuntimeError("broker unavailable")
+
+
 class _FakeTopicClient:
     def __init__(self, sender: _FakeTopicSender) -> None:
         self._sender = sender
@@ -303,6 +309,90 @@ class _FakeQueueClient:
 
     def get_topic_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
         raise AssertionError("queue completion entity must use get_queue_sender")
+
+
+def test_send_request_emits_enqueued_observability_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sender = _FakeTopicSender()
+
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield _FakeQueueClient(sender)
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+    monkeypatch.setattr(
+        service_bus,
+        "record_service_bus_request_event",
+        lambda stage, **attributes: events.append((stage, attributes)),
+    )
+    monkeypatch.setattr(
+        "api.services.aks.queue_autostart.request_autostart_evaluation",
+        lambda **_kwargs: None,
+    )
+
+    message_id = service_bus.send_request(
+        _cfg(),
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">secret\nACGT",
+            "request_id": "req-1",
+            "taxid": 9606,
+            "is_inclusive": False,
+        },
+        message_id="msg-1",
+        correlation_id="corr-1",
+    )
+
+    assert message_id == "msg-1"
+    assert events == [
+        (
+            "enqueued",
+            {
+                "correlation_id": "corr-1",
+                "request_id": "req-1",
+                "message_id": "msg-1",
+                "queue": "elastic-blast-requests",
+                "program": "blastn",
+                "database": "core_nt",
+                "taxid": 9606,
+                "is_inclusive": False,
+                "action": "sent",
+            },
+        )
+    ]
+    assert "secret" not in str(events)
+
+
+def test_send_request_emits_failure_before_reraising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield _FakeQueueClient(_FailingQueueSender())
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+    monkeypatch.setattr(
+        service_bus,
+        "record_service_bus_request_event",
+        lambda stage, **attributes: events.append((stage, attributes)),
+    )
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        service_bus.send_request(
+            _cfg(),
+            {"program": "blastn", "db": "core_nt", "query_fasta": ">secret\nACGT"},
+            message_id="msg-fail",
+            correlation_id="corr-fail",
+        )
+
+    assert events[0][0] == "enqueue_failed"
+    assert events[0][1]["action"] == "not_sent"
+    assert events[0][1]["error_code"] == "RuntimeError"
+    assert "secret" not in str(events)
 
 
 def test_publish_event_queue_kind_uses_queue_sender(

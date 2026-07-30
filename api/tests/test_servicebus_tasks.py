@@ -565,12 +565,18 @@ def test_same_correlation_payload_replays_ack_per_request_id(
     cfg = _enable(monkeypatch)
     submitted: list[dict] = []
     events: list[dict] = []
+    telemetry: list[tuple[str, dict]] = []
     monkeypatch.setattr(
         external_blast,
         "submit_job",
         lambda payload, **_kw: submitted.append(payload) or {"job_id": "op-retry"},
     )
     monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
+    monkeypatch.setattr(
+        sb_tasks,
+        "record_service_bus_request_event",
+        lambda stage, **attributes: telemetry.append((stage, attributes)),
+    )
 
     base = {
         "program": "blastn",
@@ -592,6 +598,13 @@ def test_same_correlation_payload_replays_ack_per_request_id(
     assert [event["request_id"] for event in queued] == ["req-1", "req-2"]
     assert queued[0]["openapi_job_id"] == queued[1]["openapi_job_id"] == "op-retry"
     assert queued[0]["event_id"] != queued[1]["event_id"]
+    assert [stage for stage, _attributes in telemetry] == [
+        "accepted",
+        "retry_ack_replayed",
+    ]
+    assert telemetry[1][1]["request_id"] == "req-2"
+    assert telemetry[1][1]["openapi_job_id"] == "op-retry"
+    assert telemetry[1][1]["ack_published"] is True
 
 
 def test_same_correlation_different_execution_publishes_sanitized_conflict(
@@ -600,12 +613,18 @@ def test_same_correlation_different_execution_publishes_sanitized_conflict(
     cfg = _enable(monkeypatch)
     submitted: list[dict] = []
     events: list[dict] = []
+    telemetry: list[tuple[str, dict]] = []
     monkeypatch.setattr(
         external_blast,
         "submit_job",
         lambda payload, **_kw: submitted.append(payload) or {"job_id": "op-conflict"},
     )
     monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
+    monkeypatch.setattr(
+        sb_tasks,
+        "record_service_bus_request_event",
+        lambda stage, **attributes: telemetry.append((stage, attributes)),
+    )
 
     base = {
         "program": "blastn",
@@ -635,6 +654,13 @@ def test_same_correlation_different_execution_publishes_sanitized_conflict(
     assert conflict["openapi_job_id"] == ""
     assert "SENSITIVE-SEQUENCE" not in str(conflict)
     assert "query_fasta" not in str(conflict)
+    assert [stage for stage, _attributes in telemetry] == [
+        "accepted",
+        "correlation_conflict",
+    ]
+    assert telemetry[-1][1]["error_code"] == "servicebus_correlation_conflict"
+    assert "SENSITIVE-SEQUENCE" not in str(telemetry)
+    assert "query_fasta" not in str(telemetry)
 
 
 def test_duplicate_ack_publish_failure_abandons_for_redelivery(

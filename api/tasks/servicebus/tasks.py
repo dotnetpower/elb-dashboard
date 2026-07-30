@@ -57,6 +57,7 @@ from fastapi import HTTPException
 
 from api.services import external_blast, service_bus
 from api.services.service_bus import MessageAction, ParsedMessage
+from api.services.service_bus_observability import record_service_bus_request_event
 from api.services.service_bus_pref import (
     ServiceBusConfig,
     get_service_bus_config,
@@ -1133,6 +1134,43 @@ def _publish_jobs_cache_invalidate(reason: str) -> None:
         LOGGER.debug("jobs cache invalidate publish skipped: %s", type(exc).__name__)
 
 
+def _record_drain_request_event(
+    stage: str,
+    msg: ParsedMessage,
+    cfg: ServiceBusConfig,
+    *,
+    payload: dict[str, Any] | None = None,
+    openapi_job_id: str = "",
+    action: str = "",
+    error_code: str = "",
+    ack_published: bool | None = None,
+) -> None:
+    """Record one drain decision using only bounded scalar request metadata."""
+    values = payload or {}
+    body = msg.body if isinstance(msg.body, dict) else {}
+    taxid = values.get("taxid")
+    inclusive = values.get("is_inclusive")
+    record_service_bus_request_event(
+        stage,
+        correlation_id=str(
+            values.get("external_correlation_id") or _correlation_id_from_message(msg)
+        ),
+        request_id=_extract_request_id(msg),
+        message_id=str(msg.message_id or ""),
+        queue=cfg.request_queue,
+        openapi_job_id=openapi_job_id,
+        program=str(values.get("program") or body.get("program") or ""),
+        database=str(values.get("db") or body.get("db") or ""),
+        taxid=taxid if isinstance(taxid, int) else None,
+        is_inclusive=inclusive if isinstance(inclusive, bool) else None,
+        action=action,
+        error_code=error_code,
+        delivery_count=msg.delivery_count,
+        sequence_number=msg.sequence_number,
+        ack_published=ack_published,
+    )
+
+
 
 def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     admission = _execution_admission_for_drain(cfg)
@@ -1141,6 +1179,13 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             "servicebus message deferred before submit reason=%s message_id=%s",
             admission.get("reason", "not_ready"),
             msg.message_id or "",
+        )
+        _record_drain_request_event(
+            "deferred",
+            msg,
+            cfg,
+            action=MessageAction.ABANDON,
+            error_code=str(admission.get("reason") or "not_ready"),
         )
         return MessageAction.ABANDON
     body = dict(msg.body or {})
@@ -1167,6 +1212,13 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             error_message="request message could not be parsed into a valid BLAST submit",
         )
         _publish_jobs_cache_invalidate("servicebus_drain_malformed")
+        _record_drain_request_event(
+            "rejected",
+            msg,
+            cfg,
+            action=MessageAction.DEAD_LETTER,
+            error_code="servicebus_malformed_request",
+        )
         return MessageAction.DEAD_LETTER
 
     correlation_id = str(payload["external_correlation_id"])
@@ -1207,6 +1259,15 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
                 request_id=request_id,
                 request_fingerprint=request_fingerprint,
             )
+            _record_drain_request_event(
+                "correlation_conflict",
+                msg,
+                cfg,
+                payload=payload,
+                action=MessageAction.DEAD_LETTER,
+                error_code="servicebus_correlation_conflict",
+                ack_published=True,
+            )
             return MessageAction.DEAD_LETTER
         if not existing.request_fingerprint:
             LOGGER.warning(
@@ -1215,6 +1276,15 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             )
         _publish_duplicate_ack(cfg, existing, request_id=request_id)
         LOGGER.info("service bus duplicate request ACK replayed corr=%s", correlation_id)
+        _record_drain_request_event(
+            "retry_ack_replayed",
+            msg,
+            cfg,
+            payload=payload,
+            openapi_job_id=existing.openapi_job_id,
+            action=MessageAction.COMPLETE,
+            ack_published=True,
+        )
         return MessageAction.COMPLETE
 
     # Atomic single-writer reservation (gate-on). The winner submits; a contended
@@ -1229,6 +1299,14 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         LOGGER.info(
             "service bus claim contended corr=%s — deferring to the in-flight submit",
             correlation_id,
+        )
+        _record_drain_request_event(
+            "deferred",
+            msg,
+            cfg,
+            payload=payload,
+            action=MessageAction.ABANDON,
+            error_code="claim_contended",
         )
         return MessageAction.ABANDON
 
@@ -1270,13 +1348,33 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             # on redelivery, and a permanent DEAD_LETTER leaves no phantom
             # ``claimed`` row behind.
             release_bridge(correlation_id)
+        _record_drain_request_event(
+            "rejected" if permanent else "abandoned",
+            msg,
+            cfg,
+            payload=payload,
+            action=MessageAction.DEAD_LETTER if permanent else MessageAction.ABANDON,
+            error_code=(
+                f"servicebus_submit_rejected_{status}"
+                if permanent
+                else f"openapi_http_{status or 'unknown'}"
+            ),
+        )
         return MessageAction.DEAD_LETTER if permanent else MessageAction.ABANDON
-    except Exception:
+    except Exception as exc:
         # Unknown/unexpected error — treat as transient (abandon → redelivery)
         # so a transient glitch never loses a submit.
         LOGGER.exception("service bus → OpenAPI submit failed corr=%s", correlation_id)
         if _ATOMIC_CLAIM:
             release_bridge(correlation_id)
+        _record_drain_request_event(
+            "abandoned",
+            msg,
+            cfg,
+            payload=payload,
+            action=MessageAction.ABANDON,
+            error_code=type(exc).__name__,
+        )
         return MessageAction.ABANDON
 
     openapi_job_id = str(upstream.get("job_id") or "")
@@ -1317,6 +1415,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     _publish_jobs_cache_invalidate("servicebus_drain_submitted")
     # Publish the initial "queued" transition (best-effort; a publish failure
     # is recovered by publish_transitions on the next tick).
+    queued_ack_published = False
     try:
         service_bus.publish_event(
             cfg,
@@ -1330,8 +1429,18 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             ),
         )
         mark_published(correlation_id, _STATUS_QUEUED)
+        queued_ack_published = True
     except Exception:
         LOGGER.warning("queued-event publish failed corr=%s (will retry)", correlation_id)
+    _record_drain_request_event(
+        "accepted",
+        msg,
+        cfg,
+        payload=payload,
+        openapi_job_id=openapi_job_id,
+        action=MessageAction.COMPLETE,
+        ack_published=queued_ack_published,
+    )
     return MessageAction.COMPLETE
 
 

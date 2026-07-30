@@ -55,6 +55,7 @@ from azure.servicebus.management import ServiceBusAdministrationClient
 
 from api.services import get_credential
 from api.services.sanitise import sanitise
+from api.services.service_bus_observability import record_service_bus_request_event
 from api.services.service_bus_pref import (
     AUTH_MODE_SAS,
     ServiceBusConfig,
@@ -274,8 +275,44 @@ def send_request(
         message_id=message_id,
         correlation_id=correlation_id,
     )
-    with _client(cfg) as client, client.get_queue_sender(cfg.request_queue) as sender:
-        sender.send_messages(message)
+    try:
+        with _client(cfg) as client, client.get_queue_sender(cfg.request_queue) as sender:
+            sender.send_messages(message)
+    except Exception as exc:
+        record_service_bus_request_event(
+            "enqueue_failed",
+            correlation_id=str(correlation_id or body.get("external_correlation_id") or ""),
+            request_id=str(body.get("request_id") or ""),
+            message_id=str(message.message_id or ""),
+            queue=cfg.request_queue,
+            program=str(body.get("program") or ""),
+            database=str(body.get("db") or ""),
+            taxid=body.get("taxid") if isinstance(body.get("taxid"), int) else None,
+            is_inclusive=(
+                body.get("is_inclusive")
+                if isinstance(body.get("is_inclusive"), bool)
+                else None
+            ),
+            action="not_sent",
+            error_code=type(exc).__name__,
+        )
+        raise
+    record_service_bus_request_event(
+        "enqueued",
+        correlation_id=str(correlation_id or body.get("external_correlation_id") or ""),
+        request_id=str(body.get("request_id") or ""),
+        message_id=str(message.message_id or ""),
+        queue=cfg.request_queue,
+        program=str(body.get("program") or ""),
+        database=str(body.get("db") or ""),
+        taxid=body.get("taxid") if isinstance(body.get("taxid"), int) else None,
+        is_inclusive=(
+            body.get("is_inclusive")
+            if isinstance(body.get("is_inclusive"), bool)
+            else None
+        ),
+        action="sent",
+    )
     # Event-driven auto-start: the moment a request lands on the queue, kick an
     # immediate idle/auto-start evaluation so a Stopped cluster starts within
     # seconds instead of waiting out the next 5-min beat tick. Gated + best-effort

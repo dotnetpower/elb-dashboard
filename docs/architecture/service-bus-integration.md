@@ -333,6 +333,18 @@ subscription unless an operator explicitly includes `default` in
 startup warning. In queue completion mode the observer remains disabled because
 it would compete with the external ACK consumer.
 
+### Application Insights request lifecycle
+
+When server telemetry is enabled, the producer and drain consumer emit a
+payload-free `servicebus_request` custom event for each queue decision. Stages
+include `enqueued`, `enqueue_failed`, `accepted`, `retry_ack_replayed`,
+`correlation_conflict`, `rejected`, `abandoned`, and `deferred`. These events
+carry bounded scalar identifiers and outcomes only; query FASTA, options, raw
+message bodies, and credentials are never recorded. Aggregate non-empty drain
+ticks continue to emit a structured `traces` line with receive and settlement
+counts. See [Observability](../user-guide/observability.md#service-bus-request-queue-events)
+for copy-paste KQL.
+
 ### AKS lifecycle and database warmup admission
 
 The request queue is the durable wait boundary while AKS is not safe to execute

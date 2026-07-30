@@ -101,7 +101,7 @@ Once both the SPA toggle and the server-side override are on, you will see telem
 | `requests` | `api` sidecar (FastAPI requests) and SPA `fetch()` calls | Latency P50/P95/P99, error rate, slowest paths |
 | `dependencies` | Outbound calls from `api` / `worker` (Azure SDK, Storage, AKS, ACR) | Which Azure API call slowed down a request |
 | `exceptions` | Unhandled exceptions from any Python sidecar | Stack traces correlated to the failing `request_id` |
-| `customEvents` | `telemetry-test` from the panel and any `track_event` calls | Confirming ingestion and feature-flag instrumentation |
+| `customEvents` | `telemetry-test`, feature lifecycle events, and `servicebus_request` queue lifecycle events | Confirming ingestion and tracing feature or queue outcomes |
 | `traces` | Structured log records (`LOGGER.info / warning / error`) | Reading the full request lifecycle — auth, route, task enqueue, task result |
 
 Every record carries `customDimensions.request_id` (set by the dashboard's request middleware), `cloud_RoleName` (the sidecar name), and `operation_Id` for distributed-trace correlation. The fastest way to debug a 500 you saw in the HTTP request inspector is:
@@ -137,6 +137,63 @@ Only **terminal** transitions emit an event (`event_status` ∈ `completed` / `f
 | `cluster_provision` | `api.tasks.azure.provision` | `completed`, `failed` | `completed`, `failed` (5-step pipeline: `creating_cluster` → `ensuring_resource_group` → `arm_create_or_update` → `ensuring_rbac` → `completed`) |
 | `prepare_db` | `api.tasks.storage.prepare_db_via_aks` | `completed`, `failed` | `completed` (promoted) / `partial` (some shards failed); `error_code` + `outcome` dimensions explain partials |
 | `blast` | `api.tasks.blast.*` (submit / cancel / poll) | `completed`, `failed`, `cancelled` | `completed`, `submit_failed`, `cancelled`, `submit_retryable_failure`, `config_invalid`, `terminal_unavailable`, `status_unavailable` |
+| `servicebus_request` | Service Bus producer + drain consumer | `enqueued`, `enqueue_failed`, `accepted`, `retry_ack_replayed`, `correlation_conflict`, `rejected`, `abandoned`, `deferred` | Request-queue lifecycle decisions; see below |
+
+### Service Bus Request Queue Events
+
+When server-side Application Insights is configured, each internally produced
+Service Bus request emits an `enqueued` event and each drain attempt emits one
+decision event. Existing aggregate drain lines (`received`, `completed`,
+`abandoned`, `dead_lettered`, and concurrency) remain in `traces`; the new
+`servicebus_request` event makes individual requests searchable in
+`customEvents`.
+
+Only bounded scalar metadata is recorded: correlation/request/message/OpenAPI
+job ids, queue, program, database, taxonomy direction, delivery/sequence
+counters, settlement action, ACK-published flag, and error code. Query FASTA,
+BLAST options, raw message bodies, credentials, and completion payloads are not
+accepted by the telemetry helper and never enter these events.
+
+Classic Application Insights schema:
+
+```kusto
+customEvents
+| where timestamp > ago(24h)
+| where name == "servicebus_request"
+| extend stage = tostring(customDimensions.stage),
+         corr = tostring(customDimensions.correlation_id),
+         request_id = tostring(customDimensions.request_id),
+         job_id = tostring(customDimensions.openapi_job_id),
+         action = tostring(customDimensions.action),
+         error_code = tostring(customDimensions.error_code),
+         ack_published = tobool(customDimensions.ack_published)
+| project timestamp, stage, corr, request_id, job_id, action,
+          error_code, ack_published, cloud_RoleName
+| order by timestamp desc
+```
+
+Workspace-based Application Insights uses `AppEvents`, `Name`, `Properties`,
+and `TimeGenerated` instead:
+
+```kusto
+AppEvents
+| where TimeGenerated > ago(24h)
+| where Name == "servicebus_request"
+| extend stage = tostring(Properties.stage),
+         corr = tostring(Properties.correlation_id),
+         request_id = tostring(Properties.request_id),
+         job_id = tostring(Properties.openapi_job_id),
+         action = tostring(Properties.action),
+         error_code = tostring(Properties.error_code),
+         ack_published = tobool(Properties.ack_published)
+| project TimeGenerated, stage, corr, request_id, job_id, action,
+          error_code, ack_published, AppRoleName
+| order by TimeGenerated desc
+```
+
+Queue depth and DLQ backlog remain namespace metrics (`ActiveMessages` and
+`DeadletteredMessages`) rather than one event per poll, avoiding telemetry noise
+while preserving historical alerting through Azure Monitor metrics.
 
 To see only failures across every feature in one query:
 
