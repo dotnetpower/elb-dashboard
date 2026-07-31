@@ -17,6 +17,8 @@ Validation: ``uv run pytest -q api/tests/test_service_bus_tracking.py``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 from api.services import service_bus_tracking as t
 from api.services.service_bus_tracking import BridgeRecord
@@ -110,3 +112,54 @@ def test_bridge_fingerprint_round_trips_without_request_payload() -> None:
     assert record is not None
     assert record.request_fingerprint == "a" * 64
     assert "query_fasta" not in record.to_dict()
+
+
+def test_active_bridge_pages_rotate_without_starving_rows() -> None:
+    for index in range(5):
+        t.upsert_bridge(
+            BridgeRecord(
+                correlation_id=f"corr-{index}",
+                openapi_job_id=f"job-{index}",
+            )
+        )
+
+    first, cursor = t.list_active_bridges_page(limit=2)
+    second, cursor = t.list_active_bridges_page(limit=2, after_row_key=cursor)
+    third, _cursor = t.list_active_bridges_page(limit=2, after_row_key=cursor)
+
+    seen = [record.correlation_id for record in first + second + third]
+    assert seen[:5] == [f"corr-{index}" for index in range(5)]
+    assert seen[5] == "corr-0"
+
+
+def test_table_page_does_not_issue_zero_size_wrap_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queries: list[tuple[str, int]] = []
+
+    class _Table:
+        def query_entities(self, query_filter: str, *, results_per_page: int):
+            queries.append((query_filter, results_per_page))
+            return [
+                t._entity(
+                    BridgeRecord(
+                        correlation_id=f"corr-{index}",
+                        openapi_job_id=f"job-{index}",
+                    )
+                )
+                for index in range(results_per_page)
+            ]
+
+    @contextmanager
+    def _client():
+        yield _Table()
+
+    monkeypatch.setattr(t, "_ensure_table", lambda: None)
+    monkeypatch.setattr(t, "_table_client", _client)
+
+    page, cursor = t._list_table_page(2, "cursor")
+
+    assert len(page) == 2
+    assert cursor
+    assert len(queries) == 1
+    assert queries[0][1] == 2

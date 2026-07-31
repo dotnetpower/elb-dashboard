@@ -6,7 +6,7 @@ Responsibility: Persist completion events before request settlement or bridge
 Edit boundaries: Persistence only. Event construction and Service Bus publish
     calls remain in ``api.tasks.servicebus.tasks``.
 Key entry points: ``enqueue_response``, ``list_pending_responses``,
-    ``mark_response_delivered``.
+    ``defer_response``, ``mark_response_delivered``.
 Risky contracts: A duplicate ``event_id`` is idempotent; deployed writes fail
     closed when Table Storage is unavailable; publish-before-delete may produce
     a duplicate event after a crash but can never lose the producer response.
@@ -20,12 +20,12 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
-from azure.data.tables import TableClient, TableServiceClient
+from azure.data.tables import TableClient, TableServiceClient, UpdateMode
 
 from api.services import get_credential
 
@@ -52,6 +52,9 @@ class PendingResponse:
     event_id: str
     event: dict[str, Any]
     created_at: str
+    failure_count: int = 0
+    next_attempt_at: str = ""
+    last_error_code: str = ""
 
 
 def _now_iso() -> str:
@@ -110,6 +113,9 @@ def _entity(event_id: str, event: dict[str, Any], created_at: str) -> dict[str, 
         "RowKey": _row_key(event_id),
         "created_at": created_at,
         "payload_json": json.dumps(event, separators=(",", ":"), default=str),
+        "failure_count": 0,
+        "next_attempt_at": "",
+        "last_error_code": "",
     }
 
 
@@ -189,6 +195,9 @@ def list_pending_responses(limit: int = 200) -> list[PendingResponse]:
                     event_id=str(row.get("RowKey") or ""),
                     event=event,
                     created_at=str(row.get("created_at") or ""),
+                    failure_count=max(0, int(row.get("failure_count") or 0)),
+                    next_attempt_at=str(row.get("next_attempt_at") or ""),
+                    last_error_code=str(row.get("last_error_code") or ""),
                 )
             )
             if len(pending) >= bounded:
@@ -205,10 +214,68 @@ def list_pending_responses(limit: int = 200) -> list[PendingResponse]:
                     event_id=event_id,
                     event=dict(event),
                     created_at=str(raw.get("created_at") or ""),
+                    failure_count=max(0, int(raw.get("failure_count") or 0)),
+                    next_attempt_at=str(raw.get("next_attempt_at") or ""),
+                    last_error_code=str(raw.get("last_error_code") or ""),
                 )
             )
     pending.sort(key=lambda item: (item.created_at, item.event_id))
     return pending[:bounded]
+
+
+def defer_response(
+    event_id: str,
+    *,
+    error_code: str,
+    retry_after_seconds: int,
+    replacement_event: dict[str, Any] | None = None,
+) -> None:
+    """Persist a bounded retry delay for one response without deleting it."""
+    key = _row_key(event_id)
+    if not key:
+        return
+    delay = max(1, min(int(retry_after_seconds), 24 * 60 * 60))
+    next_attempt_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(timespec="seconds")
+    bounded_error = error_code.strip()[:128]
+    _require_deployed_table()
+    if _use_table_backend():
+        _ensure_table()
+        table = _table_client()
+        try:
+            current = table.get_entity(_PARTITION_KEY, key)
+        except ResourceNotFoundError:
+            return
+        table.update_entity(
+            {
+                "PartitionKey": _PARTITION_KEY,
+                "RowKey": key,
+                "failure_count": max(0, int(current.get("failure_count") or 0)) + 1,
+                "next_attempt_at": next_attempt_at,
+                "last_error_code": bounded_error,
+                **(
+                    {
+                        "payload_json": json.dumps(
+                            replacement_event, separators=(",", ":"), default=str
+                        )
+                    }
+                    if replacement_event is not None
+                    else {}
+                ),
+            },
+            mode=UpdateMode.MERGE,
+        )
+        return
+    with _FILE_LOCK:
+        state = _read_file()
+        raw = state.get(key)
+        if not isinstance(raw, dict):
+            return
+        raw["failure_count"] = max(0, int(raw.get("failure_count") or 0)) + 1
+        raw["next_attempt_at"] = next_attempt_at
+        raw["last_error_code"] = bounded_error
+        if replacement_event is not None:
+            raw["event"] = dict(replacement_event)
+        _write_file(state)
 
 
 def mark_response_delivered(event_id: str) -> None:
@@ -243,6 +310,7 @@ def _reset_outbox_for_tests() -> None:
 __all__ = [
     "PendingResponse",
     "ResponseOutboxPersistenceError",
+    "defer_response",
     "enqueue_response",
     "list_pending_responses",
     "mark_response_delivered",

@@ -15,6 +15,7 @@ Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -288,7 +289,7 @@ def test_publish_skips_tick_on_transient_infra_error(monkeypatch: pytest.MonkeyP
     def _boom(*_a: object, **_k: object) -> object:
         raise ServiceResponseError("Connection aborted; remote end closed")
 
-    monkeypatch.setattr(sb_tasks, "list_active_bridges", _boom)
+    monkeypatch.setattr(sb_tasks, "list_active_bridges_page", _boom)
     out = sb_tasks.publish_transitions()
     assert out["skipped"] == "transient"
     assert out["error_class"] == "ServiceResponseError"
@@ -318,7 +319,6 @@ def test_non_transient_error_still_propagates(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(sb_tasks.service_bus, "drain_requests", _boom)
     with pytest.raises(ValueError, match="genuine bug"):
         sb_tasks.drain_and_resubmit()
-
 
 
 def test_drain_bridges_valid_message(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -924,6 +924,39 @@ def test_retry_exhaustion_stages_failed_response_before_dead_letter(
     assert sb_tasks._drain_handler(msg, cfg) == MessageAction.DEAD_LETTER
     assert events and events[0]["status"] == "failed"
     assert events[0]["error_code"] == "servicebus_retry_exhausted"
+
+
+def test_retry_that_would_outlive_broker_expiry_stages_expired_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    now = datetime(2026, 7, 31, 0, 0, tzinfo=UTC)
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(service_bus, "_now", lambda: now)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, event, **_kwargs: events.append(event) or (True, False),
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            HTTPException(503, detail={"code": "openapi_unreachable"})
+        ),
+    )
+    msg = _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">s\nACGT",
+            "external_correlation_id": "corr-expiring",
+        }
+    )
+    msg.expires_at_utc = now + timedelta(seconds=10)
+
+    assert sb_tasks._drain_handler(msg, cfg) == MessageAction.DEAD_LETTER
+    assert events[0]["error_code"] == "servicebus_request_expired"
 
 
 def test_dlq_response_is_durable_and_backed_up_before_complete(

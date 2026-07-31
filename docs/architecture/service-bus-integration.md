@@ -161,6 +161,35 @@ Service Bus size limit and avoids duplicating large payloads.
 
 ## Lifecycle (state machine)
 
+### Producer response phases and timeout contract
+
+The producer-facing lifecycle has three distinct clocks. They must not be
+collapsed into one ACK timeout:
+
+| Phase | Evidence | Meaning |
+|---|---|---|
+| **Phase 0 — broker accepted** | The producer's Service Bus `send` call returned successfully. | The request is durable on the broker. It has **not** passed cluster or database admission and no dashboard response event exists yet. |
+| **Phase 1 — execution accepted** | A `blast.transition` event with `status=queued`. | The drain passed admission, the OpenAPI plane accepted one idempotent execution, and the queued response is durable in the dashboard outbox. |
+| **Phase 2 — terminal** | A `blast.transition` event with `status=succeeded` or `failed`. | The logical request reached its terminal producer outcome. |
+
+During AKS start/scale or database warmup the drain deliberately does not open
+the request receiver. Requests therefore remain at Phase 0 without burning
+delivery count. A producer Phase 1 timeout can expire during a legitimate
+multi-hour warmup even though the request is safe on the broker. Treat that
+timeout as **pending/fallback**, not proof of loss: retain the original
+`external_correlation_id`, keep consuming its late events, and never submit a
+new logical request under a new correlation id solely because Phase 1 was late.
+An exact retry uses the same correlation id and execution payload plus a fresh
+`request_id`; the dashboard replays the queued ACK without starting a second
+BLAST execution.
+
+The completion subscription must exist before Phase 0. Starting the listener
+process later is safe because Service Bus retains messages for an existing
+subscription; creating a subscription after the event was published cannot
+recover that earlier event. Subscribers must use a dedicated subscription and
+deduplicate at-least-once delivery by `event_id`. A late Phase 1 or Phase 2 event
+remains authoritative even after a local fail-fast fallback fired.
+
 ```mermaid
 sequenceDiagram
   participant P as Producer
@@ -273,9 +302,20 @@ Service Bus mechanisms set on the entities:
 
 | Mechanism | Setting | Effect |
 |---|---|---|
-| Time-to-live | `default-message-time-to-live` (24h request queue / 1h completion subscription when configured) | Un-consumed messages expire automatically. |
+| Time-to-live | `default-message-time-to-live` (24h request queue / 1h completion subscription when configured) | Un-consumed messages expire automatically. Dashboard-origin sends also carry an explicit 24h message TTL (`SERVICEBUS_REQUEST_TTL_SECONDS`); an external producer controls its own message TTL. Scheduled retries preserve the original absolute expiry and never extend it. |
 | Max delivery count | `max-delivery-count` = 10 | A poison message is moved to the **dead-letter queue (DLQ)** instead of blocking the main queue. |
 | Dead-letter on expiration | `dead-lettering-on-message-expiration` = true | Expired messages are preserved in the DLQ for investigation rather than vanishing. |
+
+The live queue's default TTL must be at least the configured dashboard producer
+TTL. Azure Service Bus truncates a message TTL that exceeds the entity maximum;
+`servicebus_health` reports `request_entity_ttl_shorter_than_producer` when the
+live policy would shorten dashboard-origin requests.
+
+Scheduled automatic retries retain the original absolute expiry. An operator
+**promotion from the DLQ is different**: it is an explicit decision to retry a
+terminal request and therefore creates a new main-queue message with a fresh
+entity-default lifetime. Correlation/fingerprint idempotency still prevents a
+second execution if the original request had already been accepted.
 
 A dedicated DLQ response reconciler converts TTL expiry, max-delivery
 exhaustion, and other terminal broker outcomes into a durable `failed` response.

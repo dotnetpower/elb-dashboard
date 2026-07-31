@@ -402,6 +402,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // wake the same debounced evaluator immediately. External
             // producers remain covered by the worker's pending-queue reconcile.
             { name: 'SERVICEBUS_QUEUE_AUTOSTART', value: controlPlaneEnv.api.SERVICEBUS_QUEUE_AUTOSTART }
+            // Dashboard producer requests live for 24h independently of any
+            // caller ACK timeout. Scheduled retries preserve the broker's
+            // original absolute expiry and can never extend this lifetime.
+            { name: 'SERVICEBUS_REQUEST_TTL_SECONDS', value: controlPlaneEnv.api.SERVICEBUS_REQUEST_TTL_SECONDS }
             // Unified-ingress front door (issue #36 Tier 2). Default OFF
             // (Charter §12a Rule 4): when ON (and SERVICEBUS_ENABLED) the api
             // submit route enqueues to Service Bus instead of calling /v1/jobs

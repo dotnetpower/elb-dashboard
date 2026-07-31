@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -269,6 +270,54 @@ def test_retry_schedules_clone_before_completing_original(
     assert retry.application_properties["elb_retry_attempt"] == 1
     assert retry.scheduled_enqueue_time_utc is not None
 
+
+def test_retry_preserves_original_absolute_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 31, 0, 0, tzinfo=UTC)
+    source = _FakeMessage("retry-expiry", {"db": "core_nt"})
+    source.expires_at_utc = now + timedelta(hours=2)
+    receiver = _FakeReceiver([source])
+    sender = _FakeTopicSender()
+
+    class _RetryClient(_FakeClient):
+        def get_queue_sender(self, *_a: Any, **_k: Any) -> _FakeTopicSender:
+            return sender
+
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield _RetryClient(receiver)
+
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+    monkeypatch.setattr(service_bus, "_now", lambda: now)
+    service_bus.drain_requests(_cfg(), lambda _m: MessageAction.RETRY, max_messages=1)
+
+    retry = sender.sent[0]
+    assert retry.scheduled_enqueue_time_utc == now + timedelta(seconds=30)
+    assert retry.time_to_live == timedelta(hours=2) - timedelta(seconds=30)
+
+
+def test_retry_expiry_guard_reserves_clock_skew_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 31, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(service_bus, "_now", lambda: now)
+    parsed = service_bus.ParsedMessage(
+        body={},
+        raw_body="{}",
+        message_id="m",
+        correlation_id="c",
+        subject="blast.request",
+        content_type="application/json",
+        enqueued_time_utc=now,
+        sequence_number=1,
+        expires_at_utc=now + timedelta(seconds=89),
+    )
+
+    # 30s retry delay + 60s skew/scheduling margin reaches the 89s expiry.
+    assert service_bus.retry_would_outlive_request(parsed) is True
+
+
 def _patch_topic_client(monkeypatch: pytest.MonkeyPatch, sender: _FakeTopicSender) -> None:
     @contextmanager
     def fake_client(_cfg_arg: ServiceBusConfig):
@@ -332,6 +381,21 @@ def test_publish_event_no_request_id_leaves_envelope_clean(
     assert not (sender.sent[0].application_properties or {})
 
 
+def test_publish_event_rejects_oversized_payload_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sender = _FakeTopicSender()
+    _patch_topic_client(monkeypatch, sender)
+
+    with pytest.raises(service_bus.ServiceBusEventValidationError):
+        service_bus.publish_event(
+            _topic_cfg(),
+            {"event": "blast.transition", "oversized": "x" * (193 * 1024)},
+        )
+
+    assert sender.sent == []
+
+
 class _FakeQueueClient:
     def __init__(self, sender: _FakeTopicSender) -> None:
         self._sender = sender
@@ -379,6 +443,7 @@ def test_send_request_emits_enqueued_observability_event(
     )
 
     assert message_id == "msg-1"
+    assert sender.sent[0].time_to_live == timedelta(hours=24)
     assert events == [
         (
             "enqueued",

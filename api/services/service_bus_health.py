@@ -23,6 +23,7 @@ from api.services.service_bus_outbox import list_pending_responses
 from api.services.service_bus_pref import ServiceBusConfig
 
 _OUTBOX_SAMPLE_LIMIT = 201
+_MIN_SAFE_TTL_SECONDS = 60 * 60
 _FLUSH_LOCK = threading.Lock()
 _FLUSH_STATE: dict[str, Any] = {
     "last_attempt_at": "",
@@ -123,12 +124,21 @@ def _queue_snapshot(cfg: ServiceBusConfig) -> dict[str, Any]:
             "completion_error": "",
             "completion_active": None,
             "completion_dead_letter": None,
+            "request_policy_available": False,
+            "request_policy_error": "counts_unavailable",
+            "request_ttl_seconds": None,
+            "request_dead_letter_on_expiration": None,
+            "request_max_delivery_count": None,
+            "completion_policy_available": False,
+            "completion_min_ttl_seconds": None,
+            "completion_dead_letter_on_expiration": None,
+            "completion_max_delivery_count": None,
         }
 
-    queue = counts.get("queue") if isinstance(counts, dict) else None
-    queue = queue if isinstance(queue, dict) else {}
-    subscriptions = counts.get("subscriptions") if isinstance(counts, dict) else []
-    subscriptions = subscriptions if isinstance(subscriptions, list) else []
+    queue_raw = counts.get("queue") if isinstance(counts, dict) else None
+    queue: dict[str, Any] = queue_raw if isinstance(queue_raw, dict) else {}
+    subscriptions_raw = counts.get("subscriptions") if isinstance(counts, dict) else []
+    subscriptions: list[Any] = subscriptions_raw if isinstance(subscriptions_raw, list) else []
     completion_active = sum(
         _non_negative_int(item.get("active_message_count"))
         for item in subscriptions
@@ -139,6 +149,36 @@ def _queue_snapshot(cfg: ServiceBusConfig) -> dict[str, Any]:
         for item in subscriptions
         if isinstance(item, dict)
     )
+    queue_telemetry_raw = queue.get("telemetry")
+    queue_telemetry: dict[str, Any] = (
+        queue_telemetry_raw if isinstance(queue_telemetry_raw, dict) else {}
+    )
+    request_policy_raw = queue_telemetry.get("policy")
+    request_policy: dict[str, Any] = (
+        request_policy_raw if isinstance(request_policy_raw, dict) else {}
+    )
+    completion_policies: list[dict[str, Any]] = []
+    for item in subscriptions:
+        if not isinstance(item, dict):
+            continue
+        policy = item.get("policy")
+        if isinstance(policy, dict):
+            completion_policies.append(policy)
+    completion_ttls = [
+        _non_negative_int(policy.get("default_ttl_seconds"))
+        for policy in completion_policies
+        if policy.get("default_ttl_seconds") is not None
+    ]
+    completion_deliveries = [
+        _non_negative_int(policy.get("max_delivery_count"))
+        for policy in completion_policies
+        if policy.get("max_delivery_count") is not None
+    ]
+    expiration_values = [
+        policy.get("dead_letter_on_expiration")
+        for policy in completion_policies
+        if isinstance(policy.get("dead_letter_on_expiration"), bool)
+    ]
     return {
         "counts_available": bool(queue),
         "counts_error": "" if queue else "queue_counts_missing",
@@ -153,6 +193,28 @@ def _queue_snapshot(cfg: ServiceBusConfig) -> dict[str, Any]:
         "completion_error": str(counts.get("completion_error") or "")[:128],
         "completion_active": completion_active,
         "completion_dead_letter": completion_dead_letter,
+        "request_policy_available": bool(request_policy.get("available")),
+        "request_policy_error": str(request_policy.get("error") or "")[:128],
+        "request_ttl_seconds": (
+            _non_negative_int(request_policy.get("default_ttl_seconds"))
+            if request_policy.get("default_ttl_seconds") is not None
+            else None
+        ),
+        "request_dead_letter_on_expiration": request_policy.get("dead_letter_on_expiration"),
+        "request_max_delivery_count": (
+            _non_negative_int(request_policy.get("max_delivery_count"))
+            if request_policy.get("max_delivery_count") is not None
+            else None
+        ),
+        "completion_policy_available": bool(completion_policies)
+        and all(bool(policy.get("available")) for policy in completion_policies),
+        "completion_min_ttl_seconds": min(completion_ttls) if completion_ttls else None,
+        "completion_dead_letter_on_expiration": (
+            all(expiration_values) if expiration_values else None
+        ),
+        "completion_max_delivery_count": (
+            max(completion_deliveries) if completion_deliveries else None
+        ),
     }
 
 
@@ -166,18 +228,24 @@ def _outbox_snapshot() -> dict[str, Any]:
             "pending": None,
             "pending_truncated": False,
             "oldest_age_seconds": None,
+            "deferred": None,
+            "poison": None,
             **_flush_state(),
         }
 
     truncated = len(pending) >= _OUTBOX_SAMPLE_LIMIT
     sampled = pending[: _OUTBOX_SAMPLE_LIMIT - 1] if truncated else pending
     oldest = sampled[0].created_at if sampled else ""
+    deferred = sum(1 for item in sampled if item.next_attempt_at)
+    poison = sum(1 for item in sampled if item.last_error_code == "completion_event_compacted")
     return {
         "available": True,
         "error": "",
         "pending": len(sampled),
         "pending_truncated": truncated,
         "oldest_age_seconds": _age_seconds(oldest),
+        "deferred": deferred,
+        "poison": poison,
         **_flush_state(),
     }
 
@@ -194,8 +262,19 @@ def collect_service_bus_health(
     admission_available = admission is not None
     admission_allowed = bool(admission_values.get("allowed")) if admission_available else None
     admission_reason = str(admission_values.get("reason") or "")[:128]
+    admission_target_node_count = _non_negative_int(admission_values.get("target_node_count"))
+    admission_ready_node_count = _non_negative_int(admission_values.get("ready_node_count"))
+    warmup_jobs = admission_values.get("warmup_jobs")
+    failed_warmup_jobs = admission_values.get("failed_warmup_jobs")
+    # Counts only: keys are database names and values are warmup Job IDs; never
+    # carry either into this payload-free operational snapshot.
+    admission_warmup_job_count = len(warmup_jobs) if isinstance(warmup_jobs, dict) else 0
+    admission_failed_warmup_job_count = (
+        len(failed_warmup_jobs) if isinstance(failed_warmup_jobs, dict) else 0
+    )
     completion_configured = bool(str(getattr(cfg, "completion_topic", "") or "").strip())
     completion_kind = str(getattr(cfg, "completion_kind", "topic") or "topic")[:16]
+    producer_request_ttl_seconds = service_bus.request_ttl_seconds()
 
     warnings: list[str] = []
     if not completion_configured:
@@ -210,14 +289,43 @@ def collect_service_bus_health(
         warnings.append("completion_topic_has_no_subscriptions")
     if not queue["counts_available"]:
         warnings.append("queue_counts_unavailable")
+    if queue["counts_available"] and not queue["request_policy_available"]:
+        warnings.append("request_policy_unavailable")
+    if (
+        queue["request_ttl_seconds"] is not None
+        and queue["request_ttl_seconds"] < _MIN_SAFE_TTL_SECONDS
+    ):
+        warnings.append("request_ttl_too_short")
+    if (
+        queue["request_ttl_seconds"] is not None
+        and queue["request_ttl_seconds"] < producer_request_ttl_seconds
+    ):
+        warnings.append("request_entity_ttl_shorter_than_producer")
+    if queue["request_dead_letter_on_expiration"] is False:
+        warnings.append("request_expiration_not_dead_lettered")
     if _non_negative_int(queue["dead_letter"]) > 0:
         warnings.append("request_dlq_nonempty")
     if _non_negative_int(queue["completion_dead_letter"]) > 0:
         warnings.append("completion_dlq_nonempty")
+    if (
+        completion_configured
+        and queue["completion_subscription_count"]
+        and not queue["completion_policy_available"]
+    ):
+        warnings.append("completion_policy_unavailable")
+    if (
+        queue["completion_min_ttl_seconds"] is not None
+        and queue["completion_min_ttl_seconds"] < _MIN_SAFE_TTL_SECONDS
+    ):
+        warnings.append("completion_ttl_too_short")
+    if queue["completion_dead_letter_on_expiration"] is False:
+        warnings.append("completion_expiration_not_dead_lettered")
     if not outbox["available"]:
         warnings.append("outbox_unavailable")
     if outbox["pending_truncated"]:
         warnings.append("outbox_backlog_truncated")
+    if _non_negative_int(outbox["poison"]) > 0:
+        warnings.append("outbox_compacted_response_pending")
     if _non_negative_int(outbox["last_errors"]) > 0:
         warnings.append("outbox_flush_failed")
     if admission_available and admission_allowed is False and _non_negative_int(queue["active"]):
@@ -231,8 +339,13 @@ def collect_service_bus_health(
         "admission_available": admission_available,
         "admission_allowed": admission_allowed,
         "admission_reason": admission_reason,
+        "admission_target_node_count": admission_target_node_count,
+        "admission_ready_node_count": admission_ready_node_count,
+        "admission_warmup_job_count": admission_warmup_job_count,
+        "admission_failed_warmup_job_count": admission_failed_warmup_job_count,
         "completion_configured": completion_configured,
         "completion_kind": completion_kind,
+        "producer_request_ttl_seconds": producer_request_ttl_seconds,
         "resident_consumer_enabled": _bool_env("SERVICEBUS_RESIDENT_CONSUMER"),
         "drain_concurrency": max(
             1,

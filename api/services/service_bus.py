@@ -15,7 +15,8 @@ Key entry points: ``send_request``, ``publish_event``, ``peek_requests``,
     ``peek_request_previews``, ``peek_dead_letter_previews``, ``drain_requests``,
     ``drain_dead_letter_messages``, ``entity_counts``, ``purge_dead_letter``,
     ``delete_dead_letter_messages``,
-    ``promote_dead_letter_messages``, ``test_connection``, ``MessageAction``.
+    ``promote_dead_letter_messages``, ``test_connection``,
+    ``retry_would_outlive_request``, ``MessageAction``.
 Risky contracts: Receivers settle EVERY message they receive (complete /
     abandon / dead-letter) — a leaked lock causes redelivery and duplicate BLAST
     runs. ``drain_requests``, ``purge_dead_letter``, ``delete_dead_letter_messages``
@@ -30,7 +31,9 @@ Risky contracts: Receivers settle EVERY message they receive (complete /
     capped to handler concurrency and a pass wall-clock budget; untouched
     backlog remains broker-owned. RETRY schedules a clone before completing the
     original, preserving correlation/idempotency metadata and avoiding broker
-    delivery-count burn during transient execution-plane failures.
+    delivery-count burn during transient execution-plane failures. Dashboard
+    sends carry an explicit request TTL, and retry clones preserve the original
+    broker expiry instead of extending a request's lifetime.
 Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py
     api/tests/test_servicebus_load.py``.
 """
@@ -80,6 +83,7 @@ _PEEK_DEFAULT = 5
 # bloat the response or the dashboard. A content preview never needs the full
 # payload; the truncation is flagged via ``body_truncated``.
 _PEEK_BODY_MAX_CHARS = 4000
+_MAX_COMPLETION_EVENT_BYTES = 192 * 1024
 _MAX_LOCK_RENEWAL_SECONDS: int = max(
     30,
     min(int(os.environ.get("SERVICEBUS_MAX_LOCK_RENEWAL_SECONDS", "900")), 900),
@@ -96,6 +100,22 @@ _RETRY_MAX_DELAY_SECONDS: int = max(
     _RETRY_BASE_SECONDS,
     min(int(os.environ.get("SERVICEBUS_RETRY_MAX_DELAY_SECONDS", "900")), 3600),
 )
+_DEFAULT_REQUEST_TTL_SECONDS = 24 * 60 * 60
+
+
+def request_ttl_seconds() -> int:
+    """Return the dashboard-producer request TTL, bounded and import-safe."""
+    raw = os.environ.get("SERVICEBUS_REQUEST_TTL_SECONDS", str(_DEFAULT_REQUEST_TTL_SECONDS))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "invalid SERVICEBUS_REQUEST_TTL_SECONDS=%r; defaulting to %d",
+            raw,
+            _DEFAULT_REQUEST_TTL_SECONDS,
+        )
+        value = _DEFAULT_REQUEST_TTL_SECONDS
+    return max(60, min(value, 14 * 24 * 60 * 60))
 
 
 def _sb_client_kwargs() -> dict[str, Any]:
@@ -128,6 +148,18 @@ class ServiceBusAuthError(RuntimeError):
     """The namespace rejected the credential (Entra issuer / SAS disabled)."""
 
 
+class ServiceBusEventValidationError(ValueError):
+    """A completion event can never fit the bounded Service Bus wire contract."""
+
+
+def validate_completion_event(event: dict[str, Any]) -> str:
+    """Serialize and enforce the bounded completion-event wire contract."""
+    payload = json.dumps(event, default=str)
+    if len(payload.encode("utf-8")) > _MAX_COMPLETION_EVENT_BYTES:
+        raise ServiceBusEventValidationError("completion event exceeds the wire-size budget")
+    return payload
+
+
 class MessageAction(StrEnum):
     """What ``drain_requests`` / ``purge_dead_letter`` should do with a message."""
 
@@ -149,6 +181,7 @@ class ParsedMessage:
     content_type: str | None
     enqueued_time_utc: datetime | None
     sequence_number: int | None
+    expires_at_utc: datetime | None = None
     application_properties: dict[str, Any] = field(default_factory=dict)
     dead_letter_reason: str | None = None
     dead_letter_error_description: str | None = None
@@ -274,6 +307,7 @@ def _parse(message: Any) -> ParsedMessage:
         subject=getattr(message, "subject", None),
         content_type=getattr(message, "content_type", None),
         enqueued_time_utc=getattr(message, "enqueued_time_utc", None),
+        expires_at_utc=getattr(message, "expires_at_utc", None),
         sequence_number=getattr(message, "sequence_number", None),
         application_properties=application_properties,
         dead_letter_reason=getattr(message, "dead_letter_reason", None),
@@ -306,6 +340,7 @@ def send_request(
         subject=subject,
         message_id=message_id,
         correlation_id=correlation_id,
+        time_to_live=timedelta(seconds=request_ttl_seconds()),
     )
     try:
         with _client(cfg) as client, client.get_queue_sender(cfg.request_queue) as sender:
@@ -376,8 +411,9 @@ def publish_event(cfg: ServiceBusConfig | None, event: dict[str, Any]) -> None:
     # none, keeping the envelope unchanged for the common case.
     request_id = str(event.get("request_id") or "").strip()
     application_properties = {"request_id": request_id} if request_id else None
+    payload = validate_completion_event(event)
     message = ServiceBusMessage(
-        json.dumps(event, default=str),
+        payload,
         content_type="application/json",
         subject=str(event.get("event") or "blast.transition"),
         correlation_id=str(event.get("external_correlation_id") or "") or None,
@@ -1007,6 +1043,24 @@ def _retry_delay_seconds(attempt: int) -> int:
     return int(min(_RETRY_MAX_DELAY_SECONDS, _RETRY_BASE_SECONDS * (2**exponent)))
 
 
+def _aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def retry_would_outlive_request(parsed: ParsedMessage) -> bool:
+    """Return whether the next scheduled retry would start at/after broker expiry."""
+    expiry = _aware_utc(parsed.expires_at_utc)
+    if expiry is None:
+        return False
+    scheduled = _now() + timedelta(seconds=_retry_delay_seconds(parsed.retry_attempt + 1))
+    # Leave one minute for local/broker clock skew and scheduling latency. A
+    # retry accepted only a few seconds before expiry is not useful and risks a
+    # scheduled message expiring before the broker makes it active.
+    return scheduled >= expiry - timedelta(seconds=60)
+
+
 def _retry_message(parsed: ParsedMessage) -> ServiceBusMessage:
     """Clone one request for delayed retry without changing execution identity."""
     next_attempt = parsed.retry_attempt + 1
@@ -1026,6 +1080,11 @@ def _retry_message(parsed: ParsedMessage) -> ServiceBusMessage:
             "elb_first_enqueued_at": first_enqueued_at,
         }
     )
+    scheduled_at = _now() + timedelta(seconds=_retry_delay_seconds(next_attempt))
+    expiry = _aware_utc(parsed.expires_at_utc)
+    remaining_ttl = expiry - scheduled_at if expiry is not None else None
+    if remaining_ttl is not None and remaining_ttl.total_seconds() <= 0:
+        raise ValueError("scheduled retry would outlive the original request expiry")
     return ServiceBusMessage(
         parsed.raw_body or json.dumps(parsed.body, default=str),
         content_type=parsed.content_type or "application/json",
@@ -1033,8 +1092,8 @@ def _retry_message(parsed: ParsedMessage) -> ServiceBusMessage:
         message_id=retry_message_id,
         correlation_id=parsed.correlation_id,
         application_properties=properties,
-        scheduled_enqueue_time_utc=_now()
-        + timedelta(seconds=_retry_delay_seconds(next_attempt)),
+        scheduled_enqueue_time_utc=scheduled_at,
+        **({"time_to_live": remaining_ttl} if remaining_ttl is not None else {}),
     )
 
 
@@ -1098,6 +1157,38 @@ def _iso_or_none(value: Any) -> str | None:
     except Exception:
         # Best-effort — a bad timestamp must never break the counts call.
         return None
+
+
+def _duration_seconds(value: Any) -> int | None:
+    """Render an SDK timedelta-like property as non-negative seconds."""
+    if not isinstance(value, timedelta):
+        return None
+    return max(0, int(value.total_seconds()))
+
+
+def _entity_policy(properties: Any) -> dict[str, Any]:
+    """Return nullable, payload-free static entity policy fields."""
+    if properties is None:
+        return {
+            "available": False,
+            "error": "static_properties_unavailable",
+            "default_ttl_seconds": None,
+            "dead_letter_on_expiration": None,
+            "max_delivery_count": None,
+            "lock_duration_seconds": None,
+        }
+    return {
+        "available": True,
+        "error": "",
+        "default_ttl_seconds": _duration_seconds(
+            getattr(properties, "default_message_time_to_live", None)
+        ),
+        "dead_letter_on_expiration": getattr(
+            properties, "dead_lettering_on_message_expiration", None
+        ),
+        "max_delivery_count": getattr(properties, "max_delivery_count", None),
+        "lock_duration_seconds": _duration_seconds(getattr(properties, "lock_duration", None)),
+    }
 
 
 def pending_request_count(cfg: ServiceBusConfig | None) -> int | None:
@@ -1206,6 +1297,7 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                     "created_at": _iso_or_none(getattr(q, "created_at_utc", None)),
                     "updated_at": _iso_or_none(getattr(q, "updated_at_utc", None)),
                     "accessed_at": _iso_or_none(getattr(q, "accessed_at_utc", None)),
+                    "policy": _entity_policy(qprops),
                 },
             }
             result["dead_letter"] = q.dead_letter_message_count
@@ -1219,6 +1311,13 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                 # is no fan-out / per-subscription split in queue mode.
                 try:
                     cq = admin.get_queue_runtime_properties(cfg.completion_topic)
+                    try:
+                        cqprops = admin.get_queue(cfg.completion_topic)
+                    except (AttributeError, ServiceBusError):
+                        cqprops = None
+                        LOGGER.debug(
+                            "completion queue static properties unavailable", exc_info=True
+                        )
                     result["subscriptions"].append(
                         {
                             "name": cfg.completion_topic,
@@ -1228,6 +1327,7 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                             "transfer_dead_letter_message_count": getattr(
                                 cq, "transfer_dead_letter_message_count", None
                             ),
+                            "policy": _entity_policy(cqprops),
                         }
                     )
                     result["completion_accessible"] = True
@@ -1242,6 +1342,15 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                         srt = admin.get_subscription_runtime_properties(
                             cfg.completion_topic, sub.name
                         )
+                        try:
+                            sprops = admin.get_subscription(cfg.completion_topic, sub.name)
+                        except (AttributeError, ServiceBusError):
+                            sprops = None
+                            LOGGER.debug(
+                                "completion subscription static properties unavailable name=%s",
+                                sub.name,
+                                exc_info=True,
+                            )
                         result["subscriptions"].append(
                             {
                                 "name": sub.name,
@@ -1255,6 +1364,7 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
                                 "transfer_dead_letter_message_count": getattr(
                                     srt, "transfer_dead_letter_message_count", None
                                 ),
+                                "policy": _entity_policy(sprops),
                             }
                         )
                     result["completion_accessible"] = True

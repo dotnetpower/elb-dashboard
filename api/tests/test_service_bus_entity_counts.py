@@ -15,7 +15,7 @@ Validation: ``uv run pytest -q api/tests/test_service_bus_entity_counts.py``.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -65,6 +65,12 @@ class _FakeAdmin:
                 return runtime
         raise KeyError(name)
 
+    def get_subscription(self, _topic: str, name: str) -> Any:
+        for sub, _runtime in self._subs:
+            if sub.name == name:
+                return sub
+        raise KeyError(name)
+
 
 @contextmanager
 def _patched_admin(monkeypatch: pytest.MonkeyPatch, admin: _FakeAdmin):
@@ -91,7 +97,14 @@ def test_entity_counts_includes_telemetry_block(monkeypatch: pytest.MonkeyPatch)
         updated_at_utc=datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC),
         accessed_at_utc=datetime(2026, 6, 14, 5, 0, 0, tzinfo=UTC),
     )
-    q_props = SimpleNamespace(max_size_in_megabytes=1024, status="Active")
+    q_props = SimpleNamespace(
+        max_size_in_megabytes=1024,
+        status="Active",
+        default_message_time_to_live=timedelta(hours=24),
+        dead_lettering_on_message_expiration=True,
+        max_delivery_count=10,
+        lock_duration=timedelta(minutes=5),
+    )
     admin = _FakeAdmin(q_runtime=q_runtime, q_props=q_props)
 
     with _patched_admin(monkeypatch, admin):
@@ -112,6 +125,14 @@ def test_entity_counts_includes_telemetry_block(monkeypatch: pytest.MonkeyPatch)
     assert tele["transfer_message_count"] == 0
     assert tele["transfer_dead_letter_message_count"] == 2
     assert tele["status"] == "Active"
+    assert tele["policy"] == {
+        "available": True,
+        "error": "",
+        "default_ttl_seconds": 86400,
+        "dead_letter_on_expiration": True,
+        "max_delivery_count": 10,
+        "lock_duration_seconds": 300,
+    }
     # ISO suffix is ``Z`` (not ``+00:00``) so the SPA can render it directly.
     assert tele["accessed_at"] == "2026-06-14T05:00:00Z"
     assert result["completion_configured"] is True

@@ -15,12 +15,14 @@ Edit boundaries: Reusable persistence logic only. No Service Bus SDK, no HTTP
     shaping, no event payload construction (that lives in the tasks). Mirrors the
     Table/file backend gating of ``performance_pref`` / ``service_bus_pref``.
 Key entry points: ``BridgeRecord``, ``get_bridge``, ``upsert_bridge``,
-    ``list_active_bridges``, ``mark_published``, ``mark_done``.
+    ``list_active_bridges``, ``list_active_bridges_page``, ``mark_published``,
+    ``mark_done``.
 Risky contracts: ``last_status`` is the published-transition marker — the
     publisher MUST only emit when the freshly observed status differs from it,
     then update it, or the topic floods with duplicate events. ``list_active_
-    bridges`` returns only non-``done`` rows and is bounded by ``limit`` so the
-    publisher tick stays bounded.
+    bridges_page`` uses a RowKey cursor and returns only non-``done`` rows,
+    bounded by ``limit`` so the publisher tick stays bounded without starving
+    rows beyond the first page.
 Validation: ``uv run pytest -q api/tests/test_service_bus_tracking.py``.
 """
 
@@ -251,9 +253,19 @@ def mark_done(correlation_id: str, status: str) -> None:
 
 
 def list_active_bridges(limit: int = 200) -> list[BridgeRecord]:
+    records, _cursor = list_active_bridges_page(limit=limit)
+    return records
+
+
+def list_active_bridges_page(
+    *, limit: int = 200, after_row_key: str = ""
+) -> tuple[list[BridgeRecord], str]:
+    """Return one bounded active page after an opaque RowKey, wrapping once."""
+    bounded = max(1, min(int(limit), 1000))
+    safe_cursor = _row_key(after_row_key) if after_row_key else ""
     if _use_table_backend():
-        return _list_table(limit)
-    return _list_file(limit)
+        return _list_table_page(bounded, safe_cursor)
+    return _list_file_page(bounded, safe_cursor)
 
 
 # --------------------------------------------------------------------------- #
@@ -352,18 +364,30 @@ def _get_table(correlation_id: str) -> BridgeRecord | None:
     return _record_from_entity(entity_dict)
 
 
-def _list_table(limit: int) -> list[BridgeRecord]:
-    out: list[BridgeRecord] = []
+def _list_table_page(limit: int, after_row_key: str) -> tuple[list[BridgeRecord], str]:
+    out: list[tuple[str, BridgeRecord]] = []
     _ensure_table()
     with _table_client() as table:
-        rows = table.query_entities(f"type eq '{_TYPE}' and done eq false", results_per_page=limit)
-        for row in rows:
-            rec = _record_from_entity(dict(row))
-            if rec is not None and not rec.done:
-                out.append(rec)
+        filters = [
+            f"type eq '{_TYPE}' and done eq false"
+            + (f" and RowKey gt '{after_row_key}'" if after_row_key else "")
+        ]
+        if after_row_key:
+            filters.append(f"type eq '{_TYPE}' and done eq false and RowKey le '{after_row_key}'")
+        for query_filter in filters:
             if len(out) >= limit:
                 break
-    return out
+            rows = table.query_entities(query_filter, results_per_page=limit - len(out))
+            for row in rows:
+                row_dict = dict(row)
+                rec = _record_from_entity(row_dict)
+                if rec is not None and not rec.done:
+                    out.append((str(row_dict.get("RowKey") or ""), rec))
+                if len(out) >= limit:
+                    break
+            if len(out) >= limit:
+                break
+    return ([rec for _key, rec in out], out[-1][0] if out else "")
 
 
 def _claim_table(
@@ -518,19 +542,25 @@ def _save_file(record: BridgeRecord) -> None:
         _write_file_state(data)
 
 
-def _list_file(limit: int) -> list[BridgeRecord]:
+def _list_file_page(limit: int, after_row_key: str) -> tuple[list[BridgeRecord], str]:
     with _FILE_LOCK:
         data = _read_file_state()
-    out: list[BridgeRecord] = []
-    for raw in data.values():
+    active: list[tuple[str, BridgeRecord]] = []
+    for key, raw in data.items():
         if not isinstance(raw, dict):
             continue
         rec = BridgeRecord.from_dict(raw)
         if not rec.done:
-            out.append(rec)
-        if len(out) >= limit:
-            break
-    return out
+            active.append((key, rec))
+    active.sort(key=lambda item: item[0])
+    ordered = (
+        [item for item in active if item[0] > after_row_key]
+        + [item for item in active if item[0] <= after_row_key]
+        if after_row_key
+        else active
+    )
+    page = ordered[:limit]
+    return ([rec for _key, rec in page], page[-1][0] if page else "")
 
 
 def _claim_file(

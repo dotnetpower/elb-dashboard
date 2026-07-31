@@ -152,6 +152,75 @@ def test_outbox_scan_is_bounded_and_reports_truncation(
     assert "outbox_backlog_truncated" in snapshot["warnings"]
 
 
+def test_warns_on_unsafe_entity_policy_and_counts_warmup_without_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        health.service_bus,
+        "entity_counts",
+        lambda _cfg: {
+            "queue": {
+                "active_message_count": 2,
+                "scheduled_message_count": 0,
+                "dead_letter_message_count": 0,
+                "total_message_count": 2,
+                "telemetry": {
+                    "policy": {
+                        "available": True,
+                        "default_ttl_seconds": 900,
+                        "dead_letter_on_expiration": False,
+                        "max_delivery_count": 10,
+                    }
+                },
+            },
+            "completion_accessible": True,
+            "completion_error": "",
+            "subscriptions": [
+                {
+                    "name": "customer",
+                    "active_message_count": 0,
+                    "dead_letter_message_count": 0,
+                    "policy": {
+                        "available": True,
+                        "default_ttl_seconds": 1800,
+                        "dead_letter_on_expiration": False,
+                        "max_delivery_count": 10,
+                    },
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(health, "list_pending_responses", lambda **_kwargs: [])
+
+    snapshot = health.collect_service_bus_health(
+        _cfg(),
+        admission={
+            "allowed": False,
+            "reason": "database_warmup_in_progress",
+            "target_node_count": 4,
+            "ready_node_count": 2,
+            "warmup_jobs": {"secret-db-a": "secret-job-a", "secret-db-b": "secret-job-b"},
+            "failed_warmup_jobs": {"secret-db-b": "secret-job-b"},
+        },
+    )
+
+    assert set(snapshot["warnings"]) >= {
+        "request_ttl_too_short",
+        "request_entity_ttl_shorter_than_producer",
+        "request_expiration_not_dead_lettered",
+        "completion_ttl_too_short",
+        "completion_expiration_not_dead_lettered",
+        "drain_admission_blocked",
+    }
+    assert snapshot["admission_target_node_count"] == 4
+    assert snapshot["producer_request_ttl_seconds"] == 86400
+    assert snapshot["admission_ready_node_count"] == 2
+    assert snapshot["admission_warmup_job_count"] == 2
+    assert snapshot["admission_failed_warmup_job_count"] == 1
+    assert "secret-db" not in str(snapshot)
+    assert "secret-job" not in str(snapshot)
+
+
 def test_periodic_task_emits_scalar_health_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -266,3 +335,47 @@ def test_outbox_flush_always_records_health_state(
 
     assert result == expected
     assert recorded == [(expected, True)]
+
+
+def test_outbox_poison_isolates_only_its_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = [
+        PendingResponse(
+            "poison-queued",
+            {"event_id": "poison-queued", "external_correlation_id": "corr-poison"},
+            "2026-07-30T12:00:00+00:00",
+        ),
+        PendingResponse(
+            "poison-terminal",
+            {"event_id": "poison-terminal", "external_correlation_id": "corr-poison"},
+            "2026-07-30T12:00:01+00:00",
+        ),
+        PendingResponse(
+            "healthy",
+            {"event_id": "healthy", "external_correlation_id": "corr-healthy"},
+            "2026-07-30T12:00:02+00:00",
+        ),
+    ]
+    sent: list[str] = []
+    deferred: list[str] = []
+    monkeypatch.setattr(sb_tasks, "list_pending_responses", lambda *, limit: pending)
+    monkeypatch.setattr(sb_tasks, "mark_response_delivered", lambda event_id: None)
+    monkeypatch.setattr(
+        sb_tasks,
+        "defer_response",
+        lambda event_id, **_kwargs: deferred.append(event_id),
+    )
+
+    def publish(_cfg: object, event: dict[str, Any]) -> None:
+        if event["event_id"] == "poison-queued":
+            raise sb_tasks.service_bus.ServiceBusEventValidationError("too large")
+        sent.append(event["event_id"])
+
+    monkeypatch.setattr(sb_tasks.service_bus, "publish_event", publish)
+
+    result = sb_tasks._flush_response_outbox(_cfg())
+
+    assert result == {"scanned": 3, "delivered": 1, "errors": 1}
+    assert deferred == ["poison-queued"]
+    assert sent == ["healthy"]

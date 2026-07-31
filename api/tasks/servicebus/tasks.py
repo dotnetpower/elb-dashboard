@@ -76,6 +76,7 @@ from api.services.service_bus_observability import (
 )
 from api.services.service_bus_outbox import (
     ResponseOutboxPersistenceError,
+    defer_response,
     enqueue_response,
     list_pending_responses,
     mark_response_delivered,
@@ -89,7 +90,7 @@ from api.services.service_bus_tracking import (
     BridgeRecord,
     claim_bridge,
     get_bridge,
-    list_active_bridges,
+    list_active_bridges_page,
     mark_done,
     mark_published,
     release_bridge,
@@ -105,9 +106,14 @@ LOGGER = logging.getLogger(__name__)
 # state if that topology ever changes. The App Insights event still emits every
 # five minutes regardless of this log-noise guard.
 _LAST_SERVICE_BUS_HEALTH_WARNING = ""
+_TRANSITION_CURSOR_KEY = "servicebus:transition-poll:cursor"
+_TRANSITION_CURSOR_TTL_SECONDS = 30 * 24 * 60 * 60
+_LOCAL_TRANSITION_CURSOR = ""
 
 # Per-tick bounds (self-critique: no unbounded loop). Tunable via env.
 _DRAIN_MAX_MESSAGES = int(os.environ.get("SERVICEBUS_DRAIN_MAX_MESSAGES", "50"))
+
+
 # How many request messages may be bridged to the sibling /v1/jobs plane
 # concurrently within one drain tick. Default 1 = legacy serial behaviour
 # (charter §12a Rule 4: a new throughput knob ships default-OFF). The slow part
@@ -307,6 +313,8 @@ def _release_drain_stop_intent(queue_name: str, token: str | None) -> None:
 def release_drain_stop_intent(queue_name: str, token: str | None) -> None:
     """Release an auto-stop drain fence after stop starts, skips, or fails."""
     _release_drain_stop_intent(queue_name, token)
+
+
 _PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "200"))
 _OUTBOX_MAX_EVENTS = int(os.environ.get("SERVICEBUS_OUTBOX_MAX_EVENTS", "200"))
 _DLQ_RESPONSE_MAX_MESSAGES = int(
@@ -346,6 +354,42 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _transition_cursor() -> str:
+    """Read the fair-poll cursor, degrading to process-local state on Redis loss."""
+    global _LOCAL_TRANSITION_CURSOR
+    if not os.environ.get("CONTAINER_APP_NAME"):
+        return _LOCAL_TRANSITION_CURSOR
+    try:
+        from api.services.redis_clients import get_broker_redis_client
+
+        raw = get_broker_redis_client(socket_timeout=2).get(_TRANSITION_CURSOR_KEY)
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", "replace")[:512]
+        if isinstance(raw, str):
+            return raw[:512]
+    except Exception:
+        LOGGER.debug("transition cursor read degraded to process-local state", exc_info=True)
+    return _LOCAL_TRANSITION_CURSOR
+
+
+def _save_transition_cursor(cursor: str) -> None:
+    """Advance the fair-poll cursor best-effort; bridge markers remain authoritative."""
+    global _LOCAL_TRANSITION_CURSOR
+    _LOCAL_TRANSITION_CURSOR = cursor[:512]
+    if not os.environ.get("CONTAINER_APP_NAME"):
+        return
+    try:
+        from api.services.redis_clients import get_broker_redis_client
+
+        get_broker_redis_client(socket_timeout=2).setex(
+            _TRANSITION_CURSOR_KEY,
+            _TRANSITION_CURSOR_TTL_SECONDS,
+            _LOCAL_TRANSITION_CURSOR,
+        )
+    except Exception:
+        LOGGER.debug("transition cursor persist degraded to process-local state", exc_info=True)
+
+
 def _bridge_expired(created_at: str) -> bool:
     """True when a bridge row is older than the give-up deadline.
 
@@ -366,6 +410,8 @@ def _bridge_expired(created_at: str) -> bool:
 
 def _retry_exhausted(msg: ParsedMessage) -> bool:
     """True when a transient request has consumed its bounded retry envelope."""
+    if service_bus.retry_would_outlive_request(msg):
+        return True
     if msg.retry_attempt >= _RETRY_MAX_ATTEMPTS:
         return True
     raw = msg.first_enqueued_at
@@ -381,6 +427,19 @@ def _retry_exhausted(msg: ParsedMessage) -> bool:
     if first.tzinfo is None:
         first = first.replace(tzinfo=UTC)
     return (datetime.now(UTC) - first).total_seconds() >= _RETRY_MAX_AGE_SECONDS
+
+
+def _retry_terminal_error(msg: ParsedMessage) -> tuple[str, str]:
+    """Return the terminal code/detail for an exhausted transient retry."""
+    if service_bus.retry_would_outlive_request(msg):
+        return (
+            "servicebus_request_expired",
+            "request could not reach the execution plane before its broker expiry",
+        )
+    return (
+        "servicebus_retry_exhausted",
+        "request could not reach the execution plane before the retry deadline",
+    )
 
 
 def _classify(raw_status: str) -> str:
@@ -512,7 +571,6 @@ def _persist_result_manifest(openapi_job_id: str, job: dict[str, Any]) -> None:
         LOGGER.debug(
             "result manifest persist skipped job_id=%s", openapi_job_id, exc_info=True
         )
-
 
 
 # Bound the pass-through value so a hostile/oversized producer value cannot bloat
@@ -746,7 +804,6 @@ def _record_transition_trace(openapi_job_id: str, status: str) -> None:
         record_stage(repo, openapi_job_id, "completion_published", status=status)
     except Exception as exc:  # pragma: no cover - best-effort
         LOGGER.debug("transition trace skipped job=%s: %s", openapi_job_id, type(exc).__name__)
-
 
 
 def _openapi_kwargs(cfg: ServiceBusConfig) -> dict[str, str]:
@@ -1310,7 +1367,6 @@ def _record_drain_request_event(
     )
 
 
-
 def _stage_response_event(
     cfg: ServiceBusConfig,
     event: dict[str, Any],
@@ -1361,18 +1417,116 @@ def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
         stats["errors"] = 1
         note_outbox_flush(stats)
         return stats
+    blocked_correlations: set[str] = set()
     for item in pending:
         stats["scanned"] += 1
+        correlation_id = str(item.event.get("external_correlation_id") or "")
+        if correlation_id and correlation_id in blocked_correlations:
+            continue
+        if item.next_attempt_at:
+            try:
+                next_attempt = datetime.fromisoformat(item.next_attempt_at.replace("Z", "+00:00"))
+                if next_attempt.tzinfo is None:
+                    next_attempt = next_attempt.replace(tzinfo=UTC)
+                if datetime.now(UTC) < next_attempt:
+                    if correlation_id:
+                        blocked_correlations.add(correlation_id)
+                    continue
+            except ValueError:
+                LOGGER.warning(
+                    "producer response has invalid next_attempt_at event_id=%s",
+                    item.event_id,
+                )
+                stats["errors"] += 1
+                try:
+                    defer_response(
+                        item.event_id,
+                        error_code="deferred_timestamp_corrupt",
+                        retry_after_seconds=300,
+                    )
+                except Exception:
+                    LOGGER.warning("producer response timestamp repair failed", exc_info=True)
+                    break
+                if correlation_id:
+                    blocked_correlations.add(correlation_id)
+                continue
         try:
             service_bus.publish_event(cfg, item.event)
             mark_response_delivered(item.event_id)
             stats["delivered"] += 1
+        except service_bus.ServiceBusEventValidationError:
+            LOGGER.warning(
+                "producer response outbox poison event isolated event_id=%s",
+                item.event_id,
+            )
+            stats["errors"] += 1
+            # Preserve the stable event_id and state transition while dropping
+            # optional/high-volume fields. The result_ref remains the durable
+            # claim-check path, so the producer still receives a useful outcome.
+            compact_event = {
+                key: item.event[key]
+                for key in (
+                    "event",
+                    "event_id",
+                    "external_correlation_id",
+                    "openapi_job_id",
+                    "status",
+                    "phase",
+                    "error_code",
+                    "ts",
+                    "result_ref",
+                    "request_id",
+                    "attempt",
+                )
+                if key in item.event
+            }
+            try:
+                service_bus.validate_completion_event(compact_event)
+            except service_bus.ServiceBusEventValidationError:
+                LOGGER.error(
+                    "producer response cannot fit even after compaction event_id=%s",
+                    item.event_id,
+                )
+                try:
+                    defer_response(
+                        item.event_id,
+                        error_code="completion_event_irrecoverable",
+                        retry_after_seconds=24 * 60 * 60,
+                    )
+                except Exception:
+                    LOGGER.warning("irrecoverable response deferral persist failed", exc_info=True)
+                break
+            try:
+                defer_response(
+                    item.event_id,
+                    error_code="completion_event_compacted",
+                    retry_after_seconds=1,
+                    replacement_event=compact_event,
+                )
+            except Exception:
+                LOGGER.warning("producer response poison deferral persist failed", exc_info=True)
+                break
+            # Keep queued→running→terminal ordered for this request while
+            # allowing unrelated producers to make progress. The failed row
+            # remains durable and is retried on the next tick.
+            if correlation_id:
+                blocked_correlations.add(correlation_id)
         except Exception:
             LOGGER.warning(
                 "producer response outbox flush paused event_id=%s",
                 item.event_id,
             )
             stats["errors"] += 1
+            try:
+                defer_response(
+                    item.event_id,
+                    error_code="completion_publish_failed",
+                    retry_after_seconds=30,
+                )
+            except Exception:
+                LOGGER.warning("producer response retry deferral persist failed", exc_info=True)
+            # A broker/auth/network failure is entity-wide. Stop this bounded
+            # pass instead of multiplying one outage into N failed sends.
             break
     note_outbox_flush(stats)
     return stats
@@ -1441,10 +1595,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     # drains of the same correlation id can never both submit.
     existing = get_bridge(correlation_id)
     if existing is not None and (existing.openapi_job_id or not _ATOMIC_CLAIM):
-        if (
-            existing.request_fingerprint
-            and existing.request_fingerprint != request_fingerprint
-        ):
+        if existing.request_fingerprint and existing.request_fingerprint != request_fingerprint:
             LOGGER.warning("service bus correlation conflict corr=%s", correlation_id)
             response_durable = _publish_correlation_conflict(
                 cfg,
@@ -1545,6 +1696,11 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         status = int(getattr(exc, "status_code", 0) or 0)
         permanent = 400 <= status < 500 and status not in (408, 429)
         retry_exhausted = not permanent and _retry_exhausted(msg)
+        failure_code = (
+            f"servicebus_submit_rejected_{status}"
+            if permanent
+            else f"openapi_http_{status or 'unknown'}"
+        )
         LOGGER.warning(
             "service bus → OpenAPI submit %s corr=%s status=%s",
             "rejected (dead-letter)" if permanent else "failed (retry)",
@@ -1571,22 +1727,22 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             else:
                 permanent = False
         elif retry_exhausted:
+            terminal_code, terminal_message = _retry_terminal_error(msg)
             response_durable = _publish_drain_failure_event(
                 cfg,
                 correlation_id=correlation_id,
                 request_id=request_id,
-                error_code="servicebus_retry_exhausted",
-                error_message=(
-                    "request could not reach the execution plane before the retry deadline"
-                ),
+                error_code=terminal_code,
+                error_message=terminal_message,
             )
             if response_durable:
                 permanent = True
+                failure_code = terminal_code
                 _fail_placeholder(
                     correlation_id,
-                    error_code="servicebus_retry_exhausted",
+                    error_code=terminal_code,
                 )
-                _publish_jobs_cache_invalidate("servicebus_retry_exhausted")
+                _publish_jobs_cache_invalidate(terminal_code)
         if _ATOMIC_CLAIM:
             # Submit failed after we reserved the correlation id, so roll the
             # reservation back: a transient ABANDON can then re-claim + resubmit
@@ -1604,11 +1760,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             cfg,
             payload=payload,
             action=action,
-            error_code=(
-                f"servicebus_submit_rejected_{status}"
-                if permanent
-                else f"openapi_http_{status or 'unknown'}"
-            ),
+            error_code=failure_code,
         )
         return action
     except Exception as exc:
@@ -1621,22 +1773,21 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         retry_exhausted = _retry_exhausted(msg)
         action = MessageAction.ABANDON if retry_exhausted else MessageAction.RETRY
         if retry_exhausted:
+            terminal_code, terminal_message = _retry_terminal_error(msg)
             response_durable = _publish_drain_failure_event(
                 cfg,
                 correlation_id=correlation_id,
                 request_id=request_id,
-                error_code="servicebus_retry_exhausted",
-                error_message=(
-                    "request could not reach the execution plane before the retry deadline"
-                ),
+                error_code=terminal_code,
+                error_message=terminal_message,
             )
             if response_durable:
                 action = MessageAction.DEAD_LETTER
                 _fail_placeholder(
                     correlation_id,
-                    error_code="servicebus_retry_exhausted",
+                    error_code=terminal_code,
                 )
-                _publish_jobs_cache_invalidate("servicebus_retry_exhausted")
+                _publish_jobs_cache_invalidate(terminal_code)
         _record_drain_request_event(
             "rejected" if action == MessageAction.DEAD_LETTER else "retry_scheduled",
             msg,
@@ -1644,7 +1795,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             payload=payload,
             action=action,
             error_code=(
-                "servicebus_retry_exhausted"
+                _retry_terminal_error(msg)[0]
                 if action == MessageAction.DEAD_LETTER
                 else type(exc).__name__
             ),
@@ -2409,9 +2560,31 @@ def emit_service_bus_health() -> dict[str, Any]:
         outbox_last_scanned=int(outbox["last_scanned"]),
         outbox_last_delivered=int(outbox["last_delivered"]),
         outbox_last_errors=int(outbox["last_errors"]),
+        outbox_deferred=cast(int | None, outbox.get("deferred")),
+        outbox_poison=cast(int | None, outbox.get("poison")),
         admission_available=bool(snapshot["admission_available"]),
         admission_allowed=cast(bool | None, snapshot["admission_allowed"]),
         admission_reason=str(snapshot["admission_reason"]),
+        request_policy_available=bool(queue.get("request_policy_available")),
+        request_policy_error=str(queue.get("request_policy_error") or ""),
+        request_ttl_seconds=cast(int | None, queue.get("request_ttl_seconds")),
+        producer_request_ttl_seconds=int(snapshot.get("producer_request_ttl_seconds") or 0),
+        request_dead_letter_on_expiration=cast(
+            bool | None, queue.get("request_dead_letter_on_expiration")
+        ),
+        request_max_delivery_count=cast(int | None, queue.get("request_max_delivery_count")),
+        completion_policy_available=bool(queue.get("completion_policy_available")),
+        completion_min_ttl_seconds=cast(int | None, queue.get("completion_min_ttl_seconds")),
+        completion_dead_letter_on_expiration=cast(
+            bool | None, queue.get("completion_dead_letter_on_expiration")
+        ),
+        completion_max_delivery_count=cast(int | None, queue.get("completion_max_delivery_count")),
+        admission_target_node_count=int(snapshot.get("admission_target_node_count") or 0),
+        admission_ready_node_count=int(snapshot.get("admission_ready_node_count") or 0),
+        admission_warmup_job_count=int(snapshot.get("admission_warmup_job_count") or 0),
+        admission_failed_warmup_job_count=int(
+            snapshot.get("admission_failed_warmup_job_count") or 0
+        ),
         resident_consumer_enabled=bool(snapshot["resident_consumer_enabled"]),
         drain_concurrency=int(snapshot["drain_concurrency"]),
     )
@@ -2453,7 +2626,12 @@ def publish_transitions() -> dict[str, Any]:
     # dependency-failure exception — flooding the telemetry with thousands of
     # identical traces for a no-op tick. Resolving lazily makes the idle path
     # touch nothing but the local tracking store.
-    bridges = list_active_bridges(limit=_PUBLISH_MAX_ROWS)
+    bridges, next_cursor = list_active_bridges_page(
+        limit=_PUBLISH_MAX_ROWS,
+        after_row_key=_transition_cursor(),
+    )
+    if bridges:
+        _save_transition_cursor(next_cursor)
     if not bridges:
         return {
             "scanned": 0,

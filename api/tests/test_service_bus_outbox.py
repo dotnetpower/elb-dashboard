@@ -61,3 +61,29 @@ def test_deployed_without_table_endpoint_fails_closed(monkeypatch: pytest.Monkey
 
     with pytest.raises(outbox.ResponseOutboxPersistenceError):
         outbox.enqueue_response(_event("evt-no-table"))
+
+
+def test_defer_response_persists_bounded_retry_metadata() -> None:
+    outbox.enqueue_response(_event("evt-deferred"))
+
+    outbox.defer_response(
+        "evt-deferred",
+        error_code="completion_event_compacted",
+        retry_after_seconds=3600,
+        replacement_event={**_event("evt-deferred"), "compacted": True},
+    )
+
+    pending = outbox.list_pending_responses()[0]
+    assert pending.failure_count == 1
+    assert pending.next_attempt_at
+    assert pending.last_error_code == "completion_event_compacted"
+    assert pending.event["compacted"] is True
+
+
+def test_defer_missing_response_is_idempotent_noop() -> None:
+    outbox.defer_response(
+        "missing",
+        error_code="completion_publish_failed",
+        retry_after_seconds=30,
+    )
+    assert outbox.list_pending_responses() == []
