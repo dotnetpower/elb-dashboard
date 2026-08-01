@@ -18,9 +18,9 @@ from typing import Any
 
 import pytest
 from api.celery_app import celery_app
-from api.services import service_bus, service_bus_management
+from api.services import service_bus, service_bus_management, service_bus_preview
 from api.services.service_bus_pref import ServiceBusConfig
-from api.tasks.servicebus import drain_coordination
+from api.tasks.servicebus import drain_coordination, request_translation
 from api.tasks.servicebus import tasks as servicebus_tasks
 
 
@@ -67,6 +67,67 @@ def test_management_facade_injects_monkeypatched_admin_client(
     assert captured["auth_error"] is service_bus.ServiceBusAuthError
 
 
+def test_request_translation_facade_injects_current_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def translate(message: Any, config: ServiceBusConfig, **kwargs: Any) -> dict[str, Any]:
+        captured.update({"message": message, "config": config, **kwargs})
+        return {"external_correlation_id": "corr-1"}
+
+    message = service_bus.ParsedMessage(
+        body={},
+        raw_body="{}",
+        message_id="message-1",
+        correlation_id="corr-1",
+        subject=None,
+        content_type="application/json",
+        enqueued_time_utc=None,
+        sequence_number=1,
+    )
+    config = ServiceBusConfig(namespace_fqdn="example.servicebus.windows.net")
+    monkeypatch.setattr(request_translation, "build_request_payload", translate)
+
+    assert servicebus_tasks._build_request_payload(message, config) == {
+        "external_correlation_id": "corr-1"
+    }
+    assert captured["message"] is message
+    assert captured["config"] is config
+    assert captured["logger"] is servicebus_tasks.LOGGER
+
+
+def test_peek_preview_facade_composes_current_monkeypatchable_functions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = service_bus.ParsedMessage(
+        body={"program": "blastn"},
+        raw_body="{}",
+        message_id="message-1",
+        correlation_id="corr-1",
+        subject="blast.request",
+        content_type="application/json",
+        enqueued_time_utc=None,
+        sequence_number=1,
+    )
+    calls: list[tuple[Any, int]] = []
+
+    def peek(config: ServiceBusConfig | None, max_count: int = 5) -> list[Any]:
+        calls.append((config, max_count))
+        return [message]
+
+    monkeypatch.setattr(service_bus, "peek_requests", peek)
+    monkeypatch.setattr(
+        service_bus_preview,
+        "preview_message",
+        lambda _message, **_kwargs: {"message_id": "message-1"},
+    )
+
+    config = ServiceBusConfig(namespace_fqdn="example.servicebus.windows.net")
+    assert service_bus.peek_request_previews(config, max_count=7) == [{"message_id": "message-1"}]
+    assert calls == [(config, 7)]
+
+
 def test_legacy_facade_symbols_remain_importable() -> None:
     assert callable(servicebus_tasks.acquire_drain_stop_intent)
     assert callable(servicebus_tasks.release_drain_stop_intent)
@@ -74,6 +135,10 @@ def test_legacy_facade_symbols_remain_importable() -> None:
     assert callable(service_bus.entity_counts)
     assert callable(service_bus.discover_namespaces)
     assert callable(service_bus.discover_entities)
+    assert callable(service_bus.peek_requests)
+    assert callable(service_bus.peek_dead_letter)
+    assert callable(servicebus_tasks._build_request_payload)
+    assert callable(servicebus_tasks._build_v1_jobs_payload)
 
 
 def test_service_bus_celery_names_remain_registered() -> None:

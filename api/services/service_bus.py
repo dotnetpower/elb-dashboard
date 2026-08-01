@@ -9,8 +9,9 @@ Responsibility: Provide the stable public facade for Service Bus message
     purge the dead-letter queue with a mandatory audit backup.
 Edit boundaries: Message data-plane operations, shared SDK client construction,
     and backward-compatible public wrappers only. Read-only entity policy,
-    health, and discovery projection lives in ``service_bus_management``. No
-    HTTP shaping, Celery task bodies, or config-row persistence belongs here.
+    health, and discovery projection lives in ``service_bus_management``;
+    non-destructive peek presentation lives in ``service_bus_preview``. No HTTP
+    shaping, Celery task bodies, or config-row persistence belongs here.
 Key entry points: ``send_request``, ``publish_event``, ``peek_requests``,
     ``peek_request_previews``, ``peek_dead_letter_previews``, ``drain_requests``,
     ``drain_dead_letter_messages``, ``entity_counts``, ``purge_dead_letter``,
@@ -64,8 +65,7 @@ from azure.servicebus import (
 from azure.servicebus.exceptions import ServiceBusAuthenticationError, ServiceBusError
 from azure.servicebus.management import ServiceBusAdministrationClient
 
-from api.services import get_credential, service_bus_management
-from api.services.sanitise import sanitise
+from api.services import get_credential, service_bus_management, service_bus_preview
 from api.services.service_bus_observability import record_service_bus_request_event
 from api.services.service_bus_pref import (
     AUTH_MODE_SAS,
@@ -439,12 +439,13 @@ def peek_requests(
     cfg: ServiceBusConfig | None, max_count: int = _PEEK_DEFAULT
 ) -> list[ParsedMessage]:
     """Non-destructive peek of the request queue (does not lock or remove)."""
-    cfg = _require_enabled_config(cfg)
-    out: list[ParsedMessage] = []
-    with _client(cfg) as client, client.get_queue_receiver(cfg.request_queue) as receiver:
-        for message in receiver.peek_messages(max_message_count=max(1, min(max_count, 100))):
-            out.append(_parse(message))
-    return out
+    return service_bus_preview.peek_requests(
+        cfg,
+        max_count,
+        require_config=_require_enabled_config,
+        client_factory=_client,
+        parse_message=_parse,
+    )
 
 
 def peek_dead_letter(
@@ -459,18 +460,13 @@ def peek_dead_letter(
     description via ``application_properties`` is left untouched) so the caller
     can surface WHY each message was dead-lettered.
     """
-    cfg = _require_enabled_config(cfg)
-    out: list[ParsedMessage] = []
-    with (
-        _client(cfg) as client,
-        client.get_queue_receiver(
-            cfg.request_queue,
-            sub_queue=ServiceBusSubQueue.DEAD_LETTER,
-        ) as receiver,
-    ):
-        for message in receiver.peek_messages(max_message_count=max(1, min(max_count, 100))):
-            out.append(_parse(message))
-    return out
+    return service_bus_preview.peek_dead_letter(
+        cfg,
+        max_count,
+        require_config=_require_enabled_config,
+        client_factory=_client,
+        parse_message=_parse,
+    )
 
 
 def _preview_message(parsed: ParsedMessage) -> dict[str, Any]:
@@ -484,38 +480,14 @@ def _preview_message(parsed: ParsedMessage) -> dict[str, Any]:
     JSON-safe dict the SPA renders directly. ``enqueued_time_utc`` reuses the
     same ISO rendering as the counts telemetry.
     """
-    body = parsed.body if isinstance(parsed.body, dict) else {}
+    from api.services.sanitise import sanitise
 
-    def _opt(*candidates: Any) -> str | None:
-        """First non-empty stripped candidate, else None (keeps preview compact)."""
-        for candidate in candidates:
-            text = str(candidate or "").strip()
-            if text:
-                return text
-        return None
-
-    program = _opt(body.get("program"))
-    db = _opt(body.get("db"))
-    correlation_id = _opt(body.get("external_correlation_id"), parsed.correlation_id)
-    request_id = _opt(body.get("request_id"), parsed.application_properties.get("request_id"))
-    try:
-        body_json = json.dumps(body, default=str, ensure_ascii=False, indent=2)
-    except Exception:
-        body_json = parsed.raw_body or ""
-    sanitised_body = sanitise(body_json)
-    body_preview = sanitised_body[:_PEEK_BODY_MAX_CHARS]
-    return {
-        "message_id": parsed.message_id,
-        "correlation_id": correlation_id,
-        "request_id": request_id,
-        "subject": parsed.subject,
-        "sequence_number": parsed.sequence_number,
-        "enqueued_time_utc": _iso_or_none(parsed.enqueued_time_utc),
-        "program": program,
-        "db": db,
-        "body_preview": body_preview,
-        "body_truncated": len(sanitised_body) > _PEEK_BODY_MAX_CHARS,
-    }
+    return service_bus_preview.preview_message(
+        parsed,
+        sanitise_text=sanitise,
+        body_max_chars=_PEEK_BODY_MAX_CHARS,
+        iso_renderer=_iso_or_none,
+    )
 
 
 def _dead_letter_preview(parsed: ParsedMessage) -> dict[str, Any]:
@@ -529,15 +501,14 @@ def _dead_letter_preview(parsed: ParsedMessage) -> dict[str, Any]:
     (already in the base preview) is the stable handle the delete / promote
     routes target.
     """
-    preview = _preview_message(parsed)
-    reason = str(parsed.dead_letter_reason or "").strip()
-    description = str(parsed.dead_letter_error_description or "").strip()
-    preview["dead_letter_reason"] = sanitise(reason)[:_PEEK_BODY_MAX_CHARS] if reason else None
-    preview["dead_letter_error_description"] = (
-        sanitise(description)[:_PEEK_BODY_MAX_CHARS] if description else None
+    from api.services.sanitise import sanitise
+
+    return service_bus_preview.dead_letter_preview(
+        parsed,
+        preview=_preview_message,
+        sanitise_text=sanitise,
+        body_max_chars=_PEEK_BODY_MAX_CHARS,
     )
-    preview["delivery_count"] = parsed.delivery_count
-    return preview
 
 
 def peek_request_previews(
@@ -552,7 +523,12 @@ def peek_request_previews(
     :func:`entity_counts` requires — so it can surface content even when runtime
     counts degrade to ``no_manage_claim``. Never removes or locks a message.
     """
-    return [_preview_message(m) for m in peek_requests(cfg, max_count=max_count)]
+    return service_bus_preview.peek_request_previews(
+        cfg,
+        max_count,
+        peek=peek_requests,
+        preview=_preview_message,
+    )
 
 
 def peek_dead_letter_previews(
@@ -567,7 +543,12 @@ def peek_dead_letter_previews(
     the data-plane receiver (``Data Receiver`` claim, not ``Manage``). Never
     removes or locks a message.
     """
-    return [_dead_letter_preview(m) for m in peek_dead_letter(cfg, max_count=max_count)]
+    return service_bus_preview.peek_dead_letter_previews(
+        cfg,
+        max_count,
+        peek=peek_dead_letter,
+        preview=_dead_letter_preview,
+    )
 
 
 @dataclass

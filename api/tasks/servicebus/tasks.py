@@ -12,8 +12,9 @@ Responsibility: Orchestrate the beat-driven Service Bus BLAST state machines.
     ``dlq_cleanup`` enforces the remaining operator retention policy.
 Edit boundaries: Task entry points, request/bridge state transitions, and
     producer-response sequencing only. Redis drain lease and stop-intent
-    mechanics live in ``drain_coordination``. Service Bus data-plane calls go
-    through ``api.services.service_bus``; OpenAPI calls go through
+    mechanics live in ``drain_coordination``; request validation and OpenAPI
+    payload shaping live in ``request_translation``. Service Bus data-plane
+    calls go through ``api.services.service_bus``; OpenAPI calls go through
     ``api.services.external_blast``; persistence is delegated to focused repos.
 Key entry points: ``drain_and_resubmit``, ``publish_transitions``,
     ``emit_service_bus_health``, ``reconcile_dead_letter_responses``,
@@ -98,7 +99,7 @@ from api.services.service_bus_tracking import (
     release_bridge,
     upsert_bridge,
 )
-from api.tasks.servicebus import drain_coordination
+from api.tasks.servicebus import drain_coordination, request_translation
 from api.tasks.servicebus.dlq_backup import backup_dead_letter_message
 from api.tasks.transient import skip_tick_on_transient_infra
 
@@ -840,274 +841,20 @@ def _execution_admission_for_drain(cfg: ServiceBusConfig) -> dict[str, Any]:
 
 
 def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[str, Any] | None:
-    """Map a queue message body to a validated OpenAPI submit payload.
-
-    Returns ``None`` when the message cannot ever succeed (malformed / missing
-    required fields) — the caller dead-letters it rather than retrying forever.
-    """
-    from api.routes.elastic_blast import ExternalBlastSubmitRequest
-    from api.services.blast.submit_payload import (
-        _caller_supplied_searchsp,
-        canonical_submit_metadata,
-        resolve_sharded_db_resource_profile,
-        resolve_sharding_plan,
-    )
-
-    body = dict(msg.body or {})
-    correlation_id = (
-        str(body.get("external_correlation_id") or "").strip()
-        or (msg.correlation_id or "").strip()
-        or (msg.message_id or "").strip()
-    )
-    if not correlation_id:
-        return None
-
-    # Build the submit options exactly like the OpenAPI /v1/jobs body: an
-    # explicit `options` object wins, and flat convenience keys (word_size,
-    # evalue, dust, max_target_seqs, outfmt) are merged in for producers that
-    # send a flat message. Only the keys ExternalBlastOptions declares are
-    # meaningful; Pydantic ignores any extra (e.g. a stray `searchsp`, which is
-    # a local dashboard-submit precision-sharding option NOT part of the
-    # OpenAPI contract), so the message stays consistent with /v1/jobs.
-    options: dict[str, Any] = {}
-    raw_options = body.get("options")
-    if isinstance(raw_options, dict):
-        options.update(raw_options)
-    for key in (
-        "outfmt",
-        "word_size",
-        "dust",
-        "evalue",
-        "max_target_seqs",
-        "sharding_mode",
-        "db_effective_search_space",
-    ):
-        if key in body and key not in options:
-            options[key] = body[key]
-
-    candidate: dict[str, Any] = {
-        "query_fasta": body.get("query_fasta"),
-        "db": body.get("db"),
-        "program": body.get("program") or "blastn",
-        "external_correlation_id": correlation_id,
-    }
-    if options:
-        candidate["options"] = options
-    # Forward every other top-level ExternalBlastSubmitRequest field the
-    # producer set, so a Service Bus submit is byte-for-byte the same shape as
-    # a direct POST /api/v1/elastic-blast/submit. `submission_source` and the
-    # final `external_correlation_id` are stamped by canonical_submit_metadata
-    # below (server-derived; a producer cannot spoof the source).
-    for key in (
-        "taxid",
-        "is_inclusive",
-        "priority",
-        "batch_len",
-        "idempotency_key",
-        "resource_profile",
-    ):
-        if body.get(key) is not None:
-            candidate[key] = body[key]
-
-    try:
-        request = ExternalBlastSubmitRequest(**candidate)
-    except Exception:
-        LOGGER.warning("service bus request validation failed corr=%s", correlation_id)
-        return None
-
-    payload = request.model_dump(exclude_none=True)
-    # Server-derived sharding default (mirrors the direct /api/v1 submit path):
-    # a memory-heavy DB like core_nt MUST run sharded, which the sibling only
-    # does for a sharding-family resource_profile. A Service Bus producer that
-    # omits the profile would otherwise get a non-sharded config that
-    # elastic-blast rejects on the memory-fit check. Promote a missing/standard
-    # profile; an explicit profile is preserved.
-    payload["resource_profile"] = resolve_sharded_db_resource_profile(
-        payload.get("db") or "", payload.get("resource_profile")
-    )
-    plan = resolve_sharding_plan(
-        program=str(payload.get("program") or "blastn"),
-        database=str(payload.get("db") or ""),
-        options=payload.get("options"),
-        caller_supplied_searchsp=_caller_supplied_searchsp(body),
-        allow_servicebus_downgrade=True,
-    )
-    payload["options"] = plan.options
-    payload.update(
-        canonical_submit_metadata(
-            payload,
-            submission_source="servicebus",
-            correlation_id=correlation_id,
-        )
-    )
-    return cast(dict[str, Any], payload)
+    """Compatibility facade for XML-path Service Bus request translation."""
+    return request_translation.build_request_payload(msg, cfg, logger=LOGGER)
 
 
 def _is_v1_jobs_message(body: dict[str, Any]) -> bool:
-    """True when a message wants the free-form ``/v1/jobs`` (multi-token) path.
-
-    The signal is a ``blast_options`` object (the sibling ``/v1/jobs`` shape).
-    A message using the XML-locked ``options`` object (``ExternalBlastOptions``)
-    keeps the existing ``/api/v1/elastic-blast/submit`` path. The two are
-    mutually exclusive by key name, so detection is unambiguous and a producer
-    explicitly opts into the tabular path by sending ``blast_options``.
-    """
-    return isinstance(body.get("blast_options"), dict)
+    """Compatibility facade for Service Bus submit-path selection."""
+    return request_translation.is_v1_jobs_message(body)
 
 
 def _build_v1_jobs_payload(
     msg: ParsedMessage, cfg: ServiceBusConfig
 ) -> dict[str, Any] | None:
-    """Map a ``blast_options`` message to a validated ``/v1/jobs`` payload.
-
-    Returns ``None`` when the message cannot ever succeed (malformed / missing
-    required fields) so the caller dead-letters it instead of retrying forever.
-    Mirrors ``_build_request_payload`` but validates against
-    ``ExternalBlastV1Request`` (free-form ``outfmt`` + ``extra``) and stamps the
-    server-derived metadata (wire ``submission_source=external_api`` for the
-    sibling, sharded-DB ``resource_profile`` promotion, correlation id).
-    """
-    from api.routes.elastic_blast import ExternalBlastV1Request
-    from api.services.blast.submit_payload import (
-        canonical_submit_metadata,
-        resolve_sharded_db_resource_profile,
-        resolve_sharding_plan,
-    )
-
-    body = dict(msg.body or {})
-    correlation_id = (
-        str(body.get("external_correlation_id") or "").strip()
-        or (msg.correlation_id or "").strip()
-        or (msg.message_id or "").strip()
-    )
-    if not correlation_id:
-        return None
-
-    candidate: dict[str, Any] = {
-        "query_fasta": body.get("query_fasta"),
-        "db": body.get("db"),
-        "program": body.get("program") or "blastn",
-        "external_correlation_id": correlation_id,
-    }
-    if isinstance(body.get("blast_options"), dict):
-        candidate["blast_options"] = body["blast_options"]
-    for key in ("taxid", "is_inclusive", "priority", "batch_len", "idempotency_key"):
-        if body.get(key) is not None:
-            candidate[key] = body[key]
-
-    try:
-        request = ExternalBlastV1Request(**candidate)
-    except Exception:
-        LOGGER.warning("service bus v1 request validation failed corr=%s", correlation_id)
-        return None
-
-    payload = request.model_dump(exclude_none=True)
-    # Server-derived sharding default (same as the XML path): a memory-heavy DB
-    # like core_nt MUST run sharded, which the sibling only does for a
-    # sharding-family resource_profile. Promote a missing/standard profile.
-    payload["resource_profile"] = resolve_sharded_db_resource_profile(
-        payload.get("db") or "", payload.get("resource_profile")
-    )
-    # Forward the dashboard's Web BLAST search-space oracle value to BLAST on
-    # the free-form /v1/jobs path so an outfmt-7 Service Bus submit applies the
-    # SAME calibrated -searchsp the dashboard New Search native path emits
-    # (api/services/blast/config.py generate_config → "-searchsp <N>").
-    #
-    # Why this is needed (verified against the sibling):
-    #   * The sibling /v1/jobs BlastOptions has only outfmt + extra (no
-    #     structured searchsp field); raw flags in `extra` reach BLAST.
-    #   * When no -searchsp / -dbsize is present, the sibling submit_job
-    #     auto-injects a FIXED default -searchsp 32156241807668
-    #     (docker-openapi/app/main.py). That value is core_nt's calibration, so
-    #     it is correct ONLY for core_nt — a caller-supplied value, a snapshot
-    #     drift, or a future per-database calibration never reaches BLAST.
-    #   * The XML /api/v1/elastic-blast/submit path does NOT help here: the
-    #     sibling external_submit handler drops db_effective_search_space and
-    #     builds its own `extra` (word_size/dust only), then delegates to the
-    #     same submit_job → it too relies on that fixed auto-inject. So this v1
-    #     path is the first external surface that forwards the dashboard's
-    #     computed per-database value.
-    #
-    # resolve_sharding_plan (allow_servicebus_downgrade=True → never blocks, only
-    # degrades) resolves the per-database / drift-adjusted / caller-supplied
-    # value; we forward it as a raw -searchsp flag in blast_options.extra. A
-    # caller-pinned -searchsp / -dbsize is never overridden.
-    # db_effective_search_space is our convenience field (mirrors the XML
-    # request model), not a sibling wire field, so it is stripped before the
-    # payload leaves. searchsp resolution must never fail a valid submit — on any
-    # error we skip injection and let the sibling apply its own default.
-    blast_options = payload.get("blast_options")
-    if isinstance(blast_options, dict):
-        caller_searchsp = blast_options.pop("db_effective_search_space", None)
-        already = f"{blast_options.get('extra') or ''} {blast_options.get('outfmt') or ''}"
-        if "-searchsp" not in already and "-dbsize" not in already:
-            resolved_searchsp = None
-            plan = None
-            try:
-                plan = resolve_sharding_plan(
-                    program=str(payload.get("program") or "blastn"),
-                    database=str(payload.get("db") or ""),
-                    options={
-                        "additional_options": str(blast_options.get("extra") or ""),
-                        "db_effective_search_space": caller_searchsp,
-                        "db_total_letters": body.get("db_total_letters"),
-                        "db_total_sequences": body.get("db_total_sequences"),
-                    },
-                    caller_supplied_searchsp=(
-                        caller_searchsp if isinstance(caller_searchsp, int) else None
-                    ),
-                    allow_servicebus_downgrade=True,
-                )
-                resolved_searchsp = plan.options.get("db_effective_search_space")
-            except Exception as exc:  # never fail a valid submit over searchsp
-                LOGGER.warning(
-                    "service bus v1 searchsp resolution skipped corr=%s: %s",
-                    correlation_id,
-                    type(exc).__name__,
-                )
-                resolved_searchsp = None
-            if resolved_searchsp:
-                existing_extra = str(blast_options.get("extra") or "").strip()
-                blast_options["extra"] = (
-                    f"{existing_extra} -searchsp {int(resolved_searchsp)}".strip()
-                )
-                LOGGER.info(
-                    "service bus v1 searchsp applied corr=%s db=%s searchsp=%s",
-                    correlation_id,
-                    payload.get("db"),
-                    int(resolved_searchsp),
-                )
-            elif plan is not None and getattr(plan, "downgraded", False):
-                # Calibration does not apply to this DB snapshot; we inject
-                # nothing and the sibling falls back to its own default. Log so
-                # an unexpected e-value drift is traceable to a known cause.
-                LOGGER.info(
-                    "service bus v1 searchsp parity downgraded corr=%s db=%s reason=%s",
-                    correlation_id,
-                    payload.get("db"),
-                    getattr(plan, "downgrade_reason", None),
-                )
-        payload["blast_options"] = blast_options
-    # Server-derived source + correlation id (a producer cannot spoof the
-    # source). ``canonical_submit_metadata`` reads the just-promoted
-    # resource_profile off ``payload`` and preserves it.
-    payload.update(
-        canonical_submit_metadata(
-            payload,
-            submission_source="servicebus",
-            correlation_id=correlation_id,
-        )
-    )
-    # The sibling ``/v1/jobs`` (``JobSubmitRequest``) only accepts
-    # ``submission_source`` in {dashboard, external_api, terminal, system} and
-    # rejects ``servicebus`` with HTTP 400 (the XML ``/api/v1/elastic-blast/
-    # submit`` path silently rewrites it to ``external_api`` internally, so it
-    # never hit this). Send the sibling-accepted value on the wire while the
-    # dashboard's own tracking row stays ``servicebus`` — that row is written
-    # separately by ``_persist_drain_row_and_trace`` and is not derived from
-    # this payload field.
-    payload["submission_source"] = "external_api"
-    return cast(dict[str, Any], payload)
+    """Compatibility facade for free-form Service Bus request translation."""
+    return request_translation.build_v1_jobs_payload(msg, cfg, logger=LOGGER)
 
 
 def _supersede_placeholder(correlation_id: str) -> None:

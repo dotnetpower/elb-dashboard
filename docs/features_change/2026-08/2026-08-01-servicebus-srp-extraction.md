@@ -40,12 +40,19 @@ settings use the same public functions and registered Celery task names.
 - `api/services/service_bus_management.py` now owns read-only queue/topic runtime
   projection, static policy telemetry, pending-depth reads, and namespace/entity
   discovery.
+- `api/services/service_bus_preview.py` now owns non-destructive request/DLQ
+  peeking plus sanitised, bounded preview shaping. The data-plane facade injects
+  its current client/parser and composes its current monkeypatchable wrappers.
 - `api/services/service_bus.py` remains the stable data-plane facade. Its wrappers
   inject the current `_admin_client`, config resolver, completion-kind resolver,
   logger, and normalized auth exception, so tests and external callers require
   no import changes.
 - Celery names remain `api.tasks.servicebus.*`; no task body moved and no queue
   routing changed.
+- `api/tasks/servicebus/request_translation.py` now owns XML/free-form request
+  validation, correlation fallback, sharding promotion, and search-space
+  metadata shaping. The task facade retains `_build_request_payload`,
+  `_is_v1_jobs_message`, and `_build_v1_jobs_payload` wrappers.
 - No dependency, Azure role, Service Bus entity, Storage schema, or environment
   variable was added.
 

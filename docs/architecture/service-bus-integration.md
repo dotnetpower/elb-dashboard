@@ -282,9 +282,11 @@ or logged by collision handling.
 | Config row (Table-backed) | `api/services/service_bus_pref.py` |
 | Data-plane facade (Entra + SAS, send/receive/peek/settle/purge) | `api/services/service_bus.py` |
 | Read-only entity policy, counts, and discovery projection | `api/services/service_bus_management.py` |
+| Non-destructive request/DLQ peek and preview shaping | `api/services/service_bus_preview.py` |
 | Settings routes | `api/routes/settings/service_bus.py` |
 | Drain / publish / DLQ response / cleanup tasks | `api/tasks/servicebus/` |
 | Redis drain lease and auto-stop intent fence | `api/tasks/servicebus/drain_coordination.py` |
+| Queue request validation and OpenAPI payload translation | `api/tasks/servicebus/request_translation.py` |
 | Durable producer response outbox | `api/services/service_bus_outbox.py` |
 | Settings UI | `web/src/components/settings/sections/ServiceBusSection.tsx` |
 
