@@ -1,16 +1,16 @@
-"""Service Bus data-plane + management client wrapper (optional integration).
+"""Service Bus data-plane facade for the optional BLAST integration.
 
-Responsibility: The ONLY module that imports ``azure.servicebus``. Builds
-    senders/receivers/admin clients for both auth modes (Entra
+Responsibility: Provide the stable public facade for Service Bus message
+    operations. Builds senders/receivers/admin clients for both auth modes (Entra
     ``DefaultAzureCredential`` and SAS connection string), and exposes the
     bounded, side-effect-tagged operations the routes and tasks need: send a
     request, publish a transition event, peek (non-destructive), drain the
     request queue with explicit message settlement, read runtime counts, and
     purge the dead-letter queue with a mandatory audit backup.
-Edit boundaries: Reusable cloud/data-plane logic only. No HTTP shaping, no
-    Celery task bodies, no persistence of the config row (that is
-    ``service_bus_pref``). Routes/tasks call THIS module; nothing else imports
-    ``azure.servicebus``.
+Edit boundaries: Message data-plane operations, shared SDK client construction,
+    and backward-compatible public wrappers only. Read-only entity policy,
+    health, and discovery projection lives in ``service_bus_management``. No
+    HTTP shaping, Celery task bodies, or config-row persistence belongs here.
 Key entry points: ``send_request``, ``publish_event``, ``peek_requests``,
     ``peek_request_previews``, ``peek_dead_letter_previews``, ``drain_requests``,
     ``drain_dead_letter_messages``, ``entity_counts``, ``purge_dead_letter``,
@@ -64,7 +64,7 @@ from azure.servicebus import (
 from azure.servicebus.exceptions import ServiceBusAuthenticationError, ServiceBusError
 from azure.servicebus.management import ServiceBusAdministrationClient
 
-from api.services import get_credential
+from api.services import get_credential, service_bus_management
 from api.services.sanitise import sanitise
 from api.services.service_bus_observability import record_service_bus_request_event
 from api.services.service_bus_pref import (
@@ -1141,60 +1141,23 @@ def _settle(
 
 
 # --------------------------------------------------------------------------- #
-# Management / runtime
+# Management / runtime facade
 # --------------------------------------------------------------------------- #
 
 
 def _iso_or_none(value: Any) -> str | None:
-    """Render an SDK ``datetime`` field as ISO-8601, tolerant of ``None``.
-
-    The admin SDK returns naive UTC datetimes for created/updated/accessed
-    timestamps; callers want a JSON-safe ISO string with the ``Z`` suffix.
-    """
-    if value is None:
-        return None
-    try:
-        if not isinstance(value, datetime):
-            return None
-        # Treat naive timestamps as UTC (matches the SDK's contract).
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
-        return str(value.isoformat().replace("+00:00", "Z"))
-    except Exception:
-        # Best-effort — a bad timestamp must never break the counts call.
-        return None
+    """Compatibility wrapper for management telemetry timestamp rendering."""
+    return service_bus_management._iso_or_none(value)
 
 
 def _duration_seconds(value: Any) -> int | None:
-    """Render an SDK timedelta-like property as non-negative seconds."""
-    if not isinstance(value, timedelta):
-        return None
-    return max(0, int(value.total_seconds()))
+    """Compatibility wrapper for management duration rendering."""
+    return service_bus_management._duration_seconds(value)
 
 
 def _entity_policy(properties: Any) -> dict[str, Any]:
-    """Return nullable, payload-free static entity policy fields."""
-    if properties is None:
-        return {
-            "available": False,
-            "error": "static_properties_unavailable",
-            "default_ttl_seconds": None,
-            "dead_letter_on_expiration": None,
-            "max_delivery_count": None,
-            "lock_duration_seconds": None,
-        }
-    return {
-        "available": True,
-        "error": "",
-        "default_ttl_seconds": _duration_seconds(
-            getattr(properties, "default_message_time_to_live", None)
-        ),
-        "dead_letter_on_expiration": getattr(
-            properties, "dead_lettering_on_message_expiration", None
-        ),
-        "max_delivery_count": getattr(properties, "max_delivery_count", None),
-        "lock_duration_seconds": _duration_seconds(getattr(properties, "lock_duration", None)),
-    }
+    """Compatibility wrapper for static entity policy projection."""
+    return service_bus_management._entity_policy(properties)
 
 
 def pending_request_count(cfg: ServiceBusConfig | None) -> int | None:
@@ -1213,19 +1176,12 @@ def pending_request_count(cfg: ServiceBusConfig | None) -> int | None:
     execution plane until their retry time arrives. Dead-lettered messages are
     excluded, so terminal poison messages do not pin the cluster running.
     """
-    try:
-        cfg = _require_enabled_config(cfg)
-    except Exception:
-        return None
-    try:
-        with _admin_client(cfg) as admin:
-            q = admin.get_queue_runtime_properties(cfg.request_queue)
-            active = int(getattr(q, "active_message_count", 0) or 0)
-            scheduled = int(getattr(q, "scheduled_message_count", 0) or 0)
-            return max(0, active + scheduled)
-    except Exception:
-        LOGGER.debug("pending_request_count unavailable", exc_info=True)
-        return None
+    return service_bus_management.pending_request_count(
+        cfg,
+        require_config=_require_enabled_config,
+        admin_client=_admin_client,
+        logger=LOGGER,
+    )
 
 
 def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
@@ -1248,138 +1204,14 @@ def entity_counts(cfg: ServiceBusConfig | None) -> dict[str, Any]:
     silently degrades to ``None`` so an SDK version bump can never break the
     existing counts contract.
     """
-    cfg = _require_enabled_config(cfg)
-    result: dict[str, Any] = {
-        "queue": None,
-        "dead_letter": None,
-        "subscriptions": [],
-        "completion_kind": getattr(cfg, "completion_kind", "topic"),
-        "completion_configured": bool(cfg.completion_topic),
-        "completion_accessible": None if not cfg.completion_topic else False,
-        "completion_error": "",
-    }
-    with _admin_client(cfg) as admin:
-        try:
-            q = admin.get_queue_runtime_properties(cfg.request_queue)
-            # Try to read the static queue properties too so we know the
-            # capacity ceiling (max_size_in_megabytes) and entity status. This
-            # is a separate admin call and is bounded by the SDK; if it fails
-            # we still return the counts the SPA has always rendered.
-            qprops: Any = None
-            try:
-                qprops = admin.get_queue(cfg.request_queue)
-            except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
-                # Same auth failure as the counters above — surface it.
-                raise ServiceBusAuthError(str(exc)) from exc
-            except ServiceBusError:
-                LOGGER.debug("queue static properties unavailable", exc_info=True)
-
-            size_in_bytes = getattr(q, "size_in_bytes", None)
-            max_size_in_mb = getattr(qprops, "max_size_in_megabytes", None) if qprops else None
-            size_pct: float | None = None
-            if (
-                isinstance(size_in_bytes, int)
-                and isinstance(max_size_in_mb, int)
-                and max_size_in_mb > 0
-            ):
-                size_pct = round(size_in_bytes / (max_size_in_mb * 1024 * 1024) * 100, 2)
-
-            result["queue"] = {
-                "active_message_count": q.active_message_count,
-                "dead_letter_message_count": q.dead_letter_message_count,
-                "scheduled_message_count": q.scheduled_message_count,
-                "total_message_count": q.total_message_count,
-                # Additive telemetry — older SPAs that only read the four
-                # counters above keep working unchanged.
-                "telemetry": {
-                    "size_in_bytes": size_in_bytes,
-                    "max_size_in_mb": max_size_in_mb,
-                    "size_pct": size_pct,
-                    "transfer_message_count": getattr(q, "transfer_message_count", None),
-                    "transfer_dead_letter_message_count": getattr(
-                        q, "transfer_dead_letter_message_count", None
-                    ),
-                    "status": str(getattr(qprops, "status", "") or "") if qprops else None,
-                    "created_at": _iso_or_none(getattr(q, "created_at_utc", None)),
-                    "updated_at": _iso_or_none(getattr(q, "updated_at_utc", None)),
-                    "accessed_at": _iso_or_none(getattr(q, "accessed_at_utc", None)),
-                    "policy": _entity_policy(qprops),
-                },
-            }
-            result["dead_letter"] = q.dead_letter_message_count
-        except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
-            raise ServiceBusAuthError(str(exc)) from exc
-        if cfg.completion_topic:
-            if completion_is_queue(cfg):
-                # Queue completion entity: read its runtime counters and surface
-                # them as a single pseudo-subscription row named after the queue
-                # so the SPA's subscription-list rendering keeps working. There
-                # is no fan-out / per-subscription split in queue mode.
-                try:
-                    cq = admin.get_queue_runtime_properties(cfg.completion_topic)
-                    try:
-                        cqprops = admin.get_queue(cfg.completion_topic)
-                    except (AttributeError, ServiceBusError):
-                        cqprops = None
-                        LOGGER.debug(
-                            "completion queue static properties unavailable", exc_info=True
-                        )
-                    result["subscriptions"].append(
-                        {
-                            "name": cfg.completion_topic,
-                            "active_message_count": cq.active_message_count,
-                            "dead_letter_message_count": cq.dead_letter_message_count,
-                            "transfer_message_count": getattr(cq, "transfer_message_count", None),
-                            "transfer_dead_letter_message_count": getattr(
-                                cq, "transfer_dead_letter_message_count", None
-                            ),
-                            "policy": _entity_policy(cqprops),
-                        }
-                    )
-                    result["completion_accessible"] = True
-                except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
-                    raise ServiceBusAuthError(str(exc)) from exc
-                except ServiceBusError as exc:
-                    result["completion_error"] = type(exc).__name__
-                    LOGGER.debug("completion queue counts unavailable", exc_info=True)
-            else:
-                try:
-                    for sub in admin.list_subscriptions(cfg.completion_topic):
-                        srt = admin.get_subscription_runtime_properties(
-                            cfg.completion_topic, sub.name
-                        )
-                        try:
-                            sprops = admin.get_subscription(cfg.completion_topic, sub.name)
-                        except (AttributeError, ServiceBusError):
-                            sprops = None
-                            LOGGER.debug(
-                                "completion subscription static properties unavailable name=%s",
-                                sub.name,
-                                exc_info=True,
-                            )
-                        result["subscriptions"].append(
-                            {
-                                "name": sub.name,
-                                "active_message_count": srt.active_message_count,
-                                "dead_letter_message_count": srt.dead_letter_message_count,
-                                # Additive transfer counters per subscription so the
-                                # SPA can flag forwarding failures on a per-sub basis.
-                                "transfer_message_count": getattr(
-                                    srt, "transfer_message_count", None
-                                ),
-                                "transfer_dead_letter_message_count": getattr(
-                                    srt, "transfer_dead_letter_message_count", None
-                                ),
-                                "policy": _entity_policy(sprops),
-                            }
-                        )
-                    result["completion_accessible"] = True
-                except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
-                    raise ServiceBusAuthError(str(exc)) from exc
-                except ServiceBusError as exc:
-                    result["completion_error"] = type(exc).__name__
-                    LOGGER.debug("subscription listing unavailable", exc_info=True)
-    return result
+    return service_bus_management.entity_counts(
+        cfg,
+        require_config=_require_enabled_config,
+        admin_client=_admin_client,
+        completion_is_queue=completion_is_queue,
+        auth_error=ServiceBusAuthError,
+        logger=LOGGER,
+    )
 
 
 def test_connection(cfg: ServiceBusConfig | None) -> dict[str, Any]:
@@ -1550,21 +1382,10 @@ def _safe_abandon(receiver: Any, message: Any) -> None:
 
 def discover_namespaces(subscription_id: str) -> list[dict[str, Any]]:
     """List Service Bus namespaces in a subscription via ARM (shared MI)."""
-    from api.services.azure_clients import resource_client
-
-    rc = resource_client(get_credential(), subscription_id)
-    out: list[dict[str, Any]] = []
-    for res in rc.resources.list(filter="resourceType eq 'Microsoft.ServiceBus/namespaces'"):
-        name = getattr(res, "name", "") or ""
-        out.append(
-            {
-                "name": name,
-                "id": getattr(res, "id", "") or "",
-                "location": getattr(res, "location", "") or "",
-                "fqdn": f"{name}.servicebus.windows.net" if name else "",
-            }
-        )
-    return out
+    return service_bus_management.discover_namespaces(
+        subscription_id,
+        credential=get_credential(),
+    )
 
 
 def discover_entities(cfg: ServiceBusConfig | None) -> dict[str, list[str]]:
@@ -1573,15 +1394,9 @@ def discover_entities(cfg: ServiceBusConfig | None) -> dict[str, list[str]]:
     Requires ``Manage``/``EntityRead`` claims. Raises ``ServiceBusAuthError``
     when the credential lacks them so the route degrades to manual entry.
     """
-    cfg = _require_enabled_config(cfg)
-    queues: list[str] = []
-    topics: list[str] = []
-    with _admin_client(cfg) as admin:
-        try:
-            for q in admin.list_queues():
-                queues.append(q.name)
-            for t in admin.list_topics():
-                topics.append(t.name)
-        except (ServiceBusAuthenticationError, ClientAuthenticationError) as exc:
-            raise ServiceBusAuthError(str(exc)) from exc
-    return {"queues": queues, "topics": topics}
+    return service_bus_management.discover_entities(
+        cfg,
+        require_config=_require_enabled_config,
+        admin_client=_admin_client,
+        auth_error=ServiceBusAuthError,
+    )

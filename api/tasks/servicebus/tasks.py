@@ -1,7 +1,7 @@
 """Service Bus integration Celery tasks — drain, responses, transitions, DLQ.
 
-Responsibility: The beat-driven side effects of the optional Service Bus BLAST
-    integration. ``drain_and_resubmit`` receives request messages and bridges
+Responsibility: Orchestrate the beat-driven Service Bus BLAST state machines.
+    ``drain_and_resubmit`` receives request messages and bridges
     each to the sibling OpenAPI execution plane (``/v1/jobs``), completing the
     message immediately (never holds the lock for the run).
     ``publish_transitions`` polls the sibling status for active bridge rows and
@@ -10,10 +10,11 @@ Responsibility: The beat-driven side effects of the optional Service Bus BLAST
     ``reconcile_dead_letter_responses`` turns every DLQ outcome into a durable
     producer failure response plus mandatory audit backup before deletion.
     ``dlq_cleanup`` enforces the remaining operator retention policy.
-Edit boundaries: Long-running side effects only. Service Bus data-plane calls go
-    through ``api.services.service_bus``; the OpenAPI submit/status calls go
-    through ``api.services.external_blast``; persistence is
-    ``service_bus_pref`` (config) + ``service_bus_tracking`` (bridge rows).
+Edit boundaries: Task entry points, request/bridge state transitions, and
+    producer-response sequencing only. Redis drain lease and stop-intent
+    mechanics live in ``drain_coordination``. Service Bus data-plane calls go
+    through ``api.services.service_bus``; OpenAPI calls go through
+    ``api.services.external_blast``; persistence is delegated to focused repos.
 Key entry points: ``drain_and_resubmit``, ``publish_transitions``,
     ``emit_service_bus_health``, ``reconcile_dead_letter_responses``,
     ``dlq_cleanup`` (registered as ``api.tasks.servicebus.*``).
@@ -56,7 +57,6 @@ import hashlib
 import json
 import logging
 import os
-import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -98,6 +98,7 @@ from api.services.service_bus_tracking import (
     release_bridge,
     upsert_bridge,
 )
+from api.tasks.servicebus import drain_coordination
 from api.tasks.servicebus.dlq_backup import backup_dead_letter_message
 from api.tasks.transient import skip_tick_on_transient_infra
 
@@ -130,15 +131,7 @@ def _drain_concurrency_from_env() -> int:
     A non-numeric override must never crash module import (which would take the
     whole worker down on startup); it logs and falls back to the serial default.
     """
-    raw = os.environ.get("SERVICEBUS_DRAIN_CONCURRENCY", "1")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "invalid SERVICEBUS_DRAIN_CONCURRENCY=%r; defaulting to 1 (serial)", raw
-        )
-        value = 1
-    return max(1, min(32, value))
+    return drain_coordination.drain_concurrency_from_env(LOGGER)
 
 
 _DRAIN_CONCURRENCY = _drain_concurrency_from_env()
@@ -182,14 +175,13 @@ _DRAIN_STOP_INTENT_TTL_SECONDS = 300
 
 def _drain_lock_key(queue_name: str) -> str:
     """Queue-scoped lease key so distinct request queues never block each other."""
-    return f"{_DRAIN_LOCK_KEY}:{queue_name}" if queue_name else _DRAIN_LOCK_KEY
+    return drain_coordination.drain_lock_key(queue_name, base_key=_DRAIN_LOCK_KEY)
 
 
 def _drain_stop_intent_key(queue_name: str) -> str:
-    return (
-        f"{_DRAIN_STOP_INTENT_KEY}:{queue_name}"
-        if queue_name
-        else _DRAIN_STOP_INTENT_KEY
+    return drain_coordination.drain_stop_intent_key(
+        queue_name,
+        base_key=_DRAIN_STOP_INTENT_KEY,
     )
 
 
@@ -201,29 +193,14 @@ def _drain_lock_ttl_from_env() -> int:
     release) frees the lease quickly. The release is best-effort; the TTL is the
     backstop.
     """
-    raw = os.environ.get("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "900")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "invalid SERVICEBUS_DRAIN_LOCK_TTL_SECONDS=%r; defaulting to 900", raw
-        )
-        value = 900
-    return max(10, value)
+    return drain_coordination.drain_lock_ttl_from_env(LOGGER)
 
 
 _DRAIN_LOCK_TTL = _drain_lock_ttl_from_env()
 # Atomic compare-and-delete so a tick only releases a lease it still owns (never
 # one a later tick re-acquired after this one's TTL expired).
-_DRAIN_LOCK_RELEASE_LUA = (
-    "if redis.call('get', KEYS[1]) == ARGV[1] "
-    "then return redis.call('del', KEYS[1]) else return 0 end"
-)
-_DRAIN_LOCK_ACQUIRE_LUA = (
-    "if redis.call('exists', KEYS[2]) == 1 then return 0 end "
-    "if redis.call('set', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then return 1 end "
-    "return 0"
-)
+_DRAIN_LOCK_RELEASE_LUA = drain_coordination.LOCK_RELEASE_LUA
+_DRAIN_LOCK_ACQUIRE_LUA = drain_coordination.LOCK_ACQUIRE_LUA
 
 
 def _acquire_drain_lock(queue_name: str = "") -> tuple[bool, str | None]:
@@ -235,81 +212,44 @@ def _acquire_drain_lock(queue_name: str = "") -> tuple[bool, str | None]:
     is unreachable (``token`` is None → nothing to release, fail-open so a broker
     blip never stalls the drain).
     """
-    if not _DRAIN_SINGLEFLIGHT:
-        return (True, None)
-    try:
-        from api.services.redis_clients import get_broker_redis_client
-
-        client = get_broker_redis_client(socket_timeout=2)
-        token = uuid.uuid4().hex
-        acquired = client.eval(
-            _DRAIN_LOCK_ACQUIRE_LUA,
-            2,
-            _drain_lock_key(queue_name),
-            _drain_stop_intent_key(queue_name),
-            token,
-            _DRAIN_LOCK_TTL,
-        )
-        if acquired:
-            return (True, token)
-        return (False, None)
-    except Exception:
-        LOGGER.debug("drain lock acquire failed; proceeding without lease", exc_info=True)
-        return (True, None)
+    return drain_coordination.acquire_drain_lock(
+        queue_name,
+        enabled=_DRAIN_SINGLEFLIGHT,
+        lock_ttl=_DRAIN_LOCK_TTL,
+        lock_base_key=_DRAIN_LOCK_KEY,
+        stop_intent_base_key=_DRAIN_STOP_INTENT_KEY,
+        logger=LOGGER,
+    )
 
 
 def _release_drain_lock(token: str | None, queue_name: str = "") -> None:
     """Release the drain lease iff we still own it (best-effort, TTL backstop)."""
-    if not token:
-        return
-    try:
-        from api.services.redis_clients import get_broker_redis_client
-
-        client = get_broker_redis_client(socket_timeout=2)
-        client.eval(_DRAIN_LOCK_RELEASE_LUA, 1, _drain_lock_key(queue_name), token)
-    except Exception:
-        LOGGER.debug("drain lock release failed (will expire via TTL)", exc_info=True)
+    drain_coordination.release_drain_lock(
+        token,
+        queue_name,
+        lock_base_key=_DRAIN_LOCK_KEY,
+        logger=LOGGER,
+    )
 
 
 def acquire_drain_stop_intent(queue_name: str) -> tuple[bool, str | None]:
     """Fence new drains before auto-stop checks the active drain lease."""
-    try:
-        from api.services.redis_clients import get_broker_redis_client
-
-        client = get_broker_redis_client(socket_timeout=2)
-        token = uuid.uuid4().hex
-        acquired = client.set(
-            _drain_stop_intent_key(queue_name),
-            token,
-            nx=True,
-            ex=_DRAIN_STOP_INTENT_TTL_SECONDS,
-        )
-        if not acquired:
-            return (False, None)
-        if client.exists(_drain_lock_key(queue_name)):
-            _release_drain_stop_intent(queue_name, token)
-            return (False, None)
-        return (True, token)
-    except Exception:
-        # Fail closed: an uncoordinated stop can interrupt a PEEK_LOCKed submit.
-        LOGGER.warning("drain stop-intent acquire failed; auto-stop must defer", exc_info=True)
-        return (False, None)
+    return drain_coordination.acquire_drain_stop_intent(
+        queue_name,
+        lock_base_key=_DRAIN_LOCK_KEY,
+        stop_intent_base_key=_DRAIN_STOP_INTENT_KEY,
+        stop_intent_ttl=_DRAIN_STOP_INTENT_TTL_SECONDS,
+        logger=LOGGER,
+    )
 
 
 def _release_drain_stop_intent(queue_name: str, token: str | None) -> None:
-    if not token:
-        return
-    try:
-        from api.services.redis_clients import get_broker_redis_client
-
-        get_broker_redis_client(socket_timeout=2).eval(
-            _DRAIN_LOCK_RELEASE_LUA,
-            1,
-            _drain_stop_intent_key(queue_name),
-            token,
-        )
-    except Exception:
-        LOGGER.debug("drain stop-intent release failed (TTL backstop)", exc_info=True)
+    drain_coordination.release_drain_stop_intent(
+        queue_name,
+        token,
+        stop_intent_base_key=_DRAIN_STOP_INTENT_KEY,
+        logger=LOGGER,
+    )
 
 
 def release_drain_stop_intent(queue_name: str, token: str | None) -> None:
