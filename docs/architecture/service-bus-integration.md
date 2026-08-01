@@ -510,7 +510,7 @@ Rules a subscriber must follow:
 | `CELERY_SERVICEBUS_QUEUES` | `servicebus` | worker | Dedicated Celery queue for drain fallback, outbox/transition publication, DLQ response reconciliation, and Service Bus health. `worker-servicebus` consumes it independently of long general reconciliation scans. |
 | `CELERY_SERVICEBUS_CONCURRENCY` | `1` | worker | Prefork concurrency of the dedicated Service Bus worker. The resident request consumer also belongs only to this parent and starts after prefork. |
 | `SERVICEBUS_LIFECYCLE_INTERRUPTION_SECONDS` | `600` | worker | After a newer AKS lifecycle generation and sustained OpenAPI/Kubernetes absence, terminalise an already-accepted bridge as `cluster_lifecycle_interrupted` instead of leaving it active indefinitely. |
-| `CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS` | `10` (`5` in the deployed policy) | beat | Fallback request-drain cadence; the resident consumer remains the low-latency primary path. |
+| `CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS` | `10` (`60` in the resident-primary deployed policy) | beat | Fallback request-drain cadence. The resident consumer remains the low-latency primary path; the slower fallback interval exceeds the bounded task deadline and cannot build a stale tick backlog during a slow admission probe. |
 | `CELERY_BEAT_SERVICEBUS_PUBLISH_SECONDS` | `30` | beat | Transition/outbox publisher cadence. Each tick polls at most 20 bridges and has a 60-second hard task deadline. |
 | `CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS` | `3600` | beat | DLQ cleanup cadence. |
 

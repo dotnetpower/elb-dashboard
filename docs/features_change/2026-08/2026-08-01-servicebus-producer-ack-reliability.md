@@ -54,6 +54,11 @@ reach `AppEvents`.
   hard deadline. A live first-revision sweep of 200 legacy bridges took 240
   seconds and expired queued periodic ticks; the bounded page processes that
   backlog fairly without monopolizing the dedicated worker.
+- The resident-primary deployed policy runs the beat drain fallback every 60
+  seconds instead of every 5 seconds. Live admission probes reached 45 seconds;
+  the old cadence queued already-obsolete fallbacks even though the resident
+  parent continued accepting requests. The fallback interval now exceeds its
+  bounded execution window while retaining recovery if the resident loop exits.
 - The Service Bus parent initializes Azure Monitor after prefork. Request
   dimensions reach `AppEvents`; a payload-free searchable console line remains
   as startup fallback.
