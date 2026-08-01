@@ -1715,6 +1715,10 @@ def test_publish_transitions_reads_pending_correlations_once(
     assert out == {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
 
 
+def test_transition_publish_batch_default_is_bounded_for_live_deadline() -> None:
+    assert sb_tasks._PUBLISH_MAX_ROWS == 20
+
+
 def test_bridge_without_marker_recovers_queued_ack_before_status_poll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -317,7 +317,7 @@ def release_drain_stop_intent(queue_name: str, token: str | None) -> None:
     _release_drain_stop_intent(queue_name, token)
 
 
-_PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "200"))
+_PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "20"))
 _OUTBOX_MAX_EVENTS = int(os.environ.get("SERVICEBUS_OUTBOX_MAX_EVENTS", "200"))
 _DLQ_RESPONSE_MAX_MESSAGES = int(
     os.environ.get("SERVICEBUS_DLQ_RESPONSE_MAX_MESSAGES", "100")
@@ -2066,7 +2066,11 @@ def _openapi_ready_for_transition_poll(openapi_kwargs: dict[str, str]) -> bool:
         return False
 
 
-@shared_task(name="api.tasks.servicebus.drain_and_resubmit")
+@shared_task(
+    name="api.tasks.servicebus.drain_and_resubmit",
+    soft_time_limit=45,
+    time_limit=60,
+)
 @skip_tick_on_transient_infra
 def drain_and_resubmit() -> dict[str, Any]:
     """Drain the request queue → bridge each message to the OpenAPI plane."""
@@ -2568,7 +2572,11 @@ def _reconcile_dead_letter_responses(cfg: ServiceBusConfig) -> dict[str, int]:
     }
 
 
-@shared_task(name="api.tasks.servicebus.reconcile_dead_letter_responses")
+@shared_task(
+    name="api.tasks.servicebus.reconcile_dead_letter_responses",
+    soft_time_limit=90,
+    time_limit=120,
+)
 @skip_tick_on_transient_infra
 def reconcile_dead_letter_responses() -> dict[str, Any]:
     """Turn every terminal DLQ request into a durable producer response."""
@@ -2577,7 +2585,11 @@ def reconcile_dead_letter_responses() -> dict[str, Any]:
     return _reconcile_dead_letter_responses(get_service_bus_config())
 
 
-@shared_task(name="api.tasks.servicebus.emit_service_bus_health")
+@shared_task(
+    name="api.tasks.servicebus.emit_service_bus_health",
+    soft_time_limit=45,
+    time_limit=60,
+)
 @skip_tick_on_transient_infra
 def emit_service_bus_health() -> dict[str, Any]:
     """Emit one payload-free queue/outbox/admission health snapshot."""
@@ -2672,7 +2684,11 @@ def emit_service_bus_health() -> dict[str, Any]:
     return snapshot
 
 
-@shared_task(name="api.tasks.servicebus.publish_transitions")
+@shared_task(
+    name="api.tasks.servicebus.publish_transitions",
+    soft_time_limit=50,
+    time_limit=60,
+)
 @skip_tick_on_transient_infra
 def publish_transitions() -> dict[str, Any]:
     """Poll sibling status for active bridges and emit one event per change."""

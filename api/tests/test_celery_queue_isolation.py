@@ -103,14 +103,27 @@ def test_servicebus_parent_initialises_telemetry_and_consumers_post_fork(
 
 def test_servicebus_periodic_ticks_expire_before_stale_backlog_replays() -> None:
     schedule = celery_app.conf.beat_schedule
+    drain = schedule["servicebus-drain-and-resubmit"]
+    publish = schedule["servicebus-publish-transitions"]
 
-    for entry_name in (
-        "servicebus-drain-and-resubmit",
-        "servicebus-publish-transitions",
-    ):
-        options = schedule[entry_name]["options"]
-        assert options["queue"] == "servicebus"
-        assert 0 < float(options["expires"]) <= 30
+    assert drain["options"]["queue"] == "servicebus"
+    assert 0 < float(drain["options"]["expires"]) <= 15
+    assert publish["options"]["queue"] == "servicebus"
+    assert float(publish["schedule"]) >= 30
+    assert 0 < float(publish["options"]["expires"]) <= 90
+
+
+def test_servicebus_periodic_tasks_have_execution_deadlines() -> None:
+    expected = {
+        "api.tasks.servicebus.drain_and_resubmit": (45, 60),
+        "api.tasks.servicebus.publish_transitions": (50, 60),
+        "api.tasks.servicebus.emit_service_bus_health": (45, 60),
+        "api.tasks.servicebus.reconcile_dead_letter_responses": (90, 120),
+    }
+
+    for task_name, limits in expected.items():
+        task = celery_app.tasks[task_name]
+        assert (task.soft_time_limit, task.time_limit) == limits
 
 
 def test_servicebus_health_tick_is_bounded_and_isolated() -> None:

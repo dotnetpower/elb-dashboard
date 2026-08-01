@@ -50,6 +50,10 @@ reach `AppEvents`.
   cannot starve ACK/outbox delivery.
 - Runtime-metrics backfill runs hourly in five-row passes, uses early ACK, and
   does not poison-redeliver after worker loss.
+- Transition polling runs every 30 seconds in 20-bridge pages with a 60-second
+  hard deadline. A live first-revision sweep of 200 legacy bridges took 240
+  seconds and expired queued periodic ticks; the bounded page processes that
+  backlog fairly without monopolizing the dedicated worker.
 - The Service Bus parent initializes Azure Monitor after prefork. Request
   dimensions reach `AppEvents`; a payload-free searchable console line remains
   as startup fallback.

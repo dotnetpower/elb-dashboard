@@ -300,23 +300,23 @@ celery_app.conf.update(
         "servicebus-drain-and-resubmit": {
             "task": "api.tasks.servicebus.drain_and_resubmit",
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS", "10")),
-            # A tick older than 30 s is obsolete: the next periodic tick will
-            # inspect the same queue/bridge state. Expiry sheds stale backlog
-            # after a slow upstream call instead of replaying every missed tick.
+            # A drain tick older than 15 s is obsolete: the resident consumer
+            # is primary and the next fallback tick inspects the same queue.
+            # Transition publishing uses its own slower cadence/expiry below.
             "options": {
                 "queue": "servicebus",
                 "expires": float(
-                    os.environ.get("CELERY_BEAT_SERVICEBUS_EXPIRES_SECONDS", "30")
+                    os.environ.get("CELERY_BEAT_SERVICEBUS_DRAIN_EXPIRES_SECONDS", "15")
                 ),
             },
         },
         "servicebus-publish-transitions": {
             "task": "api.tasks.servicebus.publish_transitions",
-            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_SECONDS", "10")),
+            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_SECONDS", "30")),
             "options": {
                 "queue": "servicebus",
                 "expires": float(
-                    os.environ.get("CELERY_BEAT_SERVICEBUS_EXPIRES_SECONDS", "30")
+                    os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_EXPIRES_SECONDS", "90")
                 ),
             },
         },
@@ -340,7 +340,7 @@ celery_app.conf.update(
             ),
             "options": {
                 "queue": "servicebus",
-                "expires": 55.0,
+                "expires": 120.0,
             },
         },
         "servicebus-dlq-cleanup": {
