@@ -6,6 +6,7 @@ Responsibility: Persist completion events before request settlement or bridge
 Edit boundaries: Persistence only. Event construction and Service Bus publish
     calls remain in ``api.tasks.servicebus.tasks``.
 Key entry points: ``enqueue_response``, ``list_pending_responses``,
+    ``pending_response_correlations``, ``has_pending_response``,
     ``defer_response``, ``mark_response_delivered``.
 Risky contracts: A duplicate ``event_id`` is idempotent; deployed writes fail
     closed when Table Storage is unavailable; publish-before-delete may produce
@@ -113,6 +114,7 @@ def _entity(event_id: str, event: dict[str, Any], created_at: str) -> dict[str, 
         "RowKey": _row_key(event_id),
         "created_at": created_at,
         "payload_json": json.dumps(event, separators=(",", ":"), default=str),
+        "correlation_id": str(event.get("external_correlation_id") or "")[:256],
         "failure_count": 0,
         "next_attempt_at": "",
         "last_error_code": "",
@@ -223,6 +225,55 @@ def list_pending_responses(limit: int = 200) -> list[PendingResponse]:
     return pending[:bounded]
 
 
+def has_pending_response(correlation_id: str) -> bool:
+    """Return whether this producer still has an undelivered response.
+
+    New Table rows carry a queryable ``correlation_id`` column. Legacy rows are
+    migrated when deferred; avoiding a payload scan here keeps transition
+    polling to one indexed Table query per active bridge.
+    """
+    correlation = correlation_id.strip()
+    if not correlation:
+        return False
+    _require_deployed_table()
+    if _use_table_backend():
+        _ensure_table()
+        escaped = correlation.replace("'", "''")
+        rows = _table_client().query_entities(
+            query_filter=(
+                f"PartitionKey eq '{_PARTITION_KEY}' and correlation_id eq '{escaped}'"
+            ),
+            results_per_page=1,
+        )
+        return any(True for _row in rows)
+    with _FILE_LOCK:
+        state = _read_file()
+    return any(
+        isinstance(raw, dict)
+        and isinstance(raw.get("event"), dict)
+        and str(raw["event"].get("external_correlation_id") or "") == correlation
+        for raw in state.values()
+    )
+
+
+def pending_response_correlations(limit: int = 1000) -> tuple[set[str], bool]:
+    """Return pending producer correlations and whether the snapshot is complete.
+
+    Transition polling calls this once per tick instead of issuing one
+    unindexed Table query per active bridge. A full-sized page is treated as
+    truncated (fail closed); the outbox flush drains it before bridge polling
+    resumes.
+    """
+    bounded = max(1, min(int(limit), 1000))
+    pending = list_pending_responses(limit=bounded)
+    correlations = {
+        str(item.event.get("external_correlation_id") or "").strip()
+        for item in pending
+        if str(item.event.get("external_correlation_id") or "").strip()
+    }
+    return correlations, len(pending) < bounded
+
+
 def defer_response(
     event_id: str,
     *,
@@ -245,6 +296,16 @@ def defer_response(
             current = table.get_entity(_PARTITION_KEY, key)
         except ResourceNotFoundError:
             return
+        correlation_id = ""
+        source_event = replacement_event
+        if source_event is None:
+            try:
+                parsed_event = json.loads(str(current.get("payload_json") or "{}"))
+                source_event = parsed_event if isinstance(parsed_event, dict) else None
+            except json.JSONDecodeError:
+                source_event = None
+        if source_event is not None:
+            correlation_id = str(source_event.get("external_correlation_id") or "")[:256]
         table.update_entity(
             {
                 "PartitionKey": _PARTITION_KEY,
@@ -252,6 +313,7 @@ def defer_response(
                 "failure_count": max(0, int(current.get("failure_count") or 0)) + 1,
                 "next_attempt_at": next_attempt_at,
                 "last_error_code": bounded_error,
+                **({"correlation_id": correlation_id} if correlation_id else {}),
                 **(
                     {
                         "payload_json": json.dumps(
@@ -312,6 +374,8 @@ __all__ = [
     "ResponseOutboxPersistenceError",
     "defer_response",
     "enqueue_response",
+    "has_pending_response",
     "list_pending_responses",
     "mark_response_delivered",
+    "pending_response_correlations",
 ]

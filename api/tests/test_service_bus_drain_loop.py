@@ -52,6 +52,7 @@ class _FakeReceiver:
         self.completed: list[str] = []
         self.abandoned: list[str] = []
         self.dead_lettered: list[str] = []
+        self.dead_letter_reasons: list[tuple[str, str, str | None]] = []
 
     def __enter__(self):
         return self
@@ -73,8 +74,14 @@ class _FakeReceiver:
         # that caused the hot-loop bug). Re-queue it so the loop *could* see it.
         self._available.append(message)
 
-    def dead_letter_message(self, message: _FakeMessage, reason: str = "") -> None:
+    def dead_letter_message(
+        self,
+        message: _FakeMessage,
+        reason: str = "",
+        error_description: str | None = None,
+    ) -> None:
         self.dead_lettered.append(message.message_id)
+        self.dead_letter_reasons.append((message.message_id, reason, error_description))
 
 
 class _FakeClient:
@@ -198,6 +205,24 @@ def test_dead_letter_settles_once(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert stats.dead_lettered == 1
     assert receiver.dead_lettered == ["m1"]
+    assert receiver.dead_letter_reasons == [("m1", "handler_rejected", None)]
+
+
+def test_dead_letter_preserves_handler_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    receiver = _FakeReceiver([_FakeMessage("m1", {"db": "core_nt"})])
+    _patch_client(monkeypatch, receiver)
+
+    def handler(message: service_bus.ParsedMessage) -> MessageAction:
+        message.settlement_reason = "servicebus_malformed_request"
+        message.settlement_description = "request contract rejected"
+        return MessageAction.DEAD_LETTER
+
+    stats = service_bus.drain_requests(_cfg(), handler, max_messages=1)
+
+    assert stats.dead_lettered == 1
+    assert receiver.dead_letter_reasons == [
+        ("m1", "servicebus_malformed_request", "request contract rejected")
+    ]
 
 
 def test_multiple_distinct_messages_all_processed(monkeypatch: pytest.MonkeyPatch) -> None:

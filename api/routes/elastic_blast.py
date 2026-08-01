@@ -101,7 +101,7 @@ class ExternalBlastSubmitRequest(BaseModel):
         None,
         min_length=1,
         max_length=256,
-        pattern=r"^[A-Za-z0-9._:-]+$",
+        pattern=r"^[A-Za-z0-9._: -]+$",
     )
     resource_profile: str = Field(
         "standard", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$"
@@ -197,7 +197,7 @@ class ExternalBlastV1Request(BaseModel):
         "standard", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$"
     )
     external_correlation_id: str | None = Field(
-        None, min_length=1, max_length=256, pattern=r"^[A-Za-z0-9._:-]+$"
+        None, min_length=1, max_length=256, pattern=r"^[A-Za-z0-9._: -]+$"
     )
     subscription_id: str | None = Field(None, min_length=1, max_length=64)
     resource_group: str | None = Field(None, min_length=1, max_length=120)

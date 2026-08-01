@@ -78,8 +78,10 @@ from api.services.service_bus_outbox import (
     ResponseOutboxPersistenceError,
     defer_response,
     enqueue_response,
+    has_pending_response,
     list_pending_responses,
     mark_response_delivered,
+    pending_response_correlations,
 )
 from api.services.service_bus_pref import (
     ServiceBusConfig,
@@ -1312,6 +1314,25 @@ def _detail_text(exc: HTTPException) -> str:
     return str(detail or "")
 
 
+def _dead_letter_action(
+    msg: ParsedMessage,
+    *,
+    reason: str,
+    description: str,
+) -> MessageAction:
+    """Attach a bounded broker-visible terminal reason to one disposition."""
+    from api.services.sanitise import sanitise
+
+    msg.settlement_reason = reason.strip()[:128] or "handler_rejected"
+    msg.settlement_description = str(sanitise(description.strip()))[:1024]
+    return MessageAction.DEAD_LETTER
+
+
+def _transient_action(msg: ParsedMessage) -> MessageAction:
+    """Schedule bounded redelivery without consuming broker delivery count."""
+    return MessageAction.ABANDON if _retry_exhausted(msg) else MessageAction.RETRY
+
+
 def _publish_jobs_cache_invalidate(reason: str) -> None:
     """Drop the api sidecar's jobs / message-flow caches cross-process.
 
@@ -1556,7 +1577,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             error_message="request message could not be parsed into a valid BLAST submit",
         )
         if not response_durable:
-            return MessageAction.ABANDON
+            return _transient_action(msg)
         _fail_placeholder_for_message(msg, error_code="servicebus_malformed_request")
         _publish_jobs_cache_invalidate("servicebus_drain_malformed")
         _record_drain_request_event(
@@ -1566,7 +1587,11 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             action=MessageAction.DEAD_LETTER,
             error_code="servicebus_malformed_request",
         )
-        return MessageAction.DEAD_LETTER
+        return _dead_letter_action(
+            msg,
+            reason="servicebus_malformed_request",
+            description="request message failed the ElasticBLAST submit contract",
+        )
 
     correlation_id = str(payload["external_correlation_id"])
     received_ts = _now_iso()
@@ -1604,7 +1629,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
                 request_fingerprint=request_fingerprint,
             )
             if not response_durable:
-                return MessageAction.ABANDON
+                return _transient_action(msg)
             _record_drain_request_event(
                 "correlation_conflict",
                 msg,
@@ -1614,14 +1639,18 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
                 error_code="servicebus_correlation_conflict",
                 ack_published=True,
             )
-            return MessageAction.DEAD_LETTER
+            return _dead_letter_action(
+                msg,
+                reason="servicebus_correlation_conflict",
+                description="external_correlation_id is bound to a different request",
+            )
         if not existing.request_fingerprint:
             LOGGER.warning(
                 "service bus duplicate request corr=%s has legacy bridge without fingerprint",
                 correlation_id,
             )
         if not _publish_duplicate_ack(cfg, existing, request_id=request_id):
-            return MessageAction.ABANDON
+            return _transient_action(msg)
         LOGGER.info("service bus duplicate request ACK replayed corr=%s", correlation_id)
         _record_drain_request_event(
             "retry_ack_replayed",
@@ -1647,15 +1676,16 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             "service bus claim contended corr=%s — deferring to the in-flight submit",
             correlation_id,
         )
+        action = _transient_action(msg)
         _record_drain_request_event(
             "deferred",
             msg,
             cfg,
             payload=payload,
-            action=MessageAction.ABANDON,
+            action=action,
             error_code="claim_contended",
         )
-        return MessageAction.ABANDON
+        return action
 
     # Close the final receive/build/claim → submit race. A lifecycle barrier can
     # be created after the handler's entry check; never let that message leave
@@ -1667,12 +1697,13 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         if _ATOMIC_CLAIM:
             release_bridge(correlation_id)
         reason = str(pre_submit_admission.get("reason") or "not_ready")
+        action = _transient_action(msg)
         _record_drain_request_event(
             "deferred",
             msg,
             cfg,
             payload=payload,
-            action=MessageAction.ABANDON,
+            action=action,
             error_code=reason,
         )
         LOGGER.info(
@@ -1680,7 +1711,7 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             reason,
             correlation_id,
         )
-        return MessageAction.ABANDON
+        return action
 
     try:
         upstream = submit(payload, **_openapi_kwargs(cfg))
@@ -1762,6 +1793,12 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             action=action,
             error_code=failure_code,
         )
+        if action == MessageAction.DEAD_LETTER:
+            return _dead_letter_action(
+                msg,
+                reason=failure_code,
+                description=_detail_text(exc) or "OpenAPI submit rejected the request",
+            )
         return action
     except Exception as exc:
         # Unknown/unexpected error is transient until the bounded scheduled
@@ -1800,6 +1837,12 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
                 else type(exc).__name__
             ),
         )
+        if action == MessageAction.DEAD_LETTER:
+            return _dead_letter_action(
+                msg,
+                reason=_retry_terminal_error(msg)[0],
+                description=_retry_terminal_error(msg)[1],
+            )
         return action
 
     openapi_job_id = str(upstream.get("job_id") or "")
@@ -2133,6 +2176,8 @@ def _publish_one_bridge(
     cfg: ServiceBusConfig,
     rec: BridgeRecord,
     openapi_kwargs: dict[str, str],
+    *,
+    pending_correlations: set[str] | None = None,
 ) -> tuple[int, int]:
     """Process one active bridge: poll sibling status, publish on change.
 
@@ -2178,6 +2223,24 @@ def _publish_one_bridge(
             return (0, 0)
         mark_published(rec.correlation_id, _STATUS_QUEUED)
         return (int(delivered), 0)
+    try:
+        response_pending = (
+            rec.correlation_id in pending_correlations
+            if pending_correlations is not None
+            else has_pending_response(rec.correlation_id)
+        )
+        if response_pending:
+            # Preserve queued -> running -> terminal order even when the topic
+            # is temporarily unavailable. The outbox flush publishes the
+            # older response first; this bridge is polled on the next tick.
+            return (0, 0)
+    except Exception:
+        LOGGER.warning(
+            "producer response ordering check failed corr=%s",
+            rec.correlation_id,
+            exc_info=True,
+        )
+        return (0, 0)
     if _finish_lifecycle_interrupted_bridge(cfg, rec):
         return (1, 1)
     try:
@@ -2617,6 +2680,24 @@ def publish_transitions() -> dict[str, Any]:
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
     outbox = _flush_response_outbox(cfg)
+    try:
+        pending_correlations, pending_snapshot_complete = pending_response_correlations()
+    except Exception:
+        LOGGER.warning("producer response ordering snapshot failed", exc_info=True)
+        return {
+            "skipped": "outbox_ordering_unavailable",
+            "published": outbox["delivered"],
+            "errors": outbox["errors"] + 1,
+        }
+    if not pending_snapshot_complete:
+        LOGGER.warning(
+            "producer response ordering snapshot truncated; bridge polling deferred"
+        )
+        return {
+            "skipped": "outbox_ordering_truncated",
+            "published": outbox["delivered"],
+            "errors": outbox["errors"] + 1,
+        }
     # Fetch the work set BEFORE resolving the OpenAPI client kwargs. With zero
     # active bridges there is nothing to poll, and `_openapi_kwargs` reads the
     # configured cluster's `elb-openapi` Service IP from the Kubernetes API on
@@ -2662,7 +2743,12 @@ def publish_transitions() -> dict[str, Any]:
     for rec in bridges:
         scanned += 1
         try:
-            p_delta, f_delta = _publish_one_bridge(cfg, rec, openapi_kwargs)
+            p_delta, f_delta = _publish_one_bridge(
+                cfg,
+                rec,
+                openapi_kwargs,
+                pending_correlations=pending_correlations,
+            )
         except Exception:
             # Partial-failure isolation: a tracking write (mark_published /
             # mark_done) or any unexpected error on ONE bridge must not abort

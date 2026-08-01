@@ -114,6 +114,15 @@ def test_bridge_fingerprint_round_trips_without_request_payload() -> None:
     assert "query_fasta" not in record.to_dict()
 
 
+def test_table_unsafe_correlation_ids_use_collision_safe_keys() -> None:
+    spaced = t._row_key("wf3:943:exclusive:hypothetical protein:1024979")
+    underscored = t._row_key("wf3:943:exclusive:hypothetical_protein:1024979")
+
+    assert spaced.startswith("unsafe-")
+    assert underscored == "wf3:943:exclusive:hypothetical_protein:1024979"
+    assert spaced != underscored
+
+
 def test_active_bridge_pages_rotate_without_starving_rows() -> None:
     for index in range(5):
         t.upsert_bridge(

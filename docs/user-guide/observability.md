@@ -191,6 +191,22 @@ AppEvents
 | order by TimeGenerated desc
 ```
 
+The resident request consumer runs in the dedicated `worker-servicebus` Celery
+parent. That parent initializes Azure Monitor after its child pool has forked,
+so these dimensions reach `AppEvents` without exporter threads being inherited
+by children. A payload-free scalar copy is also written to Container App
+console logs (`servicebus_request stage=... corr=... action=...`) as a fallback.
+Use it when investigating the short startup interval before telemetry is ready:
+
+```kusto
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(24h)
+| where ContainerName_s == "worker"
+| where Log_s contains "servicebus_request stage="
+| project TimeGenerated, Log_s, RevisionName_s
+| order by TimeGenerated desc
+```
+
 Queue depth and DLQ backlog remain namespace metrics (`ActiveMessages` and
 `DeadletteredMessages`) rather than one event per poll, avoiding telemetry noise
 while preserving historical alerting through Azure Monitor metrics.

@@ -14,11 +14,16 @@ Validation: `uv run pytest -q api/tests/test_service_bus_observability.py`.
 
 from __future__ import annotations
 
+import logging
+
 from api.services.feature_events import record_feature_event
+from api.services.sanitise import sanitise
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _bounded(value: str, limit: int) -> str:
-    return str(value or "").strip()[:limit]
+    return str(sanitise(str(value or "").strip()))[:limit]
 
 
 def record_service_bus_request_event(
@@ -41,6 +46,25 @@ def record_service_bus_request_event(
 ) -> None:
     """Emit one searchable Service Bus request event without payload content."""
     try:
+        # The resident queue consumer runs in the Celery parent process while
+        # Azure Monitor OpenTelemetry is initialised in prefork children. Keep
+        # a scalar console record as well as the custom event so Log Analytics
+        # retains correlation/action dimensions even on that parent path.
+        LOGGER.info(
+            "servicebus_request stage=%s corr=%s request_id=%s message_id=%s "
+            "job_id=%s action=%s error_code=%s delivery_count=%s sequence_number=%s "
+            "ack_published=%s",
+            _bounded(stage, 64) or "-",
+            _bounded(correlation_id, 256) or "-",
+            _bounded(request_id, 256) or "-",
+            _bounded(message_id, 256) or "-",
+            _bounded(openapi_job_id, 256) or "-",
+            _bounded(action, 32) or "-",
+            _bounded(error_code, 128) or "-",
+            delivery_count if delivery_count is not None else "-",
+            sequence_number if sequence_number is not None else "-",
+            ack_published if ack_published is not None else "-",
+        )
         record_feature_event(
             "servicebus_request",
             status=_bounded(stage, 64),

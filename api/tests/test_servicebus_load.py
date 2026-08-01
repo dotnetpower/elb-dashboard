@@ -95,7 +95,13 @@ class _LoadReceiver:
     def complete_message(self, message: _LoadMessage) -> None:
         self.completed.append(message.message_id)
 
-    def dead_letter_message(self, message: _LoadMessage, reason: str = "") -> None:
+    def dead_letter_message(
+        self,
+        message: _LoadMessage,
+        reason: str = "",
+        error_description: str | None = None,
+    ) -> None:
+        del reason, error_description
         self.dead_lettered.append(message.message_id)
 
     def abandon_message(self, message: _LoadMessage) -> None:

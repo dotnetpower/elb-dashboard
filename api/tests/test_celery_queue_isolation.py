@@ -1,7 +1,8 @@
 """Regression tests for Celery worker queue isolation and stale-tick expiry.
 
 Responsibility: Verify interactive, reconcile, and artifact queues cannot share
-    the default worker pool and that obsolete Service Bus periodic ticks expire.
+    the default worker pool, Service Bus has a dedicated worker, and obsolete
+    periodic ticks expire.
 Edit boundaries: Worker topology and Celery schedule contracts only; task domain
     behaviour belongs in its focused task test module.
 Key entry points: the `test_*` functions.
@@ -25,13 +26,19 @@ def test_default_worker_topology_physically_isolates_reconcile_queue() -> None:
         for name, queues, concurrency in run_celery_workers._worker_specs()
     }
 
-    assert set(specs) == {"worker-main", "worker-reconcile", "worker-artifacts"}
+    assert set(specs) == {
+        "worker-main",
+        "worker-reconcile",
+        "worker-servicebus",
+        "worker-artifacts",
+    }
     assert specs["worker-reconcile"][0] == ["reconcile"]
+    assert specs["worker-servicebus"][0] == ["servicebus"]
     assert "reconcile" not in specs["worker-main"][0]
     assert "reconcile" not in specs["worker-artifacts"][0]
+    assert "servicebus" not in specs["worker-reconcile"][0]
     assert set(specs["worker-main"][0]).isdisjoint(specs["worker-artifacts"][0])
-    # Five children plus the added reconcile parent keeps the total Python
-    # process count equal to the prior two-parent/six-child topology.
+    # Five prefork children preserve the worker-sidecar memory envelope.
     assert sum(concurrency for _, concurrency in specs.values()) == 5
 
 
@@ -48,8 +55,11 @@ def test_worker_topology_rejects_queue_overlap_from_env_override(
         run_celery_workers._worker_specs()
 
 
-def test_only_reconcile_parent_owns_sidecar_background_consumers() -> None:
+def test_only_servicebus_parent_owns_sidecar_background_consumers() -> None:
     assert celery_signals._is_background_consumer_worker(
+        SimpleNamespace(hostname="worker-servicebus@replica")
+    )
+    assert not celery_signals._is_background_consumer_worker(
         SimpleNamespace(hostname="worker-reconcile@replica")
     )
     assert not celery_signals._is_background_consumer_worker(
@@ -60,6 +70,37 @@ def test_only_reconcile_parent_owns_sidecar_background_consumers() -> None:
     )
 
 
+def test_servicebus_parent_initialises_telemetry_and_consumers_post_fork(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.app import telemetry
+    from api.services import service_bus_external_consumer
+    from api.services.blast import resident_consumer
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        telemetry,
+        "init_telemetry",
+        lambda *, role, app=None: calls.append(f"telemetry:{role}") or True,
+    )
+    monkeypatch.setattr(
+        resident_consumer,
+        "start_resident_consumer",
+        lambda: calls.append("resident") or True,
+    )
+    monkeypatch.setattr(
+        service_bus_external_consumer,
+        "start_external_consumer",
+        lambda: calls.append("external") or True,
+    )
+
+    celery_signals._on_worker_ready(
+        sender=SimpleNamespace(hostname="worker-servicebus@replica")
+    )
+
+    assert calls == ["telemetry:worker", "resident", "external"]
+
+
 def test_servicebus_periodic_ticks_expire_before_stale_backlog_replays() -> None:
     schedule = celery_app.conf.beat_schedule
 
@@ -68,7 +109,7 @@ def test_servicebus_periodic_ticks_expire_before_stale_backlog_replays() -> None
         "servicebus-publish-transitions",
     ):
         options = schedule[entry_name]["options"]
-        assert options["queue"] == "reconcile"
+        assert options["queue"] == "servicebus"
         assert 0 < float(options["expires"]) <= 30
 
 
@@ -77,7 +118,7 @@ def test_servicebus_health_tick_is_bounded_and_isolated() -> None:
     options = entry["options"]
 
     assert entry["task"] == "api.tasks.servicebus.emit_service_bus_health"
-    assert options["queue"] == "reconcile"
+    assert options["queue"] == "servicebus"
     assert 0 < float(options["expires"]) < float(entry["schedule"])
 
 
@@ -88,6 +129,19 @@ def test_warmup_tick_expires_before_next_schedule() -> None:
     options = entry["options"]
     assert options["queue"] == "reconcile"
     assert 0 < float(options["expires"]) < float(entry["schedule"])
+
+
+def test_runtime_metrics_backfill_is_slow_cadence_and_non_poison() -> None:
+    entry = celery_app.conf.beat_schedule["blast-backfill-completed-runtime-metrics"]
+    task = celery_app.tasks["api.tasks.blast.backfill_completed_runtime_metrics"]
+
+    assert float(entry["schedule"]) >= 3600
+    assert entry["options"]["queue"] == "reconcile"
+    assert 0 < float(entry["options"]["expires"]) < float(entry["schedule"])
+    assert task.acks_late is False
+    assert task.reject_on_worker_lost is False
+    assert task.soft_time_limit == 240
+    assert task.time_limit == 300
 
 
 def test_autostop_tick_isolated_on_interactive_azure_queue() -> None:

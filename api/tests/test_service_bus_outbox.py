@@ -44,6 +44,29 @@ def test_response_remains_until_delivery_confirmation() -> None:
     assert outbox.list_pending_responses() == []
 
 
+def test_pending_response_is_queryable_by_correlation() -> None:
+    outbox.enqueue_response(_event("evt-1"))
+
+    assert outbox.has_pending_response("corr-1") is True
+    assert outbox.has_pending_response("corr-other") is False
+
+    outbox.mark_response_delivered("evt-1")
+    assert outbox.has_pending_response("corr-1") is False
+
+
+def test_pending_correlation_snapshot_is_bounded() -> None:
+    outbox.enqueue_response(_event("evt-1"))
+
+    correlations, complete = outbox.pending_response_correlations(limit=2)
+    assert correlations == {"corr-1"}
+    assert complete is True
+
+    outbox.enqueue_response({**_event("evt-2"), "external_correlation_id": "corr-2"})
+    correlations, complete = outbox.pending_response_correlations(limit=2)
+    assert correlations == {"corr-1", "corr-2"}
+    assert complete is False
+
+
 def test_pending_responses_are_oldest_first(monkeypatch: pytest.MonkeyPatch) -> None:
     timestamps = iter(("2026-07-30T00:00:02+00:00", "2026-07-30T00:00:01+00:00"))
     monkeypatch.setattr(outbox, "_now_iso", lambda: next(timestamps))

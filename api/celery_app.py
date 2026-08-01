@@ -161,7 +161,7 @@ celery_app.conf.update(
         "api.tasks.blast.*": {"queue": "blast"},
         "api.tasks.storage.*": {"queue": "storage"},
         "api.tasks.openapi.*": {"queue": "azure"},
-        "api.tasks.servicebus.*": {"queue": "reconcile"},
+        "api.tasks.servicebus.*": {"queue": "servicebus"},
     },
     # The interactive task_routes above are deliberately left pointing at the
     # latency-critical queues (azure / blast / storage / default) so an
@@ -230,8 +230,10 @@ celery_app.conf.update(
         },
         "blast-backfill-completed-runtime-metrics": {
             "task": "api.tasks.blast.backfill_completed_runtime_metrics",
-            "schedule": 300.0,
-            "options": {"queue": "reconcile"},
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_RUNTIME_METRICS_BACKFILL_SECONDS", "3600")
+            ),
+            "options": {"queue": "reconcile", "expires": 900.0},
         },
         # Heal the jobstate time-ordered index (#50): re-run the idempotent
         # backfill upserts so a job whose in-line best-effort _index_put failed
@@ -302,7 +304,7 @@ celery_app.conf.update(
             # inspect the same queue/bridge state. Expiry sheds stale backlog
             # after a slow upstream call instead of replaying every missed tick.
             "options": {
-                "queue": "reconcile",
+                "queue": "servicebus",
                 "expires": float(
                     os.environ.get("CELERY_BEAT_SERVICEBUS_EXPIRES_SECONDS", "30")
                 ),
@@ -312,7 +314,7 @@ celery_app.conf.update(
             "task": "api.tasks.servicebus.publish_transitions",
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_PUBLISH_SECONDS", "10")),
             "options": {
-                "queue": "reconcile",
+                "queue": "servicebus",
                 "expires": float(
                     os.environ.get("CELERY_BEAT_SERVICEBUS_EXPIRES_SECONDS", "30")
                 ),
@@ -327,7 +329,7 @@ celery_app.conf.update(
                 os.environ.get("CELERY_BEAT_SERVICEBUS_HEALTH_SECONDS", "300")
             ),
             "options": {
-                "queue": "reconcile",
+                "queue": "servicebus",
                 "expires": 240.0,
             },
         },
@@ -337,14 +339,14 @@ celery_app.conf.update(
                 os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_RESPONSE_SECONDS", "60")
             ),
             "options": {
-                "queue": "reconcile",
+                "queue": "servicebus",
                 "expires": 55.0,
             },
         },
         "servicebus-dlq-cleanup": {
             "task": "api.tasks.servicebus.dlq_cleanup",
             "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS", "3600")),
-            "options": {"queue": "reconcile"},
+            "options": {"queue": "servicebus"},
         },
         # Age-based result retention. No-op every tick unless STORAGE_DFS_ENABLED
         # is on AND BLAST_RESULT_RETENTION_DAYS > 0 (default 0 = disabled), so

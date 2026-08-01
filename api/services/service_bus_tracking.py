@@ -28,6 +28,7 @@ Validation: ``uv run pytest -q api/tests/test_service_bus_tracking.py``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -98,7 +99,17 @@ def _now_iso() -> str:
 
 
 def _row_key(correlation_id: str) -> str:
-    return _KEY_SAFE.sub("_", correlation_id)[:512] or "unknown"
+    raw = correlation_id.strip()
+    if not raw:
+        return "unknown"
+    safe = _KEY_SAFE.sub("_", raw)
+    if safe == raw:
+        return safe[:512]
+    # Never collapse two producer ids such as ``gene A`` and ``gene_A`` onto
+    # the same Table row. Existing safe ids retain their historical RowKey;
+    # ids containing spaces or other Table-unsafe characters use a stable,
+    # opaque key while the original value remains in ``payload_json``.
+    return "unsafe-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 @dataclass

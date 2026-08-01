@@ -99,7 +99,10 @@ Field rules (consistent with `/v1/jobs`):
   `rpsblast`/`rpstblastn`/`tblastn`/`tblastx`), `db`, `query_fasta` (valid
   FASTA, ≤ 10 MB).
 - `external_correlation_id` is the **idempotency / dedup key**
-  (`^[A-Za-z0-9._:-]+$`, ≤ 256). If omitted, the Service Bus message's
+  (`^[A-Za-z0-9._: -]+$`, ≤ 256). Spaces are accepted because WF3 correlation
+  ids include human-readable multi-word gene names. Table persistence hashes
+  ids containing Table-unsafe characters, so `gene A` and `gene_A` cannot
+  collapse onto the same bridge row. If omitted, the Service Bus message's
   `correlation_id` then `message_id` is used; if none exist the message is
   dead-lettered. It must be unique for every logical request. Reuse it only for
   an exact retry of the same execution payload; requests with different
@@ -248,6 +251,9 @@ with exponential backoff. The retry clone preserves the original correlation
 and idempotency identity; only successful scheduling permits the original
 message to complete. When the bounded retry attempt/age envelope is exhausted,
 the dashboard persists a terminal `failed` response before dead-lettering.
+Claim contention, an admission gate that closes after receive, and a temporary
+response-outbox outage use the same scheduled-retry path instead of `ABANDON`,
+so polling frequency cannot consume the queue's max-delivery budget.
 
 ### Idempotency
 
@@ -323,6 +329,14 @@ It removes a DLQ message only after both the response outbox write and audit
 backup succeed. Automatic cleanup and operator delete/purge use the same
 response-first contract, so no deletion path can silently erase a producer
 outcome.
+
+Handler-selected dead letters carry the machine error code as the broker
+`dead_letter_reason` (`servicebus_malformed_request`,
+`servicebus_correlation_conflict`, `servicebus_submit_rejected_<status>`, or a
+bounded retry terminal code). `handler_rejected` remains only the compatibility
+fallback for handlers that do not provide a specific disposition. The reason
+therefore identifies the rejection class instead of forcing operators to infer
+it from a generic broker string.
 
 ### The DLQ is never auto-purged by Service Bus
 
@@ -493,6 +507,8 @@ Rules a subscriber must follow:
 | `SERVICEBUS_RESIDENT_CONSUMER` | `false` | worker | When true (and Service Bus enabled) a resident long-polling consumer drains the queue continuously (~1 s) instead of waiting the 30 s beat; the beat stays as the fallback. |
 | `SERVICEBUS_ATOMIC_CLAIM` | `true` | worker | Required when drain concurrency is greater than 1. Atomically reserves each correlation id before OpenAPI submit; code falls back to serial drain if explicitly disabled. |
 | `SERVICEBUS_DRAIN_SINGLEFLIGHT` | `true` | worker | Takes a queue-scoped Redis lease so the resident consumer and beat fallback do not compete for the same request queue. |
+| `CELERY_SERVICEBUS_QUEUES` | `servicebus` | worker | Dedicated Celery queue for drain fallback, outbox/transition publication, DLQ response reconciliation, and Service Bus health. `worker-servicebus` consumes it independently of long general reconciliation scans. |
+| `CELERY_SERVICEBUS_CONCURRENCY` | `1` | worker | Prefork concurrency of the dedicated Service Bus worker. The resident request consumer also belongs only to this parent and starts after prefork. |
 | `SERVICEBUS_LIFECYCLE_INTERRUPTION_SECONDS` | `600` | worker | After a newer AKS lifecycle generation and sustained OpenAPI/Kubernetes absence, terminalise an already-accepted bridge as `cluster_lifecycle_interrupted` instead of leaving it active indefinitely. |
 | `CELERY_BEAT_SERVICEBUS_DRAIN_SECONDS` | `30` | beat | Drain + transition-publish cadence. |
 | `CELERY_BEAT_SERVICEBUS_DLQ_CLEANUP_SECONDS` | `3600` | beat | DLQ cleanup cadence. |

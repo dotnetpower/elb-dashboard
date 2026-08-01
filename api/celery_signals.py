@@ -8,7 +8,7 @@ Edit boundaries: Signal handlers and their direct helpers only. Celery
 app instantiation, queue routing, and beat schedule live in
 `api.celery_app`. JobState row schema lives in
 `api.services.state_repo`.
-Key entry points: `_start_reporter`, `_is_background_consumer_worker`, `_on_worker_init`,
+Key entry points: `_start_reporter`, `_is_background_consumer_worker`, `_on_worker_ready`,
 `_on_worker_process_init`, `_on_beat_init`, `_on_task_failure`,
 `_on_task_internal_error`, `_on_task_revoked`, `_on_before_task_publish`,
 `_record_task_terminal_state`.
@@ -16,8 +16,8 @@ Risky contracts: Failure signal handlers must never raise; task crashes
 must still leave a log entry and, when a JobState row can be found, a
 user-visible failed/cancelled state. Module is imported for its
 import-time side effect (signal registration); never lazy-load it from a
-worker task. Resident background consumers must start only in the dedicated
-`worker-reconcile` parent, never once per Celery worker parent.
+worker task. Resident background consumers must start only after prefork in the
+dedicated `worker-servicebus` parent, never once per Celery worker parent.
 Validation: `uv run pytest -q api/tests/test_celery_failure_visibility.py
 api/tests/test_telemetry_init.py`.
 """
@@ -37,6 +37,7 @@ from celery.signals import (
     task_revoked,
     worker_init,
     worker_process_init,
+    worker_ready,
     worker_shutdown,
 )
 
@@ -133,7 +134,7 @@ def _record_task_terminal_state(
 def _is_background_consumer_worker(sender: object | None) -> bool:
     """Return whether this Celery parent owns sidecar-level daemon consumers.
 
-    `worker_init` fires once per parent. The worker sidecar now has three
+    `worker_init` fires once per parent. The worker sidecar has four
     parents, so process-local singleton guards alone would start three Service
     Bus consumers. Unknown senders preserve the historical fail-open behaviour
     for direct test/dev invocation; named production workers are strict.
@@ -141,7 +142,7 @@ def _is_background_consumer_worker(sender: object | None) -> bool:
     hostname = str(getattr(sender, "hostname", "") or "")
     if not hostname:
         return True
-    return hostname.split("@", 1)[0] == "worker-reconcile"
+    return hostname.split("@", 1)[0] == "worker-servicebus"
 
 
 def _reset_inherited_client_pools() -> None:
@@ -171,10 +172,24 @@ def _reset_inherited_client_pools() -> None:
 @worker_init.connect  # type: ignore[untyped-decorator]
 def _on_worker_init(sender: object | None = None, **_kwargs: object) -> None:
     _start_reporter("worker")
+
+
+@worker_ready.connect  # type: ignore[untyped-decorator]
+def _on_worker_ready(sender: object | None = None, **_kwargs: object) -> None:
+    """Start Service Bus parent-only telemetry and daemon consumers post-fork."""
     if not _is_background_consumer_worker(sender):
         return
+    # The resident consumer runs in this Celery parent, not in a prefork child.
+    # Initialise Azure Monitor only after the pool has forked so correlation
+    # dimensions reach AppEvents without children inheriting exporter threads.
+    try:
+        from api.app.telemetry import init_telemetry
+
+        init_telemetry(role="worker")
+    except Exception:
+        LOGGER.debug("servicebus parent telemetry init skipped", exc_info=True)
     # Optional resident Service Bus consumer (issue #36 Tier 3, default-OFF).
-    # Starts a single daemon loop on the worker-reconcile parent when
+    # Starts a single daemon loop on the worker-servicebus parent when
     # SERVICEBUS_RESIDENT_CONSUMER is enabled, so SB-submitted jobs drain within
     # ~1 s instead of waiting the 30 s beat. No-op when the gate is off; the beat
     # drain task stays registered as the fallback either way.

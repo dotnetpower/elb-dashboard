@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run interactive, reconcile, and artifact Celery workers as isolated processes.
+"""Run interactive, reconcile, Service Bus, and artifact Celery workers.
 
 Responsibility: Isolate Celery queue classes into bounded worker processes.
 Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
@@ -18,23 +18,24 @@ import subprocess
 import sys
 import time
 
-# The `reconcile` queue carries beat-scheduled maintenance tasks (auto-warmup,
-# stale-job sweeps, Service Bus transition polling, AKS autostop, …). It MUST
-# use a separate worker process: queue routing alone is not isolation when one
-# prefork pool consumes every queue. A stopped OpenAPI plane once left four
-# long transition-publisher tasks occupying all worker-main slots while an AKS
-# start sat PENDING on the `azure` queue.
+# The `reconcile` queue carries general beat-scheduled maintenance tasks
+# (auto-warmup, stale-job sweeps, runtime backfills, …). Service Bus gets its
+# own queue because a live runtime backfill once occupied the single reconcile
+# worker for 55 minutes, expiring thousands of ACK/outbox ticks before start.
+# Queue routing alone is not isolation when one prefork pool consumes both.
 MAIN_QUEUES = os.environ.get(
     "CELERY_MAIN_QUEUES",
     "default,acr,azure,blast,storage",
 )
 RECONCILE_QUEUES = os.environ.get("CELERY_RECONCILE_QUEUES", "reconcile")
+SERVICEBUS_QUEUES = os.environ.get("CELERY_SERVICEBUS_QUEUES", "servicebus")
 ARTIFACT_QUEUES = os.environ.get("CELERY_ARTIFACT_QUEUES", "blast-artifacts")
-# Five prefork children across three parents (3 + 1 + 1) replace the previous
-# six children across two parents (4 + 2). The extra parent therefore does not
-# increase the process count or exceed the 2 GiB worker-sidecar budget.
-MAIN_CONCURRENCY = os.environ.get("CELERY_MAIN_CONCURRENCY", "3")
+# Five prefork children across four parents (2 + 1 + 1 + 1) preserve the prior
+# child count and the 2 GiB worker-sidecar memory envelope while dedicating one
+# child to latency-critical Service Bus ACK/outbox work.
+MAIN_CONCURRENCY = os.environ.get("CELERY_MAIN_CONCURRENCY", "2")
 RECONCILE_CONCURRENCY = os.environ.get("CELERY_RECONCILE_CONCURRENCY", "1")
+SERVICEBUS_CONCURRENCY = os.environ.get("CELERY_SERVICEBUS_CONCURRENCY", "1")
 ARTIFACT_CONCURRENCY = os.environ.get("CELERY_ARTIFACT_CONCURRENCY", "1")
 # Pool implementation. Default `prefork` is intentional: the ARM long-running
 # pollers in api/tasks/azure/* call `poller.result()` without a per-call
@@ -111,6 +112,7 @@ def _worker_specs() -> tuple[tuple[str, str, str], ...]:
     specs = (
         ("worker-main", MAIN_QUEUES, MAIN_CONCURRENCY),
         ("worker-reconcile", RECONCILE_QUEUES, RECONCILE_CONCURRENCY),
+        ("worker-servicebus", SERVICEBUS_QUEUES, SERVICEBUS_CONCURRENCY),
         ("worker-artifacts", ARTIFACT_QUEUES, ARTIFACT_CONCURRENCY),
     )
     queue_sets = {

@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests/test_service_bus_observability.py`.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -54,6 +55,24 @@ def test_records_searchable_scalar_dimensions(monkeypatch: pytest.MonkeyPatch) -
     assert attributes["ack_published"] is True
     assert "query_fasta" not in attributes
     assert "payload" not in attributes
+
+
+def test_request_event_writes_searchable_parent_process_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=observability.__name__)
+    observability.record_service_bus_request_event(
+        "accepted",
+        correlation_id="wf3:943:exclusive:hypothetical protein:1024979",
+        request_id="req-1",
+        openapi_job_id="job-1",
+        action="complete",
+        ack_published=True,
+    )
+
+    assert "servicebus_request stage=accepted" in caplog.text
+    assert "corr=wf3:943:exclusive:hypothetical protein:1024979" in caplog.text
+    assert "ack_published=True" in caplog.text
 
 
 def test_refuses_request_body_fields() -> None:

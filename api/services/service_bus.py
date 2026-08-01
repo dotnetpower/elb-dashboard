@@ -188,6 +188,8 @@ class ParsedMessage:
     delivery_count: int | None = None
     retry_attempt: int = 0
     first_enqueued_at: str = ""
+    settlement_reason: str = ""
+    settlement_description: str = ""
 
 
 @dataclass
@@ -1110,7 +1112,11 @@ def _settle(
             receiver.complete_message(message)
             stats.completed += 1
         elif action == MessageAction.DEAD_LETTER:
-            receiver.dead_letter_message(message, reason="handler_rejected")
+            receiver.dead_letter_message(
+                message,
+                reason=parsed.settlement_reason or "handler_rejected",
+                error_description=(parsed.settlement_description or None),
+            )
             stats.dead_lettered += 1
         elif action == MessageAction.RETRY:
             if retry_sender is None:

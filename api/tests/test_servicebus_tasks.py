@@ -207,7 +207,7 @@ def test_openapi_ready_for_drain_false_on_probe_error(monkeypatch: pytest.Monkey
     assert sb_tasks._openapi_ready_for_drain(cfg) is False
 
 
-def test_drain_handler_abandons_if_lifecycle_starts_after_receive(
+def test_drain_handler_schedules_retry_if_lifecycle_starts_after_receive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A barrier created during receive must prevent submit and preserve the message."""
@@ -236,7 +236,7 @@ def test_drain_handler_abandons_if_lifecycle_starts_after_receive(
         cfg,
     )
 
-    assert action is MessageAction.ABANDON
+    assert action is MessageAction.RETRY
     assert submitted == []
 
 
@@ -761,7 +761,7 @@ def test_conflict_publish_failure_dead_letters_after_durable_outbox(
     )
 
 
-def test_terminal_response_outbox_failure_keeps_original_message(
+def test_terminal_response_outbox_failure_schedules_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = _enable(monkeypatch)
@@ -780,7 +780,7 @@ def test_terminal_response_outbox_failure_keeps_original_message(
         }
     )
 
-    assert sb_tasks._drain_handler(malformed, cfg) == MessageAction.ABANDON
+    assert sb_tasks._drain_handler(malformed, cfg) == MessageAction.RETRY
 
 
 def test_request_fingerprint_is_canonical_and_excludes_tracking_fields() -> None:
@@ -813,11 +813,10 @@ def test_request_fingerprint_is_canonical_and_excludes_tracking_fields() -> None
 def test_drain_dead_letters_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
     # Missing query_fasta + db → cannot ever succeed.
-    action = sb_tasks._drain_handler(
-        _msg({"program": "blastn", "external_correlation_id": "corr-bad"}),
-        _enabled_cfg(),
-    )
+    message = _msg({"program": "blastn", "external_correlation_id": "corr-bad"})
+    action = sb_tasks._drain_handler(message, _enabled_cfg())
     assert action == MessageAction.DEAD_LETTER
+    assert message.settlement_reason == "servicebus_malformed_request"
 
 
 def test_drain_dead_letters_on_permanent_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -832,18 +831,17 @@ def test_drain_dead_letters_on_permanent_4xx(monkeypatch: pytest.MonkeyPatch) ->
         raise HTTPException(400, detail={"code": "openapi_http_400"})
 
     monkeypatch.setattr(external_blast, "submit_job", _reject)
-    action = sb_tasks._drain_handler(
-        _msg(
-            {
-                "program": "blastn",
-                "db": "core_nt",
-                "query_fasta": ">s\nACGT",
-                "external_correlation_id": "corr-4xx",
-            }
-        ),
-        _enabled_cfg(),
+    message = _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">s\nACGT",
+            "external_correlation_id": "corr-4xx",
+        }
     )
+    action = sb_tasks._drain_handler(message, _enabled_cfg())
     assert action == MessageAction.DEAD_LETTER
+    assert message.settlement_reason == "servicebus_submit_rejected_400"
 
 
 def test_drain_schedules_retry_on_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1055,6 +1053,24 @@ def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
     assert payload["priority"] == 70
     assert payload["idempotency_key"] == "idem-1"
     assert "searchsp" not in payload
+
+
+def test_message_payload_accepts_wf3_gene_name_with_spaces() -> None:
+    correlation_id = "wf3:943:exclusive:hypothetical protein:1024979"
+    payload = sb_tasks._build_request_payload(
+        _msg(
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">s\nACGT",
+                "external_correlation_id": correlation_id,
+            }
+        ),
+        _enabled_cfg(),
+    )
+
+    assert payload is not None
+    assert payload["external_correlation_id"] == correlation_id
 
 
 def test_message_payload_downgrades_bad_precise_override() -> None:
@@ -1682,6 +1698,23 @@ def test_publish_transitions_idle_skips_openapi_resolution(
     assert out == {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
 
 
+def test_publish_transitions_reads_pending_correlations_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    calls: list[int] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "pending_response_correlations",
+        lambda: calls.append(1) or (set(), True),
+    )
+
+    out = sb_tasks.publish_transitions()
+
+    assert calls == [1]
+    assert out == {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
+
+
 def test_bridge_without_marker_recovers_queued_ack_before_status_poll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1713,6 +1746,25 @@ def test_bridge_without_marker_recovers_queued_ack_before_status_poll(
     assert sb_tasks._publish_one_bridge(cfg, rec, {}) == (0, 0)
     assert events and events[0]["status"] == "queued"
     assert markers == [("corr-queued-recovery", "queued")]
+
+
+def test_bridge_waits_for_older_outbox_response_before_status_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    rec = BridgeRecord(
+        correlation_id="corr-ordered",
+        openapi_job_id="op-ordered",
+        last_status="queued",
+    )
+    monkeypatch.setattr(sb_tasks, "has_pending_response", lambda _corr: True)
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not poll yet")),
+    )
+
+    assert sb_tasks._publish_one_bridge(cfg, rec, {}) == (0, 0)
 
 
 def test_publish_transitions_defers_all_bridge_polls_when_openapi_is_not_ready(
@@ -2036,7 +2088,7 @@ def _claim_msg(corr: str = "corr-z") -> ParsedMessage:
     )
 
 
-def test_atomic_claim_contended_abandons_without_submit(
+def test_atomic_claim_contended_schedules_retry_without_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Gate ON + a lost claim → ABANDON and NEVER submit (the in-flight winner's
@@ -2049,7 +2101,7 @@ def test_atomic_claim_contended_abandons_without_submit(
     monkeypatch.setattr(
         external_blast, "submit_job", lambda p, **_k: submitted.append(p) or {"job_id": "x"}
     )
-    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.ABANDON
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.RETRY
     assert submitted == []
 
 
@@ -2109,7 +2161,7 @@ def test_gate_on_confirmed_row_dedups_without_claim(
     assert claimed == []
 
 
-def test_gate_on_unconfirmed_row_falls_through_to_claim(
+def test_gate_on_unconfirmed_row_schedules_retry_after_claim_contention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Gate ON: an existing UNCONFIRMED reservation does NOT early-COMPLETE; it
@@ -2119,7 +2171,7 @@ def test_gate_on_unconfirmed_row_falls_through_to_claim(
     monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
     monkeypatch.setattr(sb_tasks, "get_bridge", lambda c: BridgeRecord(correlation_id=c))
     monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": False)
-    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.ABANDON
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.RETRY
 
 
 # --------------------------------------------------------------------------- #
