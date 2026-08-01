@@ -88,10 +88,27 @@ reach `AppEvents`.
   API, and BLAST task tests.
 - Full backend test suite and Ruff lint.
 - Documentation frontmatter and strict MkDocs build.
-- Customer-environment post-deploy validation must confirm:
-  - `worker-servicebus` starts and consumes the dedicated queue;
-  - new `servicebus_request` rows include correlation/action/ACK dimensions;
-  - periodic Service Bus task expiry remains zero under runtime backfill;
-  - a WF3-style multi-word correlation receives a queued ACK and one terminal
-    event in order;
-  - request and completion DLQs remain empty for the validation window.
+- Customer revision `ca-elb-dashboard--0000257` started
+  `worker-servicebus` plus the resident consumer. Revision
+  `ca-elb-dashboard--0000258` applied the 60-second fallback policy and reached
+  Healthy / RunningAtMaxScale at 100% traffic.
+- Four prepared `core_nt` requests used correlation ids containing the exact
+  multi-word gene-name patterns seen in production (`B22R family protein`,
+  `hypothetical protein`, `DNA-dependent RNA polymerase subunit rpo132`, and
+  `RNA polymerase subunit RPO18`). Application Insights recorded 4/4
+  `accepted`, 4/4 `ack_published=true`, delivery count 0, and ACK latencies of
+  14.672, 24.242, 18.310, and 29.203 seconds.
+- Their OpenAPI job ids (`2b144118d0fa`, `b09779765d01`, `c026a8d3387d`, and
+  `f651c9cfd9ba`) all reached Completed in the dashboard. Transition publisher
+  ticks emitted terminal outcomes with `errors=0`.
+- A separate 16S negative control proved Phase 1 independently: its multi-word
+  correlation received `ack_published=true` before the job failed in Phase 2
+  because that database was not prepared in the customer cluster.
+- The bounded live publisher processed 20 bridges in 13.8 and 26.7 seconds,
+  compared with 240 seconds for the original 200-row pass.
+- After the final fallback policy took effect, the sampled final-revision
+  window showed drain, transition, and DLQ reconcile tasks received and
+  succeeded with zero revoked Service Bus tasks. The Playground reported
+  request queue 0 and DLQ 0.
+- Application Insights contained no Service Bus worker exceptions or
+  error-level Service Bus traces in the final validation window.
