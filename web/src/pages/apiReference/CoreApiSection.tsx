@@ -8,7 +8,10 @@ import { buildCoreEndpoints, type CoreApiContext } from "@/pages/apiReference/co
 // host from the AKS-hosted elb-openapi endpoints below it. Teal sits clearly
 // apart from the spec sections' `--accent` (blue) without leaving the calm,
 // muted palette.
-const CORE_ACCENT = "#33b9b0";
+// Resolve through the teal theme token so light mode gets its darker,
+// AA-legible teal (#1d6b73) instead of the dark-theme #33b9b0, which was
+// ~2.1:1 on the soft teal tint.
+const CORE_ACCENT = "var(--teal)";
 const CORE_ACCENT_SOFT = "rgba(51,185,176,0.12)";
 const CORE_ACCENT_BORDER = "rgba(51,185,176,0.35)";
 

@@ -18,6 +18,7 @@ import { ApiReference } from "@/pages/ApiReference";
 import { UpgradePage } from "@/pages/UpgradePage";
 import { configValue, isDevBypassEnabled, isUsableClientId } from "@/config/runtime";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
+import { useTheme } from "@/hooks/useTheme";
 
 const DEV_BYPASS = isDevBypassEnabled();
 const CLIENT_ID_MISSING =
@@ -213,6 +214,13 @@ function AppRoutes() {
 }
 
 export function App() {
+  // Owns the single `data-theme` write for the whole SPA. `useTheme` used to
+  // be mounted only by Settings > Appearance, so the stored preference was
+  // silently ignored until the user opened that panel (and reverted on the
+  // next reload). Mount it at the root, above every auth branch, so the
+  // preference applies on the sign-in screen and the access-denied screen too.
+  useTheme();
+
   // #67: Show visible error when client ID is missing
   if (CLIENT_ID_MISSING) {
     return (

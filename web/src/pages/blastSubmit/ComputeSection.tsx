@@ -295,7 +295,11 @@ export function ComputeSection({
                         : option.enabled
                           ? "var(--text-muted)"
                           : "var(--text-faint)",
-                      opacity: option.enabled ? 1 : 0.48,
+                      // `--text-faint` is already the muted step; the extra
+                      // 0.48 multiplier put the label at ~2.0:1 on the light
+                      // card, so the user could not read which sharding
+                      // option was unavailable.
+                      opacity: option.enabled ? 1 : 0.72,
                     }}
                   >
                     {option.label}

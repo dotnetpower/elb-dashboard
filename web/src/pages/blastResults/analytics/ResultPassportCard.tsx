@@ -13,11 +13,14 @@ export interface ResultPassportCardProps {
   job: BlastJobSummary | null | undefined;
 }
 
+// Resolved through theme tokens: the verdict is rendered as *text* inside a
+// 16%-tint pill, so the dark-theme literals (#3fbf6a / #7a8290 …) dropped
+// under AA on the light canvas.
 const PARITY_COLOR: Record<ParityState, string> = {
-  equivalent: "#3fbf6a",
-  drift: "#f0c674",
-  approximate: "#7aa7ff",
-  unknown: "#7a8290",
+  equivalent: "var(--success)",
+  drift: "var(--warning)",
+  approximate: "var(--accent)",
+  unknown: "var(--text-muted)",
 };
 
 /**

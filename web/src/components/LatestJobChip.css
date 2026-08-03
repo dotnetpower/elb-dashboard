@@ -70,7 +70,10 @@
   flex-shrink: 0;
 }
 
-@media (max-width: 1320px) {
+/* The topbar is a nowrap flex row, so the chip has to give up its title
+ * width before the account controls get pushed off-screen. Layout.css
+ * hides the chip entirely below 1180 px. */
+@media (max-width: 1680px) {
   .latest-job-chip {
     max-width: 156px;
   }

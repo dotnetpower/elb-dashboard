@@ -115,7 +115,9 @@ export default function DiagnosticsPage() {
                   boxShadow: selected ? "inset 2px 0 0 var(--accent)" : "none",
                   color: cat.available ? "var(--text-primary)" : "var(--text-faint)",
                   cursor: cat.available ? "pointer" : "default",
-                  opacity: cat.available ? 1 : 0.6,
+                  // `--text-faint` is already the muted step; multiplying it by
+                  // 0.6 dropped the label to ~2.4:1 on the light canvas.
+                  opacity: cat.available ? 1 : 0.8,
                   fontSize: 12,
                 }}
               >

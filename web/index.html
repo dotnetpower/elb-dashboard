@@ -7,6 +7,38 @@
     <meta name="theme-color" content="#111217" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>ElasticBLAST Control Plane</title>
+    <script>
+      // Pre-paint theme resolution. The SPA bundle only mounts after MSAL has
+      // settled its redirect promise, so without this a light-theme user gets
+      // a full dark first paint. Mirrors `useTheme` / `usePreferences`:
+      // localStorage["elb-prefs"].theme is "light" | "dark" | "system", and
+      // "system" (the default) follows prefers-color-scheme. React re-applies
+      // the same attribute once it mounts, so this is a no-op afterwards.
+      (function () {
+        try {
+          var mode = "system";
+          var raw = window.localStorage.getItem("elb-prefs");
+          if (raw) {
+            var parsed = JSON.parse(raw);
+            if (parsed && (parsed.theme === "light" || parsed.theme === "dark" || parsed.theme === "system")) {
+              mode = parsed.theme;
+            }
+          } else {
+            var legacy = window.localStorage.getItem("elb-theme");
+            if (legacy === "light" || legacy === "dark") mode = legacy;
+          }
+          if (mode === "system") {
+            mode =
+              window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light";
+          }
+          document.documentElement.setAttribute("data-theme", mode);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -201,7 +201,10 @@ export function ActionBtn({
         border: `1px solid ${borderColor}`,
         borderRadius: 6,
         cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.55 : 1,
+        // 0.55 dropped the 10px danger label to ~2.7:1 on the light card —
+        // the disabled "Delete" read as an empty outline. Still clearly
+        // dimmed at 0.7, but legible.
+        opacity: disabled ? 0.7 : 1,
         lineHeight: 1.2,
       }}
     >

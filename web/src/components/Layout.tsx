@@ -193,12 +193,15 @@ export function Layout({ children }: PropsWithChildren) {
   const terminalEnabled = usePreviewFeatureEnabled("terminal");
   const serviceBusPlaygroundEnabled = usePreviewFeatureEnabled("serviceBusPlayground");
   // Responsive nav tiers. Tier A (>=1320 px) shows the full horizontal nav.
-  // Tier B (720–1320 px) collapses the Tools group (Lab Tools / Terminal /
+  // Tier B (940–1320 px) collapses the Tools group (Lab Tools / Terminal /
   // API) into a "More ▾" dropdown so Dashboard / New Search / Recent
-  // searches stay first-class. Tier C (<720 px) falls back to the existing
-  // hamburger drawer where every item is listed vertically.
+  // searches stay first-class. Tier C (<940 px) falls back to the existing
+  // hamburger drawer where every item is listed vertically. The 940 px
+  // boundary matches the `@media (max-width: 940px)` block in Layout.css —
+  // below it the horizontal bar no longer fits without pushing the account
+  // controls off-screen. Keep the two in sync.
   const isCompactNav = useMediaQuery("(max-width: 1320px)");
-  const isMobileNav = useMediaQuery("(max-width: 720px)");
+  const isMobileNav = useMediaQuery("(max-width: 940px)");
   const useToolsDropdown = isCompactNav && !isMobileNav;
   const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
 

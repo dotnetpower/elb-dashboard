@@ -33,6 +33,11 @@
   --text-secondary: #c2c8d2;
   /* Inline code / monospace value text. */
   --text-code: #c9d1d9;
+  /* Block code surface (sample-code <pre> panels). Paired with
+     `--text-code` at every call site — both MUST be defined per theme or
+     the pair desyncs (light `--text-code` on the dark literal fallback is
+     ~1.3:1 and unreadable). */
+  --bg-code: #0d1117;
   /* Aliases that resolve per-theme because they reference theme-aware tokens —
      so they only need defining once. Several call sites used these names with
      dark-only hex/rgba fallbacks that washed out in light mode. */
@@ -136,6 +141,8 @@
      canvas (the dark-theme #c2c8d2 / #c9d1d9 would wash out on white). */
   --text-secondary: #3b3b3b;
   --text-code: #24292f;
+  /* GitHub Light code canvas — keeps `--text-code` (#24292f) at ~13:1. */
+  --bg-code: #f6f8fa;
   /* Light theme's step-badge fills are saturated (accent/success/grey),
      so the badge number/check must be white to pass AA. */
   --step-badge-ink: #ffffff;
@@ -592,10 +599,13 @@
   color: var(--accent);
 }
 
-/* #4 Disabled state — clearer in light (faint grey on white is invisible). */
+/* #4 Disabled state — clearer in light (faint grey on white is invisible).
+   0.5 still landed the label at ~2.0:1 on white (e.g. the "Fast shard"
+   execution-profile option), so the user could not read which option was
+   unavailable. 0.62 keeps the dimmed affordance and stays readable. */
 [data-theme="light"] .glass-button:disabled,
 [data-theme="light"] .gb:disabled {
-  opacity: 0.5;
+  opacity: 0.62;
   cursor: not-allowed;
 }
 
@@ -725,9 +735,11 @@
 }
 
 /* Refresh "last updated" whisper — was opacity 0.4 (invisible). Bump
-   so users can actually see freshness without hovering. */
+   so users can actually see freshness without hovering. 0.65 still left
+   the 12px timestamp at ~3.25:1 on white; 0.8 clears AA and the hover
+   state still lifts it to full strength. */
 [data-theme="light"] .panel-whisper {
-  opacity: 0.65;
+  opacity: 0.8;
   color: var(--text-muted);
 }
 [data-theme="light"] .panel:hover .panel-whisper {
@@ -3117,10 +3129,16 @@ textarea.form-input {
     inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 /* No ready DB of this program's molecule type — dimmed but still clickable so
-   the click can surface a "prepare a database first" toast. */
+   the click can surface a "prepare a database first" toast. At 0.45 the label
+   fell to ~2.1:1 and the caption (which carries its own 0.85) compounded to
+   ~1.7:1, so the tab read as blank. Dim enough to signal "blocked", legible
+   enough to read. */
 .blast-program-tab--blocked {
-  opacity: 0.45;
+  opacity: 0.68;
   cursor: not-allowed;
+}
+.blast-program-tab--blocked .blast-program-tab__desc {
+  opacity: 1;
 }
 .blast-program-tab--blocked:hover {
   background: transparent;
@@ -3177,7 +3195,8 @@ textarea.form-input {
   display: block;
   font-size: 9px;
   margin-top: 3px;
-  opacity: 0.7;
+  /* 0.7 put the 10.5px caption at ~3.4:1 on the light card. */
+  opacity: 0.85;
   white-space: nowrap;
 }
 .blast-program-info {
@@ -3266,7 +3285,9 @@ textarea.form-input {
   color: var(--accent);
 }
 .blast-search-set-tab:disabled {
-  opacity: 0.42;
+  /* 0.42 rendered the category label at ~2.0:1 — unreadable rather than
+     merely disabled. */
+  opacity: 0.62;
   cursor: not-allowed;
 }
 .blast-search-set-tab span {
@@ -4481,11 +4502,14 @@ button.blast-db-table__row:focus-visible {
 .taxonomy-filter-mode__segmented {
   display: inline-flex;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  /* Was rgba(255,255,255,0.1) — invisible on the light canvas, so the
+     segmented control lost its outline. */
+  border: 1px solid var(--border-weak);
   overflow: hidden;
 }
 .taxonomy-filter-mode__segmented--disabled {
-  opacity: 0.45;
+  /* 0.45 rendered the segment labels at ~2.1:1. */
+  opacity: 0.62;
 }
 .taxonomy-filter-mode__seg {
   font-family: inherit;
@@ -5601,7 +5625,10 @@ button.blast-db-table__row:focus-visible {
   color: var(--text-primary);
 }
 .blast-execution-profile:disabled {
-  opacity: 0.48;
+  /* 0.48 rendered the profile name + "Unavailable for this DB" reason at
+     ~2.0:1 on the light card, so the user could not read *why* the option
+     was unavailable. */
+  opacity: 0.65;
   cursor: not-allowed;
 }
 .blast-execution-profile span {
@@ -7426,7 +7453,8 @@ select.terminal-cockpit__cfg-input {
   border-color: color-mix(in srgb, var(--accent) 42%, transparent);
 }
 .terminal-cockpit__maturity-level[data-state="locked"] {
-  opacity: 0.66;
+  /* 0.66 put the 10px explanation copy at ~2.3:1 on the light surface. */
+  opacity: 0.82;
 }
 .terminal-cockpit__review-summary {
   display: flex;
@@ -7821,7 +7849,9 @@ select.terminal-cockpit__cfg-input {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .btn:disabled {
-  opacity: 0.5;
+  /* 0.5 rendered the label at ~2.0:1 on the light canvas (e.g. the
+     "Applied" state of the BLAST results filter bar). */
+  opacity: 0.65;
   cursor: not-allowed;
 }
 

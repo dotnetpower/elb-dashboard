@@ -62,7 +62,9 @@
   font-size: 10px;
   letter-spacing: 0.02em;
   text-transform: none;
-  opacity: 0.6;
+  /* No extra opacity — `--text-faint` is already the muted step and an
+     additional 0.6 multiplier dropped the stamp to ~2.3:1 on the light
+     topbar, which is unreadable. */
   cursor: help;
   white-space: pre;
 }
@@ -150,7 +152,8 @@
   padding: 0 2px 0 8px;
   display: flex;
   align-items: center;
-  opacity: 0.6;
+  /* `--text-faint` alone is the muted step; the former 0.6 multiplier put
+     these group labels at ~2.3:1 against the topbar surface. */
   user-select: none;
 }
 .layout__nav-sep {
@@ -184,16 +187,52 @@
  * Responsive nav tiers
  *
  * Tier A (>=1320 px) — full horizontal nav (default styles above).
- * Tier B (720–1320 px) — the React component swaps Tools group items
+ * Tier B (940–1320 px) — the React component swaps Tools group items
  *   into a "More ▾" dropdown. Only style adjustments needed:
  *     - hide the inline Tools group label/separator (handled in JSX),
  *     - render the dropdown trigger as a normal nav item.
- * Tier C (<720 px) — hamburger drawer takes over (full vertical menu).
+ * Tier C (<940 px) — hamburger drawer takes over (full vertical menu).
  *
- * The breakpoint sits at 720 px because the desktop tier with the More
- * dropdown is still usable down to that width; below it the drawer's
- * vertical list is the right fit.
+ * The Tier C breakpoint sits at 940 px because that is the narrowest
+ * viewport where the horizontal bar (logo + 5 nav items + account
+ * controls) still fits without pushing the account controls off-screen.
+ * Below it the drawer's vertical list is the right fit.
+ *
+ * `.layout__topbar` is a single nowrap flex row whose children do not
+ * shrink, so anything wider than the viewport spills out and gives the
+ * *whole document* a horizontal scrollbar (the account/settings buttons
+ * end up unreachable). The shedding tiers below drop purely decorative
+ * chrome, widest-first, so the bar always fits:
+ *   <=1680  nav group labels + separators (visual grouping only)
+ *   <=1400  build stamp (still in the Settings footer + logo tooltip)
+ *   <=1320  "Live" refresh pill (the Dashboard header owns that control)
+ *   <=1180  latest-job chip (BLAST Jobs is one click away)
  * ------------------------------------------------------------------- */
+
+@media (max-width: 1680px) {
+  .layout__nav-group-label,
+  .layout__nav-sep {
+    display: none;
+  }
+}
+
+@media (max-width: 1400px) {
+  .layout__logo-version {
+    display: none;
+  }
+}
+
+@media (max-width: 1320px) {
+  .layout__live {
+    display: none;
+  }
+}
+
+@media (max-width: 1180px) {
+  .latest-job-chip {
+    display: none;
+  }
+}
 
 /* Tier B dropdown styling (active in both A and B; A simply does not
  * render the trigger because the React component chooses inline mode). */
@@ -245,7 +284,7 @@
   white-space: nowrap;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 940px) {
   .layout .layout__hamburger {
     display: flex;
   }

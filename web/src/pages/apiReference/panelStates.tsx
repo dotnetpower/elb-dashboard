@@ -211,9 +211,9 @@ export function ClusterStoppedState({
           <Server size={12} style={{ color: "var(--text-faint)" }} />
           <span>{clusterName}</span>
         </div>
-        <span style={{ color: "var(--border-medium)" }}>·</span>
+        <span style={{ color: "var(--text-faint)" }}>·</span>
         <span style={{ color: "var(--warning)", fontWeight: 600 }}>{powerState}</span>
-        <span style={{ color: "var(--border-medium)" }}>·</span>
+        <span style={{ color: "var(--text-faint)" }}>·</span>
         <span>{region}</span>
       </div>
       <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>

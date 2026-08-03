@@ -412,14 +412,25 @@
 }
 
 /* ─── B mockup grid metrics ────────────────────────────────────── */
+/* NOTE: the column track override must stay inside the >=1101px query.
+   `[data-theme="light"] .bsl-grid` is more specific than the bare
+   `.bsl-grid` rule in the `max-width: 1100px` block above, so declaring
+   the 3-column track unconditionally re-applied it on narrow viewports
+   where the stepper/rail are already `display: none` — the centre column
+   then rendered inside the ~210px stepper track. Gap/padding are safe to
+   apply at every width. */
 [data-theme="light"] .bsl-grid {
-  grid-template-columns: clamp(210px, 16vw, 250px) minmax(0, 1fr) clamp(
-      280px,
-      20vw,
-      320px
-    );
   gap: clamp(12px, 1.1vw, 18px);
   padding: 22px 0;
+}
+@media (min-width: 1101px) {
+  [data-theme="light"] .bsl-grid {
+    grid-template-columns: clamp(210px, 16vw, 250px) minmax(0, 1fr) clamp(
+        280px,
+        20vw,
+        320px
+      );
+  }
 }
 [data-theme="light"] .bsl-center {
   gap: 0;
@@ -501,6 +512,14 @@
   border: 0;
   border-radius: 0;
   margin-bottom: 0;
+}
+/* Five 1fr tracks cannot hold "tblastn / Protein -> tNucl" on a phone —
+   the labels clip. Mirror the dark-theme <=768px wrap rule (glass.css)
+   which this more specific selector would otherwise override. */
+@media (max-width: 768px) {
+  [data-theme="light"] .bsl-grid .blast-program-tabs {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 [data-theme="light"] .bsl-grid .blast-program-tab {
   padding: 8px;
