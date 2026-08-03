@@ -3,7 +3,8 @@
 Responsibility: Wrap the long-running ManagedClusters.begin_create_or_update
 addon patch in a Celery task so the SPA can fire-and-poll instead of holding
 a request open for 30-90 s, and self-heal the linked-scope RBAC the addon
-patch needs on the Log Analytics workspace's resource group.
+patch needs on the Log Analytics workspace's resource group. Re-check the
+required provider immediately before any RBAC or AKS mutation.
 Edit boundaries: Orchestration only. SDK wrapper lives in
 `api.services.aks_observability`; the RBAC self-grant lives in
 `api.tasks.azure.rbac.ensure_dashboard_mi_resource_group_contributor`.
@@ -14,7 +15,9 @@ is already in the requested state. Before patching, `enable` self-grants
 Contributor to the dashboard MI on the workspace RG (best-effort) and then
 retries the addon patch on `LinkedAuthorizationFailed` for a bounded window
 (role-assignment propagation). Exhausting the window raises an actionable
-error carrying the exact `az role assignment create` recovery command.
+error carrying the exact `az role assignment create` recovery command. An
+unregistered or unreadable Microsoft.OperationsManagement provider returns a
+successful skipped result without RBAC writes or an AKS update.
 Validation: `uv run pytest -q api/tests/test_aks_observability_task.py`.
 """
 
@@ -25,6 +28,7 @@ import re
 import time
 from typing import Any
 
+from billiard.exceptions import SoftTimeLimitExceeded
 from celery import shared_task
 
 import api.tasks.azure as _facade
@@ -32,6 +36,8 @@ from api.services import get_credential
 from api.services.aks_observability import (
     disable_container_insights,
     enable_container_insights,
+    get_container_insights_provider_status,
+    get_container_insights_status,
 )
 from api.tasks.azure.helpers import publish_progress
 
@@ -150,6 +156,56 @@ def enable_aks_container_insights(
 ) -> dict[str, Any]:
     """Patch the omsagent addon on the AKS cluster, returning post-state."""
     job_id = self.request.id or "enable_aks_container_insights"
+    cred = get_credential()
+    publish_progress(
+        self,
+        job_id,
+        "checking_container_insights_provider",
+        step=1,
+        total_steps=1,
+        message="Checking the Container Insights resource provider",
+    )
+    provider_status = get_container_insights_provider_status(cred, subscription_id)
+    if not provider_status["enable_available"]:
+        try:
+            current = get_container_insights_status(
+                cred, subscription_id, resource_group, cluster_name
+            )
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception:
+            current = {
+                "enabled": False,
+                "workspace_resource_id": None,
+                "cluster_provisioning_state": None,
+            }
+        state = {
+            **current,
+            **provider_status,
+            "skipped": provider_status["enable_unavailable_reason"],
+        }
+        LOGGER.warning(
+            "container insights enable skipped cluster=%s provider=%s state=%s reason=%s",
+            cluster_name,
+            provider_status["provider_namespace"],
+            provider_status["provider_registration_state"],
+            provider_status["enable_unavailable_reason"],
+        )
+        publish_progress(
+            self,
+            job_id,
+            "completed",
+            step=1,
+            total_steps=1,
+            status="succeeded",
+            message=(
+                "Container Insights remains disabled because the required "
+                "resource provider is not registered or could not be confirmed"
+            ),
+            **state,
+        )
+        return state
+
     publish_progress(
         self,
         job_id,
@@ -158,7 +214,6 @@ def enable_aks_container_insights(
         total_steps=1,
         message=f"Enabling Container Insights on {cluster_name}",
     )
-    cred = get_credential()
 
     # Self-heal the linked-scope RBAC the addon patch needs. Enabling the
     # omsagent addon creates a `ContainerInsights(<workspace>)` OMS solution
@@ -211,6 +266,7 @@ def enable_aks_container_insights(
         workspace_resource_id=workspace_resource_id,
         recovery_command=recovery_command,
     )
+    state.update(provider_status)
     publish_progress(
         self,
         job_id,

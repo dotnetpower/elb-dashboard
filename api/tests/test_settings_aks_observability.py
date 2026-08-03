@@ -1,7 +1,8 @@
 """Tests for `api.routes.settings.aks_observability` HTTP layer.
 
 Responsibility: Verify auth gating, request validation, status read, and
-Celery task enqueuing for the AKS Container Insights settings routes.
+Celery task enqueuing for the AKS Container Insights settings routes, including
+the required provider fail-closed preflight.
 Edit boundaries: Stub the service layer + Celery .delay; do not exercise real
 ARM.
 Key entry points: `client`, `test_status_returns_disabled_state`,
@@ -9,7 +10,8 @@ Key entry points: `client`, `test_status_returns_disabled_state`,
     `test_status_rejects_invalid_cluster_name`,
     `test_routes_reject_anonymous_when_bypass_off`.
 Risky contracts: The response shape (`enabled`, `workspace_resource_id`,
-    `task_id`) is consumed by the SPA typed client.
+    `task_id`) is consumed by the SPA typed client. An unregistered provider
+    must never enqueue an AKS mutation; Disable remains available.
 Validation: `uv run pytest -q api/tests/test_settings_aks_observability.py`.
 """
 
@@ -26,6 +28,17 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("AZURE_TENANT_ID", "common")
     monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr(
+        "api.routes.settings.aks_observability.get_container_insights_provider_status",
+        lambda *_a, **_kw: {
+            "provider_namespace": "Microsoft.OperationsManagement",
+            "provider_registration_state": "Registered",
+            "provider_registered": True,
+            "enable_available": True,
+            "enable_unavailable_reason": "",
+            "provider_status_error": "",
+        },
+    )
     from api.main import app
 
     return TestClient(app)
@@ -54,6 +67,8 @@ def test_status_returns_disabled_state(
     body = r.json()
     assert body["enabled"] is False
     assert body["workspace_resource_id"] is None
+    assert body["provider_registration_state"] == "Registered"
+    assert body["enable_available"] is True
 
 
 def test_status_returns_enabled_state_with_workspace(
@@ -132,6 +147,44 @@ def test_enable_enqueues_celery_task_and_returns_id(
     assert calls[0]["workspace_resource_id"] == ws
 
 
+def test_enable_rejects_unregistered_provider_without_enqueue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, fake_delay = make_delay_recorder("must-not-enqueue")
+    monkeypatch.setattr(
+        "api.tasks.azure.enable_aks_container_insights.delay", fake_delay, raising=True
+    )
+    monkeypatch.setattr(
+        "api.routes.settings.aks_observability.get_container_insights_provider_status",
+        lambda *_a, **_kw: {
+            "provider_namespace": "Microsoft.OperationsManagement",
+            "provider_registration_state": "NotRegistered",
+            "provider_registered": False,
+            "enable_available": False,
+            "enable_unavailable_reason": "provider_not_registered",
+            "provider_status_error": "",
+        },
+    )
+    ws = (
+        "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-elb"
+        "/providers/Microsoft.OperationalInsights/workspaces/log-elb"
+    )
+
+    response = client.post(
+        "/api/settings/aks-observability/enable",
+        json={
+            "subscription_id": "11111111-2222-3333-4444-555555555555",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "workspace_resource_id": ws,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "container_insights_provider_not_registered"
+    assert calls == []
+
+
 def test_disable_enqueues_celery_task_and_returns_id(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -151,6 +204,39 @@ def test_disable_enqueues_celery_task_and_returns_id(
     body = r.json()
     assert body["task_id"] == "aks-obs-disable-1"
     assert body["status"] == "queued"
+    assert calls[0]["cluster_name"] == "aks-elb"
+
+
+def test_disable_remains_available_when_provider_is_unregistered(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, fake_delay = make_delay_recorder("aks-obs-disable-unregistered")
+    monkeypatch.setattr(
+        "api.tasks.azure.disable_aks_container_insights.delay", fake_delay, raising=True
+    )
+    monkeypatch.setattr(
+        "api.routes.settings.aks_observability.get_container_insights_provider_status",
+        lambda *_a, **_kw: {
+            "provider_namespace": "Microsoft.OperationsManagement",
+            "provider_registration_state": "NotRegistered",
+            "provider_registered": False,
+            "enable_available": False,
+            "enable_unavailable_reason": "provider_not_registered",
+            "provider_status_error": "",
+        },
+    )
+
+    response = client.post(
+        "/api/settings/aks-observability/disable",
+        json={
+            "subscription_id": "11111111-2222-3333-4444-555555555555",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
     assert calls[0]["cluster_name"] == "aks-elb"
 
 

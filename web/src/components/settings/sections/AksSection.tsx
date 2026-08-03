@@ -10,6 +10,8 @@ import { isRunningTask, usePollTask, TaskStatusLine, type TaskState } from "@/co
 import { usePreferences } from "@/hooks/usePreferences";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
 
+import { isContainerInsightsEnableDisabled } from "./aksObservabilityGuard";
+
 /**
  * AKS Observability settings section — Container Insights (omsagent) enable /
  * disable for a discovered cluster.
@@ -25,6 +27,8 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
   const [appInsightsName, setAppInsightsName] = useState("appi-elb-dashboard");
   const [status, setStatus] = useState<string | null>(null);
   const [containerInsightsEnabled, setContainerInsightsEnabled] = useState<boolean | null>(null);
+  const [providerRegistrationState, setProviderRegistrationState] = useState<string | null>(null);
+  const [providerEnableAvailable, setProviderEnableAvailable] = useState<boolean | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resolvingWorkspace, setResolvingWorkspace] = useState(false);
@@ -40,13 +44,25 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
 
   usePollTask(task, setTask, (taskStatus) => {
     if (taskStatus.status !== "SUCCESS") return;
-    const result = taskStatus.result as { enabled?: boolean; workspace_resource_id?: string | null } | null;
+    const result = taskStatus.result as {
+      enabled?: boolean;
+      workspace_resource_id?: string | null;
+      provider_registration_state?: string;
+      enable_available?: boolean;
+      skipped?: string;
+    } | null;
+    if (typeof result?.enable_available === "boolean") {
+      setProviderEnableAvailable(result.enable_available);
+      setProviderRegistrationState(result.provider_registration_state ?? "Unknown");
+    }
     if (typeof result?.enabled === "boolean") {
       setContainerInsightsEnabled(result.enabled);
       setStatus(
         result.enabled
           ? `Enabled (${result.workspace_resource_id ?? "workspace unknown"})`
-          : "Disabled",
+          : result.skipped
+            ? `Disabled (${result.skipped.replaceAll("_", " ")})`
+            : "Disabled",
       );
     }
   });
@@ -67,6 +83,8 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
   const refresh = useCallback(async () => {
     if (!config || !canRead) return;
     setError(null);
+    setProviderEnableAvailable(null);
+    setProviderRegistrationState(null);
     try {
       const response = await settingsApi.getAksObservabilityStatus({
         subscription_id: config.subscriptionId,
@@ -74,6 +92,8 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
         cluster_name: clusterName,
       });
       setContainerInsightsEnabled(response.enabled);
+      setProviderEnableAvailable(response.enable_available === true);
+      setProviderRegistrationState(response.provider_registration_state ?? "Unknown");
       setStatus(response.enabled ? `Enabled (${response.workspace_resource_id ?? "workspace unknown"})` : "Disabled");
       if (response.workspace_resource_id) {
         setPref("appInsightsWorkspaceResourceId", response.workspace_resource_id);
@@ -123,6 +143,13 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
   }, [config?.subscriptionId, config?.workloadResourceGroup]);
 
   const workspaceId = prefs.appInsightsWorkspaceResourceId.trim();
+  const enableDisabled = isContainerInsightsEnableDisabled({
+    canRead,
+    appInsightsName,
+    providerEnableAvailable,
+    taskRunning: isRunningTask(task),
+    resolvingWorkspace,
+  });
 
   const resolveWorkspace = useCallback(async (): Promise<string> => {
     if (!config) return "";
@@ -239,6 +266,23 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
           hint={workspaceId ? "Automatically captured from the App Insights resource." : "Use Telemetry > Provision a resource first. Existing App Insights resources are reused by name."}
           control={<Badge tone={workspaceId ? "success" : "muted"}>{workspaceId ? "Ready" : "Missing"}</Badge>}
         />
+        <Row
+          label="Microsoft.OperationsManagement provider"
+          hint="Container Insights enablement is blocked unless this subscription-level provider is registered."
+          control={
+            <Badge
+              tone={
+                providerEnableAvailable === true
+                  ? "success"
+                  : providerEnableAvailable === false
+                    ? "warning"
+                    : "muted"
+              }
+            >
+              {providerRegistrationState ?? "Checking"}
+            </Badge>
+          }
+        />
         {workspaceId && (
           <StatusLine kind="info">
             Workspace <code>{workspaceId.split("/").slice(-1)[0]}</code> will be used.
@@ -249,6 +293,11 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
             The connection string is configured, but AKS needs the backing Log Analytics workspace. Open Telemetry and provision/reuse the App Insights resource by name to fill it automatically.
           </StatusLine>
         )}
+        {providerEnableAvailable === false && (
+          <StatusLine kind="error">
+            Container Insights enablement is disabled to protect AKS. Register Microsoft.OperationsManagement in this Azure subscription, then refresh status.
+          </StatusLine>
+        )}
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", paddingBottom: 14 }}>
           <button className="glass-button" onClick={resolveWorkspace} disabled={!canRead || !appInsightsName || resolvingWorkspace} style={{ fontSize: 12 }}>
             {resolvingWorkspace ? "Resolving..." : "Resolve workspace"}
@@ -257,7 +306,7 @@ export function AksSection({ config }: { config: ResourceConfig | null }) {
           {containerInsightsEnabled ? (
             <button className="glass-button" onClick={disable} disabled={!canRead || isRunningTask(task)} style={{ fontSize: 12 }}>Disable Container Insights</button>
           ) : (
-            <button className="glass-button glass-button--primary" onClick={enable} disabled={!canRead || !appInsightsName || isRunningTask(task) || resolvingWorkspace} style={{ fontSize: 12 }}>Enable Container Insights</button>
+            <button className="glass-button glass-button--primary" onClick={enable} disabled={enableDisabled} style={{ fontSize: 12 }}>Enable Container Insights</button>
           )}
         </div>
         {status && <StatusLine kind={status.startsWith("Enabled") ? "success" : "info"}>{status}</StatusLine>}

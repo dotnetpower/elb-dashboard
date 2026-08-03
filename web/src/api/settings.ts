@@ -60,6 +60,11 @@ export interface AksObservabilityStatus {
   enabled: boolean;
   workspace_resource_id: string | null;
   cluster_provisioning_state: string | null;
+  provider_namespace?: string;
+  provider_registration_state?: string;
+  provider_registered?: boolean;
+  enable_available?: boolean;
+  enable_unavailable_reason?: string;
 }
 
 export interface AksObservabilityEnableRequest {

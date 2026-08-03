@@ -1,16 +1,20 @@
 """AKS Container Insights addon helpers.
 
 Responsibility: Read the AKS cluster's `omsagent` addon profile and toggle it
-on/off by patching `addon_profiles.omsagent`.
+on/off by patching `addon_profiles.omsagent`, and read the required resource
+provider registration state before any enable mutation.
 Edit boundaries: ARM-only wrapper. HTTP shaping in
 `api.routes.settings.aks_observability`. Long-running enablement runs through
 `api.tasks.azure.aks_observability` because the addon patch is a
 `begin_create_or_update` that can block 30-90 s.
 Key entry points: `get_container_insights_status`,
-`enable_container_insights`, `disable_container_insights`.
+`get_container_insights_provider_status`, `enable_container_insights`,
+`disable_container_insights`.
 Risky contracts: The patch is *additive* — never read-modify-write the entire
 cluster body. Always pass only `addon_profiles.omsagent` to avoid clobbering
 other addons (azurepolicy, ingress-app-routing, etc.) the cluster may carry.
+Never auto-register a provider; an unregistered or unreadable provider disables
+the enable path before `begin_create_or_update`.
 Validation: `uv run pytest -q api/tests/test_aks_observability_service.py`.
 """
 
@@ -21,10 +25,66 @@ from typing import Any
 
 from azure.core.credentials import TokenCredential
 from azure.core.exceptions import ResourceNotFoundError
+from billiard.exceptions import SoftTimeLimitExceeded
 
-from api.services.azure_clients import aks_client
+from api.services.azure_clients import aks_client, resource_client
 
 LOGGER = logging.getLogger(__name__)
+
+CONTAINER_INSIGHTS_PROVIDER_NAMESPACE = "Microsoft.OperationsManagement"
+_PROVIDER_REGISTERED = "registered"
+_PROVIDER_CONNECT_TIMEOUT_SECONDS = 5
+_PROVIDER_READ_TIMEOUT_SECONDS = 10
+
+
+def get_container_insights_provider_status(
+    credential: TokenCredential,
+    subscription_id: str,
+) -> dict[str, Any]:
+    """Return whether the provider required by the omsagent addon is registered.
+
+    This is deliberately read-only. Registration is a subscription-level
+    operator decision and must never happen as a side effect of opening
+    Settings or clicking Enable. Any read failure is fail-closed so a missing
+    permission or transient ARM fault cannot trigger an unsafe AKS update.
+    """
+    try:
+        provider = resource_client(credential, subscription_id).providers.get(
+            CONTAINER_INSIGHTS_PROVIDER_NAMESPACE,
+            retry_total=0,
+            connection_timeout=_PROVIDER_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=_PROVIDER_READ_TIMEOUT_SECONDS,
+        )
+        registration_state = str(
+            getattr(provider, "registration_state", None) or "Unknown"
+        )
+        error = ""
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception as exc:
+        registration_state = "Unavailable"
+        error = type(exc).__name__
+        LOGGER.warning(
+            "container insights provider status unavailable provider=%s error=%s",
+            CONTAINER_INSIGHTS_PROVIDER_NAMESPACE,
+            error,
+        )
+    registered = registration_state.strip().casefold() == _PROVIDER_REGISTERED
+    reason = ""
+    if not registered:
+        reason = (
+            "provider_status_unavailable"
+            if registration_state == "Unavailable"
+            else "provider_not_registered"
+        )
+    return {
+        "provider_namespace": CONTAINER_INSIGHTS_PROVIDER_NAMESPACE,
+        "provider_registration_state": registration_state,
+        "provider_registered": registered,
+        "enable_available": registered,
+        "enable_unavailable_reason": reason,
+        "provider_status_error": error,
+    }
 
 
 def get_container_insights_status(

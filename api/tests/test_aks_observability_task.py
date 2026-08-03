@@ -1,13 +1,15 @@
 """Tests for the AKS Container Insights enable task's RBAC self-heal + retry.
 
 Responsibility: Cover the linked-scope RBAC self-heal and bounded
-`LinkedAuthorizationFailed` retry wired into `enable_aks_container_insights`.
+`LinkedAuthorizationFailed` retry wired into `enable_aks_container_insights`,
+plus the provider-registration gate before any side effect.
 Edit boundaries: Pure unit tests; monkeypatch the service helper, the facade
 self-grant, credential, progress publisher, and `time.sleep`. No network.
 Key entry points: `test_*` functions below.
 Risky contracts: Must not perform real sleeps or Azure calls. Assertions
 focus on (a) the workspace RG is parsed and self-granted, (b) the retry loop
-is bounded, (c) exhaustion raises an actionable recovery command.
+is bounded, (c) exhaustion raises an actionable recovery command, and (d) an
+unregistered provider performs no RBAC or AKS write.
 Validation: `uv run pytest -q api/tests/test_aks_observability_task.py`.
 """
 
@@ -37,6 +39,18 @@ def _patch_common(monkeypatch) -> None:
     monkeypatch.setattr(task_mod, "get_credential", lambda: object())
     monkeypatch.setattr(task_mod, "publish_progress", lambda *_a, **_kw: None)
     monkeypatch.setattr(task_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        task_mod,
+        "get_container_insights_provider_status",
+        lambda *_a, **_kw: {
+            "provider_namespace": "Microsoft.OperationsManagement",
+            "provider_registration_state": "Registered",
+            "provider_registered": True,
+            "enable_available": True,
+            "enable_unavailable_reason": "",
+            "provider_status_error": "",
+        },
+    )
 
 
 def _run(**overrides: Any) -> dict[str, Any]:
@@ -75,6 +89,44 @@ def test_enable_self_grants_workspace_rg_then_succeeds(monkeypatch) -> None:
 
     assert state["enabled"] is True
     assert grant_calls == [{"sub": "sub-1", "rg": "defaultresourcegroup-se"}]
+
+
+def test_unregistered_provider_skips_before_rbac_or_aks_write(monkeypatch) -> None:
+    monkeypatch.setattr(
+        task_mod,
+        "get_container_insights_provider_status",
+        lambda *_a, **_kw: {
+            "provider_namespace": "Microsoft.OperationsManagement",
+            "provider_registration_state": "NotRegistered",
+            "provider_registered": False,
+            "enable_available": False,
+            "enable_unavailable_reason": "provider_not_registered",
+            "provider_status_error": "",
+        },
+    )
+    monkeypatch.setattr(
+        task_mod,
+        "get_container_insights_status",
+        lambda *_a, **_kw: {
+            "enabled": False,
+            "workspace_resource_id": None,
+            "cluster_provisioning_state": "Succeeded",
+        },
+    )
+
+    def _unexpected(*_a: object, **_kw: object) -> Any:
+        raise AssertionError("provider gate must run before RBAC or AKS mutation")
+
+    monkeypatch.setattr(
+        azure, "_ensure_dashboard_mi_resource_group_contributor", _unexpected
+    )
+    monkeypatch.setattr(task_mod, "enable_container_insights", _unexpected)
+
+    state = _run()
+
+    assert state["enabled"] is False
+    assert state["skipped"] == "provider_not_registered"
+    assert state["provider_registration_state"] == "NotRegistered"
 
 
 def test_enable_retries_on_linked_auth_then_succeeds(monkeypatch) -> None:

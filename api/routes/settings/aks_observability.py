@@ -1,7 +1,7 @@
 """AKS Container Insights settings routes.
 
 Responsibility: Read the omsagent addon state on an AKS cluster and enqueue
-Celery tasks to enable/disable it.
+Celery tasks to enable/disable it after a read-only provider preflight.
 Edit boundaries: HTTP shaping only. SDK wrapper lives in
 `api.services.aks_observability`. Long-running enablement runs through
 `api.tasks.azure.enable_aks_container_insights` or
@@ -9,7 +9,9 @@ Edit boundaries: HTTP shaping only. SDK wrapper lives in
 Key entry points: `get_status`, `enable`, `disable`.
 Risky contracts: Every route enforces `require_caller`. The cluster
 `begin_create_or_update` is *additive* on `addon_profiles` to avoid
-clobbering other addons.
+clobbering other addons. Enable must never enqueue unless
+`Microsoft.OperationsManagement` is confirmed Registered; Disable remains
+available regardless of provider state.
 Validation: `uv run pytest -q api/tests/test_settings_aks_observability.py`.
 """
 
@@ -26,6 +28,7 @@ from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _safe_delay
 from api.services import get_credential
 from api.services.aks_observability import (
+    get_container_insights_provider_status,
     get_container_insights_status,
 )
 from api.services.sanitise import redact_oid, sanitise
@@ -56,6 +59,39 @@ def _require(value: Any, pattern: re.Pattern[str], label: str) -> str:
     return value
 
 
+def _require_container_insights_provider(
+    subscription_id: str,
+) -> dict[str, Any]:
+    status = get_container_insights_provider_status(
+        get_credential(), subscription_id
+    )
+    if status["enable_available"]:
+        return status
+    registration_state = str(status["provider_registration_state"])
+    reason = str(status["enable_unavailable_reason"])
+    message = (
+        "Container Insights cannot be enabled because the "
+        "Microsoft.OperationsManagement resource provider is not registered "
+        f"for this subscription (state: {registration_state}). Register the "
+        "provider in Azure, then refresh this setting."
+        if reason == "provider_not_registered"
+        else (
+            "Container Insights cannot be enabled because the registration "
+            "state of Microsoft.OperationsManagement could not be confirmed. "
+            "Refresh after Azure provider status is available."
+        )
+    )
+    raise HTTPException(
+        409,
+        detail={
+            "code": f"container_insights_{reason}",
+            "message": message,
+            "provider_namespace": status["provider_namespace"],
+            "provider_registration_state": registration_state,
+        },
+    )
+
+
 @router.get("")
 def get_status(
     subscription_id: str = Query(...),
@@ -84,6 +120,7 @@ def get_status(
         raise HTTPException(
             500, f"failed to read container insights state: {sanitise(str(exc))[:200]}"
         ) from exc
+    state.update(get_container_insights_provider_status(cred, subscription_id))
     return state
 
 
@@ -99,6 +136,7 @@ def enable(
     workspace_resource_id = _require(
         body.get("workspace_resource_id"), _RE_WORKSPACE_ID, "workspace_resource_id"
     )
+    _require_container_insights_provider(subscription_id)
 
     from api.tasks.azure import enable_aks_container_insights
 
