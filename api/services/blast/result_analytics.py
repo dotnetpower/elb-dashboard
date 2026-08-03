@@ -3,11 +3,13 @@
 Responsibility: BLAST result analytics and hit-filtering helpers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
-Key entry points: `InvalidResultBlobName`, `list_parseable_result_blobs`,
+Key entry points: `InvalidResultBlobName`, `list_result_blobs_for_job`,
+`list_parseable_result_blobs`,
 `_is_parseable_result_blob_name`, `validate_result_blob_name`, `numeric_result_value`,
 `coverage_percent`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
+log boundaries. Result discovery tries at most the canonical prefix and one
+collision-safe flat fallback for sibling jobs that ignored date tiering.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
 api/tests/test_blast_tasks.py`.
 """
@@ -187,12 +189,7 @@ def has_blast_success_marker(storage_account: str, job_id: str) -> bool:
     if not storage_account or not job_id:
         return False
     try:
-        from api.services.storage.job_prefix import resolve_results_prefix
-
-        cred = get_credential()
-        blobs = storage_data.list_result_blobs(
-            cred, storage_account, container="results", prefix=resolve_results_prefix(job_id)
-        )
+        blobs = list_result_blobs_for_job(storage_account, job_id)
     except Exception as exc:
         LOGGER.info(
             "success marker check skipped job_id=%s: %s", job_id, type(exc).__name__
@@ -203,23 +200,71 @@ def has_blast_success_marker(storage_account: str, job_id: str) -> bool:
     )
 
 
+def list_result_blobs_for_job(
+    storage_account: str,
+    job_id: str,
+    *,
+    prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    """List result blobs using the canonical prefix, then one flat fallback.
+
+    Native jobs honour their stored date-tiered prefix. Some sibling OpenAPI
+    revisions accept the optional ``results_prefix`` submit field but still
+    write under the legacy ``<openapi_job_id>/`` directory. Their durable row
+    therefore points at an empty dated directory while the flat directory
+    contains valid files.
+
+    An explicit ``prefix`` remains exact. Otherwise, only a successful empty
+    canonical listing can trigger one collision-safe ``<job_id>/`` retry;
+    Storage exceptions propagate unchanged.
+    """
+    from api.services.storage.job_prefix import (
+        default_results_prefix,
+        resolve_results_prefix,
+    )
+
+    cred = get_credential()
+    canonical = prefix or resolve_results_prefix(job_id)
+    blobs = storage_data.list_result_blobs(
+        cred,
+        storage_account,
+        container="results",
+        prefix=canonical,
+    )
+    if prefix is not None or blobs:
+        return blobs
+    flat = default_results_prefix(job_id)
+    if canonical == flat:
+        return blobs
+    fallback = storage_data.list_result_blobs(
+        cred,
+        storage_account,
+        container="results",
+        prefix=flat,
+    )
+    if fallback:
+        LOGGER.warning(
+            "results prefix fallback used job_id=%s canonical=%s fallback=%s",
+            job_id,
+            canonical,
+            flat,
+        )
+    return fallback
+
+
 def list_parseable_result_blobs(
     storage_account: str, job_id: str, *, prefix: str | None = None
 ) -> list[dict[str, Any]]:
     """Return BLAST result blobs the analytics parser can understand.
 
     ``prefix`` overrides the results-container prefix (issue #67 threads the
-    stored, possibly date-tiered, prefix here); when None it falls back to the
-    legacy ``{job_id}/`` layout via the resolver.
+    stored, possibly date-tiered prefix here). When omitted, discovery tries the
+    resolved canonical prefix and then one legacy ``{job_id}/`` fallback.
     """
-    from api.services.storage.job_prefix import resolve_results_prefix
-
-    cred = get_credential()
-    blobs = storage_data.list_result_blobs(
-        cred,
+    blobs = list_result_blobs_for_job(
         storage_account,
-        container="results",
-        prefix=prefix or resolve_results_prefix(job_id),
+        job_id,
+        prefix=prefix,
     )
     candidates = [
         blob

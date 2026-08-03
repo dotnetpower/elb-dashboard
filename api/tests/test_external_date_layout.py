@@ -126,17 +126,82 @@ def test_read_chain_resolves_stored_dated_prefix(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(state_repo, "get_state_repo", lambda: _Repo())
     monkeypatch.setattr(result_analytics, "get_credential", lambda: object())
 
-    seen: dict[str, Any] = {}
+    seen: list[tuple[str, str]] = []
 
     def _fake_list(_cred: Any, _account: str, *, container: str, prefix: str) -> list[Any]:
-        seen["container"] = container
-        seen["prefix"] = prefix
+        seen.append((container, prefix))
         return []
 
     monkeypatch.setattr(result_analytics.storage_data, "list_result_blobs", _fake_list)
 
     result_analytics.list_parseable_result_blobs("stacct", job_id)
 
-    assert seen["container"] == "results"
-    assert seen["prefix"] == dated
+    assert seen == [
+        ("results", dated),
+        ("results", f"{job_id}/"),
+    ]
+
+
+def test_read_chain_falls_back_to_flat_when_sibling_ignored_date_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful empty dated list retries the legacy sibling write path."""
+    monkeypatch.setenv("STORAGE_DATE_LAYOUT_ENABLED", "true")
+    job_id = "c75483f2a08c"
+    dated = f"2026/08/03/{job_id}/"
+    flat = f"{job_id}/"
+
+    class _Row:
+        results_prefix = dated
+
+    class _Repo:
+        def get(self, _job_id: str) -> Any:
+            return _Row()
+
+    from api.services import state_repo
+    from api.services.blast import result_analytics
+
+    monkeypatch.setattr(state_repo, "get_state_repo", lambda: _Repo())
+    monkeypatch.setattr(result_analytics, "get_credential", lambda: object())
+    seen: list[str] = []
+
+    def _fake_list(
+        _cred: Any, _account: str, *, container: str, prefix: str
+    ) -> list[dict[str, Any]]:
+        assert container == "results"
+        seen.append(prefix)
+        if prefix == flat:
+            return [{"name": f"{flat}job-elb/shard_00/batch_000.out.gz"}]
+        return []
+
+    monkeypatch.setattr(result_analytics.storage_data, "list_result_blobs", _fake_list)
+
+    blobs = result_analytics.list_parseable_result_blobs("stacct", job_id)
+
+    assert seen == [dated, flat]
+    assert [blob["name"] for blob in blobs] == [
+        f"{flat}job-elb/shard_00/batch_000.out.gz"
+    ]
+
+
+def test_explicit_results_prefix_does_not_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.blast import result_analytics
+
+    monkeypatch.setattr(result_analytics, "get_credential", lambda: object())
+    seen: list[str] = []
+    monkeypatch.setattr(
+        result_analytics.storage_data,
+        "list_result_blobs",
+        lambda _cred, _account, *, container, prefix: seen.append(prefix) or [],
+    )
+
+    assert (
+        result_analytics.list_result_blobs_for_job(
+            "stacct", "job-1", prefix="custom/job-1/"
+        )
+        == []
+    )
+    assert seen == ["custom/job-1/"]
 

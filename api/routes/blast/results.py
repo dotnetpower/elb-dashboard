@@ -39,6 +39,7 @@ from api.routes.blast.result_helpers import (
 )
 from api.services.blast.result_analytics import (
     list_parseable_result_blobs,
+    list_result_blobs_for_job,
 )
 from api.services.sanitise import sanitise
 
@@ -200,11 +201,11 @@ def blast_job_results(
     artifact = read_ready_result_artifact(job_id, "result_manifest")
     if artifact is not None:
         return artifact
+    enqueue_result_artifact_backfill(job_id, "result_manifest")
     local_failure: dict[str, Any] | None = None
     try:
         if storage_account:
             from api.services import get_credential
-            from api.services.storage.data import list_result_blobs
 
             cred = get_credential()
             _maybe_open_local_storage_access(
@@ -214,13 +215,9 @@ def blast_job_results(
                 storage_account,
                 context="blast_job_results",
             )
-            from api.services.storage.job_prefix import resolve_results_prefix
-
-            files = list_result_blobs(
-                cred,
+            files = list_result_blobs_for_job(
                 storage_account,
-                container="results",
-                prefix=resolve_results_prefix(job_id),
+                job_id,
             )
             from api.services.blast.result_manifest import build_result_manifest
 

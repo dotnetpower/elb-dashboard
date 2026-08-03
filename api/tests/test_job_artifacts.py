@@ -466,7 +466,7 @@ def test_read_result_analytics_artifact_returns_fresh_payload(monkeypatch) -> No
     """Payloads that meet the schema floor pass through unchanged and
     the state row is left alone."""
     fresh_payload = {
-        "artifact_schema_version": 3,
+        "artifact_schema_version": 4,
         "job_id": "job-1",
         "organisms": [
             {
@@ -493,3 +493,63 @@ def test_read_result_analytics_artifact_returns_fresh_payload(monkeypatch) -> No
 
     assert result == fresh_payload
     assert upserts == []
+
+
+def test_read_result_aggregate_v3_is_stale_after_prefix_fallback_fix(
+    monkeypatch,
+) -> None:
+    stale_payload = {
+        "artifact_schema_version": 3,
+        "job_id": "external-job-1",
+        "status": "no_hits",
+        "files_parsed": 0,
+        "total_files": 0,
+    }
+    monkeypatch.setattr(
+        job_artifacts,
+        "read_json_artifact",
+        lambda *_args, **_kwargs: stale_payload,
+    )
+    upserts: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda *args, **kwargs: upserts.append({**kwargs, "args": list(args)}),
+    )
+
+    result = job_artifacts.read_result_analytics_artifact(
+        "external-job-1", "result_aggregate"
+    )
+
+    assert result is None
+    assert upserts[0]["status"] == "failed"
+    assert upserts[0]["error_code"] == "schema_stale"
+
+
+def test_read_result_manifest_without_schema_is_stale_after_prefix_fallback_fix(
+    monkeypatch,
+) -> None:
+    stale_payload = {
+        "job_id": "external-job-1",
+        "files": [],
+        "results": [],
+    }
+    monkeypatch.setattr(
+        job_artifacts,
+        "read_json_artifact",
+        lambda *_args, **_kwargs: stale_payload,
+    )
+    upserts: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda *args, **kwargs: upserts.append({**kwargs, "args": list(args)}),
+    )
+
+    result = job_artifacts.read_result_analytics_artifact(
+        "external-job-1", "result_manifest"
+    )
+
+    assert result is None
+    assert upserts[0]["status"] == "failed"
+    assert upserts[0]["error_code"] == "schema_stale"

@@ -5,6 +5,7 @@ Edit boundaries: Keep assertions focused on the behavior under test; prefer fake
 Azure calls.
 Key entry points: `patched_storage`, `test_aggregate_returns_stats_shape`,
 `test_results_list_opens_storage_for_local_debug_when_scope_present`,
+`test_results_list_enqueues_manifest_backfill_when_artifact_missing`,
 `test_aggregate_empty_listing_returns_no_results`,
 `test_alignments_empty_listing_returns_degraded_no_result_files`,
 `test_aggregate_no_hits_returns_complete_stats_shape`,
@@ -146,6 +147,36 @@ def test_results_list_opens_storage_for_local_debug_when_scope_present(
     assert response.json()["manifest"]["status"] == "available"
     assert response.json()["manifest"]["parseable_count"] == 1
     assert calls == [("00000000-0000-0000-0000-000000000001", "rg-elb-01", "stelb")]
+
+
+def test_results_list_enqueues_manifest_backfill_when_artifact_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    patched_storage,
+) -> None:
+    from api.routes.blast import results as results_route
+
+    monkeypatch.setattr(
+        results_route,
+        "read_ready_result_artifact",
+        lambda _job_id, _artifact_type: None,
+    )
+    enqueued: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        results_route,
+        "enqueue_result_artifact_backfill",
+        lambda job_id, artifact_type: enqueued.append((job_id, artifact_type)),
+    )
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job123/results",
+        params={"storage_account": "stelb"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["manifest"]["status"] == "available"
+    assert enqueued == [("job123", "result_manifest")]
 
 
 def test_aggregate_empty_listing_returns_no_results(monkeypatch, patched_storage):

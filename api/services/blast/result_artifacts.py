@@ -28,6 +28,7 @@ from api.services.blast.result_analytics import (
     annotate_result_hit,
     enrich_taxonomy_with_lineage,
     list_parseable_result_blobs,
+    list_result_blobs_for_job,
     read_result_blob_texts_parallel,
     result_hit_matches_filters,
     result_hit_rank_aggregates,
@@ -244,15 +245,13 @@ class _StreamingAggregate:
 def build_result_manifest_payload(
     job_id: str, storage_account: str, *, prefix: str | None = None
 ) -> dict[str, Any]:
-    from api.services.storage.job_prefix import resolve_results_prefix
-
-    files = storage_data.list_result_blobs(
-        get_credential(),
+    files = list_result_blobs_for_job(
         storage_account,
-        container="results",
-        prefix=prefix or resolve_results_prefix(job_id),
+        job_id,
+        prefix=prefix,
     )
     return {
+        "artifact_schema_version": 1,
         "job_id": job_id,
         "files": files,
         "results": files,
@@ -363,7 +362,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
             )
     if aggregate.total == 0 and parsed_files == 0 and read_failures:
         return {
-            "artifact_schema_version": 3,
+            "artifact_schema_version": 4,
             "job_id": job_id,
             "status": "degraded",
             "degraded": True,
@@ -374,7 +373,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
             "read_failures": read_failures,
         }
     return {
-        "artifact_schema_version": 3,
+        "artifact_schema_version": 4,
         "job_id": job_id,
         "status": "ok" if aggregate.total else "no_hits",
         "stats": aggregate.as_stats(),
@@ -414,7 +413,7 @@ def build_default_alignments_payload(job_id: str, storage_account: str) -> dict[
     page_count = (len(filtered) + page_size - 1) // page_size
     tie_cutoff = _load_merge_report_tie_cutoff(job_id, storage_account)
     payload: dict[str, Any] = {
-        "artifact_schema_version": 3,
+        "artifact_schema_version": 4,
         "job_id": job_id,
         "blob_name": read["blob_names"][0] if len(read["blob_names"]) == 1 else "",
         "blob_names": read["blob_names"],
@@ -483,7 +482,7 @@ def build_default_taxonomy_payload(job_id: str, storage_account: str) -> dict[st
                 type(exc).__name__,
             )
     return {
-        "artifact_schema_version": 3,
+        "artifact_schema_version": 4,
         "job_id": job_id,
         "organisms": organisms,
         "total_hits": len(hits),

@@ -76,15 +76,20 @@ _ANALYTICS_ARTIFACT_TYPES = {
 # false degraded state. `result_aggregate` is gated from 0 -> 3 here, so
 # its builder now stamps the version in BOTH the OK and degraded returns.
 #
+# 2026-08-03 manifest v1 / analytics v4 — sibling OpenAPI revisions can ignore
+# the optional date-tiered results prefix and write under the legacy flat job
+# directory. Builders now retry that exact flat prefix after an empty canonical
+# listing. Older ready artifacts containing a false 0-of-0 result must rebuild.
+#
 # IMPORTANT: a builder whose minimum is N MUST stamp its payload with
 # `"artifact_schema_version": N` (or higher), otherwise the bake would
 # write a payload that the next read immediately marks stale → infinite
 # rebuild loop. Builders for types with minimum 0 may skip the stamp.
 _ANALYTICS_ARTIFACT_MIN_SCHEMA_VERSION = {
-    "result_manifest": 0,
-    "result_aggregate": 3,
-    "result_alignments": 3,
-    "result_taxonomy": 3,
+    "result_manifest": 1,
+    "result_aggregate": 4,
+    "result_alignments": 4,
+    "result_taxonomy": 4,
 }
 
 
