@@ -4,9 +4,10 @@ Responsibility: Server-side Auto warm preferences for AKS warm cache reconciliat
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `_now_iso`, `_clean_db_names`, `_clean_programs`, `AutoWarmupPreference`,
-`preference_key`, `normalise_preference`
+`preference_key`, `normalise_preference`, `reset_autowarmup_table_pool_after_fork`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
+log boundaries. A Celery prefork child must drop inherited Table clients and replace copied
+locks without closing parent transports.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -389,6 +390,16 @@ def _reset_autowarmup_table_pool() -> None:
                 close()
             except Exception:  # noqa: S110 - close races are not fatal
                 pass
+
+
+def reset_autowarmup_table_pool_after_fork() -> None:
+    """Drop inherited Table state without touching the parent's transport."""
+    global _AUTOWARMUP_TABLE_POOLED, _AUTOWARMUP_TABLE_POOL_LOCK
+    global _ENSURED_TABLES, _ENSURED_TABLES_LOCK
+    _AUTOWARMUP_TABLE_POOLED = None
+    _AUTOWARMUP_TABLE_POOL_LOCK = threading.Lock()
+    _ENSURED_TABLES = set()
+    _ENSURED_TABLES_LOCK = threading.Lock()
 
 
 def _ensure_table() -> None:

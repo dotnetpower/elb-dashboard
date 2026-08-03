@@ -7,10 +7,12 @@ surface. Real logic lives in:
 - `api.services.state.repository` — `JobStateRepository`, singleton getters
 Edit boundaries: Do not add new logic here.
 Key entry points: re-exports of every public + private symbol the old flat module
-exposed.
+exposed, plus `reset_state_repo_cache_after_fork` for Celery children.
 Risky contracts: Tests that monkey-patch must target the real module
 (`api.services.state.repository.JobStateRepository`) so `get_state_repo()`'s
 internal lookup sees the patch.
+A forked child must replace copied singleton/registry locks without closing
+parent-owned Table transports.
 Validation: `uv run pytest -q api/tests/test_state_repo.py`.
 """
 
@@ -83,6 +85,16 @@ def reset_state_repo_cache() -> None:
         _DEFAULT_REPO = None
     _repository.reset_state_repo_cache()
 
+
+def reset_state_repo_cache_after_fork() -> None:
+    """Drop inherited repositories and replace every copied registry lock."""
+    global _DEFAULT_REPO, _DEFAULT_REPO_LOCK, _ENSURED_TABLES, _ENSURED_TABLES_LOCK
+    _DEFAULT_REPO = None
+    _DEFAULT_REPO_LOCK = threading.Lock()
+    _ENSURED_TABLES = set()
+    _ENSURED_TABLES_LOCK = threading.Lock()
+    _repository.reset_state_repo_cache_after_fork()
+
 __all__ = [
     "_ENSURED_TABLES",
     "_ENSURED_TABLES_LOCK",
@@ -103,4 +115,5 @@ __all__ = [
     "get_credential",
     "get_state_repo",
     "reset_state_repo_cache",
+    "reset_state_repo_cache_after_fork",
 ]

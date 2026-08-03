@@ -7,10 +7,13 @@ Edit boundaries: Persistence only. Event construction and Service Bus publish
     calls remain in ``api.tasks.servicebus.tasks``.
 Key entry points: ``enqueue_response``, ``list_pending_responses``,
     ``pending_response_correlations``, ``has_pending_response``,
-    ``defer_response``, ``mark_response_delivered``.
+    ``defer_response``, ``mark_response_delivered``,
+    ``reset_service_bus_outbox_after_fork``.
 Risky contracts: A duplicate ``event_id`` is idempotent; deployed writes fail
     closed when Table Storage is unavailable; publish-before-delete may produce
     a duplicate event after a crash but can never lose the producer response.
+    A Celery prefork child must drop inherited Table clients and replace copied
+    locks without closing parent transports.
 Validation: ``uv run pytest -q api/tests/test_service_bus_outbox.py``.
 """
 
@@ -369,6 +372,16 @@ def _reset_outbox_for_tests() -> None:
         _TABLE_ENSURED = False
 
 
+def reset_service_bus_outbox_after_fork() -> None:
+    """Drop inherited Table/file state without touching parent transports."""
+    global _CLIENT, _CLIENT_LOCK, _TABLE_ENSURED, _TABLE_ENSURED_LOCK, _FILE_LOCK
+    _CLIENT = None
+    _CLIENT_LOCK = threading.Lock()
+    _TABLE_ENSURED = False
+    _TABLE_ENSURED_LOCK = threading.Lock()
+    _FILE_LOCK = threading.Lock()
+
+
 __all__ = [
     "PendingResponse",
     "ResponseOutboxPersistenceError",
@@ -378,4 +391,5 @@ __all__ = [
     "list_pending_responses",
     "mark_response_delivered",
     "pending_response_correlations",
+    "reset_service_bus_outbox_after_fork",
 ]

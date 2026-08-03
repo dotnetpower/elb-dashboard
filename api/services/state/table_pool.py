@@ -5,9 +5,10 @@ Responsibility: Hold the `_PooledTableClient` wrapper plus the per-process
 Edit boundaries: Do not add Azure SDK calls beyond what is needed to keep a
 TableClient alive across multiple `with` blocks.
 Key entry points: `_PooledTableClient`, `_TABLE_ENDPOINT_ENV`, `_ENSURED_TABLES`,
-`_ENSURED_TABLES_LOCK`.
+`_ENSURED_TABLES_LOCK`, `reset_table_pool_after_fork`.
 Risky contracts: `__exit__` must NOT close the inner client — that is the whole
 point of pooling. The pool is reset only by explicit `.close()` or process exit.
+A forked child replaces the copied table-registry lock without acquiring it.
 Validation: `uv run pytest -q api/tests/test_state_repo.py`.
 """
 
@@ -19,6 +20,13 @@ from typing import Any
 _TABLE_ENDPOINT_ENV = "AZURE_TABLE_ENDPOINT"  # eg https://stelb*.table.core.windows.net
 _ENSURED_TABLES: set[tuple[str, str]] = set()
 _ENSURED_TABLES_LOCK = threading.Lock()
+
+
+def reset_table_pool_after_fork() -> None:
+    """Drop the inherited ensured-table registry and copied lock."""
+    global _ENSURED_TABLES, _ENSURED_TABLES_LOCK
+    _ENSURED_TABLES = set()
+    _ENSURED_TABLES_LOCK = threading.Lock()
 
 
 class _PooledTableClient:

@@ -4,11 +4,14 @@ Responsibility: Direct Kubernetes API session helpers for AKS clusters
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `_K8sCredentialMaterial`, `reset_k8s_credential_cache`,
-`_k8s_credential_cache_ttl`, `reset_k8s_session_pool`
+`_k8s_credential_cache_ttl`, `reset_k8s_session_pool`,
+`reset_k8s_clients_after_fork`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
 The cluster CA and any mTLS client cert / key are trusted via an in-memory
 SSLContext (`_build_k8s_https_adapter`), never a temp file, so pool eviction
 cannot delete credential material a borrowed session still references.
+A forked child drops inherited sessions and replaces copied locks without
+retiring parent-owned sessions or unlinking their files.
 Validation: `uv run pytest -q api/tests/test_k8s_list_events.py api/tests/test_k8s_session_pool.py`.
 """
 
@@ -34,6 +37,7 @@ from api.services.k8s.cluster_breaker import (
     cluster_breaker_record_failure,
     cluster_breaker_record_success,
     reset_cluster_breaker,
+    reset_cluster_breaker_after_fork,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -77,6 +81,17 @@ def reset_k8s_credential_cache() -> None:
     with _K8S_CREDENTIAL_CACHE_LOCK:
         _K8S_CREDENTIAL_CACHE.clear()
     reset_cluster_breaker()
+
+
+def reset_k8s_clients_after_fork() -> None:
+    """Drop inherited credential/session state without touching parent I/O."""
+    global _K8S_CREDENTIAL_CACHE, _K8S_CREDENTIAL_CACHE_LOCK
+    global _K8S_SESSION_POOL, _K8S_SESSION_POOL_LOCK
+    _K8S_CREDENTIAL_CACHE = {}
+    _K8S_CREDENTIAL_CACHE_LOCK = threading.Lock()
+    _K8S_SESSION_POOL = {}
+    _K8S_SESSION_POOL_LOCK = threading.Lock()
+    reset_cluster_breaker_after_fork()
 
 
 def _k8s_credential_cache_ttl() -> float:

@@ -14,8 +14,10 @@ Key entry points: ``record_feature_event``.
 Risky contracts: MUST never raise — a logging fault must not break the calling
     Celery task. The ``microsoft.custom_event.name`` attribute key is the
     documented Azure Monitor signal that maps a stdlib log record to the App
-    Insights ``customEvents`` table; do not rename it. Telemetry-disabled
-    deployments rely on this being a no-op for App Insights (only stdout).
+    Insights ``customEvents`` table; do not rename it. Process-control
+    exceptions such as a Celery soft deadline are not logging faults and must
+    propagate. Telemetry-disabled deployments rely on this being a no-op for
+    App Insights (only stdout).
 Validation: ``uv run pytest -q api/tests/test_feature_events.py``.
 """
 
@@ -23,6 +25,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.services.sanitise import sanitise
 
@@ -109,5 +113,7 @@ def record_feature_event(event: str, *, status: str = "info", **attributes: Any)
             safe_key = f"attr_{key}" if key in _RESERVED_LOGRECORD_KEYS else key
             extra[safe_key] = _coerce_attribute(value)
         LOGGER.info("feature_event %s status=%s", event, status, extra=extra)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:  # pragma: no cover - logging must never break the caller
         LOGGER.debug("feature event emit failed event=%s", event, exc_info=True)

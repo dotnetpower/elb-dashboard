@@ -9,7 +9,8 @@ Key entry points: `evaluate_execution_admission`; state primitives are re-export
 Risky contracts: Stop/delete always deny. Start/scale require ARM completion, exact target node
     convergence, strict (not degraded) DB readiness, and completed token-correlated warmup jobs.
     The short process cache includes lifecycle and warmup fingerprints so a new barrier invalidates
-    an earlier allow decision before another queue message is submitted.
+    an earlier allow decision before another queue message is submitted. Celery soft deadlines are
+    process-control signals and must propagate rather than becoming a cached deny decision.
 Validation: `uv run pytest -q api/tests/test_execution_admission.py
     api/tests/test_servicebus_tasks.py api/tests/test_resident_consumer.py`.
 """
@@ -23,6 +24,8 @@ import os
 import threading
 import time
 from typing import Any, TypedDict, cast
+
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.services.aks.execution_admission_state import (
     ExecutionAdmissionPersistenceError,
@@ -279,6 +282,8 @@ def _evaluate_uncached(
                 else {}
             ),
         }
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         LOGGER.warning(
             "execution admission evaluation failed cluster=%s error=%s",
@@ -308,6 +313,8 @@ def evaluate_execution_admission(
         )
         completed = lifecycle_completed(token) if token else False
         failure_state = lifecycle_failure(token) if token else None
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         LOGGER.warning(
             "execution admission state read failed cluster=%s error=%s",

@@ -14,11 +14,14 @@ Edit boundaries: Pure storage primitive — no Azure-management or
     domain-specific logic. New singletons live in their own caller modules
     and just pass a unique ``key`` string.
 Key entry points: ``save_singleton``, ``load_singleton``,
-    ``load_singleton_strict``, ``clear_singleton``.
+    ``load_singleton_strict``, ``clear_singleton``,
+    ``reset_singleton_cache_after_fork``.
 Risky contracts: ``key`` must be ASCII-safe (Azure RowKey forbids ``/ \\ # ?``
     and control chars). ``payload`` must be JSON-serialisable. Best-effort
     reads collapse SDK failures to missing; safety callers must use the strict
     read, which propagates every error except a confirmed missing row.
+    A Celery prefork child must drop inherited Table clients and replace copied
+    locks without closing parent transports.
 Validation: ``uv run pytest -q api/tests/test_state_singletons.py``.
 """
 
@@ -289,11 +292,21 @@ def reset_singleton_cache_for_tests() -> None:
         _TABLE_ENSURED = False
 
 
+def reset_singleton_cache_after_fork() -> None:
+    """Drop inherited Table state without touching the parent's transport."""
+    global _CLIENT, _CLIENT_LOCK, _TABLE_ENSURED, _TABLE_ENSURED_LOCK
+    _CLIENT = None
+    _CLIENT_LOCK = threading.Lock()
+    _TABLE_ENSURED = False
+    _TABLE_ENSURED_LOCK = threading.Lock()
+
+
 __all__ = [
     "clear_singleton",
     "list_singletons_by_prefix",
     "load_singleton",
     "load_singleton_strict",
+    "reset_singleton_cache_after_fork",
     "reset_singleton_cache_for_tests",
     "save_singleton",
 ]

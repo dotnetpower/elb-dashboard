@@ -7,7 +7,8 @@ Edit boundaries: Worker topology and Celery schedule contracts only; task domain
     behaviour belongs in its focused task test module.
 Key entry points: the `test_*` functions.
 Risky contracts: The default topology must preserve a dedicated interactive pool
-    without increasing the worker sidecar's total prefork child count.
+    without increasing the worker sidecar's total prefork child count. Prefork
+    children must reset every network pool the resident parent can initialize.
 Validation: `uv run pytest -q api/tests/test_celery_queue_isolation.py`.
 """
 
@@ -99,6 +100,45 @@ def test_servicebus_parent_initialises_telemetry_and_consumers_post_fork(
     )
 
     assert calls == ["telemetry:worker", "resident", "external"]
+
+
+def test_prefork_child_resets_resident_parent_table_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.services as services
+    from api.services import (
+        auto_warmup,
+        azure_clients,
+        service_bus_outbox,
+        service_bus_pref,
+        service_bus_tracking,
+        state_repo,
+    )
+    from api.services.k8s import client as k8s_client
+    from api.services.state import singletons
+
+    calls: list[str] = []
+    reset_targets = (
+        (services, "reset_credential_after_fork"),
+        (azure_clients, "reset_mgmt_client_pool_after_fork"),
+        (k8s_client, "reset_k8s_clients_after_fork"),
+        (auto_warmup, "reset_autowarmup_table_pool_after_fork"),
+        (service_bus_pref, "reset_service_bus_table_pool_after_fork"),
+        (service_bus_tracking, "reset_service_bus_bridge_pool_after_fork"),
+        (service_bus_outbox, "reset_service_bus_outbox_after_fork"),
+        (singletons, "reset_singleton_cache_after_fork"),
+        (state_repo, "reset_state_repo_cache_after_fork"),
+    )
+    for module, name in reset_targets:
+        monkeypatch.setattr(
+            module,
+            name,
+            lambda reset_name=name: calls.append(reset_name),
+        )
+
+    celery_signals._reset_inherited_client_pools()
+
+    assert calls == [name for _module, name in reset_targets]
 
 
 def test_servicebus_periodic_ticks_expire_before_stale_backlog_replays() -> None:

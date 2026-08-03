@@ -47,7 +47,8 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     the same value the producer set. A succeeded transition event additionally
     carries ``result_files`` (per-file metadata + a dashboard ``download_url``
     for the authenticated streaming gateway — pointers only, never a SAS URL or
-    result bytes; charter §9).
+    result bytes; charter §9). Celery soft deadlines are process-control signals
+    and must never be converted into a degraded-success health/admission result.
 Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py
     api/tests/test_service_bus_drain_loop.py api/tests/test_service_bus_outbox.py``.
 """
@@ -62,6 +63,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from billiard.exceptions import SoftTimeLimitExceeded
 from celery import shared_task
 from fastapi import HTTPException
 
@@ -1733,6 +1735,8 @@ def _openapi_ready_for_drain(cfg: ServiceBusConfig) -> bool:
     try:
         payload = external_blast.ready(**_openapi_kwargs(cfg))
         return bool(payload.get("ready"))
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         return False
 
@@ -1749,6 +1753,8 @@ def _openapi_ready_for_transition_poll(openapi_kwargs: dict[str, str]) -> bool:
     try:
         payload = external_blast.ready(**openapi_kwargs)
         return bool(payload.get("ready"))
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         return False
 
@@ -2285,6 +2291,8 @@ def emit_service_bus_health() -> dict[str, Any]:
     cfg = get_service_bus_config()
     try:
         admission: dict[str, Any] | None = _execution_admission_for_drain(cfg)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         admission = None
         LOGGER.debug(

@@ -7,11 +7,14 @@ does not pay another TLS handshake.
 Edit boundaries: Azure-Tables SDK lives here. Domain shaping
 (JobState / canonical metadata) lives in `job_state.py`. Connection
 pool primitive lives in `table_pool.py`.
-Key entry points: `JobStateRepository`, `get_state_repo`, `reset_state_repo_cache`.
+Key entry points: `JobStateRepository`, `get_state_repo`, `reset_state_repo_cache`,
+`reset_state_repo_cache_after_fork`.
 Risky contracts: Every OData filter MUST flow through `_sanitise_odata_value`.
 The optional time-ordered index (#50) is flag-gated by `time_index_enabled()`
 and writes an IMMUTABLE index row keyed on `owner_oid` + `created_at`; never
 key it on a mutable field.
+A forked child drops inherited repositories and replaces copied locks without
+closing parent-owned Table transports.
 Validation: `uv run pytest -q api/tests/test_state_repo.py api/tests/test_jobstate_time_index.py`.
 """
 
@@ -27,6 +30,7 @@ from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.data.tables import TableClient, TableServiceClient, UpdateMode
 
 from api.services import get_credential
+from api.services.state import table_pool as _table_pool
 from api.services.state.job_state import (
     _JOB_SCHEMA_VERSION,
     _JOBSTATE_SUMMARY_SELECT,
@@ -1508,3 +1512,13 @@ def reset_state_repo_cache() -> None:
     global _DEFAULT_REPO
     with _DEFAULT_REPO_LOCK:
         _DEFAULT_REPO = None
+
+
+def reset_state_repo_cache_after_fork() -> None:
+    """Drop inherited repository/registry state without acquiring copied locks."""
+    global _DEFAULT_REPO, _DEFAULT_REPO_LOCK, _ENSURED_TABLES, _ENSURED_TABLES_LOCK
+    _DEFAULT_REPO = None
+    _DEFAULT_REPO_LOCK = threading.Lock()
+    _ENSURED_TABLES = set()
+    _ENSURED_TABLES_LOCK = threading.Lock()
+    _table_pool.reset_table_pool_after_fork()

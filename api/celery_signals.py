@@ -18,6 +18,8 @@ user-visible failed/cancelled state. Module is imported for its
 import-time side effect (signal registration); never lazy-load it from a
 worker task. Resident background consumers must start only after prefork in the
 dedicated `worker-servicebus` parent, never once per Celery worker parent.
+Replacement prefork children must reset every network pool the resident parent
+can initialize, without closing parent-owned transports.
 Validation: `uv run pytest -q api/tests/test_celery_failure_visibility.py
 api/tests/test_telemetry_init.py`.
 """
@@ -155,11 +157,15 @@ def _reset_inherited_client_pools() -> None:
     must still boot when an optional client module is unavailable.
     """
     resets = (
-        ("api.services", "reset_credential"),
-        ("api.services.azure_clients", "reset_mgmt_client_pool"),
-        ("api.services.k8s.monitoring", "reset_k8s_credential_cache"),
-        ("api.services.k8s.monitoring", "reset_k8s_session_pool"),
-        ("api.services.state_repo", "reset_state_repo_cache"),
+        ("api.services", "reset_credential_after_fork"),
+        ("api.services.azure_clients", "reset_mgmt_client_pool_after_fork"),
+        ("api.services.k8s.client", "reset_k8s_clients_after_fork"),
+        ("api.services.auto_warmup", "reset_autowarmup_table_pool_after_fork"),
+        ("api.services.service_bus_pref", "reset_service_bus_table_pool_after_fork"),
+        ("api.services.service_bus_tracking", "reset_service_bus_bridge_pool_after_fork"),
+        ("api.services.service_bus_outbox", "reset_service_bus_outbox_after_fork"),
+        ("api.services.state.singletons", "reset_singleton_cache_after_fork"),
+        ("api.services.state_repo", "reset_state_repo_cache_after_fork"),
     )
     for module_name, attr in resets:
         try:

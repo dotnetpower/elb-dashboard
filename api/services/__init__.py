@@ -3,9 +3,10 @@
 Responsibility: Service-layer facade and shared Azure credential provider
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
-Key entry points: `get_credential`, `reset_credential`
+Key entry points: `get_credential`, `reset_credential`, `reset_credential_after_fork`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
+log boundaries. A forked child replaces the copied lock and drops the credential without closing
+or locking parent-owned downstream pools.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -98,3 +99,10 @@ def reset_credential() -> None:
             reset_fn()
         except Exception as exc:
             log.debug("%s reset skipped: %s", attr, type(exc).__name__)
+
+
+def reset_credential_after_fork() -> None:
+    """Drop inherited credential state without acquiring copied locks."""
+    global _CREDENTIAL, _CREDENTIAL_LOCK
+    _CREDENTIAL = None
+    _CREDENTIAL_LOCK = threading.Lock()

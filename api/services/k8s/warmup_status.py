@@ -9,7 +9,8 @@ Key entry points: `k8s_warmup_status`, `k8s_release_warmup_cache`,
 `k8s_release_stale_warmup_jobs`, `k8s_check_namespace_exists`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
 The six top-level reads in `k8s_warmup_status` fan out via `_k8s_fanout_pool`; keep them
-independent so the wall time stays bounded by the slowest call.
+independent so the wall time stays bounded by the slowest call. Never submit a helper that
+waits on this pool back into the same pool, and never swallow Celery soft deadlines.
 Validation: `uv run pytest -q api/tests/test_k8s_warmup_status_parallel.py
 api/tests/test_k8s_release_stale_warmup_jobs.py`.
 """
@@ -22,6 +23,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from azure.core.credentials import TokenCredential
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.app.telemetry import suppress_dependency_telemetry
 from api.services.k8s.fanout import _k8s_fanout_pool
@@ -357,9 +359,13 @@ def k8s_warmup_status(
             f_stale = pool.submit(
                 _mark_stale_warmup_nodes, session, server, warmup_databases
             )
-            f_pods = pool.submit(_warmup_pods_and_logs, session, server)
+            # Run the pod-list helper on the caller thread: it fans pod-log
+            # requests back out through this SAME pool. Submitting the helper
+            # itself to the pool creates a nested wait and can deadlock when
+            # enough concurrent callers occupy every worker while waiting for
+            # their child log futures.
+            pods, logs_by_pod = _warmup_pods_and_logs(session, server)
             f_stale.result()
-            pods, logs_by_pod = f_pods.result()
             attach_pod_progress_to_database_status(warmup_databases, pods, logs_by_pod)
             _merge_database_statuses(result, warmup_databases)
 
@@ -378,6 +384,11 @@ def k8s_warmup_status(
             ][:20]
 
         return result
+    except SoftTimeLimitExceeded:
+        # Celery uses this exception as process-control flow. Converting it to
+        # an empty warmup snapshot makes a timed-out task report SUCCESS and
+        # strands the prefork child in repeated 45-second pseudo-successes.
+        raise
     except Exception as exc:
         # Dashboard polls warmup status every few seconds, so a sustained
         # AKS read-timeout / DNS hiccup would emit a fresh WARNING per

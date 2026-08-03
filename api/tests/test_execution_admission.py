@@ -7,7 +7,7 @@ Edit boundaries: Azure ARM, Kubernetes, Redis, Table Storage, and JobState are f
 Key entry points: `_ready_dependencies`, `test_*`.
 Risky contracts: Stop/delete barriers always block; start/scale barriers require exact target
     node convergence and completed correlated warmup jobs; newer lifecycle generations alone may
-    terminalise an otherwise orphaned external job.
+    terminalise an otherwise orphaned external job. Celery soft deadlines must propagate.
 Validation: `uv run pytest -q api/tests/test_execution_admission.py`.
 """
 
@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 from api.services.aks import execution_admission as admission
 from api.services.aks import execution_admission_state as admission_state
+from billiard.exceptions import SoftTimeLimitExceeded
 
 
 @pytest.fixture(autouse=True)
@@ -134,6 +135,19 @@ def test_admission_state_read_failure_denies_queue_consumption(
 
     assert decision["allowed"] is False
     assert decision["reason"] == "execution_admission_state_unavailable"
+
+
+def test_readiness_soft_deadline_is_not_converted_to_deny(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.aks.ensure_running.evaluate_ensure_running",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        _decision()
 
 
 def test_scale_barrier_waits_for_exact_target_node_count(

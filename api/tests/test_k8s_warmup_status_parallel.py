@@ -5,23 +5,29 @@ up `k8s_warmup_status` issues every expected Kubernetes API call and
 assembles the response identically to the previous sequential
 implementation.
 Edit boundaries: Keep mocks scoped to the requests session — do not exercise
-real Kubernetes or Azure paths.
+real Kubernetes or Azure paths. The fork regression runs only in an isolated
+subprocess.
 Key entry points: `test_warmup_status_issues_all_expected_calls`,
 `test_warmup_status_handles_missing_workloads_gracefully`,
 `test_warmup_status_parallel_pod_logs`
 Risky contracts: Do not assume a specific call ordering — only assert that
-the set of called URLs matches the expected workload reads.
+the set of called URLs matches the expected workload reads. Forked processes
+must create a fresh executor, and Celery soft deadlines must propagate.
 Validation: `uv run pytest -q api/tests/test_k8s_warmup_status_parallel.py`.
 """
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 import threading
-import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from api.services.k8s import monitoring as km
+from billiard.exceptions import SoftTimeLimitExceeded
 
 
 class _FakeResponse:
@@ -113,13 +119,103 @@ def test_warmup_status_handles_missing_workloads_gracefully() -> None:
     assert result["namespaces"] == []
 
 
+def test_fanout_pool_recreates_executor_after_pid_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replacement prefork child must not reuse the parent's dead threads."""
+    from api.services.k8s import fanout
+
+    fanout._shutdown_k8s_fanout_pool()
+    current_pid = {"value": 101}
+    created: list[Any] = []
+
+    class _FakeExecutor:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+            created.append(self)
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    monkeypatch.setattr(fanout.os, "getpid", lambda: current_pid["value"])
+    monkeypatch.setattr(fanout, "ThreadPoolExecutor", _FakeExecutor)
+
+    parent_pool = fanout._k8s_fanout_pool()
+    assert fanout._k8s_fanout_pool() is parent_pool
+    current_pid["value"] = 202
+    child_pool = fanout._k8s_fanout_pool()
+
+    assert child_pool is not parent_pool
+    assert len(created) == 2
+    # Joining a copied parent executor in the child can itself deadlock.
+    assert parent_pool.shutdown_calls == []
+    fanout._shutdown_k8s_fanout_pool()
+
+
+@pytest.mark.subprocess
+def test_saturated_fanout_pool_completes_work_after_real_fork() -> None:
+    """A child must execute work even when the parent populated all threads."""
+    script = textwrap.dedent(
+        """
+        import os
+        import threading
+        from concurrent.futures import TimeoutError
+        from api.services.k8s.fanout import _k8s_fanout_pool, _shutdown_k8s_fanout_pool
+
+        pool = _k8s_fanout_pool()
+        barrier = threading.Barrier(17)
+        futures = [
+            pool.submit(lambda: (barrier.wait(), os.getpid())[1])
+            for _ in range(16)
+        ]
+        barrier.wait()
+        for future in futures:
+            future.result(timeout=2)
+        pid = os.fork()
+        if pid == 0:
+            try:
+                result = _k8s_fanout_pool().submit(os.getpid).result(timeout=2)
+                os._exit(0 if result == os.getpid() else 41)
+            except TimeoutError:
+                os._exit(42)
+        _, status = os.waitpid(pid, 0)
+        _shutdown_k8s_fanout_pool()
+        raise SystemExit(os.waitstatus_to_exitcode(status))
+        """
+    )
+
+    result = subprocess.run(  # noqa: S603 - isolated test interpreter.
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_warmup_status_propagates_celery_soft_deadline() -> None:
+    def handler(url: str, params=None, timeout=10):  # type: ignore[no-untyped-def]
+        del url, params, timeout
+        raise SoftTimeLimitExceeded()
+
+    session = _fake_session(handler)
+    with (
+        patch.object(km, "_get_k8s_session", return_value=(session, "https://k8s")),
+        pytest.raises(SoftTimeLimitExceeded),
+    ):
+        km.k8s_warmup_status(MagicMock(), "sub", "rg", "aks")
+
+
 def test_warmup_status_parallel_pod_logs() -> None:
-    """The pod-log fan-out must read every pod's log even when each fetch
-    sleeps briefly. With 4 pods and 50ms per fetch, wall time stays under
-    150ms (4x faster than serial)."""
+    """All pod-log fetches must enter concurrently, not one at a time."""
 
     pods = [{"metadata": {"name": f"warmup-pod-{i}"}} for i in range(4)]
     warmup_jobs_payload = {"items": []}
+    log_barrier = threading.Barrier(4, timeout=2)
+    concurrent_logs: list[str] = []
 
     def handler(url: str, params=None, timeout=10):  # type: ignore[no-untyped-def]
         if url.endswith("/daemonsets/create-workspace"):
@@ -156,18 +252,15 @@ def test_warmup_status_parallel_pod_logs() -> None:
         if url.endswith("/api/v1/nodes"):
             return _FakeResponse({"items": []})
         if "/log" in url:
-            time.sleep(0.05)  # 50 ms each — serial would be ~200 ms.
+            log_barrier.wait()
+            concurrent_logs.append(url)
             return _FakeResponse({}, status_code=200, text="log content")
         return _FakeResponse({}, status_code=404)
 
     session = _fake_session(handler)
-    start = time.monotonic()
     with patch.object(km, "_get_k8s_session", return_value=(session, "https://k8s")):
         km.k8s_warmup_status(MagicMock(), "sub", "rg", "aks")
-    elapsed = time.monotonic() - start
-    # 4 pod logs @ 50ms in parallel should finish well under 200ms.
-    # Generous bound to avoid flakes on slow CI.
-    assert elapsed < 0.4, f"parallel pod logs took {elapsed:.3f}s, expected <0.4s"
+    assert len(concurrent_logs) == 4
 
 
 def test_warmup_status_tags_setup_only_dbs_with_setup_source() -> None:

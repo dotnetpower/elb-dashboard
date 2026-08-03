@@ -16,13 +16,14 @@ Edit boundaries: Reusable persistence logic only. No Service Bus SDK, no HTTP
     Table/file backend gating of ``performance_pref`` / ``service_bus_pref``.
 Key entry points: ``BridgeRecord``, ``get_bridge``, ``upsert_bridge``,
     ``list_active_bridges``, ``list_active_bridges_page``, ``mark_published``,
-    ``mark_done``.
+    ``mark_done``, ``reset_service_bus_bridge_pool_after_fork``.
 Risky contracts: ``last_status`` is the published-transition marker — the
     publisher MUST only emit when the freshly observed status differs from it,
     then update it, or the topic floods with duplicate events. ``list_active_
     bridges_page`` uses a RowKey cursor and returns only non-``done`` rows,
     bounded by ``limit`` so the publisher tick stays bounded without starving
-    rows beyond the first page.
+    rows beyond the first page. A Celery prefork child must drop inherited
+    Table clients and replace copied locks without closing parent transports.
 Validation: ``uv run pytest -q api/tests/test_service_bus_tracking.py``.
 """
 
@@ -336,6 +337,16 @@ def _reset_service_bus_bridge_pool() -> None:
                 close()
             except Exception:  # noqa: S110 - close races are not fatal
                 pass
+
+
+def reset_service_bus_bridge_pool_after_fork() -> None:
+    """Drop inherited Table state without touching the parent's transport."""
+    global _BRIDGE_TABLE_POOLED, _BRIDGE_TABLE_POOL_LOCK
+    global _ENSURED_TABLES, _ENSURED_TABLES_LOCK
+    _BRIDGE_TABLE_POOLED = None
+    _BRIDGE_TABLE_POOL_LOCK = threading.Lock()
+    _ENSURED_TABLES = set()
+    _ENSURED_TABLES_LOCK = threading.Lock()
 
 
 def _ensure_table() -> None:

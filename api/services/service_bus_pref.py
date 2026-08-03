@@ -11,7 +11,8 @@ Edit boundaries: Reusable domain/persistence logic only. HTTP shaping lives in
     ``api.services.service_bus``. No Azure SDK management/data-plane calls here.
 Key entry points: ``ServiceBusConfig``, ``AUTH_MODES``, ``get_service_bus_config``,
     ``save_service_bus_config``, ``service_bus_enabled``, ``service_bus_enabled_for``,
-    ``service_bus_env_override``, ``service_bus_kill_switch_on``, ``normalise_config``.
+    ``service_bus_env_override``, ``service_bus_kill_switch_on``, ``normalise_config``,
+    ``reset_service_bus_table_pool_after_fork``.
 Risky contracts: ``enabled`` defaults to ``False`` and a missing row reads back
     as a disabled default — the integration stays off until an operator opts in
     (charter §12a Rule 4 default-OFF preserved). The deploy-time env
@@ -24,6 +25,8 @@ Risky contracts: ``enabled`` defaults to ``False`` and a missing row reads back
     the Key Vault secret name is. Table backend is gated by
     ``AZURE_TABLE_ENDPOINT`` + ``CONTAINER_APP_NAME`` (mirrors
     ``performance_pref``); local dev falls back to a JSON file.
+    A Celery prefork child must drop inherited Table clients and replace copied
+    locks without closing parent-owned transports.
 Validation: ``uv run pytest -q api/tests/test_service_bus_pref.py``.
 """
 
@@ -494,6 +497,16 @@ def _reset_service_bus_table_pool() -> None:
                 close()
             except Exception:  # noqa: S110 - close races are not fatal
                 pass
+
+
+def reset_service_bus_table_pool_after_fork() -> None:
+    """Drop inherited Table state without touching the parent's transport."""
+    global _SB_TABLE_POOLED, _SB_TABLE_POOL_LOCK
+    global _ENSURED_TABLES, _ENSURED_TABLES_LOCK
+    _SB_TABLE_POOLED = None
+    _SB_TABLE_POOL_LOCK = threading.Lock()
+    _ENSURED_TABLES = set()
+    _ENSURED_TABLES_LOCK = threading.Lock()
 
 
 def _ensure_table() -> None:

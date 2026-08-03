@@ -5,11 +5,14 @@ Edit boundaries: Keep reusable domain logic here; routes and tasks should call t
 instead of duplicating SDK code.
 Key entry points: `_get_mi_credential`, `credential_for_caller`, `resource_client`,
 `network_client`, `dns_client`, `compute_client`, `storage_client`, `subscription_client`,
-`authorization_client`, `msi_client`, `reset_mgmt_client_pool`
+`authorization_client`, `msi_client`, `reset_mgmt_client_pool`,
+`reset_mgmt_client_pool_after_fork`
 Risky contracts: Use managed identity/DefaultAzureCredential only; do not add client secrets or
 OBO flows. Pooled ARM clients are reused across threads/requests keyed by
 `(kind, id(credential), subscription_id)`; tests reset the pool via the autouse
 `_reset_mgmt_client_pool` fixture in `conftest.py`.
+A forked child drops inherited clients and replaces copied locks without closing
+parent-owned transports.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -132,6 +135,14 @@ def reset_mgmt_client_pool() -> None:
         _MGMT_CLIENT_FINALIZED.clear()
     for client in clients:
         _close_quietly(client)
+
+
+def reset_mgmt_client_pool_after_fork() -> None:
+    """Drop inherited management clients without acquiring copied locks."""
+    global _MGMT_CLIENT_POOL, _MGMT_CLIENT_POOL_LOCK, _MGMT_CLIENT_FINALIZED
+    _MGMT_CLIENT_POOL = {}
+    _MGMT_CLIENT_POOL_LOCK = threading.Lock()
+    _MGMT_CLIENT_FINALIZED = set()
 
 
 def _get_mi_credential() -> TokenCredential:

@@ -3,12 +3,12 @@
 Responsibility: Verify ``record_feature_event`` emits a well-formed log record
     on the ``api.events`` logger, carries the customEvent name attribute, drops
     ``None`` attributes, sanitises secrets, escapes reserved LogRecord keys, and
-    never raises.
+    swallows ordinary logging faults without swallowing Celery deadlines.
 Edit boundaries: Test-only. Keep assertions behavioural (record shape +
     no-raise) — do not assert on Azure Monitor export, which is out of process.
 Key entry points: pytest test functions.
 Risky contracts: Mirrors the ``microsoft.custom_event.name`` contract the
-    deployment relies on for customEvents mapping.
+deployment relies on for customEvents mapping; process-control exceptions propagate.
 Validation: ``uv run pytest -q api/tests/test_feature_events.py``.
 """
 
@@ -18,6 +18,7 @@ import logging
 
 import pytest
 from api.services.feature_events import _CUSTOM_EVENT_NAME_KEY, record_feature_event
+from billiard.exceptions import SoftTimeLimitExceeded
 
 
 def _records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
@@ -80,3 +81,14 @@ def test_never_raises_on_bad_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fe.LOGGER, "info", _boom)
     # Must swallow the error rather than propagate to the caller.
     record_feature_event("warmup", status="failed", job_id="j1")
+
+
+def test_soft_deadline_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _deadline(*_args: object, **_kwargs: object) -> None:
+        raise SoftTimeLimitExceeded()
+
+    import api.services.feature_events as fe
+
+    monkeypatch.setattr(fe.LOGGER, "info", _deadline)
+    with pytest.raises(SoftTimeLimitExceeded):
+        record_feature_event("servicebus_health", status="warning")

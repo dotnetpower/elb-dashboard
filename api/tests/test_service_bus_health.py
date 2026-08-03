@@ -6,6 +6,7 @@ Edit boundaries: Test-only fakes; no Azure, Service Bus, Table, or OpenAPI calls
 Key entry points: ``test_*``.
 Risky contracts: Health reads must stay bounded and observational; request or
     response bodies must never enter the emitted custom-event dimensions.
+    Celery soft deadlines must propagate instead of reporting false success.
 Validation: ``uv run pytest -q api/tests/test_service_bus_health.py``.
 """
 
@@ -19,6 +20,7 @@ from api.services import service_bus_health as health
 from api.services.service_bus_outbox import PendingResponse
 from api.services.service_bus_pref import ServiceBusConfig
 from api.tasks.servicebus import tasks as sb_tasks
+from billiard.exceptions import SoftTimeLimitExceeded
 
 
 def _cfg(*, completion_topic: str = "elastic-blast-completions") -> ServiceBusConfig:
@@ -297,6 +299,21 @@ def test_periodic_task_noops_when_integration_disabled(
     monkeypatch.setattr(sb_tasks, "service_bus_enabled", lambda: False)
 
     assert sb_tasks.emit_service_bus_health.run() == {"skipped": "disabled"}
+
+
+def test_periodic_task_propagates_admission_soft_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sb_tasks, "service_bus_enabled", lambda: True)
+    monkeypatch.setattr(sb_tasks, "get_service_bus_config", _cfg)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _cfg: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        sb_tasks.emit_service_bus_health.run()
 
 
 @pytest.mark.parametrize(

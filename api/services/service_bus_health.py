@@ -7,7 +7,8 @@ Edit boundaries: Observability reads and in-process outbox-flush state only; no
 Key entry points: ``collect_service_bus_health``, ``note_outbox_flush``.
 Risky contracts: Outbox scans stay bounded, request bodies and response payloads
     never enter the returned snapshot, and failures in one signal family must
-    not hide the others.
+    not hide the others. Celery soft deadlines must propagate; they are not
+    ordinary component degradation.
 Validation: ``uv run pytest -q api/tests/test_service_bus_health.py``.
 """
 
@@ -17,6 +18,8 @@ import os
 import threading
 from datetime import UTC, datetime
 from typing import Any
+
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.services import service_bus
 from api.services.service_bus_outbox import list_pending_responses
@@ -111,6 +114,8 @@ def _flush_state() -> dict[str, Any]:
 def _queue_snapshot(cfg: ServiceBusConfig) -> dict[str, Any]:
     try:
         counts = service_bus.entity_counts(cfg)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         return {
             "counts_available": False,
@@ -221,6 +226,8 @@ def _queue_snapshot(cfg: ServiceBusConfig) -> dict[str, Any]:
 def _outbox_snapshot() -> dict[str, Any]:
     try:
         pending = list_pending_responses(limit=_OUTBOX_SAMPLE_LIMIT)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         return {
             "available": False,

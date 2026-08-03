@@ -10,7 +10,7 @@ Kubernetes calls, no ``requests`` import — `api.services.k8s.client` wires the
 check/record hooks into the session + credential choke points.
 Key entry points: ``cluster_breaker_check``, ``cluster_breaker_record_failure``,
 ``cluster_breaker_record_success``, ``reset_cluster_breaker``,
-``ClusterApiUnreachable``.
+``reset_cluster_breaker_after_fork``, ``ClusterApiUnreachable``.
 Risky contracts: ``cluster_breaker_check`` raises ``ClusterApiUnreachable`` (a
 builtin ``ConnectionError`` subclass) when the breaker is open — callers must
 keep catching it with their existing broad ``except Exception`` graceful
@@ -166,3 +166,10 @@ def reset_cluster_breaker() -> None:
 
     with _BREAKER_LOCK:
         _BREAKER.clear()
+
+
+def reset_cluster_breaker_after_fork() -> None:
+    """Drop inherited breaker state without acquiring a copied lock."""
+    global _BREAKER, _BREAKER_LOCK
+    _BREAKER = {}
+    _BREAKER_LOCK = threading.Lock()
