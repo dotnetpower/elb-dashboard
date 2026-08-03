@@ -319,14 +319,19 @@ export function ClusterCard({
     setActivePolling((prev) => (prev === hot ? prev : hot));
   }, [hasProvisioningCluster, actions.transitioning]);
 
-  // Gate "Add Cluster" behind the caller's write capability at the
-  // subscription scope: provisioning creates a new resource group + AKS
-  // cluster, so a Reader must see the button disabled with a role tooltip
-  // instead of clicking through to a silent 403 (mirrors the Start / Stop /
-  // Delete gating in PulseActions). usePermissions falls back to
-  // OPEN_PERMISSIONS while loading and stays open when `degraded` so a
-  // transient ARM hiccup never locks a privileged operator out.
-  const { permissions: addClusterPermissions } = usePermissions(subscriptionId);
+  // Gate "Add Cluster" at the workload resource-group scope where the AKS
+  // resource is created. Checking subscription scope produced a false denial
+  // for the normal least-privilege setup: the caller has Contributor on
+  // `rg-elb-cluster`, while the dashboard managed identity separately carries
+  // the narrow subscription-scope permission needed for AKS to create its
+  // `MC_*` node resource group. The provision modal's managed-identity
+  // preflight remains authoritative for that subscription-level dependency.
+  // usePermissions stays open while loading/degraded so a transient ARM read
+  // never locks a privileged operator out.
+  const { permissions: addClusterPermissions } = usePermissions(
+    subscriptionId,
+    resourceGroup,
+  );
   const addClusterWriteDenied =
     !addClusterPermissions.can_write && !addClusterPermissions.degraded;
 
