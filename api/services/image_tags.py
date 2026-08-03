@@ -62,12 +62,11 @@ from __future__ import annotations
 # (fixes #62). Bounded by ELB_OPENAPI_SUBMIT_MAX_RETRIES; an alive (cold-staging)
 # submit thread is never touched. See
 # docs/features_change/2026-06/2026-06-21-openapi-dead-thread-slot-reclaim.md.
-# NOTE: sibling master has natively absorbed every patch the dashboard
-# patch-openapi-build-context.py used to inject (app + Dockerfile + the eta.py
-# overlay is now a tracked sibling file), so 4.27 was built directly from the
-# local sibling context (``az acr build --registry <acr> --image elb-openapi:4.27
-# ~/dev/elastic-blast-azure/docker-openapi``) -- the patch script's patch_app
-# anchors no longer match and it is effectively retired for this image.
+# 4.28 rebuilds the same sibling app/runtime from verified sibling commit
+# 352a1f4. Live 4.27 generated an unsharded full-core_nt config even when the
+# Service Bus producer sent resource_profile=core_nt_safe. The verified 4.28
+# context contains both the app-side core_nt profile translation and the
+# Dockerfile runtime patch hook; ACR run de4n produced digest sha256:210d0103….
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
@@ -87,7 +86,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.27",
+    "elb-openapi": "4.28",
 }
 
 # GitHub source repo for ACR Build Tasks.
