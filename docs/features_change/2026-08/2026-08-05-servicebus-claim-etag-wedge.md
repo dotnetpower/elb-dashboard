@@ -81,11 +81,49 @@ Audited every other `MatchConditions.IfNotModified` call site — `auto_stop.py`
 `scripts/dev/openapi-overlays/eta.py` all already read the etag correctly.
 `service_bus_tracking.py` was the only affected module.
 
+## Hardening round (design critique follow-ups)
+
+Restoring the steal path also made three latent defects reachable for the first
+time, so they are fixed in the same change:
+
+* **A claim-store outage no longer burns the broker delivery budget.**
+  [api/tasks/servicebus/tasks.py](../../../api/tasks/servicebus/tasks.py) now
+  wraps `claim_bridge`: any unexpected exception defers with the new
+  `claim_unavailable` error code instead of escaping to `_safe_drain_handler`,
+  which converts it to `ABANDON`. An `ABANDON` per tick during a Table outage
+  consumes the queue's ~10 deliveries and dead-letters a perfectly valid
+  request; the expiry-preserving `RETRY` keeps the retry budget intact and still
+  never submits, so the single-writer guarantee holds. `claim_unavailable` is a
+  *new* `error_code` — it is deliberately distinct from `claim_contended` so an
+  outage is not misread as normal contention, and no existing consumer switches
+  on either value (both are log/telemetry-only dimensions).
+* **Celery soft time limits are never swallowed.** Both the new claim guard and
+  `_release_table`'s catch-all re-raise `SoftTimeLimitExceeded`, matching the
+  repo-wide contract already used by `service_bus_health.py`,
+  `aks/execution_admission.py`, `feature_events.py`, and `k8s/warmup_status.py`.
+* **A benign delete race stays quiet.** `_release_table`'s conditional delete now
+  swallows `ResourceNotFoundError` alongside `ResourceModifiedError`. Without
+  this, the freshly-raised `WARNING` catch-all would print a traceback every time
+  a concurrent release removed the row first — training operators to ignore the
+  very line that makes this class of bug findable.
+* **The stale-claim threshold has a real safety floor.** `_CLAIM_STALE_FLOOR_SECONDS`
+  is 120 s, above `external_blast._DEFAULT_TIMEOUT_SECONDS` (90 s), replacing the
+  previous 30 s floor. Stealing a reservation whose submit is still in flight
+  lets two workers submit the same correlation id — a duplicate BLAST run on the
+  cluster. That was unreachable while the steal always raised; it is reachable
+  now. The default stays 180 s and `SERVICEBUS_CLAIM_STALE_SECONDS` is not set on
+  any deployment, so no environment changes behaviour.
+
+Residual, accepted: a create whose server-side write succeeds but whose response
+fails leaves a phantom reservation. It is bounded — the next redelivery contends,
+and once the row passes the stale threshold the (now working) steal path takes it
+and submits. That bounded self-heal is exactly the property the etag fix restored.
+
 ## Validation
 
-* `uv run pytest -q api/tests/test_service_bus_tracking.py` — 18 passed.
-  Six new Table-backend tests drive `_claim_table` / `_release_table` through a
-  fake `TableClient` that reproduces the SDK's own precondition
+* `uv run pytest -q api/tests/test_service_bus_tracking.py` — 22 passed.
+  Table-backend tests drive `_claim_table` / `_release_table` through a fake
+  `TableClient` that reproduces the SDK's own precondition
   (`raise ValueError("IfNotModified must be specified with etag.")` on a falsy
   etag) against a real `TableEntity` whose etag lives in `metadata`, so the
   pre-fix code fails them:
@@ -95,8 +133,16 @@ Audited every other `MatchConditions.IfNotModified` call site — `auto_stop.py`
   * `test_release_table_deletes_unconfirmed_row_using_metadata_etag`
   * `test_release_table_never_deletes_a_confirmed_row`
   * `test_entity_etag_prefers_metadata_over_mapping_key`
-* `uv run pytest -q api/tests` — 4953 passed, 3 skipped.
-* `uv run ruff check api` — clean.
+  * `test_release_table_is_quiet_when_the_row_vanishes_mid_delete`
+  * `test_release_table_logs_unexpected_failures_at_warning`
+  * `test_release_table_propagates_celery_soft_time_limit`
+  * `test_stale_claim_threshold_outlives_a_slow_sibling_submit`
+* `uv run pytest -q api/tests/test_servicebus_tasks.py` — includes
+  `test_claim_store_outage_defers_instead_of_burning_delivery_count` and
+  `test_claim_soft_time_limit_is_never_converted_into_a_defer`.
+* `uv run pytest -q api/tests` — 4959 passed, 3 skipped.
+* `uv run ruff check api` — clean. `mypy` on the changed modules reports no new
+  findings (only pre-existing ones on untouched lines).
 
 ## Operational notes
 

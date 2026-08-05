@@ -1353,28 +1353,52 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         return MessageAction.COMPLETE
 
     # Atomic single-writer reservation (gate-on). The winner submits; a contended
-    # fresh reservation means another worker is mid-submit, so defer (abandon) and
-    # let that worker's single submit stand — this is what makes the parallel /
-    # multi-worker drain safe against duplicate BLAST runs. A stale reservation
-    # (a worker that crashed between claim and submit) is stolen inside
-    # claim_bridge, so a contended claim never wedges the correlation id forever.
-    if _ATOMIC_CLAIM and not claim_bridge(
-        correlation_id, request_id, request_fingerprint
-    ):
-        LOGGER.info(
-            "service bus claim contended corr=%s — deferring to the in-flight submit",
-            correlation_id,
-        )
-        action = _transient_action(msg)
-        _record_drain_request_event(
-            "deferred",
-            msg,
-            cfg,
-            payload=payload,
-            action=action,
-            error_code="claim_contended",
-        )
-        return action
+    # fresh reservation means another worker is mid-submit, so defer (expiry-
+    # preserving RETRY) and let that worker's single submit stand — this is what
+    # makes the parallel / multi-worker drain safe against duplicate BLAST runs.
+    # A stale reservation (a worker that crashed between claim and submit) is
+    # stolen inside claim_bridge, so a contended claim never wedges the
+    # correlation id forever.
+    if _ATOMIC_CLAIM:
+        claim_error = ""
+        try:
+            claim_won = claim_bridge(correlation_id, request_id, request_fingerprint)
+        except SoftTimeLimitExceeded:
+            # The drain pass ran out of its soft budget. Never convert that into
+            # a "defer" — the handler must stop immediately so the pass can wind
+            # down instead of doing more work past its limit.
+            raise
+        except Exception:
+            # The reservation store IS the single-writer guard: while it is
+            # unreachable we cannot tell whether another worker owns this id, so
+            # deferring is the only safe move. Letting the exception escape would
+            # reach ``_safe_drain_handler`` and ABANDON, burning one of the ~10
+            # broker deliveries per outage tick until a perfectly valid request
+            # dead-letters. Deferring instead keeps the expiry-preserving retry
+            # budget intact (see the RETRY contract in ``_transient_action``).
+            LOGGER.warning(
+                "service bus claim store unavailable corr=%s — deferring",
+                correlation_id,
+                exc_info=True,
+            )
+            claim_won = False
+            claim_error = "claim_unavailable"
+        if not claim_won:
+            if not claim_error:
+                LOGGER.info(
+                    "service bus claim contended corr=%s — deferring to the in-flight submit",
+                    correlation_id,
+                )
+            action = _transient_action(msg)
+            _record_drain_request_event(
+                "deferred",
+                msg,
+                cfg,
+                payload=payload,
+                action=action,
+                error_code=claim_error or "claim_contended",
+            )
+            return action
 
     # Close the final receive/build/claim → submit race. A lifecycle barrier can
     # be created after the handler's entry check; never let that message leave

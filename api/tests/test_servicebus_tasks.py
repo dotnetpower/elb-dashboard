@@ -25,6 +25,7 @@ from api.services.service_bus import MessageAction, ParsedMessage
 from api.services.service_bus_pref import ServiceBusConfig
 from api.services.service_bus_tracking import BridgeRecord
 from api.tasks.servicebus import tasks as sb_tasks
+from billiard.exceptions import SoftTimeLimitExceeded
 from fastapi import HTTPException
 
 _REAL_OPENAPI_READY_FOR_TRANSITION_POLL = sb_tasks._openapi_ready_for_transition_poll
@@ -2176,6 +2177,65 @@ def test_gate_on_unconfirmed_row_schedules_retry_after_claim_contention(
     monkeypatch.setattr(sb_tasks, "get_bridge", lambda c: BridgeRecord(correlation_id=c))
     monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": False)
     assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.RETRY
+
+
+def test_claim_store_outage_defers_instead_of_burning_delivery_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising claim store must defer, never escape to _safe_drain_handler.
+
+    An escaped exception is converted to ABANDON, which consumes one of the
+    queue's ~10 deliveries every tick and dead-letters a perfectly valid request
+    during a Table outage. Deferring keeps the expiry-preserving retry budget and
+    never submits, so the single-writer guarantee still holds.
+    """
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+
+    def _boom(_c: str, _r: str = "", _f: str = "") -> bool:
+        raise RuntimeError("table unreachable")
+
+    monkeypatch.setattr(sb_tasks, "claim_bridge", _boom)
+    submitted: list[dict] = []
+    monkeypatch.setattr(
+        external_blast, "submit_job", lambda p, **_k: submitted.append(p) or {"job_id": "x"}
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "record_service_bus_request_event",
+        lambda stage, **kw: events.append({"stage": stage, **kw}),
+    )
+
+    assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.RETRY
+    assert submitted == []
+    # A distinct error_code so a store outage is not misread as normal
+    # contention. Asserted on the deferred event specifically so an unrelated
+    # future event on this path cannot break the assertion.
+    deferred = [e for e in events if e["stage"] == "deferred"]
+    assert [e["error_code"] for e in deferred] == ["claim_unavailable"]
+
+
+def test_claim_soft_time_limit_is_never_converted_into_a_defer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Celery soft time limit must escape the claim guard, not become a defer.
+
+    Swallowing it would let the handler keep doing work (event recording,
+    settlement bookkeeping) after the drain pass budget is already spent.
+    """
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+
+    def _timeout(_c: str, _r: str = "", _f: str = "") -> bool:
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(sb_tasks, "claim_bridge", _timeout)
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        sb_tasks._drain_handler(_claim_msg(), cfg)
 
 
 # --------------------------------------------------------------------------- #

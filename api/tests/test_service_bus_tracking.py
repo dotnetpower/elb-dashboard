@@ -26,7 +26,9 @@ from typing import Any
 import pytest
 from api.services import service_bus_tracking as t
 from api.services.service_bus_tracking import BridgeRecord
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.data.tables import TableEntity
+from billiard.exceptions import SoftTimeLimitExceeded
 
 
 @pytest.fixture(autouse=True)
@@ -99,10 +101,11 @@ def test_claim_stale_seconds_env_invalid_falls_back(
 
 
 def test_claim_stale_seconds_env_is_floored(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Floored above the sibling submit timeout so a too-small override can never
+    # steal a still-submitting reservation out from under a live worker (which
+    # would produce a duplicate BLAST run).
     monkeypatch.setenv("SERVICEBUS_CLAIM_STALE_SECONDS", "5")
-    # Floored at 30s so a too-small override can never steal a still-submitting
-    # reservation out from under a live worker.
-    assert t._claim_stale_seconds_from_env() == 30
+    assert t._claim_stale_seconds_from_env() == t._CLAIM_STALE_FLOOR_SECONDS
 
 
 def test_bridge_fingerprint_round_trips_without_request_payload() -> None:
@@ -215,13 +218,14 @@ def _table_entity(
 class _FakeTable:
     """Minimal TableClient stand-in that enforces the SDK's etag precondition."""
 
-    def __init__(self, entity: TableEntity) -> None:
+    def __init__(self, entity: TableEntity, *, delete_error: Exception | None = None) -> None:
         self.entity = entity
+        self.delete_error = delete_error
         self.updates: list[str] = []
         self.deletes: list[str] = []
 
     def create_entity(self, entity: dict[str, Any]) -> None:
-        raise t.ResourceExistsError("row already exists")
+        raise ResourceExistsError("row already exists")
 
     def get_entity(self, *, partition_key: str, row_key: str) -> TableEntity:
         return self.entity
@@ -240,13 +244,18 @@ class _FakeTable:
     def delete_entity(
         self, *, partition_key: str, row_key: str, etag: Any, match_condition: Any
     ) -> None:
-        self.deletes.append(self._require_etag(etag))
+        self._require_etag(etag)
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deletes.append(str(etag))
 
 
 @pytest.fixture
 def _fake_table(monkeypatch: pytest.MonkeyPatch):
-    def _install(entity: TableEntity) -> _FakeTable:
-        table = _FakeTable(entity)
+    def _install(
+        entity: TableEntity, *, delete_error: Exception | None = None
+    ) -> _FakeTable:
+        table = _FakeTable(entity, delete_error=delete_error)
 
         @contextmanager
         def _client():
@@ -308,3 +317,68 @@ def test_entity_etag_prefers_metadata_over_mapping_key() -> None:
     # Plain-dict fallback stays supported for fixtures / non-SDK callers.
     assert t._entity_etag({"odata.etag": "W/\"x\""}) == "W/\"x\""
     assert t._entity_etag({}) == ""
+
+
+def test_release_table_is_quiet_when_the_row_vanishes_mid_delete(
+    _fake_table, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A concurrent release removing the row first is a benign race.
+
+    The conditional delete must swallow it exactly like ResourceModifiedError;
+    letting it fall through to the catch-all would print a traceback at WARNING
+    for a non-event and train operators to ignore that line.
+    """
+    table = _fake_table(_table_entity("corr-race"), delete_error=ResourceNotFoundError("gone"))
+
+    with caplog.at_level("WARNING", logger=t.LOGGER.name):
+        t._release_table("corr-race")
+
+    assert table.deletes == []
+    assert [r for r in caplog.records if r.name == t.LOGGER.name] == []
+
+
+def test_release_table_logs_unexpected_failures_at_warning(
+    _fake_table, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The catch-all stays best-effort but must never be silent again.
+
+    This path ran at DEBUG in production, which is exactly why the etag defect
+    survived undetected until requests started disappearing.
+    """
+    table = _fake_table(_table_entity("corr-boom"), delete_error=RuntimeError("table down"))
+
+    with caplog.at_level("WARNING", logger=t.LOGGER.name):
+        t._release_table("corr-boom")
+
+    assert table.deletes == []
+    assert any("release_bridge (table) failed" in r.message for r in caplog.records)
+
+
+def test_stale_claim_threshold_outlives_a_slow_sibling_submit() -> None:
+    """The steal must never fire while the holder's submit can still be alive.
+
+    Stealing a live reservation lets two workers submit the SAME correlation id,
+    producing a duplicate BLAST run. Before the etag fix the steal path always
+    raised, so this margin was never actually exercised in production — it is now,
+    which is why it gets a regression guard instead of only a code comment. The
+    guard pins the FLOOR (not just the default) because the threshold is operator
+    tunable via SERVICEBUS_CLAIM_STALE_SECONDS.
+    """
+    from api.services import external_blast
+
+    assert t._CLAIM_STALE_FLOOR_SECONDS > external_blast._DEFAULT_TIMEOUT_SECONDS
+    assert t._claim_stale_seconds_from_env() >= t._CLAIM_STALE_FLOOR_SECONDS
+
+
+def test_release_table_propagates_celery_soft_time_limit(_fake_table) -> None:
+    """The best-effort catch-all must not swallow the task's soft time limit.
+
+    Repo-wide contract: SoftTimeLimitExceeded means the task budget is spent, so
+    swallowing it here would let the drain keep working past its limit.
+    """
+    _fake_table(
+        _table_entity("corr-soft"), delete_error=SoftTimeLimitExceeded()
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        t._release_table("corr-soft")

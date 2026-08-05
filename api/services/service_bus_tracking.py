@@ -53,6 +53,7 @@ from azure.core.exceptions import (
     ResourceNotFoundError,
 )
 from azure.data.tables import TableClient, TableServiceClient, UpdateMode
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.services import get_credential
 
@@ -80,11 +81,23 @@ _BRIDGE_TABLE_POOL_LOCK = threading.Lock()
 # would make every redelivery ABANDON in a loop until the message dead-letters).
 # Must comfortably exceed the sibling submit timeout so a slow-but-alive submit
 # is never stolen out from under itself.
+#
+# ``_CLAIM_STALE_FLOOR_SECONDS`` is that safety margin made non-negotiable:
+# ``external_blast._DEFAULT_TIMEOUT_SECONDS`` is 90 s, and the winner also runs
+# the pre-submit execution admission before it can confirm the row. Stealing
+# inside that window lets TWO workers submit the same correlation id — a
+# duplicate BLAST run on the cluster. The floor is deliberately above the submit
+# timeout rather than merely non-zero.
+_CLAIM_STALE_FLOOR_SECONDS = 120
+
+
 def _claim_stale_seconds_from_env() -> int:
-    """Resolve the stale-claim threshold from env, floored at 30s, fail-safe.
+    """Resolve the stale-claim threshold from env, floored, fail-safe.
 
     A non-numeric override must never crash module import (which would take the
     whole worker down on startup); it logs and falls back to the 180s default.
+    Values below ``_CLAIM_STALE_FLOOR_SECONDS`` are raised to the floor so an
+    over-eager override cannot steal a still-submitting reservation.
     """
     raw = os.environ.get("SERVICEBUS_CLAIM_STALE_SECONDS", "180")
     try:
@@ -94,7 +107,14 @@ def _claim_stale_seconds_from_env() -> int:
             "invalid SERVICEBUS_CLAIM_STALE_SECONDS=%r; defaulting to 180", raw
         )
         value = 180
-    return max(30, value)
+    if value < _CLAIM_STALE_FLOOR_SECONDS:
+        LOGGER.warning(
+            "SERVICEBUS_CLAIM_STALE_SECONDS=%r is below the %ds safety floor "
+            "(sibling submit timeout); using the floor",
+            raw,
+            _CLAIM_STALE_FLOOR_SECONDS,
+        )
+    return max(_CLAIM_STALE_FLOOR_SECONDS, value)
 
 
 _CLAIM_STALE_SECONDS = _claim_stale_seconds_from_env()
@@ -554,8 +574,16 @@ def _release_table(correlation_id: str) -> None:
                     etag=etag,
                     match_condition=MatchConditions.IfNotModified,
                 )
-            except ResourceModifiedError:
+            except (ResourceModifiedError, ResourceNotFoundError):
+                # Modified → the winner confirmed it in the gap (leave it).
+                # NotFound → a concurrent release already removed it. Both are
+                # benign races and must NOT reach the WARNING catch-all below,
+                # or every one of them prints a traceback operators would chase.
                 return
+    except SoftTimeLimitExceeded:
+        # Repo-wide contract: a Celery soft time limit is never swallowed by a
+        # best-effort catch-all, or the task keeps working past its budget.
+        raise
     except Exception:
         # Best-effort by contract (a failed release only defers the retry), but
         # NOT silent: a permanently failing release wedges the correlation id
