@@ -163,6 +163,22 @@ PY
 
 ts "updated $PKG_JSON and $PYPROJECT"
 
+# 9b. Keep uv.lock in sync. The lock records the project's own version, so a
+#     bump leaves it stale and the very next `uv run` rewrites it — the release
+#     commit then lands with a dirty tree that looks like an unrelated change.
+#     `uv lock` here is metadata-only (no dependency resolution changes) and is
+#     committed together with pyproject.toml, per the charter's "commit
+#     pyproject.toml + uv.lock together" rule.
+if command -v uv >/dev/null 2>&1; then
+  if uv lock --quiet 2>/dev/null || uv lock 2>/dev/null; then
+    ts "refreshed uv.lock"
+  else
+    ts "WARNING: uv lock failed; commit uv.lock manually after the bump"
+  fi
+else
+  ts "WARNING: uv not found; uv.lock still records the previous version"
+fi
+
 # 10. Generate docs/releases/vNEW.md via the shared renderer (grouping +
 #     SHA links + mismatch warnings). See scripts/dev/render_release_notes.py.
 RELEASE_NOTES="docs/releases/v${NEW}.md"
@@ -241,7 +257,7 @@ PY
 fi
 
 # 12. Commit + tag.
-git add "$PKG_JSON" "$PYPROJECT" "$RELEASE_NOTES" "docs/releases/index.md" "docs/releases/unreleased.md" "$MKDOCS" 2>/dev/null || true
+git add "$PKG_JSON" "$PYPROJECT" "uv.lock" "$RELEASE_NOTES" "docs/releases/index.md" "docs/releases/unreleased.md" "$MKDOCS" 2>/dev/null || true
 git commit -m "chore(release): v$NEW" >/dev/null
 git tag -a "v$NEW" -m "release v$NEW"
 ts "committed and tagged v$NEW (release notes: $RELEASE_NOTES)"
