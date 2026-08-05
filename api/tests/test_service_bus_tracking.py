@@ -1,27 +1,32 @@
-"""Tests for the Service Bus bridge atomic claim / release (file backend).
+"""Tests for the Service Bus bridge atomic claim / release (file + Table backends).
 
 Responsibility: Verify the single-writer reservation contract that makes a
     parallel / multi-worker drain safe — first claim wins, a fresh reservation
     blocks a second claim, a confirmed row is never re-claimable, release rolls
     an unconfirmed reservation back, release never deletes a confirmed row, and
     a stale unconfirmed reservation can be stolen so a crashed worker cannot
-    wedge a correlation id forever.
+    wedge a correlation id forever. Also pins the Table-backend etag contract
+    for the conditional steal / release writes.
 Edit boundaries: Exercises the JSON file backend (no live Azure Table); forces
     it by unsetting AZURE_TABLE_ENDPOINT and pointing ELB_LOCAL_STATE_DIR at a
-    tmp dir.
+    tmp dir. The Table-backend cases use a fake TableClient plus a real
+    ``TableEntity`` so the ``metadata["etag"]`` semantics stay faithful.
 Key entry points: the ``test_*`` functions.
 Risky contracts: at most one caller ever wins a given correlation id while a
-    fresh reservation is held; confirmed rows are immutable to claim/release.
+    fresh reservation is held; confirmed rows are immutable to claim/release;
+    conditional Table writes must carry a non-empty etag.
 Validation: ``uv run pytest -q api/tests/test_service_bus_tracking.py``.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+from typing import Any
 
 import pytest
 from api.services import service_bus_tracking as t
 from api.services.service_bus_tracking import BridgeRecord
+from azure.data.tables import TableEntity
 
 
 @pytest.fixture(autouse=True)
@@ -172,3 +177,134 @@ def test_table_page_does_not_issue_zero_size_wrap_query(
     assert cursor
     assert len(queries) == 1
     assert queries[0][1] == 2
+
+
+# --------------------------------------------------------------------------- #
+# Table backend: conditional-write etag contract
+#
+# ``azure-data-tables`` moves ``odata.etag`` into ``TableEntity.metadata`` during
+# deserialization, so reading it off the mapping yields ``None`` and the SDK then
+# raises ``ValueError: IfNotModified must be specified with etag.``. In
+# production that escaped ``claim_bridge`` (message abandoned) and silently
+# no-op'd ``release_bridge``, wedging the correlation id so its request was never
+# submitted and no completion event was ever published. These tests pin the fix.
+# --------------------------------------------------------------------------- #
+
+_ETAG = "W/\"datetime'2026-08-05T06%3A15%3A31.0Z'\""
+
+
+def _table_entity(
+    correlation_id: str,
+    *,
+    etag: str | None = _ETAG,
+    openapi_job_id: str = "",
+) -> TableEntity:
+    """A deserialized row whose etag lives in ``metadata``, as the SDK returns it."""
+    record = BridgeRecord(
+        correlation_id=correlation_id,
+        openapi_job_id=openapi_job_id,
+        # Far in the past → stale under any allowed threshold (floored at 30s).
+        created_at="2020-01-01T00:00:00+00:00",
+        claimed_at="2020-01-01T00:00:00+00:00",
+    )
+    entity = TableEntity(t._entity(record))
+    entity._metadata = {"etag": etag, "timestamp": None}
+    return entity
+
+
+class _FakeTable:
+    """Minimal TableClient stand-in that enforces the SDK's etag precondition."""
+
+    def __init__(self, entity: TableEntity) -> None:
+        self.entity = entity
+        self.updates: list[str] = []
+        self.deletes: list[str] = []
+
+    def create_entity(self, entity: dict[str, Any]) -> None:
+        raise t.ResourceExistsError("row already exists")
+
+    def get_entity(self, *, partition_key: str, row_key: str) -> TableEntity:
+        return self.entity
+
+    def _require_etag(self, etag: Any) -> str:
+        # Mirrors azure.data.tables._serialize._get_match_condition.
+        if not etag:
+            raise ValueError("IfNotModified must be specified with etag.")
+        return str(etag)
+
+    def update_entity(
+        self, entity: dict[str, Any], *, mode: Any, etag: Any, match_condition: Any
+    ) -> None:
+        self.updates.append(self._require_etag(etag))
+
+    def delete_entity(
+        self, *, partition_key: str, row_key: str, etag: Any, match_condition: Any
+    ) -> None:
+        self.deletes.append(self._require_etag(etag))
+
+
+@pytest.fixture
+def _fake_table(monkeypatch: pytest.MonkeyPatch):
+    def _install(entity: TableEntity) -> _FakeTable:
+        table = _FakeTable(entity)
+
+        @contextmanager
+        def _client():
+            yield table
+
+        monkeypatch.setattr(t, "_ensure_table", lambda: None)
+        monkeypatch.setattr(t, "_table_client", _client)
+        return table
+
+    return _install
+
+
+def test_claim_table_steals_stale_reservation_using_metadata_etag(_fake_table) -> None:
+    table = _fake_table(_table_entity("corr-steal"))
+
+    # Pre-fix this raised ValueError out of claim_bridge, the drain handler
+    # abandoned the message, and the correlation id stayed wedged forever.
+    assert t._claim_table("corr-steal", "req-1", "fingerprint-1") is True
+    assert table.updates == [_ETAG]
+
+
+def test_claim_table_refuses_steal_when_etag_is_unavailable(_fake_table) -> None:
+    table = _fake_table(_table_entity("corr-no-etag", etag=None))
+
+    # No etag → the steal cannot be guarded by optimistic concurrency. Refuse
+    # (defer this delivery) rather than risk two workers both submitting.
+    assert t._claim_table("corr-no-etag", "req-1", "fingerprint-1") is False
+    assert table.updates == []
+
+
+def test_claim_table_does_not_steal_a_confirmed_row(_fake_table) -> None:
+    table = _fake_table(_table_entity("corr-confirmed", openapi_job_id="job-1"))
+
+    assert t._claim_table("corr-confirmed", "req-1", "fingerprint-1") is False
+    assert table.updates == []
+
+
+def test_release_table_deletes_unconfirmed_row_using_metadata_etag(_fake_table) -> None:
+    table = _fake_table(_table_entity("corr-release"))
+
+    # Pre-fix the conditional delete raised ValueError, was swallowed at DEBUG,
+    # and left the phantom reservation behind.
+    t._release_table("corr-release")
+    assert table.deletes == [_ETAG]
+
+
+def test_release_table_never_deletes_a_confirmed_row(_fake_table) -> None:
+    table = _fake_table(_table_entity("corr-live", openapi_job_id="job-live"))
+
+    t._release_table("corr-live")
+    assert table.deletes == []
+
+
+def test_entity_etag_prefers_metadata_over_mapping_key() -> None:
+    entity = _table_entity("corr-etag")
+    assert t._entity_etag(entity) == _ETAG
+    # A deserialized entity never carries the odata key in the mapping itself.
+    assert "odata.etag" not in dict(entity)
+    # Plain-dict fallback stays supported for fixtures / non-SDK callers.
+    assert t._entity_etag({"odata.etag": "W/\"x\""}) == "W/\"x\""
+    assert t._entity_etag({}) == ""

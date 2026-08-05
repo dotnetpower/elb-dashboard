@@ -24,6 +24,11 @@ Risky contracts: ``last_status`` is the published-transition marker — the
     bounded by ``limit`` so the publisher tick stays bounded without starving
     rows beyond the first page. A Celery prefork child must drop inherited
     Table clients and replace copied locks without closing parent transports.
+    Conditional Table writes MUST take their etag from ``_entity_etag`` —
+    ``odata.etag`` is not a key of a deserialized ``TableEntity``, and passing
+    ``None`` to ``MatchConditions.IfNotModified`` raises ``ValueError`` out of
+    ``claim_bridge`` / silently skips ``release_bridge``, wedging the
+    correlation id.
 Validation: ``uv run pytest -q api/tests/test_service_bus_tracking.py``.
 """
 
@@ -305,6 +310,29 @@ def _record_from_entity(entity: dict[str, Any]) -> BridgeRecord | None:
     return BridgeRecord.from_dict(payload)
 
 
+def _entity_etag(entity: Any) -> str:
+    """Return the optimistic-concurrency etag of a fetched Table entity.
+
+    ``azure-data-tables`` moves every ``odata.*`` field of the wire payload into
+    ``TableEntity.metadata`` during deserialization, so the etag is NOT a key of
+    the entity mapping — ``dict(entity).get("odata.etag")`` is always ``None``,
+    and passing that to ``MatchConditions.IfNotModified`` raises
+    ``ValueError: IfNotModified must be specified with etag.``. Read
+    ``metadata["etag"]`` first and keep the mapping key only as a fallback for
+    plain-dict callers/fixtures. Returns ``""`` when no etag is available so the
+    caller can refuse the conditional write instead of raising.
+    """
+    metadata = getattr(entity, "metadata", None)
+    if isinstance(metadata, dict):
+        etag = str(metadata.get("etag") or "")
+        if etag:
+            return etag
+    try:
+        return str(entity.get("odata.etag") or "")
+    except AttributeError:  # pragma: no cover - defensive
+        return ""
+
+
 def _table_client() -> TableClient:
     global _BRIDGE_TABLE_POOLED
     pool = _BRIDGE_TABLE_POOLED
@@ -436,10 +464,10 @@ def _claim_table(
         # reservation; a confirmed row or a fresh reservation means another
         # worker owns this correlation id.
         try:
-            existing_ent = dict(
-                table.get_entity(
-                    partition_key=_PARTITION_KEY, row_key=_row_key(correlation_id)
-                )
+            # Keep the TableEntity itself (do NOT dict() it here): the etag
+            # lives in ``.metadata``, not in the mapping keys.
+            existing_ent = table.get_entity(
+                partition_key=_PARTITION_KEY, row_key=_row_key(correlation_id)
             )
         except ResourceNotFoundError:
             # Released between our create and get — race to re-create once.
@@ -448,8 +476,19 @@ def _claim_table(
                 return True
             except ResourceExistsError:
                 return False
-        rec = _record_from_entity(existing_ent)
+        rec = _record_from_entity(dict(existing_ent))
         if rec is None or not _claim_is_stale(rec):
+            return False
+        existing_etag = _entity_etag(existing_ent)
+        if not existing_etag:
+            # Without an etag the steal cannot be guarded by optimistic
+            # concurrency, and two workers could both win it. Refuse instead —
+            # losing a claim only defers this delivery, whereas an unguarded
+            # steal risks a duplicate BLAST submit.
+            LOGGER.warning(
+                "service bus claim steal skipped: no etag on existing row corr=%s",
+                correlation_id,
+            )
             return False
         # Steal via optimistic concurrency: succeed only if the row has not
         # changed since we read it, so two workers racing to steal the same
@@ -466,7 +505,7 @@ def _claim_table(
             table.update_entity(
                 _entity(steal),
                 mode=UpdateMode.REPLACE,
-                etag=existing_ent.get("odata.etag"),
+                etag=existing_etag,
                 match_condition=MatchConditions.IfNotModified,
             )
             # A steal means a prior worker reserved this id and never confirmed
@@ -487,16 +526,22 @@ def _release_table(correlation_id: str) -> None:
         _ensure_table()
         with _table_client() as table:
             try:
-                ent = dict(
-                    table.get_entity(
-                        partition_key=_PARTITION_KEY, row_key=_row_key(correlation_id)
-                    )
+                # Keep the TableEntity: the etag lives in ``.metadata``.
+                ent = table.get_entity(
+                    partition_key=_PARTITION_KEY, row_key=_row_key(correlation_id)
                 )
             except ResourceNotFoundError:
                 return
-            rec = _record_from_entity(ent)
+            rec = _record_from_entity(dict(ent))
             if rec is not None and rec.openapi_job_id:
                 return  # confirmed — never delete a live job's row
+            etag = _entity_etag(ent)
+            if not etag:
+                LOGGER.warning(
+                    "service bus release skipped: no etag on row corr=%s",
+                    correlation_id,
+                )
+                return
             try:
                 # Conditional delete: only remove the row if it has NOT changed
                 # since we read it. If the winner confirmed it (filled
@@ -506,14 +551,17 @@ def _release_table(correlation_id: str) -> None:
                 table.delete_entity(
                     partition_key=_PARTITION_KEY,
                     row_key=_row_key(correlation_id),
-                    etag=ent.get("odata.etag"),
+                    etag=etag,
                     match_condition=MatchConditions.IfNotModified,
                 )
             except ResourceModifiedError:
                 return
     except Exception:
-        LOGGER.debug(
-            "release_bridge (table) best-effort skip corr=%s", correlation_id, exc_info=True
+        # Best-effort by contract (a failed release only defers the retry), but
+        # NOT silent: a permanently failing release wedges the correlation id
+        # until the stale-claim threshold, so it must be visible in the logs.
+        LOGGER.warning(
+            "release_bridge (table) failed corr=%s", correlation_id, exc_info=True
         )
 
 
