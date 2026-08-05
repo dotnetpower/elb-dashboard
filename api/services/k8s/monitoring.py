@@ -278,7 +278,13 @@ def k8s_get_pods(
     by namespace client-side. We mirror that here by NOT applying a phase
     field selector, so completed BLAST jobs and system pods are visible too.
     `pod_ip` / `node_ip` are surfaced so the UI can show where a pod landed.
+
+    Because Completed pods are included on purpose, this list grows with every
+    BLAST run. It is fetched through ``list_k8s_items`` so the response is paged
+    and capped — an unpaged cluster-wide fetch made api memory O(cluster size)
+    and OOM-killed the sidecar (exit 137).
     """
+    from api.services.k8s.paged_list import list_k8s_items
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
@@ -287,10 +293,8 @@ def k8s_get_pods(
             if not namespace
             else f"{server}/api/v1/namespaces/{namespace}/pods"
         )
-        response = session.get(url, timeout=10)
-        response.raise_for_status()
         pods: list[dict[str, Any]] = []
-        for item in response.json().get("items", []):
+        for item in list_k8s_items(session, url, label="pods"):
             meta = item.get("metadata", {})
             spec = item.get("spec", {})
             status = item.get("status", {})
@@ -334,8 +338,10 @@ def k8s_get_deployments(
     ``available`` (availableReplicas) so the operator can spot a Deployment
     that is scaled but not actually serving. No phase/label field selector —
     system Deployments (CoreDNS, metrics-server, …) are intentionally
-    included to match the portal.
+    included to match the portal. Paged + capped via ``list_k8s_items`` so the
+    per-request peak does not scale with the cluster.
     """
+    from api.services.k8s.paged_list import list_k8s_items
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
@@ -344,10 +350,8 @@ def k8s_get_deployments(
             if not namespace
             else f"{server}/apis/apps/v1/namespaces/{namespace}/deployments"
         )
-        response = session.get(url, timeout=10)
-        response.raise_for_status()
         deployments: list[dict[str, Any]] = []
-        for item in response.json().get("items", []):
+        for item in list_k8s_items(session, url, label="deployments"):
             meta = item.get("metadata", {})
             spec = item.get("spec", {})
             status = item.get("status", {})
@@ -383,7 +387,11 @@ def k8s_get_jobs(
     (``Complete`` / ``Failed`` / ``Running`` / ``Pending``) and raw
     ``start_time`` / ``completion_time`` so the UI can render a duration
     without a second round trip.
+
+    Finished Jobs accumulate for the life of the cluster, so this is paged +
+    capped via ``list_k8s_items`` for the same reason as the pod list.
     """
+    from api.services.k8s.paged_list import list_k8s_items
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
@@ -392,10 +400,8 @@ def k8s_get_jobs(
             if not namespace
             else f"{server}/apis/batch/v1/namespaces/{namespace}/jobs"
         )
-        response = session.get(url, timeout=10)
-        response.raise_for_status()
         jobs: list[dict[str, Any]] = []
-        for item in response.json().get("items", []):
+        for item in list_k8s_items(session, url, label="jobs"):
             meta = item.get("metadata", {})
             spec = item.get("spec", {})
             status = item.get("status", {})

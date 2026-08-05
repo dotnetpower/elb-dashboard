@@ -83,15 +83,35 @@ def test_k8s_get_pods_returns_all_phases_with_ips() -> None:
 
 
 def test_k8s_get_pods_no_phase_field_selector() -> None:
-    """Azure-portal parity: every phase is returned, so no field selector."""
+    """Azure-portal parity: every phase is returned, so no field selector.
+
+    The assertion is on ``fieldSelector`` specifically, not on ``params`` being
+    absent: the list is now paged, so a ``limit`` param is expected and required.
+    """
 
     session, patcher = _patch_session([])
     with patcher:
         m.k8s_get_pods(MagicMock(), "sub", "rg", "aks")
     args, kwargs = session.get.call_args
     assert args[0] == "https://aks/api/v1/pods"
+    params = kwargs.get("params") or {}
     # No fieldSelector — Succeeded/Completed pods must be included.
-    assert "params" not in kwargs or kwargs.get("params") is None
+    assert "fieldSelector" not in params
+
+
+def test_k8s_get_pods_is_paged() -> None:
+    """Memory-safety contract: never issue an unpaged cluster-wide pod LIST.
+
+    Including Completed pods (above) means this list grows with every BLAST run;
+    without ``limit`` the api sidecar's peak was O(cluster size) and it was
+    OOM-killed with exit 137.
+    """
+
+    session, patcher = _patch_session([])
+    with patcher:
+        m.k8s_get_pods(MagicMock(), "sub", "rg", "aks")
+    params = session.get.call_args.kwargs.get("params") or {}
+    assert int(params["limit"]) > 0
 
 
 def test_k8s_get_pods_namespace_scopes_url() -> None:
