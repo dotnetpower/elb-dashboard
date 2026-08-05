@@ -144,6 +144,37 @@ and submits. That bounded self-heal is exactly the property the etag fix restore
 * `uv run ruff check api` — clean. `mypy` on the changed modules reports no new
   findings (only pre-existing ones on untouched lines).
 
+### Live end-to-end run on the deployed revision
+
+Deployed as `elb-api:20260805121915`
+(`sha256:eccadeb…`) onto `api` / `worker` / `beat`, revision
+`ca-elb-dashboard--0000265` (RunningAtMaxScale, Healthy). One real request was
+sent from the Service Bus Playground with the AKS cluster **stopped** — the
+condition the wedge needed:
+
+| Time (UTC) | Event |
+| --- | --- |
+| 12:33:49 | `enqueued` — `corr=42b3016d75a740d99f67cc9b501854ec`, `request_id=verify-etagfix-20260805`, `db=core_nt` (sharded), `blastn`, multi-token `outfmt 7`, `resource_profile=core_nt_safe` |
+| 12:33:5x | queue-arrival auto-start fired; `elb-cluster-01` → `Starting` |
+| 12:41:32 | `received` (first delivery, `delivery_count=0`) |
+| 12:41:44 | `row_created` → `routed` → `submitted`, `job_id=68b0010d2e26` |
+| 12:41:58 | `running` transition published (`publish_transitions` published=2, errors=0) |
+| 12:56:19 | `succeeded` — terminal completion event published (`published=1 finished=1 errors=0`) |
+
+End state: request queue `active=0 / dlq=0`, completion subscription `default`
+`active=0 / dlq=0`, job `completed`.
+
+Error signals across the whole window: `IfNotModified` **0**, `claim contended`
+**0**, `claim_unavailable` **0**, `release_bridge (table) failed` **0**
+(previously ~20 `IfNotModified` per day).
+
+Coverage caveat, stated plainly: because queue-arrival auto-start defers the
+whole drain tick until the sibling plane is ready, this run never took a
+post-claim deferral, so the repaired `_release_table` / steal branches were not
+themselves executed live. They are covered by the unit tests above, and the
+deployed image digest matches the tested code. The standing production signal to
+watch is that `IfNotModified` occurrences stay at zero.
+
 ## Operational notes
 
 * The 9 already-lost requests do **not** self-heal: their messages left the
