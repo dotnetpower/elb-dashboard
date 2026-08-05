@@ -2814,6 +2814,69 @@ def test_sync_external_jobs_updates_drifted_status(monkeypatch):
     ]
 
 
+def test_sync_external_jobs_heals_placeholder_query_label(monkeypatch):
+    """A row whose ``query_label`` was persisted as the generic "query.fa"
+    placeholder MUST heal to the real defline once one becomes known. The
+    placeholder is truthy, so a "fill only when empty" guard left the Recent
+    searches list stuck on "query.fa" forever."""
+    from api.routes import _blast_shared as shared
+
+    updated_calls: list[dict[str, object]] = []
+
+    class PlaceholderRow:
+        job_id = "abc123"
+        status = "running"
+        phase = "running"
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "query.fa"
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"abc123": PlaceholderRow()}
+
+        def update(self, job_id, **kwargs):
+            updated_calls.append({"job_id": job_id, **kwargs})
+
+        def create(self, state):  # pragma: no cover - defensive
+            raise AssertionError("must not create an existing row")
+
+    fake_repo = FakeRepo()
+
+    class FakeRepoFactory:
+        def __call__(self):
+            return fake_repo
+
+    class FakeJobState:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", FakeRepoFactory())
+    monkeypatch.setattr(state_repo, "JobState", FakeJobState)
+
+    result = shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "abc123",
+                "status": "running",
+                "created_at": "2026-06-14T02:55:00Z",
+                "program": "blastn",
+                "db": "core_nt",
+                "job_title": "blastn - core_nt",
+                "query_file": "warmup",
+            }
+        ],
+        caller_oid="00000000-0000-0000-0000-000000000000",
+    )
+
+    assert result == (0, 1, set())
+    assert len(updated_calls) == 1
+    assert updated_calls[0] == {"job_id": "abc123", "query_label": "warmup"}
+
+
 def test_sync_external_jobs_heals_degenerate_identity_columns(monkeypatch):
     """A row first synced from a transient /v1/jobs row that lacked program/db
     was persisted with the canonical defaults (program/job_title="blast",

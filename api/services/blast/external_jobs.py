@@ -47,7 +47,10 @@ from api.services.blast.external_job_projection import (
 from api.services.blast.external_job_projection import (
     _short_external_db_name as _short_external_db_name,
 )
-from api.services.blast.external_query_labels import apply_remembered_query_label
+from api.services.blast.external_query_labels import (
+    apply_remembered_query_label,
+    is_generic_query_label,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -620,7 +623,16 @@ def _sync_external_jobs_to_table(
                     and (cur_title in {"", "blast"} or cur_title == job_id)
                 ):
                     meta_backfill["job_title"] = fresh_title
-                if fresh_query and fresh_query not in {"", "query.fa"} and not cur_query:
+                # ``cur_query`` counts as absent when it is the generic
+                # "query.fa" placeholder the projection stamps on a row with no
+                # known query identity — otherwise that placeholder, once
+                # persisted, permanently blocks the real defline from healing
+                # onto the row.
+                if (
+                    fresh_query
+                    and not is_generic_query_label(fresh_query)
+                    and is_generic_query_label(cur_query)
+                ):
                     meta_backfill["query_label"] = fresh_query
                 # Backfill the date-tiered results prefix onto a row that was
                 # first created without one (e.g. a poll-discovered row that

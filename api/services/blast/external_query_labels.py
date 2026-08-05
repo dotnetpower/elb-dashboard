@@ -12,7 +12,8 @@ Edit boundaries: Pure derivation + best-effort Redis get/set only. No FastAPI,
     ``redis.Redis.from_url``). Every Redis call is best-effort and swallows
     failures — a Redis outage must never break submit or list.
 Key entry points: ``derive_inline_query_label``, ``remember_query_label``,
-    ``recall_query_label``, ``apply_remembered_query_label``.
+    ``recall_query_label``, ``apply_remembered_query_label``,
+    ``is_generic_query_label``.
 Risky contracts: This only ENRICHES a display label; it must never decide which
     rows appear or mutate scope/owner. ``apply_remembered_query_label`` returns
     a row unchanged when it already carries a query identity, so a real
@@ -37,6 +38,21 @@ _TTL_SECONDS = 7 * 24 * 3600
 # or the jobs-list payload. ``canonical_job_metadata`` caps query_label to 240;
 # stay well under that.
 _MAX_LABEL_CHARS = 120
+# Display placeholders the projection substitutes when NO query identity is
+# known (``external_job_projection`` stamps ``"query.fa"``; the run-detail FASTA
+# preview labels the blob ``input.fa``). They are filenames, not deflines, so
+# every surface asking "does this row already carry a query identity?" must
+# treat them as absent — otherwise a placeholder that got persisted onto the
+# Table row permanently blocks the durable Storage-backed recovery, and the
+# header keeps claiming ``query.fa`` while the FASTA preview right below it
+# shows the real defline.
+GENERIC_QUERY_LABELS = frozenset({"query.fa", "input.fa"})
+
+
+def is_generic_query_label(value: Any) -> bool:
+    """Return True when ``value`` is empty or one of the generic placeholders."""
+    text = str(value or "").strip().lower()
+    return not text or text in GENERIC_QUERY_LABELS
 
 
 def derive_inline_query_label(query_fasta: str) -> str:

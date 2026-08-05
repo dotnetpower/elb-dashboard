@@ -98,19 +98,11 @@ def _queries_blob_path(value: Any) -> str:
     return raw
 
 
-def _job_query_blob_path(job_id: str, caller: CallerIdentity) -> str:
-    try:
-        from api.services.state_repo import JobStateRepository
+def _query_blob_path_from_payload(payload: dict[str, Any], job_id: str) -> str:
+    """Resolve the ``queries`` container blob path for a job payload.
 
-        state = JobStateRepository().get(job_id)
-    except Exception as exc:
-        LOGGER.info("query preview state lookup failed job_id=%s: %s", job_id, type(exc).__name__)
-        return ""
-    if state is None:
-        return ""
-    if getattr(state, "owner_oid", None) and state.owner_oid != caller.object_id:
-        raise HTTPException(403, "not owner")
-    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    Ownership-free: the caller is responsible for having authorised the read.
+    """
     blob_path = _queries_blob_path(_payload_value(payload, "query_file", "query_blob_url"))
     if not blob_path:
         # External (OpenAPI / Service Bus) jobs carry no top-level query field
@@ -133,24 +125,42 @@ def _job_query_blob_path(job_id: str, caller: CallerIdentity) -> str:
     return blob_path
 
 
+def _job_query_blob_path(job_id: str, caller: CallerIdentity) -> str:
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        state = JobStateRepository().get(job_id)
+    except Exception as exc:
+        LOGGER.info("query preview state lookup failed job_id=%s: %s", job_id, type(exc).__name__)
+        return ""
+    if state is None:
+        return ""
+    if getattr(state, "owner_oid", None) and state.owner_oid != caller.object_id:
+        raise HTTPException(403, "not owner")
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    return _query_blob_path_from_payload(payload, job_id)
+
+
 def derive_external_query_label(job_id: str, caller: CallerIdentity) -> str:
-    """Durable Query ID fallback for an external job with no remembered label.
+    """Durable Query ID fallback for an external job with no real query label.
 
     The inline-FASTA defline label is remembered in OPS Redis (ephemeral, wiped
     on every Container App revision restart), so an external job viewed after a
-    restart shows ``Query ID: —``. This reads the first FASTA defline from the
-    DURABLE query blob (``queries/<openapi_id>.fa`` — the same blob the
-    prepare-step preview reads) and derives a short label, so the header
-    recovers the identity from Storage instead of the lost cache.
+    restart shows ``Query ID: —`` or the generic ``query.fa`` placeholder. This
+    reads the first FASTA defline from the DURABLE query blob
+    (``queries/<openapi_id>.fa`` — the same blob the prepare-step preview reads)
+    and derives a short label, so the header recovers the identity from Storage
+    instead of the lost cache and stops contradicting the preview below it.
 
     Detail-view only (one small Storage read, capped to 512 bytes) — never use
     on the jobs LIST path (it would be one read per row). Returns ``""`` for a
-    non-external job, an unresolvable/unreadable blob, or a header-less FASTA;
-    never raises except the ownership 403 (mirrors ``_job_query_blob_path``).
+    non-external job, an unresolvable/unreadable blob, or a header-less FASTA.
+
+    Authorisation: re-asserted through :func:`_assert_job_owner`, which honours
+    the shared-visibility flag. Deliberately NOT the stricter inline check in
+    ``_job_query_blob_path`` — that one ignores the flag and would turn a
+    legitimately shared job detail into a 403 on this display-only path.
     """
-    blob_path = _job_query_blob_path(job_id, caller)
-    if not blob_path:
-        return ""
     try:
         from api.services.state_repo import JobStateRepository
 
@@ -159,6 +169,7 @@ def derive_external_query_label(job_id: str, caller: CallerIdentity) -> str:
         return ""
     if state is None:
         return ""
+    _assert_job_owner(getattr(state, "owner_oid", None), caller)
     payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
     external_payload = (
         payload.get("external") if isinstance(payload.get("external"), dict) else None
@@ -166,6 +177,9 @@ def derive_external_query_label(job_id: str, caller: CallerIdentity) -> str:
     if external_payload is None:
         # Dashboard jobs already carry a query_label from their payload; the
         # durable-blob fallback exists only for external (OpenAPI) jobs.
+        return ""
+    blob_path = _query_blob_path_from_payload(payload, job_id)
+    if not blob_path:
         return ""
     storage_account = getattr(state, "storage_account", "") or str(
         _payload_value(payload, "storage_account") or ""

@@ -70,6 +70,108 @@ def test_job_detail_recovers_query_label_for_external_job(monkeypatch) -> None:
     assert body["query_label"] == "myquery"
 
 
+def test_job_detail_recovers_query_label_over_generic_placeholder(monkeypatch) -> None:
+    """A row whose ``query_label`` was persisted as the generic "query.fa"
+    placeholder MUST still recover the real defline from the durable blob and
+    persist it — otherwise the header contradicts the FASTA preview below it
+    forever (the placeholder is truthy, so an "is it empty?" guard never fires).
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    owner_oid = "00000000-0000-0000-0000-000000000000"
+    updates: list[dict[str, object]] = []
+
+    state = SimpleNamespace(
+        job_id="job-ph",
+        task_id="task-1",
+        type="blast",
+        owner_oid=owner_oid,
+        status="completed",
+        phase="completed",
+        created_at="2026-06-19T00:00:00Z",
+        updated_at="2026-06-19T00:01:00Z",
+        error_code=None,
+        parent_job_id=None,
+        storage_account="elbstg01",
+        db="https://elbstg01.blob.core.windows.net/blast-db/core_nt",
+        # The projection's generic placeholder got persisted onto the row.
+        query_label="query.fa",
+        payload={"db": "core_nt", "external": {"job_id": "openapi-ph"}},
+    )
+
+    class Repo:
+        def get(self, job_id: str):
+            return state
+
+        def update(self, job_id: str, **kwargs):
+            updates.append({"job_id": job_id, **kwargs})
+            return state
+
+    def fake_read_blob_text(_cred, _account, container, blob_path, *, max_bytes) -> str:
+        assert (container, blob_path) == ("queries", "openapi-ph.fa")
+        return ">warmup\nATGTCTGATAATGGACCCCAAAATCAGCGAAATGCACCCCGCA\n"
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job-ph",
+        params={"include_database_metadata": "false"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["query_label"] == "warmup"
+    # Durably persisted so the LIST view converges and the read never repeats.
+    assert updates == [{"job_id": "job-ph", "query_label": "warmup"}]
+
+
+def test_job_detail_keeps_real_query_label_without_storage_read(monkeypatch) -> None:
+    """A row that already carries a real defline label MUST NOT pay a Storage
+    read on every detail render."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    class Repo:
+        def get(self, job_id: str):
+            return SimpleNamespace(
+                job_id="job-real",
+                task_id="task-1",
+                type="blast",
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                status="completed",
+                phase="completed",
+                created_at="2026-06-19T00:00:00Z",
+                updated_at="2026-06-19T00:01:00Z",
+                error_code=None,
+                parent_job_id=None,
+                storage_account="elbstg01",
+                db="https://elbstg01.blob.core.windows.net/blast-db/core_nt",
+                query_label="NC_003310.1",
+                payload={"db": "core_nt", "external": {"job_id": "openapi-real"}},
+            )
+
+    def boom(*_a, **_k):  # pragma: no cover - must never be called
+        raise AssertionError("a row with a real query label must not read Storage")
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", boom)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job-real",
+        params={"include_database_metadata": "false"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["query_label"] == "NC_003310.1"
+
+
 def test_job_detail_skips_split_child_lookup_for_non_split_job(monkeypatch) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
 

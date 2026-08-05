@@ -711,14 +711,19 @@ def blast_job_get(
                 split_children=split_children,
                 include_database_metadata=include_database_metadata,
             )
-            if not str(out.get("query_label") or "").strip():
+            from api.services.blast.external_query_labels import is_generic_query_label
+
+            if is_generic_query_label(out.get("query_label")):
                 # External (OpenAPI / Service Bus) jobs remember their inline
                 # FASTA defline label only in ephemeral OPS Redis, which is
-                # wiped on every Container App revision restart — after which
-                # the Run details header shows "Query ID: —". Recover the
-                # identity durably from the query blob (detail view only; one
-                # capped Storage read) and re-remember it so the next jobs-list
-                # sync persists it back to the Table row.
+                # wiped on every Container App revision restart. After that the
+                # projection stamps the generic "query.fa" filename placeholder
+                # (an unsynced row shows "—"), so the header contradicts the
+                # prepare-step FASTA preview right below it — the preview reads
+                # the real blob and shows the real defline. Recover the identity
+                # durably from that same blob (detail view only; one 512-byte
+                # Storage read) and persist it so the list view converges and
+                # the read never repeats for this job.
                 try:
                     from api.services.blast.job_state import derive_external_query_label
 
@@ -734,6 +739,14 @@ def blast_job_get(
                     recovered_label = ""
                 if recovered_label:
                     out["query_label"] = recovered_label
+                    try:
+                        repo.update(state.job_id, query_label=recovered_label)
+                    except Exception as exc:
+                        LOGGER.debug(
+                            "query label persist skipped job_id=%s: %s",
+                            job_id,
+                            type(exc).__name__,
+                        )
                     try:
                         from api.services.blast.external_query_labels import (
                             remember_query_label,

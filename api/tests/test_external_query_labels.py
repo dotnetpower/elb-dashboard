@@ -134,3 +134,16 @@ def test_apply_is_noop_when_nothing_remembered(fake_redis: _FakeRedis) -> None:
     out = eql.apply_remembered_query_label(row)
     assert out is row
     assert "query_file" not in out
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", None, "query.fa", "input.fa", "Query.FA", " query.fa "],
+)
+def test_is_generic_query_label_true_for_placeholders(value) -> None:
+    assert eql.is_generic_query_label(value) is True
+
+
+@pytest.mark.parametrize("value", ["NC_003310.1", "warmup", "q1 (+2)", "my.query.fa"])
+def test_is_generic_query_label_false_for_real_deflines(value: str) -> None:
+    assert eql.is_generic_query_label(value) is False
