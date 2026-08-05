@@ -204,9 +204,10 @@
  * end up unreachable). The shedding tiers below drop purely decorative
  * chrome, widest-first, so the bar always fits:
  *   <=1680  nav group labels + separators (visual grouping only)
- *   <=1400  build stamp (still in the Settings footer + logo tooltip)
+ *   <=1400  build-stamp SHA only (the version itself stays visible)
  *   <=1320  "Live" refresh pill (the Dashboard header owns that control)
  *   <=1180  latest-job chip (BLAST Jobs is one click away)
+ *   <=940   build stamp entirely (drawer tier — the logo area is tight)
  * ------------------------------------------------------------------- */
 
 @media (max-width: 1680px) {
@@ -217,7 +218,12 @@
 }
 
 @media (max-width: 1400px) {
-  .layout__logo-version {
+  /* Shed only the commit SHA. Hiding the WHOLE stamp here left the running
+     version invisible at every common laptop width (1366/1440/1536 CSS px are
+     all below this breakpoint), and "which build am I looking at?" is the one
+     thing an operator reads off the topbar. Full detail stays in the logo
+     tooltip and the Settings footer. */
+  .layout__logo-sha {
     display: none;
   }
 }
@@ -287,6 +293,13 @@
 @media (max-width: 940px) {
   .layout .layout__hamburger {
     display: flex;
+  }
+
+  /* Drawer tier: the topbar keeps only the logo + account controls, so the
+     stamp finally sheds here. It remains in the logo tooltip and the Settings
+     footer. */
+  .layout__logo-version {
+    display: none;
   }
 
   .layout__nav {

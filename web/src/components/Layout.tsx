@@ -269,7 +269,12 @@ export function Layout({ children }: PropsWithChildren) {
                 className="layout__logo-version"
                 title={`Release: v${__APP_VERSION__}\nBuild: v${buildVersion}\nBuild number: ${__APP_BUILD_NUMBER__}\nCommit: ${__APP_COMMIT__}\nBuilt: ${__APP_BUILD_TIME__}`}
               >
-                v{buildVersion} · {__APP_COMMIT__}
+                v{buildVersion}
+                {/* Shed separately below 1400 px (see Layout.css): the running
+                    version is the operationally important half, the short SHA is
+                    the detail. Hiding the whole stamp made the deployed build
+                    invisible on every common laptop width. */}
+                <span className="layout__logo-sha"> · {__APP_COMMIT__}</span>
               </span>
             </div>
           </div>
