@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests/test_memory_diagnostics.py`.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 from api.app import memory_diagnostics as md
@@ -71,3 +72,68 @@ def test_env_int_clamps_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     assert md._env_int("API_MEMTRACE_TOPN", 5, minimum=0, maximum=50) == 50
     monkeypatch.setenv("API_MEMTRACE_TOPN", "bad")
     assert md._env_int("API_MEMTRACE_TOPN", 5, minimum=0, maximum=50) == 5
+
+
+# --------------------------------------------------------------------------- #
+# Arena reclaimer — the production mitigation for the api sidecar OOM (exit 137)
+# --------------------------------------------------------------------------- #
+
+
+def test_arena_reclaimer_is_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default-ON: this is a mitigation, not an opt-in diagnostic.
+
+    Regression guard for the api sidecar OOM loop — glibc retained 40-47% of RSS
+    as freed-but-unreturned arenas until the 2 GiB limit SIGKILL'd the container.
+    """
+    monkeypatch.delenv("API_ARENA_RECLAIM_INTERVAL_SECONDS", raising=False)
+    calls: list[int] = []
+    monkeypatch.setattr(md, "malloc_trim", lambda: calls.append(1) or True)
+
+    stop = md.start_arena_reclaimer()
+    try:
+        assert stop is not None
+        # Probed once up front so an unusable libc never starts the thread.
+        assert calls == [1]
+    finally:
+        if stop is not None:
+            stop.set()
+
+
+def test_arena_reclaimer_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_ARENA_RECLAIM_INTERVAL_SECONDS", "0")
+    monkeypatch.setattr(md, "malloc_trim", lambda: True)
+
+    assert md.start_arena_reclaimer() is None
+
+
+def test_arena_reclaimer_skips_when_malloc_trim_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """musl / any libc without malloc_trim: do not start a thread that no-ops."""
+    monkeypatch.delenv("API_ARENA_RECLAIM_INTERVAL_SECONDS", raising=False)
+    monkeypatch.setattr(md, "malloc_trim", lambda: False)
+
+    assert md.start_arena_reclaimer() is None
+
+
+def test_arena_reclaimer_interval_is_floored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A too-small override must not turn the reclaimer into a busy loop."""
+    monkeypatch.setenv("API_ARENA_RECLAIM_INTERVAL_SECONDS", "0.01")
+    monkeypatch.setattr(md, "malloc_trim", lambda: True)
+    waits: list[float] = []
+
+    class _Event:
+        def wait(self, timeout: float) -> bool:
+            waits.append(timeout)
+            return True  # stop immediately
+
+        def set(self) -> None:
+            return None
+
+    stop = md.start_arena_reclaimer(stop_event=_Event())  # type: ignore[arg-type]
+    assert stop is not None
+    for _ in range(50):
+        if waits:
+            break
+        time.sleep(0.01)
+    assert waits and waits[0] >= md._MIN_TRIM_INTERVAL_SECONDS

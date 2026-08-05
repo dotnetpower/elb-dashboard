@@ -205,12 +205,28 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state._memtrace_stop = start_memory_sampler()
     except Exception as exc:  # pragma: no cover - defensive
         LOGGER.debug("memory sampler scheduling skipped: %s", type(exc).__name__)
+    # Always-on arena reclaimer (production mitigation, NOT diagnostics). The api
+    # sidecar reads large transient buffers into memory (blob downloads, then
+    # XML/JSON parsing); glibc keeps those freed arenas instead of returning them
+    # to the OS, so RSS ratchets up to the container limit and the sidecar is
+    # SIGKILL'd (exit 137) while the live heap is a fraction of it. A periodic
+    # malloc_trim(0) reclaimed 40-47% of RSS per sample in production.
+    app.state._arena_reclaim_stop = None
+    try:
+        from api.app.memory_diagnostics import start_arena_reclaimer
+
+        app.state._arena_reclaim_stop = start_arena_reclaimer()
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.debug("arena reclaimer scheduling skipped: %s", type(exc).__name__)
     try:
         yield
     finally:
         stop_event = getattr(app.state, "_memtrace_stop", None)
         if stop_event is not None:
             stop_event.set()
+        reclaim_stop = getattr(app.state, "_arena_reclaim_stop", None)
+        if reclaim_stop is not None:
+            reclaim_stop.set()
         try:
             from api.services.storage.catalog_warmer import stop_catalog_warmer
 

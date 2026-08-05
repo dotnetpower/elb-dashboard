@@ -1,21 +1,30 @@
-"""Opt-in memory diagnostics sampler for the api sidecar.
+"""Memory diagnostics sampler + arena reclaimer for the api sidecar.
 
-Periodically samples and logs process memory so a *suspected* leak can be
-confirmed as unbounded growth vs a bounded plateau, and optionally returns
-freed glibc arenas to the OS via ``malloc_trim``. Entirely opt-in — when
-``API_MEMTRACE_INTERVAL_SECONDS`` is unset / <= 0 this module starts nothing
-and has zero runtime cost, so it is safe to ship enabled-by-default-OFF.
+Two independent pieces with different defaults:
 
-Responsibility: Provide a single daemon-thread memory sampler (RSS + GC stats +
-optional ``tracemalloc`` top-N) plus a best-effort ``malloc_trim`` mitigation,
-started from the api lifespan.
-Edit boundaries: Diagnostics only. Stay stdlib-only; do not import route/service
-business logic. Must be a no-op when disabled.
-Key entry points: ``start_memory_sampler``, ``read_rss_bytes``, ``sample_once``,
-``malloc_trim``.
-Risky contracts: The sampler loop must NEVER raise out (diagnostics must not
-crash the sidecar). ``tracemalloc`` adds allocation-tracking overhead so it is
-gated separately from the base RSS/GC sample.
+* ``start_arena_reclaimer`` — **default-ON production mitigation.** A periodic
+  ``malloc_trim(0)`` that hands freed glibc arenas back to the OS. The api
+  sidecar reads large transient buffers into memory (blob downloads, then
+  XML/JSON parsing); glibc retains those arenas, so RSS ratchets up to the
+  container limit and the sidecar is SIGKILL'd (exit 137) while the live heap is
+  a fraction of it.
+* ``start_memory_sampler`` — **default-OFF diagnostics.** Periodically samples
+  and logs process memory (RSS + GC stats + optional ``tracemalloc`` top-N) so a
+  *suspected* leak can be confirmed as unbounded growth vs a bounded plateau.
+  Zero runtime cost when ``API_MEMTRACE_INTERVAL_SECONDS`` is unset / <= 0.
+
+Responsibility: Own the api sidecar's memory daemon threads (arena reclaimer +
+optional sampler) plus the shared ``malloc_trim`` / RSS helpers.
+Edit boundaries: Diagnostics and allocator mitigation only. Stay stdlib-only; do
+not import route/service business logic. The sampler must be a no-op when
+disabled.
+Key entry points: ``start_arena_reclaimer``, ``start_memory_sampler``,
+``read_rss_bytes``, ``sample_once``, ``malloc_trim``.
+Risky contracts: Both loops must NEVER raise out (a diagnostics/mitigation
+thread must not crash the sidecar). ``tracemalloc`` adds allocation-tracking
+overhead so it is gated separately from the base RSS/GC sample. The reclaimer
+must not start when ``malloc_trim`` is unavailable (musl), or it would spin
+forever doing nothing.
 Validation: `uv run pytest -q api/tests/test_memory_diagnostics.py`.
 """
 
@@ -195,5 +204,66 @@ def start_memory_sampler(
         LOGGER.info("memtrace sampler stopped")
 
     thread = threading.Thread(target=_loop, name="api-memtrace", daemon=True)
+    thread.start()
+    return event
+
+
+# --------------------------------------------------------------------------- #
+# Always-on arena reclaimer (production mitigation, not diagnostics)
+# --------------------------------------------------------------------------- #
+
+# Default cadence for the standalone reclaimer. 60 s matches the interval that
+# measurably held RSS flat in production without showing up in the CPU profile
+# (one `malloc_trim(0)` is microseconds of work).
+_DEFAULT_TRIM_INTERVAL_SECONDS = 60.0
+_MIN_TRIM_INTERVAL_SECONDS = 10.0
+
+
+def start_arena_reclaimer(
+    stop_event: threading.Event | None = None,
+) -> threading.Event | None:
+    """Start the periodic ``malloc_trim`` thread that keeps api RSS bounded.
+
+    Unlike :func:`start_memory_sampler` this is a **production mitigation**, not
+    a diagnostic, so it is default-ON and carries none of the sampler's cost (no
+    ``tracemalloc``, no per-minute log line, no ``gc.get_objects()`` walk).
+
+    Why it exists: the api sidecar serves large transient buffers (blob
+    downloads read into memory, then XML/JSON parsed). glibc keeps those freed
+    arenas instead of returning them to the OS, so RSS ratchets upward until the
+    container hits its memory limit and is SIGKILL'd (exit 137) even though the
+    live heap is a fraction of it. Measured in production: ``malloc_trim(0)``
+    reclaimed 221-283 MiB (40-47% of RSS) on every single sample, and RSS went
+    from "climbs to 2 GiB then OOM" to a flat 320-380 MiB live.
+
+    Disable with ``API_ARENA_RECLAIM_INTERVAL_SECONDS=0`` (kill switch); tune the
+    cadence with the same variable. Returns the stop event, or ``None`` when
+    disabled or when the platform has no usable ``malloc_trim``.
+    """
+    interval = _env_float(
+        "API_ARENA_RECLAIM_INTERVAL_SECONDS", _DEFAULT_TRIM_INTERVAL_SECONDS
+    )
+    if interval <= 0:
+        LOGGER.info("arena reclaimer disabled by API_ARENA_RECLAIM_INTERVAL_SECONDS")
+        return None
+    interval = max(_MIN_TRIM_INTERVAL_SECONDS, interval)
+    # Probe once up front: on musl (or any libc without malloc_trim) the thread
+    # would spin forever doing nothing, so do not start it at all.
+    if not malloc_trim():
+        LOGGER.info("arena reclaimer not started: malloc_trim unavailable")
+        return None
+
+    event = stop_event or threading.Event()
+
+    def _loop() -> None:
+        LOGGER.info("arena reclaimer started interval=%.1fs", interval)
+        while not event.wait(timeout=interval):
+            try:
+                malloc_trim()
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.debug("arena reclaim skipped: %s", type(exc).__name__)
+        LOGGER.info("arena reclaimer stopped")
+
+    thread = threading.Thread(target=_loop, name="api-arena-reclaim", daemon=True)
     thread.start()
     return event
