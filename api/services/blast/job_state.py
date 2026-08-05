@@ -141,7 +141,23 @@ def _job_query_blob_path(job_id: str, caller: CallerIdentity) -> str:
     return _query_blob_path_from_payload(payload, job_id)
 
 
-def derive_external_query_label(job_id: str, caller: CallerIdentity) -> str:
+def external_payload_of(state: Any) -> dict[str, Any] | None:
+    """Return the nested ``payload["external"]`` dict for an external job, else None.
+
+    The single authority for "did this job run on the sibling OpenAPI plane?"
+    when a ``JobState`` is already loaded. Callers use it to skip external-only
+    work with zero I/O — notably the polled detail route, which must not pay a
+    Redis round trip per poll for a dashboard job that can never have an
+    external query blob.
+    """
+    payload = getattr(state, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    external = payload.get("external")
+    return external if isinstance(external, dict) else None
+
+
+def derive_external_query_label(state: Any, caller: CallerIdentity) -> str:
     """Durable Query ID fallback for an external job with no real query label.
 
     The inline-FASTA defline label is remembered in OPS Redis (ephemeral, wiped
@@ -152,32 +168,34 @@ def derive_external_query_label(job_id: str, caller: CallerIdentity) -> str:
     and derives a short label, so the header recovers the identity from Storage
     instead of the lost cache and stops contradicting the preview below it.
 
+    Takes the ALREADY-LOADED ``JobState`` rather than a ``job_id``: the detail
+    route is polled, and the generic ``query.fa`` placeholder is also the
+    dashboard's own upload filename (``uploads/<job_id>/query.fa``), so a
+    job_id-taking version would re-read the jobstate Table on every poll of
+    every dashboard job just to discover it is not external. The non-external
+    early return below is therefore reached with ZERO I/O.
+
     Detail-view only (one small Storage read, capped to 512 bytes) — never use
     on the jobs LIST path (it would be one read per row). Returns ``""`` for a
     non-external job, an unresolvable/unreadable blob, or a header-less FASTA.
+    The caller MUST bound the retry of an empty result (see
+    ``remember_query_label_miss``); nothing here caches the negative.
 
     Authorisation: re-asserted through :func:`_assert_job_owner`, which honours
     the shared-visibility flag. Deliberately NOT the stricter inline check in
     ``_job_query_blob_path`` — that one ignores the flag and would turn a
     legitimately shared job detail into a 403 on this display-only path.
     """
-    try:
-        from api.services.state_repo import JobStateRepository
-
-        state = JobStateRepository().get(job_id)
-    except Exception:
-        return ""
     if state is None:
         return ""
-    _assert_job_owner(getattr(state, "owner_oid", None), caller)
-    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
-    external_payload = (
-        payload.get("external") if isinstance(payload.get("external"), dict) else None
-    )
+    external_payload = external_payload_of(state)
     if external_payload is None:
         # Dashboard jobs already carry a query_label from their payload; the
         # durable-blob fallback exists only for external (OpenAPI) jobs.
         return ""
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    _assert_job_owner(getattr(state, "owner_oid", None), caller)
+    job_id = str(getattr(state, "job_id", "") or "")
     blob_path = _query_blob_path_from_payload(payload, job_id)
     if not blob_path:
         return ""

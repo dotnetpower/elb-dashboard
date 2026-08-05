@@ -147,3 +147,60 @@ def test_is_generic_query_label_true_for_placeholders(value) -> None:
 @pytest.mark.parametrize("value", ["NC_003310.1", "warmup", "q1 (+2)", "my.query.fa"])
 def test_is_generic_query_label_false_for_real_deflines(value: str) -> None:
     assert eql.is_generic_query_label(value) is False
+
+
+def test_derive_masks_a_sas_url_in_the_defline() -> None:
+    """The defline is attacker-controlled and the derived label is persisted on
+    the job row and rendered in the SPA, so a SAS must never survive it."""
+    fasta = (
+        ">https://acct.blob.core.windows.net/c/b"
+        "?sv=2021-08-06&ss=b&srt=sco&sp=rwdlac&sig=SECRETSIGNATUREVALUE123\n"
+        "ACGT\n"
+    )
+    label = eql.derive_inline_query_label(fasta)
+    assert "sig=" not in label
+    assert "SECRETSIGNATUREVALUE123" not in label
+
+
+def test_derive_strips_control_characters() -> None:
+    """A NUL cannot be written to an Azure Table property, and ANSI escapes are
+    invisible noise in the header."""
+    label = eql.derive_inline_query_label(">ab\x00cd\x1b[31mef\nACGT\n")
+    assert "\x00" not in label
+    assert "\x1b" not in label
+
+
+def test_derive_returns_empty_when_only_control_chars() -> None:
+    assert eql.derive_inline_query_label(">\x00\x01\x02\nACGT\n") == ""
+
+
+def test_derive_still_caps_after_masking() -> None:
+    label = eql.derive_inline_query_label(f">{'x' * 4000}\nACGT")
+    assert len(label) <= 120
+
+
+def test_query_label_miss_marker_round_trip(fake_redis: _FakeRedis) -> None:
+    assert eql.query_label_miss_recorded("job-m") is False
+    eql.remember_query_label_miss("job-m")
+    assert eql.query_label_miss_recorded("job-m") is True
+    # The miss marker lives in its own namespace, so the LIST-path recall still
+    # reports "nothing remembered" instead of leaking a sentinel into the UI.
+    assert eql.recall_query_label("job-m") == ""
+
+
+def test_query_label_miss_marker_is_best_effort_on_redis_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(**_kw):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr("api.services.redis_clients.get_ops_redis_client", boom)
+    eql.remember_query_label_miss("job-m")  # must not raise
+    # Degrades to "not recorded" so the recovery simply re-runs.
+    assert eql.query_label_miss_recorded("job-m") is False
+
+
+def test_query_label_miss_marker_ignores_blank_job_id(fake_redis: _FakeRedis) -> None:
+    eql.remember_query_label_miss("")
+    assert fake_redis.store == {}
+    assert eql.query_label_miss_recorded("") is False

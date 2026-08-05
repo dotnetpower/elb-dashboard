@@ -7,24 +7,33 @@ Responsibility: Derive a human-meaningful query label from an inline FASTA at
     no defline) on the job record, so without this bridge every API-submitted
     job renders as the generic ``query.fa`` placeholder in Recent searches.
 Edit boundaries: Pure derivation + best-effort Redis get/set only. No FastAPI,
-    no Celery, no Azure SDK. Redis access goes through
+    no Celery, no Azure SDK (``api.services.sanitise`` is a pure regex helper and
+    is allowed). Redis access goes through
     ``api.services.redis_clients.get_ops_redis_client`` (never
     ``redis.Redis.from_url``). Every Redis call is best-effort and swallows
     failures — a Redis outage must never break submit or list.
 Key entry points: ``derive_inline_query_label``, ``remember_query_label``,
     ``recall_query_label``, ``apply_remembered_query_label``,
-    ``is_generic_query_label``.
+    ``is_generic_query_label``, ``remember_query_label_miss``,
+    ``query_label_miss_recorded``.
 Risky contracts: This only ENRICHES a display label; it must never decide which
     rows appear or mutate scope/owner. ``apply_remembered_query_label`` returns
     a row unchanged when it already carries a query identity, so a real
     sibling-provided ``query_file`` always wins over the remembered label.
+    The defline is ATTACKER-CONTROLLED (any API caller picks it, and the
+    Storage-backed recovery re-reads it from the query blob), so
+    ``derive_inline_query_label`` MUST keep masking secrets and stripping
+    control characters before the value reaches the Table row or the SPA.
 Validation: ``uv run pytest -q api/tests/test_external_query_labels.py``.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
+
+from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,13 +64,89 @@ def is_generic_query_label(value: Any) -> bool:
     return not text or text in GENERIC_QUERY_LABELS
 
 
+# Negative marker for the durable Storage-backed label recovery. The job detail
+# route is POLLED, so an external job whose query blob is missing, unreadable,
+# or header-less would otherwise re-pay a Storage read on EVERY poll forever —
+# the positive cache can never fill for it. A separate key namespace keeps
+# ``recall_query_label`` (used on the LIST path) returning "" for a miss instead
+# of leaking a sentinel value into the UI. The TTL is short so a transient
+# Storage/RBAC blip recovers within minutes; a query blob is immutable, so a
+# slightly stale negative is harmless.
+_MISS_KEY_PREFIX = "elb:blast:extquerymiss:"
+_MISS_TTL_SECONDS = 600
+
+
+def remember_query_label_miss(job_id: str) -> None:
+    """Best-effort: mark that label recovery ran for ``job_id`` and found nothing."""
+    if not job_id:
+        return
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        get_ops_redis_client().set(_MISS_KEY_PREFIX + job_id, "1", ex=_MISS_TTL_SECONDS)
+    except Exception as exc:  # pragma: no cover - best-effort, Redis optional
+        LOGGER.debug(
+            "remember_query_label_miss skipped job_id=%s: %s", job_id, type(exc).__name__
+        )
+
+
+def query_label_miss_recorded(job_id: str) -> bool:
+    """Best-effort: True when a recent recovery attempt for ``job_id`` found nothing.
+
+    Degrades to False when Redis is unavailable — the recovery then re-runs, which
+    is the same cost profile the route had before the marker existed.
+    """
+    if not job_id:
+        return False
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        return get_ops_redis_client().get(_MISS_KEY_PREFIX + job_id) is not None
+    except Exception as exc:  # pragma: no cover - best-effort, Redis optional
+        LOGGER.debug(
+            "query_label_miss_recorded skipped job_id=%s: %s", job_id, type(exc).__name__
+        )
+        return False
+
+
+# Control characters (including NUL) are stripped from a derived label. An
+# Azure Table property value cannot carry them, so an entity write with a NUL
+# in the defline would throw; they are also invisible noise in the SPA header.
+# ANSI CSI sequences are already removed by ``sanitise``.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Upper bound on the raw token fed to ``sanitise``. Long enough that a full SAS
+# query string still matches its regex (so it is masked as a whole rather than
+# truncated into a partially-visible signature), short enough that a
+# pathological whitespace-free defline cannot turn the regex pipeline into a
+# CPU sink. The blob-recovery reader caps its read at 512 bytes anyway.
+_SANITISE_INPUT_CAP = 512
+
+
+def _clean_label_token(token: str) -> str:
+    """Mask secrets and strip control characters from a raw defline token.
+
+    The defline is attacker-controlled: an API caller can submit
+    ``>https://acct.blob.core.windows.net/c/b?sv=…&sig=…`` and, without this,
+    the SAS would be persisted onto the job row and rendered in the Recent
+    searches list and the Run details header (charter §12: UI output is
+    sanitised). Applied at the single derivation point so BOTH the submit-time
+    bridge and the Storage-backed recovery are covered.
+    """
+    cleaned = _CONTROL_CHARS_RE.sub("", sanitise(token[:_SANITISE_INPUT_CAP]))
+    return cleaned.strip()[:_MAX_LABEL_CHARS]
+
+
 def derive_inline_query_label(query_fasta: str) -> str:
     """Return a short query label derived from inline FASTA text.
 
     Uses the first record's sequence id (the token after ``>``) and, when the
     FASTA carries more than one record, appends ``(+N)`` so a multi-query
     submit is distinguishable. Returns ``""`` when no FASTA header is present
-    (the caller then leaves the existing generic fallback in place).
+    (the caller then leaves the existing generic fallback in place) or when the
+    header holds nothing but secrets / control characters.
+
+    The token is masked by :func:`_clean_label_token` before it is returned —
+    the defline is attacker-controlled and this value is persisted and rendered.
     """
     if not isinstance(query_fasta, str) or not query_fasta:
         return ""
@@ -77,7 +162,9 @@ def derive_inline_query_label(query_fasta: str) -> str:
             first_id = header.split(None, 1)[0] if header else ""
     if not first_id:
         return ""
-    first_id = first_id[:_MAX_LABEL_CHARS]
+    first_id = _clean_label_token(first_id)
+    if not first_id:
+        return ""
     if count > 1:
         return f"{first_id} (+{count - 1})"
     return first_id

@@ -126,7 +126,208 @@ def test_job_detail_recovers_query_label_over_generic_placeholder(monkeypatch) -
     assert response.status_code == 200
     assert response.json()["query_label"] == "warmup"
     # Durably persisted so the LIST view converges and the read never repeats.
-    assert updates == [{"job_id": "job-ph", "query_label": "warmup"}]
+    # ``updated_at`` is echoed back verbatim: the repository defaults it to
+    # *now*, and the SPA renders "Runtime · Workflow" as created_at ->
+    # updated_at, so a display-only backfill must not inflate a finished job's
+    # elapsed time to "time until someone opened the detail page".
+    assert updates == [
+        {
+            "job_id": "job-ph",
+            "query_label": "warmup",
+            "updated_at": "2026-06-19T00:01:00Z",
+        }
+    ]
+
+
+def test_job_detail_query_label_miss_is_bounded_by_negative_marker(monkeypatch) -> None:
+    """The detail route is POLLED. An external job whose query blob is missing
+    or header-less can never fill the positive cache, so without a negative
+    marker every poll would re-pay a Storage read forever."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    reads: list[str] = []
+    redis_store: dict[str, str] = {}
+
+    class FakeRedis:
+        def set(self, key: str, value: str, ex: int | None = None) -> None:
+            redis_store[key] = value
+
+        def get(self, key: str):
+            return redis_store.get(key)
+
+    class Repo:
+        def get(self, job_id: str):
+            return SimpleNamespace(
+                job_id="job-miss",
+                task_id="task-1",
+                type="blast",
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                status="running",
+                phase="running",
+                created_at="2026-06-19T00:00:00Z",
+                updated_at="2026-06-19T00:01:00Z",
+                error_code=None,
+                parent_job_id=None,
+                storage_account="elbstg01",
+                db="https://elbstg01.blob.core.windows.net/blast-db/core_nt",
+                query_label="query.fa",
+                payload={"db": "core_nt", "external": {"job_id": "openapi-miss"}},
+            )
+
+    def fake_read_blob_text(_cred, _account, container, blob_path, *, max_bytes) -> str:
+        reads.append(blob_path)
+        return "ACGTACGT\n"  # header-less: no defline to derive
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client", lambda **_kw: FakeRedis()
+    )
+
+    from api.main import app
+
+    client = TestClient(app)
+    for _ in range(3):
+        response = client.get(
+            "/api/blast/jobs/job-miss",
+            params={"include_database_metadata": "false"},
+        )
+        assert response.status_code == 200
+
+    # Three polls, exactly one Storage read — the negative marker bounds it.
+    assert reads == ["openapi-miss.fa"]
+
+
+def test_job_detail_self_referential_defline_does_not_loop(monkeypatch) -> None:
+    """A FASTA whose defline is literally ``>query.fa`` derives back into the
+    placeholder. Accepting it would re-enter the recovery on the NEXT poll —
+    a per-poll Storage read + Table write + history row for as long as the tab
+    stays open. It must be treated as a miss instead."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    reads: list[str] = []
+    updates: list[dict[str, object]] = []
+    redis_store: dict[str, str] = {}
+
+    class FakeRedis:
+        def set(self, key: str, value: str, ex: int | None = None) -> None:
+            redis_store[key] = value
+
+        def get(self, key: str):
+            return redis_store.get(key)
+
+    state = SimpleNamespace(
+        job_id="job-loop",
+        task_id="task-1",
+        type="blast",
+        owner_oid="00000000-0000-0000-0000-000000000000",
+        status="running",
+        phase="running",
+        created_at="2026-06-19T00:00:00Z",
+        updated_at="2026-06-19T00:01:00Z",
+        error_code=None,
+        parent_job_id=None,
+        storage_account="elbstg01",
+        db="https://elbstg01.blob.core.windows.net/blast-db/core_nt",
+        query_label="query.fa",
+        payload={"db": "core_nt", "external": {"job_id": "openapi-loop"}},
+    )
+
+    class Repo:
+        def get(self, job_id: str):
+            return state
+
+        def update(self, job_id: str, **kwargs):  # pragma: no cover - defensive
+            updates.append({"job_id": job_id, **kwargs})
+            return state
+
+    def fake_read_blob_text(_cred, _account, container, blob_path, *, max_bytes) -> str:
+        reads.append(blob_path)
+        return ">query.fa\nACGT\n"
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client", lambda **_kw: FakeRedis()
+    )
+
+    from api.main import app
+
+    client = TestClient(app)
+    for _ in range(3):
+        assert (
+            client.get(
+                "/api/blast/jobs/job-loop",
+                params={"include_database_metadata": "false"},
+            ).status_code
+            == 200
+        )
+
+    assert reads == ["openapi-loop.fa"]
+    # The placeholder is never written back onto the row.
+    assert updates == []
+
+
+def test_job_detail_dashboard_job_placeholder_costs_no_io(monkeypatch) -> None:
+    """``query.fa`` is ALSO the dashboard's own upload basename
+    (``canonical_job_metadata`` stores the basename of
+    ``uploads/<job_id>/query.fa``), so the widened placeholder guard would fire
+    for every dashboard job on every poll. The external-payload check must come
+    FIRST so that path costs zero Storage reads, zero extra Table reads, and
+    zero Redis round trips."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    gets: list[str] = []
+
+    class Repo:
+        def get(self, job_id: str):
+            gets.append(job_id)
+            return SimpleNamespace(
+                job_id="job-dash",
+                task_id="task-1",
+                type="blast",
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                status="completed",
+                phase="completed",
+                created_at="2026-06-19T00:00:00Z",
+                updated_at="2026-06-19T00:01:00Z",
+                error_code=None,
+                parent_job_id=None,
+                storage_account="elbstg01",
+                # Dashboard submit: no ``external`` key. ``canonical_job_metadata``
+                # stores the BASENAME, so a dashboard row genuinely carries the
+                # "query.fa" placeholder value — this path is the common case,
+                # not an edge case.
+                query_label="query.fa",
+                payload={"db": "core_nt", "query_file": "uploads/job-dash/query.fa"},
+            )
+
+    def boom(*_a, **_k):  # pragma: no cover - must never be called
+        raise AssertionError("a dashboard job must not read the query blob")
+
+    def no_redis(*_a, **_k):  # pragma: no cover - must never be called
+        raise AssertionError("a dashboard job must not touch OPS Redis for labels")
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", boom)
+    monkeypatch.setattr("api.services.redis_clients.get_ops_redis_client", no_redis)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job-dash",
+        params={"include_database_metadata": "false"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["query_label"] == "query.fa"
+    # Exactly one jobstate read for the whole request — the recovery does not
+    # re-load the row just to discover the job is not external.
+    assert gets == ["job-dash"]
 
 
 def test_job_detail_keeps_real_query_label_without_storage_read(monkeypatch) -> None:
