@@ -47,14 +47,14 @@ jobs:
       - name: Build release body
         id: body
         run: |
-          notes="${{ steps.notes.outputs.path }}"
-          {
-            echo "Generated from \`$notes\`. See the [docs site](https://dotnetpower.github.io/elb-dashboard/releases/) for the rendered view."
-            echo
-            # Strip the leading H1 to avoid duplication (GitHub Releases UI already shows the tag name).
-            awk 'NR==1 && /^# /{next} {print}' "$notes"
-          } > release-body.md
-          echo "Built release body ($(wc -l < release-body.md) lines)"
+          # The Releases API rejects a body over 125,000 characters with
+          # HTTP 422 "body is too long". A release spanning many feature-change
+          # notes overruns that easily (v0.3.0 rendered 753 notes / ~195 KB), so
+          # the builder bounds the body on a line boundary and links the full
+          # rendered page instead of failing the publish.
+          python3 scripts/dev/build_release_body.py \
+            --notes "${{ steps.notes.outputs.path }}" \
+            --out release-body.md
 
       - name: Create or update GitHub Release
         env:
