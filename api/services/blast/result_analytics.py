@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -148,6 +149,50 @@ RESULTS_ALIGNMENTS_MAX_BYTES = 20 * 1024 * 1024
 RESULTS_EXPORT_MAX_BYTES = 10 * 1024 * 1024
 RESULTS_DEFAULT_PAGE_SIZE = 100
 RESULTS_ALIGNMENTS_MAX_HITS = 50_000
+
+# Per-job ceiling on decoded result text held in memory at once. The per-file
+# caps above bound ONE file; because the parallel reader returns a list, without
+# this the worst case is RESULTS_MAX_FILES x max_bytes = 200-400 MB alive
+# simultaneously in a 2 GiB sidecar. 64 MiB comfortably covers realistic
+# multi-shard jobs while leaving the peak an order of magnitude below the limit.
+RESULTS_READ_TOTAL_MAX_BYTES = 64 * 1024 * 1024
+
+
+class ResultReadBudgetExceeded(RuntimeError):
+    """A result blob was skipped because the per-job read budget was spent.
+
+    Carried in the ``error`` slot of :func:`read_result_blob_texts_parallel` so
+    the existing caller loops count it as a read failure. That is the honest
+    accounting — the file really was not read — and it keeps the "all reads
+    failed" guards working instead of silently returning fewer hits.
+    """
+
+    def __init__(self, blob_path: str, budget_bytes: int) -> None:
+        super().__init__(
+            f"result read budget of {budget_bytes} bytes spent before {blob_path}"
+        )
+        self.blob_path = blob_path
+        self.budget_bytes = budget_bytes
+
+
+def _result_read_total_budget(total_max_bytes: int | None, max_bytes: int) -> int:
+    """Resolve the per-job read budget, never below one full file.
+
+    Floored at ``max_bytes`` so a single-file job (and the first file of any
+    job) is always read in full — a budget that could skip file #1 would turn a
+    normal export into an ``all_reads_failed`` 503.
+    """
+    if total_max_bytes is not None:
+        return max(max_bytes, int(total_max_bytes))
+    raw = os.environ.get("RESULTS_READ_TOTAL_MAX_BYTES", "").strip()
+    if raw:
+        try:
+            return max(max_bytes, int(raw))
+        except ValueError:
+            LOGGER.warning(
+                "invalid RESULTS_READ_TOTAL_MAX_BYTES=%r; using default", raw
+            )
+    return max(max_bytes, RESULTS_READ_TOTAL_MAX_BYTES)
 
 # Cap how many rows we emit so the SPA never has to render a runaway map.
 # A single BLAST query rarely matches more than a few thousand distinct
@@ -285,6 +330,7 @@ def read_result_blob_texts_parallel(
     *,
     max_bytes: int,
     max_workers: int = _RESULT_READ_MAX_WORKERS,
+    total_max_bytes: int | None = None,
 ) -> list[tuple[str, str | None, BaseException | None]]:
     """Read result blobs concurrently, preserving the input order.
 
@@ -299,9 +345,20 @@ def read_result_blob_texts_parallel(
     Blob-service clients are thread-local and pooled, so concurrent reads are
     safe; concurrency is bounded by ``max_workers`` so a 20-file job never opens
     more than that many simultaneous Storage connections.
+
+    **Per-job total-bytes budget.** Because the return value is a list, every
+    content string is alive at once — ``RESULTS_MAX_FILES`` (20) x
+    ``max_bytes`` (10-20 MB) is 200-400 MB of decoded text held simultaneously
+    in a 2 GiB sidecar. Reads are therefore issued in batches and stop once
+    ``total_max_bytes`` is spent; the remaining blobs come back carrying
+    :class:`ResultReadBudgetExceeded`, which the existing caller loops already
+    surface as a read failure (the file genuinely was not read) rather than
+    silently under-reporting. The first blob is always read in full so a
+    single-file job is never affected.
     """
     cred = get_credential()
     paths = [str(info.get("name") or "") for info in blob_infos]
+    budget = _result_read_total_budget(total_max_bytes, max_bytes)
 
     def _read(path: str) -> tuple[str, str | None, BaseException | None]:
         if not path:
@@ -322,10 +379,37 @@ def read_result_blob_texts_parallel(
         return [_read(path) for path in paths]
 
     workers = min(max_workers, len(paths))
-    with ThreadPoolExecutor(
-        max_workers=workers, thread_name_prefix="blast-result-read"
-    ) as executor:
-        return list(executor.map(_read, paths))
+    results: list[tuple[str, str | None, BaseException | None]] = []
+    used = 0
+    skipped = 0
+    for start in range(0, len(paths), workers):
+        if used >= budget:
+            # Budget spent: mark the rest without reading them. Batching is what
+            # makes this effective — a single executor.map over all 20 paths
+            # would have already materialised every content string.
+            for path in paths[start:]:
+                if not path:
+                    results.append(("", None, None))
+                    continue
+                skipped += 1
+                results.append((path, None, ResultReadBudgetExceeded(path, budget)))
+            break
+        batch = paths[start : start + workers]
+        with ThreadPoolExecutor(
+            max_workers=min(workers, len(batch)), thread_name_prefix="blast-result-read"
+        ) as executor:
+            for result in executor.map(_read, batch):
+                results.append(result)
+                used += len(result[1] or "")
+    if skipped:
+        LOGGER.warning(
+            "result read budget spent account=%s budget_bytes=%d read_bytes=%d skipped=%d",
+            storage_account,
+            budget,
+            used,
+            skipped,
+        )
+    return results
 
 
 def _is_parseable_result_blob_name(blob_name: str) -> bool:
