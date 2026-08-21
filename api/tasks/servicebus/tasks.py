@@ -33,6 +33,10 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     share strict AKS lifecycle/database-warmup admission with the resident
     consumer; blocked drains must not open a receiver, and the handler must
     re-check immediately before submit to close the receive/barrier race.
+    A failed start barrier is cancelled only after strict live admission proves
+    the target nodes and current per-node warmup have converged; cancellation
+    failure leaves the proof path fail-closed on the next tick without blocking
+    the already-proven current drain.
     Producer responses are persisted to the response outbox before terminal
     request settlement or bridge terminalisation. Transient submit failures are
     future-scheduled with stable execution identity; DB lifecycle admission
@@ -840,6 +844,55 @@ def _execution_admission_for_drain(cfg: ServiceBusConfig) -> dict[str, Any]:
             "retry_after_seconds": 10,
         }
     return dict(decision)
+
+
+def _reconcile_recovered_start_failure(admission: dict[str, Any]) -> bool:
+    """Cancel only the failed start token whose live state just converged."""
+    if not (
+        admission.get("allowed")
+        and admission.get("recovered_lifecycle_failure")
+        and admission.get("lifecycle_action") == "start"
+    ):
+        return False
+    token = str(admission.get("barrier_token") or "").strip()
+    if not token:
+        return False
+    try:
+        from api.services.aks.execution_admission import cancel_lifecycle_barrier
+
+        cancel_lifecycle_barrier(token, reason="start_failure_live_reconciled")
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception as exc:
+        from api.services.log_dedup import dedup_log_warning
+
+        dedup_log_warning(
+            LOGGER,
+            ("servicebus_admission_recovery", token[:12], type(exc).__name__),
+            "servicebus admission recovery state write failed token=%s error=%s",
+            token[:12],
+            type(exc).__name__,
+        )
+        return False
+
+    LOGGER.warning(
+        "servicebus admission recovered failed start token=%s target_nodes=%s",
+        token[:12],
+        admission.get("target_node_count", ""),
+    )
+    try:
+        from api.services.feature_events import record_feature_event
+
+        record_feature_event(
+            "servicebus_admission_recovery",
+            status="completed",
+            lifecycle_action="start",
+            barrier_token=token[:12],
+            target_node_count=int(admission.get("target_node_count") or 0),
+        )
+    except Exception:
+        LOGGER.debug("servicebus admission recovery telemetry failed", exc_info=True)
+    return True
 
 
 def _build_request_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[str, Any] | None:
@@ -1839,6 +1892,7 @@ def _drain_once(
             "skipped": reason,
             "retry_after_seconds": int(admission.get("retry_after_seconds") or 10),
         }
+    _reconcile_recovered_start_failure(admission)
     proceed, lock_token = _acquire_drain_lock(cfg.request_queue)
     if not proceed:
         # Another drain holds the single-flight lease — skip this overlapping

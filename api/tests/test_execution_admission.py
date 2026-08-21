@@ -1,13 +1,15 @@
 """Tests for lifecycle-aware Service Bus execution admission.
 
 Responsibility: Verify durable lifecycle barriers keep request messages queued until target
-    nodes and correlated post-lifecycle database warmups are complete.
+    nodes and correlated post-lifecycle database warmups are complete, including strict live
+    reconciliation of a terminal failed-start generation.
 Edit boundaries: Azure ARM, Kubernetes, Redis, Table Storage, and JobState are faked; no live
     cloud or broker access is allowed.
 Key entry points: `_ready_dependencies`, `test_*`.
 Risky contracts: Stop/delete barriers always block; start/scale barriers require exact target
     node convergence and completed correlated warmup jobs; newer lifecycle generations alone may
-    terminalise an otherwise orphaned external job. Celery soft deadlines must propagate.
+    terminalise an otherwise orphaned external job. Failed-start recovery requires authoritative
+    current-node warmup and one source generation. Celery soft deadlines must propagate.
 Validation: `uv run pytest -q api/tests/test_execution_admission.py`.
 """
 
@@ -191,6 +193,142 @@ def test_scale_barrier_surfaces_terminal_lifecycle_failure(
 
     assert decision["allowed"] is False
     assert decision["reason"] == "aks_scale_failed"
+
+
+def test_start_failure_recovers_only_after_live_execution_state_converges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = _barrier(action="start", target=4, complete=False)
+    _ready_dependencies(monkeypatch, live_nodes=4, ready_nodes=4)
+    assert admission.record_lifecycle_failed(
+        token=barrier.token,
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        error_code="ResourceExistsError",
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is True
+    assert decision["reason"] == "ready"
+    assert decision["recovered_lifecycle_failure"] is True
+
+
+def test_start_failure_keeps_original_reason_until_target_nodes_converge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = _barrier(action="start", target=4, complete=False)
+    _ready_dependencies(monkeypatch, live_nodes=3, ready_nodes=3)
+    assert admission.record_lifecycle_failed(
+        token=barrier.token,
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        error_code="ResourceExistsError",
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "aks_start_failed"
+    assert decision["recovery_blocker"] == "aks_scaling"
+
+
+def test_start_failure_with_database_requires_current_per_node_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = _barrier(
+        action="start",
+        target=4,
+        databases=["core_nt"],
+        complete=False,
+    )
+    _ready_dependencies(monkeypatch, live_nodes=4, ready_nodes=4)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *_args, **_kwargs: {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Ready",
+                    "sources": ["warmup"],
+                    "nodes_ready": 4,
+                    "nodes_active": 0,
+                    "nodes_failed": 0,
+                    "total_jobs": 4,
+                    "source_version": "2026-08-01-01-05-01",
+                }
+            ]
+        },
+    )
+    assert admission.record_lifecycle_failed(
+        token=barrier.token,
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        error_code="ResourceExistsError",
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is True
+    assert decision["recovered_lifecycle_failure"] is True
+
+
+@pytest.mark.parametrize(
+    ("sources", "nodes_ready", "source_version", "expected_detail"),
+    [
+        (["setup"], 4, "2026-08-01-01-05-01", "4/4 Ready nodes"),
+        (["warmup"], 3, "2026-08-01-01-05-01", "3/4 Ready nodes"),
+        (["warmup"], 4, "", "4/4 Ready nodes"),
+    ],
+)
+def test_start_failure_rejects_non_authoritative_or_partial_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+    sources: list[str],
+    nodes_ready: int,
+    source_version: str,
+    expected_detail: str,
+) -> None:
+    barrier = _barrier(
+        action="start",
+        target=4,
+        databases=["core_nt"],
+        complete=False,
+    )
+    _ready_dependencies(monkeypatch, live_nodes=4, ready_nodes=4)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *_args, **_kwargs: {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Ready",
+                    "sources": sources,
+                    "nodes_ready": nodes_ready,
+                    "nodes_active": 0,
+                    "nodes_failed": 0,
+                    "total_jobs": nodes_ready,
+                    "source_version": source_version,
+                }
+            ]
+        },
+    )
+    assert admission.record_lifecycle_failed(
+        token=barrier.token,
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        error_code="ResourceExistsError",
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "aks_start_failed"
+    assert decision["recovery_blocker"] == "database_warmup_pending"
+    assert expected_detail in decision["detail"]
 
 
 def test_scale_barrier_waits_for_all_kubernetes_ready_nodes(
@@ -402,6 +540,36 @@ def test_allow_decision_is_not_cached_across_manual_warmup(
     assert decision["reason"] == "cluster_warming"
 
 
+def test_recovered_start_allow_is_not_cached_across_node_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(admission, "_CACHE_SECONDS", 60)
+    barrier = _barrier(action="start", target=4, complete=False)
+    _ready_dependencies(monkeypatch, live_nodes=4, ready_nodes=4)
+    assert admission.record_lifecycle_failed(
+        token=barrier.token,
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        error_code="ResourceExistsError",
+    )
+    assert _decision()["allowed"] is True
+    monkeypatch.setattr(
+        "api.services.monitoring.get_aks_cluster_snapshot",
+        lambda *_args, **_kwargs: {
+            "node_count": 3,
+            "power_state": "Running",
+            "provisioning_state": "Succeeded",
+        },
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "aks_start_failed"
+    assert decision["recovery_blocker"] == "aks_scaling"
+
+
 def test_cancelled_enqueue_generation_no_longer_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -412,6 +580,20 @@ def test_cancelled_enqueue_generation_no_longer_blocks(
     decision = _decision()
 
     assert decision["allowed"] is True
+
+
+def test_cancelling_old_token_cannot_open_superseding_stop_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = _barrier(action="start", target=4, complete=False)
+    _barrier(action="stop", target=0, complete=False)
+    admission.cancel_lifecycle_barrier(old.token, reason="start_failure_live_reconciled")
+    _ready_dependencies(monkeypatch)
+
+    decision = _decision()
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "aks_stop_in_progress"
 
 
 def test_only_newer_lifecycle_generation_interrupts_existing_job() -> None:

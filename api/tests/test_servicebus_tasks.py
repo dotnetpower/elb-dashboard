@@ -136,6 +136,114 @@ def test_drain_proceeds_when_gate_on_and_cluster_ready(
     assert out["received"] == 0
 
 
+def test_drain_cancels_recovered_start_token_before_opening_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _cfg: {
+            "allowed": True,
+            "reason": "ready",
+            "lifecycle_action": "start",
+            "barrier_token": "failed-start-token",
+            "target_node_count": 4,
+            "recovered_lifecycle_failure": True,
+        },
+    )
+    events: list[str] = []
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.cancel_lifecycle_barrier",
+        lambda token, *, reason: events.append(f"cancel:{token}:{reason}"),
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "_acquire_drain_lock",
+        lambda _queue="": events.append("lock") or (True, "tok"),
+    )
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
+    monkeypatch.setattr(
+        service_bus,
+        "drain_requests",
+        lambda *_args, **_kwargs: events.append("receive") or _DrainStats(),
+    )
+
+    out = sb_tasks.drain_and_resubmit()
+
+    assert out["received"] == 0
+    assert events == [
+        "cancel:failed-start-token:start_failure_live_reconciled",
+        "lock",
+        "receive",
+    ]
+
+
+def test_drain_continues_when_recovered_token_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _cfg: {
+            "allowed": True,
+            "reason": "ready",
+            "lifecycle_action": "start",
+            "barrier_token": "failed-start-token",
+            "recovered_lifecycle_failure": True,
+        },
+    )
+
+    def fail_cleanup(_token: str, *, reason: str) -> None:
+        del reason
+        raise RuntimeError("table unavailable")
+
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.cancel_lifecycle_barrier",
+        fail_cleanup,
+    )
+    monkeypatch.setattr(
+        sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "tok")
+    )
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
+    monkeypatch.setattr(
+        service_bus, "drain_requests", lambda *_args, **_kwargs: _DrainStats()
+    )
+
+    out = sb_tasks.drain_and_resubmit()
+
+    assert out["received"] == 0
+
+
+def test_normal_ready_drain_does_not_touch_lifecycle_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _cfg: {"allowed": True, "reason": "ready"},
+    )
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.cancel_lifecycle_barrier",
+        lambda token, *, reason: cancelled.append(f"{token}:{reason}"),
+    )
+    monkeypatch.setattr(
+        sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "tok")
+    )
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
+    monkeypatch.setattr(
+        service_bus, "drain_requests", lambda *_args, **_kwargs: _DrainStats()
+    )
+
+    out = sb_tasks.drain_and_resubmit()
+
+    assert out["received"] == 0
+    assert cancelled == []
+
+
 def test_drain_always_enforces_execution_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

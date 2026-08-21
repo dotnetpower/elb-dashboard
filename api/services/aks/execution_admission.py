@@ -8,6 +8,8 @@ Key entry points: `evaluate_execution_admission`; state primitives are re-export
     that create lifecycle generations or correlate warmup jobs.
 Risky contracts: Stop/delete always deny. Start/scale require ARM completion, exact target node
     convergence, strict (not degraded) DB readiness, and completed token-correlated warmup jobs.
+    A terminal start failure may reconcile without its failed token only when the same exact node
+    convergence plus authoritative current-node warmup Jobs and one DB generation are live-proven.
     The short process cache includes lifecycle and warmup fingerprints so a new barrier invalidates
     an earlier allow decision before another queue message is submitted. Celery soft deadlines are
     process-control signals and must propagate rather than becoming a cached deny decision.
@@ -62,6 +64,8 @@ class AdmissionDecision(TypedDict, total=False):
     warmup_jobs: dict[str, str]
     failed_warmup_jobs: dict[str, str]
     detail: str
+    recovered_lifecycle_failure: bool
+    recovery_blocker: str
 
 
 _DECISION_CACHE: dict[tuple[str, str, str, str, str], tuple[float, AdmissionDecision]] = {}
@@ -115,9 +119,7 @@ def _active_cluster_warmup_jobs(
         row_resource_group = str(
             getattr(row, "resource_group", "") or payload.get("resource_group") or ""
         )
-        row_cluster = str(
-            getattr(row, "cluster_name", "") or payload.get("cluster_name") or ""
-        )
+        row_cluster = str(getattr(row, "cluster_name", "") or payload.get("cluster_name") or "")
         if (
             row_subscription == subscription_id
             and row_resource_group == resource_group
@@ -125,6 +127,57 @@ def _active_cluster_warmup_jobs(
         ):
             active.append(str(getattr(row, "job_id", "") or ""))
     return [job_id for job_id in active if job_id]
+
+
+def _failed_start_warmup_recovered(
+    credential: Any,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    databases: tuple[str, ...],
+    expected_node_count: int,
+) -> tuple[bool, str]:
+    """Prove failed-start databases are warm on the current Ready node set."""
+    if not databases:
+        return True, ""
+    from api.services.auto_warmup_reconcile import warmup_status_by_db
+    from api.services.monitoring import k8s_warmup_status
+
+    status = k8s_warmup_status(
+        credential,
+        subscription_id,
+        resource_group,
+        cluster_name,
+    )
+    by_database = warmup_status_by_db(status.get("databases", []) or [])
+    required_nodes = max(1, expected_node_count)
+    for database in databases:
+        item = by_database.get(database) or {}
+        sources = {str(value) for value in item.get("sources", []) or []}
+        source_versions = {
+            str(value) for value in item.get("source_versions", []) or [] if str(value)
+        }
+        source_version = str(item.get("source_version") or "").strip()
+        if source_version:
+            source_versions.add(source_version)
+        ready_nodes = int(item.get("nodes_ready") or 0)
+        total_jobs = int(item.get("total_jobs") or 0)
+        if (
+            str(item.get("status") or "") != "Ready"
+            or "warmup" not in sources
+            or len(source_versions) != 1
+            or ready_nodes < required_nodes
+            or total_jobs < required_nodes
+            or int(item.get("nodes_active") or 0) > 0
+            or int(item.get("nodes_failed") or 0) > 0
+        ):
+            return (
+                False,
+                f"current warmup proof is incomplete for {database} "
+                f"({ready_nodes}/{required_nodes} Ready nodes)",
+            )
+    return True, ""
 
 
 def _evaluate_uncached(
@@ -140,6 +193,7 @@ def _evaluate_uncached(
             barrier=barrier,
             detail="Service Bus routing does not identify exactly one AKS cluster",
         )
+    recovering_start_failure = False
     if barrier is not None:
         if barrier.action in {"stop", "delete"}:
             return _denied(
@@ -148,20 +202,42 @@ def _evaluate_uncached(
                 detail="cluster lifecycle keeps request messages queued",
             )
         if lifecycle_failure_state is not None:
-            return _denied(
-                f"aks_{barrier.action}_failed",
-                barrier=barrier,
-                detail=(
-                    "AKS lifecycle task failed; retry the lifecycle action before "
-                    "queued requests can run"
-                ),
-            )
-        if not lifecycle_completed(barrier.token):
+            if barrier.action != "start":
+                return _denied(
+                    f"aks_{barrier.action}_failed",
+                    barrier=barrier,
+                    detail=(
+                        "AKS lifecycle task failed; retry the lifecycle action before "
+                        "queued requests can run"
+                    ),
+                )
+            recovering_start_failure = True
+        elif not lifecycle_completed(barrier.token):
             return _denied(
                 f"aks_{barrier.action}_in_progress",
                 barrier=barrier,
                 detail="AKS lifecycle operation has not reported ARM convergence",
             )
+
+    def runtime_denied(
+        reason: str,
+        *,
+        detail: str = "",
+        **extra: Any,
+    ) -> AdmissionDecision:
+        if recovering_start_failure:
+            recovery_detail = "AKS start failed; live recovery is not yet proven"
+            if detail:
+                recovery_detail += f": {detail}"
+            return _denied(
+                "aks_start_failed",
+                barrier=barrier,
+                detail=recovery_detail,
+                recovery_blocker=reason,
+                **extra,
+            )
+        return _denied(reason, barrier=barrier, detail=detail, **extra)
+
     try:
         from api.services import get_credential
         from api.services.aks.ensure_running import evaluate_ensure_running
@@ -176,29 +252,22 @@ def _evaluate_uncached(
             cluster_name=cluster_name,
         )
         if readiness["status"] != "ready":
-            return _denied(
+            return runtime_denied(
                 f"cluster_{readiness['status']}",
-                barrier=barrier,
                 detail=readiness.get("reason") or "cluster is not execution-ready",
             )
         warmup = readiness.get("warmup") or {}
         if str(warmup.get("phase") or "") == "ready_degraded":
-            return _denied(
+            return runtime_denied(
                 "database_warmup_failed",
-                barrier=barrier,
                 detail=readiness.get("reason") or "database warmup failed",
             )
 
-        active_warmups = _active_cluster_warmup_jobs(
-            subscription_id, resource_group, cluster_name
-        )
+        active_warmups = _active_cluster_warmup_jobs(subscription_id, resource_group, cluster_name)
         if active_warmups:
-            return _denied(
+            return runtime_denied(
                 "database_warmup_in_progress",
-                barrier=barrier,
-                detail=(
-                    f"{len(active_warmups)} database warmup task(s) are queued or running"
-                ),
+                detail=(f"{len(active_warmups)} database warmup task(s) are queued or running"),
                 warmup_jobs={job_id: job_id for job_id in active_warmups},
             )
 
@@ -206,7 +275,7 @@ def _evaluate_uncached(
             credential, subscription_id, resource_group, cluster_name
         )
         if snapshot is None:
-            return _denied("cluster_snapshot_unavailable", barrier=barrier)
+            return runtime_denied("cluster_snapshot_unavailable")
         target = (
             barrier.target_node_count
             if barrier is not None
@@ -214,29 +283,49 @@ def _evaluate_uncached(
         )
         live_count = int(snapshot.get("node_count") or 0)
         if target > 0 and live_count != target:
-            return _denied(
+            return runtime_denied(
                 "aks_scaling",
-                barrier=barrier,
                 detail=f"workload pool reports {live_count}/{target} target nodes",
             )
         ready_nodes = k8s_ready_warmup_node_names(
             credential, subscription_id, resource_group, cluster_name
         )
         if target > 0 and len(ready_nodes) < target:
-            return _denied(
+            return runtime_denied(
                 "waiting_for_target_nodes",
-                barrier=barrier,
                 detail=f"Kubernetes reports {len(ready_nodes)}/{target} Ready workload nodes",
                 ready_node_count=len(ready_nodes),
             )
 
         if barrier is not None and barrier.databases:
+            if recovering_start_failure:
+                warmup_recovered, recovery_detail = _failed_start_warmup_recovered(
+                    credential,
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                    databases=barrier.databases,
+                    expected_node_count=target or len(ready_nodes),
+                )
+                if not warmup_recovered:
+                    return runtime_denied(
+                        "database_warmup_pending",
+                        detail=recovery_detail,
+                    )
+                return {
+                    "allowed": True,
+                    "reason": "ready",
+                    "retry_after_seconds": 0,
+                    "lifecycle_action": barrier.action,
+                    "barrier_token": barrier.token,
+                    "target_node_count": barrier.target_node_count,
+                    "recovered_lifecycle_failure": True,
+                }
             jobs = get_barrier_warmup_jobs(barrier.token, barrier.databases)
             missing = [name for name in barrier.databases if not jobs.get(name)]
             if missing:
-                return _denied(
+                return runtime_denied(
                     "database_warmup_pending",
-                    barrier=barrier,
                     detail="post-lifecycle warmup has not been enqueued for: " + ", ".join(missing),
                     warmup_jobs=jobs,
                 )
@@ -254,21 +343,19 @@ def _evaluate_uncached(
                 elif status != "completed":
                     active[name] = job_id
             if failed:
-                return _denied(
+                return runtime_denied(
                     "database_warmup_failed",
-                    barrier=barrier,
                     detail="post-lifecycle warmup failed; requests remain queued",
                     warmup_jobs=jobs,
                     failed_warmup_jobs=failed,
                 )
             if active:
-                return _denied(
+                return runtime_denied(
                     "database_warmup_in_progress",
-                    barrier=barrier,
                     detail="post-lifecycle warmup jobs are still active",
                     warmup_jobs=jobs,
                 )
-        return {
+        decision: AdmissionDecision = {
             "allowed": True,
             "reason": "ready",
             "retry_after_seconds": 0,
@@ -282,6 +369,9 @@ def _evaluate_uncached(
                 else {}
             ),
         }
+        if recovering_start_failure:
+            decision["recovered_lifecycle_failure"] = True
+        return decision
     except SoftTimeLimitExceeded:
         raise
     except Exception as exc:
@@ -290,9 +380,8 @@ def _evaluate_uncached(
             cluster_name,
             type(exc).__name__,
         )
-        return _denied(
+        return runtime_denied(
             "readiness_check_failed",
-            barrier=barrier,
             detail=type(exc).__name__,
         )
 
