@@ -667,7 +667,12 @@ def test_publish_transitions_records_trace(monkeypatch: pytest.MonkeyPatch) -> N
             correlation_id="corr-t", openapi_job_id="openapi-t", last_status="queued", done=False
         )
     )
-    monkeypatch.setattr(external_blast, "get_job", lambda jid, **k: {"status": "running"})
+    poll_kwargs: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda jid, **kwargs: poll_kwargs.append(kwargs) or {"status": "running"},
+    )
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
 
     history: list[tuple] = []
@@ -683,6 +688,32 @@ def test_publish_transitions_records_trace(monkeypatch: pytest.MonkeyPatch) -> N
     events = [e for (jid, e) in history if jid == "openapi-t"]
     assert "mf.running" in events
     assert "mf.completion_published" in events
+    assert poll_kwargs
+    assert 0 < float(poll_kwargs[0]["timeout_seconds"]) <= 5
+
+
+def test_publish_transitions_propagates_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-timeout",
+            openapi_job_id="openapi-timeout",
+            last_status="queued",
+            done=False,
+        )
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        sb_tasks.publish_transitions()
 
 
 def test_drain_dedups_duplicate_correlation(monkeypatch: pytest.MonkeyPatch) -> None:

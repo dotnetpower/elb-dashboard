@@ -81,6 +81,7 @@ __all__ = (
     "SUBMIT_SUBSTEP_TOTAL",
     "acquire_submit_lock",
     "cancel",
+    "collect_k8s_runtime_garbage",
     "detect_submit_substep",
     "persist_submit_log_events",
     "release_submit_lock",
@@ -169,6 +170,7 @@ from api.tasks.blast.poll_tasks import (  # noqa: E402,F401
     poll_running_status,
 )
 from api.tasks.blast.reconcile_task import reconcile_stale_jobs  # noqa: E402,F401
+from api.tasks.blast.runtime_gc_task import collect_k8s_runtime_garbage  # noqa: E402
 from api.tasks.blast.split_pipeline import (  # noqa: E402,F401
     _aggregate_split_child_states,
     _aggregate_split_merge_reports,

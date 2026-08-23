@@ -7,7 +7,7 @@ Edit boundaries: Keep this as an operator/dev utility; do not make production co
 Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
 `patch_app`, `main`
 Risky contracts: Assume local developer context only; avoid broad production-side effects.
-Validation: `uv run python scripts/dev/patch-openapi-build-context.py --help`.
+Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
 
 from __future__ import annotations
@@ -59,6 +59,25 @@ def _insert_once(path: Path, anchor: str, insertion: str, marker: str) -> None:
     path.write_text(text.replace(anchor, anchor + insertion, 1))
 
 
+def _replace_fresh_or_legacy(
+    path: Path,
+    *,
+    fresh: str,
+    legacy: str,
+    desired: str,
+    marker: str,
+) -> None:
+    """Apply ``desired`` to either an unpatched or previously patched context."""
+    text = path.read_text()
+    if marker in text:
+        return
+    source = legacy if legacy in text else fresh
+    count = text.count(source)
+    if count != 1:
+        raise RuntimeError(f"expected one fresh/legacy match in {path}, found {count}")
+    path.write_text(text.replace(source, desired, 1))
+
+
 def _copy_support_files(root: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     for name in ("patch_elastic_blast.py", "merge-sharded-results.sh"):
@@ -106,44 +125,81 @@ def patch_dockerfile(root: Path) -> None:
         ),
         "COPY patch_elastic_blast.py /tmp/patch_elastic_blast.py",
     )
-    _insert_once(
+    checkout_anchor = "    git -C /tmp/elb-src checkout ${ELB_REF} && \\\n"
+    legacy_patch = (
+        "    python3 /tmp/patch_elastic_blast.py /tmp/elb-src "
+        "/tmp/merge-sharded-results.sh && \\\n"
+    )
+    source_ttl_check = (
+        "    grep -q 'ttlSecondsAfterFinished:' "
+        "/tmp/elb-src/src/elastic_blast/templates/"
+        "blast-batch-job-aks.yaml.template && \\\n"
+    )
+    _replace_fresh_or_legacy(
         path,
-        "    git -C /tmp/elb-src checkout ${ELB_REF} && \\\n",
-        "    python3 /tmp/patch_elastic_blast.py /tmp/elb-src /tmp/merge-sharded-results.sh && \\\n",
-        "python3 /tmp/patch_elastic_blast.py /tmp/elb-src",
+        fresh=checkout_anchor,
+        legacy=checkout_anchor + legacy_patch,
+        desired=checkout_anchor + legacy_patch + source_ttl_check,
+        marker=source_ttl_check.strip(),
     )
     _replace_once(
         path,
         "    rm -rf /tmp/elb-src && \\\n",
         "    true && \\\n",
     )
-    _replace_once(
-        path,
-        "    pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \\\n",
-        (
-            "    pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \\\n"
-            "    cp -a /tmp/elb-src/src/elastic_blast/templates/. /usr/local/lib/python3.11/site-packages/elastic_blast/templates/ && \\\n"
-        ),
+    system_install = "    pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \\\n"
+    system_copy = (
+        "    cp -a /tmp/elb-src/src/elastic_blast/templates/. "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/ && \\\n"
     )
-    _replace_once(
+    system_check = (
+        "    grep -q 'ttlSecondsAfterFinished:' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "blast-batch-job-aks.yaml.template && \\\n"
+    )
+    _replace_fresh_or_legacy(
         path,
-        "    && pip install --no-cache-dir azure-cli \\\n",
-        (
-            "    && pip install --no-cache-dir azure-cli \\\n"
-            "    && pip install --no-cache-dir --no-deps --no-build-isolation /tmp/elb-src \\\n"
-            "    && cp -a /tmp/elb-src/src/elastic_blast/templates/. /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/ \\\n"
-            "    && rm -rf /tmp/elb-src \\\n"
-        ),
+        fresh=system_install,
+        legacy=system_install + system_copy,
+        desired=system_install + system_copy + system_check,
+        marker=system_check.strip(),
+    )
+    venv_install = "    && pip install --no-cache-dir azure-cli \\\n"
+    venv_legacy = (
+        venv_install
+        + "    && pip install --no-cache-dir --no-deps --no-build-isolation /tmp/elb-src \\\n"
+        + "    && cp -a /tmp/elb-src/src/elastic_blast/templates/. /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/ \\\n"
+        + "    && rm -rf /tmp/elb-src \\\n"
+    )
+    venv_check = (
+        "    && grep -q 'ttlSecondsAfterFinished:' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "blast-batch-job-aks.yaml.template \\\n"
+    )
+    venv_desired = (
+        venv_install
+        + "    && pip install --no-cache-dir --no-deps --no-build-isolation /tmp/elb-src \\\n"
+        + "    && cp -a /tmp/elb-src/src/elastic_blast/templates/. /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/ \\\n"
+        + venv_check
+        + "    && rm -rf /tmp/elb-src \\\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=venv_install,
+        legacy=venv_legacy,
+        desired=venv_desired,
+        marker=venv_check.strip(),
     )
 
 
 def patch_app(root: Path) -> None:
     _copy_app_overlay(root)
     path = root / "app" / "main.py"
-    _replace_once(
-        path,
-        "    return None\n\n\ndef _ensure_elb_scripts_configmap() -> None:\n",
-        (
+    if "def _effective_elb_job_id(" not in path.read_text():
+        _replace_once(
+            path,
+            "    return None\n\n\ndef _ensure_elb_scripts_configmap() -> None:\n",
+            (
             "    return None\n\n\n"
             "def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:\n"
             "    if not stdout:\n"
@@ -175,9 +231,9 @@ def patch_app(root: Path) -> None:
             "        return discovered\n"
             "    return current or job_id\n"
             "\n\n"
-            "def _ensure_elb_scripts_configmap() -> None:\n"
-        ),
-    )
+                "def _ensure_elb_scripts_configmap() -> None:\n"
+            ),
+        )
     _insert_once(
         path,
         (

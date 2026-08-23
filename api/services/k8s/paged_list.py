@@ -158,7 +158,14 @@ def list_k8s_items(
             query["limit"] = str(bounded_page)
             if continue_token:
                 query["continue"] = continue_token
-            response = session.get(url, params=query, timeout=timeout)
+            from api.services.k8s.client import get_with_transient_retry
+
+            response = get_with_transient_retry(
+                session,
+                url,
+                params=query,
+                timeout=timeout,
+            )
             status = getattr(response, "status_code", 200)
             if status == 410 and items:
                 # The continue token expired mid-pagination (objects churned).

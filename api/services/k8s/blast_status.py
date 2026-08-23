@@ -49,7 +49,9 @@ _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,63}$")
 # keeping the freshness budget well under the frontend polling cadence.
 
 _BLAST_STATUS_CACHE_TTL_SECONDS = 3.0
-_BLAST_STATUS_CACHE: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
+_BLAST_STATUS_CACHE: dict[
+    tuple[str, str, str, str, str], tuple[float, dict[str, Any]]
+] = {}
 _BLAST_STATUS_CACHE_LOCK = threading.Lock()
 
 
@@ -65,6 +67,7 @@ def _fetch_blast_pods_and_jobs(
     resource_group: str,
     cluster_name: str,
     namespace: str,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     """Return ``{target_ns, all_pods, all_jobs}`` or ``{error: ...}`` for the cluster.
 
@@ -75,7 +78,7 @@ def _fetch_blast_pods_and_jobs(
 
     from api.services.k8s.monitoring import _namespace_or_default
 
-    key = (subscription_id, resource_group, cluster_name, namespace)
+    key = (subscription_id, resource_group, cluster_name, namespace, job_id or "")
     now = time.monotonic()
     with _BLAST_STATUS_CACHE_LOCK:
         cached = _BLAST_STATUS_CACHE.get(key)
@@ -83,9 +86,15 @@ def _fetch_blast_pods_and_jobs(
             return cached[1]
 
     target_ns = _namespace_or_default(session, server, namespace)
-    pods_response = session.get(
+    selector = "app=blast"
+    if job_id:
+        selector = f"{selector},elb-job-id={job_id}"
+    from api.services.k8s.client import get_with_transient_retry
+
+    pods_response = get_with_transient_retry(
+        session,
         f"{server}/api/v1/namespaces/{target_ns}/pods",
-        params={"labelSelector": "app=blast"},
+        params={"labelSelector": selector},
         timeout=10,
     )
     if pods_response.status_code != 200:
@@ -95,9 +104,10 @@ def _fetch_blast_pods_and_jobs(
         }
     all_pods = pods_response.json().get("items", [])
 
-    jobs_response = session.get(
+    jobs_response = get_with_transient_retry(
+        session,
         f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs",
-        params={"labelSelector": "app=blast"},
+        params={"labelSelector": selector},
         timeout=10,
     )
     if jobs_response.status_code != 200:
@@ -164,6 +174,13 @@ def k8s_check_blast_status(
     so the honest status is ``creating`` rather than ``completed``.
     """
 
+    if job_id and not _K8S_LABEL_VALUE_RE.fullmatch(job_id):
+        return {
+            "status": "unknown",
+            "pods": 0,
+            "detail": "job_id is not a valid Kubernetes label value",
+        }
+
     from api.services.k8s.monitoring import _get_k8s_session
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
@@ -175,6 +192,7 @@ def k8s_check_blast_status(
             resource_group,
             cluster_name,
             namespace,
+            job_id,
         )
         target_ns = snapshot.get("target_ns") or namespace
         if "error" in snapshot:

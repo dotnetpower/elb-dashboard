@@ -61,7 +61,7 @@ render_onboarding() {
   # guards on ELB_MOTD_SHOWN).
   printf '\n'
   printf '  %sGet started%s\n' "$BOLD" "$RESET"
-  printf '    %s1.%s %saz login --use-device-code%s   %s# attribute cloud actions to you%s\n' \
+  printf '    %s1.%s %saz account show --output table%s   %s# verify the active Azure identity%s\n' \
     "$BOLD" "$RESET" "$CYAN" "$RESET" "$DIM$MUTED" "$RESET"
   printf '    %s2.%s %selb-cfg --program blastn -o ~/elastic-blast.ini%s   %s# scaffold a config%s\n' \
     "$BOLD" "$RESET" "$CYAN" "$RESET" "$DIM$MUTED" "$RESET"

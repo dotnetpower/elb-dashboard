@@ -556,6 +556,7 @@ def get_job(
     subscription_id: str = "",
     resource_group: str = "",
     cluster_name: str = "",
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     resolved_base = _base_url(
         base_url,
@@ -566,7 +567,11 @@ def get_job(
     try:
         resp = _request_with_token_resync(
             base_url=resolved_base,
-            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            timeout=(
+                _DEFAULT_TIMEOUT_SECONDS
+                if timeout_seconds is None
+                else max(0.5, min(float(timeout_seconds), _DEFAULT_TIMEOUT_SECONDS))
+            ),
             api_token=api_token,
             subscription_id=subscription_id,
             resource_group=resource_group,

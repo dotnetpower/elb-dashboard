@@ -460,6 +460,7 @@ def test_last_json_reads_structured_payload_from_log_tail() -> None:
 def test_retryable_result_uses_structured_category_and_exit_code() -> None:
     assert blast._is_retryable_result({"exit_code": 1}, {"kind": "error", "category": "capacity"})
     assert blast._is_retryable_result({"exit_code": 8}, None)
+    assert not blast._is_retryable_result({"exit_code": 7}, None)
     assert not blast._is_retryable_result(
         {"exit_code": 1}, {"kind": "error", "category": "invalid"}
     )

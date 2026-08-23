@@ -31,9 +31,11 @@ class _Session:
     def __init__(self, pods: list[dict[str, Any]], jobs: list[dict[str, Any]]) -> None:
         self.pods = pods
         self.jobs = jobs
+        self.requests: list[tuple[str, dict[str, Any]]] = []
         self.closed = False
 
-    def get(self, url: str, **_: Any) -> _Response:
+    def get(self, url: str, **kwargs: Any) -> _Response:
+        self.requests.append((url, kwargs))
         if url.endswith("/api/v1/namespaces/default"):
             return _Response(200, {})
         if url.endswith("/api/v1/namespaces/default/pods"):
@@ -134,6 +136,32 @@ def test_k8s_check_blast_status_uses_scoped_job_label_without_pod(monkeypatch) -
     assert status["job_id"] == "target-job"
     assert status["jobs"] == 1
     assert status["succeeded"] == 1
+    list_requests = [
+        kwargs for url, kwargs in session.requests if url.endswith(("/pods", "/jobs"))
+    ]
+    assert [request["params"] for request in list_requests] == [
+        {"labelSelector": "app=blast,elb-job-id=target-job"},
+        {"labelSelector": "app=blast,elb-job-id=target-job"},
+    ]
+
+
+def test_k8s_check_blast_status_rejects_invalid_job_label_before_k8s(monkeypatch) -> None:
+    def _must_not_connect(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("invalid label must be rejected before opening K8s")
+
+    monkeypatch.setattr(k8s_monitoring, "_get_k8s_session", _must_not_connect)
+
+    status = k8s_monitoring.k8s_check_blast_status(
+        None,
+        "sub",
+        "rg",
+        "cluster",
+        "default",
+        job_id="bad,label=value",
+    )
+
+    assert status["status"] == "unknown"
+    assert "valid Kubernetes label" in status["detail"]
 
 
 def test_k8s_check_blast_status_returns_runtime_timestamps(monkeypatch) -> None:

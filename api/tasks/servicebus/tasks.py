@@ -63,6 +63,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -264,7 +265,18 @@ def release_drain_stop_intent(queue_name: str, token: str | None) -> None:
     _release_drain_stop_intent(queue_name, token)
 
 
-_PUBLISH_MAX_ROWS = int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "20"))
+_PUBLISH_MAX_ROWS = max(
+    1,
+    min(int(os.environ.get("SERVICEBUS_PUBLISH_MAX_ROWS", "20")), 100),
+)
+_PUBLISH_POLL_TIMEOUT_SECONDS = max(
+    0.5,
+    min(float(os.environ.get("SERVICEBUS_PUBLISH_POLL_TIMEOUT_SECONDS", "2")), 5.0),
+)
+_PUBLISH_BUDGET_SECONDS = max(
+    5.0,
+    min(float(os.environ.get("SERVICEBUS_PUBLISH_BUDGET_SECONDS", "40")), 45.0),
+)
 _OUTBOX_MAX_EVENTS = int(os.environ.get("SERVICEBUS_OUTBOX_MAX_EVENTS", "200"))
 _DLQ_RESPONSE_MAX_MESSAGES = int(
     os.environ.get("SERVICEBUS_DLQ_RESPONSE_MAX_MESSAGES", "100")
@@ -1953,6 +1965,7 @@ def _publish_one_bridge(
     openapi_kwargs: dict[str, str],
     *,
     pending_correlations: set[str] | None = None,
+    poll_timeout_seconds: float | None = None,
 ) -> tuple[int, int]:
     """Process one active bridge: poll sibling status, publish on change.
 
@@ -2019,7 +2032,13 @@ def _publish_one_bridge(
     if _finish_lifecycle_interrupted_bridge(cfg, rec):
         return (1, 1)
     try:
-        job = external_blast.get_job(rec.openapi_job_id, **openapi_kwargs)
+        job = external_blast.get_job(
+            rec.openapi_job_id,
+            **openapi_kwargs,
+            timeout_seconds=poll_timeout_seconds,
+        )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:  # transient unless a recovered plane confirms 404
         if int(getattr(exc, "status_code", 0) or 0) == 404 and (
             _finish_lifecycle_interrupted_bridge(cfg, rec, confirmed_missing=True)
@@ -2465,6 +2484,7 @@ def emit_service_bus_health() -> dict[str, Any]:
 @skip_tick_on_transient_infra
 def publish_transitions() -> dict[str, Any]:
     """Poll sibling status for active bridges and emit one event per change."""
+    deadline = time.monotonic() + _PUBLISH_BUDGET_SECONDS
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
@@ -2530,6 +2550,13 @@ def publish_transitions() -> dict[str, Any]:
     scanned = 0
     errors = outbox["errors"]
     for rec in bridges:
+        if time.monotonic() >= deadline - _PUBLISH_POLL_TIMEOUT_SECONDS - 2:
+            LOGGER.info(
+                "servicebus publish tick budget exhausted scanned=%d remaining=%d",
+                scanned,
+                len(bridges) - scanned,
+            )
+            break
         scanned += 1
         try:
             p_delta, f_delta = _publish_one_bridge(
@@ -2537,7 +2564,10 @@ def publish_transitions() -> dict[str, Any]:
                 rec,
                 openapi_kwargs,
                 pending_correlations=pending_correlations,
+                poll_timeout_seconds=_PUBLISH_POLL_TIMEOUT_SECONDS,
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             # Partial-failure isolation: a tracking write (mark_published /
             # mark_done) or any unexpected error on ONE bridge must not abort

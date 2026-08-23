@@ -294,7 +294,14 @@ def k8s_warmup_status(
 
         # Phase 1 — fan out the six independent reads in parallel.
         def _get(url: str, params: dict[str, str] | None = None) -> Any:
-            return session.get(url, params=params, timeout=10)
+            from api.services.k8s.client import get_with_transient_retry
+
+            return get_with_transient_retry(
+                session,
+                url,
+                params=params,
+                timeout=10,
+            )
 
         # Reuses the process-wide ``_k8s_fanout_pool`` so we do not
         # spawn + tear down 6 worker threads on every monitor poll.

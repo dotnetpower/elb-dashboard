@@ -197,6 +197,19 @@ def test_runtime_metrics_backfill_is_slow_cadence_and_non_poison() -> None:
     assert task.time_limit == 300
 
 
+def test_k8s_runtime_gc_is_bounded_and_non_poison() -> None:
+    entry = celery_app.conf.beat_schedule["blast-k8s-runtime-garbage-collection"]
+    task = celery_app.tasks["api.tasks.blast.collect_k8s_runtime_garbage"]
+
+    assert float(entry["schedule"]) >= 300
+    assert entry["options"]["queue"] == "reconcile"
+    assert 0 < float(entry["options"]["expires"]) < float(entry["schedule"])
+    assert task.acks_late is False
+    assert task.reject_on_worker_lost is False
+    assert task.soft_time_limit == 240
+    assert task.time_limit == 300
+
+
 def test_autostop_tick_isolated_on_interactive_azure_queue() -> None:
     entry = celery_app.conf.beat_schedule["aks-idle-autostop-evaluate"]
     options = entry["options"]

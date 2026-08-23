@@ -235,6 +235,11 @@ celery_app.conf.update(
             ),
             "options": {"queue": "reconcile", "expires": 900.0},
         },
+        "blast-k8s-runtime-garbage-collection": {
+            "task": "api.tasks.blast.collect_k8s_runtime_garbage",
+            "schedule": float(os.environ.get("CELERY_BEAT_K8S_RUNTIME_GC_SECONDS", "300")),
+            "options": {"queue": "reconcile", "expires": 240.0},
+        },
         # Heal the jobstate time-ordered index (#50): re-run the idempotent
         # backfill upserts so a job whose in-line best-effort _index_put failed
         # is re-added and stops being omitted from the indexed /api/blast/jobs

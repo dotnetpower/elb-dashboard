@@ -566,6 +566,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Fair dispatch avoids reserving four late-ack tasks per child;
             // a killed child then requeues at most its one active task.
             { name: 'CELERY_WORKER_PREFETCH_MULTIPLIER', value: controlPlaneEnv.worker.CELERY_WORKER_PREFETCH_MULTIPLIER }
+            { name: 'K8S_RUNTIME_GC_ENABLED', value: controlPlaneEnv.worker.K8S_RUNTIME_GC_ENABLED }
+            { name: 'K8S_RUNTIME_GC_JOB_RETENTION_SECONDS', value: controlPlaneEnv.worker.K8S_RUNTIME_GC_JOB_RETENTION_SECONDS }
+            { name: 'K8S_RUNTIME_GC_CONFIGMAP_RETENTION_SECONDS', value: controlPlaneEnv.worker.K8S_RUNTIME_GC_CONFIGMAP_RETENTION_SECONDS }
+            { name: 'K8S_RUNTIME_GC_MAX_DELETES', value: controlPlaneEnv.worker.K8S_RUNTIME_GC_MAX_DELETES }
+            { name: 'K8S_RUNTIME_GC_DEADLINE_SECONDS', value: controlPlaneEnv.worker.K8S_RUNTIME_GC_DEADLINE_SECONDS }
             { name: 'JOBSTATE_TIME_INDEX_ENABLED', value: controlPlaneEnv.worker.JOBSTATE_TIME_INDEX_ENABLED }
             { name: 'PYTHONFAULTHANDLER', value: controlPlaneEnv.worker.PYTHONFAULTHANDLER }
             // Worker calls api.services.terminal_exec which needs the same

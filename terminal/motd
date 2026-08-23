@@ -8,7 +8,7 @@
          (by using this terminal you consent to this logging)
 
   Get started
-    1. az login --use-device-code                       # attribute cloud actions to you
+    1. az account show --output table                  # verify the active Azure identity
     2. elb-cfg --program blastn -o ~/elastic-blast.ini  # scaffold a config
     3. elb-cfg --check ~/elastic-blast.ini              # validate before submit
        Examples and a template are in ~/examples/.

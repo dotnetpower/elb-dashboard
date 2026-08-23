@@ -30,6 +30,7 @@ from api.services.k8s.blast_status import (
     k8s_cancel_blast_job,
     k8s_check_blast_status,
 )
+from api.services.k8s.client import get_with_transient_retry
 from api.services.k8s.manifests import (
     _ensure_job_manifests,
     k8s_ensure_job_manifests,
@@ -159,7 +160,11 @@ def reset_k8s_credential_cache() -> None:
 
 
 def _namespace_or_default(session: Any, server: str, namespace: str) -> str:
-    response = session.get(f"{server}/api/v1/namespaces/{namespace}", timeout=10)
+    response = get_with_transient_retry(
+        session,
+        f"{server}/api/v1/namespaces/{namespace}",
+        timeout=10,
+    )
     return "default" if response.status_code == 404 else namespace
 
 
@@ -175,7 +180,8 @@ def k8s_get_service_ip(
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
-        response = session.get(
+        response = get_with_transient_retry(
+            session,
             f"{server}/api/v1/namespaces/{namespace}/services/{service_name}",
             timeout=10,
         )
@@ -208,7 +214,8 @@ def k8s_get_deployment_ready_replicas(
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
-        response = session.get(
+        response = get_with_transient_retry(
+            session,
             f"{server}/apis/apps/v1/namespaces/{namespace}/deployments/{deployment_name}",
             timeout=10,
         )
@@ -240,7 +247,8 @@ def k8s_get_deployment_env_value(
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
-        response = session.get(
+        response = get_with_transient_retry(
+            session,
             f"{server}/apis/apps/v1/namespaces/{namespace}/deployments/{deployment_name}",
             timeout=10,
         )

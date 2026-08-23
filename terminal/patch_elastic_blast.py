@@ -7,10 +7,11 @@ Edit boundaries: Keep terminal-side behavior here; api/worker callers should use
 wrappers.
 Key entry points: `_replace_once`, `_replace_once_unless_present`,
 `_replace_all_unless_present`, `patch_azure_py`, `patch_azure_cli_glue`,
-`patch_finalizer_template`, `patch_finalizer_script`
+`patch_finalizer_template`, `patch_finalizer_script`,
+`patch_kubectl_transient_retries`
 Risky contracts: Do not expose terminal services directly to the internet or log secrets.
 Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py
-api/tests/test_terminal_command_guard.py`.
+api/tests/test_terminal_command_guard.py api/tests/test_terminal_patch_elastic_blast.py`.
 """
 
 from __future__ import annotations
@@ -51,6 +52,126 @@ def _replace_all_unless_present(path: Path, old: str, new: str, marker: str) -> 
     if count < 1:
         raise RuntimeError(f"expected at least one match in {path}, found {count}")
     path.write_text(text.replace(old, new))
+
+
+def patch_kubectl_transient_retries(root: Path) -> None:
+    """Retry bounded, replay-safe kubectl operations on transient API failures."""
+    path = root / "src/elastic_blast/util.py"
+    _replace_once_unless_present(
+        path,
+        "import subprocess\nimport datetime\n",
+        "import subprocess\nimport time\nimport datetime\n",
+        "import time\nimport datetime\n",
+    )
+    _replace_once_unless_present(
+        path,
+        "def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None, timeout:",
+        "def _safe_exec_once(cmd: list[str] | str, env: dict[str, str] | None = None, timeout:",
+        "def _safe_exec_once(cmd:",
+    )
+    wrapper = '''
+
+_KUBECTL_RETRYABLE_VERBS = frozenset({"apply", "delete", "get", "label", "logs"})
+_KUBECTL_TRANSIENT_MARKERS = (
+    "serviceunavailable",
+    "too many requests",
+    "toomanyrequests",
+    "server is currently unable to handle the request",
+    "internalerror",
+    "gateway timeout",
+    "connection reset",
+    "unexpected eof",
+    "tls handshake timeout",
+    "i/o timeout",
+)
+_KUBECTL_NON_RETRYABLE_MARKERS = (
+    "forbidden",
+    "unauthorized",
+    "authentication required",
+    "permission denied",
+    "invalid argument",
+    "unknown flag",
+)
+
+
+def _kubectl_verb(argv: list[str]) -> str:
+    options_with_values = {
+        "--cluster",
+        "--context",
+        "--kubeconfig",
+        "--namespace",
+        "--request-timeout",
+        "--server",
+        "--token",
+        "--user",
+    }
+    skip_value = False
+    for arg in argv[1:]:
+        if skip_value:
+            skip_value = False
+            continue
+        if arg in options_with_values:
+            skip_value = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return arg
+    return ""
+
+
+def _kubectl_transient_failure(cmd: list[str] | str, exc: SafeExecError) -> bool:
+    argv = cmd.split() if isinstance(cmd, str) else list(cmd)
+    if not argv or os.path.basename(argv[0]) != "kubectl":
+        return False
+    verb = _kubectl_verb(argv)
+    if verb not in _KUBECTL_RETRYABLE_VERBS:
+        return False
+    error = str(exc).lower()
+    if any(marker in error for marker in _KUBECTL_NON_RETRYABLE_MARKERS):
+        return False
+    if verb == "delete" and not any(
+        arg == "--ignore-not-found" or arg.startswith("--ignore-not-found=")
+        for arg in argv
+    ):
+        return False
+    if verb == "label" and "--overwrite" not in argv:
+        return False
+    return any(marker in error for marker in _KUBECTL_TRANSIENT_MARKERS) or bool(
+        re.search(r"(?:^|[^0-9])(429|500|502|503|504)(?:[^0-9]|$)", error)
+    )
+
+
+def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None,
+              timeout: Optional[float] = 60) -> subprocess.CompletedProcess:
+    """Run a command and retry replay-safe kubectl calls on transient failures."""
+    try:
+        attempts = max(1, min(int(os.getenv("ELB_KUBECTL_TRANSIENT_ATTEMPTS", "6")), 6))
+    except ValueError:
+        attempts = 6
+    for attempt in range(1, attempts + 1):
+        try:
+            return _safe_exec_once(cmd, env=env, timeout=timeout)
+        except SafeExecError as exc:
+            if attempt >= attempts or not _kubectl_transient_failure(cmd, exc):
+                raise
+            delay = min(4, 2 ** (attempt - 1))
+            logging.warning(
+                "Transient Kubernetes API failure; retrying kubectl verb=%s "
+                "attempt %d/%d in %ds",
+                _kubectl_verb(cmd.split() if isinstance(cmd, str) else list(cmd)),
+                attempt + 1,
+                attempts,
+                delay,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable kubectl retry state")
+'''
+    _replace_once_unless_present(
+        path,
+        "    return p\n\ndef safe_exec_print(",
+        f"    return p\n{wrapper}\ndef safe_exec_print(",
+        "def _kubectl_transient_failure(",
+    )
 
 
 def patch_azure_py(root: Path) -> None:
@@ -942,6 +1063,11 @@ def patch_aks_job_ttl(root: Path) -> None:
     (digits, seconds; default 1800 = 30 min).
     """
     raw = os.environ.get("ELB_JOB_TTL_SECONDS", "1800")
+    if not raw.isdigit():
+        print(
+            f"warning: ELB_JOB_TTL_SECONDS={raw!r} is not numeric; using 1800",
+            file=sys.stderr,
+        )
     ttl = raw if raw.isdigit() else "1800"
     ttl_line = f"  ttlSecondsAfterFinished: {ttl}\n"
     templates = [
@@ -1059,9 +1185,11 @@ def patch_init_job_wait_filters(root: Path) -> None:
         "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup'",
         (
             "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
-            "delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}'"
+            "delete jobs --ignore-not-found=true "
+            "-l app=setup,elb-job-id={cfg.azure.elb_job_id}'"
         ),
-        "delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}",
+        "delete jobs --ignore-not-found=true "
+        "-l app=setup,elb-job-id={cfg.azure.elb_job_id}",
     )
 
 
@@ -1088,6 +1216,7 @@ def main() -> int:
     patch_azure_py(root)
     patch_partitioned_outfmt_gate(root)
     patch_azure_cli_glue(root)
+    patch_kubectl_transient_retries(root)
     patch_azure_traits(root)
     patch_finalizer_template(root)
     patch_finalizer_script(root, merge_script_source)

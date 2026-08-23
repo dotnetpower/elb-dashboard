@@ -5,7 +5,7 @@ Edit boundaries: Keep reusable domain logic here; routes and tasks should call t
 instead of duplicating SDK code.
 Key entry points: `_K8sCredentialMaterial`, `reset_k8s_credential_cache`,
 `_k8s_credential_cache_ttl`, `reset_k8s_session_pool`,
-`reset_k8s_clients_after_fork`
+`reset_k8s_clients_after_fork`, `get_with_transient_retry`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
 The cluster CA and any mTLS client cert / key are trusted via an in-memory
 SSLContext (`_build_k8s_https_adapter`), never a temp file, so pool eviction
@@ -49,6 +49,30 @@ _K8S_SESSION_POOL_MAX_ENTRIES = 32
 # Refresh a Bearer-auth session this many seconds before the AAD token
 # actually expires so an in-flight request never sees a 401.
 _K8S_SESSION_TOKEN_SAFETY_MARGIN_SECONDS = 60.0
+_TRANSIENT_GET_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def get_with_transient_retry(
+    session: Any,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    timeout: float = 10,
+) -> Any:
+    """Issue an idempotent K8s GET with one bounded transient-status retry."""
+    request_kwargs: dict[str, Any] = {"timeout": timeout}
+    if params is not None:
+        request_kwargs["params"] = params
+    response = session.get(url, **request_kwargs)
+    if int(response.status_code) not in _TRANSIENT_GET_STATUSES:
+        return response
+    raw_retry_after = str((getattr(response, "headers", {}) or {}).get("Retry-After") or "")
+    try:
+        retry_after = float(raw_retry_after)
+    except ValueError:
+        retry_after = 0.5
+    time.sleep(max(0.1, min(retry_after, 2.0)))
+    return session.get(url, **request_kwargs)
 
 
 @dataclass(frozen=True)

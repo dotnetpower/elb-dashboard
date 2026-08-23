@@ -27,6 +27,7 @@ from api.services.openapi.runtime import save_openapi_api_token
 OPENAPI_DEPLOYMENT_NAME = "elb-openapi"
 OPENAPI_CONTAINER_NAME = "openapi"
 OPENAPI_TOKEN_ENV = "ELB_OPENAPI_API_TOKEN"  # noqa: S105 - env var name, not a token value.
+OPENAPI_INTERNAL_TOKEN_ENV = "ELB_OPENAPI_INTERNAL_TOKEN"  # noqa: S105
 K8S_NAMESPACE = "default"
 LOGGER = logging.getLogger(__name__)
 
@@ -203,14 +204,14 @@ def _patch_deployment_token(
         or []
     )
     container_index = -1
-    env_index = -1
+    env_indexes: dict[str, int] = {}
     for idx, container in enumerate(containers):
         if container.get("name") == container_name:
             container_index = idx
             for env_idx, env in enumerate(container.get("env", []) or []):
-                if env.get("name") == OPENAPI_TOKEN_ENV:
-                    env_index = env_idx
-                    break
+                name = str(env.get("name") or "")
+                if name in {OPENAPI_TOKEN_ENV, OPENAPI_INTERNAL_TOKEN_ENV}:
+                    env_indexes[name] = env_idx
             break
     if container_index < 0:
         raise OpenApiTokenError(
@@ -222,7 +223,19 @@ def _patch_deployment_token(
             ),
         )
 
+    resource_version = str((deployment.get("metadata", {}) or {}).get("resourceVersion") or "")
     ops: list[dict[str, Any]] = []
+    if resource_version:
+        # Guard positional container/env indexes against a concurrent Deployment
+        # edit. JSON Patch evaluates the test + replacements atomically; a stale
+        # snapshot fails the whole request instead of replacing the wrong env.
+        ops.append(
+            {
+                "op": "test",
+                "path": "/metadata/resourceVersion",
+                "value": resource_version,
+            }
+        )
     # The base template may not carry an `annotations` map; create it first
     # so the per-key add below cannot 422 with "path not found".
     template_meta = (
@@ -246,34 +259,36 @@ def _patch_deployment_token(
             "value": _now_iso(),
         }
     )
-    env_entry = {"name": OPENAPI_TOKEN_ENV, "value": token}
-    if env_index >= 0:
-        ops.append(
-            {
-                "op": "replace",
-                "path": f"/spec/template/spec/containers/{container_index}/env/{env_index}",
-                "value": env_entry,
-            }
-        )
-    else:
-        # Ensure /env exists before appending. K8s rejects "add /env/-" when
-        # the path is missing, so guard with an "add /env []" first.
-        env_list = containers[container_index].get("env")
-        if env_list is None:
-            ops.append(
-                {
-                    "op": "add",
-                    "path": f"/spec/template/spec/containers/{container_index}/env",
-                    "value": [],
-                }
-            )
+    env_list = containers[container_index].get("env")
+    if env_list is None:
         ops.append(
             {
                 "op": "add",
-                "path": f"/spec/template/spec/containers/{container_index}/env/-",
-                "value": env_entry,
+                "path": f"/spec/template/spec/containers/{container_index}/env",
+                "value": [],
             }
         )
+    for env_name in (OPENAPI_TOKEN_ENV, OPENAPI_INTERNAL_TOKEN_ENV):
+        env_entry = {"name": env_name, "value": token}
+        env_index = env_indexes.get(env_name)
+        if env_index is not None:
+            ops.append(
+                {
+                    "op": "replace",
+                    "path": (
+                        f"/spec/template/spec/containers/{container_index}/env/{env_index}"
+                    ),
+                    "value": env_entry,
+                }
+            )
+        else:
+            ops.append(
+                {
+                    "op": "add",
+                    "path": f"/spec/template/spec/containers/{container_index}/env/-",
+                    "value": env_entry,
+                }
+            )
 
     response = session.patch(
         _deployment_url(server, namespace, deployment_name),
@@ -337,6 +352,7 @@ def _sync_runtime_token(token: str, metadata: dict[str, Any]) -> None:
     if not token:
         return
     os.environ[OPENAPI_TOKEN_ENV] = token
+    os.environ[OPENAPI_INTERNAL_TOKEN_ENV] = token
     save_openapi_api_token(token, metadata=metadata)
     # Invalidate caches that may hold a stale token / 401 negative entry.
     # Without this the external jobs list keeps returning a cached 401 for
@@ -533,6 +549,11 @@ def get_openapi_api_token_status(
     try:
         deployment = _read_deployment(session, server, namespace, OPENAPI_DEPLOYMENT_NAME)
         token = _container_env_value(deployment, OPENAPI_CONTAINER_NAME, OPENAPI_TOKEN_ENV)
+        internal_token = _container_env_value(
+            deployment,
+            OPENAPI_CONTAINER_NAME,
+            OPENAPI_INTERNAL_TOKEN_ENV,
+        )
         generated = False
         updated_at: str | None = None
         if not token:
@@ -580,11 +601,7 @@ def get_openapi_api_token_status(
             except OpenApiTokenError as patch_exc:
                 # Patch failed (RBAC / webhook / 422). Keep the empty
                 # token in the response so the SPA still renders the
-                # Generate button — but ALSO ship the failure code +
-                # message in `self_heal_error` so the panel can show a
-                # red banner with the actionable reason. Logged at
-                # ERROR level so operators can spot the failure in
-                # App Insights without depending on the UI surface.
+                # Generate button and surfaces the actionable failure.
                 token = ""
                 generated = False
                 updated_at = None
@@ -612,6 +629,49 @@ def get_openapi_api_token_status(
                     },
                     caller_oid=caller_oid,
                     tenant_id=tenant_id,
+                )
+        elif internal_token != token:
+            try:
+                _patch_deployment_token(
+                    session,
+                    server,
+                    namespace=namespace,
+                    deployment_name=OPENAPI_DEPLOYMENT_NAME,
+                    container_name=OPENAPI_CONTAINER_NAME,
+                    token=token,
+                    deployment=deployment,
+                )
+                updated_at = _now_iso()
+                LOGGER.warning(
+                    "openapi internal webhook token self-healed to the existing API "
+                    "token cluster=%s rg=%s",
+                    cluster_name,
+                    resource_group,
+                )
+                _record_self_heal_audit(
+                    event="openapi_internal_token_self_healed",
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                    detail={
+                        "deployment_name": OPENAPI_DEPLOYMENT_NAME,
+                        "namespace": namespace,
+                        "updated_at": updated_at,
+                    },
+                    caller_oid=caller_oid,
+                    tenant_id=tenant_id,
+                )
+            except OpenApiTokenError as patch_exc:
+                self_heal_error = {
+                    "code": patch_exc.code,
+                    "message": patch_exc.message,
+                }
+                LOGGER.error(
+                    "openapi internal webhook token self-heal failed cluster=%s "
+                    "rg=%s code=%s",
+                    cluster_name,
+                    resource_group,
+                    patch_exc.code,
                 )
     finally:
         session.close()
@@ -655,11 +715,28 @@ def ensure_openapi_api_token(
     try:
         deployment = _read_deployment(session, server, namespace, OPENAPI_DEPLOYMENT_NAME)
         existing = _container_env_value(deployment, OPENAPI_CONTAINER_NAME, OPENAPI_TOKEN_ENV)
+        existing_internal = _container_env_value(
+            deployment,
+            OPENAPI_CONTAINER_NAME,
+            OPENAPI_INTERNAL_TOKEN_ENV,
+        )
         if existing and not regenerate:
             token = existing
             generated = False
             rotated = False
-            updated_at = None
+            if existing_internal != existing:
+                _patch_deployment_token(
+                    session,
+                    server,
+                    namespace=namespace,
+                    deployment_name=OPENAPI_DEPLOYMENT_NAME,
+                    container_name=OPENAPI_CONTAINER_NAME,
+                    token=existing,
+                    deployment=deployment,
+                )
+                updated_at = _now_iso()
+            else:
+                updated_at = None
         else:
             token = _generate_token()
             _patch_deployment_token(

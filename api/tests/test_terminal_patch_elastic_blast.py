@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -29,6 +30,150 @@ def _load_patch_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+_SAFE_EXEC_STUB = (
+    '''import logging
+import os
+import re
+import subprocess
+import datetime
+from typing import Optional
+
+class SafeExecError(Exception):
+    pass
+
+'''
+    "def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None, "
+    "timeout: Optional[float] = 60) -> subprocess.CompletedProcess:\n"
+    '''
+    p = subprocess.CompletedProcess(cmd, 0)
+    return p
+
+def safe_exec_print(cmd):
+    return cmd
+'''
+)
+
+
+def _patched_util_module(tmp_path: Path):
+    patch_module = _load_patch_module()
+    target = tmp_path / "src" / "elastic_blast" / "util.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(_SAFE_EXEC_STUB)
+    patch_module.patch_kubectl_transient_retries(tmp_path)
+    spec = importlib.util.spec_from_file_location("patched_elb_util", target)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_patch_kubectl_transient_retries_then_succeeds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _patched_util_module(tmp_path)
+    calls: list[object] = []
+    sleeps: list[int] = []
+
+    def _run(cmd, **_kwargs):
+        calls.append(cmd)
+        if len(calls) < 3:
+            raise module.SafeExecError("Error from server (ServiceUnavailable): 503")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(module, "_safe_exec_once", _run)
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+
+    result = module.safe_exec(["kubectl", "--context=incluster", "get", "jobs"])
+
+    assert result.returncode == 0
+    assert len(calls) == 3
+    assert sleeps == [1, 2]
+
+
+def test_patch_kubectl_transient_retries_never_replays_unsafe_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _patched_util_module(tmp_path)
+    calls: list[object] = []
+
+    def _run(cmd, **_kwargs):
+        calls.append(cmd)
+        raise module.SafeExecError("Error from server (ServiceUnavailable): 503")
+
+    monkeypatch.setattr(module, "_safe_exec_once", _run)
+
+    import pytest
+
+    with pytest.raises(module.SafeExecError):
+        module.safe_exec(["kubectl", "create", "secret", "generic", "value"])
+    assert len(calls) == 1
+
+
+def test_patch_kubectl_transient_retries_only_replay_safe_mutations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _patched_util_module(tmp_path)
+    calls: list[object] = []
+
+    def _run(cmd, **_kwargs):
+        calls.append(cmd)
+        raise module.SafeExecError("Error from server (ServiceUnavailable): 503")
+
+    monkeypatch.setattr(module, "_safe_exec_once", _run)
+
+    import pytest
+
+    with pytest.raises(module.SafeExecError):
+        module.safe_exec(["kubectl", "delete", "job", "already-gone"])
+    with pytest.raises(module.SafeExecError):
+        module.safe_exec(["kubectl", "label", "node", "n1", "ordinal=0"])
+    assert len(calls) == 2
+
+
+def test_patch_kubectl_transient_retries_reject_auth_failures(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _patched_util_module(tmp_path)
+    calls: list[object] = []
+
+    def _run(cmd, **_kwargs):
+        calls.append(cmd)
+        raise module.SafeExecError(
+            "Error from server (Forbidden): 503 permission denied"
+        )
+
+    monkeypatch.setattr(module, "_safe_exec_once", _run)
+
+    import pytest
+
+    with pytest.raises(module.SafeExecError):
+        module.safe_exec(["kubectl", "get", "jobs"])
+    assert len(calls) == 1
+
+
+def test_patch_kubectl_transient_retries_exhausts_six_attempt_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _patched_util_module(tmp_path)
+    calls: list[object] = []
+    sleeps: list[int] = []
+
+    def _run(cmd, **_kwargs):
+        calls.append(cmd)
+        raise module.SafeExecError("Error from server (ServiceUnavailable): 503")
+
+    monkeypatch.setattr(module, "_safe_exec_once", _run)
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+
+    import pytest
+
+    with pytest.raises(module.SafeExecError):
+        module.safe_exec(["kubectl", "get", "jobs"])
+    assert len(calls) == 6
+    assert sleeps == [1, 2, 4, 4, 4]
 
 
 def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> None:

@@ -67,6 +67,13 @@ from __future__ import annotations
 # Service Bus producer sent resource_profile=core_nt_safe. The verified 4.28
 # context contains both the app-side core_nt profile translation and the
 # Dockerfile runtime patch hook; ACR run de4n produced digest sha256:210d0103….
+# 4.29/4.30 were intermediate incident builds. 4.31 rebuilds sibling commit
+# 352a1f4 after the final retry review raised the bounded transient budget to
+# six attempts and closed the remaining monitoring GET retry paths.
+# The dashboard's
+# terminal/patch_elastic_blast.py layer adds bounded replay-safe kubectl retries
+# and ttlSecondsAfterFinished; the build context asserts that source/system/venv
+# batch templates all carry the TTL. ACR run de53 produced digest sha256:ed8b67d7….
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
@@ -86,7 +93,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.28",
+    "elb-openapi": "4.31",
 }
 
 # GitHub source repo for ACR Build Tasks.

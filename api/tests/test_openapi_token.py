@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests/test_openapi_token.py`.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
@@ -51,7 +52,9 @@ def _deployment(token: str = "") -> dict[str, Any]:
     env = [{"name": "ELB_CLUSTER_NAME", "value": "aks-elb"}]
     if token:
         env.append({"name": "ELB_OPENAPI_API_TOKEN", "value": token})
+        env.append({"name": "ELB_OPENAPI_INTERNAL_TOKEN", "value": token})
     return {
+        "metadata": {"resourceVersion": "7"},
         "spec": {
             "template": {
                 "spec": {
@@ -65,6 +68,17 @@ def _deployment(token: str = "") -> dict[str, Any]:
             }
         }
     }
+
+
+def _deployment_with_tokens(api_token: str, internal_token: str) -> dict[str, Any]:
+    deployment = _deployment()
+    deployment["spec"]["template"]["spec"]["containers"][0]["env"].extend(
+        [
+            {"name": "ELB_OPENAPI_API_TOKEN", "value": api_token},
+            {"name": "ELB_OPENAPI_INTERNAL_TOKEN", "value": internal_token},
+        ]
+    )
+    return deployment
 
 
 def test_existing_openapi_token_is_returned_without_patch(monkeypatch) -> None:
@@ -98,6 +112,35 @@ def test_existing_openapi_token_is_returned_without_patch(monkeypatch) -> None:
     assert session.patches == []
     assert session.closed is True
     assert saved == ["existing-token"]
+
+
+def test_existing_openapi_token_repairs_internal_webhook_token(monkeypatch) -> None:
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment_with_tokens("existing-token", "stale-token"))
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+    monkeypatch.setattr(openapi_token, "save_openapi_api_token", lambda *_a, **_k: True)
+
+    result = openapi_token.ensure_openapi_api_token(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        regenerate=False,
+    )
+
+    assert result["token"] == "existing-token"
+    assert result["rotated"] is False
+    assert result["updated_at"] is not None
+    ops = session.patches[0]["json"]
+    assert [op["value"] for op in ops if "/env/" in op["path"]] == [
+        {"name": "ELB_OPENAPI_API_TOKEN", "value": "existing-token"},
+        {"name": "ELB_OPENAPI_INTERNAL_TOKEN", "value": "existing-token"},
+    ]
 
 
 def test_generate_openapi_token_patches_deployment_and_runtime_cache(monkeypatch) -> None:
@@ -139,24 +182,38 @@ def test_generate_openapi_token_patches_deployment_and_runtime_cache(monkeypatch
     # The base fake deployment has no template annotations map, so the patch
     # creates one before adding the rotated-at key.
     assert ops[0] == {
+        "op": "test",
+        "path": "/metadata/resourceVersion",
+        "value": "7",
+    }
+    assert ops[1] == {
         "op": "add",
         "path": "/spec/template/metadata/annotations",
         "value": {},
     }
-    assert ops[1]["op"] == "add"
+    assert ops[2]["op"] == "add"
     # `~1` is the JSON Pointer escape for `/` inside the annotation key
     # `elb-dashboard/openapi-api-token-rotated-at`.
-    assert ops[1]["path"] == (
+    assert ops[2]["path"] == (
         "/spec/template/metadata/annotations/elb-dashboard~1openapi-api-token-rotated-at"
     )
     # The token env entry is new (existing env list only has ELB_CLUSTER_NAME),
     # so the op appends with the "-" path segment.
-    token_op = ops[-1]
-    assert token_op == {
-        "op": "add",
-        "path": "/spec/template/spec/containers/0/env/-",
-        "value": {"name": "ELB_OPENAPI_API_TOKEN", "value": "generated-token"},
-    }
+    assert ops[-2:] == [
+        {
+            "op": "add",
+            "path": "/spec/template/spec/containers/0/env/-",
+            "value": {"name": "ELB_OPENAPI_API_TOKEN", "value": "generated-token"},
+        },
+        {
+            "op": "add",
+            "path": "/spec/template/spec/containers/0/env/-",
+            "value": {
+                "name": "ELB_OPENAPI_INTERNAL_TOKEN",
+                "value": "generated-token",
+            },
+        },
+    ]
     assert session.closed is True
 
 
@@ -190,6 +247,38 @@ def test_status_returns_existing_token_without_patch(monkeypatch) -> None:
     assert result["self_heal_error"] is None
     assert session.patches == []
     assert saved == ["live-token"]
+
+
+def test_status_self_heals_internal_webhook_token_drift(monkeypatch) -> None:
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment_with_tokens("live-token", "stale-token"))
+    audits: list[str] = []
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+    monkeypatch.setattr(openapi_token, "save_openapi_api_token", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        openapi_token,
+        "_record_self_heal_audit",
+        lambda *, event, **_kwargs: audits.append(event),
+    )
+
+    result = openapi_token.get_openapi_api_token_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result["token"] == "live-token"
+    assert result["generated"] is False
+    assert result["updated_at"] is not None
+    assert result["self_heal_error"] is None
+    assert audits == ["openapi_internal_token_self_healed"]
+    assert len(session.patches) == 1
 
 
 def test_status_self_heals_legacy_deployment_without_token_env(monkeypatch) -> None:
@@ -243,12 +332,21 @@ def test_status_self_heals_legacy_deployment_without_token_env(monkeypatch) -> N
     assert len(session.patches) == 1
     assert session.patches[0]["headers"] == {"Content-Type": "application/json-patch+json"}
     ops = session.patches[0]["json"]
-    token_op = ops[-1]
-    assert token_op == {
-        "op": "add",
-        "path": "/spec/template/spec/containers/0/env/-",
-        "value": {"name": "ELB_OPENAPI_API_TOKEN", "value": "auto-healed-token"},
-    }
+    assert ops[-2:] == [
+        {
+            "op": "add",
+            "path": "/spec/template/spec/containers/0/env/-",
+            "value": {"name": "ELB_OPENAPI_API_TOKEN", "value": "auto-healed-token"},
+        },
+        {
+            "op": "add",
+            "path": "/spec/template/spec/containers/0/env/-",
+            "value": {
+                "name": "ELB_OPENAPI_INTERNAL_TOKEN",
+                "value": "auto-healed-token",
+            },
+        },
+    ]
 
 
 def test_status_self_heal_patch_failure_falls_back_to_empty(monkeypatch) -> None:
@@ -515,6 +613,27 @@ def test_resync_from_cluster_reads_pod_token_and_syncs(monkeypatch) -> None:
     assert metadata["subscription_id"] == "sub-1"
     assert metadata["cluster_name"] == "aks-elb"
     assert session.closed is True
+
+
+def test_sync_runtime_token_updates_both_env_aliases(monkeypatch) -> None:
+    from api.services.openapi import token as openapi_token
+
+    saved: list[str] = []
+    monkeypatch.setattr(
+        openapi_token,
+        "save_openapi_api_token",
+        lambda token, **_kwargs: saved.append(token) or True,
+    )
+    monkeypatch.setattr(
+        "api.services.blast.external_jobs._reset_external_jobs_cache",
+        lambda: None,
+    )
+
+    openapi_token._sync_runtime_token("synced-token", {"cluster_name": "aks"})
+
+    assert os.environ[openapi_token.OPENAPI_TOKEN_ENV] == "synced-token"
+    assert os.environ[openapi_token.OPENAPI_INTERNAL_TOKEN_ENV] == "synced-token"
+    assert saved == ["synced-token"]
 
 
 def test_resync_from_cluster_skips_without_context(monkeypatch) -> None:
