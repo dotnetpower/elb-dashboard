@@ -164,8 +164,10 @@ def test_register_external_job_accepts_api_token_fallback(
     monkeypatch.delenv("ELB_OPENAPI_INTERNAL_TOKEN", raising=False)
     monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", _TOKEN)
     from api.services import state_repo as state_repo_module
+    from api.services.openapi import runtime as openapi_runtime
 
     monkeypatch.setattr(state_repo_module, "get_state_repo", lambda: fake_repo)
+    monkeypatch.setattr(openapi_runtime, "get_openapi_api_token", lambda **_: "")
     from api.main import app
 
     c = TestClient(app)
@@ -173,6 +175,39 @@ def test_register_external_job_accepts_api_token_fallback(
     r = c.post(_WEBHOOK_PATH, json={"job_id": "job-1", "event": "completed"}, headers=_headers())
     assert r.status_code == 202
     assert r.json()["synced"] is True
+
+
+def test_register_external_job_runtime_token_outranks_generic_api_env(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: _FakeRepo
+) -> None:
+    """A generic control-plane M2M env token must not shadow the cluster webhook token."""
+
+    monkeypatch.setenv("AZURE_TENANT_ID", "common")
+    monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.delenv("ELB_OPENAPI_INTERNAL_TOKEN", raising=False)
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "generic-m2m-token")
+    from api.services import state_repo as state_repo_module
+    from api.services.openapi import runtime as openapi_runtime
+
+    monkeypatch.setattr(state_repo_module, "get_state_repo", lambda: fake_repo)
+    monkeypatch.setattr(openapi_runtime, "get_openapi_api_token", lambda **_: _TOKEN)
+    from api.main import app
+
+    c = TestClient(app)
+    fake_repo.rows["job-1"] = _FakeRow(job_id="job-1", status="running", phase="running")
+    accepted = c.post(
+        _WEBHOOK_PATH,
+        json={"job_id": "job-1", "event": "completed"},
+        headers=_headers(_TOKEN),
+    )
+    rejected = c.post(
+        _WEBHOOK_PATH,
+        json={"job_id": "job-1", "event": "completed"},
+        headers=_headers("generic-m2m-token"),
+    )
+
+    assert accepted.status_code == 202
+    assert rejected.status_code == 401
 
 
 # ---------------------------------------------------------------------------

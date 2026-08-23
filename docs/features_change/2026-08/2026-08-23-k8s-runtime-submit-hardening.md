@@ -38,7 +38,9 @@ Two independent control-plane faults were also active:
   failures remain immediate.
 - OpenAPI token generation, rotation, and drift repair update the API and
   webhook env entries in one resource-version-guarded JSON Patch. The
-  control-plane process synchronizes both aliases as well.
+  control-plane process synchronizes both aliases as well. The webhook receiver
+  prefers the cluster-specific durable/runtime token over the generic API M2M
+  env token, preventing revision restarts from reintroducing token drift.
 - A five-minute, Redis-single-flight runtime collector removes bounded batches
   of old terminal Jobs and terminal OpenAPI ConfigMaps. It preserves active,
   recent, malformed, and timestamp-unclassifiable objects. Azure Table and Blob
@@ -104,7 +106,7 @@ job distribution.
 
 Focused validation completed during implementation:
 
-- `uv run pytest -q api/tests` — 5,039 passed, 4 skipped; the six warnings are
+- `uv run pytest -q api/tests` — 5,040 passed, 4 skipped; the six warnings are
   pre-existing duplicate OpenAPI operation IDs.
 - `uv run pytest api/tests -m 'slow or subprocess'` — 83 passed.
 - `uv run pytest -q api/tests/test_k8s_blast_status.py api/tests/test_k8s_runtime_gc.py api/tests/test_terminal_patch_elastic_blast.py api/tests/test_servicebus_tasks.py api/tests/test_blast_tasks.py api/tests/test_celery_queue_isolation.py` — 300 passed.

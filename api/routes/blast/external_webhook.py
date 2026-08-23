@@ -89,27 +89,28 @@ def _expected_token() -> str:
     explicit ("one cluster, one secret").
 
     Lookup precedence:
-      1. ``ELB_OPENAPI_INTERNAL_TOKEN`` env (explicit override / test path)
-      2. ``ELB_OPENAPI_API_TOKEN`` env (legacy / manual config)
-      3. Ops Redis runtime cache (the worker's ``deploy_openapi_service`` writes the
-         minted token here via ``save_openapi_api_token``; this is the production
-         path because the api sidecar does not carry the token in its env)
+      1. ``ELB_OPENAPI_INTERNAL_TOKEN`` env (explicit webhook override / test path)
+      2. Ops Redis + durable runtime cache (cluster token written by deploy/token sync)
+      3. ``ELB_OPENAPI_API_TOKEN`` env (generic M2M / legacy fallback)
+
+    The generic API env can intentionally be a different control-plane M2M token.
+    It must not shadow a known cluster webhook token after a Container App revision
+    restart, or every sibling terminal notification returns 401.
     """
 
-    env_token = (
-        os.environ.get("ELB_OPENAPI_INTERNAL_TOKEN")
-        or os.environ.get("ELB_OPENAPI_API_TOKEN")
-        or ""
-    ).strip()
-    if env_token:
-        return env_token
+    internal_token = (os.environ.get("ELB_OPENAPI_INTERNAL_TOKEN") or "").strip()
+    if internal_token:
+        return internal_token
     try:
         from api.services.openapi.runtime import get_openapi_api_token
 
-        return (get_openapi_api_token() or "").strip()
+        runtime_token = (get_openapi_api_token() or "").strip()
     except Exception as exc:  # pragma: no cover — Redis import / connect failure
         LOGGER.debug("openapi webhook: runtime token lookup failed: %s", type(exc).__name__)
-        return ""
+        runtime_token = ""
+    if runtime_token:
+        return runtime_token
+    return (os.environ.get("ELB_OPENAPI_API_TOKEN") or "").strip()
 
 
 def _verify_token(request: Request) -> None:
