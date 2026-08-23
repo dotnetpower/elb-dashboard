@@ -119,6 +119,22 @@ Focused validation completed during implementation:
 - `uv run python scripts/docs/check_frontmatter.py` — 61 navigated pages valid.
 - Live webhook replay for the existing failed job returned HTTP 202 without
   exposing either token.
+- The first API rollout exposed a second token collision: a generic Container
+  App M2M env token shadowed the cluster-specific runtime token and produced 75
+  webhook 401s. Commit `aa2b8619` changed the receiver precedence to explicit
+  webhook env -> durable/runtime cluster token -> generic M2M fallback.
+- Container App revision `ca-elb-dashboard--0000285` reached Healthy / Running
+  with API digest `sha256:35df166c...06ef38` and terminal digest
+  `sha256:f95e7a3f...218b2a`. The deployed resolver selected the runtime cluster
+  token, and a sibling replay returned HTTP 202.
+- After revision `0000285`, Application Insights reported zero failed requests
+  and zero exceptions; the sidecar ERROR/Traceback query was also empty.
+- The stale start barrier is now cancelled, the Service Bus request queue
+  drained from 70 to 0, and all 70 recovered jobs completed. The final sibling
+  distribution was 152 completed / 3 pre-existing failed, with no new failure.
+- A direct deployed-worker GC smoke scanned 534 Jobs and 155 ConfigMaps with
+  zero deletions, zero errors, and no truncation, proving active/recent object
+  preservation on the live cluster.
 - Live 4.31 image verification found one retry helper marker and one
   `ttlSecondsAfterFinished: 1800` field in each installed runtime template;
   API/webhook token values matched.
