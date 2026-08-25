@@ -26,6 +26,7 @@ from api.services.blast.task_config import (
 from api.services.query_grouping import (
     QuerySplitExecutionPlan,  # noqa: F401  # re-exported for split_pipeline + tests
 )
+from api.services.state.job_state import canonical_elastic_blast_job_id
 from api.tasks.blast.progress import (
     _merge_progress_payload,  # noqa: F401  # re-exported for tests
     _phase_is_terminal_for_artifacts,  # noqa: F401  # re-exported for state + tests
@@ -108,8 +109,8 @@ def _external_reconcile_job_id(row: Any) -> str:
         getattr(row, "elastic_blast_job_id", ""),
         getattr(row, "k8s_job_id", ""),
     ):
-        job_id = str(value or "").strip()
-        if job_id.startswith("job-"):
+        job_id = canonical_elastic_blast_job_id(value)
+        if job_id:
             return job_id
     return ""
 

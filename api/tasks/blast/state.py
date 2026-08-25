@@ -28,20 +28,84 @@ from api.tasks.blast.progress import _merge_progress_payload, _phase_is_terminal
 LOGGER = logging.getLogger(__name__)
 
 
-def _enqueue_artifact_finalizer(job_id: str, phase: str, status: str) -> None:
+def _enqueue_artifact_finalizer(
+    job_id: str,
+    phase: str,
+    status: str,
+    *,
+    force: bool = False,
+    runtime_identity: str = "",
+    reconcile_attempts: int = 0,
+) -> bool:
     if not _phase_is_terminal_for_artifacts(phase, status):
-        return
+        return False
     try:
-        from api.services.job_artifacts import artifact_build_should_enqueue
+        from api.services.job_artifacts import artifact_build_should_enqueue, upsert_artifact_state
         from api.tasks.blast_artifacts import finalize_job_artifacts
 
-        if not artifact_build_should_enqueue(job_id, ["artifact_finalizer"]):
-            return
-        finalize_job_artifacts.apply_async(kwargs={"job_id": job_id})
+        should_enqueue = True
+        if not force:
+            try:
+                should_enqueue = artifact_build_should_enqueue(
+                    job_id,
+                    ["artifact_finalizer"],
+                    runtime_identity=runtime_identity,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "artifact finalizer dedup state unavailable job_id=%s: %s",
+                    job_id,
+                    type(exc).__name__,
+                )
+        if not should_enqueue:
+            return False
+        try:
+            upsert_artifact_state(
+                job_id,
+                "artifact_finalizer",
+                status="pending",
+                runtime_identity=runtime_identity,
+                reconcile_attempts=reconcile_attempts,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "artifact finalizer pending state write skipped job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
+        try:
+            finalize_job_artifacts.apply_async(
+                kwargs={"job_id": job_id},
+                retry=False,
+            )
+        except Exception as exc:
+            try:
+                upsert_artifact_state(
+                    job_id,
+                    "artifact_finalizer",
+                    status="failed",
+                    error_code="enqueue_failed",
+                    runtime_identity=runtime_identity,
+                    reconcile_attempts=reconcile_attempts,
+                )
+            except Exception:
+                LOGGER.debug(
+                    "artifact finalizer enqueue failure state write failed job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
+            LOGGER.warning(
+                "artifact finalizer enqueue failed job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
+            return False
+        return True
     except Exception as exc:
-        LOGGER.info(
+        LOGGER.warning(
             "artifact finalizer enqueue skipped job_id=%s: %s", job_id, type(exc).__name__
         )
+        return False
 
 
 def _update_state(
@@ -157,7 +221,8 @@ def _retry_or_fail(
         _blast._update_state(job_id, phase, status="failed", error_code=error_code, error=error)
         return {"job_id": job_id, "status": "failed", "phase": phase, "error": error}
 
-    countdown = retry_after_seconds or min(300, 15 * (2**retries))
+    requested_countdown = retry_after_seconds or 15 * (2**retries)
+    countdown = max(1, min(300, int(requested_countdown)))
     _blast._update_state(
         job_id,
         phase,

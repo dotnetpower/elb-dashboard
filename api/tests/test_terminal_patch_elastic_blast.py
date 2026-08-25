@@ -4,6 +4,8 @@ Responsibility: Tests for Terminal Patch Elastic BLAST behavior
 Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
 Azure calls.
 Key entry points: `_load_patch_module`,
+`test_patch_kubectl_transient_retries_honours_total_deadline`,
+`test_patch_kubectl_transient_retries_preserves_non_kubectl_path`,
 `test_patch_init_shard_script_writes_hardened_cache_skip`,
 `test_patch_init_shard_script_is_idempotent`,
 `test_patch_init_shard_script_updates_installed_package_copy`,
@@ -33,15 +35,19 @@ def _load_patch_module():
 
 
 _SAFE_EXEC_STUB = (
-    '''import logging
-import os
+    '''import os
 import re
 import subprocess
 import datetime
 from typing import Optional
 
 class SafeExecError(Exception):
-    pass
+    def __init__(self, returncode, message):
+        self.returncode = returncode
+        self.message = message
+
+    def __str__(self):
+        return self.message
 
 '''
     "def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None, "
@@ -80,7 +86,9 @@ def test_patch_kubectl_transient_retries_then_succeeds(
     def _run(cmd, **_kwargs):
         calls.append(cmd)
         if len(calls) < 3:
-            raise module.SafeExecError("Error from server (ServiceUnavailable): 503")
+            raise module.SafeExecError(
+                503, "Error from server (ServiceUnavailable): 503"
+            )
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(module, "_safe_exec_once", _run)
@@ -93,6 +101,30 @@ def test_patch_kubectl_transient_retries_then_succeeds(
     assert sleeps == [1, 2]
 
 
+def test_patch_kubectl_transient_retries_preserves_non_kubectl_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _patched_util_module(tmp_path)
+    calls: list[tuple[object, object]] = []
+
+    def _run(cmd, *, timeout, **_kwargs):
+        calls.append((cmd, timeout))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setenv("ELB_KUBECTL_TRANSIENT_DEADLINE_SECONDS", "invalid")
+    monkeypatch.setattr(module, "_safe_exec_once", _run)
+    monkeypatch.setattr(
+        module.time,
+        "monotonic",
+        lambda: (_ for _ in ()).throw(AssertionError("deadline path entered")),
+    )
+
+    result = module.safe_exec(["azcopy", "list", "https://example.invalid"], timeout=None)
+
+    assert result.returncode == 0
+    assert calls == [(["azcopy", "list", "https://example.invalid"], None)]
+
+
 def test_patch_kubectl_transient_retries_never_replays_unsafe_command(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -101,7 +133,7 @@ def test_patch_kubectl_transient_retries_never_replays_unsafe_command(
 
     def _run(cmd, **_kwargs):
         calls.append(cmd)
-        raise module.SafeExecError("Error from server (ServiceUnavailable): 503")
+        raise module.SafeExecError(503, "Error from server (ServiceUnavailable): 503")
 
     monkeypatch.setattr(module, "_safe_exec_once", _run)
 
@@ -120,7 +152,7 @@ def test_patch_kubectl_transient_retries_only_replay_safe_mutations(
 
     def _run(cmd, **_kwargs):
         calls.append(cmd)
-        raise module.SafeExecError("Error from server (ServiceUnavailable): 503")
+        raise module.SafeExecError(503, "Error from server (ServiceUnavailable): 503")
 
     monkeypatch.setattr(module, "_safe_exec_once", _run)
 
@@ -142,7 +174,7 @@ def test_patch_kubectl_transient_retries_reject_auth_failures(
     def _run(cmd, **_kwargs):
         calls.append(cmd)
         raise module.SafeExecError(
-            "Error from server (Forbidden): 503 permission denied"
+            403, "Error from server (Forbidden): 503 permission denied"
         )
 
     monkeypatch.setattr(module, "_safe_exec_once", _run)
@@ -163,7 +195,7 @@ def test_patch_kubectl_transient_retries_exhausts_six_attempt_budget(
 
     def _run(cmd, **_kwargs):
         calls.append(cmd)
-        raise module.SafeExecError("Error from server (ServiceUnavailable): 503")
+        raise module.SafeExecError(503, "Error from server (ServiceUnavailable): 503")
 
     monkeypatch.setattr(module, "_safe_exec_once", _run)
     monkeypatch.setattr(module.time, "sleep", sleeps.append)
@@ -174,6 +206,36 @@ def test_patch_kubectl_transient_retries_exhausts_six_attempt_budget(
         module.safe_exec(["kubectl", "get", "jobs"])
     assert len(calls) == 6
     assert sleeps == [1, 2, 4, 4, 4]
+
+
+def test_patch_kubectl_transient_retries_honours_total_deadline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _patched_util_module(tmp_path)
+    calls: list[float] = []
+    sleeps: list[int] = []
+    now = [0.0]
+
+    def _run(_cmd, *, timeout, **_kwargs):
+        calls.append(timeout)
+        now[0] += 2.5
+        raise module.SafeExecError(503, "Error from server (ServiceUnavailable): 503")
+
+    def _sleep(delay: int) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    monkeypatch.setenv("ELB_KUBECTL_TRANSIENT_DEADLINE_SECONDS", "5")
+    monkeypatch.setattr(module, "_safe_exec_once", _run)
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module.time, "sleep", _sleep)
+
+    import pytest
+
+    with pytest.raises(module.SafeExecError):
+        module.safe_exec(["kubectl", "get", "jobs"], timeout=60)
+    assert calls == [5.0, 1.5]
+    assert sleeps == [1]
 
 
 def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> None:
@@ -197,13 +259,14 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     assert "Resolving DB source version: ${METADATA_URL}" in text
     assert "${DB_BASE_URL}${ORIG_DB}-metadata.json" in text
     assert "WARNING: DB metadata source-version lookup failed" in text
+    assert "CACHE_UNVERIFIED expected source version is unavailable" in text
     assert "write_volpaths" in text
-    assert "printf '%s' ok > .download-complete" in text
+    assert "printf '%s' ok > .download-complete.tmp" in text
     # The blastdbcmd integrity probe gates the skip so a vol/lmdb-mismatch cache
     # is re-downloaded instead of skipped onto a broken DB.
     assert "CACHE_CORRUPT blastdbcmd integrity probe failed" in skip_prefix
     assert 'blastdbcmd -db "$ELB_DB" -info' in skip_prefix
-    assert "printf '%s' \"$EXPECTED_SOURCE_VERSION\" > .download-source-version" in text
+    assert "printf '%s' \"$EXPECTED_SOURCE_VERSION\" > .download-source-version.tmp" in text
     assert "if [ -s .download-complete ]" not in text
     assert "touch .download-complete" not in text
     assert "taxonomy4blast.sqlite3" not in skip_prefix
@@ -219,6 +282,52 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     # the corrected pattern re-stages them on the next warmup.
     assert "CACHE_INCOMPLETE missing taxonomy filter index" in text
     assert '[ -s "${ORIG_DB}.ntf" ]' in text
+    assert "downloaded taxonomy filter index is incomplete" in text
+    assert "downloaded DB failed blastdbcmd integrity probe" in text
+    assert text.index("CACHE_UNVERIFIED expected source version is unavailable") < text.index(
+        'echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"'
+    )
+    assert text.index("downloaded DB failed blastdbcmd integrity probe") < text.index(
+        "mv .download-complete.tmp .download-complete"
+    )
+    assert text.index("mv .download-source-version.tmp .download-source-version") < text.index(
+        "mv .download-complete.tmp .download-complete"
+    )
+    assert "STAGE_LOCK_WAIT_SECONDS=\"${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}\"" in text
+    assert 'flock -w "$STAGE_LOCK_WAIT_SECONDS" 9' in text
+    assert '"$STAGE_LOCK_WAIT_SECONDS" -gt 5400' in text
+    assert "waited_seconds=" in text
+    assert text.index("STAGE_LOCK_ACQUIRED") < text.index("CLEANUP partial downloads")
+    assert 'STAGE_LOCK_FILE=".elb-stage.lock"' in text
+    assert "export ELB_STAGE_LOCK_HELD=1" in text
+    assert '[[ "$ELB_DB" =~ ^(.+)_shard_([0-9]+)$ ]]' in text
+    assert '${ELB_DB%%_shard_*}' not in text
+    assert "exit 75" in text
+
+
+def test_verify_runtime_identity_templates_requires_job_and_pod_labels(
+    tmp_path: Path,
+) -> None:
+    patch_module = _load_patch_module()
+    templates = tmp_path / "src" / "elastic_blast" / "templates"
+    templates.mkdir(parents=True)
+    names = (
+        "job-init-ssd-shard-aks.yaml.template",
+        "blast-batch-job-shard-ssd-aks.yaml.template",
+        "elb-finalizer-aks.yaml.template",
+    )
+    marker = 'elb-job-id: "${BLAST_ELB_JOB_ID}"\n'
+    for name in names:
+        (templates / name).write_text(marker * 2)
+
+    patch_module.verify_runtime_identity_templates(tmp_path)
+
+    (templates / names[0]).write_text(marker)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="runtime identity label on Job and Pod"):
+        patch_module.verify_runtime_identity_templates(tmp_path)
 
 
 _ELB_CONFIG_OUTFMT_GATE = (

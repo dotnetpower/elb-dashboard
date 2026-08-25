@@ -54,11 +54,12 @@ def test_capacity_gate_disabled_when_env_unset_or_falsey(
 class _Tracker:
     updates: list[tuple[str, str, dict[str, Any]]]
     requeues: list[dict[str, Any]]
+    config_options: list[dict[str, Any]]
     stream_calls: int = 0
 
 
 def _install_pipeline_stubs(monkeypatch: pytest.MonkeyPatch) -> _Tracker:
-    tracker = _Tracker(updates=[], requeues=[])
+    tracker = _Tracker(updates=[], requeues=[], config_options=[])
 
     def _update_state(job_id: str, phase: str, status: str = "running", **details: Any) -> None:
         tracker.updates.append((job_id, phase, {"status": status, **details}))
@@ -80,9 +81,11 @@ def _install_pipeline_stubs(monkeypatch: pytest.MonkeyPatch) -> _Tracker:
     monkeypatch.setattr(_blast, "_ensure_terminal_kubeconfig_context", lambda *_a, **_k: None)
     monkeypatch.setattr(_blast, "_requires_split_parent_submission", lambda *_a, **_k: False)
     monkeypatch.setattr(_blast, "_submit_requires_node_warmup", lambda *_a, **_k: False)
-    monkeypatch.setattr(
-        _blast, "_build_config_content", lambda **_kwargs: "[elastic-blast]\n"
-    )
+    def _build_config_content(**kwargs: Any) -> str:
+        tracker.config_options.append(dict(kwargs.get("options") or {}))
+        return "[elastic-blast]\n"
+
+    monkeypatch.setattr(_blast, "_build_config_content", _build_config_content)
 
     # Skip the best-effort storage config preview upload.
     def _fake_upload(_credential, _account, _container, _path, _content):
@@ -197,6 +200,34 @@ def test_submit_gate_disabled_uses_submit_lock(monkeypatch: pytest.MonkeyPatch) 
     assert len(lock_release_calls) == 1
     assert tracker.stream_calls == 1
     assert capacity_touched == []  # gate path must not be entered when disabled
+
+
+def test_submit_drops_untrusted_warmed_cache_skip_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BLAST_GATE_ENABLED", raising=False)
+    tracker = _install_pipeline_stubs(monkeypatch)
+    monkeypatch.setattr(
+        submit_task, "acquire_submit_lock", lambda *_a, **_k: (object(), "token-A")
+    )
+    monkeypatch.setattr(submit_task, "release_submit_lock", lambda *_a, **_k: None)
+
+    kwargs = dict(_SUBMIT_KWARGS)
+    kwargs["options"] = {
+        "sharding_mode": "off",
+        "disable_sharding": True,
+        "skip_warmed_ssd_init": True,
+    }
+    result = _blast.submit.run(**kwargs)
+
+    assert result["status"] == "completed"
+    assert tracker.config_options
+    assert "skip_warmed_ssd_init" not in tracker.config_options[0]
+    assert not [
+        update
+        for update in tracker.updates
+        if update[2].get("decision") == "warmed_ssd_reused"
+    ]
 
 
 def test_submit_failed_persists_full_console_output(

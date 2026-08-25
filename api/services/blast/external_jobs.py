@@ -55,6 +55,23 @@ from api.services.blast.external_query_labels import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _text_attr(value: object, name: str) -> str:
+    return str(getattr(value, name, "") or "")
+
+
+def _log_runtime_identity_conflict(
+    job_id: str,
+    stored_identity: str,
+    incoming_identity: str,
+) -> None:
+    LOGGER.warning(
+        "external job runtime identity conflict job_id=%s stored=%s incoming=%s",
+        job_id,
+        stored_identity,
+        incoming_identity,
+    )
+
+
 def _exception_reason(exc: Exception) -> str:
     if isinstance(exc, HTTPException):
         detail = exc.detail
@@ -412,6 +429,7 @@ def _sync_external_jobs_to_table(
                     "job_id": str(ext.get("job_id") or ""),
                     "status": str(ext.get("status") or ""),
                     "phase": str(ext.get("phase") or ""),
+                    "elb_job_id": str(ext.get("elb_job_id") or ""),
                     "updated_at": str(ext.get("updated_at") or ext.get("completed_at") or ""),
                 }
                 for ext in external_jobs
@@ -427,6 +445,7 @@ def _sync_external_jobs_to_table(
             c_created, c_updated, c_tombstoned = cached[1]
             return (c_created, c_updated, set(c_tombstoned))
     try:
+        from api.services.state.job_state import canonical_elastic_blast_job_id
         from api.services.state_repo import JobState, JobStateRepository
 
         repo = JobStateRepository()
@@ -447,6 +466,7 @@ def _sync_external_jobs_to_table(
         job_id = str(ext.get("job_id") or "")
         if not job_id:
             continue
+        fresh_elastic_blast_job_id = canonical_elastic_blast_job_id(ext.get("elb_job_id"))
         # Date-tiered layout: the drain stamps the exact results prefix
         # (``YYYY/MM/DD/<openapi_job_id>/``) it told the sibling to write under.
         # Persist it verbatim so resolve_results_prefix(job_id) returns the date
@@ -641,10 +661,31 @@ def _sync_external_jobs_to_table(
                 prefix_backfill: dict[str, str] = {}
                 if _row_results_prefix and not (getattr(existing, "results_prefix", None) or ""):
                     prefix_backfill["results_prefix"] = _row_results_prefix
+                should_backfill_identity = False
+                stored_elastic_blast_job_id = canonical_elastic_blast_job_id(
+                    getattr(existing, "elastic_blast_job_id", "")
+                )
+                if fresh_elastic_blast_job_id and not stored_elastic_blast_job_id:
+                    should_backfill_identity = True
+                elif (
+                    fresh_elastic_blast_job_id
+                    and stored_elastic_blast_job_id
+                    and fresh_elastic_blast_job_id != stored_elastic_blast_job_id
+                ):
+                    _log_runtime_identity_conflict(
+                        job_id,
+                        stored_elastic_blast_job_id,
+                        fresh_elastic_blast_job_id,
+                    )
                 status_changed = bool(
                     ext_status and (ext_status != cur_status or ext_phase != cur_phase)
                 )
-                if status_changed or scope_backfill or meta_backfill or prefix_backfill:
+                if (
+                    status_changed
+                    or scope_backfill
+                    or meta_backfill
+                    or prefix_backfill
+                ):
                     update_kwargs: dict[str, Any] = dict(scope_backfill)
                     update_kwargs.update(meta_backfill)
                     update_kwargs.update(prefix_backfill)
@@ -657,8 +698,8 @@ def _sync_external_jobs_to_table(
                         # sibling is authoritative here -- if it now says the
                         # job completed, the dashboard must not keep showing
                         # the recovered error code on the row.
-                        if ext_status.lower() in {"completed", "succeeded"} and (
-                            getattr(existing, "error_code", "") or ""
+                        if ext_status.lower() in {"completed", "succeeded"} and _text_attr(
+                            existing, "error_code"
                         ):
                             update_kwargs["error_code"] = ""
                         # Surface the real failure cause on the FAILED transition.
@@ -681,6 +722,49 @@ def _sync_external_jobs_to_table(
                         updated += 1
                     except KeyError:
                         existing = None
+                if should_backfill_identity:
+                    try:
+                        persisted_identity = repo.backfill_elastic_blast_job_id(
+                            job_id, fresh_elastic_blast_job_id
+                        )
+                        if persisted_identity == fresh_elastic_blast_job_id:
+                            updated += 1
+                            if ext_status.lower() in {
+                                "completed",
+                                "succeeded",
+                                "failed",
+                                "cancelled",
+                                "deleted",
+                            }:
+                                try:
+                                    from api.services.job_artifacts import upsert_artifact_state
+
+                                    upsert_artifact_state(
+                                        job_id,
+                                        "artifact_finalizer",
+                                        status="failed",
+                                        error_code="runtime_identity_backfilled",
+                                    )
+                                except Exception as exc:
+                                    LOGGER.warning(
+                                        "external job artifact invalidation skipped "
+                                        "job_id=%s err=%s",
+                                        job_id,
+                                        type(exc).__name__,
+                                    )
+                        elif persisted_identity:
+                            _log_runtime_identity_conflict(
+                                job_id,
+                                persisted_identity,
+                                fresh_elastic_blast_job_id,
+                            )
+                    except Exception as exc:
+                        LOGGER.info(
+                            "external job runtime identity backfill skipped "
+                            "job_id=%s err=%s",
+                            job_id,
+                            type(exc).__name__,
+                        )
                 if existing is not None:
                     continue
             payload = converted.get("payload") or {"external": ext}
@@ -719,6 +803,7 @@ def _sync_external_jobs_to_table(
                     (converted.get("infrastructure") or {}).get("storage_account") or ""
                 ),
                 results_prefix=_row_results_prefix,
+                elastic_blast_job_id=fresh_elastic_blast_job_id or None,
             )
             repo.create(state)
             created += 1

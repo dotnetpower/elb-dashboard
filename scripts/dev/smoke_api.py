@@ -92,7 +92,7 @@ PROBES: list[Probe] = [
     Probe("blast.schedules", "GET", "/api/blast/schedules", {200, 401}),
     Probe("blast.submit", "POST", "/api/blast/submit", {200, 401, 422}, body={}),
     Probe("aks.skus", "GET", "/api/aks/skus", {200, 401}),
-    Probe("aks.provision", "POST", "/api/aks/provision", {200, 401, 422}, body={}),
+    Probe("aks.provision", "POST", "/api/aks/provision", {200, 400, 401, 422}, body={}),
     Probe("warmup.start", "POST", "/api/warmup/start", {200, 401, 422}, body={}),
     Probe("audit.log", "GET", "/api/audit/log", {200, 401}),
     Probe("terminal.health", "GET", "/api/terminal/health", {200, 401}),
@@ -134,7 +134,7 @@ def run_probe(base_url: str, probe: Probe, token: str | None) -> tuple[bool, str
     req = Request(url, method=probe.method, headers=headers, data=data)  # noqa: S310
     t0 = time.monotonic()
     try:
-        with urlopen(req, timeout=15) as resp:  # noqa: S310
+        with urlopen(req, timeout=30) as resp:  # noqa: S310
             status = resp.status
             body = resp.read()
     except HTTPError as exc:

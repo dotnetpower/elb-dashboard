@@ -31,6 +31,8 @@ from azure.core.exceptions import ResourceNotFoundError
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+_RUNTIME_ID = "job-0123456789abcdef0123456789abcdef"
+
 
 class FakeK8sResponse:
     def __init__(self, status_code: int, text: str = "") -> None:
@@ -405,6 +407,26 @@ def test_elastic_blast_loglevel_env_override(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("ELASTIC_BLAST_LOGLEVEL", "bogus")
     argv = blast._elastic_blast_argv("submit", "abc-123")
     assert argv[argv.index("--loglevel") + 1] == "INFO"
+
+
+def test_extract_elastic_blast_job_id_requires_canonical_identity() -> None:
+    upper_runtime_id = _RUNTIME_ID.upper().replace("JOB-", "job-")
+    output = f"results: /results/dashboard-job/{upper_runtime_id}/metadata/SUCCESS.txt"
+
+    assert blast._extract_elastic_blast_job_id(output) == _RUNTIME_ID
+    assert blast._extract_elastic_blast_job_id(
+        "results: /results/dashboard-job/job-deadbeef/metadata/SUCCESS.txt"
+    ) == ""
+
+
+def test_external_reconcile_job_id_rejects_short_identity() -> None:
+    row = SimpleNamespace(
+        payload={"elastic_blast_job_id": "job-deadbeef"},
+        elastic_blast_job_id="",
+        k8s_job_id="",
+    )
+
+    assert blast._external_reconcile_job_id(row) == ""
 
 
 
@@ -3325,6 +3347,40 @@ def test_merge_progress_payload_keeps_human_detail_alongside_machine_code() -> N
     assert payload["error"] == "az login --identity failed: ManagedIdentity unavailable"
 
 
+def test_retry_or_fail_caps_explicit_countdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    updates: list[dict[str, object]] = []
+    retry_calls: list[dict[str, object]] = []
+
+    class FakeTask:
+        max_retries = 3
+        request = type("Request", (), {"retries": 0})()
+
+        @staticmethod
+        def retry(*, exc: BaseException, countdown: int) -> None:
+            retry_calls.append({"exc": exc, "countdown": countdown})
+            raise RuntimeError("retry scheduled")
+
+    monkeypatch.setattr(
+        blast,
+        "_update_state",
+        lambda *_args, **kwargs: updates.append(kwargs),
+    )
+    monkeypatch.setattr(blast, "_snippet", lambda value: str(value))
+
+    with pytest.raises(RuntimeError, match="retry scheduled"):
+        blast._retry_or_fail(
+            FakeTask(),
+            job_id="job-retry-cap",
+            phase="submitting",
+            exc=ConnectionError("busy"),
+            error_code="submit_busy",
+            retry_after_seconds=86_400,
+        )
+
+    assert retry_calls[0]["countdown"] == 300
+    assert updates[0]["retry_after_seconds"] == 300
+
+
 def test_merge_progress_payload_drops_top_level_error_on_completion() -> None:
     # A transient failure detail must not linger as a red banner once the job
     # completes (same stale-error class as the worker_lost suppression).
@@ -4021,7 +4077,7 @@ def test_reconcile_k8s_completed_waits_for_result_artifacts(
                     "resource_group": "rg-elb",
                     "cluster_name": "elb-cluster",
                     "storage_account": "stelb",
-                    "elastic_blast_job_id": "job-k8s",
+                    "elastic_blast_job_id": _RUNTIME_ID,
                 },
             )
         ]
@@ -4039,7 +4095,7 @@ def test_reconcile_k8s_completed_waits_for_result_artifacts(
         "api.services.monitoring.k8s_check_blast_status",
         lambda *_args, **_kwargs: {
             "status": "completed",
-            "job_id": "job-k8s",
+            "job_id": _RUNTIME_ID,
             "started_at": "2026-05-21T03:04:30+00:00",
             "completed_at": "2026-05-21T03:06:35+00:00",
         },
@@ -4072,7 +4128,7 @@ def test_reconcile_k8s_completed_marks_completed_when_results_ready(
                     "resource_group": "rg-elb",
                     "cluster_name": "elb-cluster",
                     "storage_account": "stelb",
-                    "elastic_blast_job_id": "job-ready",
+                    "elastic_blast_job_id": _RUNTIME_ID,
                 },
             )
         ]
@@ -4091,7 +4147,7 @@ def test_reconcile_k8s_completed_marks_completed_when_results_ready(
         "api.services.monitoring.k8s_check_blast_status",
         lambda *_args, **_kwargs: {
             "status": "completed",
-            "job_id": "job-ready",
+            "job_id": _RUNTIME_ID,
             "started_at": "2026-05-21T03:04:30+00:00",
             "completed_at": "2026-05-21T03:06:35+00:00",
         },
@@ -4125,7 +4181,7 @@ def test_backfill_completed_runtime_metrics_updates_missing_container_metrics(
                     "subscription_id": "sub-1",
                     "resource_group": "rg-elb",
                     "cluster_name": "elb-cluster",
-                    "elastic_blast_job_id": "job-backfill",
+                    "elastic_blast_job_id": _RUNTIME_ID,
                     "_progress": {
                         "phase": "completed",
                         "status": "completed",
@@ -4148,7 +4204,7 @@ def test_backfill_completed_runtime_metrics_updates_missing_container_metrics(
         "api.services.monitoring.k8s_check_blast_status",
         lambda *_args, **_kwargs: {
             "status": "completed",
-            "job_id": "job-backfill",
+            "job_id": _RUNTIME_ID,
             "started_at": "2026-05-21T03:04:30+00:00",
             "completed_at": "2026-05-21T03:06:35+00:00",
             "blast_container_duration_ms": 7_000,
@@ -4182,7 +4238,7 @@ def test_backfill_completed_runtime_metrics_can_target_one_job(
                     "subscription_id": "sub-1",
                     "resource_group": "rg-elb",
                     "cluster_name": "elb-cluster",
-                    "elastic_blast_job_id": "job-target",
+                    "elastic_blast_job_id": _RUNTIME_ID,
                 },
             ),
         ]
@@ -4193,7 +4249,7 @@ def test_backfill_completed_runtime_metrics_can_target_one_job(
         "api.services.monitoring.k8s_check_blast_status",
         lambda *_args, **_kwargs: {
             "status": "completed",
-            "job_id": "job-target",
+            "job_id": _RUNTIME_ID,
             "started_at": "2026-05-21T03:04:30+00:00",
             "completed_at": "2026-05-21T03:06:35+00:00",
             "blast_container_duration_ms": 7_000,
@@ -4221,7 +4277,7 @@ def test_backfill_completed_runtime_metrics_uses_nested_k8s_job_id(
                     "resource_group": "rg-elb",
                     "cluster_name": "elb-cluster",
                     "_progress": {
-                        "steps": {"running": {"k8s": {"job_id": "job-nested"}}}
+                        "steps": {"running": {"k8s": {"job_id": _RUNTIME_ID}}}
                     },
                 },
             )
@@ -4231,10 +4287,10 @@ def test_backfill_completed_runtime_metrics_uses_nested_k8s_job_id(
     monkeypatch.setattr("api.services.get_credential", lambda: object())
 
     def fake_k8s(*_args: object, **kwargs: object) -> dict[str, object]:
-        assert kwargs["job_id"] == "job-nested"
+        assert kwargs["job_id"] == _RUNTIME_ID
         return {
             "status": "completed",
-            "job_id": "job-nested",
+            "job_id": _RUNTIME_ID,
             "started_at": "2026-05-21T03:04:30+00:00",
             "completed_at": "2026-05-21T03:06:35+00:00",
             "blast_container_duration_ms": 7_000,
@@ -4261,7 +4317,7 @@ def test_backfill_completed_runtime_metrics_skips_existing_metrics(
                     "subscription_id": "sub-1",
                     "resource_group": "rg-elb",
                     "cluster_name": "elb-cluster",
-                    "elastic_blast_job_id": "job-has-metrics",
+                    "elastic_blast_job_id": _RUNTIME_ID,
                     "_progress": {
                         "steps": {
                             "running": {
@@ -4461,8 +4517,8 @@ def test_reconcile_fails_external_row_lost_after_newer_cluster_lifecycle(
                 updated_at="2025-01-01T00:00:00+00:00",
                 created_at="2025-01-01T00:00:00+00:00",
                 payload={
-                    "external": {"job_id": "job-ext-lifecycle-lost"},
-                    "elastic_blast_job_id": "job-ext-lifecycle-lost",
+                    "external": {"job_id": _RUNTIME_ID},
+                    "elastic_blast_job_id": _RUNTIME_ID,
                 },
                 subscription_id="sub-1",
                 resource_group="rg-elb",
@@ -4487,7 +4543,7 @@ def test_reconcile_fails_external_row_lost_after_newer_cluster_lifecycle(
     monkeypatch.setattr(
         "api.services.external_blast.get_job",
         lambda *_args, **_kwargs: {
-            "job_id": "job-ext-lifecycle-lost",
+            "job_id": _RUNTIME_ID,
             "status": "running",
         },
     )
@@ -4678,7 +4734,7 @@ def test_reconcile_logs_external_refresh_http_detail(
                     "subscription_id": "sub-1",
                     "resource_group": "rg-elb",
                     "cluster_name": "elb-cluster",
-                    "elastic_blast_job_id": "job-j5",
+                    "elastic_blast_job_id": _RUNTIME_ID,
                 },
             )
         ]
@@ -4691,7 +4747,7 @@ def test_reconcile_logs_external_refresh_http_detail(
             self.result = None
 
     def fail_get_job(job_id: str, **_kwargs: object) -> dict[str, object]:
-        assert job_id == "job-j5"
+        assert job_id == _RUNTIME_ID
         raise HTTPException(
             400,
             detail={

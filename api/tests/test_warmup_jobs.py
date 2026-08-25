@@ -79,7 +79,7 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         # skipped: the blastdbcmd integrity probe gates the skip decision.
         assert "CACHE_CORRUPT blastdbcmd integrity probe failed" in container["args"][0]
         assert 'blastdbcmd -db "$ELB_DB" -info' in container["args"][0]
-        assert "printf '%s' ok > .download-complete" in container["args"][0]
+        assert "staging helper did not commit completion marker" in container["args"][0]
         # The warmup pod intentionally does NOT call blast-vmtouch-aks.sh any
         # more — `azcopy` already populates the OS page cache as a side effect
         # of the download, and with no mmap holder in this pod a follow-up
@@ -223,7 +223,7 @@ def test_warmup_jobs_carry_hang_backstop_deadline() -> None:
         image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
     )
     for job in plan.jobs:
-        assert job["spec"]["activeDeadlineSeconds"] == 3600
+        assert job["spec"]["activeDeadlineSeconds"] == 5400
         assert job["spec"]["backoffLimit"] == 1
 
 
@@ -312,6 +312,10 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
         in manifest["data"]["init-db-shard-aks.sh"]
     )
     assert "CACHE_STALE missing source-version marker" in manifest["data"]["init-db-shard-aks.sh"]
+    assert (
+        "CACHE_UNVERIFIED expected source version is unavailable"
+        in manifest["data"]["init-db-shard-aks.sh"]
+    )
     assert (
         "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}" in manifest["data"]["init-db-shard-aks.sh"]
     )
@@ -897,6 +901,70 @@ def test_warmup_skip_path_budget_has_floor_and_fallback() -> None:
     # The path resolution is guarded so an empty volume list does not run
     # vmtouch with no args and is logged instead.
     assert 'if [ -n "$vm_paths" ]; then' in script
+
+
+def test_warmup_cache_contract_includes_taxonomy_filter_indexes() -> None:
+    """Warmup must produce every file required by submit-time cache validation.
+
+    Otherwise warmup writes `.download-complete`, submit immediately invalidates
+    it, and concurrent Service Bus submits race while restaging the same node.
+    """
+    from api.services.warmup.scripts import (
+        INIT_DB_SHARD_AKS_SCRIPT,
+        warmup_shell_command,
+    )
+
+    assert "${ORIG_DB}.nos" in INIT_DB_SHARD_AKS_SCRIPT
+    assert "${ORIG_DB}.not" in INIT_DB_SHARD_AKS_SCRIPT
+    assert "CACHE_INCOMPLETE missing taxonomy filter index" in INIT_DB_SHARD_AKS_SCRIPT
+    assert "CACHE_INCOMPLETE missing taxonomy filter index" in warmup_shell_command()
+
+
+def test_warmup_staging_lock_is_bounded_and_reused_by_child_script() -> None:
+    from api.services.warmup.scripts import (
+        INIT_DB_SHARD_AKS_SCRIPT,
+        warmup_shell_command,
+    )
+
+    entrypoint = warmup_shell_command()
+    assert "STAGE_LOCK_WAIT_SECONDS=\"${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}\"" in entrypoint
+    assert 'flock -w "$STAGE_LOCK_WAIT_SECONDS" 9' in entrypoint
+    assert '"$STAGE_LOCK_WAIT_SECONDS" -gt 5400' in entrypoint
+    assert "waited_seconds=" in entrypoint
+    assert entrypoint.index("STAGE_LOCK_ACQUIRED") < entrypoint.index("CLEANUP partial downloads")
+    assert 'STAGE_LOCK_FILE=".elb-stage.lock"' in entrypoint
+    assert "export ELB_STAGE_LOCK_HELD=1" in entrypoint
+    assert "STAGE_LOCK_REUSE file=.elb-stage.lock" in INIT_DB_SHARD_AKS_SCRIPT
+    assert "flock -n 9" in INIT_DB_SHARD_AKS_SCRIPT
+    assert "inherited stage lock descriptor is unavailable" in INIT_DB_SHARD_AKS_SCRIPT
+    assert "/proc/$$/fd/9" not in INIT_DB_SHARD_AKS_SCRIPT
+    assert '[[ "$ELB_DB" =~ ^(.+)_shard_([0-9]+)$ ]]' in entrypoint
+    assert '${ELB_DB%%_shard_*}' not in entrypoint
+    assert '${ELB_DB%%_shard_*}' not in INIT_DB_SHARD_AKS_SCRIPT
+    assert "exit 75" in entrypoint
+
+
+def test_warmup_staging_commits_marker_after_post_download_integrity() -> None:
+    from api.services.warmup.scripts import (
+        INIT_DB_SHARD_AKS_SCRIPT,
+        warmup_shell_command,
+    )
+
+    helper = INIT_DB_SHARD_AKS_SCRIPT
+    assert "downloaded taxonomy filter index is incomplete" in helper
+    assert "downloaded DB failed blastdbcmd integrity probe" in helper
+    assert helper.index("downloaded DB failed blastdbcmd integrity probe") < helper.index(
+        "mv .download-complete.tmp .download-complete"
+    )
+    assert helper.index("mv .download-source-version.tmp .download-source-version") < helper.index(
+        "mv .download-complete.tmp .download-complete"
+    )
+    entrypoint = warmup_shell_command()
+    assert "staging helper did not commit completion marker" in entrypoint
+    assert "final blastdbcmd integrity probe failed" in entrypoint
+    assert entrypoint.index("CACHE_UNVERIFIED expected source version is unavailable") < (
+        entrypoint.index("DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}")
+    )
 
 
 def test_vmtouch_warm_log_maps_to_touching_memory_phase() -> None:

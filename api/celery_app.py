@@ -142,6 +142,11 @@ celery_app.conf.update(
             os.environ.get("CELERY_RESULT_BACKEND_CONNECT_TIMEOUT", "5")
         )
     },
+    broker_transport_options={
+        "socket_connect_timeout": float(
+            os.environ.get("CELERY_BROKER_CONNECT_TIMEOUT", "5")
+        )
+    },
     # Belt-and-braces for the redis result backend: the keyword above is
     # consumed by kombu-style backends, but Celery's redis backend reads
     # these top-level keys directly (see celery.backends.redis). Without
@@ -211,6 +216,13 @@ celery_app.conf.update(
             "task": "api.tasks.blast.reconcile_stale_jobs",
             "schedule": float(os.environ.get("CELERY_BEAT_BLAST_RECONCILE_SECONDS", "90")),
             "options": {"queue": "reconcile"},
+        },
+        "blast-reconcile-terminal-artifacts": {
+            "task": "api.tasks.blast.artifacts.reconcile_terminal_artifacts",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_BLAST_ARTIFACT_RECONCILE_SECONDS", "90")
+            ),
+            "options": {"queue": "reconcile", "expires": 80.0},
         },
         # Auto-resubmit transient-failed BLAST jobs. The task itself is a no-op
         # unless BLAST_AUTO_RETRY_ENABLED is set, so scheduling it is harmless
@@ -404,8 +416,9 @@ def fast_probe_connection(socket_connect_timeout: float = 2.0) -> Any:
     deadline. Readiness, pre-flight, and the BLAST submit gate all want a
     crisp pass/fail in a few seconds — this helper bolts that contract on.
 
-    Use only for **probes**. Production workers/producers must keep the
-    long, retrying connect that lets the worker ride out a broker restart.
+    Use only for **probes**. Production workers/producers keep their retrying
+    reconnect policy; the app-level broker transport config bounds each TCP
+    attempt without removing those retries.
     """
     conn = celery_app.connection()
     # Use getattr so test doubles that omit `transport_options` (the kombu

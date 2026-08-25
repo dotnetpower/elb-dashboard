@@ -15,9 +15,12 @@ Validation: `uv run pytest -q api/tests/test_state_repo.py`.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from api.services.state import repository as state_repo
 from api.services.state.repository import JobState, JobStateRepository
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
 
 
 class _HistoryClientContext:
@@ -142,6 +145,34 @@ def test_job_state_round_trips_servicebus_correlation_columns() -> None:
     assert native_entity["submission_source"] == ""
     assert native_entity["external_correlation_id"] == ""
     assert JobState.from_entity(native_entity).external_correlation_id is None
+
+
+def test_job_state_round_trips_external_elastic_blast_job_id() -> None:
+    state = JobState(
+        job_id="openapi-job-2",
+        type="blast",
+        status="running",
+        payload={
+            "external": {
+                "elb_job_id": "job-abc12345abc12345abc12345abc12345",
+                "status": "running",
+            }
+        },
+    )
+
+    entity = state.to_entity()
+    restored = JobState.from_entity(entity)
+
+    assert entity["elastic_blast_job_id"] == "job-abc12345abc12345abc12345abc12345"
+    assert restored.elastic_blast_job_id == "job-abc12345abc12345abc12345abc12345"
+
+    invalid = JobState(
+        job_id="openapi-job-3",
+        type="blast",
+        status="running",
+        payload={"external": {"elb_job_id": "not-a-runtime-id"}},
+    )
+    assert invalid.to_entity()["elastic_blast_job_id"] == ""
 
 
 def test_job_state_round_trips_result_manifest_column() -> None:
@@ -883,6 +914,141 @@ def test_update_backfills_scope_columns_without_status(monkeypatch) -> None:
     assert "phase" not in patch
 
 
+def test_backfill_elastic_blast_job_id_uses_conditional_merge(monkeypatch) -> None:
+    submitted: list[dict[str, object]] = []
+    update_kwargs: list[dict[str, object]] = []
+    existing_entity = JobState(
+        job_id="job-runtime-id",
+        type="blast",
+        status="running",
+        payload={"_progress": {"steps": {"running": {"status": "running"}}}},
+    ).to_entity()
+
+    class Entity(dict[str, object]):
+        metadata: ClassVar[dict[str, str]] = {"etag": "etag-1"}
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, *, partition_key: str, row_key: str) -> Entity:
+            return Entity(existing_entity)
+
+        def update_entity(self, entity: dict[str, object], **kwargs: object) -> None:
+            submitted.append(entity)
+            update_kwargs.append(kwargs)
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    stored = JobStateRepository().backfill_elastic_blast_job_id(
+        "job-runtime-id",
+        "job-deadbeefdeadbeefdeadbeefdeadbeef",
+    )
+
+    assert stored == "job-deadbeefdeadbeefdeadbeefdeadbeef"
+    assert len(submitted) == 1
+    patch = submitted[0]
+    assert patch["elastic_blast_job_id"] == "job-deadbeefdeadbeefdeadbeefdeadbeef"
+    assert "payload_json" not in patch
+    assert "status" not in patch
+    assert update_kwargs == [
+        {
+            "mode": state_repo.UpdateMode.MERGE,
+            "etag": "etag-1",
+            "match_condition": MatchConditions.IfNotModified,
+        }
+    ]
+
+
+def test_backfill_elastic_blast_job_id_preserves_concurrent_winner(monkeypatch) -> None:
+    incoming = "job-deadbeefdeadbeefdeadbeefdeadbeef"
+    winner = "job-11111111aaaaaaaa11111111aaaaaaaa"
+
+    class Entity(dict[str, object]):
+        def __init__(self, values: dict[str, object], etag: str) -> None:
+            super().__init__(values)
+            self.metadata = {"etag": etag}
+
+    entities = iter(
+        (
+            Entity({"elastic_blast_job_id": ""}, "etag-1"),
+            Entity({"elastic_blast_job_id": winner}, "etag-2"),
+        )
+    )
+
+    class RacingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RacingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, **_kwargs: object) -> Entity:
+            return next(entities)
+
+        def update_entity(self, *_args: object, **_kwargs: object) -> None:
+            raise ResourceModifiedError("etag changed")
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RacingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    assert JobStateRepository().backfill_elastic_blast_job_id("job-runtime-id", incoming) == winner
+
+
+def test_backfill_elastic_blast_job_id_reads_winner_after_repeated_etag_races(
+    monkeypatch,
+) -> None:
+    incoming = "job-deadbeefdeadbeefdeadbeefdeadbeef"
+    winner = "job-11111111aaaaaaaa11111111aaaaaaaa"
+
+    class Entity(dict[str, object]):
+        def __init__(self, values: dict[str, object], etag: str) -> None:
+            super().__init__(values)
+            self.metadata = {"etag": etag}
+
+    entities = iter(
+        [
+            Entity({"elastic_blast_job_id": ""}, f"etag-{index}")
+            for index in range(1, 4)
+        ]
+        + [Entity({"elastic_blast_job_id": winner}, "etag-4")]
+    )
+
+    class RacingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RacingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, **_kwargs: object) -> Entity:
+            return next(entities)
+
+        def update_entity(self, *_args: object, **_kwargs: object) -> None:
+            raise ResourceModifiedError("etag changed")
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RacingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    assert JobStateRepository().backfill_elastic_blast_job_id("job-runtime-id", incoming) == winner
+
+
 def test_update_explicit_scope_arg_wins_over_payload(monkeypatch) -> None:
     """When a caller passes BOTH ``payload`` and an explicit scope kwarg, the
     explicit value MUST win over the payload-derived canonical value.
@@ -1046,6 +1212,52 @@ def test_list_completed_returns_newest_first_no_starvation(monkeypatch) -> None:
     assert [r.job_id for r in rows] == ["00000005-uuid", "00000004-uuid", "00000003-uuid"]
     # Full payload was re-fetched for each returned row.
     assert all(r.payload for r in rows)
+
+
+def test_list_recent_terminal_returns_newest_first_no_starvation(monkeypatch) -> None:
+    summaries = [
+        {
+            "PartitionKey": f"terminal-{idx}",
+            "RowKey": "current",
+            "type": "blast",
+            "status": "completed",
+            "updated_at": f"2026-08-{idx:02d}T00:00:00+00:00",
+            "created_at": "2026-08-01T00:00:00+00:00",
+        }
+        for idx in range(1, 6)
+    ]
+    full_by_pk = {
+        row["PartitionKey"]: {**row, "payload_json": '{"external": {}}'}
+        for row in summaries
+    }
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, _query_filter: str, **_kwargs: object):
+            return list(summaries)
+
+        def get_entity(self, *, partition_key: str, row_key: str, **_kwargs: object):
+            return dict(full_by_pk[partition_key])
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    rows = JobStateRepository().list_recent_terminal(
+        limit=2,
+        since_seconds=86_400,
+        include_payload=False,
+    )
+
+    assert [row.job_id for row in rows] == ["terminal-5", "terminal-4"]
 
 
 def test_list_methods_clamp_page_size_to_azure_tables_max(monkeypatch) -> None:

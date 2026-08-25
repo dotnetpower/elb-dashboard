@@ -2255,6 +2255,129 @@ def test_sync_external_does_not_invent_servicebus_for_plain_external(monkeypatch
     assert ext["submission_source"] == "external_api"
 
 
+def test_sync_external_backfills_runtime_id_without_status_change(monkeypatch):
+    """A drain-created row must learn the later sibling ``elb_job_id`` without
+    replacing its progress payload or requiring another lifecycle transition."""
+    from api.routes import _blast_shared as shared
+    from api.services import job_artifacts, state_repo
+
+    updates: list[dict[str, object]] = []
+    invalidations: list[dict[str, object]] = []
+
+    class FakeExisting:
+        job_id = "runtime-backfill-1"
+        status = "completed"
+        phase = "completed"
+        error_code = ""
+        elastic_blast_job_id = None
+        subscription_id = "sub-1"
+        resource_group = "rg-1"
+        cluster_name = "elb-cluster"
+        storage_account = ""
+        program = "blastn"
+        db = "core_nt"
+        job_title = "blastn core_nt"
+        query_label = "q.fa"
+        payload: ClassVar[dict] = {"external": {"submission_source": "servicebus"}}
+
+    class FakeRepo:
+        def get_many(self, _ids):
+            return {"runtime-backfill-1": FakeExisting()}
+
+        def create(self, _state):
+            raise AssertionError("existing row must update, not create")
+
+        def update(self, _job_id, **kwargs):
+            updates.append(kwargs)
+
+        def backfill_elastic_blast_job_id(self, _job_id, value):
+            updates.append({"elastic_blast_job_id": value})
+            return value
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", object)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda job_id, artifact_type, **kwargs: invalidations.append(
+            {"job_id": job_id, "artifact_type": artifact_type, **kwargs}
+        ),
+    )
+
+    shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "runtime-backfill-1",
+                "status": "completed",
+                "elb_job_id": "job-deadbeefdeadbeefdeadbeefdeadbeef",
+            }
+        ],
+        caller_oid="oid-1",
+    )
+
+    assert updates == [
+        {"elastic_blast_job_id": "job-deadbeefdeadbeefdeadbeefdeadbeef"}
+    ]
+    assert invalidations == [
+        {
+            "job_id": "runtime-backfill-1",
+            "artifact_type": "artifact_finalizer",
+            "status": "failed",
+            "error_code": "runtime_identity_backfilled",
+        }
+    ]
+
+
+def test_sync_external_does_not_overwrite_conflicting_runtime_id(monkeypatch, caplog):
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+
+    updates: list[dict[str, object]] = []
+
+    class FakeExisting:
+        job_id = "runtime-conflict-1"
+        status = "running"
+        phase = "running"
+        error_code = ""
+        elastic_blast_job_id = "job-11111111aaaaaaaa11111111aaaaaaaa"
+        subscription_id = "sub-1"
+        resource_group = "rg-1"
+        cluster_name = "elb-cluster"
+        storage_account = ""
+        program = "blastn"
+        db = "core_nt"
+        job_title = "blastn core_nt"
+        query_label = "q.fa"
+        payload: ClassVar[dict] = {"external": {"submission_source": "servicebus"}}
+
+    class FakeRepo:
+        def get_many(self, _ids):
+            return {"runtime-conflict-1": FakeExisting()}
+
+        def create(self, _state):
+            raise AssertionError("existing row must not be recreated")
+
+        def update(self, _job_id, **kwargs):
+            updates.append(kwargs)
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", object)
+
+    shared._sync_external_jobs_to_table(
+        [
+            {
+                "job_id": "runtime-conflict-1",
+                "status": "running",
+                "elb_job_id": "job-22222222bbbbbbbb22222222bbbbbbbb",
+            }
+        ],
+        caller_oid="oid-1",
+    )
+
+    assert updates == []
+    assert "runtime identity conflict" in caplog.text
+
+
 def test_sync_external_jobs_creates_missing_rows(monkeypatch):
     """External rows that the Table does not yet know about MUST be
     persisted on first sight so they survive an AKS restart."""

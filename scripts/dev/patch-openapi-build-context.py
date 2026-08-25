@@ -5,7 +5,7 @@
 Responsibility: Patch the sibling docker-openapi build context for dashboard runtime policy
 Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
 Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
-`patch_app`, `main`
+`_disable_warmed_cache_skip`, `_harden_openapi_runtime_ids`, `patch_app`, `main`
 Risky contracts: Assume local developer context only; avoid broad production-side effects.
 Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
@@ -35,13 +35,30 @@ def _force_elb_ref(path: Path, ref: str) -> None:
 
 def _replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text()
-    if new in text:
+    if new and new in text:
         # Idempotent re-run: the final form of this replacement is already
         # present in the file. This tolerates the sibling Dockerfile / app
         # catching up to upstream (e.g. ``ARG ELB_REF`` advancing past the
         # value we used to inject, OR the venv-stage block being added
         # natively upstream so the dashboard insertion would otherwise
         # duplicate it).
+        return
+    count = text.count(old)
+    if not new and count == 0:
+        return
+    if count != 1:
+        raise RuntimeError(f"expected one match in {path}, found {count}")
+    path.write_text(text.replace(old, new, 1))
+
+
+def _replace_once_unless_marker(
+    path: Path,
+    old: str,
+    new: str,
+    marker: str,
+) -> None:
+    text = path.read_text()
+    if marker in text:
         return
     count = text.count(old)
     if count != 1:
@@ -105,17 +122,213 @@ def _copy_app_overlay(root: Path) -> None:
         dest.write_bytes(src.read_bytes())
 
 
+def _patch_terminal_webhook_runtime_id(path: Path) -> None:
+    """Attach a genuine ElasticBLAST runtime id to terminal webhooks."""
+
+    _insert_once(
+        path,
+        "            merged = {**job_snap, **updates}\n",
+        (
+            "            runtime_job_id = _effective_elb_job_id(merged)\n"
+            "            if runtime_job_id.startswith(\"job-\") and runtime_job_id != job_id:\n"
+            "                payload[\"elb_job_id\"] = runtime_job_id\n"
+        ),
+        'payload["elb_job_id"] = runtime_job_id',
+    )
+
+
+def _disable_warmed_cache_skip(path: Path) -> None:
+    """Remove the unsafe node-local cache skip hint from generated configs."""
+
+    marker = "Completed warmup Jobs are not node-local cache-presence proofs."
+    _insert_once(
+        path,
+        '    config["blast"]["db"] = db_url\n',
+        (
+            "    # Completed warmup Jobs are not node-local cache-presence proofs.\n"
+            "    # Always let the hardened init path validate and repair every shard.\n"
+            '    config["cluster"].pop("exp-skip-warmed-ssd-init", None)\n'
+        ),
+        marker,
+    )
+    text = path.read_text()
+    assignment = 'config["cluster"]["exp-skip-warmed-ssd-init"] = "true"'
+    removal = 'config["cluster"].pop("exp-skip-warmed-ssd-init", None)'
+    if removal not in text:
+        raise RuntimeError("warmed-cache safety removal is missing after patching")
+    if text.rfind(assignment) > text.rfind(removal):
+        raise RuntimeError("warmed-cache skip assignment appears after the safety removal")
+
+
+def _harden_openapi_runtime_ids(path: Path) -> None:
+    """Restrict OpenAPI runtime correlation to canonical ElasticBLAST IDs."""
+
+    text = path.read_text()
+    if text.count("def _discover_elb_job_id_from_submit_output(") != 1:
+        raise RuntimeError("expected exactly one OpenAPI runtime-id discovery helper")
+    if text.count("def _effective_elb_job_id(") != 1:
+        raise RuntimeError("expected exactly one OpenAPI effective runtime-id helper")
+    start = text.find("def _discover_elb_job_id_from_submit_output(")
+    if start < 0:
+        raise RuntimeError("missing OpenAPI runtime-id discovery helper")
+    end = text.find("\n\ndef ", start + 1)
+    if end < 0:
+        raise RuntimeError("could not isolate OpenAPI runtime-id discovery helper")
+    effective_start = text.find("def _effective_elb_job_id(", end)
+    if effective_start < 0:
+        raise RuntimeError("missing OpenAPI effective runtime-id helper")
+    effective_end = text.find("\n\ndef ", effective_start + 1)
+    if effective_end < 0:
+        raise RuntimeError("could not isolate OpenAPI effective runtime-id helper")
+
+    block = text[start:effective_end]
+    block = block.replace(
+        "(?P<elb_job_id>job-[A-Za-z0-9_-]+)",
+        "(?P<elb_job_id>job-[0-9a-fA-F]{32})",
+    )
+    block = block.replace(
+        'r"\\b(?P<elb_job_id>job-[0-9a-f]{32})\\b"',
+        'r"\\b(?P<elb_job_id>job-[0-9a-fA-F]{32})\\b"',
+    )
+    block = block.replace(
+        '            return match.group("elb_job_id")\n',
+        '            return match.group("elb_job_id").lower()\n',
+    )
+    block = block.replace(
+        '    if current.startswith("job-"):\n'
+        "        return current\n",
+        '    canonical_current = re.fullmatch(r"job-[0-9a-f]{32}", current, re.IGNORECASE)\n'
+        "    if canonical_current:\n"
+        "        return canonical_current.group(0).lower()\n",
+    )
+    block = block.replace("    return current or job_id\n", "    return job_id\n")
+
+    unsafe_fragments = (
+        "job-[A-Za-z0-9_-]+",
+        'current.startswith("job-")',
+        "return current or job_id",
+    )
+    if any(fragment in block for fragment in unsafe_fragments):
+        raise RuntimeError("OpenAPI runtime-id helper remains permissive after patching")
+    required_fragments = (
+        "job-[0-9a-fA-F]{32}",
+        "canonical_current = re.fullmatch",
+        'return match.group("elb_job_id").lower()',
+        "return canonical_current.group(0).lower()",
+        "return job_id",
+    )
+    if any(fragment not in block for fragment in required_fragments):
+        raise RuntimeError("OpenAPI runtime-id helper does not satisfy the canonical contract")
+    path.write_text(text[:start] + block + text[effective_end:])
+
+
+def _harden_openapi_runtime_id_consumers(path: Path) -> None:
+    """Require canonical IDs at every injected OpenAPI correlation boundary."""
+
+    text = path.read_text()
+    replacements = (
+        (
+            'if runtime_job_id.startswith("job-") and runtime_job_id != job_id:',
+            'if re.fullmatch(r"job-[0-9a-f]{32}", runtime_job_id, re.IGNORECASE) '
+            "and runtime_job_id != job_id:",
+        ),
+        (
+            'if elb_job_id.startswith("job-"):',
+            'if re.fullmatch(r"job-[0-9a-f]{32}", elb_job_id, re.IGNORECASE):',
+        ),
+        (
+            'if effective_elb_job_id.startswith("job-") and '
+            "job_info.get(\"elb_job_id\") != effective_elb_job_id:",
+            'if re.fullmatch(r"job-[0-9a-f]{32}", effective_elb_job_id, re.IGNORECASE) '
+            'and job_info.get("elb_job_id") != effective_elb_job_id:',
+        ),
+        (
+            'if effective_elb_job_id.startswith("job-") and effective_elb_job_id != str(',
+            'if re.fullmatch(r"job-[0-9a-f]{32}", effective_elb_job_id, re.IGNORECASE) '
+            "and effective_elb_job_id != str(",
+        ),
+    )
+    for old, new in replacements:
+        text = text.replace(old, new)
+    unsafe = (
+        'runtime_job_id.startswith("job-")',
+        'elb_job_id.startswith("job-")',
+        'effective_elb_job_id.startswith("job-")',
+    )
+    if any(fragment in text for fragment in unsafe):
+        raise RuntimeError("OpenAPI runtime-id consumer remains permissive after patching")
+    path.write_text(text)
+
+
+def _validate_dockerfile_runtime_policy(path: Path) -> None:
+    """Verify safety semantics independently from idempotency markers."""
+
+    text = path.read_text()
+    expected_counts = {
+        "ARG ELB_REF=744d79b": 1,
+        "COPY patch_elastic_blast.py /tmp/patch_elastic_blast.py": 1,
+        "COPY merge-sharded-results.sh /tmp/merge-sharded-results.sh": 1,
+        "python3 /tmp/patch_elastic_blast.py /tmp/elb-src": 1,
+        "grep -q 'ttlSecondsAfterFinished:'": 3,
+        "for template in job-init-ssd-shard-aks.yaml.template": 3,
+        'elb-job-id: \"${BLAST_ELB_JOB_ID}\"': 3,
+        "|| exit 1; done": 3,
+        "cp -a /tmp/elb-src/src/elastic_blast/templates/.": 2,
+    }
+    mismatches = {
+        fragment: (text.count(fragment), expected)
+        for fragment, expected in expected_counts.items()
+        if text.count(fragment) != expected
+    }
+    if mismatches:
+        raise RuntimeError(f"OpenAPI Dockerfile runtime policy mismatch: {mismatches}")
+
+
+def _validate_openapi_runtime_policy(path: Path) -> None:
+    """Verify generated app semantics independently from patch markers."""
+
+    text = path.read_text()
+    required = (
+        'config["cluster"].pop("exp-skip-warmed-ssd-init", None)',
+        "def _discover_elb_job_id_from_submit_output(",
+        "def _effective_elb_job_id(",
+        'canonical_current = re.fullmatch(r"job-[0-9a-f]{32}"',
+        'payload["elb_job_id"] = runtime_job_id',
+        'def _job_marker_phase(results_url: str, elb_job_id: str = "")',
+        're.fullmatch(r"job-[0-9a-f]{32}", elb_job_id, re.IGNORECASE)',
+        'safe_exec(["kubectl", "get", "jobs", "-l", f"elb-job-id={elb_job_id}"',
+        'safe_exec(["kubectl", "get", "pods", "-l", f"elb-job-id={elb_job_id}"',
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    forbidden = (
+        'runtime_job_id.startswith("job-")',
+        'elb_job_id.startswith("job-")',
+        'effective_elb_job_id.startswith("job-")',
+        'safe_exec(["kubectl", "get", "jobs", "-o", "json"]',
+        'safe_exec(["kubectl", "get", "pods", "-o", "json"]',
+    )
+    present = [fragment for fragment in forbidden if fragment in text]
+    assignment = 'config["cluster"]["exp-skip-warmed-ssd-init"] = "true"'
+    removal = 'config["cluster"].pop("exp-skip-warmed-ssd-init", None)'
+    if missing or present or text.rfind(assignment) > text.rfind(removal):
+        raise RuntimeError(
+            "OpenAPI app runtime policy mismatch: "
+            f"missing={missing}, forbidden={present}"
+        )
+
+
 def patch_dockerfile(root: Path) -> None:
     _copy_support_files(root)
     path = root / "Dockerfile"
     # Force the elastic-blast source ref the OpenAPI image installs to a
-    # known-good commit. ``7a471297`` is the ref the dashboard build is designed
-    # around: it has ``bin/elastic-blast`` (the Dockerfile ``install``s it) and
-    # already includes the taxonomy4blast.sqlite3 staging commit. The sibling
+    # known-good commit. ``744d79b`` is the one-commit successor to the previous
+    # ``7a471297`` pin: it retains ``bin/elastic-blast`` and taxonomy staging,
+    # and adds the guarded ``exp-skip-warmed-ssd-init`` config/runtime support.
+    # The sibling
     # Dockerfile's ``ARG ELB_REF`` default drifts with upstream WIP (e.g.
     # ``5b7ea2b`` dropped ``bin/elastic-blast`` and breaks the build), so pin it
     # here regardless of the current value rather than matching one exact string.
-    _force_elb_ref(path, "7a471297")
+    _force_elb_ref(path, "744d79b")
     _insert_once(
         path,
         "COPY ./app /app\n",
@@ -142,6 +355,22 @@ def patch_dockerfile(root: Path) -> None:
         desired=checkout_anchor + legacy_patch + source_ttl_check,
         marker=source_ttl_check.strip(),
     )
+    identity_templates = (
+        "job-init-ssd-shard-aks.yaml.template "
+        "blast-batch-job-shard-ssd-aks.yaml.template "
+        "elb-finalizer-aks.yaml.template"
+    )
+    source_identity_check = (
+        f"    for template in {identity_templates}; do "
+        "grep -q 'elb-job-id: \"${BLAST_ELB_JOB_ID}\"' "
+        '"/tmp/elb-src/src/elastic_blast/templates/${template}" || exit 1; done && \\\n'
+    )
+    _insert_once(
+        path,
+        source_ttl_check,
+        source_identity_check,
+        source_identity_check.strip(),
+    )
     _replace_once(
         path,
         "    rm -rf /tmp/elb-src && \\\n",
@@ -163,6 +392,18 @@ def patch_dockerfile(root: Path) -> None:
         legacy=system_install + system_copy,
         desired=system_install + system_copy + system_check,
         marker=system_check.strip(),
+    )
+    system_identity_check = (
+        f"    for template in {identity_templates}; do "
+        "grep -q 'elb-job-id: \"${BLAST_ELB_JOB_ID}\"' "
+        '"/usr/local/lib/python3.11/site-packages/elastic_blast/templates/${template}" '
+        "|| exit 1; done && \\\n"
+    )
+    _insert_once(
+        path,
+        system_check,
+        system_identity_check,
+        system_identity_check.strip(),
     )
     venv_install = "    && pip install --no-cache-dir azure-cli \\\n"
     venv_legacy = (
@@ -190,11 +431,26 @@ def patch_dockerfile(root: Path) -> None:
         desired=venv_desired,
         marker=venv_check.strip(),
     )
+    venv_identity_check = (
+        f"    && for template in {identity_templates}; do "
+        "grep -q 'elb-job-id: \"${BLAST_ELB_JOB_ID}\"' "
+        '"/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/${template}" '
+        "|| exit 1; done \\\n"
+    )
+    _insert_once(
+        path,
+        venv_check,
+        venv_identity_check,
+        venv_identity_check.strip(),
+    )
+    _validate_dockerfile_runtime_policy(path)
 
 
 def patch_app(root: Path) -> None:
     _copy_app_overlay(root)
     path = root / "app" / "main.py"
+    _patch_terminal_webhook_runtime_id(path)
+    _disable_warmed_cache_skip(path)
     if "def _effective_elb_job_id(" not in path.read_text():
         _replace_once(
             path,
@@ -205,20 +461,21 @@ def patch_app(root: Path) -> None:
             "    if not stdout:\n"
             '        return ""\n'
             "    patterns = (\n"
-            '        rf"/results/{re.escape(job_id)}/(?P<elb_job_id>job-[A-Za-z0-9_-]+)/metadata/",\n'
-            '        r"\\b(?P<elb_job_id>job-[0-9a-f]{32})\\b",\n'
+            '        rf"/results/(?:\\d{{4}}/\\d{{2}}/\\d{{2}}/)?{re.escape(job_id)}/(?P<elb_job_id>job-[0-9a-fA-F]{{32}})/metadata/",\n'
+            '        r"\\b(?P<elb_job_id>job-[0-9a-fA-F]{32})\\b",\n'
             "    )\n"
             "    for pattern in patterns:\n"
             "        match = re.search(pattern, stdout)\n"
             "        if match:\n"
-            '            return match.group("elb_job_id")\n'
+            '            return match.group("elb_job_id").lower()\n'
             '    return ""\n'
             "\n\n"
             "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n"
             '    job_id = str(job_info.get("job_id") or "")\n'
             '    current = str(job_info.get("elb_job_id") or "")\n'
-            '    if current.startswith("job-"):\n'
-            "        return current\n"
+            '    canonical_current = re.fullmatch(r"job-[0-9a-f]{32}", current, re.IGNORECASE)\n'
+            "    if canonical_current:\n"
+            "        return canonical_current.group(0).lower()\n"
             "    discovered = _discover_elb_job_id_from_submit_output(\n"
             "        job_id,\n"
             '        "\\n".join(\n'
@@ -229,11 +486,12 @@ def patch_app(root: Path) -> None:
             "    if discovered:\n"
             "        _update_job(job_id, elb_job_id=discovered)\n"
             "        return discovered\n"
-            "    return current or job_id\n"
+            "    return job_id\n"
             "\n\n"
                 "def _ensure_elb_scripts_configmap() -> None:\n"
             ),
         )
+    _harden_openapi_runtime_ids(path)
     _insert_once(
         path,
         (
@@ -311,7 +569,7 @@ def patch_app(root: Path) -> None:
         "                or job_id\n"
         "            ),\n",
     )
-    _replace_once(
+    _replace_once_unless_marker(
         path,
         "def _job_marker_phase(results_url: str) -> str | None:\n"
         "    if not results_url:\n"
@@ -344,6 +602,7 @@ def patch_app(root: Path) -> None:
         '        if "FAILURE.txt" in proc.stdout:\n'
         '            return "failed"\n'
         "    return None\n",
+        'def _job_marker_phase(results_url: str, elb_job_id: str = "")',
     )
     _replace_once(
         path,
@@ -520,6 +779,8 @@ def patch_app(root: Path) -> None:
         '            _status_payload["eta"] = _eta_out\n'
         "    return _status_payload\n",
     )
+    _harden_openapi_runtime_id_consumers(path)
+    _validate_openapi_runtime_policy(path)
 
 def main() -> int:
     if len(sys.argv) != 2:

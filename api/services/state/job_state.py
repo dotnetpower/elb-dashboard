@@ -5,7 +5,7 @@ derivation (`canonical_job_metadata`), and the small parsing/formatting
 helpers shared by it and the repository.
 Edit boundaries: Pure data shaping. No Azure SDK calls, no I/O.
 Key entry points: `JobState`, `canonical_job_metadata`, `_payload_value`,
-`_basename`, `_now_iso`, `_ulid_like`, `_sanitise_odata_value`,
+`canonical_elastic_blast_job_id`, `_basename`, `_now_iso`, `_ulid_like`, `_sanitise_odata_value`,
 `_JOB_SCHEMA_VERSION`, `_JOBSTATE_SUMMARY_SELECT`.
 Risky contracts: `_sanitise_odata_value` rejects control characters and doubles
 single quotes — every OData filter built by the repository goes through it.
@@ -47,6 +47,7 @@ _JOBSTATE_SUMMARY_SELECT = [
     "cluster_name",
     "storage_account",
     "external_correlation_id",
+    "elastic_blast_job_id",
     "submission_source",
     "queue_origin",
 ]
@@ -77,6 +78,35 @@ def _resolve_external_correlation_id(payload: dict[str, Any] | None) -> str:
         if nested:
             return nested
     return str(payload.get("external_correlation_id") or "").strip()
+
+
+def canonical_elastic_blast_job_id(value: Any) -> str:
+    """Return a genuine ``job-<32 hex>`` ElasticBLAST id or ``""``."""
+
+    text = str(value or "").strip()
+    if not re.fullmatch(r"job-[0-9a-f]{32}", text, re.IGNORECASE):
+        return ""
+    return text.lower()
+
+
+def _resolve_payload_elastic_blast_job_id(payload: dict[str, Any] | None) -> str:
+    """Extract the ElasticBLAST runtime id from known payload locations."""
+
+    if not isinstance(payload, dict):
+        return ""
+    for value in (payload.get("elastic_blast_job_id"), payload.get("k8s_job_id")):
+        resolved = canonical_elastic_blast_job_id(value)
+        if resolved:
+            return resolved
+    external = payload.get("external")
+    if isinstance(external, dict):
+        resolved = canonical_elastic_blast_job_id(external.get("elb_job_id"))
+        if resolved:
+            return resolved
+        k8s = external.get("k8s")
+        if isinstance(k8s, dict):
+            return canonical_elastic_blast_job_id(k8s.get("job_id"))
+    return ""
 
 
 def _resolve_payload_submission_source(payload: dict[str, Any] | None) -> str:
@@ -193,12 +223,18 @@ class JobState:
     # columns with ``include_payload=False`` -- can show the true queue origin
     # and let an operator trace a request from the Service Bus queue to its job.
     external_correlation_id: str | None = None
+    # Runtime ``job-*`` id stamped on ElasticBLAST Kubernetes objects. External
+    # Service Bus rows exist before this id is known, so later sibling polls
+    # backfill this separate column without replacing the concurrently-mutated
+    # progress payload.
+    elastic_blast_job_id: str | None = None
     submission_source: str | None = None
     # Queue origin for a Service Bus job: "control_plane" (dashboard send route)
     # | "external" (external producer enqueued straight to the namespace) |
     # None. Persisted as a durable column (derived from payload in ``to_entity``)
     # so the list view (``include_payload=False``) can label "queue (dashboard)".
     queue_origin: str | None = None
+    _created_by_create: bool = True
     # JSON array of ``{file_id, blob_path}`` for an external job's result files,
     # captured at the succeeded transition (cluster up) so the download route
     # can stream the result straight from Storage when the elb-openapi proxy is
@@ -248,6 +284,10 @@ class JobState:
             # row with just a payload.
             "external_correlation_id": self.external_correlation_id
             or _resolve_external_correlation_id(self.payload),
+            "elastic_blast_job_id": canonical_elastic_blast_job_id(
+                self.elastic_blast_job_id
+            )
+            or _resolve_payload_elastic_blast_job_id(self.payload),
             "submission_source": self.submission_source
             or _resolve_payload_submission_source(self.payload),
             "queue_origin": self.queue_origin
@@ -304,6 +344,7 @@ class JobState:
             cluster_name=e.get("cluster_name") or canonical["cluster_name"],
             storage_account=e.get("storage_account") or canonical["storage_account"],
             external_correlation_id=e.get("external_correlation_id") or None,
+            elastic_blast_job_id=e.get("elastic_blast_job_id") or None,
             submission_source=e.get("submission_source") or None,
             queue_origin=e.get("queue_origin") or None,
             result_manifest=e.get("result_manifest") or None,

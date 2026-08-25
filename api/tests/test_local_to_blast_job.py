@@ -25,6 +25,8 @@ import pytest
 from api.routes._blast_shared import _local_to_blast_job, _split_child_summaries_from_repo
 from api.services.blast import job_state as blast_job_state
 
+_RUNTIME_ID = "job-0123456789abcdef0123456789abcdef"
+
 
 @pytest.fixture(autouse=True)
 def _isolate_k8s_refresh_caches():
@@ -698,7 +700,7 @@ def test_refresh_running_blast_state_waits_for_result_artifacts(monkeypatch):
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
-            "elastic_blast_job_id": "job-elastic",
+            "elastic_blast_job_id": _RUNTIME_ID,
         },
     )
 
@@ -744,7 +746,7 @@ def test_refresh_running_blast_state_completes_prior_running_steps(monkeypatch):
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
-            "elastic_blast_job_id": "job-elastic",
+            "elastic_blast_job_id": _RUNTIME_ID,
             "_progress": {
                 "phase": "submitting",
                 "status": "running",
@@ -775,7 +777,7 @@ def test_refresh_running_blast_state_completes_prior_running_steps(monkeypatch):
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
         "api.services.monitoring.k8s_check_blast_status",
-        lambda *_args, **_kwargs: {"status": "completed", "job_id": "job-elastic"},
+        lambda *_args, **_kwargs: {"status": "completed", "job_id": _RUNTIME_ID},
     )
     monkeypatch.setattr(blast_job_state, "_state_has_parseable_result_artifact", lambda *_: True)
 
@@ -805,7 +807,7 @@ def test_refresh_running_blast_state_failure_marks_running_step_with_detail(monk
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
-            "elastic_blast_job_id": "job-elastic",
+            "elastic_blast_job_id": _RUNTIME_ID,
             "_progress": {
                 "phase": "submitting",
                 "status": "running",
@@ -836,7 +838,7 @@ def test_refresh_running_blast_state_failure_marks_running_step_with_detail(monk
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
         "api.services.monitoring.k8s_check_blast_status",
-        lambda *_args, **_kwargs: {"status": "failed", "job_id": "job-elastic", "failed": 1},
+        lambda *_args, **_kwargs: {"status": "failed", "job_id": _RUNTIME_ID, "failed": 1},
     )
     monkeypatch.setattr(
         blast_job_state,
@@ -877,7 +879,7 @@ def test_refresh_running_blast_state_failure_falls_back_to_generic_detail(monkey
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
-            "elastic_blast_job_id": "job-elastic",
+            "elastic_blast_job_id": _RUNTIME_ID,
             "_progress": {"phase": "running", "status": "running", "steps": {}},
         },
     )
@@ -897,7 +899,7 @@ def test_refresh_running_blast_state_failure_falls_back_to_generic_detail(monkey
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
         "api.services.monitoring.k8s_check_blast_status",
-        lambda *_args, **_kwargs: {"status": "failed", "job_id": "job-elastic", "failed": 2},
+        lambda *_args, **_kwargs: {"status": "failed", "job_id": _RUNTIME_ID, "failed": 2},
     )
     monkeypatch.setattr(
         blast_job_state, "_read_blast_runtime_failure", lambda *_args, **_kwargs: ""
@@ -937,13 +939,13 @@ def test_refresh_running_blast_state_uses_discovered_elastic_blast_job_id(monkey
         return {"status": "running", "job_id": kwargs.get("job_id")}
 
     monkeypatch.setattr("api.services.get_credential", lambda: object())
-    monkeypatch.setattr(blast_job_state, "_discover_elastic_blast_job_id", lambda *_: "job-elastic")
+    monkeypatch.setattr(blast_job_state, "_discover_elastic_blast_job_id", lambda *_: _RUNTIME_ID)
     monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
 
     refreshed = blast_job_state._refresh_running_blast_state(Repo(), state)
 
     assert refreshed is state
-    assert seen["job_id"] == "job-elastic"
+    assert seen["job_id"] == _RUNTIME_ID
 
 
 def test_refresh_running_blast_state_throttles_repeated_k8s_checks(monkeypatch):
@@ -956,7 +958,7 @@ def test_refresh_running_blast_state_throttles_repeated_k8s_checks(monkeypatch):
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
-            "elastic_blast_job_id": "job-elastic",
+            "elastic_blast_job_id": _RUNTIME_ID,
         },
     )
     calls = 0
@@ -965,7 +967,7 @@ def test_refresh_running_blast_state_throttles_repeated_k8s_checks(monkeypatch):
     def fake_k8s(*_args, **_kwargs):
         nonlocal calls
         calls += 1
-        return {"status": "running", "job_id": "job-elastic"}
+        return {"status": "running", "job_id": _RUNTIME_ID}
 
     blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
     monkeypatch.setattr(blast_job_state, "monotonic", lambda: next(times))
@@ -990,7 +992,7 @@ def _cooldown_job(job_id):
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
-            "elastic_blast_job_id": f"elastic-{job_id}",
+            "elastic_blast_job_id": _RUNTIME_ID,
         },
     )
 
@@ -1031,7 +1033,7 @@ def test_refresh_running_blast_state_reachable_clears_cluster_cooldown(monkeypat
     statuses = iter(["unknown", "running"])
 
     def fake_k8s(*_args, **_kwargs):
-        return {"status": next(statuses), "job_id": "elastic"}
+        return {"status": next(statuses), "job_id": _RUNTIME_ID}
 
     blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
     blast_job_state._K8S_REFRESH_CLUSTER_COOLDOWN.clear()
@@ -1130,6 +1132,34 @@ def test_refresh_running_blast_state_skips_without_runtime_job_id(monkeypatch):
     assert called is False
 
 
+def test_refresh_running_blast_state_rejects_noncanonical_runtime_job_id(monkeypatch):
+    state = _state(
+        status="running",
+        phase="submitted",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+            "elastic_blast_job_id": "job-deadbeef",
+        },
+    )
+    called = False
+
+    def fake_k8s(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"status": "running"}
+
+    monkeypatch.setattr(blast_job_state, "_discover_elastic_blast_job_id", lambda *_: "")
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    refreshed = blast_job_state._refresh_running_blast_state(object(), state)
+
+    assert refreshed is state
+    assert called is False
+
+
 def test_refresh_running_blast_state_running_phase_uses_short_throttle(monkeypatch):
     """`running` and `results_pending` use the 5 s throttle, not 20 s."""
     state = _state(
@@ -1141,7 +1171,7 @@ def test_refresh_running_blast_state_running_phase_uses_short_throttle(monkeypat
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
-            "elastic_blast_job_id": "job-elastic",
+            "elastic_blast_job_id": _RUNTIME_ID,
         },
     )
     calls = 0
@@ -1153,7 +1183,7 @@ def test_refresh_running_blast_state_running_phase_uses_short_throttle(monkeypat
     def fake_k8s(*_args, **_kwargs):
         nonlocal calls
         calls += 1
-        return {"status": "running", "job_id": "job-elastic"}
+        return {"status": "running", "job_id": _RUNTIME_ID}
 
     blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
     monkeypatch.setattr(blast_job_state, "monotonic", lambda: next(times))
@@ -1184,6 +1214,7 @@ def test_refresh_running_blast_state_reads_top_level_columns(monkeypatch):
         resource_group="rg-elb",
         cluster_name="elb-cluster",
         storage_account="stelb",
+        elastic_blast_job_id=_RUNTIME_ID,
     )
     full_state = _state(
         job_id="job-list",
@@ -1195,7 +1226,7 @@ def test_refresh_running_blast_state_reads_top_level_columns(monkeypatch):
                 "status": "running",
                 "steps": {"running": {"phase": "running", "started_at": "2026-05-21T00:00:00Z"}},
             },
-            "elastic_blast_job_id": "job-elastic",
+            "elastic_blast_job_id": _RUNTIME_ID,
         },
         subscription_id="sub-1",
         resource_group="rg-elb",
@@ -1221,11 +1252,15 @@ def test_refresh_running_blast_state_reads_top_level_columns(monkeypatch):
 
     repo = Repo()
     blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
-    monkeypatch.setattr(blast_job_state, "_discover_elastic_blast_job_id", lambda *_: "job-elastic")
+    monkeypatch.setattr(
+        blast_job_state,
+        "_discover_elastic_blast_job_id",
+        lambda *_: (_ for _ in ()).throw(AssertionError("durable identity must win")),
+    )
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
         "api.services.monitoring.k8s_check_blast_status",
-        lambda *_args, **_kwargs: {"status": "completed", "job_id": "job-elastic"},
+        lambda *_args, **_kwargs: {"status": "completed", "job_id": _RUNTIME_ID},
     )
     monkeypatch.setattr(blast_job_state, "_state_has_parseable_result_artifact", lambda *_: True)
 

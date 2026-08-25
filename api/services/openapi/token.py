@@ -183,6 +183,7 @@ def _patch_deployment_token(
     container_name: str,
     token: str,
     deployment: dict[str, Any],
+    _retry_conflict: bool = True,
 ) -> None:
     """Apply a surgical JSON Patch (RFC 6902) to the deployment to set the
     OpenAPI API token env var.
@@ -296,6 +297,23 @@ def _patch_deployment_token(
         headers={"Content-Type": "application/json-patch+json"},
         timeout=15,
     )
+    if response.status_code in {409, 422} and resource_version and _retry_conflict:
+        LOGGER.info(
+            "openapi token patch snapshot conflicted; retrying once deployment=%s",
+            deployment_name,
+        )
+        latest = _read_deployment(session, server, namespace, deployment_name)
+        _patch_deployment_token(
+            session,
+            server,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            container_name=container_name,
+            token=token,
+            deployment=latest,
+            _retry_conflict=False,
+        )
+        return
     if response.status_code == 404:
         raise OpenApiTokenError(
             404,

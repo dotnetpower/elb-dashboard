@@ -23,10 +23,11 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from api.services.state.job_state import canonical_elastic_blast_job_id
 from api.tasks import blast as _blast
 
 ELASTIC_BLAST_CFG_FILE = "elastic-blast.ini"
-ELASTIC_BLAST_JOB_ID_RE = re.compile(r"/results/[^/]+/(job-[A-Za-z0-9_-]+)")
+ELASTIC_BLAST_JOB_ID_RE = re.compile(r"/results/[^/]+/(job-[0-9a-f]{32})(?:/|$)", re.IGNORECASE)
 RETRYABLE_ERROR_CATEGORIES = {"transient", "capacity", "conflict"}
 RETRYABLE_EXIT_CODES = {8, 10}
 ELASTIC_BLAST_VALID_LOGLEVELS = frozenset(
@@ -242,7 +243,7 @@ def _submit_success_status(payload: Mapping[str, Any] | None) -> tuple[str, str]
 def _extract_elastic_blast_job_id(output: object) -> str:
     text = str(output or "")
     match = ELASTIC_BLAST_JOB_ID_RE.search(text)
-    return match.group(1) if match else ""
+    return canonical_elastic_blast_job_id(match.group(1)) if match else ""
 
 
 __all__ = (

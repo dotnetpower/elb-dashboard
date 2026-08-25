@@ -32,6 +32,7 @@ import re
 import time
 from typing import Any
 
+from api.services.state.job_state import canonical_elastic_blast_job_id
 from api.tasks import blast as _blast
 from api.tasks.blast.cli_parsing import (
     ELASTIC_BLAST_CFG_FILE,
@@ -403,8 +404,10 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
         for blob in container.list_blobs(name_starts_with=prefix):
             name = str(blob.name or "")
             parts = name.split("/", 2)
-            if len(parts) >= 2 and parts[1].startswith("job-"):
-                return parts[1]
+            if len(parts) >= 2:
+                runtime_identity = canonical_elastic_blast_job_id(parts[1])
+                if runtime_identity:
+                    return runtime_identity
     except Exception as exc:
         LOGGER.info(
             "elastic blast job id discovery skipped job_id=%s: %s", job_id, type(exc).__name__

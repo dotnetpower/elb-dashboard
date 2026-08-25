@@ -74,7 +74,11 @@ def persist_completed_job_pod_logs(
     if not (subscription_id and resource_group and cluster_name and job_id):
         return {}
 
-    elastic_job_id = resolve_elastic_blast_job_id(payload)
+    elastic_job_id = resolve_elastic_blast_job_id(
+        payload,
+        persisted_job_id=str(getattr(state, "elastic_blast_job_id", "") or ""),
+        error_text=str(getattr(state, "error_code", "") or ""),
+    )
     try:
         targets = discover_k8s_log_targets(
             credential,
@@ -101,6 +105,7 @@ def persist_completed_job_pod_logs(
 
     all_events: dict[str, list[dict[str, Any]]] = {}
     primaries_text: dict[str, list[tuple[str, list[str]]]] = defaultdict(list)
+    capture_incomplete = False
     for phase, group in by_phase.items():
         events: list[dict[str, Any]] = []
         primaries = set(PHASE_PRIMARY_CONTAINERS.get(phase, ()))
@@ -116,6 +121,7 @@ def persist_completed_job_pod_logs(
                     tail_lines=tail_lines,
                 )
             except Exception as exc:
+                capture_incomplete = True
                 LOGGER.info(
                     "persist_completed_job_pod_logs: tail skipped %s/%s job_id=%s: %s",
                     target.pod_name,
@@ -125,6 +131,7 @@ def persist_completed_job_pod_logs(
                 )
                 continue
             if not lines:
+                capture_incomplete = True
                 continue
             stream_name = f"{target.pod_name}/{target.container_name}"
             for line in lines:
@@ -151,15 +158,19 @@ def persist_completed_job_pod_logs(
 
     results: dict[str, int] = {}
     for phase, events in all_events.items():
+        phase_complete = True
         for chunk_seq, start in enumerate(range(0, len(events), CHUNK_EVENT_COUNT)):
             try:
-                write_execution_log_chunk(
+                written = write_execution_log_chunk(
                     job_id,
                     phase,
                     chunk_seq,
                     events[start : start + CHUNK_EVENT_COUNT],
                 )
+                if written is None:
+                    phase_complete = False
             except Exception as exc:
+                phase_complete = False
                 LOGGER.info(
                     "persist_completed_job_pod_logs: chunk skipped job_id=%s phase=%s seq=%s: %s",
                     job_id,
@@ -168,7 +179,14 @@ def persist_completed_job_pod_logs(
                     type(exc).__name__,
                 )
                 continue
-        results[phase] = len(events)
+        if phase_complete:
+            results[phase] = len(events)
+        else:
+            capture_incomplete = True
+
+    if capture_incomplete:
+        LOGGER.info("persist_completed_job_pod_logs: partial capture job_id=%s", job_id)
+        return {}
 
     try:
         repo = JobStateRepository()

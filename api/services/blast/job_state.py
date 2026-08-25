@@ -23,6 +23,7 @@ from fastapi import HTTPException
 
 from api.auth import CallerIdentity
 from api.services.response_contracts import build_target
+from api.services.state.job_state import canonical_elastic_blast_job_id
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1211,10 +1212,18 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     )
     if not (subscription_id and resource_group and cluster_name):
         return state
-    k8s_job_id = str(
-        _payload_value(payload, "elastic_blast_job_id", "k8s_job_id")
-        or _discover_elastic_blast_job_id(storage_account, str(state.job_id))
-    )
+    k8s_job_id = ""
+    for runtime_identity in (
+        getattr(state, "elastic_blast_job_id", ""),
+        _payload_value(payload, "elastic_blast_job_id", "k8s_job_id"),
+    ):
+        k8s_job_id = canonical_elastic_blast_job_id(runtime_identity)
+        if k8s_job_id:
+            break
+    if not k8s_job_id:
+        k8s_job_id = canonical_elastic_blast_job_id(
+            _discover_elastic_blast_job_id(storage_account, str(state.job_id))
+        )
     if not k8s_job_id:
         return state
     refresh_key = (str(state.job_id), subscription_id, resource_group, cluster_name)
@@ -1445,8 +1454,8 @@ def _payload_with_refresh_progress(
     error_detail: str = "",
 ) -> dict[str, Any]:
     out = dict(payload)
-    elastic_blast_job_id = str(k8s.get("job_id") or "")
-    if elastic_blast_job_id.startswith("job-"):
+    elastic_blast_job_id = canonical_elastic_blast_job_id(k8s.get("job_id"))
+    if elastic_blast_job_id:
         out["elastic_blast_job_id"] = elastic_blast_job_id
     _raw_progress = out.get("_progress")
     progress = dict(_raw_progress) if isinstance(_raw_progress, dict) else {}
@@ -1545,8 +1554,10 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
         for blob in container.list_blobs(name_starts_with=prefix):
             name = str(blob.name or "")
             parts = name.split("/", 2)
-            if len(parts) >= 2 and parts[1].startswith("job-"):
-                return parts[1]
+            if len(parts) >= 2:
+                runtime_identity = canonical_elastic_blast_job_id(parts[1])
+                if runtime_identity:
+                    return runtime_identity
     except Exception as exc:
         LOGGER.debug("elastic blast job id discovery skipped job_id=%s: %s", job_id, exc)
     return ""

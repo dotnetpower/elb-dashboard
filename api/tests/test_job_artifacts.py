@@ -6,6 +6,10 @@ Azure calls.
 Key entry points: `_state`, `test_build_execution_steps_snapshot_preserves_steps`,
 `test_artifact_finalizer_only_runs_for_terminal_phases`,
 `test_artifact_finalizer_deduplicates_pending_sentinel`,
+`test_artifact_finalizer_waits_for_pending_runtime_identity`,
+`test_reconcile_terminal_artifacts_resets_empty_identity_budget`,
+`test_finalizer_records_exhausted_pod_log_capture`,
+`test_finalizer_records_pod_log_retry_enqueue_failure`,
 `test_read_json_artifact_supports_gzip`, `test_artifact_build_should_enqueue_stale_pending`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
@@ -23,6 +27,7 @@ from api.services import job_artifacts
 from api.services.blast.result_artifacts import build_result_aggregate_payload
 from api.services.job_artifacts import ArtifactState, build_execution_steps_snapshot
 from api.tasks import blast as blast_tasks
+from api.tasks.blast_artifacts import finalize_job_artifacts
 
 
 def _state(**overrides):
@@ -97,13 +102,18 @@ def test_artifact_finalizer_only_runs_for_terminal_phases(monkeypatch) -> None:
 
     class FakeFinalizer:
         @staticmethod
-        def apply_async(*, kwargs):
+        def apply_async(*, kwargs, retry):
+            assert retry is False
             calls.append(dict(kwargs))
 
     import api.tasks.blast_artifacts as blast_artifacts
 
     monkeypatch.setattr(blast_artifacts, "finalize_job_artifacts", FakeFinalizer)
-    monkeypatch.setattr(job_artifacts, "artifact_build_should_enqueue", lambda *_args: True)
+    monkeypatch.setattr(
+        job_artifacts,
+        "artifact_build_should_enqueue",
+        lambda *_args, **_kwargs: True,
+    )
 
     blast_tasks._enqueue_artifact_finalizer("job-1", "submitting", "completed")
     blast_tasks._enqueue_artifact_finalizer("job-1", "completed", "completed")
@@ -112,22 +122,437 @@ def test_artifact_finalizer_only_runs_for_terminal_phases(monkeypatch) -> None:
     assert calls == [{"job_id": "job-1"}, {"job_id": "job-2"}]
 
 
+def test_artifact_finalizer_does_not_open_unused_result_backend() -> None:
+    assert finalize_job_artifacts.ignore_result is True
+
+
 def test_artifact_finalizer_deduplicates_pending_sentinel(monkeypatch) -> None:
     calls: list[dict[str, str]] = []
 
     class FakeFinalizer:
         @staticmethod
-        def apply_async(*, kwargs):
+        def apply_async(*, kwargs, retry):
+            assert retry is False
             calls.append(dict(kwargs))
 
     import api.tasks.blast_artifacts as blast_artifacts
 
     monkeypatch.setattr(blast_artifacts, "finalize_job_artifacts", FakeFinalizer)
-    monkeypatch.setattr(job_artifacts, "artifact_build_should_enqueue", lambda *_args: False)
+    monkeypatch.setattr(
+        job_artifacts,
+        "artifact_build_should_enqueue",
+        lambda *_args, **_kwargs: False,
+    )
 
     blast_tasks._enqueue_artifact_finalizer("job-1", "completed", "completed")
 
     assert calls == []
+
+
+def test_artifact_finalizer_marks_enqueue_failure_retryable(monkeypatch) -> None:
+    states: list[tuple[str, str]] = []
+
+    class FailingFinalizer:
+        @staticmethod
+        def apply_async(*, kwargs, retry):
+            assert retry is False
+            raise ConnectionError(kwargs["job_id"])
+
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    monkeypatch.setattr(blast_artifacts, "finalize_job_artifacts", FailingFinalizer)
+    monkeypatch.setattr(job_artifacts, "artifact_build_should_enqueue", lambda *_args: True)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda _job_id, _artifact_type, *, status, **kwargs: states.append(
+            (status, str(kwargs.get("error_code") or ""))
+        ),
+    )
+
+    assert blast_tasks._enqueue_artifact_finalizer("job-1", "completed", "completed") is False
+    assert states == [("pending", ""), ("failed", "enqueue_failed")]
+
+
+def test_artifact_finalizer_enqueues_when_dedup_state_is_unavailable(monkeypatch) -> None:
+    calls: list[dict[str, str]] = []
+
+    class FakeFinalizer:
+        @staticmethod
+        def apply_async(*, kwargs, retry):
+            assert retry is False
+            calls.append(dict(kwargs))
+
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    monkeypatch.setattr(blast_artifacts, "finalize_job_artifacts", FakeFinalizer)
+    monkeypatch.setattr(
+        job_artifacts,
+        "artifact_build_should_enqueue",
+        lambda *_args: (_ for _ in ()).throw(ConnectionError("table unavailable")),
+    )
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("table unavailable")),
+    )
+
+    assert blast_tasks._enqueue_artifact_finalizer("job-1", "completed", "completed") is True
+    assert calls == [{"job_id": "job-1"}]
+
+
+def test_artifact_finalizer_force_rebuild_bypasses_ready_dedup(monkeypatch) -> None:
+    calls: list[dict[str, str]] = []
+
+    class FakeFinalizer:
+        @staticmethod
+        def apply_async(*, kwargs, retry):
+            assert retry is False
+            calls.append(dict(kwargs))
+
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    monkeypatch.setattr(blast_artifacts, "finalize_job_artifacts", FakeFinalizer)
+    monkeypatch.setattr(
+        job_artifacts,
+        "artifact_build_should_enqueue",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("force must bypass dedup")),
+    )
+    monkeypatch.setattr(job_artifacts, "upsert_artifact_state", lambda *_args, **_kwargs: None)
+
+    assert blast_tasks._enqueue_artifact_finalizer(
+        "job-1", "completed", "completed", force=True
+    )
+    assert calls == [{"job_id": "job-1"}]
+
+
+def test_artifact_finalizer_waits_for_pending_runtime_identity(monkeypatch) -> None:
+    import api.services.state_repo as state_repo
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    state = _state(elastic_blast_job_id="")
+    sentinel = ArtifactState(
+        job_id="job-1",
+        artifact_type="artifact_finalizer",
+        status="pending",
+        updated_at="2000-01-01T00:00:00+00:00",
+        error_code="runtime_identity_pending",
+    )
+    writes: list[dict[str, object]] = []
+
+    class FakeRepo:
+        @staticmethod
+        def get(_job_id: str):
+            return state
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: sentinel)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda *_args, **kwargs: writes.append(kwargs),
+    )
+
+    result = blast_artifacts.finalize_job_artifacts.run(job_id="job-1")
+
+    assert result["status"] == "identity_pending"
+    assert writes == []
+
+
+def test_reconcile_terminal_artifacts_is_bounded_and_row_isolated(monkeypatch) -> None:
+    import api.services.state_repo as state_repo
+    import api.tasks.blast.state as blast_state
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    rows = [
+        _state(job_id="job-1"),
+        _state(job_id="job-2", status="failed", phase="failed"),
+        _state(job_id="job-3", status="cancelled", phase="cancelled"),
+    ]
+    calls: list[tuple[str, int, int]] = []
+
+    class FakeRepo:
+        def list_recent_terminal(
+            self,
+            *,
+            job_type,
+            limit,
+            since_seconds,
+            include_payload,
+        ):
+            assert include_payload is False
+            calls.append((job_type, limit, since_seconds))
+            return rows
+
+    def fake_enqueue(
+        job_id,
+        _phase,
+        _status,
+        *,
+        runtime_identity="",
+        reconcile_attempts=0,
+    ):
+        assert runtime_identity == getattr(
+            next(row for row in rows if row.job_id == job_id),
+            "elastic_blast_job_id",
+            "",
+        )
+        assert reconcile_attempts == 1
+        if job_id == "job-2":
+            raise RuntimeError("row-local")
+        return job_id == "job-1"
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(blast_state, "_enqueue_artifact_finalizer", fake_enqueue)
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: None)
+
+    summary = blast_artifacts.reconcile_terminal_artifacts.run(
+        limit=10_000,
+        since_seconds=99 * 86_400,
+    )
+
+    assert calls == [("blast", 500, 7 * 86_400)]
+    assert summary == {"scanned": 3, "enqueued": 1, "errors": 1}
+
+
+def test_reconcile_terminal_artifacts_stops_after_generation_budget(monkeypatch) -> None:
+    import api.services.state_repo as state_repo
+    import api.tasks.blast.state as blast_state
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    runtime_identity = "job-11111111111111111111111111111111"
+    row = _state(job_id="job-1", elastic_blast_job_id=runtime_identity)
+    sentinel = ArtifactState(
+        job_id="job-1",
+        artifact_type="artifact_finalizer",
+        status="failed",
+        runtime_identity=runtime_identity,
+        reconcile_attempts=blast_artifacts._RECONCILE_ATTEMPT_MAX,
+    )
+
+    class FakeRepo:
+        @staticmethod
+        def list_recent_terminal(**kwargs):
+            assert kwargs["include_payload"] is False
+            return [row]
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: sentinel)
+    monkeypatch.setattr(
+        blast_state,
+        "_enqueue_artifact_finalizer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("budget exhausted")),
+    )
+
+    summary = blast_artifacts.reconcile_terminal_artifacts.run()
+
+    assert summary == {"scanned": 1, "enqueued": 0, "errors": 0}
+
+
+def test_reconcile_terminal_artifacts_resets_budget_for_new_identity(monkeypatch) -> None:
+    import api.services.state_repo as state_repo
+    import api.tasks.blast.state as blast_state
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    row = _state(
+        job_id="job-1",
+        elastic_blast_job_id="job-22222222222222222222222222222222",
+    )
+    sentinel = ArtifactState(
+        job_id="job-1",
+        artifact_type="artifact_finalizer",
+        status="ready",
+        runtime_identity="job-11111111111111111111111111111111",
+        reconcile_attempts=blast_artifacts._RECONCILE_ATTEMPT_MAX,
+    )
+    calls: list[dict[str, object]] = []
+
+    class FakeRepo:
+        @staticmethod
+        def list_recent_terminal(**kwargs):
+            assert kwargs["include_payload"] is False
+            return [row]
+
+    def fake_enqueue(*_args, **kwargs):
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: sentinel)
+    monkeypatch.setattr(blast_state, "_enqueue_artifact_finalizer", fake_enqueue)
+
+    summary = blast_artifacts.reconcile_terminal_artifacts.run()
+
+    assert summary == {"scanned": 1, "enqueued": 1, "errors": 0}
+    assert calls == [
+        {
+            "runtime_identity": "job-22222222222222222222222222222222",
+            "reconcile_attempts": 1,
+        }
+    ]
+
+
+def test_reconcile_terminal_artifacts_resets_empty_identity_budget(monkeypatch) -> None:
+    import api.services.state_repo as state_repo
+    import api.tasks.blast.state as blast_state
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    runtime_identity = "job-22222222222222222222222222222222"
+    row = _state(job_id="job-1", elastic_blast_job_id=runtime_identity)
+    sentinel = ArtifactState(
+        job_id="job-1",
+        artifact_type="artifact_finalizer",
+        status="pending",
+        runtime_identity="",
+        reconcile_attempts=blast_artifacts._RECONCILE_ATTEMPT_MAX,
+    )
+    calls: list[dict[str, object]] = []
+
+    class FakeRepo:
+        @staticmethod
+        def list_recent_terminal(**_kwargs):
+            return [row]
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: sentinel)
+    monkeypatch.setattr(
+        blast_state,
+        "_enqueue_artifact_finalizer",
+        lambda *_args, **kwargs: calls.append(kwargs) or True,
+    )
+
+    summary = blast_artifacts.reconcile_terminal_artifacts.run()
+
+    assert summary == {"scanned": 1, "enqueued": 1, "errors": 0}
+    assert calls == [{"runtime_identity": runtime_identity, "reconcile_attempts": 1}]
+
+
+def test_finalizer_records_exhausted_pod_log_capture(monkeypatch) -> None:
+    import api.services.job_logs.persist as log_persist
+    import api.services.state_repo as state_repo
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    runtime_identity = "job-22222222222222222222222222222222"
+    state = _state(
+        status="failed",
+        phase="failed",
+        storage_account="",
+        elastic_blast_job_id=runtime_identity,
+    )
+    writes: list[tuple[str, dict[str, object]]] = []
+    history: list[tuple[str, str, dict[str, object]]] = []
+
+    class FakeRepo:
+        @staticmethod
+        def get(_job_id: str):
+            return state
+
+        @staticmethod
+        def append_history(job_id: str, event: str, payload: dict[str, object]) -> None:
+            history.append((job_id, event, payload))
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: None)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda _job_id, artifact_type, **kwargs: writes.append((artifact_type, kwargs)),
+    )
+    monkeypatch.setattr(job_artifacts, "write_execution_steps_snapshot", lambda *_args: {})
+    monkeypatch.setattr(log_persist, "persist_completed_job_pod_logs", lambda *_args: {})
+
+    result = blast_artifacts.finalize_job_artifacts.run(
+        job_id="job-1",
+        pod_log_attempt=blast_artifacts._POD_LOG_RETRY_MAX,
+    )
+
+    assert result["status"] == "completed"
+    assert result["pod_logs_error"] == "capture_exhausted"
+    assert (
+        "pod_logs",
+        {
+            "status": "failed",
+            "error_code": "capture_exhausted",
+            "runtime_identity": runtime_identity,
+            "reconcile_attempts": blast_artifacts._POD_LOG_RETRY_MAX,
+        },
+    ) in writes
+    assert history == [
+        (
+            "job-1",
+            "pod_logs_capture_failed",
+            {
+                "attempt": blast_artifacts._POD_LOG_RETRY_MAX,
+                "error_code": "capture_exhausted",
+                "runtime_identity": runtime_identity,
+            },
+        )
+    ]
+
+
+def test_finalizer_records_pod_log_retry_enqueue_failure(monkeypatch) -> None:
+    import api.services.job_logs.persist as log_persist
+    import api.services.state_repo as state_repo
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    runtime_identity = "job-22222222222222222222222222222222"
+    state = _state(
+        status="failed",
+        phase="failed",
+        storage_account="",
+        elastic_blast_job_id=runtime_identity,
+    )
+    writes: list[tuple[str, dict[str, object]]] = []
+    history: list[tuple[str, str, dict[str, object]]] = []
+
+    class FakeRepo:
+        @staticmethod
+        def get(_job_id: str):
+            return state
+
+        @staticmethod
+        def append_history(job_id: str, event: str, payload: dict[str, object]) -> None:
+            history.append((job_id, event, payload))
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: None)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda _job_id, artifact_type, **kwargs: writes.append((artifact_type, kwargs)),
+    )
+    monkeypatch.setattr(job_artifacts, "write_execution_steps_snapshot", lambda *_args: {})
+    monkeypatch.setattr(log_persist, "persist_completed_job_pod_logs", lambda *_args: {})
+    monkeypatch.setattr(
+        blast_artifacts.finalize_job_artifacts,
+        "apply_async",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("broker unavailable")),
+    )
+
+    result = blast_artifacts.finalize_job_artifacts.run(job_id="job-1")
+
+    assert result["status"] == "completed"
+    assert result["pod_logs_error"] == "retry_enqueue_failed"
+    assert (
+        "pod_logs",
+        {
+            "status": "failed",
+            "error_code": "retry_enqueue_failed",
+            "runtime_identity": runtime_identity,
+            "reconcile_attempts": 1,
+        },
+    ) in writes
+    assert history == [
+        (
+            "job-1",
+            "pod_logs_capture_failed",
+            {
+                "attempt": 1,
+                "error_code": "retry_enqueue_failed",
+                "runtime_identity": runtime_identity,
+            },
+        )
+    ]
 
 
 def test_read_json_artifact_supports_gzip(monkeypatch) -> None:
@@ -237,6 +662,76 @@ def test_artifact_build_should_enqueue_stale_pending(monkeypatch) -> None:
 
     monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: stale)
     assert job_artifacts.artifact_build_should_enqueue("job-1", ["result_aggregate"]) is True
+
+
+def test_artifact_build_does_not_expire_runtime_identity_pending(monkeypatch) -> None:
+    pending = ArtifactState(
+        job_id="job-1",
+        artifact_type="artifact_finalizer",
+        status="pending",
+        updated_at="2000-01-01T00:00:00+00:00",
+        error_code="runtime_identity_pending",
+    )
+
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: pending)
+
+    assert job_artifacts.artifact_build_should_enqueue("job-1", ["artifact_finalizer"]) is False
+
+
+def test_artifact_build_rebuilds_when_runtime_identity_changes(monkeypatch) -> None:
+    ready = ArtifactState(
+        job_id="job-1",
+        artifact_type="artifact_finalizer",
+        status="ready",
+        runtime_identity="job-11111111111111111111111111111111",
+    )
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: ready)
+
+    assert not job_artifacts.artifact_build_should_enqueue(
+        "job-1",
+        ["artifact_finalizer"],
+        runtime_identity="job-11111111111111111111111111111111",
+    )
+    assert job_artifacts.artifact_build_should_enqueue(
+        "job-1",
+        ["artifact_finalizer"],
+        runtime_identity="job-22222222222222222222222222222222",
+    )
+
+
+def test_artifact_build_does_not_duplicate_active_unknown_identity_finalizer(
+    monkeypatch,
+) -> None:
+    pending = ArtifactState(
+        job_id="job-1",
+        artifact_type="artifact_finalizer",
+        status="pending",
+        updated_at="2999-01-01T00:00:00+00:00",
+    )
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: pending)
+
+    assert not job_artifacts.artifact_build_should_enqueue(
+        "job-1",
+        ["artifact_finalizer"],
+        runtime_identity="job-22222222222222222222222222222222",
+    )
+
+
+def test_artifact_build_wakes_identity_pending_after_identity_arrives(monkeypatch) -> None:
+    pending = ArtifactState(
+        job_id="job-1",
+        artifact_type="artifact_finalizer",
+        status="pending",
+        updated_at="2999-01-01T00:00:00+00:00",
+        error_code="runtime_identity_pending",
+    )
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: pending)
+
+    assert job_artifacts.artifact_build_should_enqueue(
+        "job-1",
+        ["artifact_finalizer"],
+        runtime_identity="job-22222222222222222222222222222222",
+    )
 
 
 def test_write_execution_log_chunk_uses_safe_paths(monkeypatch) -> None:

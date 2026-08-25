@@ -49,10 +49,8 @@ def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
     # fill the dispatcher. Live N=10 warmed E2E p95 measured at 7.2 min (SLO <=10).
     assert env["ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS"] == "4"
     assert env["ELB_OPENAPI_NUM_CPUS"] == "7"
-    # Escape hatch baked into the manifest so it survives cluster restarts /
-    # redeploys: the split-versioned elb-openapi image emits a config key its
-    # bundled elastic-blast CLI does not understand, so =0 forces the
-    # historical init-ssd path and keeps `elastic-blast submit` from exiting 1.
+    # Historical warmup Jobs cannot prove node-local cache presence after
+    # scale-out, node replacement, or disk loss. Always run hardened init-ssd.
     assert env["ELB_OPENAPI_SKIP_WARMED_SSD_INIT"] == "0"
     # Token entry is now mandatory — build_manifests refuses to emit a
     # deployment without it (see test_build_manifests_rejects_empty_token).

@@ -31,6 +31,7 @@ from typing import Any
 
 from celery import shared_task
 
+from api.services.state.job_state import canonical_elastic_blast_job_id
 from api.tasks import blast as _blast
 
 LOGGER = logging.getLogger(__name__)
@@ -67,8 +68,8 @@ def _completed_row_runtime_job_id(row: Any) -> str:
     running = steps.get("running") if isinstance(steps, Mapping) else None
     k8s = running.get("k8s") if isinstance(running, Mapping) else None
     if isinstance(k8s, Mapping):
-        runtime_job_id = str(k8s.get("job_id") or "").strip()
-        if runtime_job_id.startswith("job-"):
+        runtime_job_id = canonical_elastic_blast_job_id(k8s.get("job_id"))
+        if runtime_job_id:
             return runtime_job_id
     return _blast._discover_elastic_blast_job_id(
         _blast._storage_account_from_row(row), str(row.job_id)

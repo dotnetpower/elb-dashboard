@@ -6,6 +6,7 @@ Edit boundaries: Use fakes — no live Azure / Kubernetes credentials.
 Key entry points: `test_persist_writes_chunks_and_last_output`,
 `test_persist_skips_when_inputs_missing`,
 `test_persist_skips_when_no_targets`,
+`test_persist_returns_empty_when_capture_is_partial`,
 `test_persist_does_not_clobber_longer_existing_last_output`
 Risky contracts: Pod logs must be sanitised; truncation must keep head + tail.
 Validation: `uv run pytest -q api/tests/test_job_log_persist.py`.
@@ -105,8 +106,9 @@ def test_persist_writes_chunks_and_last_output(monkeypatch) -> None:
 
     chunks: list[tuple[str, str, int, list[dict[str, Any]]]] = []
 
-    def fake_write_chunk(job_id: str, step: str, seq: int, events: list[dict[str, Any]]) -> None:
+    def fake_write_chunk(job_id: str, step: str, seq: int, events: list[dict[str, Any]]) -> object:
         chunks.append((job_id, step, seq, list(events)))
+        return object()
 
     state = _make_state()
     repo = _FakeRepo(state)
@@ -158,6 +160,82 @@ def test_persist_skips_when_no_targets(monkeypatch) -> None:
     assert persist.persist_completed_job_pod_logs(object(), state) == {}
 
 
+def test_persist_uses_init_failure_suffix_when_runtime_id_is_missing(monkeypatch) -> None:
+    state = _make_state(elastic_blast_job_id=None)
+    state.payload.pop("elastic_blast_job_id", None)
+    state.error_code = "RuntimeError: Shard init jobs failed: init-ssd-d8faab8f-3"
+    seen: list[str] = []
+
+    def fake_discover(*_args: Any, elastic_job_id: str, **_kwargs: Any) -> list[Any]:
+        seen.append(elastic_job_id)
+        return []
+
+    monkeypatch.setattr(persist, "discover_k8s_log_targets", fake_discover)
+
+    assert persist.persist_completed_job_pod_logs(object(), state) == {}
+    assert seen == ["job-d8faab8f"]
+
+
+def test_persist_returns_empty_when_capture_is_partial(monkeypatch) -> None:
+    state = _make_state()
+    targets = [
+        k8s.K8sLogTarget(
+            namespace="default",
+            pod_name="blast-good",
+            container_name="blast",
+            phase="running",
+        ),
+        k8s.K8sLogTarget(
+            namespace="default",
+            pod_name="blast-late",
+            container_name="results-export",
+            phase="running",
+        ),
+    ]
+    monkeypatch.setattr(persist, "discover_k8s_log_targets", lambda *args, **kwargs: targets)
+
+    def fake_tail(*_args: Any, target: k8s.K8sLogTarget, **_kwargs: Any) -> list[str]:
+        if target.pod_name == "blast-late":
+            raise TimeoutError("log not flushed")
+        return ["completed"]
+
+    monkeypatch.setattr(persist, "fetch_k8s_pod_log_tail", fake_tail)
+    monkeypatch.setattr(
+        "api.services.job_artifacts.write_execution_log_chunk",
+        lambda *args, **kwargs: object(),
+    )
+    repo = _FakeRepo(state)
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: repo)
+
+    assert persist.persist_completed_job_pod_logs(object(), state) == {}
+    assert repo.updates == []
+
+
+def test_persist_returns_empty_when_a_chunk_write_fails(monkeypatch) -> None:
+    state = _make_state()
+    target = k8s.K8sLogTarget(
+        namespace="default",
+        pod_name="blast-pod",
+        container_name="blast",
+        phase="running",
+    )
+    monkeypatch.setattr(persist, "discover_k8s_log_targets", lambda *args, **kwargs: [target])
+    monkeypatch.setattr(
+        persist,
+        "fetch_k8s_pod_log_tail",
+        lambda *args, **kwargs: ["completed"],
+    )
+    monkeypatch.setattr(
+        "api.services.job_artifacts.write_execution_log_chunk",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ConnectionError("blob unavailable")),
+    )
+    repo = _FakeRepo(state)
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: repo)
+
+    assert persist.persist_completed_job_pod_logs(object(), state) == {}
+    assert repo.updates == []
+
+
 def test_persist_does_not_clobber_longer_existing_last_output(monkeypatch) -> None:
     long_existing = "x" * 1000
     state = _make_state(
@@ -179,7 +257,7 @@ def test_persist_does_not_clobber_longer_existing_last_output(monkeypatch) -> No
     )
     monkeypatch.setattr(
         "api.services.job_artifacts.write_execution_log_chunk",
-        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: object(),
     )
     repo = _FakeRepo(state)
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: repo)

@@ -103,6 +103,8 @@ class ArtifactState:
     size_bytes: int = 0
     updated_at: str = ""
     error_code: str = ""
+    runtime_identity: str = ""
+    reconcile_attempts: int = 0
 
 
 def _now_iso() -> str:
@@ -162,19 +164,19 @@ def _artifact_table_client() -> TableClient:
     global _ARTIFACT_TABLE_POOLED
     pool = _ARTIFACT_TABLE_POOLED
     if pool is not None:
-        return pool  # type: ignore[return-value]
+        return pool
     with _ARTIFACT_TABLE_POOL_LOCK:
         if _ARTIFACT_TABLE_POOLED is None:
             from api.services.state_repo import _PooledTableClient
 
-            _ARTIFACT_TABLE_POOLED = _PooledTableClient(  # type: ignore[assignment]
+            _ARTIFACT_TABLE_POOLED = _PooledTableClient(
                 TableClient(
                     endpoint=endpoint,
                     table_name=ARTIFACTS_TABLE,
                     credential=get_credential(),
                 )
             )
-        return _ARTIFACT_TABLE_POOLED  # type: ignore[return-value]
+        return _ARTIFACT_TABLE_POOLED
 
 
 def _reset_artifact_table_pool() -> None:
@@ -359,6 +361,8 @@ def upsert_artifact_state(
     content_hash: str = "",
     size_bytes: int = 0,
     error_code: str = "",
+    runtime_identity: str = "",
+    reconcile_attempts: int = 0,
 ) -> ArtifactState:
     updated_at = _now_iso()
     entity = {
@@ -370,6 +374,8 @@ def upsert_artifact_state(
         "size_bytes": int(size_bytes or 0),
         "updated_at": updated_at,
         "error_code": error_code,
+        "runtime_identity": runtime_identity,
+        "reconcile_attempts": max(0, int(reconcile_attempts or 0)),
     }
     with _artifact_table_client() as table:
         table.upsert_entity(entity, mode=UpdateMode.MERGE)
@@ -382,6 +388,8 @@ def upsert_artifact_state(
         size_bytes=int(size_bytes or 0),
         updated_at=updated_at,
         error_code=error_code,
+        runtime_identity=runtime_identity,
+        reconcile_attempts=max(0, int(reconcile_attempts or 0)),
     )
 
 
@@ -400,6 +408,8 @@ def get_artifact_state(job_id: str, artifact_type: str) -> ArtifactState | None:
         size_bytes=int(entity.get("size_bytes") or 0),
         updated_at=str(entity.get("updated_at") or ""),
         error_code=str(entity.get("error_code") or ""),
+        runtime_identity=str(entity.get("runtime_identity") or ""),
+        reconcile_attempts=max(0, int(entity.get("reconcile_attempts") or 0)),
     )
 
 
@@ -418,15 +428,34 @@ def artifact_state_payload(job_id: str, artifact_type: str) -> dict[str, Any] | 
     }
 
 
-def artifact_build_should_enqueue(job_id: str, artifact_types: list[str]) -> bool:
+def artifact_build_should_enqueue(
+    job_id: str,
+    artifact_types: list[str],
+    *,
+    runtime_identity: str = "",
+) -> bool:
     now = datetime.now(UTC)
+    expected_runtime_identity = runtime_identity.strip().casefold()
     for artifact_type in artifact_types:
         state = get_artifact_state(job_id, artifact_type)
         if state is None or state.status == "failed":
             return True
+        if (
+            artifact_type == "artifact_finalizer"
+            and expected_runtime_identity
+            and state.runtime_identity.casefold() != expected_runtime_identity
+            and not (
+                state.status == "pending"
+                and not state.runtime_identity
+                and state.error_code != "runtime_identity_pending"
+            )
+        ):
+            return True
         if state.status == "ready":
             continue
         if state.status == "pending":
+            if state.error_code == "runtime_identity_pending":
+                return False
             try:
                 updated_at = datetime.fromisoformat(state.updated_at.replace("Z", "+00:00"))
             except Exception:

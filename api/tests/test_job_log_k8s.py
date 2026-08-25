@@ -31,7 +31,9 @@ def test_discover_k8s_log_targets_filters_to_job_and_maps_phases(monkeypatch) ->
                     {
                         "metadata": {
                             "name": "init-ssd-e2fc8081-0-abcde",
-                            "labels": {},
+                            "labels": {
+                                "elb-job-id": "job-000000000000000000000000e2fc8081"
+                            },
                             "ownerReferences": [{"kind": "Job", "name": "init-ssd-e2fc8081-0"}],
                         },
                         "spec": {
@@ -54,7 +56,10 @@ def test_discover_k8s_log_targets_filters_to_job_and_maps_phases(monkeypatch) ->
                                 {
                                     "name": "blast",
                                     "env": [
-                                        {"name": "BLAST_ELB_JOB_ID", "value": "job-abcde2fc8081"}
+                                        {
+                                            "name": "BLAST_ELB_JOB_ID",
+                                            "value": "job-000000000000000000000000e2fc8081",
+                                        }
                                     ],
                                 }
                             ]
@@ -89,7 +94,7 @@ def test_discover_k8s_log_targets_filters_to_job_and_maps_phases(monkeypatch) ->
         "elb-cluster",
         namespace="default",
         job_id="dashboard-job",
-        elastic_job_id="job-abcde2fc8081",
+        elastic_job_id="job-000000000000000000000000e2fc8081",
     )
 
     assert [(target.pod_name, target.container_name, target.phase) for target in targets] == [
@@ -127,7 +132,10 @@ def test_discover_k8s_log_targets_includes_init_containers(monkeypatch) -> None:
                                 {
                                     "name": "blast",
                                     "env": [
-                                        {"name": "BLAST_ELB_JOB_ID", "value": "job-abcde2fc8081"}
+                                        {
+                                            "name": "BLAST_ELB_JOB_ID",
+                                            "value": "job-000000000000000000000000e2fc8081",
+                                        }
                                     ],
                                 }
                             ],
@@ -156,7 +164,7 @@ def test_discover_k8s_log_targets_includes_init_containers(monkeypatch) -> None:
         "elb-cluster",
         namespace="default",
         job_id="dashboard-job",
-        elastic_job_id="job-abcde2fc8081",
+        elastic_job_id="job-000000000000000000000000e2fc8081",
     )
 
     container_names = {target.container_name for target in targets}
@@ -219,11 +227,15 @@ def test_resolve_elastic_blast_job_id_prefers_top_level() -> None:
     assert (
         k8s.resolve_elastic_blast_job_id(
             {
-                "elastic_blast_job_id": "job-aaa111",
-                "_progress": {"steps": {"running": {"k8s": {"job_id": "job-bbb222"}}}},
+                "elastic_blast_job_id": "job-00000000000000000000000000aaa111",
+                "_progress": {
+                    "steps": {
+                        "running": {"k8s": {"job_id": "job-00000000000000000000000000bbb222"}}
+                    }
+                },
             }
         )
-        == "job-aaa111"
+        == "job-00000000000000000000000000aaa111"
     )
 
 
@@ -232,20 +244,22 @@ def test_resolve_elastic_blast_job_id_falls_back_to_progress_steps() -> None:
         "elastic_blast_job_id": None,
         "_progress": {
             "steps": {
-                "running": {"k8s": {"job_id": "job-ccc333"}},
-                "exporting_results": {"k8s": {"job_id": "job-ddd444"}},
+                "running": {"k8s": {"job_id": "job-00000000000000000000000000ccc333"}},
+                "exporting_results": {
+                    "k8s": {"job_id": "job-00000000000000000000000000ddd444"}
+                },
             }
         },
     }
-    assert k8s.resolve_elastic_blast_job_id(payload) == "job-ccc333"
+    assert k8s.resolve_elastic_blast_job_id(payload) == "job-00000000000000000000000000ccc333"
 
 
 def test_resolve_elastic_blast_job_id_falls_back_to_external_k8s() -> None:
     payload = {
         "k8s_job_id": "",
-        "external": {"k8s": {"job_id": "job-eee555"}},
+        "external": {"k8s": {"job_id": "job-00000000000000000000000000eee555"}},
     }
-    assert k8s.resolve_elastic_blast_job_id(payload) == "job-eee555"
+    assert k8s.resolve_elastic_blast_job_id(payload) == "job-00000000000000000000000000eee555"
 
 
 def test_resolve_elastic_blast_job_id_reads_external_elb_job_id() -> None:
@@ -253,16 +267,136 @@ def test_resolve_elastic_blast_job_id_reads_external_elb_job_id() -> None:
     # ``external.elb_job_id`` (the dashboard stores the row under
     # ``payload.external``). This is what enables live pod-log streaming for
     # external / Service Bus jobs.
-    payload = {"external": {"elb_job_id": "job-fff666", "submission_source": "servicebus"}}
-    assert k8s.resolve_elastic_blast_job_id(payload) == "job-fff666"
+    payload = {
+        "external": {
+            "elb_job_id": "job-00000000000000000000000000fff666",
+            "submission_source": "servicebus",
+        }
+    }
+    assert k8s.resolve_elastic_blast_job_id(payload) == "job-00000000000000000000000000fff666"
+
+
+def test_resolve_elastic_blast_job_id_prefers_durable_column() -> None:
+    payload = {"external": {"elb_job_id": "job-0000000000000000000000000a1e0111"}}
+    assert (
+        k8s.resolve_elastic_blast_job_id(
+            payload,
+            persisted_job_id="job-000000000000000000000000d0ab1e22",
+            error_text="Shard init jobs failed: init-ssd-deadbeef-3",
+        )
+        == "job-000000000000000000000000d0ab1e22"
+    )
+
+
+def test_resolve_elastic_blast_job_id_recovers_init_failure_suffix() -> None:
+    error = "RuntimeError: Shard init jobs failed: init-ssd-d8faab8f-3"
+    assert k8s.resolve_elastic_blast_job_id({}, error_text=error) == "job-d8faab8f"
+    assert k8s.elastic_blast_selector_from_error("init-ssd-nothex-3") == ""
+    assert k8s.elastic_blast_selector_from_error("init-ssd-d8faab8f-3000") == ""
 
 
 def test_resolve_elastic_blast_job_id_returns_empty_when_missing() -> None:
     assert k8s.resolve_elastic_blast_job_id(None) == ""
     assert k8s.resolve_elastic_blast_job_id({}) == ""
+    assert k8s.resolve_elastic_blast_job_id({"elastic_blast_job_id": "job-a"}) == ""
     assert (
         k8s.resolve_elastic_blast_job_id(
             {"elastic_blast_job_id": "not-a-job-id", "_progress": "string"}
         )
         == ""
     )
+
+
+def test_pod_matching_rejects_embedded_suffix_collision() -> None:
+    pod = {
+        "metadata": {
+            "name": "blastn-batch-s00-job-000-xdeadbeefx-abcde",
+            "labels": {},
+        },
+        "spec": {"containers": [{"name": "blast"}]},
+    }
+
+    assert not k8s._pod_matches_job(
+        pod,
+        "dashboard-job",
+        "job-000000000000000000000000deadbeef",
+    )
+
+
+def test_pod_matching_rejects_suffix_collision_with_mismatched_label() -> None:
+    pod = {
+        "metadata": {
+            "name": "blastn-batch-s00-job-000-deadbeef-abcde",
+            "labels": {"elb-job-id": "job-111111111111111111111111deadbeef"},
+        },
+        "spec": {"containers": [{"name": "blast"}]},
+    }
+
+    assert not k8s._pod_matches_job(
+        pod,
+        "dashboard-job",
+        "job-000000000000000000000000deadbeef",
+    )
+
+
+def test_pod_matching_rejects_suffix_collision_with_mismatched_env() -> None:
+    pod = {
+        "metadata": {
+            "name": "blastn-batch-s00-job-000-deadbeef-abcde",
+            "labels": {},
+        },
+        "spec": {
+            "containers": [
+                {
+                    "name": "blast",
+                    "env": [
+                        {
+                            "name": "BLAST_ELB_JOB_ID",
+                            "value": "job-111111111111111111111111deadbeef",
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+
+    assert not k8s._pod_matches_job(
+        pod,
+        "dashboard-job",
+        "job-000000000000000000000000deadbeef",
+    )
+
+
+def test_pod_matching_rejects_unlabelled_full_id_suffix_match() -> None:
+    pod = {
+        "metadata": {
+            "name": "blastn-batch-s00-job-000-deadbeef-abcde",
+            "labels": {},
+        },
+        "spec": {"containers": [{"name": "blast"}]},
+    }
+
+    assert not k8s._pod_matches_job(
+        pod,
+        "dashboard-job",
+        "job-000000000000000000000000deadbeef",
+    )
+
+
+def test_short_failure_selector_matches_only_exact_init_ssd_names() -> None:
+    matching = {
+        "metadata": {
+            "name": "init-ssd-d8faab8f-3-abcde",
+            "labels": {"elb-job-id": "job-000000000000000000000000d8faab8f"},
+            "ownerReferences": [{"kind": "Job", "name": "init-ssd-d8faab8f-3"}],
+        }
+    }
+    unrelated_batch = {
+        "metadata": {
+            "name": "blastn-batch-s00-job-000-d8faab8f-abcde",
+            "labels": {"elb-job-id": "job-000000000000000000000000d8faab8f"},
+        }
+    }
+
+    assert k8s._pod_matches_job(matching, "dashboard-job", "job-d8faab8f")
+    assert not k8s._pod_matches_job(unrelated_batch, "dashboard-job", "job-d8faab8f")

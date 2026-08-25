@@ -18,6 +18,8 @@ Risky contracts:
     A 4xx/5xx would cause the sibling to retry-storm against the dashboard.
   * Only writes status/phase/error_code onto an EXISTING jobstate row. If the row does not
     exist, log + 202 — the next normal /v1/jobs poll will create it with the right owner.
+    * Every accepted terminal event re-checks the idempotent artifact-finalizer gate, including
+        same-status delivery, so a transient enqueue failure can recover before Kubernetes TTL GC.
 Validation: ``uv run pytest -q api/tests/test_external_webhook.py``.
 """
 
@@ -33,6 +35,10 @@ from pydantic import BaseModel, ConfigDict, Field
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _text_attr(value: object, name: str) -> str:
+    return str(getattr(value, name, "") or "")
 
 
 # Sibling terminal statuses (see ``docker-openapi/app/main.py::_TERMINAL_STATES``).
@@ -77,6 +83,7 @@ class ExternalJobEvent(BaseModel):
     run_seconds: int | None = None
     queue_wait_seconds: int | None = None
     elapsed_seconds: int | None = None
+    elb_job_id: str | None = Field(default=None, max_length=128)
 
 
 def _expected_token() -> str:
@@ -141,7 +148,42 @@ def _normalise_status(body: ExternalJobEvent) -> str:
     return raw
 
 
-def _apply_to_jobstate(job_id: str, ext_status: str, error_msg: str | None) -> dict[str, Any]:
+def _record_runtime_identity_conflict(
+    repo: Any,
+    job_id: str,
+    stored_identity: str,
+    incoming_identity: str,
+) -> None:
+    LOGGER.warning(
+        "openapi webhook: runtime identity conflict job_id=%s stored=%s incoming=%s",
+        job_id,
+        stored_identity,
+        incoming_identity,
+    )
+    try:
+        repo.append_history(
+            job_id,
+            "runtime_identity_conflict",
+            {
+                "stored_runtime_identity": stored_identity,
+                "incoming_runtime_identity": incoming_identity,
+            },
+        )
+    except Exception as exc:
+        LOGGER.info(
+            "openapi webhook: runtime identity conflict history skipped "
+            "job_id=%s err=%s",
+            job_id,
+            type(exc).__name__,
+        )
+
+
+def _apply_to_jobstate(
+    job_id: str,
+    ext_status: str,
+    error_msg: str | None,
+    elastic_blast_job_id: str | None = None,
+) -> dict[str, Any]:
     """Write the reported status onto an existing jobstate row, idempotently.
 
     Returns a small dict describing the outcome (logged + emitted as the App Insights
@@ -173,6 +215,26 @@ def _apply_to_jobstate(job_id: str, ext_status: str, error_msg: str | None) -> d
         return {"synced": False, "reason": "unknown_job"}
 
     cur_status = str(getattr(existing, "status", "") or "").lower()
+    from api.services.state.job_state import canonical_elastic_blast_job_id
+
+    incoming_elastic_blast_job_id = canonical_elastic_blast_job_id(elastic_blast_job_id)
+    stored_elastic_blast_job_id = canonical_elastic_blast_job_id(
+        getattr(existing, "elastic_blast_job_id", "")
+    )
+    identity_backfill: dict[str, str] = {}
+    if incoming_elastic_blast_job_id and not stored_elastic_blast_job_id:
+        identity_backfill["elastic_blast_job_id"] = incoming_elastic_blast_job_id
+    elif (
+        incoming_elastic_blast_job_id
+        and stored_elastic_blast_job_id
+        and incoming_elastic_blast_job_id != stored_elastic_blast_job_id
+    ):
+        _record_runtime_identity_conflict(
+            repo,
+            job_id,
+            stored_elastic_blast_job_id,
+            incoming_elastic_blast_job_id,
+        )
 
     # Terminal rows are immutable against NON-terminal events. The sibling fires
     # webhooks with a 3-retry exponential backoff, so a ``running``/``submitted``
@@ -205,19 +267,49 @@ def _apply_to_jobstate(job_id: str, ext_status: str, error_msg: str | None) -> d
         )
         return {"synced": False, "reason": "backward_transition_ignored"}
 
-    if cur_status == ext_status and not (ext_status in _TERMINAL_STATUSES and error_msg):
+    if (
+        cur_status == ext_status
+        and not (ext_status in _TERMINAL_STATUSES and error_msg)
+        and not identity_backfill
+    ):
         # Idempotent no-op: same status, no new error detail to attach.
         return {"synced": True, "noop": True, "status": ext_status}
 
     update_kwargs: dict[str, Any] = {"status": ext_status, "phase": ext_status}
+    existing_error_code = _text_attr(existing, "error_code")
     if ext_status in _TERMINAL_STATUSES and error_msg:
         # ``error_code`` is a short tag (≤200 chars per sibling truncation rule).
         update_kwargs["error_code"] = error_msg[:200]
-    elif ext_status in {"completed", "succeeded"} and (getattr(existing, "error_code", "") or ""):
+    elif ext_status in {"completed", "succeeded"} and existing_error_code:
         # Clear a stale error_code when terminal-success arrives (mirrors the existing
         # _sync_external_jobs_to_table behaviour so the SPA does not keep showing a
         # recovered error tag on a finished-OK row).
         update_kwargs["error_code"] = ""
+
+    identity_resolved = False
+    if identity_backfill:
+        identity_backfilled = False
+        try:
+            persisted_identity = repo.backfill_elastic_blast_job_id(
+                job_id, incoming_elastic_blast_job_id
+            )
+            identity_backfilled = persisted_identity == incoming_elastic_blast_job_id
+            identity_resolved = bool(persisted_identity)
+            if persisted_identity and persisted_identity != incoming_elastic_blast_job_id:
+                _record_runtime_identity_conflict(
+                    repo,
+                    job_id,
+                    persisted_identity,
+                    incoming_elastic_blast_job_id,
+                )
+        except Exception as exc:
+            LOGGER.warning(
+                "openapi webhook: runtime identity backfill skipped job_id=%s err=%s",
+                job_id,
+                type(exc).__name__,
+            )
+    else:
+        identity_backfilled = False
 
     try:
         repo.update(job_id, **update_kwargs)
@@ -231,7 +323,52 @@ def _apply_to_jobstate(job_id: str, ext_status: str, error_msg: str | None) -> d
         )
         return {"synced": False, "reason": "update_failed"}
 
-    return {"synced": True, "from": cur_status, "to": ext_status}
+    return {
+        "synced": True,
+        "from": cur_status,
+        "to": ext_status,
+        "identity_backfilled": identity_backfilled,
+        "identity_resolved": identity_resolved,
+        "identity_pending": bool(identity_backfill) and not identity_resolved,
+    }
+
+
+def _enqueue_terminal_artifacts(job_id: str, ext_status: str, outcome: dict[str, Any]) -> None:
+    """Best-effort artifact capture after a successfully correlated terminal event."""
+
+    if ext_status not in _TERMINAL_STATUSES or outcome.get("synced") is not True:
+        return
+    if outcome.get("identity_pending") is True:
+        try:
+            from api.services.job_artifacts import upsert_artifact_state
+
+            upsert_artifact_state(
+                job_id,
+                "artifact_finalizer",
+                status="pending",
+                error_code="runtime_identity_pending",
+            )
+        except Exception as exc:
+            LOGGER.info(
+                "openapi webhook: identity-pending artifact state skipped "
+                "job_id=%s err=%s",
+                job_id,
+                type(exc).__name__,
+            )
+        return
+    try:
+        from api.tasks.blast.state import _enqueue_artifact_finalizer
+
+        if outcome.get("identity_resolved") is True:
+            _enqueue_artifact_finalizer(job_id, ext_status, ext_status, force=True)
+        else:
+            _enqueue_artifact_finalizer(job_id, ext_status, ext_status)
+    except Exception as exc:
+        LOGGER.info(
+            "openapi webhook: artifact finalizer enqueue skipped job_id=%s err=%s",
+            job_id,
+            type(exc).__name__,
+        )
 
 
 @router.post(
@@ -275,7 +412,8 @@ async def register_external_job(request: Request) -> dict[str, Any]:
         )
         return {"status": "accepted", "synced": False, "reason": "unknown_status"}
 
-    outcome = _apply_to_jobstate(job_id, ext_status, body.error)
+    outcome = _apply_to_jobstate(job_id, ext_status, body.error, body.elb_job_id)
+    _enqueue_terminal_artifacts(job_id, ext_status, outcome)
     # Cache sibling-derived runtime stats on the terminal fast path so the
     # BlastJobs list view's "Elapsed" / "Duration" timer reads accurate values
     # the instant the webhook lands -- rather than waiting up to one

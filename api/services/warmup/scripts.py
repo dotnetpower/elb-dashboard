@@ -38,7 +38,38 @@ set -euo pipefail
 cd /blast/blastdb
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 log "START shard=${ELB_SHARD_IDX} db=${ELB_DB} node=$(hostname)"
+ORIG_DB="$ELB_DB"
+if [[ "$ELB_DB" =~ ^(.+)_shard_([0-9]+)$ ]]; then
+    ORIG_DB="${BASH_REMATCH[1]}"
+fi
+STAGE_LOCK_WAIT_SECONDS="${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}"
+case "$STAGE_LOCK_WAIT_SECONDS" in
+    ''|*[!0-9]*) log "ERROR invalid stage lock timeout: ${STAGE_LOCK_WAIT_SECONDS}"; exit 64 ;;
+esac
+if [ "${#STAGE_LOCK_WAIT_SECONDS}" -gt 4 ] \
+    || [ "$STAGE_LOCK_WAIT_SECONDS" -lt 1 ] \
+    || [ "$STAGE_LOCK_WAIT_SECONDS" -gt 5400 ]; then
+    log "ERROR stage lock timeout must be between 1 and 5400 seconds"
+    exit 64
+fi
+if ! command -v flock >/dev/null 2>&1; then
+    log "ERROR flock is required for safe node-local DB staging"
+    exit 69
+fi
+STAGE_LOCK_FILE=".elb-stage.lock"
+exec 9>"$STAGE_LOCK_FILE"
+log "STAGE_LOCK_WAIT file=${STAGE_LOCK_FILE} timeout=${STAGE_LOCK_WAIT_SECONDS}s"
+STAGE_LOCK_WAIT_STARTED=$(date +%s)
+if ! flock -w "$STAGE_LOCK_WAIT_SECONDS" 9; then
+    STAGE_LOCK_WAIT_ELAPSED=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))
+    log "ERROR stage lock timeout file=${STAGE_LOCK_FILE} waited_seconds=${STAGE_LOCK_WAIT_ELAPSED}"
+    exit 75
+fi
+export ELB_STAGE_LOCK_HELD=1
+STAGE_LOCK_WAIT_ELAPSED=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))
+log "STAGE_LOCK_ACQUIRED file=${STAGE_LOCK_FILE} waited_seconds=${STAGE_LOCK_WAIT_ELAPSED}"
 EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
+rm -f .download-complete.tmp .download-source-version.tmp
 if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
     log "CLEANUP partial downloads"
     find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
@@ -46,6 +77,10 @@ fi
 valid_nsq_count=$(find . -maxdepth 1 -name '*.nsq' ! -name '.azDownload-*' | wc -l)
 if [ -f .download-complete ] && [ "$valid_nsq_count" = "0" ]; then
     log "CACHE_INCOMPLETE missing nucleotide volume files"
+    rm -f .download-complete
+fi
+if [ -f .download-complete ] && [ -z "$EXPECTED_SOURCE_VERSION" ]; then
+    log "CACHE_UNVERIFIED expected source version is unavailable"
     rm -f .download-complete
 fi
 if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
@@ -56,6 +91,11 @@ if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
         log "CACHE_STALE source-version mismatch"
         rm -f .download-complete
     fi
+fi
+if [ -f .download-complete ] && [ -s "${ORIG_DB}.ntf" ] \
+    && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
+    log "CACHE_INCOMPLETE missing taxonomy filter index ${ORIG_DB}.not/.nos"
+    rm -f .download-complete
 fi
 # Integrity gate: the file-presence checks above catch a MISSING volume, but a
 # cache whose volume files exist yet disagree with the alias/LMDB metadata
@@ -86,9 +126,9 @@ if [ ! -f .download-complete ]; then
     if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
         log "TAXDB_SKIP taxdb files not present in DB prefix"
     fi
-    printf '%s' ok > .download-complete
-    if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
-        printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version
+    if [ ! -f .download-complete ]; then
+        log "ERROR staging helper did not commit completion marker"
+        exit 1
     fi
 else
   log "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
@@ -132,7 +172,11 @@ else
     fi
   fi
 fi
-blastdbcmd -db "$ELB_DB" -info | tee warmup-db-info.txt
+if ! blastdbcmd -db "$ELB_DB" -info | tee warmup-db-info.txt; then
+    rm -f .download-complete
+    log "ERROR final blastdbcmd integrity probe failed"
+    exit 1
+fi
 log "STAGING_COMPLETE shard=${ELB_SHARD_IDX}"
 log "DONE shard=${ELB_SHARD_IDX} size=$(du -sh . | cut -f1)"
 """.strip()
@@ -147,7 +191,49 @@ echo "Shard download: idx=${ELB_SHARD_IDX} prefix=${ELB_PARTITION_PREFIX} db=${E
 
 cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"
 
+ORIG_DB="$ELB_DB"
+if [[ "$ELB_DB" =~ ^(.+)_shard_([0-9]+)$ ]]; then
+    ORIG_DB="${BASH_REMATCH[1]}"
+fi
+if [ "${ELB_STAGE_LOCK_HELD:-0}" = "1" ]; then
+    if ! flock -n 9; then
+        echo "ERROR: inherited stage lock descriptor is unavailable"
+        exit 70
+    fi
+    echo "STAGE_LOCK_REUSE file=.elb-stage.lock"
+else
+    STAGE_LOCK_WAIT_SECONDS="${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}"
+    case "$STAGE_LOCK_WAIT_SECONDS" in
+      ''|*[!0-9]*) echo "ERROR: invalid stage lock timeout: ${STAGE_LOCK_WAIT_SECONDS}"; exit 64 ;;
+    esac
+        if [ "${#STAGE_LOCK_WAIT_SECONDS}" -gt 4 ] \
+                || [ "$STAGE_LOCK_WAIT_SECONDS" -lt 1 ] \
+                || [ "$STAGE_LOCK_WAIT_SECONDS" -gt 5400 ]; then
+                echo "ERROR: stage lock timeout must be between 1 and 5400 seconds"
+                exit 64
+        fi
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: flock is required for safe node-local DB staging"
+        exit 69
+    fi
+    STAGE_LOCK_FILE=".elb-stage.lock"
+    exec 9>"$STAGE_LOCK_FILE"
+    echo "STAGE_LOCK_WAIT file=${STAGE_LOCK_FILE} timeout=${STAGE_LOCK_WAIT_SECONDS}s"
+    STAGE_LOCK_WAIT_STARTED=$(date +%s)
+    if ! flock -w "$STAGE_LOCK_WAIT_SECONDS" 9; then
+        STAGE_LOCK_WAIT_ELAPSED=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))
+        echo "ERROR: stage lock timeout file=${STAGE_LOCK_FILE}" \
+            "waited_seconds=${STAGE_LOCK_WAIT_ELAPSED}"
+        exit 75
+    fi
+    export ELB_STAGE_LOCK_HELD=1
+    STAGE_LOCK_WAIT_ELAPSED=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))
+    echo "STAGE_LOCK_ACQUIRED file=${STAGE_LOCK_FILE}" \
+        "waited_seconds=${STAGE_LOCK_WAIT_ELAPSED}"
+fi
+
 EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
+rm -f .download-complete.tmp .download-source-version.tmp
 if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
     echo "CLEANUP partial downloads"
     find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
@@ -155,6 +241,10 @@ fi
 valid_nsq_count=$(find . -maxdepth 1 -name '*.nsq' ! -name '.azDownload-*' | wc -l)
 if [ -f .download-complete ] && [ "$valid_nsq_count" = "0" ]; then
     echo "CACHE_INCOMPLETE missing nucleotide volume files"
+    rm -f .download-complete
+fi
+if [ -f .download-complete ] && [ -z "$EXPECTED_SOURCE_VERSION" ]; then
+    echo "CACHE_UNVERIFIED expected source version is unavailable"
     rm -f .download-complete
 fi
 if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
@@ -165,6 +255,11 @@ if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
         echo "CACHE_STALE source-version mismatch"
         rm -f .download-complete
     fi
+fi
+if [ -f .download-complete ] && [ -s "${ORIG_DB}.ntf" ] \
+    && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
+    echo "CACHE_INCOMPLETE missing taxonomy filter index ${ORIG_DB}.not/.nos"
+    rm -f .download-complete
 fi
 # Integrity gate (see the warmup entrypoint): file-presence checks miss a cache
 # whose volumes exist but disagree with the alias/LMDB metadata, which fails the
@@ -223,7 +318,6 @@ VOLUMES=$(cat /tmp/manifest.txt)
 echo "Volumes: ${VOLUMES}"
 
 DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
-ORIG_DB=$(echo "${ELB_DB}" | sed 's/_shard_[0-9]*$//')
 DB_URL="${DB_BASE_URL}${ORIG_DB}/"
 echo "DB base URL: ${DB_URL}"
 
@@ -232,7 +326,7 @@ for VOL in $VOLUMES; do
     [ -n "$PATTERN" ] && PATTERN="${PATTERN};"
     PATTERN="${PATTERN}${VOL}.*"
 done
-PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto"
+PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto;${ORIG_DB}.nos;${ORIG_DB}.not"
 echo "Downloading with pattern: ${PATTERN}"
 
 retry_azcopy cp "${DB_URL}*" . \
@@ -256,6 +350,15 @@ fi
 if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
     echo "TAXDB_SKIP taxdb files not present in DB prefix"
 fi
+if [ -s "${ORIG_DB}.ntf" ] \
+    && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
+    echo "ERROR: downloaded taxonomy filter index is incomplete ${ORIG_DB}.not/.nos"
+    exit 1
+fi
+if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
+    echo "ERROR: downloaded DB failed blastdbcmd integrity probe"
+    exit 1
+fi
 
 VOLPATHS=""
 for VOL in $VOLUMES; do
@@ -264,10 +367,14 @@ for VOL in $VOLUMES; do
 done
 echo "VOLPATHS=${VOLPATHS}" > /tmp/shard_volpaths.txt
 echo "Volume paths: ${VOLPATHS}"
-printf '%s' ok > .download-complete
 if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
-    printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version
+    printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version.tmp
+    mv .download-source-version.tmp .download-source-version
+else
+    rm -f .download-source-version
 fi
+printf '%s' ok > .download-complete.tmp
+mv .download-complete.tmp .download-complete
 pkill -f azcopy 2>/dev/null || true
 rm -rf /root/.azcopy 2>/dev/null || true
 """.strip()

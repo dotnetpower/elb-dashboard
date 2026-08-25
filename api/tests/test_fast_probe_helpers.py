@@ -54,6 +54,13 @@ def test_fast_probe_connection_sets_socket_connect_timeout() -> None:
             pass
 
 
+def test_celery_broker_tcp_connect_is_bounded() -> None:
+    from api.celery_app import celery_app
+
+    timeout = celery_app.conf.broker_transport_options["socket_connect_timeout"]
+    assert 0 < timeout <= 30
+
+
 def test_fast_probe_connection_preserves_existing_transport_options() -> None:
     """If kombu (or a future caller) has already set transport_options we must
     merge, not clobber. A `del`-like overwrite would silently drop SSL /

@@ -184,6 +184,16 @@ def test_warmup_tick_expires_before_next_schedule() -> None:
     assert 0 < float(options["expires"]) < float(entry["schedule"])
 
 
+def test_terminal_artifact_reconcile_is_bounded_and_isolated() -> None:
+    entry = celery_app.conf.beat_schedule["blast-reconcile-terminal-artifacts"]
+    task = celery_app.tasks["api.tasks.blast.artifacts.reconcile_terminal_artifacts"]
+
+    assert entry["options"]["queue"] == "reconcile"
+    assert 0 < float(entry["options"]["expires"]) < float(entry["schedule"])
+    assert task.soft_time_limit == 60
+    assert task.time_limit == 75
+
+
 def test_runtime_metrics_backfill_is_slow_cadence_and_non_poison() -> None:
     entry = celery_app.conf.beat_schedule["blast-backfill-completed-runtime-metrics"]
     task = celery_app.tasks["api.tasks.blast.backfill_completed_runtime_metrics"]

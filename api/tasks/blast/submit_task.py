@@ -195,6 +195,11 @@ def submit(
         options=options,
     )
     effective_options = _blast._expand_strict_tie_order_candidate_pool(effective_options)
+    effective_options = dict(effective_options or {})
+    # Completed warmup Jobs cannot prove that node-local data still exists
+    # after scale-out, node replacement, or disk loss. The hardened init path
+    # must validate and repair the cache on every submit.
+    effective_options.pop("skip_warmed_ssd_init", None)
     db_name_for_warmup = extract_db_name(database)
     try:
         _blast._validate_blast_database_ready(
@@ -449,8 +454,6 @@ def submit(
             }
 
         if warmup_ready is not None:
-            effective_options = dict(effective_options or {})
-            effective_options["skip_warmed_ssd_init"] = True
             _blast._progress(
                 self,
                 "warmup_ready",
@@ -615,31 +618,9 @@ def submit(
         return {"job_id": job_id, "status": "failed", "phase": "config_invalid", "error": error}
 
     requires_node_warmup = _blast._submit_requires_node_warmup(effective_options)
-    reuses_warmed_ssd = requires_node_warmup and bool(
-        (effective_options or {}).get("skip_warmed_ssd_init")
-    )
     if requires_node_warmup:
-        if reuses_warmed_ssd:
-            _blast._progress(
-                self,
-                "staging_db",
-                skipped=True,
-                decision="warmed_ssd_reused",
-            )
-            _blast._update_state(
-                job_id,
-                "staging_db",
-                status="completed",
-                skipped=True,
-                decision="warmed_ssd_reused",
-                skip_reason="node_local_ssd_warmup_ready",
-                output="Node-local DB warmup is ready; ElasticBLAST SSD initialization is skipped.",
-            )
-            _blast._progress(self, "submitting")
-            _blast._update_state(job_id, "submitting")
-        else:
-            _blast._progress(self, "staging_db")
-            _blast._update_state(job_id, "staging_db")
+        _blast._progress(self, "staging_db")
+        _blast._update_state(job_id, "staging_db")
     else:
         _blast._progress(self, "submitting")
         _blast._update_state(job_id, "submitting")
@@ -1105,7 +1086,7 @@ def submit(
         job_id,
     )
     if exit_code == 0:
-        if requires_node_warmup and not reuses_warmed_ssd:
+        if requires_node_warmup:
             _blast._update_state(
                 job_id,
                 "staging_db",

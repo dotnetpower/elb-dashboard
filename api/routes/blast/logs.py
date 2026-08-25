@@ -214,7 +214,13 @@ async def blast_job_logs_events(
                 await asyncio.sleep(_DISCOVERY_INTERVAL_SEC)
                 continue
             payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
-            elastic_job_id = resolve_elastic_blast_job_id(payload)
+            elastic_job_id = resolve_elastic_blast_job_id(
+                payload,
+                persisted_job_id=str(
+                    getattr(state, "elastic_blast_job_id", "") or ""
+                ),
+                error_text=str(getattr(state, "error_code", "") or ""),
+            )
             targets = await _discover_targets(entry, job_id, elastic_job_id)
             for target in targets:
                 if target.key in followed:

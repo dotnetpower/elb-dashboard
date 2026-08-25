@@ -460,6 +460,7 @@ run_api() {
   export AUTH_DEV_BYPASS=${AUTH_DEV_BYPASS:-true}
   export ENABLE_DOCS=${ENABLE_DOCS:-true}
   export CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost:8090,http://127.0.0.1:8090}
+  export FRONTEND_UPSTREAM=${FRONTEND_UPSTREAM:-http://127.0.0.1:${WEB_PORT:-8090}}
 
   local api_host=${API_HOST:-127.0.0.1}
   local api_port=${API_PORT:-8085}

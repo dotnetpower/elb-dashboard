@@ -31,14 +31,17 @@ class _FakeRow:
     status: str = "running"
     phase: str = "running"
     error_code: str = ""
+    elastic_blast_job_id: str | None = None
 
 
 @dataclass
 class _FakeRepo:
     rows: dict[str, _FakeRow] = field(default_factory=dict)
     updates: list[dict[str, Any]] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)
     raise_on_get: Exception | None = None
     raise_on_update: Exception | None = None
+    raise_on_backfill: Exception | None = None
     raise_key_error_on_update: bool = False
 
     def get(self, job_id: str) -> _FakeRow | None:
@@ -59,10 +62,36 @@ class _FakeRepo:
         self.updates.append({"job_id": job_id, **kwargs})
         return row
 
+    def backfill_elastic_blast_job_id(self, job_id: str, value: str) -> str:
+        if self.raise_on_backfill is not None:
+            raise self.raise_on_backfill
+        row = self.rows.get(job_id)
+        if row is None:
+            raise KeyError(job_id)
+        if row.elastic_blast_job_id:
+            return row.elastic_blast_job_id
+        row.elastic_blast_job_id = value
+        self.updates.append({"job_id": job_id, "elastic_blast_job_id": value})
+        return value
+
+    def append_history(self, job_id: str, event: str, payload: dict[str, Any]) -> None:
+        self.history.append({"job_id": job_id, "event": event, "payload": payload})
+
 
 @pytest.fixture()
 def fake_repo() -> _FakeRepo:
     return _FakeRepo()
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_artifact_enqueue(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.tasks.blast import state as blast_state
+
+    monkeypatch.setattr(
+        blast_state,
+        "_enqueue_artifact_finalizer",
+        lambda *_args, **_kwargs: False,
+    )
 
 
 @pytest.fixture()
@@ -243,6 +272,219 @@ def test_register_external_job_writes_failed_with_error(
     assert r.status_code == 202
     assert r.json()["synced"] is True
     assert fake_repo.updates[0]["error_code"] == "boom"
+
+
+def test_register_external_job_persists_runtime_id_before_finalizer(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_repo.rows["job-1"] = _FakeRow(job_id="job-1", status="running", phase="running")
+    enqueued: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+    from api.tasks.blast import state as blast_state
+
+    monkeypatch.setattr(
+        blast_state,
+        "_enqueue_artifact_finalizer",
+        lambda *args, **kwargs: enqueued.append((args, kwargs)),
+    )
+
+    r = client.post(
+        _WEBHOOK_PATH,
+        json={
+            "job_id": "job-1",
+            "event": "failed",
+            "status": "failed",
+            "error": "Shard init jobs failed: init-ssd-d8faab8f-3",
+            "elb_job_id": "job-d8faab8f01234567d8faab8f01234567",
+        },
+        headers=_headers(),
+    )
+
+    assert r.status_code == 202
+    assert fake_repo.updates == [
+        {
+            "job_id": "job-1",
+            "elastic_blast_job_id": "job-d8faab8f01234567d8faab8f01234567",
+        },
+        {
+            "job_id": "job-1",
+            "status": "failed",
+            "phase": "failed",
+            "error_code": "Shard init jobs failed: init-ssd-d8faab8f-3",
+        },
+    ]
+    assert enqueued == [
+        (("job-1", "failed", "failed"), {"force": True}),
+    ]
+
+
+def test_register_external_job_defers_artifacts_while_runtime_id_is_pending(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_repo.rows["job-1"] = _FakeRow(job_id="job-1", status="running", phase="running")
+    fake_repo.raise_on_backfill = ConnectionError("table busy")
+    enqueued: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+    pending_states: list[dict[str, Any]] = []
+
+    from api.services import job_artifacts
+    from api.tasks.blast import state as blast_state
+
+    monkeypatch.setattr(
+        blast_state,
+        "_enqueue_artifact_finalizer",
+        lambda *args, **kwargs: enqueued.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda job_id, artifact_type, **kwargs: pending_states.append(
+            {"job_id": job_id, "artifact_type": artifact_type, **kwargs}
+        ),
+    )
+
+    response = client.post(
+        _WEBHOOK_PATH,
+        json={
+            "job_id": "job-1",
+            "event": "failed",
+            "status": "failed",
+            "elb_job_id": "job-d8faab8f01234567d8faab8f01234567",
+        },
+        headers=_headers(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["identity_pending"] is True
+    assert fake_repo.rows["job-1"].status == "failed"
+    assert enqueued == []
+    assert pending_states == [
+        {
+            "job_id": "job-1",
+            "artifact_type": "artifact_finalizer",
+            "status": "pending",
+            "error_code": "runtime_identity_pending",
+        }
+    ]
+
+
+def test_register_external_job_ignores_noncanonical_runtime_id(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_repo.rows["job-1"] = _FakeRow(job_id="job-1", status="running", phase="running")
+    enqueued: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+    from api.tasks.blast import state as blast_state
+
+    monkeypatch.setattr(
+        blast_state,
+        "_enqueue_artifact_finalizer",
+        lambda *args, **kwargs: enqueued.append((args, kwargs)),
+    )
+
+    response = client.post(
+        _WEBHOOK_PATH,
+        json={
+            "job_id": "job-1",
+            "event": "failed",
+            "status": "failed",
+            "elb_job_id": "job-not-canonical",
+        },
+        headers=_headers(),
+    )
+
+    assert response.status_code == 202
+    assert fake_repo.rows["job-1"].status == "failed"
+    assert fake_repo.rows["job-1"].elastic_blast_job_id is None
+    assert response.json()["identity_backfilled"] is False
+    assert response.json()["identity_pending"] is False
+    assert enqueued == [(('job-1', 'failed', 'failed'), {})]
+
+
+def test_register_external_job_records_runtime_identity_conflict(
+    client: TestClient, fake_repo: _FakeRepo
+) -> None:
+    fake_repo.rows["job-1"] = _FakeRow(
+        job_id="job-1",
+        status="running",
+        phase="running",
+        elastic_blast_job_id="job-11111111111111111111111111111111",
+    )
+
+    response = client.post(
+        _WEBHOOK_PATH,
+        json={
+            "job_id": "job-1",
+            "event": "running",
+            "status": "running",
+            "elb_job_id": "job-22222222222222222222222222222222",
+        },
+        headers=_headers(),
+    )
+
+    assert response.status_code == 202
+    assert fake_repo.rows["job-1"].elastic_blast_job_id == (
+        "job-11111111111111111111111111111111"
+    )
+    assert fake_repo.history == [
+        {
+            "job_id": "job-1",
+            "event": "runtime_identity_conflict",
+            "payload": {
+                "stored_runtime_identity": "job-11111111111111111111111111111111",
+                "incoming_runtime_identity": "job-22222222222222222222222222222222",
+            },
+        }
+    ]
+
+
+def test_register_external_job_duplicate_terminal_rechecks_finalizer(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_repo.rows["job-1"] = _FakeRow(job_id="job-1", status="completed", phase="completed")
+    enqueued: list[tuple[str, str, str]] = []
+
+    from api.tasks.blast import state as blast_state
+
+    monkeypatch.setattr(
+        blast_state,
+        "_enqueue_artifact_finalizer",
+        lambda *args: enqueued.append(args),
+    )
+
+    r = client.post(
+        _WEBHOOK_PATH,
+        json={"job_id": "job-1", "event": "completed", "status": "completed"},
+        headers=_headers(),
+    )
+
+    assert r.status_code == 202
+    assert r.json()["noop"] is True
+    assert fake_repo.updates == []
+    assert enqueued == [("job-1", "completed", "completed")]
+
+
+def test_register_external_job_nonterminal_does_not_enqueue_finalizer(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_repo.rows["job-1"] = _FakeRow(job_id="job-1", status="queued", phase="queued")
+    enqueued: list[tuple[str, str, str]] = []
+
+    from api.tasks.blast import state as blast_state
+
+    monkeypatch.setattr(
+        blast_state,
+        "_enqueue_artifact_finalizer",
+        lambda *args: enqueued.append(args),
+    )
+
+    r = client.post(
+        _WEBHOOK_PATH,
+        json={"job_id": "job-1", "event": "running", "status": "running"},
+        headers=_headers(),
+    )
+
+    assert r.status_code == 202
+    assert enqueued == []
 
 
 def test_register_external_job_clears_stale_error_on_success(

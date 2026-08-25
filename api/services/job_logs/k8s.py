@@ -4,7 +4,8 @@ Responsibility: Kubernetes pod log discovery and follow helpers for BLAST jobs
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `K8sLogTarget`, `elastic_blast_suffix`, `resolve_elastic_blast_job_id`,
-`discover_k8s_log_targets`, `stream_k8s_log_lines`, `fetch_k8s_pod_log_tail`
+`elastic_blast_selector_from_error`, `discover_k8s_log_targets`,
+`stream_k8s_log_lines`, `fetch_k8s_pod_log_tail`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests`.
@@ -25,6 +26,9 @@ from api.services.sanitise import sanitise
 
 _LINE_MAX_CHARS = 4_000
 _SAFE_K8S_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_ELASTIC_BLAST_JOB_ID_RE = re.compile(r"^job-[0-9a-f]{32}$", re.IGNORECASE)
+_ELASTIC_BLAST_SHORT_SELECTOR_RE = re.compile(r"^job-[0-9a-f]{8}$", re.IGNORECASE)
+_INIT_SSD_FAILURE_RE = re.compile(r"\binit-ssd-([0-9a-f]{8})-[0-9]{1,3}\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -51,7 +55,25 @@ def elastic_blast_suffix(value: str) -> str:
     return compact[-8:] if len(compact) >= 8 else compact
 
 
-def resolve_elastic_blast_job_id(payload: dict[str, Any] | None) -> str:
+def elastic_blast_selector_from_error(error_text: str) -> str:
+    """Return a short ``job-<8hex>`` selector from an init-ssd failure name.
+
+    Submit-time shard initialization can fail before the sibling persists the
+    full ElasticBLAST runtime id. Its bounded error still names the failed Job
+    as ``init-ssd-<runtime-suffix>-<ordinal>``; the suffix is enough to match
+    the pod owner name and the full ``elb-job-id`` label suffix before TTL GC.
+    """
+
+    match = _INIT_SSD_FAILURE_RE.search(str(error_text or ""))
+    return f"job-{match.group(1).lower()}" if match else ""
+
+
+def resolve_elastic_blast_job_id(
+    payload: dict[str, Any] | None,
+    *,
+    persisted_job_id: str = "",
+    error_text: str = "",
+) -> str:
     """Return the ``job-<hash>`` id ElasticBLAST stamped on its k8s objects.
 
     The dashboard stores this in a few places depending on which code path
@@ -64,12 +86,15 @@ def resolve_elastic_blast_job_id(payload: dict[str, Any] | None) -> str:
     all known sites and returns the first ``job-…`` value it finds.
     """
 
+    candidates: list[Any] = [persisted_job_id]
     if not isinstance(payload, dict):
-        return ""
-    candidates: list[Any] = [
-        payload.get("elastic_blast_job_id"),
-        payload.get("k8s_job_id"),
-    ]
+        payload = {}
+    candidates.extend(
+        [
+            payload.get("elastic_blast_job_id"),
+            payload.get("k8s_job_id"),
+        ]
+    )
     progress = payload.get("_progress")
     if isinstance(progress, dict):
         steps = progress.get("steps")
@@ -94,21 +119,23 @@ def resolve_elastic_blast_job_id(payload: dict[str, Any] | None) -> str:
             candidates.append(k8s.get("job_id"))
     for value in candidates:
         text = str(value or "").strip()
-        if text.startswith("job-"):
-            return text
-    return ""
+        if _ELASTIC_BLAST_JOB_ID_RE.fullmatch(text):
+            return text.lower()
+    return elastic_blast_selector_from_error(error_text)
 
 
-def _pod_env_has_value(pod: dict[str, Any], name: str, values: set[str]) -> bool:
-    if not values:
-        return False
+def _pod_env_values(pod: dict[str, Any], name: str) -> set[str]:
+    values: set[str] = set()
     spec = pod.get("spec", {}) if isinstance(pod.get("spec"), dict) else {}
     for group_key in ("initContainers", "containers"):
         for container in spec.get(group_key, []) or []:
             for env in container.get("env", []) or []:
-                if env.get("name") == name and str(env.get("value") or "") in values:
-                    return True
-    return False
+                if env.get("name") != name:
+                    continue
+                value = str(env.get("value") or "")
+                if value:
+                    values.add(value)
+    return values
 
 
 def _owner_names(pod: dict[str, Any]) -> set[str]:
@@ -131,20 +158,48 @@ def _target_phase(pod_name: str, container_name: str) -> str:
     return "running"
 
 
+def _name_has_suffix_token(name: str, suffix: str) -> bool:
+    return bool(re.search(rf"(?:^|-){re.escape(suffix)}(?:-|$)", name, re.IGNORECASE))
+
+
+def _is_init_ssd_name_for_suffix(name: str, suffix: str) -> bool:
+    return bool(
+        re.fullmatch(
+            rf"init-ssd-{re.escape(suffix)}-[0-9]{{1,3}}(?:-[a-z0-9]+)?",
+            name,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _pod_matches_job(pod: dict[str, Any], job_id: str, elastic_job_id: str) -> bool:
     metadata = pod.get("metadata", {}) or {}
     labels = metadata.get("labels", {}) or {}
     pod_name = str(metadata.get("name") or "")
     owner_names = _owner_names(pod)
     ids = {value for value in {job_id, elastic_job_id} if value}
-    suffixes = {elastic_blast_suffix(value) for value in ids if elastic_blast_suffix(value)}
+    valid_elastic_selector = (
+        elastic_job_id
+        if _ELASTIC_BLAST_JOB_ID_RE.fullmatch(elastic_job_id)
+        or _ELASTIC_BLAST_SHORT_SELECTOR_RE.fullmatch(elastic_job_id)
+        else ""
+    )
+    elastic_suffix = elastic_blast_suffix(valid_elastic_selector)
+    is_short_selector = bool(_ELASTIC_BLAST_SHORT_SELECTOR_RE.fullmatch(valid_elastic_selector))
 
-    if labels.get("elb-job-id") in ids:
-        return True
-    if _pod_env_has_value(pod, "BLAST_ELB_JOB_ID", ids):
-        return True
-    haystack = " ".join([pod_name, *owner_names])
-    return any(suffix and suffix in haystack for suffix in suffixes)
+    if is_short_selector:
+        return any(
+            _is_init_ssd_name_for_suffix(name, elastic_suffix)
+            for name in {pod_name, *owner_names}
+        )
+
+    labelled_id = str(labels.get("elb-job-id") or "")
+    if labelled_id:
+        return labelled_id in ids
+    env_ids = _pod_env_values(pod, "BLAST_ELB_JOB_ID")
+    if env_ids:
+        return bool(env_ids & ids)
+    return False
 
 
 def discover_k8s_log_targets(

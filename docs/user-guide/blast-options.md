@@ -130,7 +130,7 @@ The `disable_sharding` boolean is a legacy opt-out kept for older callers. New c
 | UI field | OpenAPI field | CLI mapping | Default | Notes |
 | --- | --- | --- | --- | --- |
 | Auto warm | `enable_warmup` | Sets `[cluster] reuse=true` + warmup init logic | `false` | When on, the worker pre-stages the database to the node-local SSD before BLAST starts. Already-warm databases skip this step. Feasibility is checked by `/api/blast/warmup/plan` and replayed in preflight. |
-| `skip_warmed_ssd_init` | `skip_warmed_ssd_init` | Skips SSD init even with warmup on | `false` | Internal optimisation; OpenAPI-only. |
+| `skip_warmed_ssd_init` | `skip_warmed_ssd_init` | No effect; submit-time cache validation always runs | `false` | Accepted for backward compatibility and ignored. |
 | `reuse` | `reuse` | `[cluster] reuse=` | (auto) | Set internally when warmup is on. |
 
 !!! note "Warmup wait has a deadline"

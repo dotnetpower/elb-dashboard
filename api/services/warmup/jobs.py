@@ -738,15 +738,16 @@ def _build_job(
         },
         "spec": {
             "backoffLimit": 1,
-            # Hang backstop: a real warmup azcopy finishes in ~1-15 min (16S
-            # ~1-2 min, core_nt ~8 min); without a deadline a hung azcopy
-            # (network stall) would leave the pod Running forever. 1 h sits far
-            # above any real warmup so it never truncates legitimate work — a
+            # Hang backstop: core_nt staging has taken about 27 minutes in the
+            # live environment. A contender may first wait up to 40 minutes on
+            # the node-wide staging lock, then need to resume after the holder
+            # failed. Ninety minutes covers that bounded recovery path while
+            # still terminating a hung azcopy. A
             # Job that exceeds it is marked Failed and the existing
             # force-release path recreates it on the next reconcile. Override
             # with BLAST_WARMUP_JOB_DEADLINE_SECONDS.
             "activeDeadlineSeconds": env_int(
-                "BLAST_WARMUP_JOB_DEADLINE_SECONDS", 3600, minimum=300
+                "BLAST_WARMUP_JOB_DEADLINE_SECONDS", 5400, minimum=300
             ),
             "template": {
                 "metadata": {

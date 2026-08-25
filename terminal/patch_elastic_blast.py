@@ -142,26 +142,56 @@ def _kubectl_transient_failure(cmd: list[str] | str, exc: SafeExecError) -> bool
 
 
 def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None,
-              timeout: Optional[float] = 60) -> subprocess.CompletedProcess:
+              timeout: float | None = 60) -> subprocess.CompletedProcess:
     """Run a command and retry replay-safe kubectl calls on transient failures."""
+    import logging as retry_logging
+
+    if not isinstance(cmd, (list, str)):
+        return _safe_exec_once(cmd, env=env, timeout=timeout)
+    argv = cmd.split() if isinstance(cmd, str) else list(cmd)
+    if not argv or os.path.basename(argv[0]) != "kubectl":
+        return _safe_exec_once(cmd, env=env, timeout=timeout)
     try:
         attempts = max(1, min(int(os.getenv("ELB_KUBECTL_TRANSIENT_ATTEMPTS", "6")), 6))
     except ValueError:
         attempts = 6
+    try:
+        deadline_seconds = max(
+            1.0,
+            min(float(os.getenv("ELB_KUBECTL_TRANSIENT_DEADLINE_SECONDS", "180")), 600.0),
+        )
+    except ValueError:
+        deadline_seconds = 180.0
+    started_at = time.monotonic()
+    last_error: SafeExecError | None = None
     for attempt in range(1, attempts + 1):
+        remaining = deadline_seconds - (time.monotonic() - started_at)
+        if remaining <= 0:
+            if last_error is not None:
+                raise last_error
+            raise SafeExecError(
+                deadline_seconds,
+                f"kubectl retry deadline exceeded after {deadline_seconds:g}s",
+            )
+        attempt_timeout = remaining if timeout is None else min(float(timeout), remaining)
         try:
-            return _safe_exec_once(cmd, env=env, timeout=timeout)
+            return _safe_exec_once(cmd, env=env, timeout=attempt_timeout)
         except SafeExecError as exc:
+            last_error = exc
             if attempt >= attempts or not _kubectl_transient_failure(cmd, exc):
                 raise
             delay = min(4, 2 ** (attempt - 1))
-            logging.warning(
+            remaining = deadline_seconds - (time.monotonic() - started_at)
+            if remaining <= delay:
+                raise
+            retry_logging.warning(
                 "Transient Kubernetes API failure; retrying kubectl verb=%s "
-                "attempt %d/%d in %ds",
-                _kubectl_verb(cmd.split() if isinstance(cmd, str) else list(cmd)),
+                "attempt %d/%d in %ds deadline=%gs",
+                _kubectl_verb(argv),
                 attempt + 1,
                 attempts,
                 delay,
+                deadline_seconds,
             )
             time.sleep(delay)
     raise AssertionError("unreachable kubectl retry state")
@@ -596,6 +626,35 @@ fi
 
 cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"
 
+ORIG_DB="$ELB_DB"
+if [[ "$ELB_DB" =~ ^(.+)_shard_([0-9]+)$ ]]; then
+        ORIG_DB="${BASH_REMATCH[1]}"
+fi
+STAGE_LOCK_WAIT_SECONDS="${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}"
+case "$STAGE_LOCK_WAIT_SECONDS" in
+  ''|*[!0-9]*) echo "ERROR: invalid stage lock timeout: ${STAGE_LOCK_WAIT_SECONDS}"; exit 64 ;;
+esac
+if [ "${#STAGE_LOCK_WAIT_SECONDS}" -gt 4 ] \
+        || [ "$STAGE_LOCK_WAIT_SECONDS" -lt 1 ] \
+        || [ "$STAGE_LOCK_WAIT_SECONDS" -gt 5400 ]; then
+        echo "ERROR: stage lock timeout must be between 1 and 5400 seconds"
+        exit 64
+fi
+if ! command -v flock >/dev/null 2>&1; then
+    echo "ERROR: flock is required for safe node-local DB staging"
+    exit 69
+fi
+STAGE_LOCK_FILE=".elb-stage.lock"
+exec 9>"$STAGE_LOCK_FILE"
+echo "STAGE_LOCK_WAIT file=${STAGE_LOCK_FILE} timeout=${STAGE_LOCK_WAIT_SECONDS}s"
+STAGE_LOCK_WAIT_STARTED=$(date +%s)
+if ! flock -w "$STAGE_LOCK_WAIT_SECONDS" 9; then
+    echo "ERROR: stage lock timeout file=${STAGE_LOCK_FILE} waited_seconds=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))"
+    exit 75
+fi
+export ELB_STAGE_LOCK_HELD=1
+echo "STAGE_LOCK_ACQUIRED file=${STAGE_LOCK_FILE} waited_seconds=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))"
+
 start=$(date +%s)
 log_runtime() {
     local ts
@@ -633,7 +692,6 @@ VOLUMES=$(cat /tmp/manifest.txt)
 echo "Volumes: ${VOLUMES}"
 
 DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
-ORIG_DB=$(echo "${ELB_DB}" | sed 's/_shard_[0-9]*$//')
 DB_URL="${DB_BASE_URL}${ORIG_DB}/"
 echo "DB base URL: ${DB_URL}"
 
@@ -676,6 +734,11 @@ write_volpaths() {
     echo "Volume paths: ${volpaths}"
 }
 
+rm -f .download-complete.tmp .download-source-version.tmp
+if [ -f .download-complete ] && [ -z "$EXPECTED_SOURCE_VERSION" ]; then
+    echo "CACHE_UNVERIFIED expected source version is unavailable"
+    rm -f .download-complete
+fi
 if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
     echo "CLEANUP partial downloads"
     find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
@@ -775,12 +838,25 @@ fi
 if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
     echo "TAXDB_SKIP taxdb files not present in DB prefix"
 fi
+if [ -s "${ORIG_DB}.ntf" ] \
+    && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
+    echo "ERROR: downloaded taxonomy filter index is incomplete ${ORIG_DB}.not/.nos"
+    exit 1
+fi
+if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
+    echo "ERROR: downloaded DB failed blastdbcmd integrity probe"
+    exit 1
+fi
 
 write_volpaths
-printf '%s' ok > .download-complete
 if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
-    printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version
+    printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version.tmp
+    mv .download-source-version.tmp .download-source-version
+else
+    rm -f .download-source-version
 fi
+printf '%s' ok > .download-complete.tmp
+mv .download-complete.tmp .download-complete
 
 pkill -f azcopy 2>/dev/null || true
 rm -rf /root/.azcopy 2>/dev/null || true
@@ -1193,6 +1269,24 @@ def patch_init_job_wait_filters(root: Path) -> None:
     )
 
 
+def verify_runtime_identity_templates(root: Path) -> None:
+    """Fail closed when log-correlation labels drift out of AKS templates."""
+
+    templates = (
+        "job-init-ssd-shard-aks.yaml.template",
+        "blast-batch-job-shard-ssd-aks.yaml.template",
+        "elb-finalizer-aks.yaml.template",
+    )
+    marker = 'elb-job-id: "${BLAST_ELB_JOB_ID}"'
+    for name in templates:
+        path = root / "src/elastic_blast/templates" / name
+        count = path.read_text().count(marker)
+        if count < 2:
+            raise RuntimeError(
+                f"{name}: expected runtime identity label on Job and Pod metadata"
+            )
+
+
 def main() -> int:
     if len(sys.argv) not in {2, 3}:
         print(
@@ -1227,6 +1321,7 @@ def main() -> int:
     patch_unique_init_ssd_job_names(root)
     patch_create_workspace_daemonset_tolerations(root)
     patch_init_job_wait_filters(root)
+    verify_runtime_identity_templates(root)
     print("patched elastic-blast-azure finalizer for sharded result merge")
     return 0
 

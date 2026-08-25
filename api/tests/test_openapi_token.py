@@ -217,6 +217,69 @@ def test_generate_openapi_token_patches_deployment_and_runtime_cache(monkeypatch
     assert session.closed is True
 
 
+def test_token_patch_retries_once_after_resource_version_conflict() -> None:
+    from api.services.openapi import token as openapi_token
+
+    initial = _deployment()
+    latest = _deployment()
+    latest["metadata"]["resourceVersion"] = "8"
+
+    class ConflictSession(FakeSession):
+        def __init__(self) -> None:
+            super().__init__(latest)
+            self.responses = [
+                FakeResponse(422, {"message": "jsonpatch test operation failed"}),
+                FakeResponse(200, latest),
+            ]
+
+        def patch(self, *args, **kwargs) -> FakeResponse:
+            super().patch(*args, **kwargs)
+            return self.responses.pop(0)
+
+    session = ConflictSession()
+
+    openapi_token._patch_deployment_token(
+        session,
+        "https://k8s",
+        namespace="default",
+        deployment_name="elb-openapi",
+        container_name="openapi",
+        token="rotated-token",
+        deployment=initial,
+    )
+
+    assert len(session.patches) == 2
+    assert session.patches[0]["json"][0]["value"] == "7"
+    assert session.patches[1]["json"][0]["value"] == "8"
+
+
+def test_token_patch_stops_after_one_resource_version_retry() -> None:
+    from api.services.openapi import token as openapi_token
+
+    class ConflictSession(FakeSession):
+        def patch(self, *args, **kwargs) -> FakeResponse:
+            super().patch(*args, **kwargs)
+            return FakeResponse(422, {"message": "still conflicted"})
+
+    session = ConflictSession(_deployment())
+
+    import pytest
+
+    with pytest.raises(openapi_token.OpenApiTokenError) as error:
+        openapi_token._patch_deployment_token(
+            session,
+            "https://k8s",
+            namespace="default",
+            deployment_name="elb-openapi",
+            container_name="openapi",
+            token="rotated-token",
+            deployment=_deployment(),
+        )
+
+    assert error.value.code == "openapi_token_patch_failed"
+    assert len(session.patches) == 2
+
+
 def test_status_returns_existing_token_without_patch(monkeypatch) -> None:
     from api.services.openapi import token as openapi_token
 

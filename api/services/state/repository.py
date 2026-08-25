@@ -26,7 +26,8 @@ import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
 from azure.data.tables import TableClient, TableServiceClient, UpdateMode
 
 from api.services import get_credential
@@ -38,6 +39,7 @@ from api.services.state.job_state import (
     _now_iso,
     _sanitise_odata_value,
     _ulid_like,
+    canonical_elastic_blast_job_id,
     canonical_job_metadata,
 )
 from api.services.state.table_pool import (
@@ -78,6 +80,20 @@ def _clamp_page_size(limit: int) -> int:
     if limit <= 0:
         return 1
     return min(limit, _AZURE_TABLES_MAX_PAGE_SIZE)
+
+
+def _entity_etag(entity: Any) -> str:
+    """Return an Azure Table entity ETag without discarding metadata."""
+
+    metadata = getattr(entity, "metadata", None)
+    if isinstance(metadata, dict):
+        etag = str(metadata.get("etag") or "")
+        if etag:
+            return etag
+    try:
+        return str(entity.get("odata.etag") or "")
+    except AttributeError:
+        return ""
 
 
 # Max number of job_ids folded into a single `get_many` OData `$filter`.
@@ -541,6 +557,61 @@ class JobStateRepository:
                     self._ensure_table("jobstate")
                     break
         return result
+
+    def backfill_elastic_blast_job_id(self, job_id: str, value: str) -> str:
+        """Atomically fill an empty ElasticBLAST runtime-id column.
+
+        Returns the value now stored. A concurrent different winner is never
+        overwritten. Three conditional attempts plus one authoritative read
+        bound retries when unrelated row updates repeatedly change the ETag.
+        """
+
+        resolved = canonical_elastic_blast_job_id(value)
+        if not resolved:
+            raise ValueError("invalid elastic_blast_job_id")
+        with self._state_client() as table:
+            for attempt in range(3):
+                try:
+                    entity = table.get_entity(partition_key=job_id, row_key="current")
+                except ResourceNotFoundError as exc:
+                    self._ensure_table("jobstate")
+                    raise KeyError(job_id) from exc
+                stored = canonical_elastic_blast_job_id(entity.get("elastic_blast_job_id"))
+                if stored:
+                    return stored
+                etag = _entity_etag(entity)
+                if not etag:
+                    LOGGER.warning(
+                        "elastic blast runtime id backfill skipped: no etag job_id=%s",
+                        job_id,
+                    )
+                    return ""
+                now = _now_iso()
+                try:
+                    table.update_entity(
+                        {
+                            "PartitionKey": job_id,
+                            "RowKey": "current",
+                            "elastic_blast_job_id": resolved,
+                            "updated_at": now,
+                        },
+                        mode=UpdateMode.MERGE,
+                        etag=etag,
+                        match_condition=MatchConditions.IfNotModified,
+                    )
+                    return resolved
+                except ResourceModifiedError:
+                    if attempt < 2:
+                        continue
+                    LOGGER.warning(
+                        "elastic blast runtime id backfill raced three times job_id=%s",
+                        job_id,
+                    )
+            try:
+                entity = table.get_entity(partition_key=job_id, row_key="current")
+            except ResourceNotFoundError as exc:
+                raise KeyError(job_id) from exc
+            return canonical_elastic_blast_job_id(entity.get("elastic_blast_job_id"))
 
     def update(
         self,
@@ -1218,13 +1289,14 @@ class JobStateRepository:
         job_type: str = "blast",
         limit: int = 200,
         since_seconds: int = 86_400,
+        include_payload: bool = True,
     ) -> list[JobState]:
-        """Return recent terminal jobs (with payload) for the webhook sweep.
+        """Return recent terminal jobs, optionally as newest-first summaries.
 
-        Terminal = ``completed`` / ``failed`` / ``cancelled``. Same bounded,
-        time-windowed, capped scan as :meth:`list_recent_failed` (payload is
-        included so the sweep can read the per-job ``_webhook_sent`` marker and
-        build the message). Most-recently-terminal first.
+        The legacy webhook caller needs payload and retains its bounded full-row
+        query. Reconcilers pass ``include_payload=False``: Azure Table query
+        order is undefined, so that path scans lightweight summaries up to the
+        hard cap, sorts by ``updated_at``, and avoids fixed-page starvation.
         """
         safe_type = _sanitise_odata_value(job_type)
         clauses = [
@@ -1237,18 +1309,45 @@ class JobStateRepository:
             )
             clauses.append(f"updated_at gt '{_sanitise_odata_value(cutoff)}'")
         filter_expr = " and ".join(clauses)
-        rows: list[JobState] = []
+        if include_payload:
+            rows: list[JobState] = []
+            with self._state_client() as t:
+                try:
+                    entities = t.query_entities(
+                        filter_expr,
+                        results_per_page=_clamp_page_size(limit),
+                    )
+                    for entity in entities:
+                        rows.append(JobState.from_entity(dict(entity)))
+                        if len(rows) >= limit:
+                            break
+                except ResourceNotFoundError:
+                    self._ensure_table("jobstate")
+            rows.sort(key=lambda row: row.updated_at or row.created_at or "", reverse=True)
+            return rows
+        scan_cap = _list_scan_hard_cap()
+        summaries: list[JobState] = []
         with self._state_client() as t:
             try:
-                entities = t.query_entities(filter_expr, results_per_page=_clamp_page_size(limit))
+                entities = t.query_entities(
+                    filter_expr,
+                    results_per_page=_clamp_page_size(scan_cap),
+                    select=_JOBSTATE_SUMMARY_SELECT,
+                )
                 for e in entities:
-                    rows.append(JobState.from_entity(dict(e)))
-                    if len(rows) >= limit:
+                    summaries.append(JobState.from_entity(dict(e)))
+                    if len(summaries) >= scan_cap:
+                        LOGGER.warning(
+                            "list_recent_terminal scan hit hard cap=%d (type=%r); "
+                            "ordering is best-effort beyond the cap",
+                            scan_cap,
+                            job_type,
+                        )
                         break
             except ResourceNotFoundError:
                 self._ensure_table("jobstate")
-        rows.sort(key=lambda r: r.updated_at or "", reverse=True)
-        return rows
+        summaries.sort(key=lambda r: r.updated_at or r.created_at or "", reverse=True)
+        return summaries[: max(0, limit)]
 
     def list_completed(
         self,

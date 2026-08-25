@@ -46,7 +46,7 @@ _DEFAULT_AZCOPY_CONCURRENCY = 64
 # DeadlineExceeded condition; Celery soft/hard limits sit above the poller so
 # they remain backstops rather than killing a healthy status loop first.
 _WARMUP_JOB_DEADLINE_SECONDS = env_int(
-    "BLAST_WARMUP_JOB_DEADLINE_SECONDS", 3600, minimum=300, maximum=24 * 60 * 60
+    "BLAST_WARMUP_JOB_DEADLINE_SECONDS", 5400, minimum=300, maximum=24 * 60 * 60
 )
 _WARMUP_WAIT_GRACE_SECONDS = env_int(
     "BLAST_WARMUP_WAIT_GRACE_SECONDS", 120, minimum=30, maximum=15 * 60
