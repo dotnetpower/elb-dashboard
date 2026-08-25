@@ -34,6 +34,11 @@ from azure.core.exceptions import ResourceNotFoundError
 
 LOGGER = logging.getLogger(__name__)
 
+
+class CopyProgressAbort(RuntimeError):
+    """Signal that a progress callback revoked this poller's ownership."""
+
+
 # Cooperative shutdown event — checked by ``poll_copy_completion`` between
 # batches so the api sidecar can exit cleanly on SIGTERM instead of waiting
 # the full poll interval. The event stays unset in normal operation; the
@@ -51,6 +56,7 @@ _COPY_POLL_BATCH_SIZE = max(32, int(os.environ.get("PREPARE_DB_COPY_POLL_BATCH_S
 __all__ = [
     "_COPY_POLL_INTERVAL_SECONDS",
     "_COPY_POLL_MAX_SECONDS",
+    "CopyProgressAbort",
     "poll_copy_completion",
     "request_shutdown",
     "shutdown_requested",
@@ -117,9 +123,7 @@ def poll_copy_completion(
                 # container mid-flight). Surface as a copy failure rather
                 # than hanging forever.
                 failed += 1
-                failed_files.append(
-                    {"blob": name, "status": "missing", "reason": "blob not found"}
-                )
+                failed_files.append({"blob": name, "status": "missing", "reason": "blob not found"})
                 pending.discard(name)
                 continue
             copy = copy_by_name[name]
@@ -161,9 +165,7 @@ def poll_copy_completion(
                 pending.discard(name)
             elif status == "failed":
                 failed += 1
-                failed_files.append(
-                    {"blob": name, "status": "failed", "reason": description[:200]}
-                )
+                failed_files.append({"blob": name, "status": "failed", "reason": description[:200]})
                 pending.discard(name)
             elif status == "aborted":
                 aborted += 1
@@ -183,6 +185,8 @@ def poll_copy_completion(
                             "pending": len(pending),
                         }
                     )
+                except CopyProgressAbort:
+                    raise
                 except Exception as exc:
                     LOGGER.debug(
                         "copy progress callback raised db=%s: %s",

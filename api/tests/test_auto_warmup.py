@@ -8,7 +8,8 @@ Key entry points: `_patch_ready_warmup_nodes`,
 `test_reconcile_auto_warmup_waits_for_all_ready_workload_nodes`,
 `test_reconcile_auto_warmup_enqueues_when_all_ready_workload_nodes`,
 `test_reconcile_auto_warmup_skips_stale_downloaded_generation`,
-`test_reconcile_auto_warmup_reenqueues_stale_warm_generation`
+`test_reconcile_auto_warmup_reenqueues_stale_warm_generation`,
+`test_warmup_legacy_shard_backfill_publishes_only_complete_layout`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_auto_warmup.py`.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -947,6 +949,7 @@ def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
                 "file_count": 12,
                 "sharded": True,
                 "shard_sets": [8, 10],
+                "shard_layout_schema": 1,
                 "total_bytes": 1024,
             }
         ],
@@ -1009,8 +1012,348 @@ def test_warmup_task_time_limits_outlive_job_polling() -> None:
     assert task_module._TASK_HARD_TIME_LIMIT > task_module._TASK_SOFT_TIME_LIMIT
     assert task_module._STALE_DBOPS_WARMUP_SECONDS > task_module._TASK_HARD_TIME_LIMIT
     assert task_module._AUTOSTOP_ACTIVE_ROW_STALE_SECONDS > task_module._TASK_HARD_TIME_LIMIT
+    assert task_module._SHARDING_STALE_SECONDS > task_module._TASK_HARD_TIME_LIMIT
     assert warmup_database.soft_time_limit == task_module._TASK_SOFT_TIME_LIMIT
     assert warmup_database.time_limit == task_module._TASK_HARD_TIME_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("database", "expected"),
+    [
+        (
+            {
+                "sharded": True,
+                "shard_sets": [4],
+                "shard_layout_schema": 1,
+            },
+            True,
+        ),
+        ({"sharded": True, "shard_sets": [4]}, False),
+        ({"sharded": True, "shard_sets": [4], "shard_layout_schema": "1"}, False),
+        ({"sharded": True, "shard_sets": [4], "shard_layout_schema": True}, False),
+        ({"sharded": False, "shard_sets": [4], "shard_layout_schema": 1}, False),
+        ({"sharded": True, "shard_sets": [], "shard_layout_schema": 1}, False),
+    ],
+)
+def test_has_current_shard_layout_requires_schema_one(
+    database: dict[str, Any],
+    expected: bool,
+) -> None:
+    from api.tasks.storage.warmup import _has_current_shard_layout
+
+    assert _has_current_shard_layout(database) is expected
+
+
+def _patch_legacy_shard_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    summary: dict[str, Any],
+    lock_available: bool = True,
+) -> tuple[Any, dict[str, Any], list[str]]:
+    from api.tasks.storage import warmup as task_module
+
+    metadata: dict[str, Any] = {
+        "db_name": "core_nt",
+        "source_version": "2026-05-20-00-00-00",
+        "peer_field": "preserved",
+    }
+    events: list[str] = []
+
+    class _Lock:
+        held = False
+
+        def acquire(self, *, blocking: bool) -> bool:
+            assert blocking is False
+            events.append("acquire")
+            if not lock_available:
+                return False
+            self.held = True
+            return True
+
+        def release(self) -> None:
+            assert self.held
+            self.held = False
+            events.append("release")
+
+    lock = _Lock()
+
+    class _Service:
+        def get_container_client(self, name: str) -> object:
+            assert name == "blast-db"
+            assert lock.held
+            events.append("container")
+            return object()
+
+    def _update_metadata(
+        _container: object,
+        db_name: str,
+        account_name: str,
+        mutator: Any,
+    ) -> dict[str, Any]:
+        assert db_name == "core_nt"
+        assert account_name == "elbstg01"
+        assert lock.held
+        updated = mutator(dict(metadata))
+        metadata.clear()
+        metadata.update(updated)
+        if updated.get("sharding_in_progress"):
+            events.append("metadata-started")
+        elif updated.get("sharded"):
+            events.append("metadata-completed")
+        elif updated.get("sharding_error"):
+            events.append("metadata-failed")
+        return dict(updated)
+
+    def _ensure_shard_sets(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        assert lock.held
+        events.append("ensure")
+        return dict(summary)
+
+    monkeypatch.setattr(
+        "api.services.storage.prepare_db_locks.prepare_db_lock",
+        lambda account_name, db_name: lock,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda credential, account_name: _Service(),
+    )
+    monkeypatch.setattr(
+        "api.services.storage.prepare_db_metadata.update_metadata",
+        _update_metadata,
+    )
+    monkeypatch.setattr(
+        "api.services.db.sharding.ensure_shard_sets",
+        _ensure_shard_sets,
+    )
+    return task_module, metadata, events
+
+
+def test_warmup_legacy_shard_backfill_publishes_only_complete_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_module, metadata, events = _patch_legacy_shard_backfill(
+        monkeypatch,
+        summary={
+            "layout_schema": 1,
+            "total_volumes": 4,
+            "total_bytes": 1000,
+            "shard_sets": [1, 2, 3, 4],
+            "created": 10,
+            "skipped": 0,
+            "errors": [],
+        },
+    )
+    result = task_module._backfill_legacy_shard_layout(
+        object(),
+        "elbstg01",
+        "core_nt",
+    )
+
+    assert result["shard_sets"] == [1, 2, 3, 4]
+    assert metadata["peer_field"] == "preserved"
+    assert metadata["sharding_in_progress"] is False
+    assert metadata["sharded"] is True
+    assert metadata["shard_sets"] == [1, 2, 3, 4]
+    assert metadata["shard_layout_schema"] == 1
+    assert metadata["shard_source_version"] == "2026-05-20-00-00-00"
+    assert "sharding_operation_id" not in metadata
+    assert "sharding_error" not in metadata
+    assert events == [
+        "acquire",
+        "container",
+        "metadata-started",
+        "ensure",
+        "metadata-completed",
+        "release",
+    ]
+
+
+def test_warmup_legacy_shard_backfill_fails_on_partial_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_module, metadata, events = _patch_legacy_shard_backfill(
+        monkeypatch,
+        summary={
+            "layout_schema": 1,
+            "total_volumes": 4,
+            "shard_sets": [1, 2, 3],
+            "errors": [{"num_shards": 4, "error": "upload failed"}],
+        },
+    )
+    metadata.update(
+        {
+            "sharded": True,
+            "shard_sets": [1, 2],
+            "shard_layout_schema": 1,
+            "shard_source_version": "2026-05-20-00-00-00",
+            "sharded_at": "2026-05-20T00:00:00+00:00",
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete shard layout publication"):
+        task_module._backfill_legacy_shard_layout(
+            object(),
+            "elbstg01",
+            "core_nt",
+        )
+
+    assert metadata["peer_field"] == "preserved"
+    assert metadata["sharding_in_progress"] is False
+    assert metadata["sharded"] is False
+    assert metadata["shard_sets"] == []
+    assert "shard_layout_schema" not in metadata
+    assert metadata["shard_source_version"] is None
+    assert "sharded_at" not in metadata
+    assert "sharding_operation_id" not in metadata
+    assert "incomplete shard layout publication" in metadata["sharding_error"]
+    assert events == [
+        "acquire",
+        "container",
+        "metadata-started",
+        "ensure",
+        "metadata-failed",
+        "release",
+    ]
+
+
+def test_warmup_legacy_shard_backfill_fails_before_io_when_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_module, metadata, events = _patch_legacy_shard_backfill(
+        monkeypatch,
+        summary={},
+        lock_available=False,
+    )
+
+    with pytest.raises(RuntimeError, match="another database operation"):
+        task_module._backfill_legacy_shard_layout(
+            object(),
+            "elbstg01",
+            "core_nt",
+        )
+
+    assert metadata == {
+        "db_name": "core_nt",
+        "source_version": "2026-05-20-00-00-00",
+        "peer_field": "preserved",
+    }
+    assert events == ["acquire"]
+
+
+def test_warmup_legacy_shard_backfill_rejects_live_sharding_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_module, metadata, events = _patch_legacy_shard_backfill(
+        monkeypatch,
+        summary={
+            "layout_schema": 1,
+            "total_volumes": 1,
+            "shard_sets": [1],
+            "errors": [],
+        },
+    )
+    metadata.update(
+        {
+            "sharding_in_progress": True,
+            "sharding_started_at": datetime.now(UTC).isoformat(),
+            "sharding_operation_id": "peer-operation",
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="sharding is already in progress"):
+        task_module._backfill_legacy_shard_layout(
+            object(),
+            "elbstg01",
+            "core_nt",
+        )
+
+    assert metadata["sharding_operation_id"] == "peer-operation"
+    assert events == ["acquire", "container", "release"]
+
+
+def test_warmup_legacy_shard_backfill_releases_lock_after_client_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.storage import warmup as task_module
+
+    events: list[str] = []
+
+    class _Lock:
+        def acquire(self, *, blocking: bool) -> bool:
+            assert blocking is False
+            events.append("acquire")
+            return True
+
+        def release(self) -> None:
+            events.append("release")
+
+    monkeypatch.setattr(
+        "api.services.storage.prepare_db_locks.prepare_db_lock",
+        lambda account_name, db_name: _Lock(),
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda credential, account_name: (_ for _ in ()).throw(RuntimeError("storage unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        task_module._backfill_legacy_shard_layout(
+            object(),
+            "elbstg01",
+            "core_nt",
+        )
+
+    assert events == ["acquire", "release"]
+
+
+def test_warmup_database_stops_after_legacy_shard_backfill_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    import importlib
+
+    task_module = importlib.import_module("api.tasks.storage.warmup")
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda credential, storage_account: [
+            {
+                "name": "core_nt",
+                "file_count": 12,
+                "source_version": "2026-05-20-00-00-00",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        task_module,
+        "_backfill_legacy_shard_layout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("incomplete shard layout publication")
+        ),
+    )
+    state_updates: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.tasks.storage._update_state",
+        lambda job_id, phase, status="running", **extra: state_updates.append(
+            {"job_id": job_id, "phase": phase, "status": status, **extra}
+        ),
+    )
+    monkeypatch.setattr("api.tasks.storage._record_task_progress", lambda *a, **k: None)
+
+    result = warmup_database.run(
+        job_id="warmup-core-nt-1",
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        storage_account="elbstg01",
+        database_name="core_nt",
+        storage_resource_group="rg-storage",
+    )
+
+    assert result["status"] == "failed"
+    assert "incomplete shard layout publication" in result["error"]
+    assert state_updates[-1]["status"] == "failed"
 
 
 def test_warmup_database_force_rewarm_drops_existing_jobs(monkeypatch, tmp_path) -> None:
@@ -1037,6 +1380,7 @@ def test_warmup_database_force_rewarm_drops_existing_jobs(monkeypatch, tmp_path)
                 "file_count": 12,
                 "sharded": True,
                 "shard_sets": [4],
+                "shard_layout_schema": 1,
                 "source_version": "2026-05-20-00-00-00",
             }
         ],
@@ -1116,6 +1460,7 @@ def test_warmup_database_force_rewarm_defaults_off(monkeypatch, tmp_path) -> Non
                 "file_count": 12,
                 "sharded": True,
                 "shard_sets": [4],
+                "shard_layout_schema": 1,
                 "source_version": "2026-05-20-00-00-00",
             }
         ],
@@ -1189,6 +1534,7 @@ def test_warmup_database_force_rewarm_partial_release_fails_loudly(monkeypatch, 
                 "file_count": 12,
                 "sharded": True,
                 "shard_sets": [4],
+                "shard_layout_schema": 1,
                 "source_version": "2026-05-20-00-00-00",
             }
         ],

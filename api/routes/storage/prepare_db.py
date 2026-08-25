@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from datetime import UTC, datetime
 from threading import Thread
 from typing import Any
@@ -51,10 +52,23 @@ from api.services.storage.prepare_db_copy_poller import (
 )
 from api.services.storage.prepare_db_locks import prepare_db_lock as _prepare_db_lock
 from api.services.storage.prepare_db_metadata import (
+    DatabaseOperationInProgressError,
+    DatabaseOperationOwnershipError,
+)
+from api.services.storage.prepare_db_metadata import (
     download_blob_with_etag as _download_blob_with_etag,
 )
 from api.services.storage.prepare_db_metadata import (
+    invalidate_shard_publication as _invalidate_shard_publication,
+)
+from api.services.storage.prepare_db_metadata import (
     is_stale_prepare_marker as _is_stale_prepare_marker,
+)
+from api.services.storage.prepare_db_metadata import (
+    is_stale_sharding_marker as _is_stale_sharding_marker,
+)
+from api.services.storage.prepare_db_metadata import (
+    require_prepare_operation_owner as _require_prepare_operation_owner,
 )
 from api.services.storage.prepare_db_metadata import (
     update_metadata as _update_metadata,
@@ -63,6 +77,14 @@ from api.services.storage.prepare_db_metadata import (
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class _PrepareDbAlreadyTerminal(RuntimeError):
+    """Raised when cancellation races an already-terminal prepare operation."""
+
+
+class _PrepareDbCompleted(RuntimeError):
+    """Raised when cancellation races a successful prepare promotion."""
 
 
 # When true (default), prepare-db also stages the snapshot-root taxonomy
@@ -78,9 +100,7 @@ router = APIRouter()
 # route keeps HTTP validation + orchestration; they are re-imported above
 # under their original private names so internal call sites and the
 # `prepare_db_via_aks` task / tests keep their existing import surface.
-_INCLUDE_SHARED_TAXONOMY = (
-    os.environ.get("PREPARE_DB_INCLUDE_TAXONOMY", "true").lower() != "false"
-)
+_INCLUDE_SHARED_TAXONOMY = os.environ.get("PREPARE_DB_INCLUDE_TAXONOMY", "true").lower() != "false"
 
 
 @router.post("/prepare-db")
@@ -98,8 +118,8 @@ def prepare_db(
     Hardening:
       * Per-(account, db) lock — a re-clicked Download returns 409 instead
         of spawning a second daemon that races the metadata.json blob.
-      * Stale-flag recovery — a previous daemon's ``update_in_progress`` flag
-        older than 2 h is treated as crashed and the new call proceeds.
+            * Stale-flag recovery — a previous daemon's ``update_in_progress`` flag
+                older than the bounded copy-poll envelope is treated as crashed.
       * Copy.status polling — every staged blob is polled until terminal
         status. Partial successes record ``failed_files`` and DO NOT promote
         ``source_version`` (atomic generation cut-over).
@@ -267,29 +287,47 @@ def prepare_db(
 
         previous_source_version = str(previous_metadata.get("source_version") or "")
         started_at = datetime.now(UTC).isoformat()
+        operation_id = uuid.uuid4().hex
 
         def _start_mutator(meta: dict[str, Any]) -> dict[str, Any]:
+            if meta.get("update_in_progress") and not _is_stale_prepare_marker(meta):
+                raise DatabaseOperationInProgressError("prepare-db is already running for this DB")
+            if meta.get("sharding_in_progress") and not _is_stale_sharding_marker(meta):
+                raise DatabaseOperationInProgressError("sharding is already running for this DB")
             meta["db_name"] = db_name
             meta["update_in_progress"] = True
             meta["update_started_at"] = started_at
+            meta["prepare_operation_id"] = operation_id
             meta["updating_to_source_version"] = latest_dir
             meta["updating_signature_etag"] = None
             meta.pop("update_error", None)
             meta.pop("update_failed_at", None)
             meta.pop("failed_files", None)
             meta.pop("copy_status", None)
-            if previous_source_version and previous_source_version != latest_dir:
-                meta["previous_source_version"] = previous_source_version
+            current_source_version = str(meta.get("source_version") or "")
+            if current_source_version and current_source_version != latest_dir:
+                meta["previous_source_version"] = current_source_version
             return meta
 
         try:
-            _update_metadata(container, db_name, account_name, _start_mutator)
+            started_metadata = _update_metadata(
+                container,
+                db_name,
+                account_name,
+                _start_mutator,
+            )
+            previous_source_version = str(started_metadata.get("source_version") or "")
+        except DatabaseOperationInProgressError as exc:
+            lock.release()
+            raise HTTPException(409, sanitise(str(exc))[:200]) from exc
         except Exception as exc:
             LOGGER.warning(
                 "prepare_db update-start metadata write failed for %s: %s",
                 db_name,
                 sanitise(str(exc))[:200],
             )
+            lock.release()
+            raise HTTPException(502, "prepare-db metadata start commit failed") from exc
     except HTTPException:
         raise
     except Exception:
@@ -319,9 +357,7 @@ def prepare_db(
                 file_basename = key.split("/")[-1]
                 blob_name = f"{db_name}/{file_basename}"
                 try:
-                    local_container.get_blob_client(blob_name).start_copy_from_url(
-                        source_url
-                    )
+                    local_container.get_blob_client(blob_name).start_copy_from_url(source_url)
                     return (blob_name, "started")
                 except Exception as e:
                     if "PendingCopyOperation" in str(e):
@@ -362,12 +398,13 @@ def prepare_db(
                 # state and DO NOT promote source_version. The previous
                 # generation (if any) stays the active version.
                 def _init_fail(meta: dict[str, Any]) -> dict[str, Any]:
+                    _require_prepare_operation_owner(meta, operation_id)
+                    reason = f"copy initiation failed for {errors} of {len(all_keys)} files"
                     meta["db_name"] = db_name
                     meta["update_in_progress"] = False
+                    meta.pop("prepare_operation_id", None)
                     meta["updating_to_source_version"] = latest_dir
-                    meta["update_error"] = (
-                        f"copy initiation failed for {errors} of {len(all_keys)} files"
-                    )
+                    meta["update_error"] = reason
                     meta["update_failed_at"] = datetime.now(UTC).isoformat()
                     meta["copy_status"] = {
                         "phase": "init_failed",
@@ -376,21 +413,25 @@ def prepare_db(
                         "initiation_errors": errors,
                         "total_files": len(all_keys),
                     }
+                    if successful_inits > 0:
+                        _invalidate_shard_publication(meta, error=reason)
                     return meta
 
                 try:
                     _update_metadata(local_container, db_name, account_name, _init_fail)
                 except Exception as exc:
-                    LOGGER.warning(
+                    LOGGER.error(
                         "prepare_db init-failure metadata write failed for %s: %s",
                         db_name,
                         sanitise(str(exc))[:200],
                     )
+                    raise
                 return
 
             # Phase 2: poll each staged blob's copy.status until terminal.
             def _record_progress(snapshot: dict[str, int]) -> None:
                 def _mut(meta: dict[str, Any]) -> dict[str, Any]:
+                    _require_prepare_operation_owner(meta, operation_id)
                     meta["copy_status"] = {
                         "phase": "copying",
                         "total_files": len(all_keys),
@@ -400,6 +441,8 @@ def prepare_db(
 
                 try:
                     _update_metadata(local_container, db_name, account_name, _mut)
+                except DatabaseOperationOwnershipError:
+                    raise
                 except Exception as exc:
                     LOGGER.debug(
                         "copy progress metadata write skipped db=%s: %s",
@@ -424,8 +467,10 @@ def prepare_db(
             if not all_succeeded:
                 # Partial completion or timeout — DO NOT promote source_version.
                 def _partial(meta: dict[str, Any]) -> dict[str, Any]:
+                    _require_prepare_operation_owner(meta, operation_id)
                     meta["db_name"] = db_name
                     meta["update_in_progress"] = False
+                    meta.pop("prepare_operation_id", None)
                     if poll_summary["timed_out"]:
                         reason = (
                             f"timed out polling copy.status after "
@@ -450,16 +495,17 @@ def prepare_db(
                         "pending": poll_summary["pending"],
                         "timed_out": poll_summary["timed_out"],
                     }
-                    return meta
+                    return _invalidate_shard_publication(meta, error=reason)
 
                 try:
                     _update_metadata(local_container, db_name, account_name, _partial)
                 except Exception as exc:
-                    LOGGER.warning(
+                    LOGGER.error(
                         "prepare_db partial-completion metadata write failed for %s: %s",
                         db_name,
                         sanitise(str(exc))[:200],
                     )
+                    raise
                 return
 
             # Phase 3: all copies succeeded — auto-shard, then promote.
@@ -470,16 +516,15 @@ def prepare_db(
             # drifting apart) that made every BLAST job on a shrunk DB fail with
             # "vol does not match lmdb vol". See api/services/db/consistency.py.
             shard_sets_created: list[int] = []
+            shard_layout_schema = 0
             try:
                 from api.services.db.consistency import reconcile_db_consistency
 
-                recon = reconcile_db_consistency(
-                    cred, account_name, db_name, force_reshard=True
-                )
+                recon = reconcile_db_consistency(cred, account_name, db_name, force_reshard=True)
                 if recon.get("resharded"):
-                    shard_sets_created = list(
-                        recon.get("shard", {}).get("shard_sets") or []
-                    )
+                    shard_summary = recon.get("shard", {})
+                    shard_sets_created = list(shard_summary.get("shard_sets") or [])
+                    shard_layout_schema = int(shard_summary.get("layout_schema") or 0)
                 LOGGER.info(
                     "prepare-db consistency for %s: status=%s prune=%s",
                     db_name,
@@ -513,6 +558,7 @@ def prepare_db(
                 )
 
             def _promote(meta: dict[str, Any]) -> dict[str, Any]:
+                _require_prepare_operation_owner(meta, operation_id)
                 meta["db_name"] = db_name
                 meta["source_version"] = latest_dir
                 if new_signature_etag:
@@ -522,6 +568,7 @@ def prepare_db(
                 meta["downloaded_at"] = datetime.now(UTC).isoformat()
                 meta["file_count"] = poll_summary["success"]
                 meta["update_in_progress"] = False
+                meta.pop("prepare_operation_id", None)
                 meta["update_completed_at"] = datetime.now(UTC).isoformat()
                 meta.pop("updating_to_source_version", None)
                 meta.pop("update_error", None)
@@ -541,21 +588,20 @@ def prepare_db(
                 if shard_sets_created:
                     meta["sharded"] = True
                     meta["shard_sets"] = shard_sets_created
+                    if shard_layout_schema:
+                        meta["shard_layout_schema"] = shard_layout_schema
                     meta["shard_source_version"] = latest_dir
                     meta["sharded_at"] = datetime.now(UTC).isoformat()
                     meta.pop("sharding_error", None)
                 else:
-                    meta["sharded"] = False
-                    meta["shard_sets"] = []
-                    meta["shard_source_version"] = None
-                    meta["sharding_error"] = "preset shard layout generation failed"
+                    _invalidate_shard_publication(
+                        meta,
+                        error="preset shard layout generation failed",
+                    )
                 meta["sharding_in_progress"] = False
                 if isinstance(meta.get("db_order_oracle"), dict):
                     oracle = dict(meta["db_order_oracle"])
-                    if (
-                        oracle.get("source_version")
-                        and oracle.get("source_version") != latest_dir
-                    ):
+                    if oracle.get("source_version") and oracle.get("source_version") != latest_dir:
                         oracle["status"] = "stale"
                     meta["db_order_oracle"] = oracle
                 return meta
@@ -563,15 +609,56 @@ def prepare_db(
             try:
                 _update_metadata(local_container, db_name, account_name, _promote)
             except Exception as exc:
-                LOGGER.warning(
+                LOGGER.error(
                     "prepare_db promotion metadata write failed for %s: %s",
                     db_name,
                     sanitise(str(exc))[:200],
                 )
+                raise
         finally:
             lock.release()
 
-    Thread(target=_do_copies, daemon=True, name=f"prepare-db-{db_name}").start()
+    copy_thread = Thread(
+        target=_do_copies,
+        daemon=True,
+        name=f"prepare-db-{db_name}",
+    )
+    try:
+        copy_thread.start()
+    except Exception as exc:
+
+        def _thread_start_failed(meta: dict[str, Any]) -> dict[str, Any]:
+            _require_prepare_operation_owner(meta, operation_id)
+            meta["update_in_progress"] = False
+            meta.pop("prepare_operation_id", None)
+            meta["update_error"] = "prepare-db background worker failed to start"
+            meta["update_failed_at"] = datetime.now(UTC).isoformat()
+            meta["copy_status"] = {
+                "phase": "init_failed",
+                "mode": "server-side",
+                "stage": "thread_start",
+            }
+            return meta
+
+        try:
+            _update_metadata(
+                container,
+                db_name,
+                account_name,
+                _thread_start_failed,
+            )
+        except Exception as marker_exc:
+            LOGGER.error(
+                "prepare_db thread-start rollback failed db=%s: %s",
+                db_name,
+                type(marker_exc).__name__,
+            )
+        finally:
+            lock.release()
+        raise HTTPException(
+            502,
+            "prepare-db background worker failed to start",
+        ) from exc
 
     # Audit — recorded after the lock + thread are set up so a 409 / 502
     # earlier in the route does NOT leak a phantom "started" event.
@@ -641,7 +728,7 @@ def prepare_db_cancel(
     Calls ``abort_copy`` on every staged blob whose copy is pending, then
     rewrites the metadata blob with ``copy_status.phase = "cancelled"`` so
     the SPA can flip the row back to a clean state without waiting the
-    full 2 h stale-recovery window.
+    full recovery window (which is longer than the 24-hour copy-poll ceiling).
 
     Idempotent — if no copy is in flight, returns a no-op success. Refuses
     (409) when ``copy_status.phase == "completed"`` to avoid undoing a
@@ -675,12 +762,55 @@ def prepare_db_cancel(
     if phase == "completed" and not meta.get("update_in_progress"):
         raise HTTPException(409, f"database {db_name} download already completed")
 
+    cancel_operation_id = uuid.uuid4().hex
+    cancel_started_at = datetime.now(UTC).isoformat()
+
+    def _claim_cancel(meta_in: dict[str, Any]) -> dict[str, Any]:
+        current_status = meta_in.get("copy_status")
+        current_phase = (
+            str(current_status.get("phase") or "") if isinstance(current_status, dict) else ""
+        )
+        if current_phase == "completed" and not meta_in.get("update_in_progress"):
+            raise _PrepareDbCompleted
+        if not meta_in.get("update_in_progress"):
+            raise _PrepareDbAlreadyTerminal
+        meta_in["prepare_operation_id"] = cancel_operation_id
+        meta_in["cancel_operation_id"] = cancel_operation_id
+        meta_in["cancel_started_at"] = cancel_started_at
+        return meta_in
+
+    try:
+        meta = _update_metadata(container, db_name, account_name, _claim_cancel)
+    except _PrepareDbCompleted as exc:
+        raise HTTPException(409, f"database {db_name} download already completed") from exc
+    except _PrepareDbAlreadyTerminal:
+        return {
+            "ok": True,
+            "db_name": db_name,
+            "aborted": 0,
+            "skipped": 0,
+            "errors": 0,
+            "aks_job_deleted": None,
+            "already_terminal": True,
+        }
+    except Exception as exc:
+        LOGGER.warning(
+            "prepare_db_cancel claim write failed for %s: %s",
+            db_name,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            502,
+            "Cancellation metadata claim failed; no cancellation side effects started.",
+        ) from exc
+
     # AKS-fanout cancel path: if the dispatch recorded `aks_job_ref`, delete
     # the K8s Job + ConfigMap. The azcopy upload pods write via
     # PUT-Block (not start_copy_from_url) so the blob `abort_copy` loop
     # below is a no-op for AKS mode — the Job has to go to actually stop
     # the data flow.
     aks_job_deleted: dict[str, Any] | None = None
+    aks_job_delete_failed = False
     aks_job_ref_raw = meta.get("aks_job_ref")
     aks_job_ref = aks_job_ref_raw if isinstance(aks_job_ref_raw, dict) else None
     if aks_job_ref:
@@ -695,12 +825,11 @@ def prepare_db_cancel(
                 namespace=str(aks_job_ref.get("namespace") or "default"),
                 job_name=str(aks_job_ref.get("job_name") or ""),
                 configmap_name=str(
-                    aks_job_ref.get("configmap_name")
-                    or aks_job_ref.get("job_name")
-                    or ""
+                    aks_job_ref.get("configmap_name") or aks_job_ref.get("job_name") or ""
                 )
                 or None,
             )
+            aks_job_delete_failed = aks_job_deleted.get("status") != "deleted"
         except Exception as exc:
             LOGGER.warning(
                 "prepare_db_cancel AKS Job delete failed db=%s job=%s: %s",
@@ -709,6 +838,7 @@ def prepare_db_cancel(
                 type(exc).__name__,
             )
             aks_job_deleted = {"status": "error", "error": type(exc).__name__}
+            aks_job_delete_failed = True
 
     # Walk container for blobs under {db_name}/ and abort any pending copies.
     aborted = 0
@@ -743,9 +873,34 @@ def prepare_db_cancel(
             )
 
     def _cancel_mutator(meta_in: dict[str, Any]) -> dict[str, Any]:
+        _require_prepare_operation_owner(meta_in, cancel_operation_id)
         meta_in["db_name"] = db_name
-        meta_in["update_in_progress"] = False
         _cancel_oid = redact_oid(caller.object_id) or "caller"
+        cancellation_side_effect_failed = aks_job_delete_failed or errors > 0
+        if cancellation_side_effect_failed:
+            meta_in["update_in_progress"] = True
+            meta_in["update_error"] = (
+                f"cancellation by {_cancel_oid} could not stop every active transfer"
+            )
+            meta_in["update_failed_at"] = datetime.now(UTC).isoformat()
+            meta_in["copy_status"] = {
+                "phase": "cancel_failed",
+                "aborted": aborted,
+                "skipped": skipped,
+                "errors": errors,
+            }
+            if aks_job_ref:
+                meta_in["copy_status"]["mode"] = "aks"
+                meta_in["copy_status"]["aks_job_deleted"] = aks_job_deleted or {"status": "unknown"}
+            return _invalidate_shard_publication(
+                meta_in,
+                error="prepare-db cancellation could not stop every active transfer",
+            )
+
+        meta_in["update_in_progress"] = False
+        meta_in.pop("prepare_operation_id", None)
+        meta_in.pop("cancel_operation_id", None)
+        meta_in.pop("cancel_started_at", None)
         meta_in["update_error"] = (
             f"cancelled by {_cancel_oid}: aborted {aborted} pending copies "
             f"({skipped} skipped, {errors} errors)"
@@ -763,7 +918,10 @@ def prepare_db_cancel(
         meta_in["copy_status"] = cs
         meta_in.pop("updating_to_source_version", None)
         meta_in.pop("aks_job_ref", None)
-        return meta_in
+        return _invalidate_shard_publication(
+            meta_in,
+            error="prepare-db was cancelled after database artifacts may have changed",
+        )
 
     try:
         _update_metadata(container, db_name, account_name, _cancel_mutator)
@@ -772,6 +930,18 @@ def prepare_db_cancel(
             "prepare_db_cancel metadata write failed for %s: %s",
             db_name,
             type(exc).__name__,
+        )
+        raise HTTPException(
+            502,
+            "Cancellation side effects may have completed, but the metadata "
+            "commit failed; retry cancellation.",
+        ) from exc
+
+    if aks_job_delete_failed or errors > 0:
+        raise HTTPException(
+            502,
+            "Not every active transfer was stopped; cancellation remains "
+            "pending and can be retried.",
         )
 
     try:
@@ -890,9 +1060,7 @@ def prepare_db_delete(
                 namespace=str(aks_job_ref.get("namespace") or "default"),
                 job_name=str(aks_job_ref.get("job_name") or ""),
                 configmap_name=str(
-                    aks_job_ref.get("configmap_name")
-                    or aks_job_ref.get("job_name")
-                    or ""
+                    aks_job_ref.get("configmap_name") or aks_job_ref.get("job_name") or ""
                 )
                 or None,
             )
@@ -1019,9 +1187,7 @@ def prepare_db_delete(
         )
     else:
         try:
-            container.delete_blob(
-                f"{db_name}-metadata.json", delete_snapshots="include"
-            )
+            container.delete_blob(f"{db_name}-metadata.json", delete_snapshots="include")
             metadata_deleted = True
         except ResourceNotFoundError:
             metadata_deleted = True
@@ -1087,6 +1253,3 @@ def prepare_db_delete(
         "metadata_deleted": metadata_deleted,
         "aks_job_deleted": aks_job_deleted,
     }
-
-
-

@@ -200,6 +200,20 @@ def test_render_nal_rejects_out_of_range_shard_idx() -> None:
         dbs.render_nal("x", shard_idx=5, num_shards=3, volumes=["x.00"])
 
 
+def test_render_shard_layout_metadata_binds_content_and_bytes() -> None:
+    first = dbs.render_shard_layout_metadata("db.00\n", "DBLIST db.00\n", 123)
+    same = dbs.render_shard_layout_metadata("db.00\n", "DBLIST db.00\n", 123)
+    changed_layout = dbs.render_shard_layout_metadata("db.01\n", "DBLIST db.01\n", 123)
+    changed_bytes = dbs.render_shard_layout_metadata("db.00\n", "DBLIST db.00\n", 124)
+
+    assert first == same
+    assert first != changed_layout
+    assert first != changed_bytes
+    digest, required_bytes = first.split()
+    assert len(digest) == 64
+    assert required_bytes == "123"
+
+
 # ---------------------------------------------------------------------------
 # select_partitions_for_submit
 # ---------------------------------------------------------------------------
@@ -319,6 +333,57 @@ def test_list_db_volumes_single_volume_db(monkeypatch: pytest.MonkeyPatch) -> No
     assert total == 50_001_500
 
 
+def test_list_db_volume_details_counts_runtime_shared_files_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blobs = [
+        _FakeBlob("core_nt/core_nt.00.nsq", 100),
+        _FakeBlob("core_nt/core_nt.00.nhr", 10),
+        _FakeBlob("core_nt/core_nt.01.nsq", 200),
+        _FakeBlob("core_nt/core_nt.01.nhr", 20),
+        _FakeBlob("core_nt/core_nt.ndb", 30),
+        _FakeBlob("core_nt/core_nt.ntf", 40),
+        _FakeBlob("core_nt/taxdb.btd", 50),
+        _FakeBlob("core_nt/taxdb.bti", 60),
+        _FakeBlob("core_nt/taxonomy4blast.sqlite3", 70),
+        # Multi-volume runtime patterns do not request the root .njs file.
+        _FakeBlob("core_nt/core_nt.njs", 999),
+    ]
+    container = _FakeContainerClient(blobs, store={})
+    _patch_blob_service(monkeypatch, container)
+
+    volumes, volume_bytes, shared_bytes = dbs._list_db_volume_details(
+        MagicMock(), "elbstg01", "core_nt"
+    )
+
+    assert volumes == ["core_nt.00", "core_nt.01"]
+    assert volume_bytes == {"core_nt.00": 110, "core_nt.01": 220}
+    assert shared_bytes == 250
+
+
+def test_list_db_volume_details_single_volume_matches_wildcard_union(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blobs = [
+        _FakeBlob("small/small.nsq", 100),
+        _FakeBlob("small/small.nhr", 10),
+        _FakeBlob("small/small.njs", 20),
+        _FakeBlob("small/small.ndb", 30),
+        _FakeBlob("small/taxdb.btd", 40),
+    ]
+    container = _FakeContainerClient(blobs, store={})
+    _patch_blob_service(monkeypatch, container)
+
+    volumes, volume_bytes, shared_bytes = dbs._list_db_volume_details(
+        MagicMock(), "elbstg01", "small"
+    )
+
+    assert volumes == ["small"]
+    assert volume_bytes == {"small": 130}
+    assert shared_bytes == 70
+    assert volume_bytes["small"] + shared_bytes == sum(blob.size for blob in blobs)
+
+
 def test_list_db_volumes_raises_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     container = _FakeContainerClient([], store={})
     _patch_blob_service(monkeypatch, container)
@@ -381,6 +446,65 @@ def test_upload_shard_set_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None
     assert second.skipped == 2 * 5
 
 
+def test_upload_shard_set_rewrites_stale_generation_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainerClient([], store={})
+    _patch_blob_service(monkeypatch, container)
+
+    old_volumes = [f"core_nt.{i:02d}" for i in range(4)]
+    new_volumes = [f"core_nt.{i:02d}" for i in range(6)]
+    dbs.upload_shard_set(MagicMock(), "elbstg01", "core_nt", 2, old_volumes)
+
+    result = dbs.upload_shard_set(MagicMock(), "elbstg01", "core_nt", 2, new_volumes)
+
+    assert result.created == 4
+    assert result.skipped == 0
+    assert (
+        container._store["2shards/core_nt_shard_00/core_nt_shard_00.manifest"]
+        == b"core_nt.00\ncore_nt.01\ncore_nt.02\n"
+    )
+    assert (
+        container._store["2shards/core_nt_shard_01/core_nt_shard_01.manifest"]
+        == b"core_nt.03\ncore_nt.04\ncore_nt.05\n"
+    )
+
+
+def test_upload_shard_set_rewrites_layout_when_only_blob_size_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainerClient([], store={})
+    _patch_blob_service(monkeypatch, container)
+    volumes = [f"core_nt.{i:02d}" for i in range(4)]
+    initial_sizes = {name: 100 for name in volumes}
+
+    first = dbs.upload_shard_set(
+        MagicMock(),
+        "elbstg01",
+        "core_nt",
+        2,
+        volumes,
+        volume_bytes=initial_sizes,
+        shared_bytes=10,
+    )
+    changed_sizes = {**initial_sizes, "core_nt.00": 150}
+    second = dbs.upload_shard_set(
+        MagicMock(),
+        "elbstg01",
+        "core_nt",
+        2,
+        volumes,
+        volume_bytes=changed_sizes,
+        shared_bytes=10,
+    )
+
+    assert first.created == 6
+    assert second.created == 1
+    assert second.skipped == 5
+    layout = container._store["2shards/core_nt_shard_00/core_nt_shard_00.layout"].decode()
+    assert layout.endswith(" 260\n")
+
+
 def test_ensure_shard_sets_skips_oversized_presets(monkeypatch: pytest.MonkeyPatch) -> None:
     # 3-volume DB → only N=1, 2, 3 are achievable; N=4..10 should be skipped.
     njs = json.dumps({"number-of-letters": 3_000, "number-of-sequences": 3}).encode()
@@ -393,8 +517,33 @@ def test_ensure_shard_sets_skips_oversized_presets(monkeypatch: pytest.MonkeyPat
     assert summary["total_volumes"] == 3
     assert summary["total_letters"] == 3_000
     assert summary["total_sequences"] == 3
+    assert summary["layout_schema"] == dbs.SHARD_LAYOUT_SCHEMA_VERSION
     assert summary["shard_sets"] == [1, 2, 3]
     assert summary["errors"] == []
+    assert "1shards/smalldb_shard_00/smalldb_shard_00.layout" in container._store
+
+
+def test_require_complete_shard_summary_rejects_partial_preset() -> None:
+    with pytest.raises(RuntimeError, match="incomplete shard layout publication"):
+        dbs.require_complete_shard_summary(
+            {
+                "layout_schema": dbs.SHARD_LAYOUT_SCHEMA_VERSION,
+                "total_volumes": 4,
+                "shard_sets": [1, 2, 3],
+                "errors": [{"num_shards": 4, "error": "upload failed"}],
+            }
+        )
+
+
+def test_require_complete_shard_summary_accepts_all_eligible_presets() -> None:
+    assert dbs.require_complete_shard_summary(
+        {
+            "layout_schema": dbs.SHARD_LAYOUT_SCHEMA_VERSION,
+            "total_volumes": 4,
+            "shard_sets": [1, 2, 3, 4],
+            "errors": [],
+        }
+    ) == [1, 2, 3, 4]
 
 
 def test_shard_sets_present_returns_intersection(monkeypatch: pytest.MonkeyPatch) -> None:

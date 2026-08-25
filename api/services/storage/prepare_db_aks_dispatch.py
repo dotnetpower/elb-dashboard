@@ -14,8 +14,9 @@ Risky contracts: ``mode == "aks"`` never silently falls back — every failure r
 `AksDispatchError` (acceptance criterion #3). ``mode == "auto"`` returns ``None`` to
 fall through to the server-side path. Concurrency is serialised by the per-(account,
 db) `prepare_db_lock` registry (same registry the cancel route + tests use); the
-metadata ``update_in_progress`` flag is the cross-process gate. ``source_version`` is
-written as a start marker only; the worker promotes it on full success. The Celery
+metadata ``update_in_progress`` flag plus ``prepare_operation_id`` owner token is the
+cross-process gate. ``source_version`` is written as a start marker only; the worker
+promotes it on full success. The Celery
 task name `api.tasks.storage.prepare_db_via_aks` and the 409 detail ``code`` values
 (`aks_unavailable`, `kubelet_rbac_missing`) are SPA-facing contracts.
 Validation: `uv run pytest -q api/tests/test_prepare_db_aks_route.py
@@ -27,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -34,10 +36,19 @@ from api.auth import CallerIdentity
 from api.services.sanitise import redact_oid, sanitise
 from api.services.storage.prepare_db_locks import prepare_db_lock as _prepare_db_lock
 from api.services.storage.prepare_db_metadata import (
+    DatabaseOperationInProgressError,
+)
+from api.services.storage.prepare_db_metadata import (
     download_blob_with_etag as _download_blob_with_etag,
 )
 from api.services.storage.prepare_db_metadata import (
     is_stale_prepare_marker as _is_stale_prepare_marker,
+)
+from api.services.storage.prepare_db_metadata import (
+    is_stale_sharding_marker as _is_stale_sharding_marker,
+)
+from api.services.storage.prepare_db_metadata import (
+    require_prepare_operation_owner as _require_prepare_operation_owner,
 )
 from api.services.storage.prepare_db_metadata import (
     update_metadata as _update_metadata,
@@ -49,9 +60,7 @@ LOGGER = logging.getLogger(__name__)
 # AKS path and the server-side path read the same environment variable, so the
 # two module-level evaluations are identical at runtime; they are kept separate
 # only so each path can be patched independently in tests.
-_INCLUDE_SHARED_TAXONOMY = (
-    os.environ.get("PREPARE_DB_INCLUDE_TAXONOMY", "true").lower() != "false"
-)
+_INCLUDE_SHARED_TAXONOMY = os.environ.get("PREPARE_DB_INCLUDE_TAXONOMY", "true").lower() != "false"
 
 
 class AksDispatchError(Exception):
@@ -103,13 +112,9 @@ def try_dispatch_aks_mode(
     from api.routes.storage.common import _RE_RG
 
     if not _RE_RG.match(aks_rg):
-        raise AksDispatchError(
-            400, f"invalid aks_resource_group: '{sanitise(str(aks_rg)[:40])}'"
-        )
+        raise AksDispatchError(400, f"invalid aks_resource_group: '{sanitise(str(aks_rg)[:40])}'")
     if not _RE_RG.match(cluster_name):
-        raise AksDispatchError(
-            400, f"invalid cluster_name: '{sanitise(str(cluster_name)[:40])}'"
-        )
+        raise AksDispatchError(400, f"invalid cluster_name: '{sanitise(str(cluster_name)[:40])}'")
 
     min_idle_env = os.environ.get("PREPARE_DB_AKS_MIN_IDLE_NODES", "3")
     try:
@@ -165,8 +170,7 @@ def try_dispatch_aks_mode(
                 {
                     "code": "aks_unavailable",
                     "message": (
-                        "Could not probe AKS cluster for ready workers: "
-                        f"{type(exc).__name__}"
+                        f"Could not probe AKS cluster for ready workers: {type(exc).__name__}"
                     ),
                     "ready_nodes": 0,
                     "required_nodes": min_idle_nodes,
@@ -244,8 +248,7 @@ def try_dispatch_aks_mode(
         return None
     if rbac.status == "probe_failed":
         LOGGER.info(
-            "prepare_db: kubelet RBAC pre-flight indeterminate (%s); "
-            "proceeding optimistically",
+            "prepare_db: kubelet RBAC pre-flight indeterminate (%s); proceeding optimistically",
             rbac.reason,
         )
 
@@ -275,9 +278,7 @@ def try_dispatch_aks_mode(
             "NCBI latest-dir lookup failed for AKS prepare-db: %s",
             type(exc).__name__,
         )
-        raise AksDispatchError(
-            502, f"could not contact NCBI: {sanitise(str(exc))[:200]}"
-        ) from exc
+        raise AksDispatchError(502, f"could not contact NCBI: {sanitise(str(exc))[:200]}") from exc
 
     try:
         sized_keys = _common._list_keys_with_sizes(latest_dir, db_name)
@@ -301,10 +302,7 @@ def try_dispatch_aks_mode(
     if not sized_keys:
         raise AksDispatchError(
             404,
-            (
-                f"No files found for database '{db_name}' in NCBI S3 (snapshot: "
-                f"{latest_dir})."
-            ),
+            (f"No files found for database '{db_name}' in NCBI S3 (snapshot: {latest_dir})."),
         )
 
     if _INCLUDE_SHARED_TAXONOMY:
@@ -370,11 +368,9 @@ def try_dispatch_aks_mode(
                 "prepare-db is already running for this DB (check the dashboard)",
             )
 
-        previous_source_version = str(previous_metadata.get("source_version") or "")
         started_at = datetime.now(UTC).isoformat()
-        aks_namespace = os.environ.get(
-            "PREPARE_DB_AKS_NAMESPACE", _AKS_DEFAULT_NAMESPACE
-        )
+        operation_id = uuid.uuid4().hex
+        aks_namespace = os.environ.get("PREPARE_DB_AKS_NAMESPACE", _AKS_DEFAULT_NAMESPACE)
         aks_job_name = _prepare_db_job_name(db_name, latest_dir)
         # Persisted so the cancel route + a future reconciler can find the
         # in-flight Job after the api/worker revision restarts (Redis is
@@ -390,9 +386,14 @@ def try_dispatch_aks_mode(
         }
 
         def _start_mutator(meta: dict[str, Any]) -> dict[str, Any]:
+            if meta.get("update_in_progress") and not _is_stale_prepare_marker(meta):
+                raise DatabaseOperationInProgressError("prepare-db is already running for this DB")
+            if meta.get("sharding_in_progress") and not _is_stale_sharding_marker(meta):
+                raise DatabaseOperationInProgressError("sharding is already running for this DB")
             meta["db_name"] = db_name
             meta["update_in_progress"] = True
             meta["update_started_at"] = started_at
+            meta["prepare_operation_id"] = operation_id
             meta["updating_to_source_version"] = latest_dir
             meta["updating_signature_etag"] = None
             meta.pop("update_error", None)
@@ -404,18 +405,30 @@ def try_dispatch_aks_mode(
                 "total_files": len(file_keys),
             }
             meta["aks_job_ref"] = aks_job_ref
-            if previous_source_version and previous_source_version != latest_dir:
-                meta["previous_source_version"] = previous_source_version
+            current_source_version = str(meta.get("source_version") or "")
+            if current_source_version and current_source_version != latest_dir:
+                meta["previous_source_version"] = current_source_version
             return meta
 
         try:
-            _update_metadata(container, db_name, account_name, _start_mutator)
+            _update_metadata(
+                container,
+                db_name,
+                account_name,
+                _start_mutator,
+            )
+        except DatabaseOperationInProgressError as exc:
+            raise AksDispatchError(409, str(exc)) from exc
         except Exception as exc:
             LOGGER.warning(
                 "AKS prepare-db update-start metadata write failed for %s: %s",
                 db_name,
                 sanitise(str(exc))[:200],
             )
+            raise AksDispatchError(
+                502,
+                "prepare-db metadata start commit failed",
+            ) from exc
 
         # Kubernetes Job tuning knobs (env-driven) are resolved by the
         # reusable, side-effect-free service helper — the route keeps only the
@@ -428,6 +441,7 @@ def try_dispatch_aks_mode(
         try:
             task_kwargs: dict[str, Any] = dict(
                 job_id=f"prepare-db-aks-{db_name}-{int(time.time())}",
+                prepare_operation_id=operation_id,
                 subscription_id=sub,
                 storage_resource_group=storage_rg,
                 storage_account=account_name,
@@ -456,8 +470,11 @@ def try_dispatch_aks_mode(
             # Roll back the start marker so the SPA does not show a
             # phantom in-progress with no live worker.
             try:
+
                 def _rollback(meta: dict[str, Any]) -> dict[str, Any]:
+                    _require_prepare_operation_owner(meta, operation_id)
                     meta["update_in_progress"] = False
+                    meta.pop("prepare_operation_id", None)
                     meta["update_error"] = "AKS dispatch failed (enqueue error)"
                     meta["update_failed_at"] = datetime.now(UTC).isoformat()
                     meta["copy_status"] = {
@@ -505,9 +522,7 @@ def try_dispatch_aks_mode(
             },
         )
     except Exception as exc:
-        LOGGER.debug(
-            "prepare_db_aks audit record skipped: %s", type(exc).__name__
-        )
+        LOGGER.debug("prepare_db_aks audit record skipped: %s", type(exc).__name__)
         audit_job_id = ""
 
     LOGGER.info(

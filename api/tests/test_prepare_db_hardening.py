@@ -29,16 +29,18 @@ from typing import Any
 # constants like ``_COPY_POLL_INTERVAL_SECONDS`` resolve correctly.
 import api.routes.storage.prepare_db  # noqa: F401 — ensure submodule is imported
 import pytest
-from azure.core.exceptions import ResourceModifiedError
+from azure.core.exceptions import (
+    ResourceExistsError,
+    ResourceModifiedError,
+    ResourceNotFoundError,
+)
 
 prepare_db_module = _sys.modules["api.routes.storage.prepare_db"]
 
 
 class _FakeCopyProps:
     def __init__(self, status: str, description: str = "") -> None:
-        self.copy = type(
-            "_Copy", (), {"status": status, "status_description": description}
-        )
+        self.copy = type("_Copy", (), {"status": status, "status_description": description})
 
 
 class _FakeBlobClient:
@@ -52,9 +54,7 @@ class _FakeBlobClient:
 class _FakeBlobItem:
     def __init__(self, name: str, status: str, description: str = "") -> None:
         self.name = name
-        self.copy = type(
-            "_Copy", (), {"status": status, "status_description": description}
-        )
+        self.copy = type("_Copy", (), {"status": status, "status_description": description})
 
 
 class _FakeContainerClient:
@@ -139,9 +139,7 @@ def test_poll_returns_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_poll_falls_back_when_list_copy_include_is_unsupported() -> None:
     class _FallbackContainer(_FakeContainerClient):
-        def list_blobs(
-            self, *, name_starts_with: str = "", include: Any = None
-        ) -> list[Any]:
+        def list_blobs(self, *, name_starts_with: str = "", include: Any = None) -> list[Any]:
             if include is not None:
                 raise TypeError("include is not supported")
             return [
@@ -166,6 +164,25 @@ def test_poll_falls_back_when_list_copy_include_is_unsupported() -> None:
     assert out["timed_out"] is False
 
 
+def test_poll_propagates_operation_ownership_loss() -> None:
+    from api.services.storage.prepare_db_metadata import (
+        DatabaseOperationOwnershipError,
+    )
+
+    container = _FakeContainerClient({"core_nt/a": ("pending", "")})
+
+    def _ownership_lost(_snapshot: dict[str, int]) -> None:
+        raise DatabaseOperationOwnershipError("ownership changed")
+
+    with pytest.raises(DatabaseOperationOwnershipError, match="ownership changed"):
+        prepare_db_module._poll_copy_completion(
+            container,
+            ["core_nt/a"],
+            db_name="core_nt",
+            on_progress=_ownership_lost,
+        )
+
+
 def test_stale_marker_recovers() -> None:
     from api.services.storage import prepare_db_metadata as _metadata
 
@@ -187,6 +204,81 @@ def test_stale_marker_recovers() -> None:
     )
     # Missing flag = effectively stale (allow new daemon).
     assert prepare_db_module._is_stale_prepare_marker({}) is True
+
+
+def test_stale_sharding_marker_recovers() -> None:
+    from api.services.storage import prepare_db_metadata as metadata_module
+
+    fresh = datetime.now(UTC).isoformat()
+    old = (
+        datetime.now(UTC) - timedelta(seconds=metadata_module._SHARDING_STALE_SECONDS + 60)
+    ).isoformat()
+
+    assert metadata_module.is_stale_sharding_marker({}) is True
+    assert (
+        metadata_module.is_stale_sharding_marker(
+            {"sharding_in_progress": True, "sharding_started_at": fresh}
+        )
+        is False
+    )
+    assert (
+        metadata_module.is_stale_sharding_marker(
+            {"sharding_in_progress": True, "sharding_started_at": old}
+        )
+        is True
+    )
+
+
+def test_prepare_stale_window_exceeds_server_copy_poll_ceiling() -> None:
+    from api.services.storage import prepare_db_metadata as metadata_module
+    from api.services.storage.prepare_db_copy_poller import _COPY_POLL_MAX_SECONDS
+
+    assert metadata_module._PREPARE_DB_STALE_SECONDS > _COPY_POLL_MAX_SECONDS
+
+
+def test_sharding_stale_window_exceeds_warmup_task_limit() -> None:
+    from api.services.storage import prepare_db_metadata as metadata_module
+    from api.tasks.storage import warmup as warmup_module
+
+    assert metadata_module._SHARDING_STALE_SECONDS > warmup_module._TASK_HARD_TIME_LIMIT
+
+
+def test_prepare_operation_owner_rejects_superseded_daemon() -> None:
+    from api.services.storage import prepare_db_metadata as metadata_module
+
+    metadata_module.require_prepare_operation_owner(
+        {"update_in_progress": True, "prepare_operation_id": "owner-a"},
+        "owner-a",
+    )
+    metadata_module.require_prepare_operation_owner({"update_in_progress": True}, "")
+
+    with pytest.raises(
+        metadata_module.DatabaseOperationOwnershipError,
+        match="ownership changed",
+    ):
+        metadata_module.require_prepare_operation_owner(
+            {"update_in_progress": True, "prepare_operation_id": "owner-b"},
+            "owner-a",
+        )
+
+    for metadata in ({}, {"update_in_progress": True, "prepare_operation_id": "owner-a"}):
+        with pytest.raises(
+            metadata_module.DatabaseOperationOwnershipError,
+            match="ownership changed",
+        ):
+            metadata_module.require_prepare_operation_owner(metadata, "")
+
+
+@pytest.mark.parametrize("max_attempts", [True, 0, 11])
+def test_update_metadata_rejects_invalid_retry_bound(max_attempts: Any) -> None:
+    with pytest.raises(ValueError, match="max_attempts"):
+        prepare_db_module._update_metadata(
+            object(),
+            "core_nt",
+            "stacc",
+            lambda meta: meta,
+            max_attempts=max_attempts,
+        )
 
 
 def test_update_metadata_retries_on_etag_clash(
@@ -240,9 +332,130 @@ def test_update_metadata_retries_on_etag_clash(
         meta["source_version"] = "2026-05-21-01-05-02"
         return meta
 
-    result = prepare_db_module._update_metadata(
-        container, "core_nt", "stacc", _mutator
-    )
+    result = prepare_db_module._update_metadata(container, "core_nt", "stacc", _mutator)
     assert result["source_version"] == "2026-05-21-01-05-02"
     assert state["meta"]["source_version"] == "2026-05-21-01-05-02"
     assert state["attempt"] >= 2
+
+
+def test_update_metadata_fails_closed_after_etag_retries() -> None:
+    """Exhausted optimistic-concurrency retries must never blind-overwrite."""
+
+    state = {"conditional_attempts": 0, "blind_attempts": 0}
+
+    class _Stream:
+        properties = type("_P", (), {"etag": "etag-current"})
+
+        def readall(self) -> bytes:
+            return b'{"db_name": "core_nt", "source_version": "current"}'
+
+    class _Blob:
+        def download_blob(self, *, offset: int = 0, length: int | None = None) -> _Stream:
+            del offset, length
+            return _Stream()
+
+        def upload_blob(self, _body: bytes, **kwargs: Any) -> dict[str, str]:
+            if kwargs.get("etag"):
+                state["conditional_attempts"] += 1
+                raise ResourceModifiedError("412")
+            state["blind_attempts"] += 1
+            return {"etag": '"etag-blind"'}
+
+    class _Container:
+        def get_blob_client(self, _name: str) -> _Blob:
+            return _Blob()
+
+    with pytest.raises(ResourceModifiedError):
+        prepare_db_module._update_metadata(
+            _Container(),
+            "core_nt",
+            "stacc",
+            lambda meta: {**meta, "sharding_in_progress": True},
+            max_attempts=3,
+        )
+
+    assert state == {"conditional_attempts": 3, "blind_attempts": 0}
+
+
+def test_update_metadata_propagates_read_failure_without_writing() -> None:
+    state = {"uploads": 0}
+
+    class _Blob:
+        def download_blob(self, *, offset: int = 0, length: int | None = None) -> Any:
+            del offset, length
+            raise RuntimeError("storage read unavailable")
+
+        def upload_blob(self, _body: bytes, **_kwargs: Any) -> dict[str, str]:
+            state["uploads"] += 1
+            return {"etag": '"unexpected"'}
+
+    class _Container:
+        def get_blob_client(self, _name: str) -> _Blob:
+            return _Blob()
+
+    with pytest.raises(RuntimeError, match="storage read unavailable"):
+        prepare_db_module._update_metadata(
+            _Container(),
+            "core_nt",
+            "stacc",
+            lambda meta: {**meta, "sharding_in_progress": True},
+        )
+
+    assert state["uploads"] == 0
+
+
+def test_update_metadata_retries_concurrent_create_without_overwrite() -> None:
+    state: dict[str, Any] = {
+        "exists": False,
+        "etag": "",
+        "meta": {},
+        "create_attempts": 0,
+        "conditional_attempts": 0,
+    }
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.properties = type("_P", (), {"etag": state["etag"]})
+
+        def readall(self) -> bytes:
+            import json as _json
+
+            return _json.dumps(state["meta"]).encode("utf-8")
+
+    class _Blob:
+        def download_blob(self, *, offset: int = 0, length: int | None = None) -> _Stream:
+            del offset, length
+            if not state["exists"]:
+                raise ResourceNotFoundError("404")
+            return _Stream()
+
+        def upload_blob(self, body: bytes, **kwargs: Any) -> dict[str, str]:
+            import json as _json
+
+            if kwargs.get("overwrite") is False:
+                state["create_attempts"] += 1
+                state["exists"] = True
+                state["etag"] = "etag-peer"
+                state["meta"] = {"db_name": "core_nt", "peer_field": "preserved"}
+                raise ResourceExistsError("409")
+            state["conditional_attempts"] += 1
+            assert kwargs["etag"] == "etag-peer"
+            state["meta"] = _json.loads(body.decode("utf-8"))
+            state["etag"] = "etag-final"
+            return {"etag": '"etag-final"'}
+
+    class _Container:
+        def get_blob_client(self, _name: str) -> _Blob:
+            return _Blob()
+
+    result = prepare_db_module._update_metadata(
+        _Container(),
+        "core_nt",
+        "stacc",
+        lambda meta: {**meta, "sharding_in_progress": True},
+    )
+
+    assert result["peer_field"] == "preserved"
+    assert result["sharding_in_progress"] is True
+    assert state["create_attempts"] == 1
+    assert state["conditional_attempts"] == 1

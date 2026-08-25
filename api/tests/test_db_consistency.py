@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from api.services.db import consistency
 
 
@@ -51,6 +52,29 @@ class _FakeSvc:
 
 def _volumes(n: int) -> list[str]:
     return [f"core_nt.{i:02d}" for i in range(n)]
+
+
+def _patch_metadata_updates(
+    monkeypatch,
+    initial: dict[str, dict[str, object]] | None = None,
+    *,
+    expected_container: _FakeContainer | None = None,
+) -> dict[str, dict[str, object]]:
+    states = {name: dict(value) for name, value in (initial or {}).items()}
+
+    def _update(actual_container, db_name, _account, mutator):
+        if expected_container is not None:
+            assert actual_container is expected_container
+        current = states.setdefault(db_name, {"db_name": db_name, "source_version": "v1"})
+        updated = mutator(dict(current))
+        states[db_name] = updated
+        return updated
+
+    monkeypatch.setattr(
+        "api.services.storage.prepare_db_metadata.update_metadata",
+        _update,
+    )
+    return states
 
 
 # --------------------------------------------------------------------------- #
@@ -149,12 +173,18 @@ def test_reconcile_heals_after_prune(monkeypatch) -> None:
     monkeypatch.setattr(
         consistency,
         "ensure_shard_sets",
-        lambda *a, **k: {"total_volumes": 79, "shard_sets": [1, 2, 10], "errors": []},
+        lambda *a, **k: {
+            "layout_schema": 1,
+            "total_volumes": 79,
+            "shard_sets": [1, 2, 3, 4, 5, 6, 8, 10],
+            "errors": [],
+        },
     )
     result = consistency.reconcile_db_consistency(None, "acct", "core_nt")
     assert result["status"] == "healed"
     assert result["resharded"] is True
-    assert result["shard"]["shard_sets"] == [1, 2, 10]
+    assert result["shard"]["shard_sets"] == [1, 2, 3, 4, 5, 6, 8, 10]
+    assert result["shard"]["layout_schema"] == 1
 
 
 def test_reconcile_clean_no_action(monkeypatch) -> None:
@@ -182,11 +212,43 @@ def test_reconcile_reshards_stale_layout_without_ghosts(monkeypatch) -> None:
     monkeypatch.setattr(
         consistency,
         "ensure_shard_sets",
-        lambda *a, **k: {"total_volumes": 79, "shard_sets": [1], "errors": []},
+        lambda *a, **k: {
+            "layout_schema": 1,
+            "total_volumes": 79,
+            "shard_sets": [1, 2, 3, 4, 5, 6, 8, 10],
+            "errors": [],
+        },
     )
     result = consistency.reconcile_db_consistency(None, "acct", "core_nt")
     assert result["status"] == "reshard_only"
     assert result["resharded"] is True
+
+
+def test_reconcile_reports_partial_when_shard_generation_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        consistency,
+        "prune_ghost_volumes",
+        lambda *a, **k: {"status": "pruned", "authoritative": 4, "pruned": 1},
+    )
+    monkeypatch.setattr(consistency, "delete_shard_layouts", lambda *a, **k: 4)
+    monkeypatch.setattr(
+        consistency,
+        "ensure_shard_sets",
+        lambda *a, **k: {
+            "layout_schema": 1,
+            "total_volumes": 4,
+            "shard_sets": [1, 2, 3],
+            "errors": [{"num_shards": 4, "error": "upload failed"}],
+        },
+    )
+
+    result = consistency.reconcile_db_consistency(None, "acct", "core_nt")
+
+    assert result["status"] == "partial"
+    assert result["resharded"] is False
+    assert result["shard_error"] == "RuntimeError"
 
 
 def test_reconcile_propagates_abort(monkeypatch) -> None:
@@ -204,6 +266,7 @@ def test_reconcile_propagates_abort(monkeypatch) -> None:
 # reconcile-all iteration
 # --------------------------------------------------------------------------- #
 def test_reconcile_all_iterates_and_counts(monkeypatch) -> None:
+    container_client = _FakeContainer([])
     monkeypatch.setattr(
         "api.services.storage.orphan_prepare_db._resolve_workload_storage_account",
         lambda: "acct",
@@ -214,19 +277,121 @@ def test_reconcile_all_iterates_and_counts(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "api.services.storage.data._blob_service",
-        lambda *a, **k: _FakeSvc(_FakeContainer([])),
+        lambda *a, **k: _FakeSvc(container_client),
     )
+    _patch_metadata_updates(monkeypatch, expected_container=container_client)
     calls: list[str] = []
 
     def _fake_reconcile(cred, acct, db, **k):
         calls.append(db)
-        return {"status": "healed" if db == "core_nt" else "clean"}
+        if db == "core_nt":
+            return {
+                "status": "healed",
+                "shard": {
+                    "layout_schema": 1,
+                    "total_volumes": 2,
+                    "shard_sets": [1, 2],
+                    "errors": [],
+                },
+            }
+        return {"status": "clean"}
 
     monkeypatch.setattr(consistency, "reconcile_db_consistency", _fake_reconcile)
     result = consistency.reconcile_all_db_consistency(None)
     assert result["checked"] == 2
     assert result["healed"] == 1
     assert calls == ["core_nt", "nt"]
+
+
+def test_reconcile_all_invalidates_partial_shard_publication(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "api.services.storage.orphan_prepare_db._resolve_workload_storage_account",
+        lambda: "acct",
+    )
+    monkeypatch.setattr(
+        "api.services.storage.orphan_prepare_db._iter_metadata_db_names",
+        lambda cc, limit: iter(["core_nt"]),
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda *a, **k: _FakeSvc(_FakeContainer([])),
+    )
+    states = _patch_metadata_updates(
+        monkeypatch,
+        {
+            "core_nt": {
+                "db_name": "core_nt",
+                "source_version": "v1",
+                "sharded": True,
+                "shard_sets": [1, 2],
+                "shard_layout_schema": 1,
+                "shard_source_version": "v1",
+                "sharded_at": "2026-05-20T00:00:00+00:00",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        consistency,
+        "reconcile_db_consistency",
+        lambda *a, **k: {
+            "status": "partial",
+            "resharded": False,
+            "shard_error": "RuntimeError",
+        },
+    )
+
+    result = consistency.reconcile_all_db_consistency(None)
+
+    metadata = states["core_nt"]
+    assert result["healed"] == 0
+    assert metadata["sharding_in_progress"] is False
+    assert "sharding_operation_id" not in metadata
+    assert metadata["sharded"] is False
+    assert metadata["shard_sets"] == []
+    assert "shard_layout_schema" not in metadata
+    assert metadata["shard_source_version"] is None
+    assert "sharded_at" not in metadata
+    assert "incomplete shard layout" in str(metadata["sharding_error"])
+
+
+def test_reconcile_all_skips_cross_process_live_prepare(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "api.services.storage.orphan_prepare_db._resolve_workload_storage_account",
+        lambda: "acct",
+    )
+    monkeypatch.setattr(
+        "api.services.storage.orphan_prepare_db._iter_metadata_db_names",
+        lambda cc, limit: iter(["core_nt"]),
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda *a, **k: _FakeSvc(_FakeContainer([])),
+    )
+    states = _patch_metadata_updates(
+        monkeypatch,
+        {
+            "core_nt": {
+                "db_name": "core_nt",
+                "source_version": "v1",
+                "update_in_progress": True,
+                "prepare_operation_id": "peer-prepare",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        consistency,
+        "reconcile_db_consistency",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("live prepare must block destructive reconcile")
+        ),
+    )
+
+    result = consistency.reconcile_all_db_consistency(None)
+
+    assert result["checked"] == 1
+    assert result["healed"] == 0
+    assert states["core_nt"]["prepare_operation_id"] == "peer-prepare"
+    assert "sharding_operation_id" not in states["core_nt"]
 
 
 def test_reconcile_all_skips_without_storage_account(monkeypatch) -> None:
@@ -328,6 +493,7 @@ def test_reconcile_all_skips_locked_db(monkeypatch) -> None:
         "api.services.storage.data._blob_service",
         lambda *a, **k: _FakeSvc(_FakeContainer([])),
     )
+    _patch_metadata_updates(monkeypatch)
 
     class _Lock:
         def __init__(self, ok: bool) -> None:
@@ -347,7 +513,16 @@ def test_reconcile_all_skips_locked_db(monkeypatch) -> None:
 
     def _fake_reconcile(cred, acct, db, **k):
         seen.append(db)
-        return {"status": "healed", "prune": {"status": "pruned"}}
+        return {
+            "status": "healed",
+            "prune": {"status": "pruned"},
+            "shard": {
+                "layout_schema": 1,
+                "total_volumes": 2,
+                "shard_sets": [1, 2],
+                "errors": [],
+            },
+        }
 
     monkeypatch.setattr(consistency, "reconcile_db_consistency", _fake_reconcile)
     result = consistency.reconcile_all_db_consistency(None)

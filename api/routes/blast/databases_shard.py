@@ -13,10 +13,10 @@ Edit boundaries: HTTP validation + dispatch only; the shard math lives in
     `api/services/storage/prepare_db_metadata.py`.
 Key entry points: `blast_database_shard`.
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller`.
-    The per-`(account, db)` lock + `_SHARD_STALE_SECONDS` stale recovery MUST
-    stay so two daemons never race the metadata blob.
-Validation: `uv run pytest -q api/tests/test_route_contracts.py
-    api/tests/test_blast_results_routes.py`.
+    The shared per-`(account, db)` lock and ETag-owned sharding marker MUST stay
+    so prepare-db, warmup, and manual shard producers cannot overlap.
+Validation: `uv run pytest -q api/tests/test_blast_database_shard_route.py
+    api/tests/test_db_sharding.py`.
 """
 
 from __future__ import annotations
@@ -28,9 +28,6 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import (
-    _SHARD_LOCK_REGISTRY,
-    _SHARD_LOCK_REGISTRY_GUARD,
-    _SHARD_STALE_SECONDS,
     _maybe_open_local_storage_access,
 )
 from api.routes.blast.databases import (
@@ -64,19 +61,16 @@ def blast_database_shard(
     (and survives a page reload).
 
     Hardening:
-      * Per-``(account, db)`` lock prevents concurrent daemons from
-        thrashing the metadata blob.
-      * If a previous daemon's ``sharding_in_progress`` flag is older
-        than ``_SHARD_STALE_SECONDS`` we treat it as crashed and allow
-        re-trigger.
+            * The shared per-``(account, db)`` lock prevents concurrent local
+                prepare/shard workers from thrashing the metadata blob.
+            * The ETag-owned marker rejects cross-process prepare/shard overlap and
+                permits takeover only after the shared stale threshold.
       * All error strings are passed through ``sanitise()`` before
         landing in the metadata blob or the response.
     """
-    import json
     import threading
+    import uuid
     from datetime import UTC, datetime
-
-    from azure.core.exceptions import ResourceNotFoundError
 
     from api.services import get_credential
     from api.services.db.sharding import (
@@ -116,70 +110,47 @@ def blast_database_shard(
         context="blast_database_shard",
     )
 
-    # Per-(account, db) lock — prevents the user double-clicking a chip
-    # from spawning two daemons that race the metadata write. Lock is
-    # acquired non-blocking; if it's already held we return 409 so the
-    # SPA shows "already running" instead of starting a second writer.
-    lock_key = f"{account_name.lower()}|{db_name}"
-    with _SHARD_LOCK_REGISTRY_GUARD:
-        lock = _SHARD_LOCK_REGISTRY.setdefault(lock_key, threading.Lock())
-    if not lock.acquire(blocking=False):
-        raise HTTPException(409, "sharding already in progress for this DB")
+    from api.services.storage.prepare_db_locks import prepare_db_lock
 
-    # Read the current metadata so we can preserve unrelated fields
-    # (source_version, downloaded_at, …) and detect a stale in-progress
-    # marker from a crashed previous daemon.
+    lock = prepare_db_lock(account_name, db_name)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "another database operation is in progress for this DB")
+
     svc = _blob_service(cred, account_name)
     cc = svc.get_container_client(DEFAULT_CONTAINER)
-    bc = cc.get_blob_client(f"{db_name}-metadata.json")
-    existing: dict[str, Any] = {}
-    try:
-        from api.services.storage.data import read_metadata_blob_text
-
-        existing = json.loads(
-            read_metadata_blob_text(bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json")
-        )
-    except ResourceNotFoundError:
-        existing = {"db_name": db_name}
-    except Exception:
-        existing = {"db_name": db_name}
-
-    # Stale-flag recovery — if the previous daemon crashed the metadata
-    # could be left with sharding_in_progress=true forever. Treat
-    # markers older than _SHARD_STALE_SECONDS as crashed.
-    if existing.get("sharding_in_progress"):
-        started = existing.get("sharding_started_at") or ""
-        try:
-            started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
-            age = (datetime.now(UTC) - started_dt).total_seconds()
-        except Exception:
-            age = float("inf")  # parse failure → treat as stale
-        if age < _SHARD_STALE_SECONDS:
-            lock.release()
-            raise HTTPException(409, "sharding already in progress for this DB")
-        LOGGER.info(
-            "blast_database_shard: clearing stale in-progress flag for %s (age=%.0fs)",
-            db_name,
-            age,
-        )
-
     started_at = datetime.now(UTC).isoformat()
+    operation_id = uuid.uuid4().hex
     # ETag-aware metadata write. Concurrent prepare-db / warmup writers can
     # not race the same metadata blob anymore — `_update_metadata` retries on
     # 412 instead of blindly overwriting.
     try:
         from api.services.storage.prepare_db_metadata import (
+            DatabaseOperationInProgressError,
+            is_stale_sharding_marker,
+        )
+        from api.services.storage.prepare_db_metadata import (
             update_metadata as _update_md,
         )
 
         def _pre_mutator(meta: dict[str, Any]) -> dict[str, Any]:
+            if meta.get("update_in_progress"):
+                raise DatabaseOperationInProgressError("prepare-db is in progress for this DB")
+            if meta.get("sharding_in_progress") and not is_stale_sharding_marker(meta):
+                raise DatabaseOperationInProgressError(
+                    "sharding is already in progress for this DB"
+                )
             meta["db_name"] = db_name
             meta["sharding_in_progress"] = True
             meta["sharding_started_at"] = started_at
+            meta["sharding_operation_id"] = operation_id
             meta.pop("sharding_error", None)
             return meta
 
-        _update_md(cc, db_name, account_name, _pre_mutator)
+        started_metadata = _update_md(cc, db_name, account_name, _pre_mutator)
+        source_version = str(started_metadata.get("source_version") or "")
+    except DatabaseOperationInProgressError as exc:
+        lock.release()
+        raise HTTPException(409, sanitise(str(exc))[:200]) from exc
     except Exception as exc:
         lock.release()
         LOGGER.warning(
@@ -213,6 +184,10 @@ def blast_database_shard(
     def _do_shard() -> None:
         """Background worker — owns the lock for the lifetime of the call."""
         from api.services import get_credential as _get_cred
+        from api.services.db.sharding import require_complete_shard_summary
+        from api.services.storage.prepare_db_metadata import (
+            invalidate_shard_publication,
+        )
         from api.services.storage.prepare_db_metadata import (
             update_metadata as _update_md,
         )
@@ -228,56 +203,35 @@ def blast_database_shard(
             # (re)built — identical to the old ensure_shard_sets behaviour.
             from api.services.db.consistency import reconcile_db_consistency
 
-            recon = reconcile_db_consistency(
-                local_cred, account_name, db_name, force_reshard=True
-            )
-            summary = recon.get("shard") or {}
-        except Exception as exc:
-            LOGGER.warning(
-                "blast_database_shard daemon failed db=%s: %s",
-                db_name,
-                type(exc).__name__,
-            )
-            err_msg = sanitise(f"{type(exc).__name__}: {exc}")[:300]
-            try:
-                local_cred = _get_cred()
-                svc2 = _blob_service(local_cred, account_name)
-                cc2 = svc2.get_container_client(DEFAULT_CONTAINER)
-
-                def _err_mut(meta: dict[str, Any]) -> dict[str, Any]:
-                    meta["sharding_in_progress"] = False
-                    meta["sharding_error"] = err_msg
-                    return meta
-
-                _update_md(cc2, db_name, account_name, _err_mut)
-            except Exception as inner:
-                LOGGER.warning(
-                    "blast_database_shard error-state write failed db=%s: %s",
-                    db_name,
-                    type(inner).__name__,
+            recon = reconcile_db_consistency(local_cred, account_name, db_name, force_reshard=True)
+            if not recon.get("resharded"):
+                raise RuntimeError(
+                    "shard consistency reconcile did not complete "
+                    f"(status={recon.get('status')}, error={recon.get('shard_error')})"
                 )
-            finally:
-                lock.release()
-            return
-
-        # Success — merge the summary into metadata via ETag-aware writer
-        # so a concurrent prepare-db / warmup writer cannot clobber the
-        # shard fields.
-        try:
-            local_cred = _get_cred()
+            summary = recon.get("shard") or {}
+            complete_sets = require_complete_shard_summary(summary)
             svc2 = _blob_service(local_cred, account_name)
             cc2 = svc2.get_container_client(DEFAULT_CONTAINER)
 
             def _ok_mut(meta: dict[str, Any]) -> dict[str, Any]:
+                if meta.get("sharding_operation_id") != operation_id:
+                    raise RuntimeError("shard marker ownership changed")
+                if meta.get("update_in_progress"):
+                    raise RuntimeError("prepare-db started during sharding")
+                if str(meta.get("source_version") or "") != source_version:
+                    raise RuntimeError("database source version changed during sharding")
                 meta["sharding_in_progress"] = False
+                meta.pop("sharding_operation_id", None)
                 meta.pop("sharding_error", None)
-                meta["sharded"] = bool(summary.get("shard_sets"))
-                meta["shard_sets"] = summary.get("shard_sets", [])
-                if meta.get("source_version"):
-                    meta["shard_source_version"] = meta.get("source_version")
+                meta["sharded"] = True
+                meta["shard_sets"] = complete_sets
+                meta["shard_layout_schema"] = int(summary["layout_schema"])
+                if source_version:
+                    meta["shard_source_version"] = source_version
                 meta["sharded_at"] = datetime.now(UTC).isoformat()
                 if summary.get("total_bytes"):
-                    meta.setdefault("total_bytes", summary["total_bytes"])
+                    meta["total_bytes"] = summary["total_bytes"]
                 for key in (
                     "total_letters",
                     "total_sequences",
@@ -285,7 +239,7 @@ def blast_database_shard(
                     "bytes_total",
                 ):
                     if summary.get(key):
-                        meta.setdefault(key, summary[key])
+                        meta[key] = summary[key]
                 return meta
 
             _update_md(cc2, db_name, account_name, _ok_mut)
@@ -313,18 +267,61 @@ def blast_database_shard(
             )
         except Exception as exc:
             LOGGER.warning(
-                "blast_database_shard final-state write failed db=%s: %s",
+                "blast_database_shard daemon failed db=%s: %s",
                 db_name,
                 type(exc).__name__,
             )
+            err_msg = sanitise(f"{type(exc).__name__}: {exc}")[:300]
+            try:
+                local_cred = _get_cred()
+                svc2 = _blob_service(local_cred, account_name)
+                cc2 = svc2.get_container_client(DEFAULT_CONTAINER)
+
+                def _err_mut(meta: dict[str, Any]) -> dict[str, Any]:
+                    if meta.get("sharding_operation_id") != operation_id:
+                        return meta
+                    meta["sharding_in_progress"] = False
+                    meta.pop("sharding_operation_id", None)
+                    return invalidate_shard_publication(meta, error=err_msg)
+
+                _update_md(cc2, db_name, account_name, _err_mut)
+            except Exception as inner:
+                LOGGER.warning(
+                    "blast_database_shard error-state write failed db=%s: %s",
+                    db_name,
+                    type(inner).__name__,
+                )
         finally:
             lock.release()
 
-    threading.Thread(
+    shard_thread = threading.Thread(
         target=_do_shard,
         daemon=True,
         name=f"shard-{db_name}",
-    ).start()
+    )
+    try:
+        shard_thread.start()
+    except Exception as exc:
+
+        def _thread_start_failed(meta: dict[str, Any]) -> dict[str, Any]:
+            if meta.get("sharding_operation_id") != operation_id:
+                raise RuntimeError("shard marker ownership changed")
+            meta["sharding_in_progress"] = False
+            meta.pop("sharding_operation_id", None)
+            meta["sharding_error"] = "shard background worker failed to start"
+            return meta
+
+        try:
+            _update_md(cc, db_name, account_name, _thread_start_failed)
+        except Exception as marker_exc:
+            LOGGER.error(
+                "blast_database_shard thread-start rollback failed db=%s: %s",
+                db_name,
+                type(marker_exc).__name__,
+            )
+        finally:
+            lock.release()
+        raise HTTPException(502, "shard background worker failed to start") from exc
 
     return {
         "accepted": True,

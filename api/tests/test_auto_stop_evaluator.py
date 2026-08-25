@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from api.services import auto_stop_evaluator as evaluator_module
 from api.services.auto_stop import AutoStopPreference
 from api.services.auto_stop_evaluator import IdleDecision, evaluate_cluster
 
@@ -77,9 +78,7 @@ def test_disabled_short_circuits() -> None:
 
 
 def test_stopped_power_state_keeps_cluster() -> None:
-    decision = evaluate_cluster(
-        _pref(), repo=_FakeRepo(), now=_NOW, power_state="Stopped"
-    )
+    decision = evaluate_cluster(_pref(), repo=_FakeRepo(), now=_NOW, power_state="Stopped")
     assert decision.verdict == "keep"
     assert decision.reason.startswith("power_state:")
 
@@ -142,9 +141,7 @@ def test_active_jobs_block_stop() -> None:
         _FakeJob(type="warmup", status="queued"),
         _FakeJob(type="blast", status="completed"),  # not active
     ]
-    decision = evaluate_cluster(
-        _pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running"
-    )
+    decision = evaluate_cluster(_pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running")
     # Single query: 2 active rows (running blast + queued warmup), the
     # completed blast does not count.
     assert decision.verdict == "keep"
@@ -178,9 +175,7 @@ def test_fresh_active_row_still_blocks_stop() -> None:
     cluster alive — the staleness age-out must only drop zombies."""
     fresh_ts = (_NOW - timedelta(minutes=5)).isoformat(timespec="seconds")
     jobs = [_FakeJob(type="warmup", status="running", updated_at=fresh_ts)]
-    decision = evaluate_cluster(
-        _pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running"
-    )
+    decision = evaluate_cluster(_pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running")
     assert decision.verdict == "keep"
     assert decision.reason == "active_jobs:1"
     assert decision.active_job_count == 1
@@ -193,9 +188,7 @@ def test_prepare_db_aks_row_blocks_stop_via_prefix_match() -> None:
     cluster, so prefix matching must keep an otherwise-idle cluster alive."""
     fresh_ts = (_NOW - timedelta(minutes=5)).isoformat(timespec="seconds")
     jobs = [_FakeJob(type="prepare_db_aks", status="running", updated_at=fresh_ts)]
-    decision = evaluate_cluster(
-        _pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running"
-    )
+    decision = evaluate_cluster(_pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running")
     assert decision.verdict == "keep"
     assert decision.reason == "active_jobs:1"
     assert decision.active_job_count == 1
@@ -211,8 +204,10 @@ def test_prepare_db_aks_uses_long_execution_stale_window() -> None:
 
 
 def test_prepare_db_aks_zombie_ages_out_after_long_execution_window() -> None:
-    seven_hours_old = (_NOW - timedelta(hours=7)).isoformat(timespec="seconds")
-    jobs = [_FakeJob(type="prepare_db_aks", status="running", updated_at=seven_hours_old)]
+    stale = (
+        _NOW - timedelta(seconds=evaluator_module._LONG_DBOPS_ACTIVE_ROW_STALE_SECONDS + 60)
+    ).isoformat(timespec="seconds")
+    jobs = [_FakeJob(type="prepare_db_aks", status="running", updated_at=stale)]
     decision = evaluate_cluster(
         _pref(idle_minutes=60),
         repo=_FakeRepo(jobs),
@@ -221,6 +216,12 @@ def test_prepare_db_aks_zombie_ages_out_after_long_execution_window() -> None:
     )
     assert decision.verdict == "stop"
     assert decision.active_job_count == 0
+
+
+def test_long_dbops_window_cannot_precede_metadata_recovery() -> None:
+    from api.services.storage.prepare_db_metadata import _PREPARE_DB_STALE_SECONDS
+
+    assert evaluator_module._LONG_DBOPS_ACTIVE_ROW_STALE_SECONDS >= _PREPARE_DB_STALE_SECONDS
 
 
 def test_row_type_blocks_autostop_prefix_helper() -> None:
@@ -242,9 +243,7 @@ def test_active_row_without_timestamp_fails_safe() -> None:
     counts as active so a brand-new submission (no timestamp yet) is never
     dropped."""
     jobs = [_FakeJob(type="blast", status="running")]
-    decision = evaluate_cluster(
-        _pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running"
-    )
+    decision = evaluate_cluster(_pref(), repo=_FakeRepo(jobs), now=_NOW, power_state="Running")
     assert decision.verdict == "keep"
     assert decision.reason == "active_jobs:1"
 
@@ -527,9 +526,7 @@ def test_stale_persisted_live_activity_does_not_prevent_stop() -> None:
         # Last live activity was 2 h ago — past the window.
         last_live_activity_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
     )
-    decision = evaluate_cluster(
-        pref, repo=_FakeRepo([]), now=_NOW, power_state="Running"
-    )
+    decision = evaluate_cluster(pref, repo=_FakeRepo([]), now=_NOW, power_state="Running")
     assert decision.verdict == "stop"
     assert decision.reason.startswith("idle:")
 
@@ -776,4 +773,3 @@ def test_active_jobs_take_precedence_over_sb_queue() -> None:
     )
     assert decision.verdict == "keep"
     assert decision.reason == "active_jobs:2"
-

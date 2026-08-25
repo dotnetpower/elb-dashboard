@@ -102,8 +102,9 @@ def _copy_support_files(root: Path) -> None:
         dest = root / name
         if not src.is_file():
             raise RuntimeError(f"missing OpenAPI build support file: {src}")
-        if not dest.exists() or dest.read_bytes() != src.read_bytes():
-            dest.write_bytes(src.read_bytes())
+        source_bytes = src.read_bytes()
+        if not dest.exists() or dest.read_bytes() != source_bytes:
+            dest.write_bytes(source_bytes)
 
 
 def _copy_app_overlay(root: Path) -> None:
@@ -130,8 +131,8 @@ def _patch_terminal_webhook_runtime_id(path: Path) -> None:
         "            merged = {**job_snap, **updates}\n",
         (
             "            runtime_job_id = _effective_elb_job_id(merged)\n"
-            "            if runtime_job_id.startswith(\"job-\") and runtime_job_id != job_id:\n"
-            "                payload[\"elb_job_id\"] = runtime_job_id\n"
+            '            if runtime_job_id.startswith("job-") and runtime_job_id != job_id:\n'
+            '                payload["elb_job_id"] = runtime_job_id\n'
         ),
         'payload["elb_job_id"] = runtime_job_id',
     )
@@ -195,8 +196,7 @@ def _harden_openapi_runtime_ids(path: Path) -> None:
         '            return match.group("elb_job_id").lower()\n',
     )
     block = block.replace(
-        '    if current.startswith("job-"):\n'
-        "        return current\n",
+        '    if current.startswith("job-"):\n        return current\n',
         '    canonical_current = re.fullmatch(r"job-[0-9a-f]{32}", current, re.IGNORECASE)\n'
         "    if canonical_current:\n"
         "        return canonical_current.group(0).lower()\n",
@@ -238,7 +238,7 @@ def _harden_openapi_runtime_id_consumers(path: Path) -> None:
         ),
         (
             'if effective_elb_job_id.startswith("job-") and '
-            "job_info.get(\"elb_job_id\") != effective_elb_job_id:",
+            'job_info.get("elb_job_id") != effective_elb_job_id:',
             'if re.fullmatch(r"job-[0-9a-f]{32}", effective_elb_job_id, re.IGNORECASE) '
             'and job_info.get("elb_job_id") != effective_elb_job_id:',
         ),
@@ -271,8 +271,16 @@ def _validate_dockerfile_runtime_policy(path: Path) -> None:
         "python3 /tmp/patch_elastic_blast.py /tmp/elb-src": 1,
         "grep -q 'ttlSecondsAfterFinished:'": 3,
         "for template in job-init-ssd-shard-aks.yaml.template": 3,
-        'elb-job-id: \"${BLAST_ELB_JOB_ID}\"': 3,
-        "|| exit 1; done": 3,
+        'elb-job-id: "${BLAST_ELB_JOB_ID}"': 3,
+        "grep -q 'def _wait_for_elb_init_jobs('": 3,
+        "grep -q 'ELB DB reader lock'": 3,
+        "grep -q 'name: ELB_DB_READER_LOCK'": 3,
+        "grep -q 'DISK_PREFLIGHT required_bytes='": 3,
+        "grep -q 'ELB DB writer lock'": 3,
+        "grep -q 'name: ELB_DB_WRITER_LOCK'": 3,
+        "for template in blast-batch-job-local-ssd-aks.yaml.template": 3,
+        "grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}'": 3,
+        "|| exit 1; done": 6,
         "cp -a /tmp/elb-src/src/elastic_blast/templates/.": 2,
     }
     mismatches = {
@@ -312,8 +320,7 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
     removal = 'config["cluster"].pop("exp-skip-warmed-ssd-init", None)'
     if missing or present or text.rfind(assignment) > text.rfind(removal):
         raise RuntimeError(
-            "OpenAPI app runtime policy mismatch: "
-            f"missing={missing}, forbidden={present}"
+            f"OpenAPI app runtime policy mismatch: missing={missing}, forbidden={present}"
         )
 
 
@@ -340,8 +347,7 @@ def patch_dockerfile(root: Path) -> None:
     )
     checkout_anchor = "    git -C /tmp/elb-src checkout ${ELB_REF} && \\\n"
     legacy_patch = (
-        "    python3 /tmp/patch_elastic_blast.py /tmp/elb-src "
-        "/tmp/merge-sharded-results.sh && \\\n"
+        "    python3 /tmp/patch_elastic_blast.py /tmp/elb-src /tmp/merge-sharded-results.sh && \\\n"
     )
     source_ttl_check = (
         "    grep -q 'ttlSecondsAfterFinished:' "
@@ -370,6 +376,45 @@ def patch_dockerfile(root: Path) -> None:
         source_ttl_check,
         source_identity_check,
         source_identity_check.strip(),
+    )
+    source_hardening_check_legacy = (
+        "    grep -q 'def _wait_for_elb_init_jobs(' "
+        "/tmp/elb-src/src/elastic_blast/kubernetes.py && \\\n"
+        "    grep -q 'ELB DB reader lock' "
+        "/tmp/elb-src/src/elastic_blast/templates/scripts/blast-run-aks.sh && \\\n"
+        "    grep -q 'name: ELB_DB_READER_LOCK' "
+        "/tmp/elb-src/src/elastic_blast/templates/"
+        "blast-batch-job-shard-ssd-aks.yaml.template && \\\n"
+        "    grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' "
+        "/tmp/elb-src/src/elastic_blast/templates/"
+        "job-init-ssd-shard-aks.yaml.template && \\\n"
+    )
+    source_hardening_check = (
+        "    grep -q 'def _wait_for_elb_init_jobs(' "
+        "/tmp/elb-src/src/elastic_blast/kubernetes.py && \\\n"
+        "    grep -q 'ELB DB reader lock' "
+        "/tmp/elb-src/src/elastic_blast/templates/scripts/blast-run-aks.sh && \\\n"
+        "    for template in blast-batch-job-local-ssd-aks.yaml.template "
+        "blast-batch-job-shard-ssd-aks.yaml.template; do "
+        "grep -q 'name: ELB_DB_READER_LOCK' "
+        '"/tmp/elb-src/src/elastic_blast/templates/${template}" || exit 1; done && \\\n'
+        "    grep -q 'ELB DB writer lock' "
+        "/tmp/elb-src/src/elastic_blast/templates/scripts/init-db-download-aks.sh && \\\n"
+        "    grep -q 'name: ELB_DB_WRITER_LOCK' "
+        "/tmp/elb-src/src/elastic_blast/templates/"
+        "job-init-local-ssd-aks.yaml.template && \\\n"
+        "    grep -q 'DISK_PREFLIGHT required_bytes=' "
+        "/tmp/elb-src/src/elastic_blast/templates/scripts/init-db-shard-aks.sh && \\\n"
+        "    grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' "
+        "/tmp/elb-src/src/elastic_blast/templates/"
+        "job-init-ssd-shard-aks.yaml.template && \\\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=source_identity_check,
+        legacy=source_identity_check + source_hardening_check_legacy,
+        desired=source_identity_check + source_hardening_check,
+        marker=source_hardening_check.strip(),
     )
     _replace_once(
         path,
@@ -404,6 +449,50 @@ def patch_dockerfile(root: Path) -> None:
         system_check,
         system_identity_check,
         system_identity_check.strip(),
+    )
+    system_hardening_check_legacy = (
+        "    grep -q 'def _wait_for_elb_init_jobs(' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/kubernetes.py && \\\n"
+        "    grep -q 'ELB DB reader lock' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "scripts/blast-run-aks.sh && \\\n"
+        "    grep -q 'name: ELB_DB_READER_LOCK' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "blast-batch-job-shard-ssd-aks.yaml.template && \\\n"
+        "    grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "job-init-ssd-shard-aks.yaml.template && \\\n"
+    )
+    system_hardening_check = (
+        "    grep -q 'def _wait_for_elb_init_jobs(' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/kubernetes.py && \\\n"
+        "    grep -q 'ELB DB reader lock' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "scripts/blast-run-aks.sh && \\\n"
+        "    for template in blast-batch-job-local-ssd-aks.yaml.template "
+        "blast-batch-job-shard-ssd-aks.yaml.template; do "
+        "grep -q 'name: ELB_DB_READER_LOCK' "
+        '"/usr/local/lib/python3.11/site-packages/elastic_blast/templates/${template}" '
+        "|| exit 1; done && \\\n"
+        "    grep -q 'ELB DB writer lock' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "scripts/init-db-download-aks.sh && \\\n"
+        "    grep -q 'name: ELB_DB_WRITER_LOCK' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "job-init-local-ssd-aks.yaml.template && \\\n"
+        "    grep -q 'DISK_PREFLIGHT required_bytes=' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "scripts/init-db-shard-aks.sh && \\\n"
+        "    grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' "
+        "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/"
+        "job-init-ssd-shard-aks.yaml.template && \\\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=system_identity_check,
+        legacy=system_identity_check + system_hardening_check_legacy,
+        desired=system_identity_check + system_hardening_check,
+        marker=system_hardening_check.strip(),
     )
     venv_install = "    && pip install --no-cache-dir azure-cli \\\n"
     venv_legacy = (
@@ -443,6 +532,50 @@ def patch_dockerfile(root: Path) -> None:
         venv_identity_check,
         venv_identity_check.strip(),
     )
+    venv_hardening_check_legacy = (
+        "    && grep -q 'def _wait_for_elb_init_jobs(' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/kubernetes.py \\\n"
+        "    && grep -q 'ELB DB reader lock' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "scripts/blast-run-aks.sh \\\n"
+        "    && grep -q 'name: ELB_DB_READER_LOCK' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "blast-batch-job-shard-ssd-aks.yaml.template \\\n"
+        "    && grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "job-init-ssd-shard-aks.yaml.template \\\n"
+    )
+    venv_hardening_check = (
+        "    && grep -q 'def _wait_for_elb_init_jobs(' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/kubernetes.py \\\n"
+        "    && grep -q 'ELB DB reader lock' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "scripts/blast-run-aks.sh \\\n"
+        "    && for template in blast-batch-job-local-ssd-aks.yaml.template "
+        "blast-batch-job-shard-ssd-aks.yaml.template; do "
+        "grep -q 'name: ELB_DB_READER_LOCK' "
+        '"/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/${template}" '
+        "|| exit 1; done \\\n"
+        "    && grep -q 'ELB DB writer lock' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "scripts/init-db-download-aks.sh \\\n"
+        "    && grep -q 'name: ELB_DB_WRITER_LOCK' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "job-init-local-ssd-aks.yaml.template \\\n"
+        "    && grep -q 'DISK_PREFLIGHT required_bytes=' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "scripts/init-db-shard-aks.sh \\\n"
+        "    && grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' "
+        "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/"
+        "job-init-ssd-shard-aks.yaml.template \\\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=venv_identity_check,
+        legacy=venv_identity_check + venv_hardening_check_legacy,
+        desired=venv_identity_check + venv_hardening_check,
+        marker=venv_hardening_check.strip(),
+    )
     _validate_dockerfile_runtime_policy(path)
 
 
@@ -456,38 +589,38 @@ def patch_app(root: Path) -> None:
             path,
             "    return None\n\n\ndef _ensure_elb_scripts_configmap() -> None:\n",
             (
-            "    return None\n\n\n"
-            "def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:\n"
-            "    if not stdout:\n"
-            '        return ""\n'
-            "    patterns = (\n"
-            '        rf"/results/(?:\\d{{4}}/\\d{{2}}/\\d{{2}}/)?{re.escape(job_id)}/(?P<elb_job_id>job-[0-9a-fA-F]{{32}})/metadata/",\n'
-            '        r"\\b(?P<elb_job_id>job-[0-9a-fA-F]{32})\\b",\n'
-            "    )\n"
-            "    for pattern in patterns:\n"
-            "        match = re.search(pattern, stdout)\n"
-            "        if match:\n"
-            '            return match.group("elb_job_id").lower()\n'
-            '    return ""\n'
-            "\n\n"
-            "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n"
-            '    job_id = str(job_info.get("job_id") or "")\n'
-            '    current = str(job_info.get("elb_job_id") or "")\n'
-            '    canonical_current = re.fullmatch(r"job-[0-9a-f]{32}", current, re.IGNORECASE)\n'
-            "    if canonical_current:\n"
-            "        return canonical_current.group(0).lower()\n"
-            "    discovered = _discover_elb_job_id_from_submit_output(\n"
-            "        job_id,\n"
-            '        "\\n".join(\n'
-            '            str(job_info.get(key) or "")\n'
-            '            for key in ("stdout_tail", "stderr_tail")\n'
-            "        ),\n"
-            "    )\n"
-            "    if discovered:\n"
-            "        _update_job(job_id, elb_job_id=discovered)\n"
-            "        return discovered\n"
-            "    return job_id\n"
-            "\n\n"
+                "    return None\n\n\n"
+                "def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:\n"
+                "    if not stdout:\n"
+                '        return ""\n'
+                "    patterns = (\n"
+                '        rf"/results/(?:\\d{{4}}/\\d{{2}}/\\d{{2}}/)?{re.escape(job_id)}/(?P<elb_job_id>job-[0-9a-fA-F]{{32}})/metadata/",\n'
+                '        r"\\b(?P<elb_job_id>job-[0-9a-fA-F]{32})\\b",\n'
+                "    )\n"
+                "    for pattern in patterns:\n"
+                "        match = re.search(pattern, stdout)\n"
+                "        if match:\n"
+                '            return match.group("elb_job_id").lower()\n'
+                '    return ""\n'
+                "\n\n"
+                "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n"
+                '    job_id = str(job_info.get("job_id") or "")\n'
+                '    current = str(job_info.get("elb_job_id") or "")\n'
+                '    canonical_current = re.fullmatch(r"job-[0-9a-f]{32}", current, re.IGNORECASE)\n'
+                "    if canonical_current:\n"
+                "        return canonical_current.group(0).lower()\n"
+                "    discovered = _discover_elb_job_id_from_submit_output(\n"
+                "        job_id,\n"
+                '        "\\n".join(\n'
+                '            str(job_info.get(key) or "")\n'
+                '            for key in ("stdout_tail", "stderr_tail")\n'
+                "        ),\n"
+                "    )\n"
+                "    if discovered:\n"
+                "        _update_job(job_id, elb_job_id=discovered)\n"
+                "        return discovered\n"
+                "    return job_id\n"
+                "\n\n"
                 "def _ensure_elb_scripts_configmap() -> None:\n"
             ),
         )
@@ -751,27 +884,26 @@ def patch_app(root: Path) -> None:
         "            _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)\n"
         "            if _eta_out:\n"
         '                payload["eta"] = _eta_out\n',
-    )    # Primary polling endpoint GET /v1/jobs/{id}/status (get_job_status) builds
+    )  # Primary polling endpoint GET /v1/jobs/{id}/status (get_job_status) builds
     # its own inline dict and does NOT route through _external_job_payload, so
     # the ETA hook above never reaches it. Inject the same gated projection here
     # so callers polling the canonical status_url see `eta` for active/queued
     # jobs. Terminal jobs are skipped (compute_eta returns None anyway).
     _replace_once(
         path,
-        '    return {\n'
+        "    return {\n"
         '        "job_id": job_id,\n'
         '        "status": job_info.get("status", "unknown"),\n',
-        '    _status_payload: dict[str, Any] = {\n'
+        "    _status_payload: dict[str, Any] = {\n"
         '        "job_id": job_id,\n'
         '        "status": job_info.get("status", "unknown"),\n',
     )
     _replace_once(
         path,
-        '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n'
-        "    }\n",
+        '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n    }\n',
         '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n'
         "    }\n"
-        "    if _eta is not None and _eta.enabled() and job_info.get(\"status\") in {\"queued\", \"dispatching\", \"submitting\", \"running\"}:\n"
+        '    if _eta is not None and _eta.enabled() and job_info.get("status") in {"queued", "dispatching", "submitting", "running"}:\n'
         "        with _jobs_lock:\n"
         "            _eta_jobs = [dict(v) for v in _jobs.values()]\n"
         "        _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)\n"
@@ -781,6 +913,7 @@ def patch_app(root: Path) -> None:
     )
     _harden_openapi_runtime_id_consumers(path)
     _validate_openapi_runtime_policy(path)
+
 
 def main() -> int:
     if len(sys.argv) != 2:

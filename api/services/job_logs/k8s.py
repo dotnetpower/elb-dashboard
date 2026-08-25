@@ -28,7 +28,8 @@ _LINE_MAX_CHARS = 4_000
 _SAFE_K8S_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 _ELASTIC_BLAST_JOB_ID_RE = re.compile(r"^job-[0-9a-f]{32}$", re.IGNORECASE)
 _ELASTIC_BLAST_SHORT_SELECTOR_RE = re.compile(r"^job-[0-9a-f]{8}$", re.IGNORECASE)
-_INIT_SSD_FAILURE_RE = re.compile(r"\binit-ssd-([0-9a-f]{8})-[0-9]{1,3}\b", re.IGNORECASE)
+_INIT_SSD_FULL_FAILURE_RE = re.compile(r"\binit-ssd-(job-[0-9a-f]{32})-[0-9]{1,3}\b", re.IGNORECASE)
+_INIT_SSD_LEGACY_FAILURE_RE = re.compile(r"\binit-ssd-([0-9a-f]{8})-[0-9]{1,3}\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -56,16 +57,20 @@ def elastic_blast_suffix(value: str) -> str:
 
 
 def elastic_blast_selector_from_error(error_text: str) -> str:
-    """Return a short ``job-<8hex>`` selector from an init-ssd failure name.
+    """Return the runtime selector encoded in an init-SSD failure name.
 
     Submit-time shard initialization can fail before the sibling persists the
-    full ElasticBLAST runtime id. Its bounded error still names the failed Job
-    as ``init-ssd-<runtime-suffix>-<ordinal>``; the suffix is enough to match
-    the pod owner name and the full ``elb-job-id`` label suffix before TTL GC.
+    runtime id. New Jobs carry the complete canonical id in
+    ``init-ssd-job-<32hex>-<ordinal>``. The legacy 8-hex format remains accepted
+    for historical rows and for logs from an older terminal image.
     """
 
-    match = _INIT_SSD_FAILURE_RE.search(str(error_text or ""))
-    return f"job-{match.group(1).lower()}" if match else ""
+    text = str(error_text or "")
+    full_match = _INIT_SSD_FULL_FAILURE_RE.search(text)
+    if full_match:
+        return full_match.group(1).lower()
+    legacy_match = _INIT_SSD_LEGACY_FAILURE_RE.search(text)
+    return f"job-{legacy_match.group(1).lower()}" if legacy_match else ""
 
 
 def resolve_elastic_blast_job_id(
@@ -189,8 +194,7 @@ def _pod_matches_job(pod: dict[str, Any], job_id: str, elastic_job_id: str) -> b
 
     if is_short_selector:
         return any(
-            _is_init_ssd_name_for_suffix(name, elastic_suffix)
-            for name in {pod_name, *owner_names}
+            _is_init_ssd_name_for_suffix(name, elastic_suffix) for name in {pod_name, *owner_names}
         )
 
     labelled_id = str(labels.get("elb-job-id") or "")

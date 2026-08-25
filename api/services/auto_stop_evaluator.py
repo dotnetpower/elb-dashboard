@@ -22,7 +22,6 @@ Validation: `uv run pytest -q api/tests/test_auto_stop_evaluator.py`.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
@@ -32,6 +31,8 @@ from api.services.auto_stop import (
     is_extended,
     is_in_cooldown,
 )
+from api.services.env import env_int
+from api.services.storage.prepare_db_metadata import _PREPARE_DB_STALE_SECONDS
 
 ACTIVE_JOB_STATUSES = frozenset({"queued", "pending", "running", "reducing"})
 """Job statuses that count as "cluster in use" for the auto-stop gate.
@@ -72,12 +73,14 @@ def _row_type_blocks_autostop(row_type: str) -> bool:
 
 # A worker-lost row must eventually stop pinning the cluster, but the timeout
 # must outlive that task family's legitimate execution envelope. Warmup and
-# ordinary work use 2 h; prepare-db/shard/oracle use 6 h because AKS prepare-db
-# has a per-task hard limit of roughly 4 h 45 m. Rows with no parseable
-# timestamp still fail safe and count as active.
-_ACTIVE_ROW_STALE_SECONDS = int(os.environ.get("AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", "7200"))
-_LONG_DBOPS_ACTIVE_ROW_STALE_SECONDS = int(
-    os.environ.get("STALE_DBOPS_PREPARE_DB_SECONDS", "21600")
+# ordinary work use 2 h; prepare-db/shard/oracle use at least the shared
+# prepare metadata recovery window because server-side copy polling can run for
+# 24 h. Rows with no parseable timestamp still fail safe and count as active.
+_ACTIVE_ROW_STALE_SECONDS = env_int("AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", 7200, minimum=300)
+_LONG_DBOPS_ACTIVE_ROW_STALE_SECONDS = env_int(
+    "STALE_DBOPS_PREPARE_DB_SECONDS",
+    _PREPARE_DB_STALE_SECONDS,
+    minimum=_PREPARE_DB_STALE_SECONDS,
 )
 
 
@@ -103,8 +106,7 @@ class StateRepoProtocol(Protocol):
         cluster_name: str = "",
         limit: int = 50,
         include_payload: bool = True,
-    ) -> list[Any]:
-        ...
+    ) -> list[Any]: ...
 
 
 @dataclass
@@ -207,8 +209,8 @@ def _scan_cluster_jobs(
     active = 0
     latest: datetime | None = None
     for row in rows:
-        row_type = (getattr(row, "type", "") or "")
-        row_status = (getattr(row, "status", "") or "")
+        row_type = getattr(row, "type", "") or ""
+        row_status = getattr(row, "status", "") or ""
         row_latest: datetime | None = None
         for field in ("updated_at", "created_at"):
             raw = getattr(row, field, "") or ""
@@ -387,9 +389,7 @@ def evaluate_cluster(
                 verdict="keep",
                 reason="extended",
                 next_stop_at=_format_iso(extend_deadline),
-                seconds_until_stop=max(
-                    0, int((extend_deadline - current).total_seconds())
-                ),
+                seconds_until_stop=max(0, int((extend_deadline - current).total_seconds())),
                 cluster_power_state=power_state,
             )
         return IdleDecision(

@@ -9,6 +9,8 @@ Edit boundaries: Stubs the K8s probe + `_safe_send_task` + Storage
 Key entry points: `test_mode_server_side_default_path_unchanged`,
     `test_mode_aks_unavailable_returns_409`,
     `test_mode_aks_dispatches_celery_task`,
+    `test_mode_aks_rejects_live_sharding_marker`,
+    `test_mode_aks_metadata_start_failure_returns_502`,
     `test_mode_auto_falls_back_when_no_aks_coords`.
 Risky contracts: The 409 detail object's `code: aks_unavailable` is the
     SPA hook for showing the actionable "no AKS / not idle" hint —
@@ -348,6 +350,7 @@ def test_mode_aks_dispatches_celery_task(
     assert kwargs["aks_resource_group"] == "rg-elb"
     assert kwargs["cluster_name"] == "aks-elb"
     assert kwargs["source_version"] == snapshot
+    assert kwargs["prepare_operation_id"] == container._meta["prepare_operation_id"]
     assert kwargs["file_sizes"] == {
         f"{snapshot}/core_nt.000.nhr": 1024,
         f"{snapshot}/core_nt.000.nin": 4096,
@@ -395,6 +398,93 @@ def test_mode_aks_concurrent_returns_409(
         assert "progress" in resp.json()["detail"].lower()
     finally:
         lock.release()
+
+
+def test_mode_aks_rejects_live_sharding_marker(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = "2026-05-21-01-05-02"
+    container = _FakeContainer()
+    container._meta.update(
+        {
+            "sharding_in_progress": True,
+            "sharding_started_at": "2999-01-01T00:00:00+00:00",
+        }
+    )
+    _baseline_patches(
+        monkeypatch,
+        snapshot=snapshot,
+        keys_with_sizes=[(f"{snapshot}/core_nt.000.nhr", 1024)],
+        container=container,
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_kw: ["aks-node-1"],
+        raising=True,
+    )
+    calls, fake_send = make_send_task_recorder("must-not-dispatch")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
+
+    response = client.post(
+        "/api/storage/prepare-db",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+            "db_name": "core_nt",
+            "mode": "aks",
+            "aks_resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "sharding" in response.json()["detail"]
+    assert calls == []
+
+
+def test_mode_aks_metadata_start_failure_returns_502(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = "2026-05-21-01-05-02"
+    container = _FakeContainer()
+    _baseline_patches(
+        monkeypatch,
+        snapshot=snapshot,
+        keys_with_sizes=[(f"{snapshot}/core_nt.000.nhr", 1024)],
+        container=container,
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_kw: ["aks-node-1"],
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.prepare_db_aks_dispatch._update_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ETag retries exhausted")),
+        raising=True,
+    )
+    calls, fake_send = make_send_task_recorder("must-not-dispatch")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
+
+    response = client.post(
+        "/api/storage/prepare-db",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+            "db_name": "core_nt",
+            "mode": "aks",
+            "aks_resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+
+    assert response.status_code == 502
+    assert "metadata start commit failed" in response.json()["detail"]
+    assert calls == []
 
 
 def test_mode_auto_falls_back_when_no_aks_coords(

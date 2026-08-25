@@ -26,9 +26,9 @@ Risky contracts:
     * Asynchronous ops are terminalised only when Celery reports a terminal
       task state (``SUCCESS`` → ``completed``, ``FAILURE`` / ``REVOKED`` →
       ``failed``) OR the row has been quiet longer than the per-type threshold
-      AND Celery has no live record. The threshold MUST exceed the task's own
-      hard time limit (``prepare_db_aks`` ≈ 4 h 45 m) so a genuinely-running
-      download is never aged out — see ``_PREPARE_DB_STALE_SECONDS``.
+    AND Celery has no live record. The prepare/shard/oracle threshold MUST
+    never precede metadata recovery; server-side copy polling can legitimately
+    run for 24 hours — see ``_PREPARE_DB_STALE_SECONDS``.
     * Idempotent: a row already terminal is skipped; running twice is a no-op.
 Validation: ``uv run pytest -q api/tests/test_stale_dbops_reconcile.py``.
 """
@@ -42,6 +42,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from api.services.env import env_int as _env_int
+from api.services.storage.prepare_db_metadata import (
+    _PREPARE_DB_STALE_SECONDS as _METADATA_PREPARE_DB_STALE_SECONDS,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -62,10 +65,15 @@ _CELERY_TERMINAL_FAILED = frozenset({"FAILURE", "REVOKED"})
 _WARMUP_STALE_SECONDS = _env_int("STALE_DBOPS_WARMUP_SECONDS", 7200)
 
 # Quiet threshold for prepare-db / shard / oracle rows. A real ``nt`` /
-# ``core_nt`` download legitimately runs for hours; ``prepare_db_aks`` carries a
-# task time limit of roughly ``_JOB_POLL_MAX_SECONDS + 30 min`` ≈ 4 h 45 m. The
-# threshold must comfortably exceed that so a live download is never aged out.
-_PREPARE_DB_STALE_SECONDS = _env_int("STALE_DBOPS_PREPARE_DB_SECONDS", 21600)
+# ``core_nt`` server-side copy polling can legitimately run for 24 hours. Keep
+# this audit-row threshold at least as large as the metadata recovery window so
+# observability never terminalises an operation that still owns its marker.
+_PREPARE_DB_STALE_SECONDS = _env_int(
+    "STALE_DBOPS_PREPARE_DB_SECONDS",
+    _METADATA_PREPARE_DB_STALE_SECONDS,
+    minimum=_METADATA_PREPARE_DB_STALE_SECONDS,
+)
+
 
 # Per-type reconciliation policy.
 #   synchronous=True  → the op finished inside its request; an active row is a
@@ -83,9 +91,7 @@ class _TypePolicy:
 _TYPE_POLICY: dict[str, _TypePolicy] = {
     "warmup": _TypePolicy(synchronous=False, stale_seconds=_WARMUP_STALE_SECONDS),
     "prepare_db": _TypePolicy(synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS),
-    "prepare_db_aks": _TypePolicy(
-        synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS
-    ),
+    "prepare_db_aks": _TypePolicy(synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS),
     "shard": _TypePolicy(synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS),
     "oracle": _TypePolicy(synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS),
     # Synchronous-by-design ops: born terminal at the source now, but mop up any
@@ -166,9 +172,7 @@ def classify_dbops_row(
 
     # Asynchronous ops: Celery is the authoritative terminal signal.
     if celery_state == _CELERY_SUCCESS:
-        return DbopsDecision(
-            "terminalize", "completed", "completed", "", "celery-success"
-        )
+        return DbopsDecision("terminalize", "completed", "completed", "", "celery-success")
     if celery_state in _CELERY_TERMINAL_FAILED:
         return DbopsDecision(
             "terminalize", "failed", "failed", "task_failed", "celery-terminal-failed"
@@ -214,9 +218,9 @@ def reconcile_dbops_decision(repo: Any, row: Any, *, celery_app: Any, now: datet
             try:
                 from celery.result import AsyncResult
 
-                celery_state = str(
-                    AsyncResult(task_id, app=celery_app).status or ""
-                ).upper() or None
+                celery_state = (
+                    str(AsyncResult(task_id, app=celery_app).status or "").upper() or None
+                )
             except Exception as exc:
                 LOGGER.debug(
                     "reconcile_dbops: AsyncResult failed job_id=%s: %s",
@@ -306,16 +310,12 @@ def reconcile_dbops(*, limit: int = 200, enabled: bool | None = None) -> dict[st
         try:
             rows = repo.list_active(job_type=row_type, limit=limit)
         except Exception as exc:
-            LOGGER.warning(
-                "reconcile_dbops: list_active failed type=%s: %s", row_type, exc
-            )
+            LOGGER.warning("reconcile_dbops: list_active failed type=%s: %s", row_type, exc)
             summary["errors"] += 1
             continue
         for row in rows:
             summary["scanned"] += 1
-            reason = reconcile_dbops_decision(
-                repo, row, celery_app=celery_app, now=now
-            )
+            reason = reconcile_dbops_decision(repo, row, celery_app=celery_app, now=now)
             if reason == "error":
                 summary["errors"] += 1
             elif reason in {"celery-success", "synchronous-op-completed"}:

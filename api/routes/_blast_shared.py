@@ -12,7 +12,6 @@ Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 from __future__ import annotations
 
 import logging
-import threading as _threading
 from typing import Any
 
 from fastapi import Body, Depends, HTTPException, Path, Query
@@ -123,20 +122,6 @@ from api.services.blast.submit_payload import (
 
 LOGGER = logging.getLogger(__name__)
 
-# Per-(account, db) lock registry for /api/blast/databases/{db}/shard.
-# A shard daemon holds the lock for the lifetime of its background work
-# so a re-clicked chip returns 409 instead of starting a second writer.
-# The guard mutex protects insertions into the registry itself; the
-# registry never shrinks (one entry per ever-touched DB) which is fine
-# at the scale we operate at (low-tens of DBs per deployment).
-_SHARD_LOCK_REGISTRY: dict[str, _threading.Lock] = {}
-_SHARD_LOCK_REGISTRY_GUARD = _threading.Lock()
-# Older than this and we treat a leftover sharding_in_progress=true
-# marker as a crashed previous daemon (and allow re-trigger). Picked to
-# be much larger than the worst-case wall time for ensure_shard_sets
-# against the largest known DB while still small enough that a real
-# crash recovers quickly.
-_SHARD_STALE_SECONDS = 30 * 60
 _WARMUP_RELEASE_BODY = Body(...)
 _WARMUP_RELEASE_CALLER = Depends(require_caller)
 _TAXONOMY_SEARCH_QUERY = Query(..., min_length=1, max_length=120)

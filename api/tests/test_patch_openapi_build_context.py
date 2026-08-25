@@ -51,7 +51,15 @@ def test_patch_dockerfile_asserts_ttl_in_all_runtime_copies(tmp_path: Path) -> N
     assert "ARG ELB_REF=744d79b" in text
     assert text.count("grep -q 'ttlSecondsAfterFinished:'") == 3
     assert text.count("for template in job-init-ssd-shard-aks.yaml.template") == 3
-    assert text.count("elb-job-id: \"${BLAST_ELB_JOB_ID}\"") == 3
+    assert text.count('elb-job-id: "${BLAST_ELB_JOB_ID}"') == 3
+    assert text.count("grep -q 'def _wait_for_elb_init_jobs('") == 3
+    assert text.count("grep -q 'ELB DB reader lock'") == 3
+    assert text.count("grep -q 'name: ELB_DB_READER_LOCK'") == 3
+    assert text.count("grep -q 'DISK_PREFLIGHT required_bytes='") == 3
+    assert text.count("grep -q 'ELB DB writer lock'") == 3
+    assert text.count("grep -q 'name: ELB_DB_WRITER_LOCK'") == 3
+    assert text.count("for template in blast-batch-job-local-ssd-aks.yaml.template") == 3
+    assert text.count("grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}'") == 3
     source_templates = "/tmp/elb-src/src/elastic_blast/templates/"  # noqa: S108
     assert source_templates in text
     assert "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/" in text
@@ -92,7 +100,15 @@ def test_patch_dockerfile_upgrades_legacy_patched_context(tmp_path: Path) -> Non
     assert text.count("cp -a /tmp/elb-src/src/elastic_blast/templates/.") == 2
     assert text.count("grep -q 'ttlSecondsAfterFinished:'") == 3
     assert text.count("for template in job-init-ssd-shard-aks.yaml.template") == 3
-    assert text.count("elb-job-id: \"${BLAST_ELB_JOB_ID}\"") == 3
+    assert text.count('elb-job-id: "${BLAST_ELB_JOB_ID}"') == 3
+    assert text.count("grep -q 'def _wait_for_elb_init_jobs('") == 3
+    assert text.count("grep -q 'ELB DB reader lock'") == 3
+    assert text.count("grep -q 'name: ELB_DB_READER_LOCK'") == 3
+    assert text.count("grep -q 'DISK_PREFLIGHT required_bytes='") == 3
+    assert text.count("grep -q 'ELB DB writer lock'") == 3
+    assert text.count("grep -q 'name: ELB_DB_WRITER_LOCK'") == 3
+    assert text.count("for template in blast-batch-job-local-ssd-aks.yaml.template") == 3
+    assert text.count("grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}'") == 3
 
 
 def test_patch_app_adds_runtime_id_to_terminal_webhook(tmp_path: Path) -> None:
@@ -220,15 +236,9 @@ def test_patch_app_restricts_runtime_ids_to_canonical_values(tmp_path: Path) -> 
         canonical_lower
     )
     assert discover("request-1", "/results/request-1/job-not-canonical/metadata/") == ""
-    assert effective({"job_id": "request-1", "elb_job_id": canonical_upper}) == (
-        canonical_lower
-    )
-    assert effective({"job_id": "request-1", "elb_job_id": "job-not-canonical"}) == (
-        "request-1"
-    )
-    assert effective({"job_id": "request-1", "stdout_tail": canonical_upper}) == (
-        canonical_lower
-    )
+    assert effective({"job_id": "request-1", "elb_job_id": canonical_upper}) == (canonical_lower)
+    assert effective({"job_id": "request-1", "elb_job_id": "job-not-canonical"}) == ("request-1")
+    assert effective({"job_id": "request-1", "stdout_tail": canonical_upper}) == (canonical_lower)
     assert updates == [("request-1", canonical_lower)]
 
 

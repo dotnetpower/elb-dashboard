@@ -24,14 +24,15 @@ Edit boundaries: No HTTP shaping and no Celery scheduling here — routes/tasks
     primitives (``list_db_volumes``, ``ensure_shard_sets``).
 Key entry points: ``read_authoritative_volume_count``, ``find_ghost_volumes``,
     ``prune_ghost_volumes``, ``delete_shard_layouts``,
-    ``shard_layout_needs_rebuild``, ``reconcile_db_consistency``.
+    ``shard_layout_needs_rebuild``, ``reconcile_db_consistency``,
+    ``reconcile_all_db_consistency``.
 Risky contracts: DELETES Storage blobs. Guarded so it can NEVER delete when the
     njs authority is missing / unparseable / <= 0, and ABORTS (deletes nothing)
     when ghosts would exceed ``_MAX_GHOST_FRACTION`` of all volumes (a defensive
     stop against an NCBI latest-dir glitch that under-reports the count). It does
-    NOT take the per-DB prepare-db lock itself — callers that can race prepare-db
-    (the beat reconciler) MUST hold ``prepare_db_lock`` around the call. All work
-    is best-effort and returns a structured summary; it never raises.
+    NOT take the per-DB prepare-db lock itself. The all-DB orchestrator holds the
+    process lock and an ETag-owned sharding marker across destructive work, and
+    invalidates published shard fields if regeneration is partial.
 Validation: ``uv run pytest -q api/tests/test_db_consistency.py``.
 """
 
@@ -40,6 +41,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from azure.core.credentials import TokenCredential
@@ -356,10 +359,14 @@ def reconcile_db_consistency(
         try:
             deleted = delete_shard_layouts(credential, account_name, db_name, container=container)
             shard = ensure_shard_sets(credential, account_name, db_name, container=container)
+            from api.services.db.sharding import require_complete_shard_summary
+
+            require_complete_shard_summary(shard)
             summary["shard_layouts_deleted"] = deleted
             summary["shard"] = {
                 "total_volumes": shard.get("total_volumes"),
                 "shard_sets": shard.get("shard_sets"),
+                "layout_schema": shard.get("layout_schema"),
                 "errors": shard.get("errors"),
             }
             summary["resharded"] = True
@@ -370,7 +377,9 @@ def reconcile_db_consistency(
     else:
         summary["resharded"] = False
 
-    if prune.get("status") == "skipped":
+    if (pruned or stale_layout or force_reshard) and not summary.get("resharded"):
+        summary["status"] = "partial"
+    elif prune.get("status") == "skipped":
         summary["status"] = "skipped"
     elif pruned:
         summary["status"] = "healed"
@@ -407,6 +416,12 @@ def reconcile_all_db_consistency(
         _resolve_workload_storage_account,
     )
     from api.services.storage.prepare_db_locks import prepare_db_lock
+    from api.services.storage.prepare_db_metadata import (
+        DatabaseOperationInProgressError,
+        invalidate_shard_publication,
+        is_stale_sharding_marker,
+        update_metadata,
+    )
 
     account = storage_account or _resolve_workload_storage_account()
     if not account:
@@ -427,14 +442,122 @@ def reconcile_all_db_consistency(
         lock = prepare_db_lock(account, db_name)
         if not lock.acquire(blocking=False):
             continue  # prepare-db (or another reconcile) is active — skip this tick
+        operation_id = uuid.uuid4().hex
+        started_at = datetime.now(UTC).isoformat()
+        marker_written = False
+        reconcile_started = False
         try:
+
+            def _claim(
+                meta: dict[str, Any],
+                *,
+                _db_name: str = db_name,
+                _started_at: str = started_at,
+                _operation_id: str = operation_id,
+            ) -> dict[str, Any]:
+                if meta.get("update_in_progress"):
+                    raise DatabaseOperationInProgressError("prepare-db is in progress")
+                if meta.get("sharding_in_progress") and not is_stale_sharding_marker(meta):
+                    raise DatabaseOperationInProgressError("sharding is already in progress")
+                meta["db_name"] = _db_name
+                meta["sharding_in_progress"] = True
+                meta["sharding_started_at"] = _started_at
+                meta["sharding_operation_id"] = _operation_id
+                meta.pop("sharding_error", None)
+                return meta
+
+            started = update_metadata(cc, db_name, account, _claim)
+            marker_written = True
+            source_version = str(started.get("source_version") or "")
+            reconcile_started = True
             recon = reconcile_db_consistency(credential, account, db_name, container=container)
+            status = str(recon.get("status") or "")
+            complete_sets: tuple[int, ...] = ()
+            layout_schema = 0
+            if status in {"healed", "reshard_only"}:
+                from api.services.db.sharding import require_complete_shard_summary
+
+                shard = recon.get("shard") or {}
+                complete_sets = tuple(require_complete_shard_summary(shard))
+                layout_schema = int(shard["layout_schema"])
+            shard_error = str(recon.get("shard_error") or "unknown")
+
+            def _publish(
+                meta: dict[str, Any],
+                *,
+                _operation_id: str = operation_id,
+                _source_version: str = source_version,
+                _status: str = status,
+                _complete_sets: tuple[int, ...] = complete_sets,
+                _layout_schema: int = layout_schema,
+                _shard_error: str = shard_error,
+            ) -> dict[str, Any]:
+                if meta.get("sharding_operation_id") != _operation_id:
+                    raise RuntimeError("consistency marker ownership changed")
+                if meta.get("update_in_progress"):
+                    raise RuntimeError("prepare-db started during consistency reconcile")
+                if str(meta.get("source_version") or "") != _source_version:
+                    raise RuntimeError(
+                        "database source version changed during consistency reconcile"
+                    )
+                meta["sharding_in_progress"] = False
+                meta.pop("sharding_operation_id", None)
+                if _status in {"healed", "reshard_only"}:
+                    meta["sharded"] = True
+                    meta["shard_sets"] = list(_complete_sets)
+                    meta["shard_layout_schema"] = _layout_schema
+                    meta["shard_source_version"] = _source_version or None
+                    meta["sharded_at"] = datetime.now(UTC).isoformat()
+                    meta.pop("sharding_error", None)
+                elif _status == "partial":
+                    invalidate_shard_publication(
+                        meta,
+                        error=(
+                            "consistency reconcile produced an incomplete shard layout "
+                            f"({_shard_error})"
+                        ),
+                    )
+                return meta
+
+            update_metadata(cc, db_name, account, _publish)
+        except DatabaseOperationInProgressError:
+            continue
         except Exception as exc:
             LOGGER.warning(
                 "db-consistency reconcile-all failed db=%s: %s",
                 db_name,
                 type(exc).__name__,
             )
+            if marker_written:
+                failure_type = type(exc).__name__
+
+                def _mark_failed(
+                    meta: dict[str, Any],
+                    *,
+                    _operation_id: str = operation_id,
+                    _reconcile_started: bool = reconcile_started,
+                    _failure_type: str = failure_type,
+                ) -> dict[str, Any]:
+                    if meta.get("sharding_operation_id") != _operation_id:
+                        return meta
+                    meta["sharding_in_progress"] = False
+                    meta.pop("sharding_operation_id", None)
+                    if _reconcile_started:
+                        return invalidate_shard_publication(
+                            meta,
+                            error=(f"consistency reconcile failed: {_failure_type}"),
+                        )
+                    meta["sharding_error"] = f"consistency reconcile failed: {_failure_type}"
+                    return meta
+
+                try:
+                    update_metadata(cc, db_name, account, _mark_failed)
+                except Exception as marker_exc:
+                    LOGGER.warning(
+                        "db-consistency failure marker write failed db=%s: %s",
+                        db_name,
+                        type(marker_exc).__name__,
+                    )
             continue
         finally:
             lock.release()

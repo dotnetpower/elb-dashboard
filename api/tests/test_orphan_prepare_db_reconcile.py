@@ -6,8 +6,8 @@ Responsibility: Cover the pure ``classify_prepare_db_entry`` decision branches a
     Job lookup.
 Edit boundaries: Test module only. No production code.
 Key entry points: pytest test functions.
-Risky contracts: The race test asserts a fresh dispatch (changed ``update_started_at``)
-    is NOT clobbered — keep it green when touching the reset mutator.
+Risky contracts: The race test asserts a fresh dispatch (changed owner token)
+    is NOT clobbered even when timestamps match.
 Validation: ``uv run pytest -q api/tests/test_orphan_prepare_db_reconcile.py``.
 """
 
@@ -62,18 +62,14 @@ def test_classify_missing_job_resets() -> None:
 
 def test_classify_failed_job_resets() -> None:
     job = {"missing": False, "conditions": [{"type": "Failed", "status": "True"}]}
-    action, reason = classify_prepare_db_entry(
-        _candidate_meta(), job, now=NOW, stale_seconds=STALE
-    )
+    action, reason = classify_prepare_db_entry(_candidate_meta(), job, now=NOW, stale_seconds=STALE)
     assert action == "reset"
     assert "failed" in reason
 
 
 def test_classify_running_job_skips() -> None:
     job = {"missing": False, "active": 3, "succeeded": 0, "completions": 10, "conditions": []}
-    action, _ = classify_prepare_db_entry(
-        _candidate_meta(), job, now=NOW, stale_seconds=STALE
-    )
+    action, _ = classify_prepare_db_entry(_candidate_meta(), job, now=NOW, stale_seconds=STALE)
     assert action == "skip-running"
 
 
@@ -85,16 +81,12 @@ def test_classify_complete_job_skips() -> None:
         "completions": 10,
         "conditions": [{"type": "Complete", "status": "True"}],
     }
-    action, _ = classify_prepare_db_entry(
-        _candidate_meta(), job, now=NOW, stale_seconds=STALE
-    )
+    action, _ = classify_prepare_db_entry(_candidate_meta(), job, now=NOW, stale_seconds=STALE)
     assert action == "skip-running"
 
 
 def test_classify_job_lookup_unavailable_skips() -> None:
-    action, _ = classify_prepare_db_entry(
-        _candidate_meta(), None, now=NOW, stale_seconds=STALE
-    )
+    action, _ = classify_prepare_db_entry(_candidate_meta(), None, now=NOW, stale_seconds=STALE)
     assert action == "skip-error"
 
 
@@ -125,17 +117,13 @@ def test_classify_no_ref_unparseable_started_resets() -> None:
 def test_classify_terminal_phase_skips() -> None:
     for phase in ("completed", "partial", "failed", "cancelled"):
         meta = _candidate_meta(copy_status={"phase": phase})
-        action, _ = classify_prepare_db_entry(
-            meta, {"missing": True}, now=NOW, stale_seconds=STALE
-        )
+        action, _ = classify_prepare_db_entry(meta, {"missing": True}, now=NOW, stale_seconds=STALE)
         assert action == "skip-terminal", phase
 
 
 def test_classify_not_in_progress_skips() -> None:
     meta = _candidate_meta(update_in_progress=False)
-    action, _ = classify_prepare_db_entry(
-        meta, {"missing": True}, now=NOW, stale_seconds=STALE
-    )
+    action, _ = classify_prepare_db_entry(meta, {"missing": True}, now=NOW, stale_seconds=STALE)
     assert action == "skip-terminal"
 
 
@@ -247,7 +235,20 @@ def test_reconcile_no_storage_account(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_reconcile_missing_job_resets_to_partial() -> None:
     container = _FakeContainer()
-    container.set_metadata("nt", _candidate_meta())
+    candidate = _candidate_meta()
+    candidate["prepare_operation_id"] = "orphan-owner"
+    candidate["cancel_operation_id"] = "orphan-cancel"
+    candidate["cancel_started_at"] = NOW.isoformat()
+    candidate.update(
+        {
+            "sharded": True,
+            "shard_sets": [1, 2],
+            "shard_layout_schema": 1,
+            "shard_source_version": "old",
+            "sharded_at": "2026-05-20T00:00:00+00:00",
+        }
+    )
+    container.set_metadata("nt", candidate)
     container.add_data_blob("nt/file1", 100)
     container.add_data_blob("nt/file2", 200)
 
@@ -263,11 +264,19 @@ def test_reconcile_missing_job_resets_to_partial() -> None:
     assert out["reset"] == ["nt"]
     meta = container.metadata("nt")
     assert meta["update_in_progress"] is False
+    assert "prepare_operation_id" not in meta
+    assert "cancel_operation_id" not in meta
+    assert "cancel_started_at" not in meta
     assert meta["copy_status"]["phase"] == "partial"
     assert meta["copy_status"]["success"] == 2
     assert meta["copy_status"]["total_files"] == 4874
     assert "aks_job_ref" not in meta
     assert "reconciler" in meta["update_error"]
+    assert meta["sharded"] is False
+    assert meta["shard_sets"] == []
+    assert "shard_layout_schema" not in meta
+    assert meta["shard_source_version"] is None
+    assert "sharded_at" not in meta
 
 
 def test_reconcile_running_job_leaves_row_untouched() -> None:
@@ -330,12 +339,11 @@ def test_reconcile_race_with_fresh_dispatch_is_skipped() -> None:
         def on_upload(self, name: str, etag: str | None) -> None:
             if name == "nt-metadata.json" and not self._raced:
                 self._raced = True
-                # Simulate a brand-new dispatch landing: new started_at + new
-                # job ref + bumped ETag so the If-Match upload 412s and the
-                # retry re-reads this fresh row.
-                fresh = _candidate_meta(
-                    update_started_at=(NOW + timedelta(minutes=1)).isoformat(),
-                )
+                # Simulate a brand-new dispatch with the same timestamp but a
+                # new owner + bumped ETag. Timestamp-only recovery would
+                # clobber this row on retry.
+                fresh = _candidate_meta()
+                fresh["prepare_operation_id"] = "new-owner"
                 fresh["aks_job_ref"]["job_name"] = "prepare-db-nt-NEWDISPATCH"
                 self.store[name] = (
                     json.dumps(fresh).encode("utf-8"),
@@ -343,7 +351,9 @@ def test_reconcile_race_with_fresh_dispatch_is_skipped() -> None:
                 )
 
     container = _RaceContainer()
-    container.set_metadata("nt", _candidate_meta())
+    candidate = _candidate_meta()
+    candidate["prepare_operation_id"] = "old-owner"
+    container.set_metadata("nt", candidate)
 
     out = reconcile_orphaned_prepare_db(
         credential=None,
@@ -359,4 +369,5 @@ def test_reconcile_race_with_fresh_dispatch_is_skipped() -> None:
     # The fresh dispatch's state survived untouched.
     meta = container.metadata("nt")
     assert meta["update_in_progress"] is True
+    assert meta["prepare_operation_id"] == "new-owner"
     assert meta["aks_job_ref"]["job_name"] == "prepare-db-nt-NEWDISPATCH"

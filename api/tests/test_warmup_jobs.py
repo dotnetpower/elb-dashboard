@@ -14,6 +14,8 @@ Validation: `uv run pytest -q api/tests/test_warmup_jobs.py`.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from api.services.warmup.jobs import (
     DEFAULT_CONTAINER_DB_PATH,
@@ -69,15 +71,8 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         assert host_path == "/workspace/blast"
         assert container["volumeMounts"][0]["mountPath"] == DEFAULT_CONTAINER_DB_PATH
         assert "source /tmp/shard_volpaths.txt" not in container["args"][0]
-        assert "CLEANUP partial downloads" in container["args"][0]
-        assert "CACHE_INCOMPLETE missing nucleotide volume files" in container["args"][0]
-        assert "CACHE_STALE missing source-version marker" in container["args"][0]
-        assert "TAXDB_SKIP taxdb files not present in DB prefix" in container["args"][0]
-        assert "valid_nsq_count=" in container["args"][0]
-        # A cache whose volumes exist but disagree with the alias/LMDB metadata
-        # ("Input db vol does not match lmdb vol") must be re-downloaded, not
-        # skipped: the blastdbcmd integrity probe gates the skip decision.
-        assert "CACHE_CORRUPT blastdbcmd integrity probe failed" in container["args"][0]
+        assert "/scripts/init-db-shard-aks.sh" in container["args"][0]
+        assert "STAGE_LOCK_ACQUIRED" in container["args"][0]
         assert 'blastdbcmd -db "$ELB_DB" -info' in container["args"][0]
         assert "staging helper did not commit completion marker" in container["args"][0]
         # The warmup pod intentionally does NOT call blast-vmtouch-aks.sh any
@@ -289,7 +284,7 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
     assert "init-db-shard-aks.sh" in manifest["data"]
     assert "blast-vmtouch-aks.sh" in manifest["data"]
     assert "azcopy login --identity" in manifest["data"]["init-db-shard-aks.sh"]
-    assert "--overwrite=ifSourceNewer" in manifest["data"]["init-db-shard-aks.sh"]
+    assert "--overwrite=true" in manifest["data"]["init-db-shard-aks.sh"]
     # The reusable script must not pin policy itself. The production task
     # injects bounded concurrency through the Job environment; direct builder
     # benchmarks can still omit it to exercise azcopy auto-tuning.
@@ -303,15 +298,17 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
     assert "taxdb.btd;taxdb.bti" in manifest["data"]["init-db-shard-aks.sh"]
     assert 'cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"' in manifest["data"]["init-db-shard-aks.sh"]
     assert "CLEANUP partial downloads" in manifest["data"]["init-db-shard-aks.sh"]
-    assert (
-        "CACHE_INCOMPLETE missing nucleotide volume files"
-        in manifest["data"]["init-db-shard-aks.sh"]
-    )
+    helper = manifest["data"]["init-db-shard-aks.sh"]
+    assert "CACHE_INCOMPLETE missing ${volume}.${payload_ext}" in helper
     assert (
         "TAXDB_SKIP taxdb files not present in DB prefix"
         in manifest["data"]["init-db-shard-aks.sh"]
     )
     assert "CACHE_STALE missing source-version marker" in manifest["data"]["init-db-shard-aks.sh"]
+    assert "CACHE_STALE shard manifest mismatch" in helper
+    assert "CACHE_STALE shard layout mismatch" in helper
+    assert "CACHE_STALE shard alias mismatch" in helper
+    assert 'cp /tmp/shard.nal "./${ELB_DB}.nal.tmp"' in helper
     assert (
         "CACHE_UNVERIFIED expected source version is unavailable"
         in manifest["data"]["init-db-shard-aks.sh"]
@@ -319,10 +316,30 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
     assert (
         "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}" in manifest["data"]["init-db-shard-aks.sh"]
     )
-    assert ".download-source-version" in manifest["data"]["init-db-shard-aks.sh"]
-    assert "valid_nsq_count=" in manifest["data"]["init-db-shard-aks.sh"]
-    assert "printf '%s' ok > .download-complete" in manifest["data"]["init-db-shard-aks.sh"]
+    assert 'CACHE_SOURCE_VERSION=".elb-cache.${ELB_DB}.source-version"' in helper
+    assert 'if [ "${ELB_DB_MOL_TYPE:-nucl}" = "prot" ]; then' in helper
+    assert 'for volume in "${VOLUMES[@]}"; do' in helper
+    assert "printf '%s' ok > \"${CACHE_COMPLETE}.tmp\"" in helper
     assert "exit 0" in manifest["data"]["init-db-shard-aks.sh"]
+    assert 'LAYOUT_URL="${SHARD_URL}${ELB_DB}.layout"' in helper
+    assert "LAYOUT_VERIFIED sha256=" in helper
+    assert "DISK_PREFLIGHT required_bytes=" in helper
+    assert "schema ${SHARD_LAYOUT_SCHEMA} requires shard layout metadata" in helper
+    assert "DB metadata lookup failed after retries; refusing unversioned shard staging" in helper
+    assert "DB source version changed after Job creation" in helper
+    cleanup = helper.split("# Shared taxonomy files", 1)[1].split(
+        'if [ "$LAYOUT_AVAILABLE" = "1" ]; then', 1
+    )[0]
+    assert "taxdb.btd" not in cleanup
+    assert "taxonomy4blast.sqlite3" not in cleanup
+    syntax = subprocess.run(
+        ["/bin/bash", "-n"],
+        input=helper,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert syntax.returncode == 0, syntax.stderr
     assert "vmtouch" in manifest["data"]["blast-vmtouch-aks.sh"]
 
 
@@ -917,7 +934,9 @@ def test_warmup_cache_contract_includes_taxonomy_filter_indexes() -> None:
     assert "${ORIG_DB}.nos" in INIT_DB_SHARD_AKS_SCRIPT
     assert "${ORIG_DB}.not" in INIT_DB_SHARD_AKS_SCRIPT
     assert "CACHE_INCOMPLETE missing taxonomy filter index" in INIT_DB_SHARD_AKS_SCRIPT
-    assert "CACHE_INCOMPLETE missing taxonomy filter index" in warmup_shell_command()
+    entrypoint = warmup_shell_command()
+    assert "/scripts/init-db-shard-aks.sh" in entrypoint
+    assert "CACHE_INCOMPLETE missing taxonomy filter index" not in entrypoint
 
 
 def test_warmup_staging_lock_is_bounded_and_reused_by_child_script() -> None:
@@ -927,11 +946,13 @@ def test_warmup_staging_lock_is_bounded_and_reused_by_child_script() -> None:
     )
 
     entrypoint = warmup_shell_command()
-    assert "STAGE_LOCK_WAIT_SECONDS=\"${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}\"" in entrypoint
+    assert 'STAGE_LOCK_WAIT_SECONDS="${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}"' in entrypoint
     assert 'flock -w "$STAGE_LOCK_WAIT_SECONDS" 9' in entrypoint
     assert '"$STAGE_LOCK_WAIT_SECONDS" -gt 5400' in entrypoint
     assert "waited_seconds=" in entrypoint
-    assert entrypoint.index("STAGE_LOCK_ACQUIRED") < entrypoint.index("CLEANUP partial downloads")
+    assert entrypoint.index("STAGE_LOCK_ACQUIRED") < entrypoint.index(
+        "/scripts/init-db-shard-aks.sh"
+    )
     assert 'STAGE_LOCK_FILE=".elb-stage.lock"' in entrypoint
     assert "export ELB_STAGE_LOCK_HELD=1" in entrypoint
     assert "STAGE_LOCK_REUSE file=.elb-stage.lock" in INIT_DB_SHARD_AKS_SCRIPT
@@ -939,9 +960,12 @@ def test_warmup_staging_lock_is_bounded_and_reused_by_child_script() -> None:
     assert "inherited stage lock descriptor is unavailable" in INIT_DB_SHARD_AKS_SCRIPT
     assert "/proc/$$/fd/9" not in INIT_DB_SHARD_AKS_SCRIPT
     assert '[[ "$ELB_DB" =~ ^(.+)_shard_([0-9]+)$ ]]' in entrypoint
-    assert '${ELB_DB%%_shard_*}' not in entrypoint
-    assert '${ELB_DB%%_shard_*}' not in INIT_DB_SHARD_AKS_SCRIPT
+    assert "${ELB_DB%%_shard_*}" not in entrypoint
+    assert "${ELB_DB%%_shard_*}" not in INIT_DB_SHARD_AKS_SCRIPT
     assert "exit 75" in entrypoint
+    assert INIT_DB_SHARD_AKS_SCRIPT.index("STAGE_LOCK_REUSE") < (
+        INIT_DB_SHARD_AKS_SCRIPT.index("CLEANUP partial downloads")
+    )
 
 
 def test_warmup_staging_commits_marker_after_post_download_integrity() -> None:
@@ -954,17 +978,28 @@ def test_warmup_staging_commits_marker_after_post_download_integrity() -> None:
     assert "downloaded taxonomy filter index is incomplete" in helper
     assert "downloaded DB failed blastdbcmd integrity probe" in helper
     assert helper.index("downloaded DB failed blastdbcmd integrity probe") < helper.index(
-        "mv .download-complete.tmp .download-complete"
+        'mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"'
     )
-    assert helper.index("mv .download-source-version.tmp .download-source-version") < helper.index(
-        "mv .download-complete.tmp .download-complete"
+    assert helper.index('mv "${CACHE_SOURCE_VERSION}.tmp" "$CACHE_SOURCE_VERSION"') < (
+        helper.index('mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"')
     )
     entrypoint = warmup_shell_command()
     assert "staging helper did not commit completion marker" in entrypoint
     assert "final blastdbcmd integrity probe failed" in entrypoint
-    assert entrypoint.index("CACHE_UNVERIFIED expected source version is unavailable") < (
-        entrypoint.index("DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}")
+    assert helper.index("CACHE_UNVERIFIED expected source version is unavailable") < (
+        helper.index("DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}")
     )
+    assert "STAGE_RESULT=$(cat /tmp/elb-stage-result)" in entrypoint
+    assert 'if [ "$STAGE_RESULT" = "downloaded" ]; then' in entrypoint
+    assert 'elif [ "$STAGE_RESULT" = "skipped" ]; then' in entrypoint
+    syntax = subprocess.run(
+        ["/bin/bash", "-n"],
+        input=entrypoint,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert syntax.returncode == 0, syntax.stderr
 
 
 def test_vmtouch_warm_log_maps_to_touching_memory_phase() -> None:

@@ -16,10 +16,11 @@ Risky contracts: Task name is referenced by the route's `_safe_send_task`
     final metadata shape MUST match the server-side path so SPA polling +
     test fixtures stay shape-stable. The HTTP route's `threading.Lock`
     does not propagate to this worker process — cross-process
-    serialisation is the metadata blob's `update_in_progress=true` flag
-    (written by the route before enqueue) and the
-    `_PREPARE_DB_STALE_SECONDS` stale-flag recovery window if the worker
-    crashes mid-task.
+    serialisation is the metadata blob's `update_in_progress=true` flag plus
+    `prepare_operation_id` owner token. Ownership is checked before and after
+    K8s submit and on every terminal metadata commit. Ambiguous submit failures
+    preserve owner + deterministic Job reference for bounded retry/adoption;
+    post-submit failures terminalise only after Job cleanup is confirmed.
 Validation: `uv run pytest -q api/tests/test_prepare_db_aks_task.py
     api/tests/test_prepare_db_aks_route.py`.
 """
@@ -52,6 +53,12 @@ from api.services.k8s.prepare_db_jobs import (
     plan_prepare_db_shards,
     prepare_db_job_name,
     submit_prepare_db_job,
+)
+from api.services.storage.prepare_db_metadata import (
+    _PREPARE_DB_STALE_SECONDS,
+    DatabaseOperationOwnershipError,
+    invalidate_shard_publication,
+    require_prepare_operation_owner,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -94,9 +101,7 @@ def get_credential() -> Any:
 # at the 30 s ceiling so the K8s API is not hammered. Small DBs no longer reach
 # this path at all (mode=auto routes them server-side), so this only tightens
 # completion detection for the medium AKS jobs that remain.
-_JOB_POLL_INTERVAL_SECONDS = float(
-    os.environ.get("PREPARE_DB_AKS_JOB_POLL_INTERVAL_SECONDS", "30")
-)
+_JOB_POLL_INTERVAL_SECONDS = float(os.environ.get("PREPARE_DB_AKS_JOB_POLL_INTERVAL_SECONDS", "30"))
 _JOB_POLL_INITIAL_SECONDS = max(
     1.0,
     min(
@@ -115,23 +120,19 @@ _JOB_POLL_MAX_SECONDS = int(
 # sitting above the poll ceiling plus a margin for the post-job
 # `_poll_copy_completion` reconcile sweep. Keep soft < hard.
 _TASK_SOFT_TIME_LIMIT = int(
-    os.environ.get(
-        "PREPARE_DB_AKS_TASK_SOFT_TIME_LIMIT", str(_JOB_POLL_MAX_SECONDS + 20 * 60)
-    )
+    os.environ.get("PREPARE_DB_AKS_TASK_SOFT_TIME_LIMIT", str(_JOB_POLL_MAX_SECONDS + 20 * 60))
 )
 _TASK_HARD_TIME_LIMIT = int(
-    os.environ.get(
-        "PREPARE_DB_AKS_TASK_TIME_LIMIT", str(_JOB_POLL_MAX_SECONDS + 30 * 60)
-    )
+    os.environ.get("PREPARE_DB_AKS_TASK_TIME_LIMIT", str(_JOB_POLL_MAX_SECONDS + 30 * 60))
 )
 if _TASK_SOFT_TIME_LIMIT >= _TASK_HARD_TIME_LIMIT:
-    raise ValueError(
-        "PREPARE_DB_AKS_TASK_SOFT_TIME_LIMIT must be < PREPARE_DB_AKS_TASK_TIME_LIMIT"
-    )
+    raise ValueError("PREPARE_DB_AKS_TASK_SOFT_TIME_LIMIT must be < PREPARE_DB_AKS_TASK_TIME_LIMIT")
 if _TASK_HARD_TIME_LIMIT <= _JOB_POLL_MAX_SECONDS:
     raise ValueError(
         "PREPARE_DB_AKS_TASK_TIME_LIMIT must exceed PREPARE_DB_AKS_JOB_POLL_MAX_SECONDS"
     )
+if _TASK_HARD_TIME_LIMIT >= _PREPARE_DB_STALE_SECONDS:
+    raise ValueError("PREPARE_DB_METADATA_STALE_SECONDS must exceed PREPARE_DB_AKS_TASK_TIME_LIMIT")
 
 
 @shared_task(
@@ -149,6 +150,7 @@ def prepare_db_via_aks(
     self: Any,
     *,
     job_id: str,
+    prepare_operation_id: str = "",
     subscription_id: str,
     storage_resource_group: str,
     storage_account: str,
@@ -171,13 +173,10 @@ def prepare_db_via_aks(
     """Submit + poll the AKS-fanout prepare-db Job for `(db_name, source_version)`.
 
     Cross-process serialisation is provided by the metadata blob's
-    `update_in_progress=true` flag (written by the HTTP route before this
-    task is enqueued) + the stale-flag recovery window
-    (`_PREPARE_DB_STALE_SECONDS`). The route's in-process `threading.Lock`
-    does not propagate to the worker process, and there's no benefit in
-    acquiring a fresh worker-side lock here — Celery already guarantees
-    one execution per task message, and a duplicate enqueue would re-trip
-    the route-level metadata-flag check.
+    `update_in_progress=true` flag and `prepare_operation_id` written before
+    enqueue. Every side-effect/publication boundary revalidates that owner.
+    The route's in-process `threading.Lock` does not propagate to the worker;
+    deterministic K8s names make a redelivery adopt the same Job.
     """
     from api.routes.storage.prepare_db import (
         _poll_copy_completion,
@@ -210,6 +209,17 @@ def prepare_db_via_aks(
     cred = get_credential()
     blob_svc = _blob_service(cred, storage_account)
     container = blob_svc.get_container_client("blast-db")
+
+    def _verify_owner(meta: dict[str, Any]) -> dict[str, Any]:
+        require_prepare_operation_owner(meta, prepare_operation_id)
+        return meta
+
+    _update_metadata(
+        container,
+        db_name,
+        storage_account,
+        _verify_owner,
+    )
 
     sizes = file_sizes or {}
     # Sum of known source sizes is the denominator for the SPA's byte-based
@@ -278,22 +288,23 @@ def prepare_db_via_aks(
             job_manifest=job_manifest,
         )
     except Exception as exc:
-        _mark_partial(
+        _mark_retryable_failure(
             container,
             db_name,
             storage_account,
             _update_metadata,
             reason=f"AKS dispatch failed: {type(exc).__name__}",
-            failed_files=[],
-            mode="aks",
             stage="dispatch",
+            prepare_operation_id=prepare_operation_id,
         )
         raise
 
     if submit_summary.get("status") not in {"created", "existing"}:
-        # Don't promote, leave metadata in partial state. Do not delete the
-        # ConfigMap — it may belong to a peer's in-flight Job.
-        _mark_partial(
+        # A failed create response can still be ambiguous at the transport /
+        # API-server boundary. Preserve owner + deterministic Job ref so the
+        # bounded Celery retry can adopt an accepted Job, and so the orphan
+        # reconciler can prove it absent before terminalising metadata.
+        _mark_retryable_failure(
             container,
             db_name,
             storage_account,
@@ -302,17 +313,30 @@ def prepare_db_via_aks(
                 f"AKS Job submit error: {submit_summary.get('stage')}/"
                 f"{submit_summary.get('status')}"
             ),
-            failed_files=[],
-            mode="aks",
             stage="dispatch",
             submit_summary=submit_summary,
+            prepare_operation_id=prepare_operation_id,
         )
-        return {
-            "ok": False,
-            "mode": "aks",
-            "reason": "submit_failed",
-            "summary": submit_summary,
-        }
+        raise RuntimeError("AKS prepare-db Job submission failed")
+
+    try:
+        _update_metadata(
+            container,
+            db_name,
+            storage_account,
+            _verify_owner,
+        )
+    except DatabaseOperationOwnershipError:
+        _safe_delete_job(
+            cred,
+            subscription_id,
+            aks_resource_group,
+            cluster_name,
+            namespace,
+            job_name,
+            configmap_name,
+        )
+        raise
 
     _update_state(
         job_id,
@@ -332,9 +356,7 @@ def prepare_db_via_aks(
 
     # Staged blob names mirror what the server-side path expects: one blob
     # per source file at `<db>/<basename>`. The per-pod script writes there.
-    staged_blob_names = [
-        f"{db_name}/{key.rsplit('/', 1)[-1]}" for key in file_keys
-    ]
+    staged_blob_names = [f"{db_name}/{key.rsplit('/', 1)[-1]}" for key in file_keys]
 
     job_result: dict[str, Any] = {}
     job_timed_out = False
@@ -354,23 +376,17 @@ def prepare_db_via_aks(
                 snap,
                 mode_label="aks",
                 update_metadata=_update_metadata,
+                prepare_operation_id=prepare_operation_id,
                 bytes_total=total_bytes_expected,
                 since=progress_since,
             ),
         )
         job_timed_out = bool(job_result.get("timed_out"))
+    except DatabaseOperationOwnershipError:
+        raise
     except Exception as exc:
-        _mark_partial(
-            container,
-            db_name,
-            storage_account,
-            _update_metadata,
-            reason=f"AKS Job poll failed: {type(exc).__name__}",
-            failed_files=[],
-            mode="aks",
-            stage="poll",
-        )
-        _safe_delete_job(
+        reason = f"AKS Job poll failed: {type(exc).__name__}"
+        cleaned_up = _safe_delete_job(
             cred,
             subscription_id,
             aks_resource_group,
@@ -379,7 +395,45 @@ def prepare_db_via_aks(
             job_name,
             configmap_name,
         )
-        raise
+        if not cleaned_up:
+            _mark_retryable_failure(
+                container,
+                db_name,
+                storage_account,
+                _update_metadata,
+                reason=f"{reason}; Job cleanup failed",
+                stage="cleanup",
+                prepare_operation_id=prepare_operation_id,
+                artifacts_may_have_changed=True,
+            )
+            raise
+        _mark_partial(
+            container,
+            db_name,
+            storage_account,
+            _update_metadata,
+            reason=reason,
+            prepare_operation_id=prepare_operation_id,
+            failed_files=[],
+            mode="aks",
+            stage="poll",
+            artifacts_may_have_changed=True,
+        )
+        _update_state(
+            job_id,
+            "partial",
+            status="failed",
+            mode="aks",
+            outcome="partial",
+            error_code="prepare_db_poll_failed",
+        )
+        return {
+            "ok": False,
+            "mode": "aks",
+            "db_name": db_name,
+            "source_version": source_version,
+            "reason": "poll_failed",
+        }
 
     # The Job + per-blob views can disagree (eg pod marked complete with
     # 1 fail, but blob copy is still pending). Confirm via the same
@@ -399,6 +453,7 @@ def prepare_db_via_aks(
         and poll_summary["success"] >= len(staged_blob_names)
     )
 
+    cleanup_attempted = False
     try:
         if job_succeeded and all_blobs_succeeded:
             _promote_success(
@@ -411,14 +466,13 @@ def prepare_db_via_aks(
                 _update_metadata,
                 credential=cred,
                 mode="aks",
+                prepare_operation_id=prepare_operation_id,
             )
             outcome = "promoted"
         else:
             reason_bits: list[str] = []
             if job_timed_out:
-                reason_bits.append(
-                    f"AKS Job poll timed out after {_JOB_POLL_MAX_SECONDS}s"
-                )
+                reason_bits.append(f"AKS Job poll timed out after {_JOB_POLL_MAX_SECONDS}s")
             if not job_succeeded:
                 reason_bits.append(
                     f"Job pods succeeded={job_result.get('succeeded_pods', 0)}/"
@@ -431,6 +485,27 @@ def prepare_db_via_aks(
                     f"pending={poll_summary['pending']}"
                 )
             reason = "; ".join(reason_bits) or "AKS prepare-db did not complete"
+            cleanup_attempted = True
+            if not _safe_delete_job(
+                cred,
+                subscription_id,
+                aks_resource_group,
+                cluster_name,
+                namespace,
+                job_name,
+                configmap_name,
+            ):
+                _mark_retryable_failure(
+                    container,
+                    db_name,
+                    storage_account,
+                    _update_metadata,
+                    reason=f"{reason}; Job cleanup failed",
+                    stage="cleanup",
+                    prepare_operation_id=prepare_operation_id,
+                    artifacts_may_have_changed=True,
+                )
+                raise RuntimeError("AKS prepare-db Job cleanup failed")
             _mark_partial(
                 container,
                 db_name,
@@ -449,18 +524,21 @@ def prepare_db_via_aks(
                     "pending": poll_summary["pending"],
                     "timed_out": poll_summary["timed_out"],
                 },
+                prepare_operation_id=prepare_operation_id,
+                artifacts_may_have_changed=True,
             )
             outcome = "partial"
     finally:
-        _safe_delete_job(
-            cred,
-            subscription_id,
-            aks_resource_group,
-            cluster_name,
-            namespace,
-            job_name,
-            configmap_name,
-        )
+        if not cleanup_attempted:
+            _safe_delete_job(
+                cred,
+                subscription_id,
+                aks_resource_group,
+                cluster_name,
+                namespace,
+                job_name,
+                configmap_name,
+            )
 
     elapsed = round(time.monotonic() - started_monotonic, 2)
     _update_state(
@@ -542,9 +620,7 @@ def _count_staged_blobs(
             total_bytes += int(getattr(blob, "size", 0) or 0)
         return count, total_bytes
     except Exception as exc:  # pragma: no cover - network/SDK variance
-        LOGGER.debug(
-            "AKS staged-blob count skipped db=%s: %s", db_name, type(exc).__name__
-        )
+        LOGGER.debug("AKS staged-blob count skipped db=%s: %s", db_name, type(exc).__name__)
         return None
 
 
@@ -557,6 +633,7 @@ def _on_job_progress(
     *,
     mode_label: str,
     update_metadata: Any,
+    prepare_operation_id: str = "",
     bytes_total: int = 0,
     since: datetime | None = None,
 ) -> None:
@@ -570,6 +647,7 @@ def _on_job_progress(
     staged = _count_staged_blobs(container, db_name, since=since)
 
     def _mut(meta: dict[str, Any]) -> dict[str, Any]:
+        require_prepare_operation_owner(meta, prepare_operation_id)
         copy_status: dict[str, Any] = {
             "phase": "copying",
             "mode": mode_label,
@@ -594,6 +672,8 @@ def _on_job_progress(
 
     try:
         update_metadata(container, db_name, storage_account, _mut)
+    except DatabaseOperationOwnershipError:
+        raise
     except Exception as exc:
         LOGGER.debug(
             "AKS poll progress metadata write skipped db=%s: %s",
@@ -669,10 +749,10 @@ def _poll_job_until_done(
         if callable(on_progress):
             try:
                 on_progress(last_snapshot)
+            except DatabaseOperationOwnershipError:
+                raise
             except Exception as exc:
-                LOGGER.debug(
-                    "AKS poll on_progress callback failed: %s", type(exc).__name__
-                )
+                LOGGER.debug("AKS poll on_progress callback failed: %s", type(exc).__name__)
         terminal = _job_is_terminal(status, succeeded, completions)
         if terminal:
             return last_snapshot
@@ -681,9 +761,7 @@ def _poll_job_until_done(
     return last_snapshot
 
 
-def _job_is_terminal(
-    status: dict[str, Any], succeeded: int, completions: int
-) -> bool:
+def _job_is_terminal(status: dict[str, Any], succeeded: int, completions: int) -> bool:
     """Return True if the Job has reached a terminal state.
 
     K8s sets `conditions: [{type: Complete}]` once `succeeded >= completions`
@@ -712,12 +790,16 @@ def _mark_partial(
     stage: str = "post-job",
     submit_summary: dict[str, Any] | None = None,
     copy_summary: dict[str, Any] | None = None,
+    prepare_operation_id: str = "",
+    artifacts_may_have_changed: bool = False,
 ) -> None:
     """Write the same partial-completion shape the server-side path writes."""
 
     def _mut(meta: dict[str, Any]) -> dict[str, Any]:
+        require_prepare_operation_owner(meta, prepare_operation_id)
         meta["db_name"] = db_name
         meta["update_in_progress"] = False
+        meta.pop("prepare_operation_id", None)
         meta["update_error"] = reason
         meta["update_failed_at"] = datetime.now(UTC).isoformat()
         if failed_files:
@@ -734,16 +816,53 @@ def _mark_partial(
         if submit_summary is not None:
             meta["aks_submit_summary"] = submit_summary
         meta.pop("aks_job_ref", None)
+        if artifacts_may_have_changed:
+            invalidate_shard_publication(meta, error=reason)
         return meta
 
     try:
         update_metadata(container, db_name, storage_account, _mut)
     except Exception as exc:
-        LOGGER.warning(
+        LOGGER.error(
             "AKS prepare-db partial metadata write failed db=%s: %s",
             db_name,
             type(exc).__name__,
         )
+        raise
+
+
+def _mark_retryable_failure(
+    container: Any,
+    db_name: str,
+    storage_account: str,
+    update_metadata: Any,
+    *,
+    reason: str,
+    stage: str,
+    prepare_operation_id: str = "",
+    artifacts_may_have_changed: bool = False,
+    submit_summary: dict[str, Any] | None = None,
+) -> None:
+    """Record a recoverable failure without releasing the operation owner."""
+
+    def _mut(meta: dict[str, Any]) -> dict[str, Any]:
+        require_prepare_operation_owner(meta, prepare_operation_id)
+        meta["update_in_progress"] = True
+        meta["update_error"] = reason
+        meta["update_error_at"] = datetime.now(UTC).isoformat()
+        meta["copy_status"] = {
+            "phase": "copying" if artifacts_may_have_changed else "queued",
+            "mode": "aks",
+            "stage": stage,
+            "reason": reason,
+        }
+        if submit_summary is not None:
+            meta["aks_submit_summary"] = submit_summary
+        if artifacts_may_have_changed:
+            invalidate_shard_publication(meta, error=reason)
+        return meta
+
+    update_metadata(container, db_name, storage_account, _mut)
 
 
 def _promote_success(
@@ -757,6 +876,7 @@ def _promote_success(
     *,
     credential: Any,
     mode: str,
+    prepare_operation_id: str = "",
 ) -> None:
     """Run auto-shard + promote `source_version`, byte-shape identical to server-side."""
     # Deferred import keeps the import graph free of cycles (sharding
@@ -768,14 +888,15 @@ def _promote_success(
     # BLAST job on a shrunk DB fail with "vol does not match lmdb vol".
     # See api/services/db/consistency.py.
     shard_sets_created: list[int] = []
+    shard_layout_schema = 0
     try:
         from api.services.db.consistency import reconcile_db_consistency
 
-        recon = reconcile_db_consistency(
-            credential, storage_account, db_name, force_reshard=True
-        )
+        recon = reconcile_db_consistency(credential, storage_account, db_name, force_reshard=True)
         if recon.get("resharded"):
-            shard_sets_created = list(recon.get("shard", {}).get("shard_sets") or [])
+            shard_summary = recon.get("shard", {})
+            shard_sets_created = list(shard_summary.get("shard_sets") or [])
+            shard_layout_schema = int(shard_summary.get("layout_schema") or 0)
         LOGGER.info(
             "AKS prepare-db consistency for %s: status=%s prune=%s",
             db_name,
@@ -805,6 +926,7 @@ def _promote_success(
         )
 
     def _mut(meta: dict[str, Any]) -> dict[str, Any]:
+        require_prepare_operation_owner(meta, prepare_operation_id)
         previous_source_version = str(meta.get("source_version") or "")
         meta["db_name"] = db_name
         meta["source_version"] = source_version
@@ -815,11 +937,14 @@ def _promote_success(
         meta["downloaded_at"] = datetime.now(UTC).isoformat()
         meta["file_count"] = poll_summary["success"]
         meta["update_in_progress"] = False
+        meta.pop("prepare_operation_id", None)
         meta["update_completed_at"] = datetime.now(UTC).isoformat()
         meta.pop("updating_to_source_version", None)
         meta.pop("update_error", None)
+        meta.pop("update_error_at", None)
         meta.pop("update_failed_at", None)
         meta.pop("failed_files", None)
+        meta.pop("aks_submit_summary", None)
         meta["copy_status"] = {
             "phase": "completed",
             "mode": mode,
@@ -835,22 +960,21 @@ def _promote_success(
         if shard_sets_created:
             meta["sharded"] = True
             meta["shard_sets"] = shard_sets_created
+            if shard_layout_schema:
+                meta["shard_layout_schema"] = shard_layout_schema
             meta["shard_source_version"] = source_version
             meta["sharded_at"] = datetime.now(UTC).isoformat()
             meta.pop("sharding_error", None)
         else:
-            meta["sharded"] = False
-            meta["shard_sets"] = []
-            meta["shard_source_version"] = None
-            meta["sharding_error"] = "preset shard layout generation failed"
+            invalidate_shard_publication(
+                meta,
+                error="preset shard layout generation failed",
+            )
         meta["sharding_in_progress"] = False
         meta.pop("aks_job_ref", None)
         if isinstance(meta.get("db_order_oracle"), dict):
             oracle = dict(meta["db_order_oracle"])
-            if (
-                oracle.get("source_version")
-                and oracle.get("source_version") != source_version
-            ):
+            if oracle.get("source_version") and oracle.get("source_version") != source_version:
                 oracle["status"] = "stale"
             meta["db_order_oracle"] = oracle
         return meta
@@ -858,11 +982,12 @@ def _promote_success(
     try:
         update_metadata(container, db_name, storage_account, _mut)
     except Exception as exc:
-        LOGGER.warning(
+        LOGGER.error(
             "AKS prepare-db promotion metadata write failed db=%s: %s",
             db_name,
             type(exc).__name__,
         )
+        raise
 
 
 def _safe_delete_job(
@@ -873,10 +998,10 @@ def _safe_delete_job(
     namespace: str,
     job_name: str,
     configmap_name: str,
-) -> None:
-    """Best-effort delete of Job + ConfigMap. K8s TTL is the safety net."""
+) -> bool:
+    """Return whether the Job + ConfigMap are confirmed deleted or absent."""
     try:
-        delete_prepare_db_job(
+        summary = delete_prepare_db_job(
             credential,
             subscription_id,
             resource_group,
@@ -885,9 +1010,20 @@ def _safe_delete_job(
             job_name=job_name,
             configmap_name=configmap_name,
         )
+        if summary is None:
+            return True
+        deleted = summary.get("status") == "deleted"
+        if not deleted:
+            LOGGER.warning(
+                "AKS prepare-db cleanup incomplete job=%s status=%s",
+                job_name,
+                summary.get("status"),
+            )
+        return deleted
     except Exception as exc:
         LOGGER.warning(
             "AKS prepare-db cleanup failed job=%s: %s",
             job_name,
             type(exc).__name__,
         )
+        return False

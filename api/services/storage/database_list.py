@@ -210,6 +210,7 @@ def list_databases(
         info.setdefault("sharded", False)
         info.setdefault("shard_sets", [])
         info.setdefault("shard_source_version", None)
+        info.setdefault("shard_layout_schema", 0)
         info.setdefault("shards_stale", False)
         info.setdefault("sharding_in_progress", False)
         info.setdefault("sharding_started_at", None)
@@ -274,6 +275,9 @@ def list_databases(
                     # Legacy metadata predates explicit shard generation tagging; treat
                     # the existing layouts as belonging to the recorded DB generation.
                     info["shard_source_version"] = info.get("source_version")
+                shard_layout_schema = meta.get("shard_layout_schema")
+                if isinstance(shard_layout_schema, int) and shard_layout_schema >= 0:
+                    info["shard_layout_schema"] = shard_layout_schema
                 db_source_version = str(info.get("source_version") or "")
                 shard_version = str(info.get("shard_source_version") or "")
                 info["shards_stale"] = bool(
@@ -310,9 +314,7 @@ def list_databases(
                     info["copy_status"] = meta["copy_status"]
                 if isinstance(meta.get("failed_files"), list):
                     info["failed_files"] = [
-                        item
-                        for item in meta["failed_files"]
-                        if isinstance(item, dict)
+                        item for item in meta["failed_files"] if isinstance(item, dict)
                     ][:50]
                 # ETag of a stable NCBI key (the .tar.gz.md5 we picked when
                 # the DB was prepared). The SPA uses it for per-DB update

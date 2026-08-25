@@ -10,6 +10,7 @@ Edit boundaries: Stubs the K8s session module, the Storage container, and
 Key entry points: `test_aks_task_happy_path_promotes_metadata`,
     `test_aks_task_submit_error_marks_partial`,
     `test_aks_task_blob_partial_marks_partial`,
+    `test_terminal_metadata_helpers_propagate_commit_failure`,
     `test_aks_task_always_deletes_job`.
 Risky contracts: Final metadata `copy_status.mode == "aks"` plus the
     classic promoted-shape keys (`source_version`, `update_completed_at`,
@@ -47,7 +48,7 @@ class _FakeContainer:
     """Tracks every metadata mutation so tests can assert on the final shape."""
 
     def __init__(self, initial: dict[str, Any] | None = None) -> None:
-        self.meta: dict[str, Any] = dict(initial or {})
+        self.meta: dict[str, Any] = {"update_in_progress": True, **(initial or {})}
         self.update_calls: list[dict[str, Any]] = []
         # Optional staged-blob inventory for `_count_staged_blobs`. Names are
         # full blob paths (e.g. "core_nt/core_nt.000.nhr"); the optional
@@ -96,6 +97,114 @@ def _fake_poll_copy_completion(
         "timed_out": False,
         "failed_files": [],
     }
+
+
+@pytest.mark.parametrize("helper", ["partial", "promote"])
+def test_terminal_metadata_helpers_propagate_commit_failure(helper: str) -> None:
+    container = _FakeContainer({"db_name": "core_nt", "update_in_progress": True})
+
+    def _fail_update(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("ETag retries exhausted")
+
+    with pytest.raises(RuntimeError, match="ETag retries exhausted"):
+        if helper == "partial":
+            task_module._mark_partial(
+                container,
+                "core_nt",
+                "stworkload",
+                _fail_update,
+                reason="copy failed",
+            )
+        else:
+            task_module._promote_success(
+                container,
+                "core_nt",
+                "stworkload",
+                "2026-05-21-01-05-02",
+                ["snapshot/core_nt.000.nhr"],
+                {
+                    "success": 1,
+                    "failed": 0,
+                    "aborted": 0,
+                    "pending": 0,
+                    "timed_out": False,
+                },
+                _fail_update,
+                credential=object(),
+                mode="aks",
+            )
+
+
+def test_aks_task_rejects_superseded_owner_before_job_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer(
+        {
+            "db_name": "core_nt",
+            "update_in_progress": True,
+            "prepare_operation_id": "new-owner",
+        }
+    )
+    _set_container(container)
+    monkeypatch.setattr(
+        task_module,
+        "submit_prepare_db_job",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            AssertionError("superseded task must not submit a K8s Job")
+        ),
+    )
+
+    with pytest.raises(
+        task_module.DatabaseOperationOwnershipError,
+        match="ownership changed",
+    ):
+        prepare_db_via_aks.run(**_base_kwargs(prepare_operation_id="old-owner"))
+
+    assert container.meta["prepare_operation_id"] == "new-owner"
+    assert container.meta["update_in_progress"] is True
+
+
+def test_aks_task_deletes_job_when_owner_changes_during_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer(
+        {
+            "db_name": "core_nt",
+            "update_in_progress": True,
+            "prepare_operation_id": "prepare-owner",
+        }
+    )
+    _set_container(container)
+    delete_calls: list[str] = []
+
+    def _submit_then_cancel(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        container.meta["prepare_operation_id"] = "cancel-owner"
+        container.meta["cancel_operation_id"] = "cancel-owner"
+        return {"status": "created", "stage": "job"}
+
+    monkeypatch.setattr(task_module, "submit_prepare_db_job", _submit_then_cancel)
+    monkeypatch.setattr(
+        task_module,
+        "delete_prepare_db_job",
+        lambda *_args, **_kwargs: delete_calls.append("deleted") or {"status": "deleted"},
+    )
+    monkeypatch.setattr(
+        task_module,
+        "get_prepare_db_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale task must not poll the Job")
+        ),
+    )
+
+    with pytest.raises(
+        task_module.DatabaseOperationOwnershipError,
+        match="ownership changed",
+    ):
+        prepare_db_via_aks.run(**_base_kwargs(prepare_operation_id="prepare-owner"))
+
+    assert delete_calls == ["deleted"]
+    assert container.meta["prepare_operation_id"] == "cancel-owner"
+    assert container.meta["cancel_operation_id"] == "cancel-owner"
 
 
 def _fake_blob_service(_cred: Any, _account: str):
@@ -263,8 +372,11 @@ def test_aks_task_happy_path_promotes_metadata(monkeypatch: pytest.MonkeyPatch) 
     assert delete_calls == ["deleted"]
 
 
-def test_aks_task_submit_error_marks_partial(monkeypatch: pytest.MonkeyPatch) -> None:
-    container = _FakeContainer({"db_name": "core_nt"})
+def test_aks_task_submit_error_keeps_retryable_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aks_job_ref = {"job_name": "prepare-core-nt", "cluster_name": "aks-elb"}
+    container = _FakeContainer({"db_name": "core_nt", "aks_job_ref": aks_job_ref})
     _set_container(container)
 
     def _fake_submit(*_a, **_kw):
@@ -289,24 +401,34 @@ def test_aks_task_submit_error_marks_partial(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(task_module, "get_prepare_db_job", _fake_get_job)
     monkeypatch.setattr(task_module, "delete_prepare_db_job", _fake_delete)
 
-    result = prepare_db_via_aks.run(**_base_kwargs())
+    with pytest.raises(RuntimeError, match="Job submission failed"):
+        prepare_db_via_aks.run(**_base_kwargs())
 
-    assert result["ok"] is False
-    assert result["reason"] == "submit_failed"
     # Submit failure should NOT trigger Job polling or Job delete.
     assert poll_calls == []
     assert delete_calls == []
 
     meta = container.meta
-    assert meta["update_in_progress"] is False
+    assert meta["update_in_progress"] is True
     assert meta["copy_status"]["mode"] == "aks"
-    assert meta["copy_status"]["phase"] == "partial"
+    assert meta["copy_status"]["phase"] == "queued"
+    assert meta["copy_status"]["stage"] == "dispatch"
     assert "AKS Job submit error" in meta.get("update_error", "")
     assert meta["aks_submit_summary"]["stage"] == "configmap"
+    assert meta["aks_job_ref"] == aks_job_ref
 
 
 def test_aks_task_blob_partial_marks_partial(monkeypatch: pytest.MonkeyPatch) -> None:
-    container = _FakeContainer({"db_name": "core_nt"})
+    container = _FakeContainer(
+        {
+            "db_name": "core_nt",
+            "sharded": True,
+            "shard_sets": [1, 2],
+            "shard_layout_schema": 1,
+            "shard_source_version": "old",
+            "sharded_at": "2026-05-20T00:00:00+00:00",
+        }
+    )
     _set_container(container)
 
     def _fake_submit(*_a, **_kw):
@@ -335,9 +457,7 @@ def test_aks_task_blob_partial_marks_partial(monkeypatch: pytest.MonkeyPatch) ->
             "aborted": 0,
             "pending": 0,
             "timed_out": False,
-            "failed_files": [
-                {"key": "core_nt/core_nt.000.nin", "status_description": "fake-fail"}
-            ],
+            "failed_files": [{"key": "core_nt/core_nt.000.nin", "status_description": "fake-fail"}],
         }
 
     monkeypatch.setitem(
@@ -359,6 +479,64 @@ def test_aks_task_blob_partial_marks_partial(monkeypatch: pytest.MonkeyPatch) ->
     assert meta["copy_status"]["phase"] == "partial"
     assert meta["copy_status"]["failed"] == 1
     assert meta["failed_files"][0]["key"] == "core_nt/core_nt.000.nin"
+    assert meta["sharded"] is False
+    assert meta["shard_sets"] == []
+    assert "shard_layout_schema" not in meta
+    assert meta["shard_source_version"] is None
+    assert "sharded_at" not in meta
+
+
+def test_aks_task_cleanup_failure_keeps_owned_retryable_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer(
+        {
+            "db_name": "core_nt",
+            "prepare_operation_id": "prepare-owner",
+            "aks_job_ref": {
+                "job_name": "prepare-core-nt",
+                "cluster_name": "aks-elb",
+            },
+            "sharded": True,
+            "shard_sets": [1, 2],
+        }
+    )
+    _set_container(container)
+    monkeypatch.setattr(
+        task_module,
+        "submit_prepare_db_job",
+        lambda *_a, **_kw: {"status": "created"},
+    )
+    monkeypatch.setattr(
+        task_module,
+        "get_prepare_db_job",
+        lambda *_a, **_kw: {
+            "missing": False,
+            "active": 0,
+            "succeeded": 0,
+            "failed": 1,
+            "completions": 2,
+            "parallelism": 2,
+            "conditions": [{"type": "Failed", "status": "True"}],
+        },
+    )
+    monkeypatch.setattr(
+        task_module,
+        "delete_prepare_db_job",
+        lambda *_a, **_kw: {"status": "partial"},
+    )
+
+    with pytest.raises(RuntimeError, match="Job cleanup failed"):
+        prepare_db_via_aks.run(**_base_kwargs(prepare_operation_id="prepare-owner"))
+
+    meta = container.meta
+    assert meta["update_in_progress"] is True
+    assert meta["prepare_operation_id"] == "prepare-owner"
+    assert meta["aks_job_ref"]["job_name"] == "prepare-core-nt"
+    assert meta["copy_status"]["phase"] == "copying"
+    assert meta["copy_status"]["stage"] == "cleanup"
+    assert meta["sharded"] is False
+    assert meta["shard_sets"] == []
 
 
 def test_aks_task_always_deletes_job_on_promote(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -401,9 +579,7 @@ def test_aks_task_missing_job_treated_as_done(monkeypatch: pytest.MonkeyPatch) -
         task_module, "submit_prepare_db_job", lambda *_a, **_kw: {"status": "created"}
     )
     # Simulate the TTL controller having reaped the Job before our first poll.
-    monkeypatch.setattr(
-        task_module, "get_prepare_db_job", lambda *_a, **_kw: {"missing": True}
-    )
+    monkeypatch.setattr(task_module, "get_prepare_db_job", lambda *_a, **_kw: {"missing": True})
     monkeypatch.setattr(task_module, "delete_prepare_db_job", lambda *_a, **_kw: None)
 
     result = prepare_db_via_aks.run(**_base_kwargs())
@@ -621,6 +797,7 @@ def test_task_time_limits_outlive_job_poll_and_deadline() -> None:
     assert task_module._JOB_POLL_MAX_SECONDS >= DEFAULT_ACTIVE_DEADLINE_SECONDS
     assert task_module._TASK_SOFT_TIME_LIMIT > task_module._JOB_POLL_MAX_SECONDS
     assert task_module._TASK_HARD_TIME_LIMIT > task_module._TASK_SOFT_TIME_LIMIT
+    assert task_module._PREPARE_DB_STALE_SECONDS > task_module._TASK_HARD_TIME_LIMIT
 
     # Celery must actually apply the per-task overrides (not the global 1h).
     assert prepare_db_via_aks.soft_time_limit == task_module._TASK_SOFT_TIME_LIMIT

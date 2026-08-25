@@ -25,6 +25,11 @@ same symptom:
   node-local directory without one lock covering the complete transaction;
 - a failed database source-version lookup could leave a stale completion marker
   trusted;
+- concurrent prepare, cancel, warmup, manual-shard, and beat-reconcile writers
+  could publish metadata without one cross-process owner, and exhausted ETag
+  retries could fall back to a blind overwrite;
+- a partial copy or shard rewrite could leave the previous `sharded=true`
+  publication visible even though stable database artifacts had changed;
 - dashboard and OpenAPI submits could bypass submit-time cache validation using
   a warmed-cache hint; and
 - external jobs did not durably preserve a canonical ElasticBLAST runtime ID,
@@ -60,6 +65,18 @@ same symptom:
   Deployment snapshot. Runtime-ID patching and template identity assertions
   fail the image build when the pinned sibling source drifts from the required
   contract.
+- Prepare, cancel, warmup backfill, manual shard, and consistency repair now
+  coordinate through ETag-owned operation IDs in [Azure Blob
+  Storage](https://learn.microsoft.com/azure/storage/blobs/storage-blobs-introduction).
+  Metadata creation and update conflicts retry a bounded number of times and
+  fail closed; no blind overwrite fallback remains.
+- A shard layout is published only after every required preset succeeds.
+  Partial copy, cancellation, orphan recovery, and failed shard regeneration
+  clear every field that could advertise the rewritten stable layout.
+- Ambiguous AKS Job submission keeps its owner and deterministic Job reference
+  for bounded Celery retry/adoption. Post-submit failures become terminal only
+  after Job and ConfigMap cleanup is confirmed; incomplete cleanup remains
+  retryable and visible.
 
 ## Code and API diff
 
@@ -85,6 +102,16 @@ same symptom:
   `retry_enqueue_failed` into an independent artifact row; terminal failures
   also append `pod_logs_capture_failed` to owner-scoped job history.
 - `api/services/openapi/token.py` retries one Kubernetes JSON Patch conflict.
+- `api/services/storage/prepare_db_metadata.py` centralizes fail-closed metadata
+  CAS, prepare ownership checks, stale-window floors, and shard-publication
+  invalidation. Server and AKS prepare, cancel, orphan recovery, warmup, manual
+  shard, and consistency reconciliation use those shared contracts.
+- `api/services/db/sharding.py` validates the complete preset summary before
+  publication. `api/services/db/consistency.py` claims an ETag-owned sharding
+  marker and writes through the resolved Blob container client.
+- `api/services/db/stale_dbops.py` and `api/services/auto_stop_evaluator.py`
+  clamp long DB-operation expiry to the metadata recovery window, which stays
+  above the 24-hour server-copy poll ceiling.
 - `scripts/dev/patch-openapi-build-context.py` pins ElasticBLAST `744d79b`,
   removes unlabeled Kubernetes fallbacks, enforces canonical runtime IDs, and
   validates source/system/venv template policy independently from idempotency
@@ -97,7 +124,7 @@ All new Table fields are optional and default safely for existing rows. No
 public HTTP response field was removed or renamed. No RBAC assignment, browser
 SAS path, Storage public-network setting, or SSE authentication contract changed.
 
-## Twenty-round design critique
+## Thirty-three-round design critique
 
 1. **Incident boundary:** preserved `init-ssd-d8faab8f-3` as the correlation key
    without claiming unavailable stderr evidence.
@@ -144,15 +171,49 @@ SAS path, Storage public-network setting, or SSE authentication contract changed
   contracts, bounded liveness, concurrency, partial failure, security,
   observability, and compatibility. Only Low residual operational risks
   remained.
+21. **Fail-closed metadata CAS:** removed blind overwrite after bounded ETag
+  retry exhaustion and treated missing-blob creation as a conditional write.
+22. **Prepare ownership:** added per-operation UUIDs and revalidated the owner
+  inside every progress, failure, promotion, and enqueue-rollback mutator.
+23. **Cancellation saga:** claimed metadata before external side effects,
+  transferred ownership atomically, and kept incomplete Job/blob cleanup in a
+  retryable `cancel_failed` state.
+24. **Terminal commit:** propagated must-succeed metadata failures instead of
+  reporting a successful prepare whose terminal state was never committed.
+25. **Complete publication:** required schema version 1, every eligible shard
+  preset, and an empty error list before advertising a shard layout.
+26. **Stable artifact safety:** invalidated all shard-publication fields after
+  partial copy, cancellation, orphan recovery, or incomplete regeneration.
+27. **Cross-process sharding:** gave warmup, manual shard, and beat consistency
+  work ETag-owned markers in addition to process-local locks.
+28. **Consistency client boundary:** corrected all beat metadata writes to use
+  the Blob container client and strengthened the fake so a string/client mixup
+  fails tests.
+29. **Legacy compatibility:** limited empty prepare-operation IDs to live,
+  ownerless rolling-upgrade markers; terminal and token-owned rows reject them.
+30. **Timeout ordering:** floored metadata, audit reconciliation, and auto-stop
+  stale windows above every legitimate copy/task deadline.
+31. **AKS partial failure:** preserved deterministic Job ownership across
+  ambiguous submit results and required confirmed cleanup before terminalizing
+  post-submit failures.
+32. **Final independent severity gate:** re-ran contract, liveness, ownership,
+  partial-failure, observability, compatibility, consumer, and fixture review.
+  No valid Critical, High, or Medium finding remained.
+33. **Post-validation adversarial pass:** re-checked cancellation as an atomic
+  ownership transfer, the actual 24-hour/26-hour timeout ordering, AKS cleanup
+  recovery, and formatted consistency closures. No valid Critical, High, or
+  Medium finding remained.
 
 ## Validation
 
-Local-safe validation completed after the twentieth critique round:
+Local-safe validation completed after the thirty-third critique round:
 
-- `uv run pytest -q api/tests` — 5,103 passed, 4 skipped. Three skips require an
+- Prepare/shard ownership, publication, recovery, and stale-policy suite — 264
+  passed.
+- `uv run pytest -q api/tests` — 5,167 passed, 4 skipped. Three skips require an
   optional parity candidate directory; one requires the absent sibling source
   checkout. Six pre-existing duplicate OpenAPI operation-ID warnings remained.
-- `uv run pytest api/tests -m 'slow or subprocess'` — 83 passed.
+- `uv run pytest api/tests -m 'slow or subprocess'` — 95 passed.
 - Artifact generation and pod-log partial-failure suite — 39 passed after the
   final state/history changes.
 - Terminal transient retry/deadline selection — 7 passed with a test stub that
@@ -163,6 +224,10 @@ Local-safe validation completed after the twentieth critique round:
 - `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` — succeeded.
 - `scripts/dev/local-run.sh smoke` — 27/27 API and SPA probes passed.
 - `git diff --check` — clean.
+- Consumer and fixture parity — frontend consumers keep the existing optional
+  `shard_source_version` contract; owner IDs remain internal coordination
+  fields, and backend fixtures cover complete publication plus every invalidation
+  path.
 - Earlier in the same implementation session, the real OpenAPI build context
   was patched twice consecutively and generated `app/main.py` compiled. Its
   output contained no permissive runtime-ID consumer or unlabeled job/pod

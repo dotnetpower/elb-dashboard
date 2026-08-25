@@ -5,7 +5,10 @@ Responsibility: Cover the 409 response when a prepare-db daemon is already
 Edit boundaries: Mock the Azure SDK and the lock registry; never reach a
     real Storage account.
 Key entry points: ``test_concurrent_prepare_db_returns_409``,
+    ``test_prepare_db_rejects_live_sharding_marker``,
+    ``test_prepare_db_start_metadata_failure_returns_502_before_thread``,
     ``test_cancel_aborts_pending_copies``,
+    ``test_cancel_metadata_failure_does_not_return_success``,
     ``test_cancel_refuses_when_completed``.
 Risky contracts: 409 + lock interaction is load-bearing — the test asserts
     BOTH that the second call returns 409 AND that the held lock is not
@@ -98,9 +101,7 @@ class _FakeBlob:
 class _FakeListedBlob:
     def __init__(self, name: str, status: str) -> None:
         self.name = name
-        self.copy = type(
-            "_Copy", (), {"status": status, "id": "copy-1", "status_description": ""}
-        )
+        self.copy = type("_Copy", (), {"status": status, "id": "copy-1", "status_description": ""})
 
 
 class _FakeContainer:
@@ -191,9 +192,129 @@ def test_concurrent_prepare_db_returns_409(
         lock.release()
 
 
-def test_cancel_aborts_pending_copies(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+def test_prepare_db_rejects_live_sharding_marker(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    snapshot = "2026-05-21-01-05-02"
+    _patch_common(monkeypatch, snapshot=snapshot, keys=[f"{snapshot}/core_nt.000.nhr"])
+    container = _FakeContainer({"core_nt/core_nt.000.nhr": "success"})
+    container._meta.update(
+        {
+            "sharding_in_progress": True,
+            "sharding_started_at": "2999-01-01T00:00:00+00:00",
+        }
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        prepare_db_module,
+        "Thread",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("copy thread must not start")),
+    )
+
+    response = client.post(
+        "/api/storage/prepare-db",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+            "db_name": "core_nt",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "sharding" in response.json()["detail"]
+    lock = prepare_db_module._prepare_db_lock("stworkload", "core_nt")
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+
+def test_prepare_db_start_metadata_failure_returns_502_before_thread(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = "2026-05-21-01-05-02"
+    _patch_common(monkeypatch, snapshot=snapshot, keys=[f"{snapshot}/core_nt.000.nhr"])
+    container = _FakeContainer({"core_nt/core_nt.000.nhr": "success"})
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        prepare_db_module,
+        "_update_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ETag retries exhausted")),
+    )
+    monkeypatch.setattr(
+        prepare_db_module,
+        "Thread",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("copy thread must not start")),
+    )
+
+    response = client.post(
+        "/api/storage/prepare-db",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+            "db_name": "core_nt",
+        },
+    )
+
+    assert response.status_code == 502
+    assert "metadata start commit failed" in response.json()["detail"]
+    lock = prepare_db_module._prepare_db_lock("stworkload", "core_nt")
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+
+def test_prepare_db_thread_start_failure_rolls_back_marker_and_lock(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = "2026-05-21-01-05-02"
+    _patch_common(monkeypatch, snapshot=snapshot, keys=[f"{snapshot}/core_nt.000.nhr"])
+    container = _FakeContainer({"core_nt/core_nt.000.nhr": "success"})
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+
+    class _StartFailureThread:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(prepare_db_module, "Thread", _StartFailureThread)
+
+    response = client.post(
+        "/api/storage/prepare-db",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+            "db_name": "core_nt",
+        },
+    )
+
+    assert response.status_code == 502
+    assert container._meta["update_in_progress"] is False
+    assert container._meta["copy_status"]["stage"] == "thread_start"
+    assert "prepare_operation_id" not in container._meta
+    lock = prepare_db_module._prepare_db_lock("stworkload", "core_nt")
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+
+def test_cancel_aborts_pending_copies(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     container = _FakeContainer(
         {
             "core_nt/core_nt.000.nhr": "pending",
@@ -204,6 +325,11 @@ def test_cancel_aborts_pending_copies(
         "db_name": "core_nt",
         "update_in_progress": True,
         "copy_status": {"phase": "copying"},
+        "sharded": True,
+        "shard_sets": [1, 2],
+        "shard_layout_schema": 1,
+        "shard_source_version": "old",
+        "sharded_at": "2026-05-20T00:00:00+00:00",
     }
     monkeypatch.setattr(
         "azure.storage.blob.BlobServiceClient",
@@ -238,11 +364,198 @@ def test_cancel_aborts_pending_copies(
     assert body["ok"] is True
     assert body["aborted"] == 1
     assert container._meta["copy_status"]["phase"] == "cancelled"
+    assert container._meta["sharded"] is False
+    assert container._meta["shard_sets"] == []
+    assert "shard_layout_schema" not in container._meta
+    assert container._meta["shard_source_version"] is None
+    assert "sharded_at" not in container._meta
 
 
-def test_cancel_refuses_when_completed(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+def test_cancel_metadata_failure_does_not_return_success(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    container = _FakeContainer({"core_nt/core_nt.000.nhr": "pending"})
+    container._meta = {
+        "db_name": "core_nt",
+        "update_in_progress": True,
+        "copy_status": {"phase": "copying"},
+    }
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        prepare_db_module,
+        "_update_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ETag retries exhausted")),
+    )
+
+    response = client.post(
+        "/api/storage/prepare-db/core_nt/cancel",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+            "db_name": "core_nt",
+        },
+    )
+
+    assert response.status_code == 502
+    assert "metadata claim failed" in response.json()["detail"]
+
+
+def test_cancel_claim_rejects_concurrent_promotion_before_side_effects(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer({"core_nt/core_nt.000.nhr": "pending"})
+    container._meta = {
+        "db_name": "core_nt",
+        "update_in_progress": True,
+        "prepare_operation_id": "prepare-owner",
+        "copy_status": {"phase": "copying"},
+    }
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+
+    def _promote_before_claim(
+        _container: Any,
+        _db_name: str,
+        _account_name: str,
+        mutator: Any,
+    ) -> dict[str, Any]:
+        container._meta = {
+            "db_name": "core_nt",
+            "update_in_progress": False,
+            "source_version": "2026-05-21-01-05-02",
+            "copy_status": {"phase": "completed"},
+        }
+        return mutator(dict(container._meta))
+
+    monkeypatch.setattr(
+        prepare_db_module,
+        "_update_metadata",
+        _promote_before_claim,
+        raising=True,
+    )
+    monkeypatch.setattr(
+        container,
+        "list_blobs",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cancel side effects must not start")
+        ),
+    )
+
+    response = client.post(
+        "/api/storage/prepare-db/core_nt/cancel",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+        },
+    )
+
+    assert response.status_code == 409
+    assert container._meta["copy_status"]["phase"] == "completed"
+
+
+def test_cancel_aks_delete_partial_keeps_retryable_marker(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer({})
+    container._meta = {
+        "db_name": "core_nt",
+        "update_in_progress": True,
+        "prepare_operation_id": "prepare-owner",
+        "copy_status": {"phase": "copying", "mode": "aks"},
+        "aks_job_ref": {
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-aks",
+            "cluster_name": "aks-elb",
+            "namespace": "default",
+            "job_name": "prepare-core-nt",
+            "configmap_name": "prepare-core-nt",
+        },
+    }
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.prepare_db_jobs.delete_prepare_db_job",
+        lambda *_args, **_kwargs: {
+            "status": "partial",
+            "job": {"ok": False, "status_code": 503},
+            "configmap": {"ok": True, "status_code": 202},
+        },
+    )
+
+    response = client.post(
+        "/api/storage/prepare-db/core_nt/cancel",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+        },
+    )
+
+    assert response.status_code == 502
+    assert container._meta["update_in_progress"] is True
+    assert container._meta["copy_status"]["phase"] == "cancel_failed"
+    assert container._meta["aks_job_ref"]["job_name"] == "prepare-core-nt"
+    assert container._meta["prepare_operation_id"] == container._meta["cancel_operation_id"]
+
+
+def test_cancel_blob_abort_failure_keeps_retryable_marker(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer({"core_nt/core_nt.000.nhr": "pending"})
+    container._meta = {
+        "db_name": "core_nt",
+        "update_in_progress": True,
+        "prepare_operation_id": "prepare-owner",
+        "copy_status": {"phase": "copying"},
+    }
+    original_get_blob_client = container.get_blob_client
+
+    def _get_blob_client(name: str) -> Any:
+        blob = original_get_blob_client(name)
+        if not name.endswith("-metadata.json"):
+            blob.abort_copy = lambda _copy_id: (_ for _ in ()).throw(RuntimeError("abort failed"))
+        return blob
+
+    monkeypatch.setattr(container, "get_blob_client", _get_blob_client)
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+
+    response = client.post(
+        "/api/storage/prepare-db/core_nt/cancel",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_resource_group": "rg-workload",
+            "account_name": "stworkload",
+        },
+    )
+
+    assert response.status_code == 502
+    assert container._meta["update_in_progress"] is True
+    assert container._meta["copy_status"]["phase"] == "cancel_failed"
+    assert container._meta["copy_status"]["errors"] == 1
+    assert container._meta["prepare_operation_id"] == container._meta["cancel_operation_id"]
+
+
+def test_cancel_refuses_when_completed(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     container = _FakeContainer({"core_nt/core_nt.000.nhr": "success"})
     container._meta = {
         "db_name": "core_nt",

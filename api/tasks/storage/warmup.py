@@ -4,7 +4,8 @@ Responsibility: Execute the full per-database warmup pipeline (verify staged blo
     auto-shard if needed, schedule node-local warmup Jobs on AKS, wait for readiness).
 Edit boundaries: Keep the task body self-contained. Helpers live in `helpers.py`;
     cross-package RBAC/AKS attach calls go through `api.tasks.azure`.
-Key entry points: `warmup_database` (Celery task `api.tasks.storage.warmup_database`).
+Key entry points: `_has_current_shard_layout`, `warmup_database` (Celery task
+    `api.tasks.storage.warmup_database`).
 Risky contracts: Task name `api.tasks.storage.warmup_database` is referenced by routes,
     beat schedules, and tests — do not rename. Task must remain idempotent + retry-aware
     and write phase checkpoints via `state_repo` so the SPA can render progress.
@@ -16,17 +17,21 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from celery import shared_task
 
 import api.tasks.storage as _facade
+from api.services.db.sharding import (
+    SHARD_LAYOUT_SCHEMA_VERSION,
+    require_complete_shard_summary,
+)
 from api.services.env import env_int
 from api.services.feature_events import TERMINAL_STATUSES, record_feature_event
-from api.tasks.storage.helpers import (
-    publish_db_metadata_invalidate as _publish_db_metadata_invalidate,
-)
+from api.services.sanitise import sanitise
+from api.services.storage.prepare_db_metadata import _SHARDING_STALE_SECONDS
 from api.tasks.storage.helpers import (
     wait_for_warmup_jobs as _wait_for_warmup_jobs,
 )
@@ -62,6 +67,20 @@ _STALE_DBOPS_WARMUP_SECONDS = env_int("STALE_DBOPS_WARMUP_SECONDS", 7200, minimu
 _AUTOSTOP_ACTIVE_ROW_STALE_SECONDS = env_int(
     "AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS", 7200, minimum=300
 )
+
+
+def _has_current_shard_layout(database: dict[str, Any]) -> bool:
+    """Return whether warmup may skip authoritative shard artifact backfill."""
+
+    schema = database.get("shard_layout_schema")
+    return (
+        bool(database.get("sharded"))
+        and bool(database.get("shard_sets"))
+        and type(schema) is int
+        and schema == SHARD_LAYOUT_SCHEMA_VERSION
+    )
+
+
 if _TASK_SOFT_TIME_LIMIT >= _TASK_HARD_TIME_LIMIT:
     raise ValueError("WARMUP_TASK_SOFT_TIME_LIMIT must be < WARMUP_TASK_TIME_LIMIT")
 if _TASK_SOFT_TIME_LIMIT <= _WARMUP_POLL_MAX_SECONDS:
@@ -69,6 +88,7 @@ if _TASK_SOFT_TIME_LIMIT <= _WARMUP_POLL_MAX_SECONDS:
 if _TASK_HARD_TIME_LIMIT >= min(
     _STALE_DBOPS_WARMUP_SECONDS,
     _AUTOSTOP_ACTIVE_ROW_STALE_SECONDS,
+    _SHARDING_STALE_SECONDS,
 ):
     raise ValueError(
         "warmup stale-row thresholds must exceed WARMUP_TASK_TIME_LIMIT; "
@@ -76,7 +96,8 @@ if _TASK_HARD_TIME_LIMIT >= min(
         "AKS_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS="
         f"{_AUTOSTOP_ACTIVE_ROW_STALE_SECONDS}, "
         f"WARMUP_TASK_TIME_LIMIT={_TASK_HARD_TIME_LIMIT}; raise both stale-row "
-        f"thresholds above {_TASK_HARD_TIME_LIMIT}"
+        "thresholds and SHARDING_METADATA_STALE_SECONDS above "
+        f"{_TASK_HARD_TIME_LIMIT}"
     )
 
 
@@ -152,6 +173,126 @@ def _warmup_azcopy_concurrency() -> int:
 
     override = _env_int_override("WARMUP_AZCOPY_CONCURRENCY", lo=1, hi=512)
     return override if override is not None else _DEFAULT_AZCOPY_CONCURRENCY
+
+
+def _backfill_legacy_shard_layout(
+    credential: Any,
+    storage_account: str,
+    database_name: str,
+) -> dict[str, Any]:
+    """Build and atomically publish one legacy database's shard layouts."""
+
+    from api.services.db.sharding import DEFAULT_CONTAINER, ensure_shard_sets
+    from api.services.storage.data import _blob_service
+    from api.services.storage.prepare_db_locks import prepare_db_lock
+    from api.services.storage.prepare_db_metadata import (
+        DatabaseOperationInProgressError,
+        invalidate_shard_publication,
+        is_stale_sharding_marker,
+        update_metadata,
+    )
+
+    lock = prepare_db_lock(storage_account, database_name)
+    if not lock.acquire(blocking=False):
+        raise RuntimeError("another database operation is in progress; retry warmup")
+
+    started_at = datetime.now(UTC).isoformat()
+    operation_id = uuid.uuid4().hex
+    marker_written = False
+    try:
+        container = _blob_service(
+            credential,
+            storage_account,
+        ).get_container_client(DEFAULT_CONTAINER)
+
+        def _mark_started(meta: dict[str, Any]) -> dict[str, Any]:
+            if meta.get("update_in_progress"):
+                raise DatabaseOperationInProgressError("prepare-db is in progress; retry warmup")
+            if meta.get("sharding_in_progress") and not is_stale_sharding_marker(meta):
+                raise DatabaseOperationInProgressError(
+                    "sharding is already in progress; retry warmup"
+                )
+            meta["db_name"] = database_name
+            meta["sharding_in_progress"] = True
+            meta["sharding_started_at"] = started_at
+            meta["sharding_operation_id"] = operation_id
+            meta.pop("sharding_error", None)
+            return meta
+
+        started = update_metadata(
+            container,
+            database_name,
+            storage_account,
+            _mark_started,
+        )
+        marker_written = True
+        source_version = str(started.get("source_version") or "")
+
+        summary = ensure_shard_sets(credential, storage_account, database_name)
+        complete_sets = require_complete_shard_summary(summary)
+
+        def _mark_completed(meta: dict[str, Any]) -> dict[str, Any]:
+            if meta.get("sharding_operation_id") != operation_id:
+                raise RuntimeError("shard backfill marker ownership changed")
+            if meta.get("update_in_progress"):
+                raise RuntimeError("prepare-db started during shard backfill")
+            if str(meta.get("source_version") or "") != source_version:
+                raise RuntimeError("database source version changed during shard backfill")
+            meta["sharding_in_progress"] = False
+            meta.pop("sharding_operation_id", None)
+            meta.pop("sharding_error", None)
+            meta["sharded"] = True
+            meta["shard_sets"] = complete_sets
+            meta["shard_layout_schema"] = SHARD_LAYOUT_SCHEMA_VERSION
+            if source_version:
+                meta["shard_source_version"] = source_version
+            meta["sharded_at"] = datetime.now(UTC).isoformat()
+            if summary.get("total_bytes"):
+                meta["total_bytes"] = summary["total_bytes"]
+            for key in (
+                "total_letters",
+                "total_sequences",
+                "bytes_to_cache",
+                "bytes_total",
+            ):
+                if summary.get(key):
+                    meta[key] = summary[key]
+            return meta
+
+        update_metadata(
+            container,
+            database_name,
+            storage_account,
+            _mark_completed,
+        )
+        return summary
+    except Exception as exc:
+        if marker_written:
+            error = sanitise(f"{type(exc).__name__}: {exc}")[:300]
+
+            def _mark_failed(meta: dict[str, Any]) -> dict[str, Any]:
+                if meta.get("sharding_operation_id") != operation_id:
+                    return meta
+                meta["sharding_in_progress"] = False
+                meta.pop("sharding_operation_id", None)
+                return invalidate_shard_publication(meta, error=error)
+
+            try:
+                update_metadata(
+                    container,
+                    database_name,
+                    storage_account,
+                    _mark_failed,
+                )
+            except Exception as marker_exc:
+                LOGGER.warning(
+                    "warmup shard error marker failed db=%s: %s",
+                    database_name,
+                    type(marker_exc).__name__,
+                )
+        raise
+    finally:
+        lock.release()
 
 
 @shared_task(
@@ -289,91 +430,21 @@ def warmup_database(
         # Inline (synchronous) is safe in a Celery worker: there is no
         # HTTP timeout, ensure_shard_sets is idempotent, and the work
         # for even the largest known DB completes in a few minutes.
-        already_sharded = bool(match.get("sharded")) and bool(match.get("shard_sets"))
+        already_sharded = _has_current_shard_layout(match)
         sharding = "skipped" if already_sharded else "running"
         if not already_sharded:
             _record_task_progress(self, "sharding", database=database_name)
             _update_state(job_id, "sharding", status="running")
             try:
-                import json
-                from datetime import datetime
-
-                from api.services.db.sharding import (
-                    DEFAULT_CONTAINER,
-                    ensure_shard_sets,
+                summary = _backfill_legacy_shard_layout(
+                    cred,
+                    storage_account,
+                    database_name,
                 )
-                from api.services.sanitise import sanitise
-                from api.services.storage.data import _blob_service
-
-                # Mark in-progress before the long call so the SPA's
-                # chip strip can reflect the auto-shard step.
-                svc = _blob_service(cred, storage_account)
-                cc = svc.get_container_client(DEFAULT_CONTAINER)
-                bc = cc.get_blob_client(f"{database_name}-metadata.json")
-                pre: dict[str, Any] = {}
-                try:
-                    from api.services.storage.data import read_metadata_blob_text
-
-                    pre = json.loads(
-                        read_metadata_blob_text(
-                            bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
-                        )
-                    )
-                except Exception:
-                    pre = {"db_name": database_name}
-                pre["db_name"] = database_name
-                pre["sharding_in_progress"] = True
-                pre["sharding_started_at"] = datetime.now(UTC).isoformat()
-                pre.pop("sharding_error", None)
-                try:
-                    bc.upload_blob(json.dumps(pre).encode("utf-8"), overwrite=True)
-                    _publish_db_metadata_invalidate(storage_account, database_name)
-                except Exception as exc:
-                    LOGGER.warning(
-                        "warmup_database pre-state write failed db=%s: %s",
-                        database_name,
-                        type(exc).__name__,
-                    )
-
-                summary = ensure_shard_sets(cred, storage_account, database_name)
-
-                # Persist final state so the next /api/blast/databases
-                # poll flips the chip to "sharded".
-                final: dict[str, Any] = {}
-                try:
-                    from api.services.storage.data import read_metadata_blob_text
-
-                    final = json.loads(
-                        read_metadata_blob_text(
-                            bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
-                        )
-                    )
-                except Exception:
-                    final = {"db_name": database_name}
-                final["sharding_in_progress"] = False
-                final.pop("sharding_error", None)
-                final["sharded"] = bool(summary.get("shard_sets"))
-                final["shard_sets"] = summary.get("shard_sets", [])
-                if final.get("source_version"):
-                    final["shard_source_version"] = final.get("source_version")
-                final["sharded_at"] = datetime.now(UTC).isoformat()
-                if summary.get("total_bytes"):
-                    final.setdefault("total_bytes", summary["total_bytes"])
-                for key in ("total_letters", "total_sequences", "bytes_to_cache", "bytes_total"):
-                    if summary.get(key):
-                        final.setdefault(key, summary[key])
-                try:
-                    bc.upload_blob(json.dumps(final).encode("utf-8"), overwrite=True)
-                    _publish_db_metadata_invalidate(storage_account, database_name)
-                except Exception as exc:
-                    LOGGER.warning(
-                        "warmup_database final-state write failed db=%s: %s",
-                        database_name,
-                        type(exc).__name__,
-                    )
                 sharding = "completed"
                 match["sharded"] = True
                 match["shard_sets"] = summary.get("shard_sets", [])
+                match["shard_layout_schema"] = int(summary.get("layout_schema") or 0)
                 for key in (
                     "total_bytes",
                     "total_letters",
@@ -389,40 +460,6 @@ def warmup_database(
                     database_name,
                     type(exc).__name__,
                 )
-                # Best-effort error marker so the SPA shows a useful chip.
-                try:
-                    import json as _json
-
-                    from api.services.db.sharding import DEFAULT_CONTAINER as _DC
-                    from api.services.sanitise import sanitise as _sanitise
-                    from api.services.storage.data import _blob_service as _bs
-
-                    cred2 = get_credential()
-                    svc2 = _bs(cred2, storage_account)
-                    bc2 = svc2.get_container_client(_DC).get_blob_client(
-                        f"{database_name}-metadata.json"
-                    )
-                    err_meta: dict[str, Any] = {}
-                    try:
-                        from api.services.storage.data import read_metadata_blob_text
-
-                        err_meta = _json.loads(
-                            read_metadata_blob_text(
-                                bc2, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
-                            )
-                        )
-                    except Exception:
-                        err_meta = {"db_name": database_name}
-                    err_meta["sharding_in_progress"] = False
-                    err_meta["sharding_error"] = _sanitise(f"{type(exc).__name__}: {exc}")[:300]
-                    bc2.upload_blob(_json.dumps(err_meta).encode("utf-8"), overwrite=True)
-                    _publish_db_metadata_invalidate(storage_account, database_name)
-                except Exception as marker_exc:
-                    LOGGER.debug(
-                        "warmup_database shard error marker failed db=%s: %s",
-                        database_name,
-                        type(marker_exc).__name__,
-                    )
                 # Sharding is a prereq — don't claim success if it failed.
                 err = sanitise(f"{type(exc).__name__}: {exc}")[:300]
                 _update_state(
@@ -437,7 +474,10 @@ def warmup_database(
                     "error": f"auto-shard failed: {err}",
                 }
 
-        node_warmup: dict[str, Any] = {"status": "skipped", "reason": "cluster not supplied"}
+        node_warmup: dict[str, Any] = {
+            "status": "skipped",
+            "reason": "cluster not supplied",
+        }
         if cluster_name:
             _record_task_progress(self, "planning_node_warmup", database=database_name)
             _update_state(job_id, "planning_node_warmup", status="running")

@@ -6,19 +6,18 @@ Responsibility: Detect ``{db}-metadata.json`` rows whose ``update_in_progress`` 
     ``partial`` phase so the SPA stops showing a perpetual download spinner and the 409
     in-progress gate clears. A worker/beat revision restart kills the in-flight poller in
     ``prepare_db_via_aks`` before it can write the terminal ``copy_status``; without this
-    reconciler the row freezes forever (the only other recovery is the route's 2 h stale
-    window or a manual Cancel).
+    reconciler the row freezes until the shared bounded stale window or a manual Cancel.
 Edit boundaries: Pure-Python decision + Storage/Kubernetes read-modify-write only. Do NOT
     re-dispatch downloads from here (no auto-relaunch — that belongs to an explicit user
-    Update click). Metadata writes go through the route's ETag-guarded ``_update_metadata``
-    so a concurrent fresh dispatch is never clobbered. Never open Storage network surface.
+    Update click). Metadata writes go through the shared ETag-guarded ``update_metadata``
+    helper so a concurrent fresh dispatch is never clobbered. Never open Storage network surface.
 Key entry points: ``reconcile_orphaned_prepare_db`` (orchestrator),
     ``classify_prepare_db_entry`` (pure decision function, unit-tested in isolation).
 Risky contracts: The authoritative orphan signal is the K8s Job lookup, NOT age — a healthy
-    ``nt`` download legitimately exceeds the 2 h stale window, so age-only resets would abort
+    ``nt`` download can run for many hours, so age-only resets would abort
     live downloads. Age is used only as a fallback when no ``aks_job_ref`` is recorded
-    (server-side mode). The reset mutator re-validates ``update_started_at`` under the ETag
-    so an interleaved new dispatch is skipped instead of reset (concurrency-race guard).
+    (server-side mode). The reset mutator re-validates both ``update_started_at`` and the
+    owner token under the ETag so an interleaved new dispatch is never reset.
 Validation: ``uv run pytest -q api/tests/test_orphan_prepare_db_reconcile.py``.
 """
 
@@ -107,11 +106,7 @@ def classify_prepare_db_entry(
         return ("skip-terminal", f"copy_status.phase={phase!r} is terminal")
 
     ref = metadata.get("aks_job_ref")
-    has_ref = (
-        isinstance(ref, dict)
-        and bool(ref.get("job_name"))
-        and bool(ref.get("cluster_name"))
-    )
+    has_ref = isinstance(ref, dict) and bool(ref.get("job_name")) and bool(ref.get("cluster_name"))
 
     if has_ref:
         if job_status is None:
@@ -151,9 +146,7 @@ def _resolve_workload_storage_account() -> str:
             return value
     endpoint = os.environ.get("AZURE_BLOB_ENDPOINT", "").strip()
     if endpoint:
-        host = urlparse(endpoint).netloc or endpoint.removeprefix("https://").split(
-            "/", 1
-        )[0]
+        host = urlparse(endpoint).netloc or endpoint.removeprefix("https://").split("/", 1)[0]
         account = host.split(".", 1)[0].strip()
         if account:
             return account
@@ -214,8 +207,7 @@ def reconcile_orphaned_prepare_db(
     """
     if enabled is None:
         enabled = (
-            os.environ.get("PREPARE_DB_ORPHAN_RECONCILE_ENABLED", "true").strip().lower()
-            != "false"
+            os.environ.get("PREPARE_DB_ORPHAN_RECONCILE_ENABLED", "true").strip().lower() != "false"
         )
     if not enabled:
         return {"enabled": False, "reset": [], "scanned": 0}
@@ -224,6 +216,7 @@ def reconcile_orphaned_prepare_db(
     # avoid importing azure/k8s SDKs at module import time (tests inject fakes).
     from api.services.storage.prepare_db_metadata import (
         _PREPARE_DB_STALE_SECONDS,
+        invalidate_shard_publication,
     )
     from api.services.storage.prepare_db_metadata import (
         download_blob_with_etag as _download_blob_with_etag,
@@ -281,9 +274,7 @@ def reconcile_orphaned_prepare_db(
 
         ref = metadata.get("aks_job_ref")
         has_ref = (
-            isinstance(ref, dict)
-            and bool(ref.get("job_name"))
-            and bool(ref.get("cluster_name"))
+            isinstance(ref, dict) and bool(ref.get("job_name")) and bool(ref.get("cluster_name"))
         )
         job_status: dict[str, Any] | None = None
         if has_ref:
@@ -324,12 +315,11 @@ def reconcile_orphaned_prepare_db(
 
         # action == "reset"
         observed_started_at = str(metadata.get("update_started_at") or "")
+        observed_operation_id = str(metadata.get("prepare_operation_id") or "")
         staged = _count_staged_blobs(container, db_name)
         success = staged[0] if staged else None
         copy_status = metadata.get("copy_status")
-        total_files = (
-            copy_status.get("total_files") if isinstance(copy_status, dict) else None
-        )
+        total_files = copy_status.get("total_files") if isinstance(copy_status, dict) else None
         mode_label = "aks" if has_ref else "server-side"
 
         def _reset_mutator(
@@ -337,6 +327,7 @@ def reconcile_orphaned_prepare_db(
             *,
             _reason: str = reason,
             _started: str = observed_started_at,
+            _operation_id: str = observed_operation_id,
             _mode: str = mode_label,
             _success: int | None = success,
             _total: Any = total_files,
@@ -351,7 +342,12 @@ def reconcile_orphaned_prepare_db(
                 raise _SkipReset
             if str(meta.get("update_started_at") or "") != _started:
                 raise _SkipReset
+            if _operation_id and str(meta.get("prepare_operation_id") or "") != _operation_id:
+                raise _SkipReset
             meta["update_in_progress"] = False
+            meta.pop("prepare_operation_id", None)
+            meta.pop("cancel_operation_id", None)
+            meta.pop("cancel_started_at", None)
             meta["update_error"] = f"prepare-db reconciler: {_reason}"
             meta["update_failed_at"] = now.isoformat()
             summary: dict[str, Any] = {
@@ -367,7 +363,10 @@ def reconcile_orphaned_prepare_db(
             meta["copy_status"] = summary
             meta.pop("aks_job_ref", None)
             meta.pop("updating_to_source_version", None)
-            return meta
+            return invalidate_shard_publication(
+                meta,
+                error=f"prepare-db reconciler: {_reason}",
+            )
 
         try:
             _update_metadata(container, db_name, account, _reset_mutator)

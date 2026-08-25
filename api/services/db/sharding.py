@@ -4,7 +4,8 @@ Responsibility: DB sharding helpers - generate manifest + .nal alias text files
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `ShardLayout`, `_validate_db_name`, `_validate_shard_count`,
-`list_db_volumes`, `read_blastdb_stats`, `derive_volumes_from_keys`
+`list_db_volumes`, `render_shard_layout_metadata`, `read_blastdb_stats`,
+`derive_volumes_from_keys`, `require_complete_shard_summary`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests`.
@@ -12,6 +13,7 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -57,6 +59,47 @@ _RE_DB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$")
 _MAX_VOLUMES = 1024
 
 DEFAULT_CONTAINER = "blast-db"
+SHARD_LAYOUT_SCHEMA_VERSION = 1
+
+
+def required_shard_sets(
+    total_volumes: int,
+    *,
+    presets: Iterable[int] = PRESET_SHARD_SETS,
+) -> list[int]:
+    """Return every configured shard preset supported by a volume count."""
+
+    if type(total_volumes) is not int or total_volumes < 1:
+        raise RuntimeError("shard generation returned an invalid total_volumes value")
+    return sorted({int(preset) for preset in presets if int(preset) <= total_volumes})
+
+
+def require_complete_shard_summary(
+    summary: dict[str, Any],
+    *,
+    presets: Iterable[int] = PRESET_SHARD_SETS,
+) -> list[int]:
+    """Return successful presets or raise when any eligible layout failed."""
+
+    expected = required_shard_sets(summary.get("total_volumes"), presets=presets)
+    shard_sets = summary.get("shard_sets")
+    actual = (
+        shard_sets
+        if isinstance(shard_sets, list) and all(type(value) is int for value in shard_sets)
+        else []
+    )
+    errors = summary.get("errors")
+    error_count = len(errors) if isinstance(errors, list) else int(bool(errors))
+    if (
+        summary.get("layout_schema") != SHARD_LAYOUT_SCHEMA_VERSION
+        or error_count
+        or actual != expected
+    ):
+        raise RuntimeError(
+            "incomplete shard layout publication "
+            f"(expected={expected}, successful={actual}, errors={error_count})"
+        )
+    return expected
 
 
 # ---------------------------------------------------------------------------
@@ -94,14 +137,14 @@ def _validate_shard_count(n: int) -> None:
 # ---------------------------------------------------------------------------
 # Volume discovery
 # ---------------------------------------------------------------------------
-def list_db_volumes(
+def _list_db_volume_details(
     credential: TokenCredential,
     account_name: str,
     db_name: str,
     *,
     container: str = DEFAULT_CONTAINER,
-) -> tuple[list[str], int]:
-    """Return ``(sorted volume base names, total bytes across volumes)``.
+) -> tuple[list[str], dict[str, int], int]:
+    """Return volume names, exact volume bytes, and shared-file bytes.
 
     A "volume" is a numbered split (e.g. ``core_nt.00``, ``core_nt.01``).
     Single-volume databases (e.g. ``16S_ribosomal_RNA``) return one entry
@@ -147,22 +190,53 @@ def list_db_volumes(
     if not volume_size:
         raise LookupError(f"no BLAST volume files under {container}/{db_name}/ in {account_name!r}")
 
-    # Second pass: attribute each blob's bytes to its volume by filename
-    # prefix. ``core_nt.00.nhr``, ``core_nt.00.nin``, ``core_nt.00.nsq`` →
-    # all summed under ``core_nt.00``.
+    shared_names = {
+        "taxdb.btd",
+        "taxdb.bti",
+        "taxonomy4blast.sqlite3",
+        f"{db_name}.ndb",
+        f"{db_name}.ntf",
+        f"{db_name}.nto",
+        f"{db_name}.nos",
+        f"{db_name}.not",
+    }
+    # Match the runtime's `${VOL}.*` include pattern exactly. Shared DB-level
+    # files are accounted once per shard instead of being attributed to a
+    # single-volume DB and then double-counted.
     for leaf, size in blob_sizes.items():
-        # Try multi-volume match first.
-        m = re.match(rf"^({re.escape(db_name)}\.\d+)\.[a-z]{{2,4}}$", leaf)
-        if m and m.group(1) in volume_size:
-            volume_size[m.group(1)] += size
+        if leaf in shared_names:
             continue
-        # Single-volume match.
-        if db_name in volume_size and re.match(rf"^{re.escape(db_name)}\.[a-z]{{2,4}}$", leaf):
-            volume_size[db_name] += size
+        for volume in sorted(volume_size, key=len, reverse=True):
+            if leaf.startswith(f"{volume}."):
+                volume_size[volume] += size
+                break
 
     volumes = sorted(volume_size.keys(), key=_volume_sort_key)
-    total_bytes = sum(volume_size.values())
-    return volumes, total_bytes
+    shared_bytes = sum(blob_sizes.get(name, 0) for name in shared_names)
+    return volumes, volume_size, shared_bytes
+
+
+def list_db_volumes(
+    credential: TokenCredential,
+    account_name: str,
+    db_name: str,
+    *,
+    container: str = DEFAULT_CONTAINER,
+) -> tuple[list[str], int]:
+    """Return ``(sorted volume base names, total bytes across volumes)``.
+
+    Shared taxonomy/index files are intentionally excluded from ``total`` to
+    preserve the planner's historical DB-volume contract. Shard layout
+    metadata adds those shared bytes to each concrete download separately.
+    """
+
+    volumes, volume_bytes, _shared_bytes = _list_db_volume_details(
+        credential,
+        account_name,
+        db_name,
+        container=container,
+    )
+    return volumes, sum(volume_bytes.values())
 
 
 def read_blastdb_stats(
@@ -311,6 +385,19 @@ def render_nal(
     return f"TITLE {shard_name}\nDBLIST {paths}\n"
 
 
+def render_shard_layout_metadata(
+    manifest_text: str,
+    nal_text: str,
+    required_bytes: int,
+) -> str:
+    """Bind an exact download byte count to one manifest/NAL pair."""
+
+    if required_bytes <= 0:
+        raise ValueError("required_bytes must be positive")
+    digest = hashlib.sha256(f"{manifest_text}\0{nal_text}".encode()).hexdigest()
+    return f"{digest} {required_bytes}\n"
+
+
 # ---------------------------------------------------------------------------
 # Upload
 # ---------------------------------------------------------------------------
@@ -340,9 +427,7 @@ def _shard_set_already_present(cc: Any, db_name: str, num_shards: int) -> bool:
     layout the previous version paid 100 RTT every ``prepare-db`` run.
     """
     base_prefix = f"{num_shards}shards/"
-    expected = {
-        _shard_blob_paths(db_name, num_shards, i)[1] for i in range(num_shards)
-    }
+    expected = {_shard_blob_paths(db_name, num_shards, i)[1] for i in range(num_shards)}
     present: set[str] = set()
     try:
         for blob in cc.list_blobs(name_starts_with=base_prefix):
@@ -378,26 +463,29 @@ def upload_shard_set(
     container: str = DEFAULT_CONTAINER,
     force: bool = False,
     local_db_dir: str = AKS_LOCAL_DB_DIR,
+    volume_bytes: dict[str, int] | None = None,
+    shared_bytes: int = 0,
 ) -> ShardUploadResult:
     """Idempotently upload manifest + .nal for one ``N``-shard layout.
 
-    If every ``.nal`` already exists and ``force`` is false, returns with
-    ``skipped == 2*num_shards`` and no writes.
+    Every tiny artifact is content-compared even when all ``.nal`` files
+    already exist. Presence alone is not a generation proof: after a database
+    update, the volume set can change while the old shard paths remain. A
+    presence-only fast path would then stamp the new ``shard_source_version``
+    over stale manifests and silently search an old database subset.
     """
     _validate_db_name(db_name)
     _validate_shard_count(num_shards)
+    if volume_bytes is not None:
+        missing_sizes = sorted(set(volumes) - set(volume_bytes))
+        if missing_sizes:
+            raise ValueError(f"missing byte sizes for volumes: {missing_sizes[:3]}")
+        if shared_bytes < 0 or any(volume_bytes[name] < 0 for name in volumes):
+            raise ValueError("volume/shared byte sizes must be non-negative")
     layout = plan_shard_layout(db_name, volumes, num_shards)
 
     svc = _blob_service(credential, account_name)
     cc = svc.get_container_client(container)
-
-    if not force and _shard_set_already_present(cc, db_name, num_shards):
-        return ShardUploadResult(
-            db_name=db_name,
-            num_shards=num_shards,
-            created=0,
-            skipped=2 * num_shards,
-        )
 
     created = 0
     skipped = 0
@@ -411,7 +499,21 @@ def upload_shard_set(
             volumes=shard_volumes,
             local_db_dir=local_db_dir,
         )
-        for path, text in ((manifest_path, manifest_text), (nal_path, nal_text)):
+        artifacts = [(manifest_path, manifest_text), (nal_path, nal_text)]
+        if volume_bytes is not None:
+            required_bytes = shared_bytes + sum(volume_bytes[volume] for volume in shard_volumes)
+            layout_path = f"{manifest_path.removesuffix('.manifest')}.layout"
+            artifacts.append(
+                (
+                    layout_path,
+                    render_shard_layout_metadata(
+                        manifest_text,
+                        nal_text,
+                        required_bytes,
+                    ),
+                )
+            )
+        for path, text in artifacts:
             bc = cc.get_blob_client(path)
             if not force:
                 try:
@@ -465,7 +567,13 @@ def ensure_shard_sets(
         }
     """
     _validate_db_name(db_name)
-    volumes, total_bytes = list_db_volumes(credential, account_name, db_name, container=container)
+    volumes, volume_bytes, shared_bytes = _list_db_volume_details(
+        credential,
+        account_name,
+        db_name,
+        container=container,
+    )
+    total_bytes = sum(volume_bytes.values())
     stats = read_blastdb_stats(credential, account_name, db_name, container=container)
 
     successful: list[int] = []
@@ -492,6 +600,8 @@ def ensure_shard_sets(
                 n,
                 volumes,
                 container=container,
+                volume_bytes=volume_bytes,
+                shared_bytes=shared_bytes,
             )
             successful.append(n)
             created += result.created
@@ -507,6 +617,7 @@ def ensure_shard_sets(
 
     return {
         "db_name": db_name,
+        "layout_schema": SHARD_LAYOUT_SCHEMA_VERSION,
         "total_volumes": len(volumes),
         "total_bytes": total_bytes,
         **stats,
@@ -613,7 +724,4 @@ def partition_prefix_for(
     _validate_shard_count(num_shards)
     from api.services.storage.endpoint import blob_account_url
 
-    return (
-        f"{blob_account_url(account_name)}/{container}/"
-        f"{num_shards}shards/{db_name}_shard_"
-    )
+    return f"{blob_account_url(account_name)}/{container}/{num_shards}shards/{db_name}_shard_"

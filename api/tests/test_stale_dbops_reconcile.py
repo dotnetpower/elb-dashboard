@@ -146,6 +146,12 @@ def test_warmup_threshold_is_shorter_than_prepare_db() -> None:
     assert d.error_code == "worker_lost"
 
 
+def test_prepare_db_audit_window_cannot_precede_metadata_recovery() -> None:
+    from api.services.storage.prepare_db_metadata import _PREPARE_DB_STALE_SECONDS
+
+    assert stale_dbops._PREPARE_DB_STALE_SECONDS >= _PREPARE_DB_STALE_SECONDS
+
+
 def test_already_terminal_row_is_skipped() -> None:
     d = classify_dbops_row(
         row_type="warmup",
@@ -287,9 +293,7 @@ def _patch_orchestrator(
     monkeypatch: pytest.MonkeyPatch, repo: _FakeRepo, states: dict[str, str]
 ) -> None:
     _patch_async(monkeypatch, states)
-    monkeypatch.setattr(
-        "api.services.state_repo.JobStateRepository", lambda *a, **k: repo
-    )
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda *a, **k: repo)
 
     class _App:  # celery_app stand-in
         pass

@@ -12,12 +12,14 @@ Responsibility: Read, write, and optimistic-concurrency-update the
 Edit boundaries: Storage blob I/O only — no HTTP, no Celery dispatch, no
     NCBI listing. The route still owns dispatch, locking, and error mapping.
 Key entry points: `read_db_metadata`, `download_blob_with_etag`,
-    `write_db_metadata`, `update_metadata`, `is_stale_prepare_marker`.
+    `write_db_metadata`, `update_metadata`, `is_stale_prepare_marker`,
+    `is_stale_sharding_marker`, `require_prepare_operation_owner`,
+    `invalidate_shard_publication`.
 Risky contracts: `update_metadata` MUST stay read-modify-write with ETag
     ``If-Match`` retry so a concurrent writer (shard daemon, warmup task)
-    cannot clobber unrelated fields; its final blind write is the documented
-    last-resort. `write_db_metadata` MUST invalidate the merged display cache
-    so the SPA never shows stale state after a prepare-db action.
+    cannot clobber unrelated fields, and MUST fail closed after bounded retry
+    exhaustion. Operation owners must be revalidated inside each mutator, and
+    partial shard generation must clear every published layout field.
 Validation: `uv run pytest -q api/tests/test_storage_data.py
     api/tests/test_prepare_db_hardening.py api/tests/test_prepare_db_routes.py`.
 """
@@ -30,23 +32,95 @@ from datetime import UTC, datetime
 from typing import Any
 
 from azure.core import MatchConditions
-from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
+from azure.core.exceptions import (
+    ResourceExistsError,
+    ResourceModifiedError,
+    ResourceNotFoundError,
+)
+
+from api.services.env import env_int
+from api.services.storage.prepare_db_copy_poller import (
+    _COPY_POLL_MAX_SECONDS,
+    CopyProgressAbort,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 # An older `update_in_progress=true` marker than this is treated as a crashed
-# previous daemon. Large enough to cover the worst-case copy initiation for
-# `nt`/`sra` but small enough that real crashes recover same-hour.
-_PREPARE_DB_STALE_SECONDS = 2 * 60 * 60
+# previous daemon. Keep the floor beyond the server-side copy poll ceiling so
+# a legitimate daemon cannot be taken over while it can still publish.
+_PREPARE_DB_STALE_MIN_SECONDS = _COPY_POLL_MAX_SECONDS + 2 * 60 * 60
+_PREPARE_DB_STALE_SECONDS = env_int(
+    "PREPARE_DB_METADATA_STALE_SECONDS",
+    _PREPARE_DB_STALE_MIN_SECONDS,
+    minimum=_PREPARE_DB_STALE_MIN_SECONDS,
+    maximum=7 * 24 * 60 * 60,
+)
+_SHARDING_STALE_SECONDS = env_int(
+    "SHARDING_METADATA_STALE_SECONDS",
+    6 * 60 * 60,
+    minimum=2 * 60 * 60,
+    maximum=7 * 24 * 60 * 60,
+)
+_MAX_METADATA_UPDATE_ATTEMPTS = 10
+
+
+class DatabaseOperationInProgressError(RuntimeError):
+    """Raised when an atomic metadata claim finds another live DB operation."""
+
+
+class DatabaseOperationOwnershipError(CopyProgressAbort):
+    """Raised when a daemon no longer owns the metadata operation marker."""
+
 
 __all__ = [
     "_PREPARE_DB_STALE_SECONDS",
+    "_SHARDING_STALE_SECONDS",
+    "DatabaseOperationInProgressError",
+    "DatabaseOperationOwnershipError",
     "download_blob_with_etag",
+    "invalidate_shard_publication",
     "is_stale_prepare_marker",
+    "is_stale_sharding_marker",
     "read_db_metadata",
+    "require_prepare_operation_owner",
     "update_metadata",
     "write_db_metadata",
 ]
+
+
+def invalidate_shard_publication(
+    metadata: dict[str, Any],
+    *,
+    error: str,
+) -> dict[str, Any]:
+    """Remove every field that could advertise a partially rewritten layout."""
+
+    metadata["sharded"] = False
+    metadata["shard_sets"] = []
+    metadata.pop("shard_layout_schema", None)
+    metadata["shard_source_version"] = None
+    metadata.pop("sharded_at", None)
+    metadata["sharding_error"] = error
+    return metadata
+
+
+def require_prepare_operation_owner(metadata: dict[str, Any], operation_id: str) -> None:
+    """Reject a write from a superseded prepare-db daemon.
+
+    An empty operation id is accepted only for a live ownerless marker created
+    by a Celery message enqueued before ownership tokens were introduced.
+    """
+
+    if not operation_id:
+        if metadata.get("update_in_progress") and not metadata.get("prepare_operation_id"):
+            return
+        raise DatabaseOperationOwnershipError("prepare-db metadata marker ownership changed")
+    if (
+        not metadata.get("update_in_progress")
+        or str(metadata.get("prepare_operation_id") or "") != operation_id
+    ):
+        raise DatabaseOperationOwnershipError("prepare-db metadata marker ownership changed")
 
 
 def is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
@@ -63,6 +137,22 @@ def is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
     except Exception:
         return True
     return age >= _PREPARE_DB_STALE_SECONDS
+
+
+def is_stale_sharding_marker(metadata: dict[str, Any]) -> bool:
+    """Return whether an active sharding marker is old enough to replace."""
+
+    if not metadata.get("sharding_in_progress"):
+        return True
+    started = str(metadata.get("sharding_started_at") or "")
+    if not started:
+        return True
+    try:
+        started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        age = (datetime.now(UTC) - started_dt).total_seconds()
+    except Exception:
+        return True
+    return age >= _SHARDING_STALE_SECONDS
 
 
 def read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
@@ -92,12 +182,9 @@ def download_blob_with_etag(container: Any, db_name: str) -> tuple[dict[str, Any
         stream = blob.download_blob(offset=0, length=max_bytes + 1)
         payload_bytes = stream.readall()
         if len(payload_bytes) > max_bytes:
-            LOGGER.warning(
-                "db-metadata.json blob exceeds %d bytes (got %d); treating as missing",
-                max_bytes,
-                len(payload_bytes),
+            raise ValueError(
+                f"db-metadata.json blob exceeds {max_bytes} bytes (got {len(payload_bytes)})"
             )
-            return {"db_name": db_name}, ""
         payload = payload_bytes.decode("utf-8")
         try:
             parsed = json.loads(payload) if payload else {}
@@ -110,11 +197,10 @@ def download_blob_with_etag(container: Any, db_name: str) -> tuple[dict[str, Any
             etag = getattr(stream, "properties", None).etag if stream.properties else ""  # type: ignore[union-attr]
         except Exception:
             etag = ""
-        return parsed, etag or ""
+        if not etag:
+            raise RuntimeError("existing db-metadata.json response is missing an ETag")
+        return parsed, str(etag)
     except ResourceNotFoundError:
-        return {"db_name": db_name}, ""
-    except Exception as exc:
-        LOGGER.debug("DB metadata read skipped for %s: %s", db_name, type(exc).__name__)
         return {"db_name": db_name}, ""
 
 
@@ -130,10 +216,17 @@ def write_db_metadata(
     ``If-Match`` so a concurrent writer cannot clobber unrelated fields.
     Returns the resulting blob's new ETag (or empty string)."""
     metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
-    kwargs: dict[str, Any] = {"overwrite": True}
+    kwargs: dict[str, Any]
     if etag:
-        kwargs["etag"] = etag
-        kwargs["match_condition"] = MatchConditions.IfNotModified
+        kwargs = {
+            "overwrite": True,
+            "etag": etag,
+            "match_condition": MatchConditions.IfNotModified,
+        }
+    else:
+        # A missing snapshot is also a CAS state. Refuse to replace a blob
+        # created after our read; update_metadata will re-read and merge it.
+        kwargs = {"overwrite": False}
     result = metadata_blob.upload_blob(
         json.dumps(payload, sort_keys=True).encode("utf-8"),
         **kwargs,
@@ -173,17 +266,17 @@ def update_metadata(
 
     ``mutator(meta_copy) -> dict`` must be a pure function over the snapshot
     (it should not depend on external state). On 412 Precondition Failed
-    (concurrent writer) we re-read and retry up to ``max_attempts``. Final
-    fall-back is a blind overwrite — only reached when the concurrent writer
-    is itself in a loop, which we accept rather than failing the caller.
+    (concurrent writer) we re-read and retry up to ``max_attempts``. Exhaustion
+    re-raises the last conflict; metadata is never written without the ETag
+    precondition merely to force progress.
     """
-    last: dict[str, Any] = {}
+    if type(max_attempts) is not int or not 1 <= max_attempts <= _MAX_METADATA_UPDATE_ATTEMPTS:
+        raise ValueError(f"max_attempts must be in [1, {_MAX_METADATA_UPDATE_ATTEMPTS}]")
+
+    last_conflict: ResourceExistsError | ResourceModifiedError | None = None
     for attempt in range(max_attempts):
         current, etag = download_blob_with_etag(container, db_name)
-        try:
-            mutated = mutator(dict(current))
-        except Exception:
-            raise
+        mutated = mutator(dict(current))
         try:
             write_db_metadata(
                 container,
@@ -193,18 +286,18 @@ def update_metadata(
                 etag=etag or None,
             )
             return mutated
-        except ResourceModifiedError:
+        except (ResourceExistsError, ResourceModifiedError) as exc:
             LOGGER.debug(
                 "metadata ETag retry db=%s attempt=%d",
                 db_name,
                 attempt + 1,
             )
-            last = mutated
+            last_conflict = exc
             continue
-        except Exception:
-            raise
-    # Final blind write — we already exhausted retries; better to land the
-    # mutation and accept that a peer's interleaved field may be lost than to
-    # leave the metadata silently un-updated.
-    write_db_metadata(container, db_name, last, account_name=account_name)
-    return last
+    assert last_conflict is not None
+    LOGGER.warning(
+        "metadata ETag retries exhausted db=%s attempts=%d",
+        db_name,
+        max_attempts,
+    )
+    raise last_conflict

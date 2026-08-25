@@ -54,6 +54,29 @@ def _replace_all_unless_present(path: Path, old: str, new: str, marker: str) -> 
     path.write_text(text.replace(old, new))
 
 
+def _replace_block_once_unless_present(
+    path: Path,
+    *,
+    start_marker: str,
+    end_marker: str,
+    replacement: str,
+    marker: str,
+) -> None:
+    """Replace one bounded source block while failing closed on layout drift."""
+
+    text = path.read_text()
+    if marker in text:
+        return
+    if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+        raise RuntimeError(
+            f"expected one bounded block in {path}, found "
+            f"start={text.count(start_marker)} end={text.count(end_marker)}"
+        )
+    start = text.index(start_marker)
+    end = text.index(end_marker, start) + len(end_marker)
+    path.write_text(text[:start] + replacement + text[end:])
+
+
 def patch_kubectl_transient_retries(root: Path) -> None:
     """Retry bounded, replay-safe kubectl operations on transient API failures."""
     path = root / "src/elastic_blast/util.py"
@@ -302,10 +325,7 @@ def patch_azure_cli_glue(root: Path) -> None:
     path = root / "src/elastic_blast/azure_cli_glue.py"
     _replace_once_unless_present(
         path,
-        (
-            "    # Phase 3: success -> structured ACCEPTED.\n"
-            "    if json_mode and rc == 0:\n"
-        ),
+        ("    # Phase 3: success -> structured ACCEPTED.\n    if json_mode and rc == 0:\n"),
         (
             "    # Phase 3: success -> structured ACCEPTED.\n"
             "    if json_mode and rc == 0:\n"
@@ -317,6 +337,7 @@ def patch_azure_cli_glue(root: Path) -> None:
         ),
         "Dashboard JSON submit has its own log/state collectors",
     )
+
 
 def _azure_traits_paths(root: Path) -> list[Path]:
     paths = [root / "src/elastic_blast/azure_traits.py"]
@@ -358,7 +379,7 @@ def patch_azure_traits(root: Path) -> None:
         _replace_once_unless_present(
             path,
             "    'Standard_D64s_v3': 3.072,\n",
-            "    'Standard_D64s_v3': 3.072,\n" f"{price_entries}",
+            f"    'Standard_D64s_v3': 3.072,\n{price_entries}",
             "'Standard_E32as_v7': 2.016",
             allow_absent=True,
         )
@@ -481,7 +502,7 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
         path,
         (
             '            if ! azcopy cp "${SHARD_DIR}/*.out.gz" "$LOCAL_DIR/" '
-            '--log-level=ERROR 2>/dev/null; then\n'
+            "--log-level=ERROR 2>/dev/null; then\n"
         ),
         (
             '            if ! azcopy cp "${SHARD_DIR}/*" "$LOCAL_DIR/" '
@@ -503,10 +524,7 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
     # so this is a no-op for the standard layout.
     _replace_once_unless_present(
         path,
-        (
-            "                    if ! zcat \"$f\" | awk '!/^#/' "
-            '>> "$MERGE_INPUT"; then\n'
-        ),
+        ('                    if ! zcat "$f" | awk \'!/^#/\' >> "$MERGE_INPUT"; then\n'),
         (
             "                    if ! zcat \"$f\" | awk '/^# Fields:/ || !/^#/' "
             '>> "$MERGE_INPUT"; then\n'
@@ -518,7 +536,7 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
         (
             '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n'
             '        echo "Downloaded $SHARD_COUNT shard files, $TOTAL_ROWS tabular rows"\n\n'
-            '        if ! /scripts/merge-sharded-results.sh \\\n'
+            "        if ! /scripts/merge-sharded-results.sh \\\n"
         ),
         (
             '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n'
@@ -528,24 +546,24 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             '        ORACLE_PARENT_RESULTS="${ELB_RESULTS%/job-*}"\n'
             '        if [ "$ORACLE_PARENT_RESULTS" != "$ELB_RESULTS" ]; then\n'
             '            ORACLE_SEARCH_BASES="$ORACLE_SEARCH_BASES $ORACLE_PARENT_RESULTS"\n'
-            '        fi\n'
-            '        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n'
+            "        fi\n"
+            "        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
             '            [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break\n'
             '            ORACLE_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/tie-order-oracle.txt"\n'
             '            if blob_exists "$ORACLE_BLOB"; then\n'
             '                if azcopy cp "$ORACLE_BLOB" "$ORACLE_FILE" '
-            '--log-level=ERROR 2>/dev/null; then\n'
+            "--log-level=ERROR 2>/dev/null; then\n"
             '                    export ELB_TIE_ORDER_FILE="$ORACLE_FILE"\n'
             '                    export ELB_TIE_ORDER_BASE="$ORACLE_BASE"\n'
             '                    echo "Using tie-order oracle from ${ORACLE_BLOB}"\n'
-            '                else\n'
+            "                else\n"
             '                    echo "WARNING: tie-order oracle exists but could not be '
             'downloaded: ${ORACLE_BLOB}"\n'
-            '                fi\n'
-            '            fi\n'
-            '        done\n\n'
+            "                fi\n"
+            "            fi\n"
+            "        done\n\n"
             '        if [ -z "${ELB_TIE_ORDER_FILE:-}" ]; then\n'
-            '            for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n'
+            "            for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
             '                [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break\n'
             '                ORACLE_URLS_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/'
             'tie-order-oracle-urls.txt"\n'
@@ -554,19 +572,19 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             '                    ORACLE_PART_DIR="$MERGE_DIR/tie-order-oracle-parts"\n'
             '                    mkdir -p "$ORACLE_PART_DIR"\n'
             '                    if azcopy cp "$ORACLE_URLS_BLOB" "$ORACLE_URLS_FILE" '
-            '--log-level=ERROR 2>/dev/null; then\n'
-            '                        idx=0\n'
-            '                        while IFS= read -r part_url; do\n'
+            "--log-level=ERROR 2>/dev/null; then\n"
+            "                        idx=0\n"
+            "                        while IFS= read -r part_url; do\n"
             '                            [ -z "$part_url" ] && continue\n'
             '                            part_file=$(printf "%s/part-%06d.txt" '
             '"$ORACLE_PART_DIR" "$idx")\n'
             '                            if ! azcopy cp "$part_url" "$part_file" '
-            '--log-level=ERROR 2>/dev/null; then\n'
+            "--log-level=ERROR 2>/dev/null; then\n"
             '                                echo "WARNING: tie-order oracle part could not '
             'be downloaded: ${part_url}"\n'
             '                                rm -f "$part_file"\n'
-            '                            fi\n'
-            '                            idx=$((idx + 1))\n'
+            "                            fi\n"
+            "                            idx=$((idx + 1))\n"
             '                        done < "$ORACLE_URLS_FILE"\n'
             '                        if find "$ORACLE_PART_DIR" -type f '
             '-name "part-*.txt" | grep -q .; then\n'
@@ -576,20 +594,20 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             '                            export ELB_TIE_ORDER_BASE="$ORACLE_BASE"\n'
             '                            echo "Using DB-order tie oracle parts from '
             '${ORACLE_URLS_BLOB}"\n'
-            '                        fi\n'
-            '                    fi\n'
-            '                fi\n'
-            '            done\n'
-            '        fi\n'
+            "                        fi\n"
+            "                    fi\n"
+            "                fi\n"
+            "            done\n"
+            "        fi\n"
             '        if [ -n "${ELB_TIE_ORDER_FILE:-}" ]; then\n'
             '            ORACLE_STRICT_BLOB="${ELB_TIE_ORDER_BASE:-$ELB_RESULTS}/'
-            '${ELB_METADATA_DIR}/'
+            "${ELB_METADATA_DIR}/"
             'tie-order-oracle-strict.txt"\n'
             '            if blob_exists "$ORACLE_STRICT_BLOB"; then\n'
             '                export ELB_TIE_ORDER_STRICT="1"\n'
-            '            fi\n'
-            '        fi\n\n'
-            '        if ! /scripts/merge-sharded-results.sh \\\n'
+            "            fi\n"
+            "        fi\n\n"
+            "        if ! /scripts/merge-sharded-results.sh \\\n"
         ),
         "ELB_TIE_ORDER_FILE",
     )
@@ -630,30 +648,51 @@ ORIG_DB="$ELB_DB"
 if [[ "$ELB_DB" =~ ^(.+)_shard_([0-9]+)$ ]]; then
         ORIG_DB="${BASH_REMATCH[1]}"
 fi
-STAGE_LOCK_WAIT_SECONDS="${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}"
-case "$STAGE_LOCK_WAIT_SECONDS" in
-  ''|*[!0-9]*) echo "ERROR: invalid stage lock timeout: ${STAGE_LOCK_WAIT_SECONDS}"; exit 64 ;;
-esac
-if [ "${#STAGE_LOCK_WAIT_SECONDS}" -gt 4 ] \
-        || [ "$STAGE_LOCK_WAIT_SECONDS" -lt 1 ] \
-        || [ "$STAGE_LOCK_WAIT_SECONDS" -gt 5400 ]; then
-        echo "ERROR: stage lock timeout must be between 1 and 5400 seconds"
-        exit 64
+if [[ ! "$ELB_DB" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,126}$ ]]; then
+    echo "ERROR: unsafe shard DB name for cache markers: ${ELB_DB}"
+    exit 64
 fi
-if ! command -v flock >/dev/null 2>&1; then
-    echo "ERROR: flock is required for safe node-local DB staging"
-    exit 69
+CACHE_COMPLETE=".elb-cache.${ELB_DB}.complete"
+CACHE_SOURCE_VERSION=".elb-cache.${ELB_DB}.source-version"
+CACHE_MANIFEST=".elb-cache.${ELB_DB}.manifest"
+CACHE_LAYOUT_SHA=".elb-cache.${ELB_DB}.layout-sha256"
+if [ "${ELB_STAGE_LOCK_HELD:-0}" = "1" ]; then
+    if ! flock -n 9; then
+        echo "ERROR: inherited stage lock descriptor is unavailable"
+        exit 70
+    fi
+    echo "STAGE_LOCK_REUSE file=.elb-stage.lock"
+else
+    STAGE_LOCK_WAIT_SECONDS="${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}"
+    case "$STAGE_LOCK_WAIT_SECONDS" in
+      ''|*[!0-9]*) echo "ERROR: invalid stage lock timeout: ${STAGE_LOCK_WAIT_SECONDS}"; exit 64 ;;
+    esac
+    if [ "${#STAGE_LOCK_WAIT_SECONDS}" -gt 4 ] \
+            || [ "$STAGE_LOCK_WAIT_SECONDS" -lt 1 ] \
+            || [ "$STAGE_LOCK_WAIT_SECONDS" -gt 5400 ]; then
+            echo "ERROR: stage lock timeout must be between 1 and 5400 seconds"
+            exit 64
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: flock is required for safe node-local DB staging"
+        exit 69
+    fi
+    STAGE_LOCK_FILE=".elb-stage.lock"
+    exec 9>"$STAGE_LOCK_FILE"
+    echo "STAGE_LOCK_WAIT file=${STAGE_LOCK_FILE} timeout=${STAGE_LOCK_WAIT_SECONDS}s"
+    STAGE_LOCK_WAIT_STARTED=$(date +%s)
+    if ! flock -w "$STAGE_LOCK_WAIT_SECONDS" 9; then
+        echo "ERROR: stage lock timeout file=${STAGE_LOCK_FILE} waited_seconds=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))"
+        exit 75
+    fi
+    export ELB_STAGE_LOCK_HELD=1
+    echo "STAGE_LOCK_ACQUIRED file=${STAGE_LOCK_FILE} waited_seconds=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))"
 fi
-STAGE_LOCK_FILE=".elb-stage.lock"
-exec 9>"$STAGE_LOCK_FILE"
-echo "STAGE_LOCK_WAIT file=${STAGE_LOCK_FILE} timeout=${STAGE_LOCK_WAIT_SECONDS}s"
-STAGE_LOCK_WAIT_STARTED=$(date +%s)
-if ! flock -w "$STAGE_LOCK_WAIT_SECONDS" 9; then
-    echo "ERROR: stage lock timeout file=${STAGE_LOCK_FILE} waited_seconds=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))"
-    exit 75
+if [ -f .download-complete ]; then
+    echo "CACHE_MIGRATE invalidating legacy global completion marker"
+    rm -f .download-complete
 fi
-export ELB_STAGE_LOCK_HELD=1
-echo "STAGE_LOCK_ACQUIRED file=${STAGE_LOCK_FILE} waited_seconds=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))"
+rm -f /tmp/elb-stage-result
 
 start=$(date +%s)
 log_runtime() {
@@ -682,51 +721,176 @@ retry_azcopy() {
 SHARD_URL="${ELB_PARTITION_PREFIX}${ELB_SHARD_IDX}/"
 MANIFEST_URL="${SHARD_URL}${ELB_DB}.manifest"
 NAL_URL="${SHARD_URL}${ELB_DB}.nal"
+LAYOUT_URL="${SHARD_URL}${ELB_DB}.layout"
 echo "Downloading manifest: ${MANIFEST_URL}"
 retry_azcopy cp "${MANIFEST_URL}" /tmp/manifest.txt --log-level=ERROR || {
     echo "ERROR: manifest download failed"
     exit 1
 }
-retry_azcopy cp "${NAL_URL}" "./${ELB_DB}.nal" --log-level=ERROR || true
-VOLUMES=$(cat /tmp/manifest.txt)
-echo "Volumes: ${VOLUMES}"
+retry_azcopy cp "${NAL_URL}" /tmp/shard.nal --log-level=ERROR || {
+    echo "ERROR: shard alias download failed"
+    rm -f "$CACHE_COMPLETE"
+    exit 1
+}
+
+valid_volume_name() {
+    local volume="$1" suffix
+    if [ "$volume" = "$ORIG_DB" ]; then
+        return 0
+    fi
+    if [[ "$volume" != "$ORIG_DB".* ]]; then
+        return 1
+    fi
+    suffix="${volume#"$ORIG_DB"}"
+    [[ "$suffix" =~ ^\.[0-9]+$ ]]
+}
+
+mapfile -t VOLUMES < /tmp/manifest.txt
+if [ "${#VOLUMES[@]}" -lt 1 ]; then
+    echo "ERROR: shard manifest is empty"
+    rm -f "$CACHE_COMPLETE"
+    exit 65
+fi
+declare -A SEEN_VOLUMES=()
+for volume in "${VOLUMES[@]}"; do
+    if ! valid_volume_name "$volume"; then
+        echo "ERROR: invalid volume name in shard manifest: ${volume}"
+        rm -f "$CACHE_COMPLETE"
+        exit 65
+    fi
+    if [ -n "${SEEN_VOLUMES[$volume]+x}" ]; then
+        echo "ERROR: duplicate volume name in shard manifest: ${volume}"
+        rm -f "$CACHE_COMPLETE"
+        exit 65
+    fi
+    SEEN_VOLUMES["$volume"]=1
+done
+echo "Volumes: ${VOLUMES[*]}"
 
 DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
 DB_URL="${DB_BASE_URL}${ORIG_DB}/"
 echo "DB base URL: ${DB_URL}"
 
 EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
-if [ -z "$EXPECTED_SOURCE_VERSION" ]; then
-    METADATA_URL="${DB_BASE_URL}${ORIG_DB}-metadata.json"
-    echo "Resolving DB source version: ${METADATA_URL}"
-    if retry_azcopy cp "${METADATA_URL}" /tmp/db-metadata.json --log-level=ERROR; then
-        if command -v python3 >/dev/null 2>&1; then
-            EXPECTED_SOURCE_VERSION=$(python3 -c '
+METADATA_SOURCE_VERSION=""
+SHARD_LAYOUT_SCHEMA="0"
+METADATA_URL="${DB_BASE_URL}${ORIG_DB}-metadata.json"
+echo "Resolving DB metadata: ${METADATA_URL}"
+if retry_azcopy cp "${METADATA_URL}" /tmp/db-metadata.json --log-level=ERROR; then
+    if command -v python3 >/dev/null 2>&1; then
+        METADATA_SOURCE_VERSION=$(python3 -c '
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     print(str(json.load(handle).get("source_version") or ""))
 ' /tmp/db-metadata.json 2>/dev/null || true)
-        else
-            EXPECTED_SOURCE_VERSION=$(sed -n \
-                's/.*"source_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-                /tmp/db-metadata.json | head -1)
-        fi
-        if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
-            echo "DB source version: ${EXPECTED_SOURCE_VERSION}"
-        else
-            echo "WARNING: DB metadata did not contain source_version"
-        fi
+        SHARD_LAYOUT_SCHEMA=$(python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle).get("shard_layout_schema", 0)
+print(value if type(value) is int else "invalid")
+' /tmp/db-metadata.json 2>/dev/null || printf invalid)
     else
-        echo "WARNING: DB metadata source-version lookup failed;" \
-            "cache freshness marker will not be checked"
+        METADATA_SOURCE_VERSION=$(sed -n \
+            's/.*"source_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            /tmp/db-metadata.json | head -1)
+        SHARD_LAYOUT_SCHEMA=$(sed -n \
+            's/.*"shard_layout_schema"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+            /tmp/db-metadata.json | head -1)
+        SHARD_LAYOUT_SCHEMA="${SHARD_LAYOUT_SCHEMA:-0}"
     fi
+else
+    echo "ERROR: DB metadata lookup failed after retries; refusing unversioned shard staging"
+    rm -f "$CACHE_COMPLETE"
+    exit 75
+fi
+case "$SHARD_LAYOUT_SCHEMA" in
+    ''|*[!0-9]*) echo "ERROR: invalid shard_layout_schema: ${SHARD_LAYOUT_SCHEMA}"; rm -f "$CACHE_COMPLETE"; exit 65 ;;
+esac
+if [ "${#SHARD_LAYOUT_SCHEMA}" -gt 2 ] || [ "$SHARD_LAYOUT_SCHEMA" -gt 1 ]; then
+    echo "ERROR: unsupported shard_layout_schema: ${SHARD_LAYOUT_SCHEMA}"
+    rm -f "$CACHE_COMPLETE"
+    exit 65
+fi
+if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+    if [ -z "$METADATA_SOURCE_VERSION" ]; then
+        echo "ERROR: DB metadata is missing source_version required by this Job"
+        rm -f "$CACHE_COMPLETE"
+        exit 75
+    fi
+    if [ "$EXPECTED_SOURCE_VERSION" != "$METADATA_SOURCE_VERSION" ]; then
+        echo "ERROR: DB source version changed after Job creation" \
+            "expected=${EXPECTED_SOURCE_VERSION} actual=${METADATA_SOURCE_VERSION}"
+        rm -f "$CACHE_COMPLETE"
+        exit 75
+    fi
+fi
+if [ -z "$EXPECTED_SOURCE_VERSION" ]; then
+    EXPECTED_SOURCE_VERSION="$METADATA_SOURCE_VERSION"
+fi
+if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+    echo "DB source version: ${EXPECTED_SOURCE_VERSION}"
+else
+    echo "WARNING: DB metadata did not contain source_version"
+fi
+
+LAYOUT_AVAILABLE="0"
+rm -f /tmp/shard-layout.txt
+if [ "$SHARD_LAYOUT_SCHEMA" -ge 1 ]; then
+    if ! retry_azcopy cp "${LAYOUT_URL}" /tmp/shard-layout.txt --log-level=ERROR; then
+        echo "ERROR: schema ${SHARD_LAYOUT_SCHEMA} requires shard layout metadata"
+        rm -f "$CACHE_COMPLETE"
+        exit 65
+    fi
+elif ! azcopy cp "${LAYOUT_URL}" /tmp/shard-layout.txt --log-level=ERROR; then
+    echo "WARNING: LEGACY_LAYOUT no authoritative disk-size metadata; preflight is degraded"
+    rm -f /tmp/shard-layout.txt
+fi
+if [ -f /tmp/shard-layout.txt ]; then
+    layout_extra=""
+    if ! read -r EXPECTED_LAYOUT_SHA REQUIRED_BYTES layout_extra < /tmp/shard-layout.txt \
+            || [ -n "$layout_extra" ]; then
+        echo "ERROR: malformed shard layout metadata"
+        rm -f "$CACHE_COMPLETE"
+        exit 65
+    fi
+    case "$EXPECTED_LAYOUT_SHA" in
+    *[!0-9a-f]*) echo "ERROR: invalid shard layout digest"; rm -f "$CACHE_COMPLETE"; exit 65 ;;
+    esac
+    case "$REQUIRED_BYTES" in
+    ''|*[!0-9]*) echo "ERROR: invalid shard required_bytes"; rm -f "$CACHE_COMPLETE"; exit 65 ;;
+    esac
+    if [ "${#EXPECTED_LAYOUT_SHA}" -ne 64 ] \
+            || [ "${#REQUIRED_BYTES}" -gt 18 ] \
+            || [ "$REQUIRED_BYTES" -lt 1 ]; then
+        echo "ERROR: shard layout metadata values are out of range"
+        rm -f "$CACHE_COMPLETE"
+        exit 65
+    fi
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo "ERROR: sha256sum is required for shard layout validation"
+        rm -f "$CACHE_COMPLETE"
+        exit 69
+    fi
+    ACTUAL_LAYOUT_SHA=$( \
+        { cat /tmp/manifest.txt; printf '\0'; cat /tmp/shard.nal; } \
+        | sha256sum | awk '{print $1}'
+    )
+    if [ "$ACTUAL_LAYOUT_SHA" != "$EXPECTED_LAYOUT_SHA" ]; then
+        echo "ERROR: shard layout digest mismatch"
+        rm -f "$CACHE_COMPLETE"
+        exit 65
+    fi
+    LAYOUT_AVAILABLE="1"
+    echo "LAYOUT_VERIFIED sha256=${EXPECTED_LAYOUT_SHA} required_bytes=${REQUIRED_BYTES}"
 fi
 
 write_volpaths() {
     local volpaths=""
-    for volume in $VOLUMES; do
+    for volume in "${VOLUMES[@]}"; do
         [ -n "$volpaths" ] && volpaths="$volpaths "
         volpaths="${volpaths}$(pwd)/${volume}"
     done
@@ -734,10 +898,22 @@ write_volpaths() {
     echo "Volume paths: ${volpaths}"
 }
 
-rm -f .download-complete.tmp .download-source-version.tmp
-if [ -f .download-complete ] && [ -z "$EXPECTED_SOURCE_VERSION" ]; then
+commit_layout_markers() {
+    cp /tmp/manifest.txt "${CACHE_MANIFEST}.tmp"
+    mv "${CACHE_MANIFEST}.tmp" "$CACHE_MANIFEST"
+    if [ "$LAYOUT_AVAILABLE" = "1" ]; then
+        printf '%s' "$EXPECTED_LAYOUT_SHA" > "${CACHE_LAYOUT_SHA}.tmp"
+        mv "${CACHE_LAYOUT_SHA}.tmp" "$CACHE_LAYOUT_SHA"
+    else
+        rm -f "$CACHE_LAYOUT_SHA"
+    fi
+}
+
+rm -f "${CACHE_COMPLETE}.tmp" "${CACHE_SOURCE_VERSION}.tmp" \
+    "${CACHE_LAYOUT_SHA}.tmp" "${CACHE_MANIFEST}.tmp" "./${ELB_DB}.nal.tmp"
+if [ -f "$CACHE_COMPLETE" ] && [ -z "$EXPECTED_SOURCE_VERSION" ]; then
     echo "CACHE_UNVERIFIED expected source version is unavailable"
-    rm -f .download-complete
+    rm -f "$CACHE_COMPLETE"
 fi
 if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
     echo "CLEANUP partial downloads"
@@ -749,15 +925,15 @@ if [ "${ELB_DB_MOL_TYPE:-nucl}" = "prot" ]; then
     payload_ext="psq"
 fi
 missing_volume="0"
-if [ -f .download-complete ]; then
-    for volume in $VOLUMES; do
+if [ -f "$CACHE_COMPLETE" ]; then
+    for volume in "${VOLUMES[@]}"; do
         if [ ! -s "${volume}.${payload_ext}" ]; then
             missing_volume="1"
             echo "CACHE_INCOMPLETE missing ${volume}.${payload_ext}"
         fi
     done
     if [ "$missing_volume" != "0" ]; then
-        rm -f .download-complete
+        rm -f "$CACHE_COMPLETE"
     fi
 fi
 
@@ -769,19 +945,47 @@ fi
 # fix and any `-taxids`/`-negative_taxids` search would abort with blastn
 # exit 255 ("the file must exist: '<db>.not'"). Invalidate so the corrected
 # pattern below re-stages them. Non-taxonomy DBs (no local `.ntf`) are untouched.
-if [ -f .download-complete ] && [ -s "${ORIG_DB}.ntf" ] \
+if [ -f "$CACHE_COMPLETE" ] && [ -s "${ORIG_DB}.ntf" ] \
     && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
     echo "CACHE_INCOMPLETE missing taxonomy filter index ${ORIG_DB}.not/.nos"
-    rm -f .download-complete
+    rm -f "$CACHE_COMPLETE"
 fi
 
-if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
-    if [ ! -f .download-source-version ]; then
+if [ -f "$CACHE_COMPLETE" ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+    if [ ! -f "$CACHE_SOURCE_VERSION" ]; then
         echo "CACHE_STALE missing source-version marker"
-        rm -f .download-complete
-    elif [ "$(cat .download-source-version)" != "$EXPECTED_SOURCE_VERSION" ]; then
+        rm -f "$CACHE_COMPLETE"
+    elif [ "$(cat "$CACHE_SOURCE_VERSION")" != "$EXPECTED_SOURCE_VERSION" ]; then
         echo "CACHE_STALE source-version mismatch"
-        rm -f .download-complete
+        rm -f "$CACHE_COMPLETE"
+    fi
+fi
+
+if [ -f "$CACHE_COMPLETE" ]; then
+    if [ ! -f "$CACHE_MANIFEST" ]; then
+        echo "CACHE_STALE missing shard-manifest marker"
+        rm -f "$CACHE_COMPLETE"
+    elif ! cmp -s /tmp/manifest.txt "$CACHE_MANIFEST"; then
+        echo "CACHE_STALE shard manifest mismatch"
+        rm -f "$CACHE_COMPLETE"
+    fi
+fi
+if [ -f "$CACHE_COMPLETE" ]; then
+    if [ ! -f "./${ELB_DB}.nal" ]; then
+        echo "CACHE_STALE missing shard alias"
+        rm -f "$CACHE_COMPLETE"
+    elif ! cmp -s /tmp/shard.nal "./${ELB_DB}.nal"; then
+        echo "CACHE_STALE shard alias mismatch"
+        rm -f "$CACHE_COMPLETE"
+    fi
+fi
+if [ -f "$CACHE_COMPLETE" ] && [ "$LAYOUT_AVAILABLE" = "1" ]; then
+    if [ ! -f "$CACHE_LAYOUT_SHA" ]; then
+        echo "CACHE_STALE missing shard-layout marker"
+        rm -f "$CACHE_COMPLETE"
+    elif [ "$(cat "$CACHE_LAYOUT_SHA")" != "$EXPECTED_LAYOUT_SHA" ]; then
+        echo "CACHE_STALE shard layout mismatch"
+        rm -f "$CACHE_COMPLETE"
     fi
 fi
 
@@ -791,21 +995,93 @@ fi
 # lmdb vol". blastdbcmd -info reads that vol<->lmdb<->alias consistency; a
 # failing probe means the staged DB is corrupt, so invalidate the marker and
 # re-download rather than skip onto a broken cache.
-if [ -f .download-complete ]; then
+if [ -f "$CACHE_COMPLETE" ]; then
     if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
         echo "CACHE_CORRUPT blastdbcmd integrity probe failed - invalidating"
-        rm -f .download-complete
+        rm -f "$CACHE_COMPLETE"
     fi
 fi
 
-if [ -f .download-complete ]; then
+if [ -f "$CACHE_COMPLETE" ]; then
     echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
+    commit_layout_markers
     write_volpaths
+    printf '%s' skipped > /tmp/elb-stage-result
     exit 0
 fi
 
+remove_volume_payloads() {
+    local volume candidate
+    for volume in "$@"; do
+        for candidate in "${volume}".*; do
+            if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+                rm -f -- "$candidate"
+            fi
+        done
+    done
+}
+
+# A failed or stale cache is rebuilt from a clean set of files while the
+# exclusive node-local lock is held. The current manifest is trusted only after
+# strict name validation above. A prior committed manifest may contribute stale
+# volumes, but only names belonging to this same DB are eligible for deletion.
+remove_volume_payloads "${VOLUMES[@]}"
+for previous_manifest in "$CACHE_MANIFEST" .download-manifest; do
+    if [ -f "$previous_manifest" ]; then
+        mapfile -t PREVIOUS_VOLUMES < "$previous_manifest"
+        for previous_volume in "${PREVIOUS_VOLUMES[@]}"; do
+            if valid_volume_name "$previous_volume"; then
+                remove_volume_payloads "$previous_volume"
+            else
+                echo "WARNING: ignoring unsafe volume in previous cache manifest"
+            fi
+        done
+    fi
+done
+# Shared taxonomy files have no DB prefix and may still be required by another
+# prepared database in this flat node-local cache. Preserve them here; the
+# transfer below overwrites them when the current DB prefix supplies a newer
+# authoritative copy.
+rm -f -- "${ORIG_DB}.ndb" "${ORIG_DB}.ntf" "${ORIG_DB}.nto" \
+    "${ORIG_DB}.nos" "${ORIG_DB}.not"
+
+if [ "$LAYOUT_AVAILABLE" = "1" ]; then
+    RESERVE_BYTES="${ELB_STAGE_DISK_RESERVE_BYTES:-}"
+    if [ -z "$RESERVE_BYTES" ]; then
+        RESERVE_BYTES=$(( REQUIRED_BYTES / 20 ))
+        if [ "$RESERVE_BYTES" -lt 1073741824 ]; then
+            RESERVE_BYTES=1073741824
+        fi
+    fi
+    case "$RESERVE_BYTES" in
+      ''|*[!0-9]*) echo "ERROR: invalid ELB_STAGE_DISK_RESERVE_BYTES"; exit 64 ;;
+    esac
+    if [ "${#RESERVE_BYTES}" -gt 18 ]; then
+        echo "ERROR: ELB_STAGE_DISK_RESERVE_BYTES is out of range"
+        exit 64
+    fi
+    AVAILABLE_BYTES=$(df -B1 --output=avail . | tail -n 1 | tr -d '[:space:]')
+    case "$AVAILABLE_BYTES" in
+      ''|*[!0-9]*) echo "ERROR: unable to determine node-local available bytes"; exit 74 ;;
+    esac
+    TOTAL_REQUIRED_BYTES=$(( REQUIRED_BYTES + RESERVE_BYTES ))
+    if [ "$TOTAL_REQUIRED_BYTES" -lt "$REQUIRED_BYTES" ]; then
+        echo "ERROR: disk preflight byte calculation overflow"
+        exit 65
+    fi
+    echo "DISK_PREFLIGHT required_bytes=${REQUIRED_BYTES} reserve_bytes=${RESERVE_BYTES} available_bytes=${AVAILABLE_BYTES}"
+    if [ "$AVAILABLE_BYTES" -lt "$TOTAL_REQUIRED_BYTES" ]; then
+        echo "ERROR: insufficient node-local disk required_bytes=${REQUIRED_BYTES}" \
+            "reserve_bytes=${RESERVE_BYTES} available_bytes=${AVAILABLE_BYTES};" \
+            "free node disk space or use a larger node OS disk"
+        exit 28
+    fi
+else
+    echo "WARNING: DISK_PREFLIGHT_SKIP legacy shard layout has no authoritative byte count"
+fi
+
 PATTERN=""
-for VOL in $VOLUMES; do
+for VOL in "${VOLUMES[@]}"; do
     [ -n "$PATTERN" ] && PATTERN="${PATTERN};"
     PATTERN="${PATTERN}${VOL}.*"
 done
@@ -821,6 +1097,7 @@ echo "Downloading with pattern: ${PATTERN}"
 retry_azcopy cp "${DB_URL}*" . \
     --include-pattern "${PATTERN}" \
     --block-size-mb=256 \
+    --overwrite=true \
     --log-level=WARNING
 
 find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
@@ -835,6 +1112,12 @@ if [ "$payload_count" = "0" ]; then
     echo "ERROR: no ${payload_ext} volume files downloaded"
     exit 1
 fi
+for volume in "${VOLUMES[@]}"; do
+    if [ ! -s "${volume}.${payload_ext}" ]; then
+        echo "ERROR: required payload is missing after download: ${volume}.${payload_ext}"
+        exit 1
+    fi
+done
 if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
     echo "TAXDB_SKIP taxdb files not present in DB prefix"
 fi
@@ -843,20 +1126,25 @@ if [ -s "${ORIG_DB}.ntf" ] \
     echo "ERROR: downloaded taxonomy filter index is incomplete ${ORIG_DB}.not/.nos"
     exit 1
 fi
+cp /tmp/shard.nal "./${ELB_DB}.nal.tmp"
+mv "./${ELB_DB}.nal.tmp" "./${ELB_DB}.nal"
 if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
     echo "ERROR: downloaded DB failed blastdbcmd integrity probe"
     exit 1
 fi
 
 write_volpaths
+commit_layout_markers
 if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
-    printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version.tmp
-    mv .download-source-version.tmp .download-source-version
+    printf '%s' "$EXPECTED_SOURCE_VERSION" > "${CACHE_SOURCE_VERSION}.tmp"
+    mv "${CACHE_SOURCE_VERSION}.tmp" "$CACHE_SOURCE_VERSION"
 else
-    rm -f .download-source-version
+    rm -f "$CACHE_SOURCE_VERSION"
 fi
-printf '%s' ok > .download-complete.tmp
-mv .download-complete.tmp .download-complete
+printf '%s' ok > "${CACHE_COMPLETE}.tmp"
+mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"
+rm -f .download-source-version .download-layout-sha256 .download-manifest
+printf '%s' downloaded > /tmp/elb-stage-result
 
 pkill -f azcopy 2>/dev/null || true
 rm -rf /root/.azcopy 2>/dev/null || true
@@ -880,6 +1168,103 @@ def patch_init_shard_script(root: Path) -> None:
         raise RuntimeError(f"init-db-shard-aks.sh not found under {root}")
     for path in paths:
         path.write_text(_HARDENED_INIT_DB_SHARD_AKS_SCRIPT + "\n")
+
+
+_INIT_DB_DOWNLOAD_LOCK_ANCHOR = "fi\n\nstart=$(date +%s)\n"
+_INIT_DB_DOWNLOAD_LOCK_BLOCK = r"""# ELB DB writer lock (added by patch_elastic_blast.py).
+# Only the local-SSD init template opts in. PV-backed uses of this shared script
+# retain upstream behaviour because filesystem lock semantics vary by PV type.
+if [ "${ELB_DB_WRITER_LOCK:-0}" = "1" ]; then
+    STAGE_LOCK_WAIT_SECONDS="${ELB_STAGE_LOCK_TIMEOUT_SECONDS:-2400}"
+    case "$STAGE_LOCK_WAIT_SECONDS" in
+      ''|*[!0-9]*) echo "ERROR: invalid stage lock timeout: ${STAGE_LOCK_WAIT_SECONDS}"; exit 64 ;;
+    esac
+    if [ "${#STAGE_LOCK_WAIT_SECONDS}" -gt 4 ] \
+            || [ "$STAGE_LOCK_WAIT_SECONDS" -lt 1 ] \
+            || [ "$STAGE_LOCK_WAIT_SECONDS" -gt 5400 ]; then
+        echo "ERROR: stage lock timeout must be between 1 and 5400 seconds"
+        exit 64
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: flock is required for safe node-local DB staging"
+        exit 69
+    fi
+    STAGE_LOCK_FILE=".elb-stage.lock"
+    exec 9>"$STAGE_LOCK_FILE"
+    echo "STAGE_LOCK_WAIT file=${STAGE_LOCK_FILE} timeout=${STAGE_LOCK_WAIT_SECONDS}s"
+    STAGE_LOCK_WAIT_STARTED=$(date +%s)
+    if ! flock -w "$STAGE_LOCK_WAIT_SECONDS" 9; then
+        echo "ERROR: stage lock timeout file=${STAGE_LOCK_FILE} waited_seconds=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))"
+        exit 75
+    fi
+    export ELB_STAGE_LOCK_HELD=1
+    echo "STAGE_LOCK_ACQUIRED file=${STAGE_LOCK_FILE} waited_seconds=$(( $(date +%s) - STAGE_LOCK_WAIT_STARTED ))"
+fi
+
+"""
+
+_INIT_DB_DOWNLOAD_VERIFY_ANCHOR = (
+    "# Clean up azcopy background processes to ensure container exits cleanly.\n"
+)
+_INIT_DB_DOWNLOAD_VERIFY_BLOCK = r"""# A local-SSD writer must not report its
+# init Job successful after a partial or corrupt transfer. PV-backed callers do
+# not opt in and retain the upstream verification policy.
+if [ "${ELB_DB_WRITER_LOCK:-0}" = "1" ]; then
+    if ! blastdbcmd -info -db "$ELB_DB" -dbtype "$ELB_DB_MOL_TYPE" >/dev/null 2>&1; then
+        echo "ERROR: local-SSD DB writer integrity check failed db=${ELB_DB}" >&2
+        exit 76
+    fi
+    echo "DB_WRITER_CACHE_VERIFIED db=${ELB_DB}"
+fi
+
+"""
+
+
+def patch_init_db_download_writer_lock(root: Path) -> None:
+    """Opt the non-sharded local-SSD init path into the cache writer lock."""
+
+    paths = []
+    source = root / "src/elastic_blast/templates/scripts/init-db-download-aks.sh"
+    if source.exists():
+        paths.append(source)
+    for pattern in (
+        "venv/lib/python*/site-packages/elastic_blast/templates/scripts/init-db-download-aks.sh",
+        ".venv/lib/python*/site-packages/elastic_blast/templates/scripts/init-db-download-aks.sh",
+    ):
+        paths.extend(root.glob(pattern))
+    if not paths:
+        raise RuntimeError(f"init-db-download-aks.sh not found under {root}")
+    for path in sorted(set(paths)):
+        _replace_once_unless_present(
+            path,
+            _INIT_DB_DOWNLOAD_LOCK_ANCHOR,
+            "fi\n\n" + _INIT_DB_DOWNLOAD_LOCK_BLOCK + "start=$(date +%s)\n",
+            "ELB DB writer lock (added by patch_elastic_blast.py)",
+        )
+        _replace_once_unless_present(
+            path,
+            _INIT_DB_DOWNLOAD_VERIFY_ANCHOR,
+            _INIT_DB_DOWNLOAD_VERIFY_BLOCK + _INIT_DB_DOWNLOAD_VERIFY_ANCHOR,
+            "DB_WRITER_CACHE_VERIFIED db=${ELB_DB}",
+        )
+
+    template = root / "src/elastic_blast/templates/job-init-local-ssd-aks.yaml.template"
+    _replace_once_unless_present(
+        template,
+        (
+            "        - name: ELB_SKIP_DB_VERIFY\n"
+            '          value: "true"\n'
+            "        - name: STARTUP_DELAY\n"
+        ),
+        (
+            "        - name: ELB_SKIP_DB_VERIFY\n"
+            '          value: "true"\n'
+            "        - name: ELB_DB_WRITER_LOCK\n"
+            '          value: "1"\n'
+            "        - name: STARTUP_DELAY\n"
+        ),
+        "name: ELB_DB_WRITER_LOCK",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -945,6 +1330,81 @@ fi
 
 """
 
+_BLAST_RUN_AKS_READER_LOCK_ACQUIRE_ANCHOR = (
+    'if [[ ! -s "$RESULTS_DIR/BLASTDB_LENGTH.out" ]]; then\n'
+)
+_BLAST_RUN_AKS_READER_LOCK_ACQUIRE_BLOCK = r"""# ELB DB reader lock (added by patch_elastic_blast.py).
+# Sharded local-SSD staging takes an exclusive flock on the same file. Hold a
+# shared lock from the first DB metadata read through BLAST process completion
+# so a cache repair or source-generation refresh cannot replace mmap payloads
+# underneath an active search. Other readers remain concurrent.
+if [ "${ELB_DB_READER_LOCK:-0}" = "1" ]; then
+    READER_LOCK_WAIT_SECONDS="${ELB_DB_READER_LOCK_TIMEOUT_SECONDS:-5400}"
+    case "$READER_LOCK_WAIT_SECONDS" in
+      ''|*[!0-9]*) echo "ERROR: invalid DB reader lock timeout: ${READER_LOCK_WAIT_SECONDS}" >&2; exit 64 ;;
+    esac
+    if [ "${#READER_LOCK_WAIT_SECONDS}" -gt 4 ] \
+            || [ "$READER_LOCK_WAIT_SECONDS" -lt 1 ] \
+            || [ "$READER_LOCK_WAIT_SECONDS" -gt 5400 ]; then
+        echo "ERROR: DB reader lock timeout must be between 1 and 5400 seconds" >&2
+        exit 64
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: flock is required for safe node-local DB reads" >&2
+        exit 69
+    fi
+    READER_LOCK_FILE=".elb-stage.lock"
+    if ! exec 8>>"$READER_LOCK_FILE"; then
+        echo "ERROR: unable to open DB reader lock file=${READER_LOCK_FILE}" >&2
+        exit 73
+    fi
+    echo "DB_READER_LOCK_WAIT file=${READER_LOCK_FILE} timeout=${READER_LOCK_WAIT_SECONDS}s"
+    READER_LOCK_WAIT_STARTED=$(date +%s)
+    if ! flock -s -w "$READER_LOCK_WAIT_SECONDS" 8; then
+        echo "ERROR: DB reader lock timeout file=${READER_LOCK_FILE} waited_seconds=$(( $(date +%s) - READER_LOCK_WAIT_STARTED ))" >&2
+        exit 75
+    fi
+    ELB_DB_READER_LOCK_HELD=1
+    echo "DB_READER_LOCK_ACQUIRED file=${READER_LOCK_FILE} waited_seconds=$(( $(date +%s) - READER_LOCK_WAIT_STARTED ))"
+    if [[ "$ELB_DB" =~ _shard_[0-9]+$ ]]; then
+        if [[ ! "$ELB_DB" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+                || [ "${#ELB_DB}" -gt 127 ]; then
+            echo "ERROR: unsafe shard DB name for cache marker: ${ELB_DB}" >&2
+            flock -u 8 || true
+            exec 8>&-
+            ELB_DB_READER_LOCK_HELD=0
+            exit 64
+        fi
+        READER_CACHE_COMPLETE=".elb-cache.${ELB_DB}.complete"
+        if [ ! -f "$READER_CACHE_COMPLETE" ]; then
+            echo "ERROR: DB shard completion marker is missing db=${ELB_DB}" >&2
+            flock -u 8 || true
+            exec 8>&-
+            ELB_DB_READER_LOCK_HELD=0
+            exit 76
+        fi
+    fi
+    if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
+        echo "ERROR: DB cache integrity check failed after reader lock acquisition db=${ELB_DB}" >&2
+        flock -u 8 || true
+        exec 8>&-
+        ELB_DB_READER_LOCK_HELD=0
+        exit 76
+    fi
+    echo "DB_READER_CACHE_VERIFIED db=${ELB_DB}"
+fi
+
+"""
+_BLAST_RUN_AKS_READER_LOCK_RELEASE_ANCHOR = "BLAST_EXIT_CODE=$?\n"
+_BLAST_RUN_AKS_READER_LOCK_RELEASE_BLOCK = r"""BLAST_EXIT_CODE=$?
+if [ "${ELB_DB_READER_LOCK_HELD:-0}" = "1" ]; then
+    flock -u 8 || true
+    exec 8>&-
+    ELB_DB_READER_LOCK_HELD=0
+    echo "DB_READER_LOCK_RELEASED file=${READER_LOCK_FILE}"
+fi
+"""
+
 
 def _blast_run_aks_script_paths(root: Path) -> list[Path]:
     source_path = root / "src/elastic_blast/templates/scripts/blast-run-aks.sh"
@@ -969,6 +1429,24 @@ def patch_blast_run_aks_script(root: Path) -> None:
             "ELB vmtouch warm step",
         )
         patch_blast_run_aks_outfmt_argv(path)
+        patch_blast_run_aks_reader_lock(path)
+
+
+def patch_blast_run_aks_reader_lock(path: Path) -> None:
+    """Fence sharded local-SSD cache writers for the BLAST read lifetime."""
+
+    _replace_once_unless_present(
+        path,
+        _BLAST_RUN_AKS_READER_LOCK_ACQUIRE_ANCHOR,
+        _BLAST_RUN_AKS_READER_LOCK_ACQUIRE_BLOCK + _BLAST_RUN_AKS_READER_LOCK_ACQUIRE_ANCHOR,
+        "ELB DB reader lock (added by patch_elastic_blast.py)",
+    )
+    _replace_once_unless_present(
+        path,
+        _BLAST_RUN_AKS_READER_LOCK_RELEASE_ANCHOR,
+        _BLAST_RUN_AKS_READER_LOCK_RELEASE_BLOCK,
+        "DB_READER_LOCK_RELEASED file=${READER_LOCK_FILE}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -991,7 +1469,7 @@ def patch_blast_run_aks_script(root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 _BLAST_RUN_AKS_ARGV_ANCHOR = (
-    '# shellcheck disable=SC2086\n'
+    "# shellcheck disable=SC2086\n"
     'TIME="$DATE_NOW run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB %e %U %S %P" \\\n'
 )
 _BLAST_RUN_AKS_ARGV_BLOCK = r"""# ELB outfmt argv rebuild (added by patch_elastic_blast.py).
@@ -1101,10 +1579,51 @@ def patch_aks_workload_tolerations(root: Path) -> None:
             new = f"      restartPolicy: {restart_policy}\n{tolerations}"
             _replace_once(path, old, new)
             text = path.read_text()
-        if "nodeSelector:\n        workload: blast" not in text:
-            insert_at = text.index(tolerations) + len(tolerations)
-            text = text[:insert_at] + node_selector + text[insert_at:]
-            path.write_text(text)
+        duplicate = tolerations + node_selector + "      nodeSelector:\n"
+        if duplicate in text:
+            text = text.replace(
+                duplicate,
+                tolerations + "      nodeSelector:\n        workload: blast\n",
+                1,
+            )
+        elif tolerations + "      nodeSelector:\n        workload: blast\n" in text:
+            continue
+        elif tolerations + "      nodeSelector:\n" in text:
+            text = text.replace(
+                tolerations + "      nodeSelector:\n",
+                tolerations + "      nodeSelector:\n        workload: blast\n",
+                1,
+            )
+        else:
+            text = text.replace(tolerations, tolerations + node_selector, 1)
+        path.write_text(text)
+
+
+def patch_sharded_reader_lock_opt_in(root: Path) -> None:
+    """Enable the DB reader lock for both node-local SSD search modes."""
+
+    templates = root / "src/elastic_blast/templates"
+    for name in (
+        "blast-batch-job-local-ssd-aks.yaml.template",
+        "blast-batch-job-shard-ssd-aks.yaml.template",
+    ):
+        path = templates / name
+        _replace_once_unless_present(
+            path,
+            (
+                "        - name: ELB_DB_MOL_TYPE\n"
+                '          value: "${ELB_DB_MOL_TYPE}"\n'
+                "        - name: QUERY_DIR\n"
+            ),
+            (
+                "        - name: ELB_DB_MOL_TYPE\n"
+                '          value: "${ELB_DB_MOL_TYPE}"\n'
+                "        - name: ELB_DB_READER_LOCK\n"
+                '          value: "1"\n'
+                "        - name: QUERY_DIR\n"
+            ),
+            "name: ELB_DB_READER_LOCK",
+        )
 
 
 def patch_aks_job_ttl(root: Path) -> None:
@@ -1182,8 +1701,8 @@ def patch_unique_init_ssd_job_names(root: Path) -> None:
         _replace_once_unless_present(
             path,
             "  name: init-ssd-${NODE_ORDINAL}\n",
-            "  name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}\n",
-            "name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}",
+            "  name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}\n",
+            "name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}",
         )
 
 
@@ -1201,9 +1720,7 @@ def patch_create_workspace_daemonset_tolerations(root: Path) -> None:
         "job-init-ssd-shard-aks.yaml.template",
     ]
     old = (
-        "          type: DirectoryOrCreate\n"
-        "      nodeSelector:\n"
-        "        kubernetes.io/os: linux\n"
+        "          type: DirectoryOrCreate\n      nodeSelector:\n        kubernetes.io/os: linux\n"
     )
     new = (
         "          type: DirectoryOrCreate\n"
@@ -1264,8 +1781,182 @@ def patch_init_job_wait_filters(root: Path) -> None:
             "delete jobs --ignore-not-found=true "
             "-l app=setup,elb-job-id={cfg.azure.elb_job_id}'"
         ),
-        "delete jobs --ignore-not-found=true "
-        "-l app=setup,elb-job-id={cfg.azure.elb_job_id}",
+        "delete jobs --ignore-not-found=true -l app=setup,elb-job-id={cfg.azure.elb_job_id}",
+    )
+
+
+def patch_init_job_retry_tolerance(root: Path) -> None:
+    """Treat only a terminal Kubernetes Job condition as init failure.
+
+    ``status.failed`` counts failed Pods, including Pods that a Job with a
+    ``backoffLimit`` is still retrying. The pinned runtime aborts the complete
+    submit as soon as that counter becomes non-zero. Keep polling retryable
+    Jobs and fail only after Kubernetes sets the Job's ``Failed`` condition.
+    """
+
+    path = root / "src/elastic_blast/kubernetes.py"
+    helper = '''def _elb_init_job_states(raw: str) -> tuple[set[str], set[str], set[str]]:
+    """Return pending, terminal-failed, and succeeded Job names."""
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as err:
+        raise RuntimeError(f'Invalid init Job status response: {err}') from err
+    items = payload.get('items') if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise RuntimeError('Invalid init Job status response: items must be a list')
+    pending: set[str] = set()
+    failed: set[str] = set()
+    succeeded: set[str] = set()
+    for job in items:
+        if not isinstance(job, dict):
+            raise RuntimeError('Invalid init Job status response: Job must be an object')
+        metadata = job.get('metadata') or {}
+        status = job.get('status') or {}
+        name = str(metadata.get('name') or '')
+        if not name or not isinstance(status, dict):
+            raise RuntimeError('Invalid init Job status response: Job name/status is missing')
+        conditions = status.get('conditions') or []
+        if not isinstance(conditions, list):
+            raise RuntimeError(f'Invalid init Job status response for {name}: conditions')
+        terminal_failed = any(
+            isinstance(condition, dict)
+            and condition.get('type') == 'Failed'
+            and str(condition.get('status') or '').lower() == 'true'
+            for condition in conditions
+        )
+        complete = any(
+            isinstance(condition, dict)
+            and condition.get('type') == 'Complete'
+            and str(condition.get('status') or '').lower() == 'true'
+            for condition in conditions
+        )
+        try:
+            succeeded_count = int(status.get('succeeded') or 0)
+        except (TypeError, ValueError) as err:
+            raise RuntimeError(
+                f'Invalid init Job status response for {name}: succeeded count'
+            ) from err
+        if terminal_failed:
+            failed.add(name)
+        elif complete or succeeded_count > 0:
+            succeeded.add(name)
+        else:
+            # Includes a failed Pod that is between Kubernetes backoff retries.
+            pending.add(name)
+    return pending, failed, succeeded
+
+
+def _wait_for_elb_init_jobs(
+    cfg: ElasticBlastConfig,
+    *,
+    selector: str,
+    expected_job_names: set[str],
+    timeout_seconds: int,
+    failure_prefix: str,
+    dry_run: bool,
+) -> None:
+    """Wait for the exact init Job set within one wall-clock deadline."""
+    if not expected_job_names:
+        raise ValueError('Expected init Job set must not be empty')
+    deadline = timer() + timeout_seconds
+    while True:
+        remaining = deadline - timer()
+        if remaining <= 0:
+            missing = ' '.join(sorted(expected_job_names))
+            raise TimeoutError(f'{failure_prefix} timed out: {missing}')
+        cmd = (
+            f'kubectl --context={cfg.appstate.k8s_ctx} get jobs '
+            f'-l {selector} -o json'
+        )
+        if dry_run:
+            logging.info(cmd)
+            return
+        proc = safe_exec(cmd, timeout=max(1, min(20, remaining)))
+        pending, failed, succeeded = _elb_init_job_states(handle_error(proc.stdout))
+        pending &= expected_job_names
+        failed &= expected_job_names
+        succeeded &= expected_job_names
+        missing = expected_job_names - pending - failed - succeeded
+        logging.debug(
+            'Init Jobs pending=%s missing=%s succeeded=%s',
+            ' '.join(sorted(pending)),
+            ' '.join(sorted(missing)),
+            ' '.join(sorted(succeeded)),
+        )
+        if failed:
+            names = ' '.join(sorted(failed))
+            try:
+                logs = safe_exec(
+                    f'kubectl --context={cfg.appstate.k8s_ctx} logs '
+                    f'-l {selector} --all-containers=true --prefix=true --tail=-1',
+                    timeout=max(1, min(20, deadline - timer())),
+                )
+                for line in handle_error(logs.stdout).split('\\n'):
+                    if line:
+                        logging.error(line)
+            except Exception as err:
+                logging.error('Failed to collect init Job logs: %s', err)
+            raise RuntimeError(f'{failure_prefix}: {names}')
+        if expected_job_names.issubset(succeeded):
+            logging.debug('Init Jobs succeeded: %s', ' '.join(sorted(succeeded)))
+            return
+        remaining = deadline - timer()
+        if remaining > 0:
+            time.sleep(min(20, remaining))
+
+
+'''
+    _replace_once_unless_present(
+        path,
+        "def initialize_local_ssd(cfg: ElasticBlastConfig,",
+        helper + "def initialize_local_ssd(cfg: ElasticBlastConfig,",
+        "def _wait_for_elb_init_jobs(",
+    )
+    _replace_block_once_unless_present(
+        path,
+        start_marker="        # wait for multiple jobs\n",
+        end_marker="            raise TimeoutError(f'{d} jobs timed out')\n",
+        replacement="""        # Wait for the exact init Job set. A non-zero status.failed is only a
+        # failed-Pod count while Kubernetes still has backoff retries available.
+        if cfg.cloud_provider.cloud == CSP.AZURE:
+            init_selector = f'elb-job-id={cfg.azure.elb_job_id}'
+            expected_init_jobs = {
+                f'init-ssd-{cfg.azure.elb_job_id}-{n}' for n in range(num_nodes)
+            }
+        else:
+            init_selector = 'app=setup'
+            expected_init_jobs = {f'init-ssd-{n}' for n in range(num_nodes)}
+        _wait_for_elb_init_jobs(
+            cfg,
+            selector=init_selector,
+            expected_job_names=expected_init_jobs,
+            timeout_seconds=init_blastdb_minutes_timeout * 60,
+            failure_prefix='Local SSD initialization jobs failed',
+            dry_run=dry_run,
+        )
+""",
+        marker="failure_prefix='Local SSD initialization jobs failed'",
+    )
+    _replace_block_once_unless_present(
+        path,
+        start_marker="        # Wait for all init jobs to complete\n",
+        end_marker="            raise TimeoutError('Shard init jobs timed out')\n",
+        replacement="""        # Scope to this runtime generation and require every expected shard Job.
+        init_selector = f'app=setup,elb-job-id={cfg.azure.elb_job_id}'
+        expected_init_jobs = {
+            f'init-ssd-{cfg.azure.elb_job_id}-{n}'
+            for n in range(min(num_shards, num_nodes))
+        }
+        _wait_for_elb_init_jobs(
+            cfg,
+            selector=init_selector,
+            expected_job_names=expected_init_jobs,
+            timeout_seconds=init_blastdb_minutes_timeout * 60,
+            failure_prefix='Shard init jobs failed',
+            dry_run=dry_run,
+        )
+""",
+        marker="failure_prefix='Shard init jobs failed'",
     )
 
 
@@ -1282,9 +1973,7 @@ def verify_runtime_identity_templates(root: Path) -> None:
         path = root / "src/elastic_blast/templates" / name
         count = path.read_text().count(marker)
         if count < 2:
-            raise RuntimeError(
-                f"{name}: expected runtime identity label on Job and Pod metadata"
-            )
+            raise RuntimeError(f"{name}: expected runtime identity label on Job and Pod metadata")
 
 
 def main() -> int:
@@ -1315,12 +2004,15 @@ def main() -> int:
     patch_finalizer_template(root)
     patch_finalizer_script(root, merge_script_source)
     patch_init_shard_script(root)
+    patch_init_db_download_writer_lock(root)
     patch_blast_run_aks_script(root)
     patch_aks_workload_tolerations(root)
+    patch_sharded_reader_lock_opt_in(root)
     patch_aks_job_ttl(root)
     patch_unique_init_ssd_job_names(root)
     patch_create_workspace_daemonset_tolerations(root)
     patch_init_job_wait_filters(root)
+    patch_init_job_retry_tolerance(root)
     verify_runtime_identity_templates(root)
     print("patched elastic-blast-azure finalizer for sharded result merge")
     return 0
