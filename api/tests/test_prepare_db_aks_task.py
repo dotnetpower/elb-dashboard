@@ -164,6 +164,42 @@ def test_aks_task_rejects_superseded_owner_before_job_submit(
     assert container.meta["update_in_progress"] is True
 
 
+def test_aks_task_rechecks_owner_immediately_before_job_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer(
+        {
+            "db_name": "core_nt",
+            "update_in_progress": True,
+            "prepare_operation_id": "prepare-owner",
+        }
+    )
+    _set_container(container)
+    original_builder = task_module.build_prepare_db_job_manifest
+
+    def _build_then_cancel(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        manifest = original_builder(*args, **kwargs)
+        container.meta["prepare_operation_id"] = "cancel-owner"
+        container.meta["cancel_operation_id"] = "cancel-owner"
+        return manifest
+
+    monkeypatch.setattr(task_module, "build_prepare_db_job_manifest", _build_then_cancel)
+    monkeypatch.setattr(
+        task_module,
+        "submit_prepare_db_job",
+        lambda *_a, **_kw: pytest.fail("superseded task must not submit a K8s Job"),
+    )
+
+    with pytest.raises(
+        task_module.DatabaseOperationOwnershipError,
+        match="ownership changed",
+    ):
+        prepare_db_via_aks.run(**_base_kwargs(prepare_operation_id="prepare-owner"))
+
+    assert container.meta["prepare_operation_id"] == "cancel-owner"
+    assert container.meta["cancel_operation_id"] == "cancel-owner"
+
+
 def test_aks_task_deletes_job_when_owner_changes_during_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -205,6 +241,47 @@ def test_aks_task_deletes_job_when_owner_changes_during_submit(
     assert delete_calls == ["deleted"]
     assert container.meta["prepare_operation_id"] == "cancel-owner"
     assert container.meta["cancel_operation_id"] == "cancel-owner"
+
+
+def test_promotion_rechecks_owner_before_consistency_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeContainer(
+        {
+            "db_name": "core_nt",
+            "update_in_progress": True,
+            "prepare_operation_id": "new-owner",
+        }
+    )
+    consistency_module = _sys.modules["api.services.db.consistency"]
+    monkeypatch.setattr(
+        consistency_module,
+        "reconcile_db_consistency",
+        lambda *_a, **_kw: pytest.fail("stale owner must not reconcile DB artifacts"),
+    )
+
+    with pytest.raises(
+        task_module.DatabaseOperationOwnershipError,
+        match="ownership changed",
+    ):
+        task_module._promote_success(
+            container,
+            "core_nt",
+            "stworkload",
+            "2026-05-21-01-05-02",
+            ["snapshot/core_nt.000.nhr"],
+            {
+                "success": 1,
+                "failed": 0,
+                "aborted": 0,
+                "pending": 0,
+                "timed_out": False,
+            },
+            _fake_update_metadata,
+            credential=object(),
+            mode="aks",
+            prepare_operation_id="old-owner",
+        )
 
 
 def _fake_blob_service(_cred: Any, _account: str):

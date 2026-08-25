@@ -520,6 +520,17 @@ def prepare_db(
             try:
                 from api.services.db.consistency import reconcile_db_consistency
 
+                def _verify_promotion_owner(meta: dict[str, Any]) -> dict[str, Any]:
+                    _require_prepare_operation_owner(meta, operation_id)
+                    return meta
+
+                _update_metadata(
+                    local_container,
+                    db_name,
+                    account_name,
+                    _verify_promotion_owner,
+                )
+
                 recon = reconcile_db_consistency(cred, account_name, db_name, force_reshard=True)
                 if recon.get("resharded"):
                     shard_summary = recon.get("shard", {})

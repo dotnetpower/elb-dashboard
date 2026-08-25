@@ -17,10 +17,11 @@ Risky contracts: Task name is referenced by the route's `_safe_send_task`
     test fixtures stay shape-stable. The HTTP route's `threading.Lock`
     does not propagate to this worker process — cross-process
     serialisation is the metadata blob's `update_in_progress=true` flag plus
-    `prepare_operation_id` owner token. Ownership is checked before and after
-    K8s submit and on every terminal metadata commit. Ambiguous submit failures
-    preserve owner + deterministic Job reference for bounded retry/adoption;
-    post-submit failures terminalise only after Job cleanup is confirmed.
+    `prepare_operation_id` owner token. Ownership is checked immediately before
+    and after K8s submit, before destructive consistency reconciliation, and on
+    every terminal metadata commit. Ambiguous submit failures preserve owner +
+    deterministic Job reference for bounded retry/adoption; post-submit failures
+    terminalise only after Job cleanup is confirmed.
 Validation: `uv run pytest -q api/tests/test_prepare_db_aks_task.py
     api/tests/test_prepare_db_aks_route.py`.
 """
@@ -276,6 +277,13 @@ def prepare_db_via_aks(
         backoff_limit=backoff_limit,
         ttl_seconds_after_finished=ttl_seconds_after_finished,
         active_deadline_seconds=active_deadline_seconds,
+    )
+
+    _update_metadata(
+        container,
+        db_name,
+        storage_account,
+        _verify_owner,
     )
 
     try:
@@ -879,6 +887,17 @@ def _promote_success(
     prepare_operation_id: str = "",
 ) -> None:
     """Run auto-shard + promote `source_version`, byte-shape identical to server-side."""
+    def _verify_owner(meta: dict[str, Any]) -> dict[str, Any]:
+        require_prepare_operation_owner(meta, prepare_operation_id)
+        return meta
+
+    update_metadata(
+        container,
+        db_name,
+        storage_account,
+        _verify_owner,
+    )
+
     # Deferred import keeps the import graph free of cycles (sharding
     # imports storage data helpers that pull in the route).
     # Prune ghost volumes left from a previous (larger) NCBI generation and
