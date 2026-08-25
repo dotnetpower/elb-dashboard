@@ -1,16 +1,12 @@
-"""Tests for the cross-sub ACR override guard in scripts/dev/az-context.sh.
+"""Tests for deploy-target discovery guards in scripts/dev/az-context.sh.
 
-Responsibility: Lock the safety guard that refuses a deploy when an operator's
-    ``ACR_NAME`` override names a registry the ACTIVE subscription does not own
-    (the dual-env same-name hazard: ``ca-elb-dashboard`` exists in two subs, so
-    an ``az containerapp update`` on a stale active sub would PATCH the wrong
-    environment while ``az acr build`` pushed to the named registry).
+Responsibility: Lock cross-sub ACR refusal and selected azd-environment lookup
+    while deployment metadata is discovered from the active Azure subscription.
 Edit boundaries: Test module only. Stubs ``az`` / ``azd`` on PATH and runs the
     real ``prepare_deploy_env_from_az_login`` bash function in a subshell.
-Key entry points: ``test_acr_override_mismatch_refused``,
-    ``test_acr_override_match_passes``.
-Risky contracts: Mirrors the guard's exit code (3) and the
-    ``ELB_ALLOW_ACR_OVERRIDE_MISMATCH=1`` escape hatch.
+Key entry points: ``test_*``.
+Risky contracts: Mirrors the ACR guard's exit code (3), its explicit escape
+    hatch, and the supported azd command used before persisting discovered values.
 Validation: ``uv run pytest -q api/tests/test_az_context_acr_guard.py -m subprocess``.
 """
 
@@ -46,7 +42,7 @@ exit 0
 _FAKE_AZD = """#!/usr/bin/env bash
 case "$*" in
   "env get-values") echo 'AZURE_SUBSCRIPTION_ID="active-sub-0000"' ;;
-  "env get-name") echo "testenv" ;;
+    "env get-value AZURE_ENV_NAME") echo "testenv" ;;
   *) printf '' ;;
 esac
 exit 0
@@ -123,3 +119,24 @@ def test_acr_override_match_passes(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert "does NOT match the active subscription" not in proc.stderr
+
+
+def test_selected_azd_environment_uses_supported_get_value_command(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_exec(bin_dir / "azd", _FAKE_AZD)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    result = subprocess.run(  # noqa: S603 -- test sources the checked-in az-context.sh
+        [
+            "/bin/bash",
+            "-c",
+            f"source '{_AZ_CONTEXT}'; _az_context_current_azd_env_name",
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "testenv"

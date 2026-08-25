@@ -74,15 +74,13 @@ _az_context_warn() { printf '[az-context] ⚠ %s\n' "$*" >&2; }
 
 _az_context_current_azd_env_name() {
   command -v azd >/dev/null 2>&1 || { printf ''; return; }
-  # Avoid piping into `head` here. Under callers with `set -Eeuo pipefail`
-  # the SIGPIPE that bash sends to `azd env get-name` when `head` closes
-  # the pipe after the first line propagates as exit 141 through the
-  # pipeline and trips `set -e`, killing the deploy script silently right
-  # after the opening banner.
+  # `azd env get-name` is not available in current azd releases. Read the
+  # selected environment's canonical value instead; this also works for older
+  # releases that support `env get-value`.
   local raw name
-  raw="$(azd env get-name 2>/dev/null || true)"
+  raw="$(azd env get-value AZURE_ENV_NAME 2>/dev/null || true)"
   name="${raw%%$'\n'*}"
-  # When no azd env is selected, `azd env get-name` writes multi-line
+  # When no azd env is selected, azd can write multi-line
   # help text to stdout instead of failing. A real env name is a single
   # token with no internal whitespace.
   name="${name#"${name%%[![:space:]]*}"}"
@@ -120,7 +118,7 @@ _az_context_discover_workload_env() {
        && az group show -n "$AZURE_RESOURCE_GROUP" --subscription "$sub" -o none 2>/dev/null; then
     rg="$AZURE_RESOURCE_GROUP"
   elif az group show -n rg-elb-dashboard --subscription "$sub" -o none 2>/dev/null; then
-    rg=rg-elb-dashboard
+    rg="rg-elb-dashboard"
   else
     local candidates candidate
     candidates="$(az group list --subscription "$sub" --query "[?starts_with(name, 'rg-elb-')].name" -o tsv 2>/dev/null || true)"
@@ -279,7 +277,9 @@ _az_context_discover_workload_env() {
              API_CLIENT_ID VITE_AZURE_CLIENT_ID; do
       v="${!k:-}"
       if [[ -n "$v" ]]; then
-        azd env set "$k" "$v" >/dev/null 2>&1 && persisted=$((persisted + 1)) || true
+        if azd env set "$k" "$v" >/dev/null 2>&1; then
+          persisted=$((persisted + 1))
+        fi
       fi
     done
     _az_context_log "persisted $persisted values to azd env '$azd_env_name'"
@@ -364,7 +364,7 @@ prepare_deploy_env_from_az_login() {
           "$current_sub" "$azd_sub" >&2
         printf '       Deploying now would target the az-login sub, which is almost certainly NOT\n' >&2
         printf '       the environment your azd env points at. To proceed anyway, re-run with:\n' >&2
-        printf '         ELB_ALLOW_SUB_MISMATCH=1 %s\n' "$0 $*" >&2
+        printf '         ELB_ALLOW_SUB_MISMATCH=1 %s\n' "$0" >&2
         printf '       Or align them first:\n' >&2
         printf '         az account set --subscription %s   # use azd env sub\n' "$azd_sub" >&2
         printf '         azd env select <env-for-%s>        # use az login sub\n' "$current_sub" >&2
