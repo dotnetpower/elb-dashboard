@@ -169,8 +169,8 @@ not carry the role set the run needs. New shared helper
 | Script | Mode invoked | Why |
 |--------|--------------|-----|
 | `deploy.sh` | `deploy` \u2014 Owner OR (Contributor + UAA) at sub | Bicep creates RGs (sub write) and role assignments (UAA). Catching the gap up-front saves the operator from a 10-minute azd-up that leaves an orphan RG. |
-| `cli-upgrade.sh <api|frontend|terminal|full>` | `upgrade-write` \u2014 Owner OR Contributor at sub | Needs to push images via `az acr build` and PATCH the Container App. |
-| `cli-upgrade.sh rollback` and `cli-upgrade.sh --dry-run` | `upgrade-read` \u2014 Reader / Contributor / Owner at sub | Read-only paths; the wider role set is enough but UAA isn't required. |
+| `cli-upgrade.sh <api|frontend|terminal|full>` | `upgrade-write` \u2014 Owner OR Contributor at the subscription or platform RG | Needs to push images via `az acr build` and PATCH the Container App. RG-scoped support was added on 2026-08-25. |
+| `cli-upgrade.sh rollback` and `cli-upgrade.sh --dry-run` | `upgrade-read` \u2014 Reader / Contributor / Owner at the subscription or platform RG | Read-only paths; the wider role set is enough but UAA isn't required. RG-scoped support was added on 2026-08-25. |
 | `cli-upgrade.sh --auto-fix-rbac` | extra `upgrade-autofix` check \u2014 Owner OR UAA at sub | The post-health doctor will create role assignments under the caller's identity. |
 | `check-mi-rbac.sh` (default) | `doctor-read` \u2014 Reader at sub | Needs `Microsoft.Authorization/roleAssignments/read` to enumerate the MI's grants. |
 | `check-mi-rbac.sh --auto-fix` | `doctor-autofix` \u2014 Owner OR UAA at sub | Auto-fix creates role assignments under the caller's identity. |

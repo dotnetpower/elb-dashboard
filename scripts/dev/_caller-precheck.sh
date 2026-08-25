@@ -28,8 +28,8 @@
 #                                     dies with an actionable diagnostic
 #                                     when not. Modes:
 #                                       deploy           Owner OR (Contributor + UAA) at sub
-#                                       upgrade-read     any of Owner/Contributor/Reader at sub
-#                                       upgrade-write    Owner OR Contributor at sub
+#                                       upgrade-read     any of Owner/Contributor/Reader at sub or platform RG
+#                                       upgrade-write    Owner OR Contributor at sub or platform RG
 #                                       upgrade-autofix  Owner OR UAA at sub (cluster-RG too if --auto-fix-rbac)
 #                                       doctor-read      any of Owner/Contributor/Reader at sub
 #                                       doctor-autofix   Owner OR UAA at sub
@@ -59,6 +59,7 @@ ELB_CALLER_OID=""
 ELB_CALLER_UPN=""
 ELB_CALLER_SUB=""
 ELB_CALLER_ROLES_AT_SUB=""
+ELB_CALLER_ROLES_AT_RG=""
 
 # Populate ELB_CALLER_OID / UPN / SUB. Returns 0 on success, 1 on failure
 # (caller decides whether to die or skip).
@@ -118,6 +119,23 @@ _elb_has_role() {
   printf '%s\n' "$ELB_CALLER_ROLES_AT_SUB" | grep -qFx "$1"
 }
 
+_elb_load_roles_at_rg() {
+  [[ -n "$ELB_CALLER_ROLES_AT_RG" || -z "${AZURE_RESOURCE_GROUP:-}" ]] && return 0
+  ELB_CALLER_ROLES_AT_RG="$(
+    az role assignment list \
+      --assignee-object-id "$ELB_CALLER_OID" \
+      --scope "/subscriptions/$ELB_CALLER_SUB/resourceGroups/$AZURE_RESOURCE_GROUP" \
+      --include-inherited \
+      --query '[].roleDefinitionName' -o tsv 2>/dev/null \
+      | sort -u || true
+  )"
+}
+
+_elb_has_role_at_rg() {
+  _elb_load_roles_at_rg
+  printf '%s\n' "$ELB_CALLER_ROLES_AT_RG" | grep -qFx "$1"
+}
+
 # Print the role assignments the caller actually has so the operator can
 # see why preflight failed.
 _elb_print_actual_roles() {
@@ -132,6 +150,15 @@ _elb_print_actual_roles() {
     _elb_red "You currently have NO role assignments visible at this scope."
     _elb_red "Either you have no access at all, or you lack 'Microsoft.Authorization/"
     _elb_red "roleAssignments/read' which is needed even to list your own grants."
+  fi
+  if [[ -n "${AZURE_RESOURCE_GROUP:-}" ]]; then
+    _elb_load_roles_at_rg
+    if [[ -n "$ELB_CALLER_ROLES_AT_RG" ]]; then
+      _elb_red "Your current role assignments at platform RG '$AZURE_RESOURCE_GROUP':"
+      while IFS= read -r r; do
+        [[ -n "$r" ]] && _elb_red "   - $r"
+      done <<<"$ELB_CALLER_ROLES_AT_RG"
+    fi
   fi
 }
 
@@ -151,11 +178,16 @@ _elb_precheck_die() {
   _elb_red ""
   _elb_red "Ask a subscription Owner to grant you the missing role(s):"
   _elb_red ""
+  local remediation_scope="/subscriptions/$ELB_CALLER_SUB"
+  if [[ "$mode" == upgrade-read || "$mode" == upgrade-write ]] \
+      && [[ -n "${AZURE_RESOURCE_GROUP:-}" ]]; then
+    remediation_scope+="/resourceGroups/$AZURE_RESOURCE_GROUP"
+  fi
   _elb_red "  az role assignment create --subscription $ELB_CALLER_SUB \\"
   _elb_red "    --assignee-object-id $ELB_CALLER_OID \\"
   _elb_red "    --assignee-principal-type User \\"
   _elb_red "    --role <role-name> \\"
-  _elb_red "    --scope /subscriptions/$ELB_CALLER_SUB"
+  _elb_red "    --scope $remediation_scope"
   _elb_red ""
   _elb_red "RBAC propagation usually takes 1–5 minutes after the grant lands."
   exit 4
@@ -186,21 +218,29 @@ elb_precheck_caller_for() {
       ;;
     upgrade-write)
       # cli-upgrade.sh needs ACR build/push + Container App patch on the
-      # platform RG. Sub-Contributor is the cleanest signal; we allow
-      # Owner as a superset. If the caller has neither at sub, they
-      # might still have Contributor at RG scope only — that case is
-      # rare for cli-upgrade operators and we ask them to re-run with
-      # `az account set` against the right context, OR the script will
-      # fail loudly on the first `az containerapp update` with a clear
-      # Azure error.
-      if _elb_has_role "Owner" || _elb_has_role "Contributor"; then
+      # platform RG. Subscription Owner/Contributor and platform-RG
+      # Owner/Contributor both cover those operations; requiring the broader
+      # subscription grant would reject valid least-privilege operators.
+      if _elb_has_role "Owner" || _elb_has_role "Contributor" \
+          || _elb_has_role_at_rg "Owner" || _elb_has_role_at_rg "Contributor"; then
         return 0
       fi
       _elb_precheck_die "$mode" \
         "'Owner' OR 'Contributor' at /subscriptions/$ELB_CALLER_SUB" \
+        "OR at /subscriptions/$ELB_CALLER_SUB/resourceGroups/${AZURE_RESOURCE_GROUP:-<platform-rg>}" \
         "(needed for 'az acr build' and 'az containerapp update' on the platform RG)"
       ;;
-    upgrade-read|doctor-read)
+    upgrade-read)
+      if _elb_has_role "Owner" || _elb_has_role "Contributor" || _elb_has_role "Reader" \
+          || _elb_has_role_at_rg "Owner" || _elb_has_role_at_rg "Contributor" \
+          || _elb_has_role_at_rg "Reader"; then
+        return 0
+      fi
+      _elb_precheck_die "$mode" \
+        "At least 'Reader' at /subscriptions/$ELB_CALLER_SUB" \
+        "OR at /subscriptions/$ELB_CALLER_SUB/resourceGroups/${AZURE_RESOURCE_GROUP:-<platform-rg>}"
+      ;;
+    doctor-read)
       # Read-only doctor / cli-upgrade --dry-run path. Needs Reader at
       # minimum to list role assignments.
       if _elb_has_role "Owner" || _elb_has_role "Contributor" || _elb_has_role "Reader"; then

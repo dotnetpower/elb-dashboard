@@ -210,6 +210,7 @@ case "$SCOPE" in worker|beat) SCOPE="api" ;; esac
 # load_azd_env) live in lib-env.sh so the set-vs-unset guard cannot drift
 # back to the buggy `${!key:-}` form. See lib-env.sh "Risky contracts".
 # ---------------------------------------------------------------------------
+# shellcheck source=scripts/dev/lib-env.sh
 . "$REPO_ROOT/scripts/dev/lib-env.sh"
 
 load_simple_env_file "$REPO_ROOT/.env"
@@ -224,6 +225,7 @@ fi
 # active az login subscription, so the env validation below sees fresh
 # values even when a stale `azd env get-values` was sourced earlier.
 # ---------------------------------------------------------------------------
+# shellcheck source=scripts/dev/az-context.sh
 . "$REPO_ROOT/scripts/dev/az-context.sh"
 assert_az_subscription_aligned
 
@@ -297,7 +299,7 @@ preflight_storage_parity() {
   # a different RG). RBAC needed: Reader on the storage account.
   local show_json
   if ! show_json="$(az storage account show -n "$acct" \
-        --query '{public:publicNetworkAccess, pecs:privateEndpointConnections[?properties.privateLinkServiceConnectionState.status==`Approved`]}' \
+      --query '{public:publicNetworkAccess, pecs:privateEndpointConnections}' \
         -o json 2>&1)"; then
     warn "cannot read storage account '$acct' (RBAC on the account?); skipping parity check"
     warn "  az error: ${show_json:0:200}"
@@ -306,7 +308,7 @@ preflight_storage_parity() {
   local public pe_count
   # Parse both fields in one jq invocation (1 fork instead of 2).
   read -r public pe_count < <(printf '%s' "$show_json" \
-    | jq -r '"\(.public) \(.pecs | length)"')
+    | jq -r '"\(.public) \([.pecs[]? | select((.privateLinkServiceConnectionState.status // .properties.privateLinkServiceConnectionState.status) == "Approved")] | length)"')
   ts "==> Storage parity: account=$acct publicNetworkAccess=$public approvedPrivateEndpoints=$pe_count"
   if [[ "$public" == "Disabled" && "$pe_count" -eq 0 ]]; then
     cat >&2 <<EOF
@@ -354,7 +356,7 @@ if elb_precheck_init "${AZURE_SUBSCRIPTION_ID:-}"; then
     ts "==> Pre-flight: verifying caller can read role assignments (dry-run / rollback)"
     elb_precheck_caller_for "upgrade-read"
   else
-    ts "==> Pre-flight: verifying caller has Contributor at sub for upgrade"
+    ts "==> Pre-flight: verifying caller has Contributor at subscription or platform RG"
     elb_precheck_caller_for "upgrade-write"
     if $AUTO_FIX_RBAC; then
       ts "==> Pre-flight: --auto-fix-rbac also requires UAA / Owner at sub"
@@ -500,7 +502,9 @@ poll_health() {
   # before we return, which would otherwise leak the tempfile). RETURN
   # fires first on a normal return and removes the file; the EXIT trap is
   # then a no-op because `rm -f` is idempotent.
+  # shellcheck disable=SC2064 # Expand the local path before body_file leaves scope.
   trap "rm -f '$body_file'" RETURN
+  # shellcheck disable=SC2064 # Keep the same captured path for process exit.
   trap "rm -f '$body_file'" EXIT
   ts "==> Polling $url (timeout ${HEALTH_TIMEOUT}s)"
   while (( SECONDS < deadline )); do

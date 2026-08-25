@@ -211,6 +211,7 @@ The script enforces these automatically and refuses to proceed if any fails:
 | `az account show` succeeds | Stale or missing `az login` |
 | `az account show` subscription is treated as the source of truth; if it differs from `AZURE_SUBSCRIPTION_ID` in azd env, the script auto-syncs azd env (`azd env set AZURE_SUBSCRIPTION_ID <current>` plus `AZURE_TENANT_ID` when different) and exports the values in-process before continuing | Silently pushing the new image to the wrong ACR / Container App when your `az login` and `azd env` point at different subscriptions. The script never switches `az account set` for you, so `az account show` keeps showing the subscription you actually selected. |
 | `AZURE_RESOURCE_GROUP`, `ACR_NAME`, `ACR_LOGIN_SERVER`, `CONTAINER_APP_NAME`, `CONTAINER_APP_FQDN` are set (auto-loaded from `azd env get-values`) | Pointing at the wrong app |
+| Caller has `Reader` for dry-run/rollback or `Contributor` for image deployment at either subscription scope or the platform resource-group scope | Rejecting an underprivileged deploy before ACR build or Container App patch, while supporting least-privilege RG-scoped operators. Full `azd up` and RBAC auto-fix retain their broader subscription-scope requirements. |
 | `git status --porcelain` is empty | Building with uncommitted edits silently shipping debug code (override with `--allow-dirty`) |
 | `--pull` only on the branch you started on | Accidental `pull` of a feature branch into `main` |
 | `git pull --ff-only` | Non-fast-forward pulls leaving a merge commit you did not intend |
