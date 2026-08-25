@@ -1,12 +1,17 @@
 ---
 title: quick-deploy surfaces the Service Bus master-switch state (Message Flow visibility)
-description: quick-deploy.sh now prints a one-time deploy notice when SERVICEBUS_ENABLED is not pinned ON, explaining why the Message Flow card stays hidden and the exact command to enable it — without flipping the charter §12a Rule 4 default-OFF gate.
+description: Historical quick-deploy Service Bus gate notice, superseded by the current three-state override guidance.
 tags:
   - operate
   - blast
 ---
 
 # quick-deploy Service Bus gate notice
+
+> **Superseded on 2026-08-25.** This page records the historical notice. The
+> current deploy script warns only for an explicit falsy `SERVICEBUS_ENABLED`
+> kill switch; unset, empty, and truthy values defer activation to the saved
+> Settings config. See [Service Bus three-state deployment guidance](../2026-08/2026-08-25-servicebus-three-state-guidance.md).
 
 ## Motivation
 

@@ -1,12 +1,17 @@
 ---
 title: Service Bus dashboard visibility — surface the deployment gate
-description: Explain why a Settings-enabled Service Bus integration stays hidden on the dashboard (the deployment master switch SERVICEBUS_ENABLED is OFF), expose the env gate in the status API, warn in Settings, and let the production deploy pin the gate from a GitHub repo variable.
+description: Historical Service Bus deployment-gate visibility change, superseded by the current three-state override contract.
 tags:
   - architecture
   - blast
 ---
 
 # Service Bus dashboard visibility — surface the deployment gate
+
+> **Superseded on 2026-08-25.** This page records the historical two-gate
+> behavior. The current runtime treats explicit falsy `SERVICEBUS_ENABLED` as a
+> kill switch; unset, empty, and truthy values defer activation to the saved
+> Settings config. See [Service Bus three-state deployment guidance](../2026-08/2026-08-25-servicebus-three-state-guidance.md).
 
 ## Motivation
 

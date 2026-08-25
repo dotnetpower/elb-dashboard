@@ -49,12 +49,15 @@ The code review also reproduced these deterministic failures:
 - Tracked operations hold independently expiring Redis tokens through broker I/O; Settings atomically removes expired tokens and acquires its stop-intent only when both the drain lease and token set are empty. Token-specific release prevents a stale operation from releasing a newer lease. Coordination fails closed on Redis errors, while the unified API retains its direct fallback.
 - Producer tokens use a 900-second interrupted-process backstop and shrink to a 60-second visibility grace after a confirmed or ambiguous broker attempt.
 - The routing stop-intent and full-row config mutation mutex use the same 900-second crash backstop, so a slow management-plane safety check cannot outlive its fence.
+- Every Redis coordination primitive now enforces that 900-second floor at its own boundary, even if a future caller passes a shorter custom value. Concurrent send acquisition extends but never shortens the shared token-set TTL, so a shorter later caller cannot expire an older live token.
+- Best-effort lease release failures now log at warning level; the token-owned release and TTL crash backstop remain unchanged.
 - Internal senders with persisted config revisions re-read the routing signature after acquiring the token, closing the stale-config window before broker I/O without changing existing Entra or SAS authentication behavior.
 - Confirmed and ambiguous broker sends retain a 60-second visibility token so delayed runtime counters cannot expose an apparently empty queue to Settings. Drain lease acquisition now fails closed on Redis errors because the lease is also the routing-mutation fence.
 - The drain lease is mandatory; a legacy `SERVICEBUS_DRAIN_SINGLEFLIGHT=false` override no longer disables coordination because an untracked drain would invalidate the Settings fence.
 - `SERVICEBUS_DRAIN_LOCK_TTL_SECONDS` now has a 900-second safety floor, preventing an override from expiring the routing fence during a live resident drain.
 - A soft-timed-out drain retains its lease until that TTL backstop instead of exposing still-unwinding submit threads to a Settings routing change.
 - The Celery task's remaining work budget is passed into the generic drain loop, not only the submit handler, so future batch changes cannot outlive the five-second settlement reserve.
+- The fallback does not start a receive pass with less than the generic drain loop's one-second minimum window, and it releases a won bridge claim without submitting when less than the OpenAPI transport's 0.5-second minimum remains above the five-second settlement reserve.
 - Expired unconfirmed bridges must win the atomic stale claim before publishing `bridge_unconfirmed_timeout`; a concurrent confirmation wins instead of receiving a contradictory failure.
 - Malformed outbox retry counters are quarantined per row and cannot abort delivery of valid rows.
 - A per-row defer persistence failure no longer stops unrelated correlations in the same bounded flush pass, and `deferred_timestamp_corrupt` rows have a distinct payload-free health warning.

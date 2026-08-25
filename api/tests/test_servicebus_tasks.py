@@ -269,6 +269,34 @@ def test_fallback_drain_does_not_receive_after_task_budget_is_spent(
     assert received == []
 
 
+def test_fallback_drain_does_not_expand_tiny_pass_past_settlement_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _q="": (True, "tok"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
+    received: list[object] = []
+    monkeypatch.setattr(
+        service_bus,
+        "drain_requests",
+        lambda *_args, **_kwargs: received.append(object()) or service_bus.DrainStats(),
+    )
+
+    result = sb_tasks._drain_once(
+        cfg,
+        max_messages=1,
+        max_wait_seconds=1,
+        max_concurrency=1,
+        submit_timeout_seconds=35,
+        submit_transport_retries=0,
+        pass_deadline=40,
+        clock=lambda: 34,
+    )
+
+    assert result == {"skipped": "task_budget_exhausted"}
+    assert received == []
+
+
 def test_drain_handler_releases_claim_when_pre_submit_work_consumes_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -300,6 +328,36 @@ def test_drain_handler_releases_claim_when_pre_submit_work_consumes_budget(
 
     assert action == MessageAction.RETRY
     assert released == ["corr-handler-budget"]
+    assert submitted == []
+
+
+def test_drain_handler_preserves_reserve_when_submit_window_is_too_small(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": True)
+    released: list[str] = []
+    monkeypatch.setattr(sb_tasks, "release_bridge", released.append)
+    submitted: list[object] = []
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda *_args, **_kwargs: submitted.append(object()) or {"job_id": "too-late"},
+    )
+
+    action = sb_tasks._drain_handler(
+        _claim_msg("corr-tiny-window"),
+        cfg,
+        submit_timeout_seconds=35,
+        submit_transport_retries=0,
+        submit_deadline=40,
+        clock=lambda: 34.5,
+    )
+
+    assert action == MessageAction.RETRY
+    assert released == ["corr-tiny-window"]
     assert submitted == []
 
 
@@ -3033,12 +3091,14 @@ class _FakeLockRedis:
     def __init__(self, set_result: object = True) -> None:
         self._set_result = set_result
         self.set_keys: list[str] = []
+        self.set_expiries: list[int | None] = []
         self.eval_keys: list[object] = []
         self.evaled: list[tuple] = []
         self.eval_calls: list[tuple[str, int, tuple[object, ...]]] = []
 
     def set(self, key: str, value: str, nx: bool = False, ex: int | None = None) -> object:
         self.set_keys.append(key)
+        self.set_expiries.append(ex)
         return self._set_result
 
     def eval(self, script: str, numkeys: int, *args: object) -> int:
@@ -3221,6 +3281,55 @@ def test_config_mutation_mutex_is_token_owned() -> None:
         coordination.DEFAULT_CONFIG_MUTATION_TTL_SECONDS >= coordination.MIN_DRAIN_LOCK_TTL_SECONDS
     )
     assert sb_tasks._DRAIN_STOP_INTENT_TTL_SECONDS >= coordination.MIN_DRAIN_LOCK_TTL_SECONDS
+
+
+def test_coordination_primitives_enforce_lease_ttl_floor() -> None:
+    coordination = sb_tasks.drain_coordination
+    minimum = coordination.MIN_DRAIN_LOCK_TTL_SECONDS
+
+    drain = _FakeLockRedis()
+    assert coordination.acquire_drain_lock(
+        "requests",
+        enabled=True,
+        lock_ttl=1,
+        lock_base_key="drain",
+        stop_intent_base_key="stop",
+        logger=sb_tasks.LOGGER,
+        redis_factory=lambda **_kwargs: drain,
+    )[0]
+    assert drain.eval_calls[0][2][-1] == minimum
+
+    stop = _FakeLockRedis()
+    assert coordination.acquire_drain_stop_intent(
+        "requests",
+        lock_base_key="drain",
+        stop_intent_base_key="stop",
+        stop_intent_ttl=1,
+        logger=sb_tasks.LOGGER,
+        redis_factory=lambda **_kwargs: stop,
+    )[0]
+    assert stop.eval_calls[0][2][-1] == minimum
+
+    send = _FakeLockRedis()
+    assert coordination.acquire_request_send(
+        "requests",
+        send_inflight_ttl=1,
+        redis_factory=lambda **_kwargs: send,
+    )[0]
+    assert send.eval_calls[0][2][-1] == minimum
+
+    config = _FakeLockRedis()
+    assert coordination.acquire_config_mutation(
+        ttl_seconds=1,
+        redis_factory=lambda **_kwargs: config,
+    )[0]
+    assert config.set_expiries == [minimum]
+
+
+def test_internal_send_acquire_never_shortens_shared_key_ttl() -> None:
+    lua = sb_tasks.drain_coordination.SEND_ACQUIRE_LUA
+    assert "local ttl = redis.call('ttl', KEYS[2])" in lua
+    assert "if ttl < tonumber(ARGV[2])" in lua
 
 
 def test_drain_lock_ttl_env_invalid_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:

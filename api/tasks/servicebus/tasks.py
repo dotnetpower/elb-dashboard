@@ -166,6 +166,8 @@ _SERVICEBUS_TASK_SUBMIT_TRANSPORT_RETRIES = 0
 _SERVICEBUS_TASK_SUBMIT_ALLOW_TOKEN_RESYNC = False
 _SERVICEBUS_TASK_WORK_BUDGET_SECONDS = 40.0
 _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS = 5.0
+_SERVICEBUS_TASK_MIN_SUBMIT_WINDOW_SECONDS = 0.5
+_SERVICEBUS_TASK_MIN_DRAIN_PASS_SECONDS = 1.0
 _DRAIN_ROUTING_FIELDS = (
     "auth_mode",
     "sas_secret_name",
@@ -1744,7 +1746,10 @@ def _drain_handler(
     if submit_deadline is not None:
         monotonic = clock or time.monotonic
         remaining = submit_deadline - monotonic()
-        if remaining <= _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS:
+        if remaining <= (
+            _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS
+            + _SERVICEBUS_TASK_MIN_SUBMIT_WINDOW_SECONDS
+        ):
             if _ATOMIC_CLAIM:
                 release_bridge(correlation_id)
             action = _transient_action(msg)
@@ -1760,10 +1765,7 @@ def _drain_handler(
         if effective_submit_timeout is not None:
             effective_submit_timeout = min(
                 effective_submit_timeout,
-                max(
-                    0.5,
-                    remaining - _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS,
-                ),
+                remaining - _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS,
             )
 
     submit_kwargs: dict[str, Any] = _openapi_kwargs(cfg)
@@ -2282,13 +2284,13 @@ def _drain_once(
         monotonic = clock or time.monotonic
         if pass_deadline is not None:
             remaining = pass_deadline - monotonic()
-            if remaining <= _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS:
+            if remaining <= (
+                _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS
+                + _SERVICEBUS_TASK_MIN_DRAIN_PASS_SECONDS
+            ):
                 LOGGER.info("servicebus drain tick skipped: task budget exhausted before receive")
                 return {"skipped": "task_budget_exhausted"}
-            drain_pass_seconds = max(
-                1.0,
-                remaining - _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS,
-            )
+            drain_pass_seconds = remaining - _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS
 
         def handle_message(message: ParsedMessage) -> MessageAction:
             return _drain_handler(

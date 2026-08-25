@@ -195,19 +195,15 @@ PY
 }
 
 # ---------------------------------------------------------------------------
-# Service Bus master-switch deploy notice (one-time, informational only).
+# Service Bus kill-switch deploy notice (one-time, informational only).
 #
-# The optional Service Bus integration — and therefore the dashboard "Message
-# Flow" card — is gated by TWO things: the deploy-time master switch
-# SERVICEBUS_ENABLED (api/worker/beat sidecars) AND a saved namespace config in
-# Settings (service_bus_enabled() requires BOTH; api/services/service_bus_pref.py).
-# The repo default for the env gate is OFF per charter §12a Rule 4, so this
-# script deliberately does NOT flip it. The recurring operator confusion is the
-# Message Flow card silently staying hidden after a deploy with no hint why.
+# SERVICEBUS_ENABLED is a three-state override: explicit falsy forces OFF;
+# unset/empty and truthy both defer activation to the saved Settings config.
+# Only the falsy state needs a deploy-time warning because it can make an
+# otherwise enabled config appear broken.
 #
 # This helper surfaces that ONCE per deploy when the resolved SERVICEBUS_ENABLED
-# is not pinned truthy (i.e. the card will be hidden), printing the exact pin
-# command. It mirrors control_plane_env_pairs override precedence: a SET
+# is explicitly falsy. It mirrors control_plane_env_pairs override precedence: a SET
 # process/azd env value wins over the JSON default; unset falls back to the JSON
 # ("" = defer to the Settings config row). It never flips a gate and never
 # fails the deploy — purely a discoverability nudge.
@@ -231,14 +227,13 @@ PY
 )"
   fi
   case "$(printf '%s' "$resolved" | tr '[:upper:]' '[:lower:]')" in
-    true | 1 | yes | on)
-      # Pinned ON — the card can render (given a namespace); no nudge needed.
-      return 0
+    false | 0 | no | off)
+      ts "    ! Service Bus kill switch is active: SERVICEBUS_ENABLED=$resolved forces the saved Settings config OFF."
+      ts "      Clear it for this deployment: azd env set SERVICEBUS_ENABLED true  (then rerun this deploy)"
+      ts "      Unset/empty and true both defer activation to Settings -> Service Bus integration."
       ;;
+    *) return 0 ;;
   esac
-  ts "    i Service Bus master switch SERVICEBUS_ENABLED is not pinned ON — the Message Flow card stays hidden."
-  ts "      Enable it for this deployment (survives redeploys): azd env set SERVICEBUS_ENABLED true  (then rerun this deploy)"
-  ts "      Message Flow also needs a Service Bus namespace saved in Settings -> Service Bus integration."
 }
 
 

@@ -18,7 +18,8 @@ Risky contracts: Drain lease acquisition fails closed on Redis errors because
     config-dependent data-plane mutation, not only request sends. The config
     mutation mutex serializes full-row Settings writes. Compare-and-delete
     release must never remove a lease owned by a newer caller. Celery soft
-    deadlines propagate through every Redis catch-all.
+    deadlines propagate through every Redis catch-all. Every active-operation
+    lease has the same 900-second safety floor and shared-key TTLs never shrink.
 Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py
     api/tests/test_auto_stop_task.py api/tests/test_servicebus_load.py``.
 """
@@ -73,7 +74,9 @@ SEND_ACQUIRE_LUA = (
     "local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) "
     "redis.call('zremrangebyscore', KEYS[2], '-inf', now_ms) "
     "redis.call('zadd', KEYS[2], now_ms + tonumber(ARGV[2]) * 1000, ARGV[1]) "
-    "redis.call('expire', KEYS[2], ARGV[2]) return 1"
+    "local ttl = redis.call('ttl', KEYS[2]) "
+    "if ttl < tonumber(ARGV[2]) then redis.call('expire', KEYS[2], ARGV[2]) end "
+    "return 1"
 )
 SEND_RELEASE_LUA = (
     "local retain = tonumber(ARGV[2]) or 0 "
@@ -167,7 +170,7 @@ def acquire_drain_lock(
             drain_lock_key(queue_name, base_key=lock_base_key),
             drain_stop_intent_key(queue_name, base_key=stop_intent_base_key),
             token,
-            lock_ttl,
+            max(MIN_DRAIN_LOCK_TTL_SECONDS, int(lock_ttl)),
         )
         return (True, token) if acquired else (False, None)
     except SoftTimeLimitExceeded:
@@ -199,7 +202,7 @@ def release_drain_lock(
     except SoftTimeLimitExceeded:
         raise
     except Exception:
-        logger.debug("drain lock release failed (will expire via TTL)", exc_info=True)
+        logger.warning("drain lock release failed (will expire via TTL)", exc_info=True)
 
 
 def acquire_drain_stop_intent(
@@ -224,7 +227,7 @@ def acquire_drain_stop_intent(
             drain_stop_intent_key(queue_name, base_key=stop_intent_base_key),
             send_inflight_key(queue_name, base_key=send_inflight_base_key),
             token,
-            stop_intent_ttl,
+            max(MIN_DRAIN_LOCK_TTL_SECONDS, int(stop_intent_ttl)),
         )
         if not acquired:
             return (False, None)
@@ -258,7 +261,7 @@ def release_drain_stop_intent(
     except SoftTimeLimitExceeded:
         raise
     except Exception:
-        logger.debug("drain stop-intent release failed (TTL backstop)", exc_info=True)
+        logger.warning("drain stop-intent release failed (TTL backstop)", exc_info=True)
 
 
 def acquire_request_send(
@@ -284,7 +287,7 @@ def acquire_request_send(
             drain_stop_intent_key(queue_name, base_key=stop_intent_base_key),
             send_inflight_key(queue_name, base_key=send_inflight_base_key),
             token,
-            max(10, int(send_inflight_ttl)),
+            max(MIN_DRAIN_LOCK_TTL_SECONDS, int(send_inflight_ttl)),
         )
         return (True, token) if acquired else (False, None)
     except SoftTimeLimitExceeded:
@@ -318,6 +321,7 @@ def release_request_send(
     except SoftTimeLimitExceeded:
         raise
     except Exception:
+        LOGGER.warning("Service Bus request-send token release failed", exc_info=True)
         return
 
 
@@ -335,7 +339,7 @@ def acquire_config_mutation(
             key,
             token,
             nx=True,
-            ex=max(10, int(ttl_seconds)),
+            ex=max(MIN_DRAIN_LOCK_TTL_SECONDS, int(ttl_seconds)),
         )
         return (True, token) if acquired else (False, None)
     except SoftTimeLimitExceeded:
@@ -360,5 +364,5 @@ def release_config_mutation(
     except SoftTimeLimitExceeded:
         raise
     except Exception:
-        LOGGER.debug("Service Bus config mutation lock release failed", exc_info=True)
+        LOGGER.warning("Service Bus config mutation lock release failed", exc_info=True)
         return

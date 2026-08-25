@@ -27,6 +27,8 @@ Validation: `uv run pytest -q api/tests/test_control_plane_env.py`.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,16 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _JSON_PATH = _REPO_ROOT / "infra" / "control-plane-env.json"
 _BICEP_PATH = _REPO_ROOT / "infra" / "modules" / "containerAppControl.bicep"
+_QUICK_DEPLOY_PATH = _REPO_ROOT / "scripts" / "dev" / "quick-deploy.sh"
+_SERVICE_BUS_UI_PATH = (
+    _REPO_ROOT
+    / "web"
+    / "src"
+    / "components"
+    / "settings"
+    / "sections"
+    / "ServiceBusSection.tsx"
+)
 
 
 def _load() -> dict[str, dict[str, str]]:
@@ -71,6 +83,52 @@ def test_dashboard_rbac_enforced_by_default() -> None:
     must be a deliberate edit to this test + the JSON together."""
     data = _load()
     assert data["api"]["ENFORCE_DASHBOARD_RBAC"] == "true"
+
+
+def _servicebus_notice_output(value: str | None) -> str:
+    script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
+    start = script.index("servicebus_gate_notice() {")
+    end = script.index("\n}\n\n\nrelease_build_number()", start) + len("\n}")
+    function = script[start:end]
+    command = (
+        "_SB_GATE_NOTICE_DONE=false; CONTROL_PLANE_ENV_FILE=/nonexistent; "
+        "ts() { printf '%s\\n' \"$*\"; }; "
+        f"{function}; servicebus_gate_notice"
+    )
+    env = os.environ.copy()
+    if value is None:
+        env.pop("SERVICEBUS_ENABLED", None)
+    else:
+        env["SERVICEBUS_ENABLED"] = value
+    result = subprocess.run(  # noqa: S603 -- repository-controlled function.
+        ["/bin/bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return result.stdout
+
+
+@pytest.mark.parametrize("value", [None, "", "true", "yes", "unexpected"])
+def test_servicebus_deploy_notice_is_silent_when_config_controls_activation(
+    value: str | None,
+) -> None:
+    assert _servicebus_notice_output(value) == ""
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off"])
+def test_servicebus_deploy_notice_only_warns_for_kill_switch(value: str) -> None:
+    output = _servicebus_notice_output(value)
+    assert "kill switch is active" in output
+    assert "forces the saved Settings config OFF" in output
+    assert "not pinned ON" not in output
+
+
+def test_servicebus_ui_describes_three_state_override() -> None:
+    ui = _SERVICE_BUS_UI_PATH.read_text(encoding="utf-8")
+    assert "saved config controls activation unless SERVICEBUS_ENABLED is explicitly false" in ui
+    assert "Both the deployment env switch" not in ui
 
 
 def test_bicep_references_every_guard_key() -> None:

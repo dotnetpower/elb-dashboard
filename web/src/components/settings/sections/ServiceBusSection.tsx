@@ -69,12 +69,10 @@ type PurgeTarget = "main" | "dlq" | null;
 
 /**
  * A read-only shell command with a copy-to-clipboard affordance. Used by the
- * env-gate remediation banner so an operator can apply the exact
- * `SERVICEBUS_ENABLED=true` command from the browser without hunting through
- * docs. The deployment master switch lives on the Container App revision (it is
- * NOT a runtime toggle — setting it from the dashboard would force a control
- * plane restart and need extra RBAC), so the durable fix stays a deploy-time
- * command; this just makes that command one click away.
+ * kill-switch remediation banner so an operator can clear an explicit
+ * `SERVICEBUS_ENABLED=false` override without hunting through docs. The
+ * deployment override lives on the Container App revision, so changing it
+ * requires a deploy; the saved Settings config remains the runtime toggle.
  */
 function CopyCommand({ label, command }: { label: string; command: string }) {
   const [copied, setCopied] = useState(false);
@@ -453,7 +451,7 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
       <Group title="Runtime">
         <Row
           label="Effective state"
-          hint="Both the deployment env switch (SERVICEBUS_ENABLED) and this saved config must be on."
+          hint="The saved config controls activation unless SERVICEBUS_ENABLED is explicitly false as a deployment kill switch."
           control={
             <Badge tone={counts?.available ? "success" : "muted"}>
               {counts?.available ? "Live" : (counts?.reason ?? "idle")}
