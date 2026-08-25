@@ -977,6 +977,7 @@ function matchApi(path: string, method: string): Response | null {
       ip_rules: [],
       caller_ip: null,
       caller_ip_in_rules: false,
+      same_region_ip_rules_unsupported: false,
     });
   }
   if (path === "/api/blast/databases") return jsonResponse(databasesPayload());

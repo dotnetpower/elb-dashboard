@@ -108,6 +108,8 @@ scripts/dev/local-run.sh storage-status
 
 The helper refuses to run inside a Container App (`CONTAINER_APP_NAME` guard), so it cannot accidentally weaken production. The local backend may also auto-open with `LOCAL_DEBUG_AUTO_OPEN_STORAGE=true` — see [`.github/copilot-instructions.md §9`](https://github.com/dotnetpower/elb-dashboard/blob/main/.github/copilot-instructions.md#9-storage-network-isolation-hard-requirement).
 
+Azure Storage [IP network rules do not apply to clients in the same Azure region as the Storage account](https://learn.microsoft.com/azure/storage/common/storage-network-security-limitations#restrictions-for-ip-network-rules). The helper detects an Azure VM host through Instance Metadata and refuses before changing Storage when the regions match. In that topology, use the deployed dashboard over its private endpoint or an explicitly approved virtual-network path; do not fall back to `defaultAction=Allow`.
+
 Do not leave the network surface open after debugging. The Storage card itself shows the current `publicNetworkAccess` value so you can confirm it is back to `Disabled`.
 
 ## Sign-in works but Dashboard shows no workspace

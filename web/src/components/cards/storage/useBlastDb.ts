@@ -208,12 +208,6 @@ export function useBlastDb({
     dbQuery.data?.public_access_disabled === true ||
     dbDegradedReason === "network_blocked" ||
     localFirewallBlocked;
-  const storageAccessTitle = localFirewallBlocked
-    ? "Storage firewall is still blocking this host"
-    : "Storage is Private only";
-  const storageAccessHint = localFirewallBlocked
-    ? "This local browser session is still being rejected by the selected-network firewall. Refresh the IP allowlist for local testing; production continues to use the private endpoint."
-    : "This local browser session cannot read the database list through the private endpoint. Open an IP-allowlisted debug window for local testing; production continues to use the private endpoint.";
 
   // Local-debug toggle visibility — fetched once, refreshed every 60s while
   // the storage account is blocked. The endpoint always returns 200 with
@@ -228,7 +222,21 @@ export function useBlastDb({
     refetchInterval: publicAccessDisabled ? 30_000 : 5 * 60_000,
   });
   const localDebug: StorageLocalDebugStatus | undefined = localDebugQuery.data;
-  const canEnableLocalAccess = localDebug?.is_local === true;
+  const sameRegionIpRulesUnsupported =
+    localDebug?.same_region_ip_rules_unsupported === true;
+  const storageAccessTitle = sameRegionIpRulesUnsupported
+    ? "Use the deployed Storage path"
+    : localFirewallBlocked
+      ? "Storage firewall is still blocking this host"
+      : "Storage is Private only";
+  const storageAccessHint = sameRegionIpRulesUnsupported
+    ? (localDebug?.local_debug_message ??
+      "This Azure host is in the same region as Storage, where public IP rules do not apply. Use the deployed control plane over its private endpoint.")
+    : localFirewallBlocked
+      ? "This local browser session is still being rejected by the selected-network firewall. Refresh the IP allowlist for local testing; production continues to use the private endpoint."
+      : "This local browser session cannot read the database list through the private endpoint. Open an IP-allowlisted debug window for local testing; production continues to use the private endpoint.";
+  const canEnableLocalAccess =
+    localDebug?.is_local === true && !sameRegionIpRulesUnsupported;
   const canGrantLocalRbac = storageAccessDenied && localDebug?.is_local === true;
 
   const downloadedDbs = useMemo(() => {
@@ -642,7 +650,7 @@ export function useBlastDb({
       const msg =
         apiError.status === 404
           ? "Local API has not loaded the RBAC grant route yet. Restart the local API, then try again."
-          : apiError.status === 400 || apiError.status === 403
+          : apiError.status === 400 || apiError.status === 403 || apiError.status === 409
             ? detail || formatApiError(e, "storage")
             : formatApiError(e, "storage");
       setLocalDebugError(msg);

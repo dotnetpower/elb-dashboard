@@ -21,6 +21,10 @@ export interface StorageLocalDebugStatus {
   caller_ip?: string | null;
   /** True when caller_ip is already inside ip_rules. */
   caller_ip_in_rules?: boolean;
+  /** True when this Azure host shares the Storage region, where IP rules do not apply. */
+  same_region_ip_rules_unsupported?: boolean;
+  /** Actionable topology guidance when local public access cannot work safely. */
+  local_debug_message?: string;
   /** Present when ARM read failed; UI may still render the toggle. */
   error?: string;
 }
@@ -32,6 +36,7 @@ export interface StorageLocalDebugOpenResult {
   off_hint?: string;
   reason?: string;
   error?: string;
+  message?: string;
 }
 
 export interface StorageLocalDebugGrantRbacResult {

@@ -114,7 +114,11 @@ def storage_local_debug_open(
         result.get("action"),
     )
     if result.get("action") == "failed":
-        raise HTTPException(500, f"could not open storage: {result.get('error')}")
+        unsupported = result.get("error") == "same_region_azure_ip_rules_unsupported"
+        raise HTTPException(
+            409 if unsupported else 500,
+            result.get("message") or f"could not open storage: {result.get('error')}",
+        )
     return result
 
 

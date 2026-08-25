@@ -14,18 +14,14 @@
 # Running this script with `on` flips the account to:
 #
 #   publicNetworkAccess = Enabled
-#   networkAcls.defaultAction = Allow
-#   networkAcls.bypass        = AzureServices
+#   networkAcls.defaultAction = Deny
+#   networkAcls.bypass        = None
+#   networkAcls.ipRules       = [<your caller IP>]
 #
-# i.e. the data plane is reachable from any IP, but Entra ID auth is still
-# enforced (allowSharedKeyAccess=false). Your `az login` identity must already
-# hold `Storage Blob Data Reader` (or higher) on the account / container scope.
-#
-# Why not Deny + ipRule? For ADLS Gen2 (isHnsEnabled=true) accounts with an
-# approved private endpoint, defaultAction=Deny + ipRule does not reliably
-# propagate to the data plane. defaultAction=Allow is the only method that
-# works reliably for local development access. See docs/features_change/ for
-# the root-cause analysis.
+# i.e. the public data plane is reachable only from your current public IPv4.
+# Entra ID auth is still enforced (allowSharedKeyAccess=false). Your `az login`
+# identity must already hold `Storage Blob Data Reader` (or higher) on the
+# account / container scope.
 #
 # Running with `off` reverts to the production posture
 # (publicNetworkAccess = Disabled, ipRules cleared).
@@ -84,6 +80,32 @@ done
 
 command -v az >/dev/null 2>&1 || die "az CLI not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
+command -v curl >/dev/null 2>&1 || die "curl not found"
+
+if [[ -n "${CONTAINER_APP_NAME:-}" && "$ACTION" != "status" ]]; then
+  die "refusing to change Storage public access inside a Container App"
+fi
+
+is_ipv4() {
+  local candidate="$1" octet
+  local -a octets
+  IFS=. read -r -a octets <<< "$candidate"
+  [[ ${#octets[@]} -eq 4 ]] || return 1
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$octet <= 255 )) || return 1
+  done
+}
+
+normalise_region() {
+  printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'
+}
+
+azure_host_region() {
+  curl -fsS --max-time 1 -H Metadata:true \
+    'http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01' \
+    2>/dev/null | jq -r '.location // empty' 2>/dev/null || true
+}
 
 # Resolve subscription.
 if [[ -z "$SUBSCRIPTION" ]]; then
@@ -116,22 +138,59 @@ case "$ACTION" in
     ;;
 
   on)
-    ts "Opening '$ACCOUNT' for local debugging (publicNetworkAccess=Enabled, defaultAction=Allow) ..."
-    # 1. Enable the public surface.
+    if [[ -z "$IP" ]]; then
+      ts "Detecting caller public IP via api.ipify.org ..."
+      IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+      [[ -n "$IP" ]] || die "could not auto-detect IP; pass --ip <your-public-ip>"
+    fi
+    is_ipv4 "$IP" || die "IP '$IP' is not a bare IPv4 address"
+
+    storage_region="$(az storage account show "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
+      --query primaryLocation -o tsv)"
+    host_region="$(azure_host_region)"
+    if [[ -n "$host_region" \
+       && "$(normalise_region "$host_region")" == "$(normalise_region "$storage_region")" ]]; then
+      die "Azure Storage IP rules do not apply to same-region Azure clients ($host_region). Use the deployed private-endpoint path or an approved virtual-network rule; Storage was not changed."
+    fi
+
+    ts "Opening '$ACCOUNT' for caller IP $IP (defaultAction=Deny, bypass=None) ..."
+    # Close first so remediation from an unsafe state can never leave an
+    # Enabled+Allow interval while rules are replaced.
     az storage account update "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
-        --public-network-access Enabled -o none
-    # 2. Set defaultAction=Allow with bypass=AzureServices.
-    #    Note: defaultAction=Deny + ipRule does NOT reliably propagate to the
-    #    data plane for ADLS Gen2 (isHnsEnabled=true) accounts with a private
-    #    endpoint. defaultAction=Allow is used instead. Azure AD auth
-    #    (allowSharedKeyAccess=false) is still enforced on every request.
+        --public-network-access Disabled --default-action Deny --bypass None -o none
+
+    # Replace stale local-debug entries rather than accumulating trusted IPs.
+    existing_ips="$(az storage account network-rule list "${SUB_FLAG[@]}" -g "$RG" --account-name "$ACCOUNT" \
+        --query 'ipRules[].ipAddressOrRange' -o tsv 2>/dev/null || true)"
+    if [[ -n "$existing_ips" ]]; then
+      while IFS= read -r prev_ip; do
+        [[ -z "$prev_ip" ]] && continue
+        az storage account network-rule remove "${SUB_FLAG[@]}" -g "$RG" --account-name "$ACCOUNT" \
+            --ip-address "$prev_ip" -o none
+      done <<< "$existing_ips"
+    fi
+    az storage account network-rule add "${SUB_FLAG[@]}" -g "$RG" --account-name "$ACCOUNT" \
+        --ip-address "$IP" -o none
+
+    # Enable public access only after the deny-by-default rule set is complete.
     az storage account update "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
-        --default-action Allow --bypass AzureServices -o none
+        --public-network-access Enabled --default-action Deny --bypass None -o none
 
     ts "Waiting ~90 s for the firewall change to propagate ..."
     sleep 90
 
-    green "OPEN — storage account '$ACCOUNT' now accepts data-plane traffic (defaultAction=Allow)"
+    state="$(az storage account show "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
+      --query '{public:publicNetworkAccess,defaultAction:networkRuleSet.defaultAction,bypass:networkRuleSet.bypass,ipRules:networkRuleSet.ipRules[].ipAddressOrRange}' \
+      -o json)"
+    if [[ "$(echo "$state" | jq -r '.public')" != "Enabled" \
+       || "$(echo "$state" | jq -r '.defaultAction')" != "Deny" \
+       || "$(echo "$state" | jq -r '.bypass')" != "None" \
+       || "$(echo "$state" | jq -r '.ipRules | length')" -ne 1 \
+       || "$(echo "$state" | jq -r '.ipRules[0]')" != "$IP" ]]; then
+      die "failed to establish caller-IP-only Storage access; state=$(echo "$state" | jq -c .)"
+    fi
+
+    green "OPEN — storage account '$ACCOUNT' now accepts data-plane traffic from $IP"
     print_state
 
     cat <<EOF
@@ -141,35 +200,36 @@ Reminder:
       'Storage Blob Data Reader'  (read-only views)
       'Storage Blob Data Contributor' (uploads / writes)
     on $ACCOUNT (or one of its containers).
-  * defaultAction=Allow means any authenticated Azure AD identity can reach
-    the data plane. Close the surface as soon as you are done:
+  * Network access is limited to $IP. Close the surface as soon as you are done:
       $0 off --account $ACCOUNT --rg $RG
 EOF
     ;;
 
   off)
     ts "Closing '$ACCOUNT' (publicNetworkAccess=Disabled, ipRules cleared) ..."
-    # Wipe the IP allowlist first so a future `on` starts clean.
+    # Close first. Cleanup failures after this point cannot leave public access enabled.
+    az storage account update "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
+      --public-network-access Disabled --default-action Deny --bypass None -o none
+
     existing_ips="$(az storage account network-rule list "${SUB_FLAG[@]}" -g "$RG" --account-name "$ACCOUNT" \
         --query 'ipRules[].ipAddressOrRange' -o tsv 2>/dev/null || true)"
     if [[ -n "$existing_ips" ]]; then
       while IFS= read -r prev_ip; do
         [[ -z "$prev_ip" ]] && continue
         az storage account network-rule remove "${SUB_FLAG[@]}" -g "$RG" --account-name "$ACCOUNT" \
-            --ip-address "$prev_ip" -o none 2>/dev/null || true
+            --ip-address "$prev_ip" -o none
       done <<< "$existing_ips"
     fi
-    # Restore the production posture in one ARM update. Splitting these into
-    # separate updates can leave some API versions reporting Enabled/Allow.
-    az storage account update "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
-      --public-network-access Disabled --default-action Deny -o none
 
     state="$(az storage account show "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
-      --query '{public:publicNetworkAccess,defaultAction:networkRuleSet.defaultAction}' \
+      --query '{public:publicNetworkAccess,defaultAction:networkRuleSet.defaultAction,bypass:networkRuleSet.bypass,ipRules:networkRuleSet.ipRules}' \
       -o json)"
     public_state="$(echo "$state" | jq -r '.public')"
     default_action="$(echo "$state" | jq -r '.defaultAction')"
-    if [[ "$public_state" != "Disabled" || "$default_action" != "Deny" ]]; then
+    bypass="$(echo "$state" | jq -r '.bypass')"
+    ip_rule_count="$(echo "$state" | jq -r '.ipRules | length')"
+    if [[ "$public_state" != "Disabled" || "$default_action" != "Deny" \
+       || "$bypass" != "None" || "$ip_rule_count" -ne 0 ]]; then
       die "failed to close storage network; state=$(echo "$state" | jq -c .)"
     fi
 

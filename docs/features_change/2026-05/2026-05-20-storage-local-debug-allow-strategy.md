@@ -1,5 +1,11 @@
 # Storage local-debug: switch from Deny+ipRule to Allow strategy
 
+> **Superseded on 2026-08-25.** This historical workaround no longer reflects
+> the active security contract. Local-debug access now uses
+> `publicNetworkAccess=Enabled`, `defaultAction=Deny`, `bypass=None`, and one
+> caller IPv4 rule; normal local launches keep auto-open disabled. See
+> [Local Storage auto-open default-off hardening](../2026-08/2026-08-25-local-storage-auto-open-default-off.md).
+
 **Date**: 2026-05-20  
 **Scope**: `api/services/storage_public_access.py`, `scripts/dev/storage-public-access.sh`, `api/tests/test_storage_public_access.py`
 

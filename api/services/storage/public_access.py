@@ -5,8 +5,8 @@ Edit boundaries: Keep reusable domain logic here; routes and tasks should call t
 instead of duplicating SDK code.
 Key entry points: `_truthy`, `is_local_debug_auto_open_enabled`, `is_running_locally`,
 `ensure_local_storage_access`, `read_local_storage_state`
-Risky contracts: Validate Storage account/blob inputs and preserve the no-browser-SAS policy.
-Validation: `uv run pytest -q api/tests/test_storage_data.py`.
+Risky contracts: Keep public access local-only, caller-IP scoped, and blocked in Container Apps.
+Validation: `uv run pytest -q api/tests/test_storage_public_access.py`.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ _OFF_HINT = "scripts/dev/storage-public-access.sh off"
 # ARM get_properties + an ipify GET, which dominated local CPU.
 _CACHE_TTL_SEC = 60.0
 _cache_lock = threading.Lock()
-_already_open_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+_already_open_cache: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
 
 # Caller IP lookup configuration. Override via env, fall back to two
 # providers, cache both success and failure so the dashboard's poll
@@ -60,6 +60,9 @@ _CALLER_IP_FAILURE_TTL_SEC = 30.0  # 30 s on failure so we recover fast.
 _caller_ip_lock = threading.Lock()
 # (timestamp_monotonic, ip_or_None, ttl_for_this_entry)
 _caller_ip_cache: tuple[float, str | None, float] | None = None
+_AZURE_IMDS_COMPUTE_URL = (
+    "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01"
+)
 
 
 def _truthy(value: str | None) -> bool:
@@ -154,6 +157,34 @@ def _detect_caller_ip() -> str | None:
     return discovered
 
 
+def _detect_azure_host_region() -> str | None:
+    """Return the Azure VM region from IMDS, or None outside Azure."""
+    try:
+        import httpx
+
+        response = httpx.get(
+            _AZURE_IMDS_COMPUTE_URL,
+            headers={"Metadata": "true"},
+            timeout=1.0,
+        )
+        response.raise_for_status()
+        region = str(response.json().get("location") or "").strip()
+        return region or None
+    except Exception:
+        return None
+
+
+def _same_azure_region(host_region: str | None, storage_region: str | None) -> bool:
+    """Compare Azure region names while ignoring case and spaces."""
+
+    def _normalise(value: str | None) -> str:
+        return "".join((value or "").split()).casefold()
+
+    host = _normalise(host_region)
+    storage = _normalise(storage_region)
+    return bool(host and storage and host == storage)
+
+
 def ensure_local_storage_access(
     credential: TokenCredential,
     subscription_id: str,
@@ -178,14 +209,10 @@ def ensure_local_storage_access(
     ``POST /api/storage/local-debug/open`` button uses this path so a
     developer can enable access from the UI without exporting the env var.
 
-    Side effect: when ``action`` is ``opened``, the Storage account is
-    updated to ``publicNetworkAccess=Enabled``, ``defaultAction=Allow``,
-    ``bypass=AzureServices``. No per-IP rules are set — for ADLS Gen2
-    (``isHnsEnabled=true``) accounts with an approved private endpoint,
-    ``defaultAction=Deny + ipRule`` does not reliably propagate to the data
-    plane. ``defaultAction=Allow`` with ``allowSharedKeyAccess=false`` still
-    enforces Azure AD authentication on every request. Auto-close is
-    intentionally NOT performed — the caller must run
+    Side effect: when ``action`` is ``opened`` or ``ip_added``, the Storage
+    account is updated to ``publicNetworkAccess=Enabled``,
+    ``defaultAction=Deny``, ``bypass=None``, and exactly one caller IPv4 rule.
+    Auto-close is intentionally NOT performed — the caller must run
     ``scripts/dev/storage-public-access.sh off``.
     """
     if force:
@@ -202,7 +229,11 @@ def ensure_local_storage_access(
             "reason": (f"{ENV_OPT_IN} not enabled or running inside a Container App"),
         }
 
-    cache_key = (subscription_id, resource_group, account_name)
+    caller_ip = _detect_caller_ip()
+    if caller_ip is None:
+        return {"action": "failed", "error": "could not detect caller public IP"}
+
+    cache_key = (subscription_id, resource_group, account_name, caller_ip)
     now = time.monotonic()
     with _cache_lock:
         cached = _already_open_cache.get(cache_key)
@@ -229,20 +260,48 @@ def ensure_local_storage_access(
         if network_rule_set is not None
         else ""
     )
+    bypass = (
+        str(getattr(network_rule_set, "bypass", "") or "")
+        if network_rule_set is not None
+        else ""
+    )
+    existing_ips: list[str] = []
+    if network_rule_set is not None:
+        for rule in getattr(network_rule_set, "ip_rules", None) or []:
+            ip_value = getattr(rule, "ip_address_or_range", None) or getattr(
+                rule, "value", None
+            )
+            if ip_value:
+                existing_ips.append(str(ip_value))
 
-    # Hard invariant for the local-debug path: ``defaultAction=Allow`` is
-    # only acceptable WHEN ``allowSharedKeyAccess=false``, because the
-    # Allow disposition leaves AAD as the only enforcement layer. If
-    # shared-key access is enabled, any leaked account key would have
-    # network-unconditional reach. Refuse to open the window in that
-    # case — the operator must first set ``allowSharedKeyAccess: false``
-    # via Bicep / az.
+    storage_region = str(getattr(account, "primary_location", "") or "").strip()
+    host_region = _detect_azure_host_region() if storage_region else None
+    if _same_azure_region(host_region, storage_region):
+        LOGGER.warning(
+            "ensure_local_storage_access: refusing same-region Azure IP rule "
+            "host_region=%s storage_region=%s account=%s",
+            host_region,
+            storage_region,
+            account_name,
+        )
+        return {
+            "action": "failed",
+            "error": "same_region_azure_ip_rules_unsupported",
+            "message": (
+                "Azure Storage public IP rules do not apply to clients in the same "
+                "Azure region. Use the deployed dashboard over its private endpoint "
+                "or configure an approved virtual-network path; Storage was not changed."
+            ),
+        }
+
+    # Local debug still requires AAD-only data-plane authentication. The IP
+    # allowlist limits network reach, while this check ensures a leaked account
+    # key cannot bypass the caller's Azure RBAC permissions from that address.
     allow_shared_key = getattr(account, "allow_shared_key_access", None)
     if allow_shared_key is True:
         LOGGER.warning(
             "ensure_local_storage_access: refusing to open %s — "
-            "allowSharedKeyAccess=true would weaken the Allow disposition "
-            "to network-unconditional shared-key reach",
+            "allowSharedKeyAccess=true would permit shared-key data-plane access",
             account_name,
         )
         return {
@@ -250,22 +309,23 @@ def ensure_local_storage_access(
             "error": "shared_key_access_enabled",
             "message": (
                 "Set allowSharedKeyAccess=false on the storage account before "
-                "enabling local-debug network access. The Allow disposition is "
-                "only safe with AAD-only data-plane auth."
+                "enabling local-debug network access."
             ),
         }
 
-    # For ADLS Gen2 (isHnsEnabled=true) accounts with an approved private
-    # endpoint, defaultAction=Deny + ipRule does not reliably propagate to
-    # the data plane even after extended propagation time. defaultAction=Allow
-    # + allowSharedKeyAccess=false still enforces Azure AD auth at every
-    # request, so this is safe for a local-debug session.
-    already_ok = public_state == "Enabled" and default_action == "Allow"
+    already_ok = (
+        public_state == "Enabled"
+        and default_action == "Deny"
+        and bypass.lower() == "none"
+        and existing_ips == [caller_ip]
+    )
     if already_ok:
         result: dict[str, Any] = {
             "action": "already_open",
+            "ip": caller_ip,
             "public": public_state,
             "default_action": default_action,
+            "bypass": bypass,
             "off_hint": _OFF_HINT,
         }
         with _cache_lock:
@@ -273,6 +333,7 @@ def ensure_local_storage_access(
         return result
 
     from azure.mgmt.storage.models import (
+        IPRule,
         NetworkRuleSet,
         StorageAccountUpdateParameters,
     )
@@ -282,12 +343,17 @@ def ensure_local_storage_access(
         if network_rule_set is not None
         else []
     )
+    resource_access_rules = (
+        list(getattr(network_rule_set, "resource_access_rules", None) or [])
+        if network_rule_set is not None
+        else []
+    )
     new_rules = NetworkRuleSet(
-        bypass="AzureServices",
-        default_action="Allow",
+        bypass="None",
+        default_action="Deny",
+        ip_rules=[IPRule(ip_address_or_range=caller_ip)],
         virtual_network_rules=vnet_rules,
-        # No ip_rules: defaultAction=Allow makes per-IP rules redundant.
-        # Deny+ipRule does not work reliably for ADLS Gen2+private endpoint.
+        resource_access_rules=resource_access_rules,
     )
     update = StorageAccountUpdateParameters(
         public_network_access="Enabled",
@@ -304,22 +370,24 @@ def ensure_local_storage_access(
         )
         return {"action": "failed", "error": f"arm_update:{type(exc).__name__}"}
 
-    caller_ip = _detect_caller_ip()  # informational only
+    action = "ip_added" if public_state == "Enabled" else "opened"
     LOGGER.warning(
-        "ensure_local_storage_access: opened account=%s defaultAction=Allow previous_public=%s "
+        "ensure_local_storage_access: %s account=%s ip=%s previous_public=%s "
         "(LOCAL_DEBUG_AUTO_OPEN_STORAGE active — remember to run `%s`)",
+        action,
         account_name,
+        caller_ip,
         public_state or "Disabled",
         _OFF_HINT,
     )
     result = {
-        "action": "opened",
+        "action": action,
+        "ip": caller_ip,
         "previous_public": public_state or "Disabled",
-        "default_action": "Allow",
+        "default_action": "Deny",
+        "bypass": "None",
         "off_hint": _OFF_HINT,
     }
-    if caller_ip:
-        result["ip"] = caller_ip
     with _cache_lock:
         _already_open_cache[cache_key] = (now, result)
     return result
@@ -381,5 +449,15 @@ def read_local_storage_state(
     state["public_access"] = public_state or "Disabled"
     state["default_action"] = default_action or None
     state["ip_rules"] = ip_rules
+    storage_region = str(getattr(account, "primary_location", "") or "").strip()
+    host_region = _detect_azure_host_region() if storage_region else None
+    unsupported = _same_azure_region(host_region, storage_region)
+    state["same_region_ip_rules_unsupported"] = unsupported
+    if unsupported:
+        state["local_debug_message"] = (
+            "This API host and Storage account are in the same Azure region, where "
+            "public IP firewall rules do not apply. Use the deployed control plane's "
+            "private-endpoint path."
+        )
     state["caller_ip_in_rules"] = state["caller_ip"] is not None and state["caller_ip"] in ip_rules
     return state
