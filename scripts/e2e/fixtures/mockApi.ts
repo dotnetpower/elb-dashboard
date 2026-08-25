@@ -245,11 +245,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     running_version: "0.2.0",
     running_sha: "1111111",
     running_revision: "rev-current",
-    current_images: {
-      api: "api:0.2.0",
-      frontend: "frontend:0.2.0",
-      terminal: "terminal:0.2.0",
-    },
+    current_images: { api: "api:0.2.0", frontend: "frontend:0.2.0", terminal: "terminal:0.2.0" },
     latest_version: "0.3.0",
     latest_sha: "2222222",
     latest_checked_at: now,
@@ -266,11 +262,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     phase_detail: "idle",
     phase_progress: 0,
     build_log_blob: "",
-    rollback_target: {
-      api: "api:0.2.0",
-      frontend: "frontend:0.2.0",
-      terminal: "terminal:0.2.0",
-    },
+    rollback_target: { api: "api:0.2.0", frontend: "frontend:0.2.0", terminal: "terminal:0.2.0" },
     rollback_available_until: "2026-05-25T10:00:00.000Z",
     updated_at: now,
   };
@@ -312,71 +304,36 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     jsonResponse(route, state.responses.topNodes ?? { nodes: [] }),
   );
   await page.route("**/api/monitor/aks/start-stats**", (route) =>
-    jsonResponse(
-      route,
-      state.responses.startStats ?? { phases: {}, api_ready_seconds: 0 },
-    ),
+    jsonResponse(route, state.responses.startStats ?? { phases: {}, api_ready_seconds: 0 }),
   );
 
-  await page.route("**/api/upgrade/status", (route) =>
-    jsonResponse(route, upgradeStatus),
-  );
+  await page.route("**/api/upgrade/status", (route) => jsonResponse(route, upgradeStatus));
   await page.route("**/api/upgrade/candidates", (route) =>
     jsonResponse(route, {
       configured: true,
       remote: "origin",
       running_version: "0.2.0",
-      candidates: [
-        {
-          name: "0.3.0",
-          raw_ref: "refs/tags/v0.3.0",
-          commit_sha: "2222222abcdef",
-        },
-      ],
+      candidates: [{ name: "0.3.0", raw_ref: "refs/tags/v0.3.0", commit_sha: "2222222abcdef" }],
     }),
   );
   await page.route("**/api/upgrade/history?**", (route) =>
-    jsonResponse(route, {
-      events: [
-        { ts: now, job_id: "upgrade-e2e", event: "checked", version: "0.3.0" },
-      ],
-    }),
+    jsonResponse(route, { events: [{ ts: now, job_id: "upgrade-e2e", event: "checked", version: "0.3.0" }] }),
   );
-  await page.route("**/api/upgrade/check", (route) =>
-    jsonResponse(route, { ...upgradeStatus, latest_checked_at: now }),
-  );
+  await page.route("**/api/upgrade/check", (route) => jsonResponse(route, { ...upgradeStatus, latest_checked_at: now }));
   await page.route("**/api/upgrade/start", async (route) => {
     const payload = route.request().postDataJSON() as Record<string, unknown>;
     state.upgradeStarts.push(payload);
-    await jsonResponse(route, {
-      ...upgradeStatus,
-      state: "queued",
-      target_version: payload.target_version,
-      job_id: "upgrade-e2e",
-      phase_detail: "queued",
-      phase_progress: 5,
-    });
+    await jsonResponse(route, { ...upgradeStatus, state: "queued", target_version: payload.target_version, job_id: "upgrade-e2e", phase_detail: "queued", phase_progress: 5 });
   });
   await page.route("**/api/upgrade/rollback", async (route) => {
     state.upgradeRollbacks += 1;
-    await jsonResponse(route, {
-      ...upgradeStatus,
-      state: "rolling_back",
-      job_id: "upgrade-e2e",
-      phase_detail: "rollback queued",
-      phase_progress: 10,
-    });
+    await jsonResponse(route, { ...upgradeStatus, state: "rolling_back", job_id: "upgrade-e2e", phase_detail: "rollback queued", phase_progress: 10 });
   });
   await page.route("**/api/upgrade/rollback-preflight", (route) =>
     jsonResponse(route, {
       available: true,
       reason: "ok",
-      images: Object.values(upgradeStatus.rollback_target).map((image_ref) => ({
-        image_ref,
-        exists: true,
-        created_on: now,
-        error: "",
-      })),
+      images: Object.values(upgradeStatus.rollback_target).map((image_ref) => ({ image_ref, exists: true, created_on: now, error: "" })),
     }),
   );
   await page.route("**/api/upgrade/escape-hatch", (route) =>
@@ -385,10 +342,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
       subscription_id: workspaceConfig.subscriptionId,
       resource_group: workspaceConfig.workloadResourceGroup,
       target_images: upgradeStatus.rollback_target,
-      commands: [
-        "az containerapp revision list --name ca-elb-dashboard",
-        "az containerapp update --image api:0.2.0",
-      ],
+      commands: ["az containerapp revision list --name ca-elb-dashboard", "az containerapp update --image api:0.2.0"],
     }),
   );
 
@@ -402,28 +356,22 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
       },
     ]),
   );
-  await page.route(
-    /\/api\/arm\/subscriptions\/[^/]+\/resource-groups$/,
-    (route) =>
-      jsonResponse(route, [
-        {
-          name: workspaceConfig.workloadResourceGroup,
-          location: workspaceConfig.region,
-          tags: {
-            "elb-workload-rg": workspaceConfig.workloadResourceGroup,
-            "elb-acr-rg": workspaceConfig.acrResourceGroup,
-            "elb-acr": workspaceConfig.acrName,
-            "elb-storage": workspaceConfig.storageAccountName,
-            "elb-region": workspaceConfig.region,
-          },
+  await page.route(/\/api\/arm\/subscriptions\/[^/]+\/resource-groups$/, (route) =>
+    jsonResponse(route, [
+      {
+        name: workspaceConfig.workloadResourceGroup,
+        location: workspaceConfig.region,
+        tags: {
+          "elb-workload-rg": workspaceConfig.workloadResourceGroup,
+          "elb-acr-rg": workspaceConfig.acrResourceGroup,
+          "elb-acr": workspaceConfig.acrName,
+          "elb-storage": workspaceConfig.storageAccountName,
+          "elb-region": workspaceConfig.region,
         },
-        {
-          name: "MC_aks-e2e_nodes",
-          location: workspaceConfig.region,
-          tags: {},
-        },
-        { name: "rg-unrelated", location: "eastus", tags: {} },
-      ]),
+      },
+      { name: "MC_aks-e2e_nodes", location: workspaceConfig.region, tags: {} },
+      { name: "rg-unrelated", location: "eastus", tags: {} },
+    ]),
   );
   await page.route("**/api/arm/resource-group/tags?**", (route) =>
     jsonResponse(route, {
@@ -445,26 +393,17 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
       },
     ]),
   );
-  await page.route(
-    /\/api\/arm\/subscriptions\/[^/]+\/resource-groups\/[^/]+\/storage-accounts$/,
-    (route) =>
-      jsonResponse(route, [
-        {
-          name: workspaceConfig.storageAccountName,
-          location: workspaceConfig.region,
-        },
-      ]),
+  await page.route(/\/api\/arm\/subscriptions\/[^/]+\/resource-groups\/[^/]+\/storage-accounts$/, (route) =>
+    jsonResponse(route, [{ name: workspaceConfig.storageAccountName, location: workspaceConfig.region }]),
   );
-  await page.route(
-    /\/api\/arm\/subscriptions\/[^/]+\/resource-groups\/[^/]+\/acrs$/,
-    (route) =>
-      jsonResponse(route, [
-        {
-          name: workspaceConfig.acrName,
-          location: workspaceConfig.region,
-          loginServer: `${workspaceConfig.acrName}.azurecr.io`,
-        },
-      ]),
+  await page.route(/\/api\/arm\/subscriptions\/[^/]+\/resource-groups\/[^/]+\/acrs$/, (route) =>
+    jsonResponse(route, [
+      {
+        name: workspaceConfig.acrName,
+        location: workspaceConfig.region,
+        loginServer: `${workspaceConfig.acrName}.azurecr.io`,
+      },
+    ]),
   );
 
   await page.route("**/api/monitor/aks?**", (route) =>
@@ -495,10 +434,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     ),
   );
   await page.route("**/api/monitor/aks/service-ip?**", (route) =>
-    jsonResponse(route, {
-      service_name: "elb-openapi",
-      external_ip: "127.0.0.1",
-    }),
+    jsonResponse(route, { service_name: "elb-openapi", external_ip: "127.0.0.1" }),
   );
   // ClusterCard hydrates the "Provisioning failed." banner from this endpoint;
   // without a stub the real local api answers from a long-lived jobstate row
@@ -568,10 +504,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/blast/databases?**", (route) =>
     jsonResponse(
       route,
-      state.responses.databases ?? {
-        databases: e2eDatabases,
-        public_access_disabled: false,
-      },
+      state.responses.databases ?? { databases: e2eDatabases, public_access_disabled: false },
     ),
   );
   await page.route("**/api/blast/databases/build", async (route) => {
@@ -588,13 +521,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     });
   });
   await page.route(/\/api\/blast\/databases\/[^/]+\/preview$/, (route) => {
-    const dbName = decodeURIComponent(
-      route
-        .request()
-        .url()
-        .split("/api/blast/databases/")[1]
-        .split("/preview")[0],
-    );
+    const dbName = decodeURIComponent(route.request().url().split("/api/blast/databases/")[1].split("/preview")[0]);
     return jsonResponse(route, {
       db_name: dbName,
       snapshot: "2026-05-20",
@@ -631,20 +558,12 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     sidecars: Object.fromEntries(
       ["frontend", "api", "worker", "beat", "redis", "terminal"].map((name) => [
         name,
-        {
-          name,
-          health: "ok",
-          ts: Date.now() / 1000,
-          cpu_pct: 1,
-          mem_bytes: 64_000_000,
-        },
+        { name, health: "ok", ts: Date.now() / 1000, cpu_pct: 1, mem_bytes: 64_000_000 },
       ]),
     ),
     events: { row1: 1, row2: 0, row3: 0, row4: 0 },
   };
-  await page.route("**/api/monitor/sidecars", (route) =>
-    jsonResponse(route, sidecarsSnapshot),
-  );
+  await page.route("**/api/monitor/sidecars", (route) => jsonResponse(route, sidecarsSnapshot));
   await page.route("**/api/monitor/sidecars/ticket", (route) =>
     jsonResponse(route, { ticket: "e2e-sidecars", expires_at: now }),
   );
@@ -662,7 +581,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     route.fulfill({
       status: 200,
       contentType: "text/event-stream",
-      body: 'event: line\ndata: {"text":"e2e log line"}\n\n',
+      body: "event: line\ndata: {\"text\":\"e2e log line\"}\n\n",
     }),
   );
   await page.route(/\/api\/monitor\/logs\/[^/]+\/recent\?/, (route) =>
@@ -684,59 +603,33 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   );
 
   await page.route("**/api/terminal/health", (route) =>
-    jsonResponse(route, {
-      status: "ok",
-      user: "azureuser",
-      cwd: "/home/azureuser",
-    }),
+    jsonResponse(route, { status: "ok", user: "azureuser", cwd: "/home/azureuser" }),
   );
   await page.route("**/api/terminal/azure-cli?**", (route) =>
-    jsonResponse(route, {
-      status: "signed_in",
-      user: "researcher@example.test",
-      subscription: workspaceConfig.subscriptionId,
-    }),
+    jsonResponse(route, { status: "signed_in", user: "researcher@example.test", subscription: workspaceConfig.subscriptionId }),
   );
   await page.route("**/api/terminal/ticket", (route) =>
-    jsonResponse(
-      route,
-      { detail: "terminal websocket disabled in e2e fixture" },
-      401,
-    ),
+    jsonResponse(route, { detail: "terminal websocket disabled in e2e fixture" }, 401),
   );
 
   await page.route(/\/api\/blast\/jobs\?.*/, (route) =>
     jsonResponse(route, {
       jobs: [
         {
-          ...completedJob,
+            ...completedJob,
         },
       ],
       page: { limit: 20, returned: 1, has_more: false },
     }),
   );
   await page.route("**/api/blast/jobs/job-e2e/execution-steps", (route) =>
-    jsonResponse(route, {
-      schema_version: 1,
-      job_id: "job-e2e",
-      status: "completed",
-      phase: "completed",
-      created_at: now,
-      updated_at: now,
-      artifact_state: "ready",
-    }),
+    jsonResponse(route, { schema_version: 1, job_id: "job-e2e", status: "completed", phase: "completed", created_at: now, updated_at: now, artifact_state: "ready" }),
   );
   await page.route("**/api/blast/jobs/job-e2e/results/aggregate?**", (route) =>
     jsonResponse(route, {
       job_id: "job-e2e",
       status: "ready",
-      stats: {
-        total_hits: 1,
-        query_count: 1,
-        subject_count: 1,
-        min_evalue: 1e-40,
-        max_bitscore: 220.5,
-      },
+      stats: { total_hits: 1, query_count: 1, subject_count: 1, min_evalue: 1e-40, max_bitscore: 220.5 },
       files_parsed: 1,
       total_files: 1,
     }),
@@ -751,16 +644,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
       filtered_hits: 1,
       returned: 1,
       query_ids: ["e2e_16s"],
-      subject_aggregates: [
-        {
-          sseqid: "NR_123456.1",
-          max_bitscore: 220.5,
-          total_bitscore: 441,
-          hsp_count: 2,
-          sscinames: "Escherichia coli",
-          staxids: "562",
-        },
-      ],
+      subject_aggregates: [{ sseqid: "NR_123456.1", max_bitscore: 220.5, total_bitscore: 441, hsp_count: 2, sscinames: "Escherichia coli", staxids: "562" }],
       page: 1,
       page_size: 25,
       pages: 1,
@@ -771,24 +655,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/blast/jobs/job-e2e/results/taxonomy?**", (route) =>
     jsonResponse(route, {
       job_id: "job-e2e",
-      organisms: [
-        {
-          key: "562",
-          organism: "Escherichia coli",
-          taxid: "562",
-          count: 1,
-          best_evalue: 1e-40,
-          top_bitscore: 220.5,
-          blast_name: "bacteria",
-          lineage_ex: [
-            {
-              rank: "species",
-              taxid: 562,
-              scientific_name: "Escherichia coli",
-            },
-          ],
-        },
-      ],
+      organisms: [{ key: "562", organism: "Escherichia coli", taxid: "562", count: 1, best_evalue: 1e-40, top_bitscore: 220.5, blast_name: "bacteria", lineage_ex: [{ rank: "species", taxid: 562, scientific_name: "Escherichia coli" }] }],
       total_hits: 1,
       filtered_hits: 1,
       files_parsed: 1,
@@ -798,44 +665,13 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     }),
   );
   await page.route("**/api/blast/jobs/job-e2e/results/export?**", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "text/csv",
-      body: "qseqid,sseqid\ne2e_16s,NR_123456.1\n",
-    }),
+    route.fulfill({ status: 200, contentType: "text/csv", body: "qseqid,sseqid\ne2e_16s,NR_123456.1\n" }),
   );
   await page.route("**/api/blast/jobs/job-e2e/results?**", (route) =>
     jsonResponse(route, {
       job_id: "job-e2e",
-      files: [
-        {
-          file_id: "result-main",
-          name: "job-e2e/results.xml",
-          size: 2048,
-          last_modified: now,
-          format: "xml",
-          source: "result",
-        },
-      ],
-      manifest: {
-        schema_version: 1,
-        job_id: "job-e2e",
-        status: "available",
-        source: "e2e",
-        file_count: 1,
-        parseable_count: 1,
-        files: [
-          {
-            file_id: "result-main",
-            name: "job-e2e/results.xml",
-            size: 2048,
-            last_modified: now,
-            format: "xml",
-            parseable: true,
-            source: "result",
-          },
-        ],
-      },
+      files: [{ file_id: "result-main", name: "job-e2e/results.xml", size: 2048, last_modified: now, format: "xml", source: "result" }],
+      manifest: { schema_version: 1, job_id: "job-e2e", status: "available", source: "e2e", file_count: 1, parseable_count: 1, files: [{ file_id: "result-main", name: "job-e2e/results.xml", size: 2048, last_modified: now, format: "xml", parseable: true, source: "result" }] },
     }),
   );
   await page.route(/\/api\/blast\/jobs\/job-e2e(\?.*)?$/, (route) => {
@@ -847,37 +683,16 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   });
 
   await page.route("**/api/aks/stop", async (route) => {
-    state.aksActions.push({
-      action: "stop",
-      payload: route.request().postDataJSON() as Record<string, unknown>,
-    });
-    await jsonResponse(route, {
-      cluster_name: e2eCluster.name,
-      task_id: "task-stop-e2e",
-      status: "queued",
-    });
+    state.aksActions.push({ action: "stop", payload: route.request().postDataJSON() as Record<string, unknown> });
+    await jsonResponse(route, { cluster_name: e2eCluster.name, task_id: "task-stop-e2e", status: "queued" });
   });
   await page.route("**/api/aks/start", async (route) => {
-    state.aksActions.push({
-      action: "start",
-      payload: route.request().postDataJSON() as Record<string, unknown>,
-    });
-    await jsonResponse(route, {
-      cluster_name: e2eCluster.name,
-      task_id: "task-start-e2e",
-      status: "queued",
-    });
+    state.aksActions.push({ action: "start", payload: route.request().postDataJSON() as Record<string, unknown> });
+    await jsonResponse(route, { cluster_name: e2eCluster.name, task_id: "task-start-e2e", status: "queued" });
   });
   await page.route("**/api/aks/delete", async (route) => {
-    state.aksActions.push({
-      action: "delete",
-      payload: route.request().postDataJSON() as Record<string, unknown>,
-    });
-    await jsonResponse(route, {
-      cluster_name: e2eCluster.name,
-      task_id: "task-delete-e2e",
-      status: "queued",
-    });
+    state.aksActions.push({ action: "delete", payload: route.request().postDataJSON() as Record<string, unknown> });
+    await jsonResponse(route, { cluster_name: e2eCluster.name, task_id: "task-delete-e2e", status: "queued" });
   });
 
   // After a queued AKS/start/stop/delete action the SPA polls the Celery task
@@ -899,119 +714,54 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/storage/prepare-db", async (route) => {
     const payload = route.request().postDataJSON() as Record<string, unknown>;
     state.dbDownloads.push(payload);
-    await jsonResponse(route, {
-      ok: true,
-      db_name: payload.db_name,
-      async: true,
-      output: "queued",
-    });
+    await jsonResponse(route, { ok: true, db_name: payload.db_name, async: true, output: "queued" });
   });
-  await page.route(
-    /\/api\/storage\/prepare-db\/[^/]+\/cancel$/,
-    async (route) => {
-      state.dbCancels.push(route.request().url());
-      await jsonResponse(route, {
-        ok: true,
-        db_name: "core_nt",
-        aborted: 1,
-        skipped: 0,
-        errors: 0,
-      });
-    },
-  );
+  await page.route(/\/api\/storage\/prepare-db\/[^/]+\/cancel$/, async (route) => {
+    state.dbCancels.push(route.request().url());
+    await jsonResponse(route, { ok: true, db_name: "core_nt", aborted: 1, skipped: 0, errors: 0 });
+  });
 
   await page.route("**/api/aks/openapi/spec?**", (route) =>
     jsonResponse(route, {
       openapi: "3.0.3",
-      info: {
-        title: "E2E OpenAPI",
-        version: "1.0.0",
-        description: "E2E fixture OpenAPI.",
-      },
+      info: { title: "E2E OpenAPI", version: "1.0.0", description: "E2E fixture OpenAPI." },
       tags: [{ name: "Jobs", description: "BLAST jobs" }],
       paths: {
         "/v1/jobs": {
           get: {
             tags: ["Jobs"],
             summary: "List jobs",
-            parameters: [
-              {
-                name: "limit",
-                in: "query",
-                schema: { type: "integer", default: 10 },
-              },
-            ],
-            responses: {
-              "200": {
-                description: "OK",
-                content: { "application/json": { example: { jobs: [] } } },
-              },
-            },
+            parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 10 } }],
+            responses: { "200": { description: "OK", content: { "application/json": { example: { jobs: [] } } } } },
           },
         },
       },
     }),
   );
   await page.route("**/api/aks/openapi/deployment?**", (route) =>
-    jsonResponse(route, {
-      configured: true,
-      deployment_name: "elb-openapi",
-      container_name: "openapi",
-      namespace: "default",
-      image: "elb-openapi:1.0.0",
-      image_repository: "elb-openapi",
-      image_tag: "1.0.0",
-    }),
+    jsonResponse(route, { configured: true, deployment_name: "elb-openapi", container_name: "openapi", namespace: "default", image: "elb-openapi:1.0.0", image_repository: "elb-openapi", image_tag: "1.0.0" }),
   );
   await page.route("**/api/aks/openapi/token?**", (route) =>
-    jsonResponse(route, {
-      configured: true,
-      token: "e2e-token",
-      masked_token: "e2e-****",
-      header_name: "X-ELB-API-Token",
-      env_name: "ELB_OPENAPI_TOKEN",
-      source: "keyvault",
-      updated_at: now,
-    }),
+    jsonResponse(route, { configured: true, token: "e2e-token", masked_token: "e2e-****", header_name: "X-ELB-API-Token", env_name: "ELB_OPENAPI_TOKEN", source: "keyvault", updated_at: now }),
   );
   await page.route("**/api/aks/openapi/token", (route) =>
-    jsonResponse(route, {
-      configured: true,
-      token: "e2e-token-regenerated",
-      masked_token: "e2e-regenerated-****",
-      header_name: "X-ELB-API-Token",
-      env_name: "ELB_OPENAPI_TOKEN",
-      source: "keyvault",
-      updated_at: now,
-      rotated: true,
-    }),
+    jsonResponse(route, { configured: true, token: "e2e-token-regenerated", masked_token: "e2e-regenerated-****", header_name: "X-ELB-API-Token", env_name: "ELB_OPENAPI_TOKEN", source: "keyvault", updated_at: now, rotated: true }),
   );
   await page.route("**/api/aks/openapi/proxy?**", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ jobs: ["job-e2e"] }),
-    }),
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: ["job-e2e"] }) }),
   );
 
   await page.route("**/api/acr/build-images", async (route) => {
     const payload = route.request().postDataJSON() as Record<string, unknown>;
     state.buildRequests.push(payload);
     await jsonResponse(route, {
-      results: [
-        { image: "elb-openapi:1.0.0", status: "scheduled", run_id: "run-e2e" },
-      ],
+      results: [{ image: "elb-openapi:1.0.0", status: "scheduled", run_id: "run-e2e" }],
     });
   });
 
   await page.route("**/api/blast/cost-estimate", (route) =>
     jsonResponse(route, {
-      estimate: {
-        compute_usd: 12.34,
-        disk_usd: 1.23,
-        storage_usd: 0.45,
-        total_usd: 14.02,
-      },
+      estimate: { compute_usd: 12.34, disk_usd: 1.23, storage_usd: 0.45, total_usd: 14.02 },
       params: {},
       note: "e2e fixture",
     }),
@@ -1069,15 +819,9 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/blast/taxonomy/tree/562?**", (route) =>
     jsonResponse(route, {
       taxid: 562,
-      lineage: [
-        { taxid: 2, scientific_name: "Bacteria", rank: "superkingdom" },
-      ],
+      lineage: [{ taxid: 2, scientific_name: "Bacteria", rank: "superkingdom" }],
       children: [],
-      siblings: {
-        species: [
-          { taxid: 562, scientific_name: "Escherichia coli", rank: "species" },
-        ],
-      },
+      siblings: { species: [{ taxid: 562, scientific_name: "Escherichia coli", rank: "species" }] },
     }),
   );
   await page.route("**/api/blast/schedules", (route) =>
@@ -1098,19 +842,12 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   );
   await page.route(/\/api\/blast\/schedules\/([^/]+)\/run$/, async (route) => {
     state.scheduleRuns.push(route.request().url());
-    await jsonResponse(route, {
-      job_id: "job-scheduled-e2e",
-      instance_id: "task-e2e",
-      schedule_id: "schedule-e2e",
-    });
+    await jsonResponse(route, { job_id: "job-scheduled-e2e", instance_id: "task-e2e", schedule_id: "schedule-e2e" });
   });
   await page.route(/\/api\/blast\/schedules\/([^/]+)$/, async (route) => {
     if (route.request().method() === "DELETE") {
       state.scheduleDeletes.push(route.request().url());
-      await jsonResponse(route, {
-        status: "deleted",
-        schedule_id: "schedule-e2e",
-      });
+      await jsonResponse(route, { status: "deleted", schedule_id: "schedule-e2e" });
       return;
     }
     await route.fallback();
@@ -1118,28 +855,14 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/blast/databases/versions?**", (route) =>
     jsonResponse(route, {
       versions: [
-        {
-          db_name: "core_nt",
-          db_type: "nucl",
-          source: "ncbi",
-          source_version: "2026-05-20",
-          created_at: now,
-        },
+        { db_name: "core_nt", db_type: "nucl", source: "ncbi", source_version: "2026-05-20", created_at: now },
       ],
       total: 1,
     }),
   );
   await page.route("**/api/audit/log?**", (route) =>
     jsonResponse(route, {
-      events: [
-        {
-          timestamp: now,
-          action: "blast_submit",
-          user: "e2e@example.test",
-          job_id: "job-e2e",
-          details: {},
-        },
-      ],
+      events: [{ timestamp: now, action: "blast_submit", user: "e2e@example.test", job_id: "job-e2e", details: {} }],
       total: 1,
     }),
   );
