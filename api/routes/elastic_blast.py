@@ -14,7 +14,7 @@ Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import Response, StreamingResponse
@@ -244,7 +244,6 @@ class ExternalBlastV1Request(BaseModel):
         return self
 
 
-
 _QUEUED_STATUSES = frozenset({"accepted", "created", "pending", "queued", "scheduled"})
 _RUNNING_STATUSES = frozenset(
     {
@@ -380,13 +379,19 @@ def _normalise_external_job_payload(
     return out
 
 
+class _OpenAPIScopeKwargs(TypedDict, total=False):
+    subscription_id: str
+    resource_group: str
+    cluster_name: str
+
+
 def _openapi_scope_kwargs(
     *,
     subscription_id: str = "",
     resource_group: str = "",
     cluster_name: str = "",
-) -> dict[str, str]:
-    out: dict[str, str] = {}
+) -> _OpenAPIScopeKwargs:
+    out: _OpenAPIScopeKwargs = {}
     if subscription_id:
         out["subscription_id"] = subscription_id
     if resource_group:
@@ -449,8 +454,9 @@ def submit_external_blast_job(
     # never drops a submit.
     correlation_id = str(payload["external_correlation_id"])
     from api.services.blast.submit_ingress import enqueue_submit_request, should_enqueue_submit
+    from api.services.service_bus_target import has_explicit_routing_scope
 
-    if should_enqueue_submit():
+    if not has_explicit_routing_scope(payload) and should_enqueue_submit():
         try:
             message_id = enqueue_submit_request(payload, correlation_id)
             LOGGER.info(
@@ -743,8 +749,7 @@ def download_external_blast_file(
     caller: CallerIdentity = _REQUIRE_CALLER_OR_DOWNLOAD_TOKEN,
 ) -> Response:
     LOGGER.info(
-        "external BLAST file requested caller_oid=%s job_id=%s file_id=%s "
-        "decompress=%s format=%s",
+        "external BLAST file requested caller_oid=%s job_id=%s file_id=%s decompress=%s format=%s",
         redact_oid(caller.object_id),
         job_id,
         file_id,
@@ -778,9 +783,7 @@ def download_external_blast_file(
         return StreamingResponse(
             downloaded.chunks,
             media_type=downloaded.media_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{downloaded.filename}"'
-            },
+            headers={"Content-Disposition": f'attachment; filename="{downloaded.filename}"'},
         )
     return _transform_download(downloaded, decompress=decompress, target_format=format)
 
@@ -889,9 +892,7 @@ def _transform_download(
         return StreamingResponse(
             downloaded.chunks,
             media_type=downloaded.media_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{downloaded.filename}"'
-            },
+            headers={"Content-Disposition": f'attachment; filename="{downloaded.filename}"'},
         )
     filename = strip_gzip_suffix(downloaded.filename)
     return StreamingResponse(

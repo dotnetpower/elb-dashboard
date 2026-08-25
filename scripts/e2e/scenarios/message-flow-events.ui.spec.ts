@@ -167,29 +167,39 @@ test("MessageFlow card expands to the constellation and opens a redacted job det
   // "<N> active jobs" count specifically — the card also renders a static
   // "active jobs" eyebrow label, so a bare /active jobs/ would resolve to two
   // elements and trip Playwright strict mode.
-  const card = uiPage.locator(".glass-card", { hasText: "Message Flow" }).first();
+  const card = uiPage
+    .locator(".glass-card", { hasText: "Message Flow" })
+    .first();
   await expect(card).toBeVisible();
   await expect(card.getByText(/\d+ active jobs/)).toBeVisible();
   await expect(card.getByText(/submitter/)).toBeVisible();
 
   // Expand into the full modal.
   await card.getByRole("button", { name: "Expand message flow" }).click();
-  const modal = uiPage.getByRole("dialog", { name: "Service Bus message flow" });
+  const modal = uiPage.getByRole("dialog", {
+    name: "Service Bus message flow",
+  });
   await expect(modal).toBeVisible();
 
   // The d3 constellation SVG renders with focusable job nodes. The SVG sizes
   // itself from the container via ResizeObserver, so assert on the job node
   // (the real interactive target) rather than the SVG box, which may report a
   // zero size before the first observer tick.
-  const svg = modal.locator("svg.mf-constellation, .mf-constellation svg").first();
+  const svg = modal
+    .locator("svg.mf-constellation, .mf-constellation svg")
+    .first();
   await expect(svg).toBeAttached();
   const jobNode = modal
-    .getByRole("button", { name: new RegExp(`View JSON for blastn job ${JOB_ID}`) })
+    .getByRole("button", {
+      name: new RegExp(`View JSON for blastn job ${JOB_ID}`),
+    })
     .first();
   await expect(jobNode).toBeVisible({ timeout: 15_000 });
 
-  // Click a job node -> JSON detail modal opens.
-  await jobNode.click();
+  // The force simulation keeps moving SVG nodes after they become visible. The
+  // test owns the click-handler contract, not browser hit-testing, so dispatch
+  // directly to the already verified interactive target.
+  await jobNode.dispatchEvent("click");
   const detail = uiPage.getByRole("dialog", {
     name: new RegExp(`Job detail for blastn ${JOB_ID}`),
   });
@@ -210,10 +220,14 @@ test("MessageFlow card expands to the constellation and opens a redacted job det
   await expect(modal).toHaveCount(0);
 });
 
-test("MessageFlow card stays hidden when the integration is disabled", async ({ uiPage }) => {
+test("MessageFlow card stays hidden when the integration is disabled", async ({
+  uiPage,
+}) => {
   // Default fixture route already returns { enabled: false }; assert the card
   // renders nothing so the integration-off dashboard is unchanged.
   await uiPage.goto("/");
   await expect(uiPage.getByText("ElasticBLAST Dashboard")).toBeVisible();
-  await expect(uiPage.locator(".glass-card", { hasText: "Message Flow" })).toHaveCount(0);
+  await expect(
+    uiPage.locator(".glass-card", { hasText: "Message Flow" }),
+  ).toHaveCount(0);
 });

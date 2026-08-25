@@ -326,11 +326,13 @@ export type ServiceBusAuthMode = "entra" | "sas";
 /** Service Bus integration config (no secret material — `sas_secret_name` is a
  *  Key Vault secret NAME, never the connection string). */
 export interface ServiceBusConfig {
+  revision: string;
   enabled: boolean;
   auth_mode: ServiceBusAuthMode;
   namespace_fqdn: string;
   request_queue: string;
   completion_topic: string;
+  completion_kind: "topic" | "queue";
   sas_secret_name: string;
   subscription_id: string;
   resource_group: string;
@@ -609,28 +611,16 @@ export interface ControlPlaneUrlSavedResponse extends ControlPlaneUrlStatus {
 export const settingsApi = {
   getAppInsightsStatus: () => api.get<AppInsightsStatus>("/settings/app-insights"),
   lookupAppInsights: (body: AppInsightsLookupRequest) =>
-    api.post<{ component: AppInsightsComponent }>(
-      "/settings/app-insights/lookup",
-      body,
-    ),
+    api.post<{ component: AppInsightsComponent }>("/settings/app-insights/lookup", body),
 
   provisionAppInsights: (body: AppInsightsProvisionRequest) =>
-    api.post<AppInsightsTaskQueuedResponse>(
-      "/settings/app-insights/provision",
-      body,
-    ),
+    api.post<AppInsightsTaskQueuedResponse>("/settings/app-insights/provision", body),
 
   applyAppInsightsToDeployment: (body: AppInsightsApplyRequest) =>
-    api.post<AppInsightsTaskQueuedResponse>(
-      "/settings/app-insights/apply",
-      body,
-    ),
+    api.post<AppInsightsTaskQueuedResponse>("/settings/app-insights/apply", body),
 
   clearAppInsightsFromDeployment: () =>
-    api.post<AppInsightsTaskQueuedResponse>(
-      "/settings/app-insights/clear",
-      {},
-    ),
+    api.post<AppInsightsTaskQueuedResponse>("/settings/app-insights/clear", {}),
 
   getAksObservabilityStatus: (q: AksObservabilityStatusQuery) =>
     api.get<AksObservabilityStatus>(
@@ -638,16 +628,10 @@ export const settingsApi = {
     ),
 
   enableAksObservability: (body: AksObservabilityEnableRequest) =>
-    api.post<AppInsightsTaskQueuedResponse>(
-      "/settings/aks-observability/enable",
-      body,
-    ),
+    api.post<AppInsightsTaskQueuedResponse>("/settings/aks-observability/enable", body),
 
   disableAksObservability: (body: AksObservabilityDisableRequest) =>
-    api.post<AppInsightsTaskQueuedResponse>(
-      "/settings/aks-observability/disable",
-      body,
-    ),
+    api.post<AppInsightsTaskQueuedResponse>("/settings/aks-observability/disable", body),
 
   /** Read the per-cluster warm-cache mode. Returns the default `ephemeral`
    *  (and `preference: null`) when no row exists — never 404s. */
@@ -659,10 +643,7 @@ export const settingsApi = {
   /** Persist the per-cluster warm-cache mode. Applies to the NEXT provisioned
    *  cluster — the OS disk type is fixed at create time. */
   putPerformance: (body: PerformancePreferencePutRequest) =>
-    api.put<PerformancePreferenceSavedResponse>(
-      "/settings/performance",
-      body,
-    ),
+    api.put<PerformancePreferenceSavedResponse>("/settings/performance", body),
 
   /** Peer a target VNet with the AKS auto-VNet and probe the elb-openapi
    *  private IP from the dashboard's api sidecar. Synchronous — the
@@ -692,20 +673,14 @@ export const settingsApi = {
    *  derives all sensitive parameters from the resolved VNet pair — the
    *  caller never supplies CIDRs or wildcards. */
   applyPeeringNsgRule: (body: VnetPeeringNsgRuleRequest) =>
-    api.post<VnetPeeringNsgRuleResponse>(
-      "/settings/vnet-peering/apply-nsg-rule",
-      body,
-    ),
+    api.post<VnetPeeringNsgRuleResponse>("/settings/vnet-peering/apply-nsg-rule", body),
 
   /** Remove a single orphaned ("Disconnected") peering from the cluster's
    *  AKS VNet. Symmetric with `peerVnet` — only the AKS-side peering is
    *  deleted (the remote side is typically already gone). Idempotent: a
    *  missing peering returns `deleted=true`. */
   deletePeering: (body: VnetPeeringDeleteRequest) =>
-    api.post<VnetPeeringDeleteResponse>(
-      "/settings/vnet-peering/delete",
-      body,
-    ),
+    api.post<VnetPeeringDeleteResponse>("/settings/vnet-peering/delete", body),
 
   /** Read the Service Bus integration config + best-effort runtime counts.
    *  Never 404s; returns a disabled default when no row exists. */
@@ -721,8 +696,12 @@ export const settingsApi = {
 
   /** Discover namespaces (pass subscription_id) or queues/topics (pass
    *  namespace_fqdn) for the Settings dropdowns. */
-  discoverServiceBus: (body: { subscription_id?: string; namespace_fqdn?: string; auth_mode?: ServiceBusAuthMode; sas_secret_name?: string }) =>
-    api.post<ServiceBusDiscoverResponse>("/settings/service-bus/discover", body),
+  discoverServiceBus: (body: {
+    subscription_id?: string;
+    namespace_fqdn?: string;
+    auth_mode?: ServiceBusAuthMode;
+    sas_secret_name?: string;
+  }) => api.post<ServiceBusDiscoverResponse>("/settings/service-bus/discover", body),
 
   /** Manual purge of the main queue or its DLQ (operator action). */
   purgeServiceBus: (body: { dead_letter: boolean; max_messages?: number }) =>
@@ -751,17 +730,13 @@ export const settingsApi = {
    *  data-plane Receiver claim, so it works even when runtime counts are
    *  unavailable for lack of the Manage claim. Never removes/locks a message. */
   peekServiceBus: (limit = 5) =>
-    api.get<ServiceBusPeekResponse>(
-      `/settings/service-bus/peek?limit=${limit}`,
-    ),
+    api.get<ServiceBusPeekResponse>(`/settings/service-bus/peek?limit=${limit}`),
 
   /** Non-destructively peek the dead-letter queue. Reader-accessible (data-plane
    *  Receiver claim only). Each message carries its `sequence_number` (the handle
    *  for delete/promote), the dead-letter reason, and a body preview. */
   peekServiceBusDlq: (limit = 20) =>
-    api.get<ServiceBusDlqPeekResponse>(
-      `/settings/service-bus/dlq/peek?limit=${limit}`,
-    ),
+    api.get<ServiceBusDlqPeekResponse>(`/settings/service-bus/dlq/peek?limit=${limit}`),
 
   /** Delete specific dead-letter messages by sequence number (operator action,
    *  hard delete). The SPA owns the confirmation gate. */
@@ -780,8 +755,7 @@ export const settingsApi = {
 
   /** Read the configured control-plane custom domain + the resolved effective
    *  URL the OpenAPI sibling webhooks back to. Never 404s. */
-  getControlPlaneUrl: () =>
-    api.get<ControlPlaneUrlStatus>("/settings/control-plane"),
+  getControlPlaneUrl: () => api.get<ControlPlaneUrlStatus>("/settings/control-plane"),
 
   /** Persist the control-plane custom domain (validated server-side: https only
    *  except localhost, origin with no path/query). */
@@ -806,8 +780,7 @@ export const settingsApi = {
    *  placeholder. Returns ``token: ""`` when the deployment has no shared
    *  token configured; the SPA falls back to the placeholder in that case.
    *  Requires an authenticated caller (any Reader/Contributor/Owner works). */
-  getOpenApiToken: () =>
-    api.get<SharedApiTokenStatus>("/settings/openapi-token"),
+  getOpenApiToken: () => api.get<SharedApiTokenStatus>("/settings/openapi-token"),
 };
 
 /** Response of `GET /api/settings/openapi-token`. Named `SharedApiTokenStatus`

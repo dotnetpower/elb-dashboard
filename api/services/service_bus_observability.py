@@ -8,13 +8,16 @@ Key entry points: `record_service_bus_request_event`,
     `record_service_bus_health_event`.
 Risky contracts: The explicit scalar-only signature is the data-loss boundary:
     query FASTA, options, credentials, and raw message bodies must never be
-    accepted. Emission is best-effort and must never affect queue processing.
+    accepted. Ordinary emission failures are best-effort; Celery soft deadlines
+    must propagate instead of being mistaken for a logging failure.
 Validation: `uv run pytest -q api/tests/test_service_bus_observability.py`.
 """
 
 from __future__ import annotations
 
 import logging
+
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.services.feature_events import record_feature_event
 from api.services.sanitise import sanitise
@@ -84,6 +87,8 @@ def record_service_bus_request_event(
             sequence_number=sequence_number,
             ack_published=ack_published,
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         return
 
@@ -136,6 +141,8 @@ def record_service_bus_health_event(
     admission_failed_warmup_job_count: int = 0,
     outbox_deferred: int | None = None,
     outbox_poison: int | None = None,
+    outbox_corrupt: int | None = None,
+    outbox_timestamp_corrupt: int | None = None,
     producer_request_ttl_seconds: int = 0,
 ) -> None:
     """Emit one bounded operational snapshot with no message-level fields."""
@@ -170,6 +177,8 @@ def record_service_bus_health_event(
             outbox_last_errors=outbox_last_errors,
             outbox_deferred=outbox_deferred,
             outbox_poison=outbox_poison,
+            outbox_corrupt=outbox_corrupt,
+            outbox_timestamp_corrupt=outbox_timestamp_corrupt,
             admission_available=admission_available,
             admission_allowed=admission_allowed,
             admission_reason=_bounded(admission_reason, 128) or None,
@@ -190,5 +199,7 @@ def record_service_bus_health_event(
             resident_consumer_enabled=resident_consumer_enabled,
             drain_concurrency=drain_concurrency,
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         return

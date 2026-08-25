@@ -97,7 +97,10 @@ Field rules (consistent with `/v1/jobs`):
 
 - **Required**: `program` (one of `blastn`/`blastp`/`blastx`/`psiblast`/
   `rpsblast`/`rpstblastn`/`tblastn`/`tblastx`), `db`, `query_fasta` (valid
-  FASTA, ≤ 10 MB).
+  FASTA). The direct API accepts up to 10 MB, but the serialized Service Bus
+  request is capped at 192 KiB to leave room inside the broker envelope. The
+  optional unified API ingress falls back to direct submit above that budget;
+  the Service Bus Playground returns `413 request_too_large`.
 - `external_correlation_id` is the **idempotency / dedup key**
   (`^[A-Za-z0-9._: -]+$`, ≤ 256). Spaces are accepted because WF3 correlation
   ids include human-readable multi-word gene names. Table persistence hashes
@@ -108,6 +111,14 @@ Field rules (consistent with `/v1/jobs`):
   an exact retry of the same execution payload; requests with different
   execution semantics (for example the inclusive and exclusive forms of the
   same gene/taxon query) must use different correlation ids.
+- Dashboard producers preserve the original request-queue envelope: the JSON
+  body uses the existing serialization, and `MessageId` remains unset unless a
+  caller explicitly supplies one so the SDK/broker assigns it as before.
+  `502 send_outcome_unknown` returns the reusable correlation id instead of
+  claiming that the broker definitely rejected the send. A retry can create a
+  second broker message, but the atomic bridge claim collapses identical
+  correlations before BLAST submission. Scheduled retry clones retain the
+  existing correlation-plus-attempt `MessageId` rule.
 - `request_id` is an optional, length-bounded tracking value echoed on completion
   events. It is not an idempotency key and does not distinguish two executions
   that reuse the same `external_correlation_id`.
@@ -225,8 +236,9 @@ sequenceDiagram
 The drain task does **not** hold the message lock for the duration of the BLAST
 run. Service Bus peek-lock is capped at **5 minutes**; a BLAST run takes
 minutes to hours. Holding the lock would cause `MessageLockLost`, redelivery,
-and **duplicate job execution**. Instead the task: receives → dedups → creates
-the `JobState` row → enqueues the existing Celery submit task → publishes the
+and **duplicate job execution**. Instead the task: receives → dedups → asks the
+sibling OpenAPI plane to create one idempotent execution → creates the `JobState`
+row → publishes the
 queued acceptance response to the durable outbox → **completes the message promptly**.
 The message is not held for the BLAST run. If the initial queued-event publish
 fails, the outbox retains it and the transition publisher retries it on a later
@@ -240,11 +252,64 @@ admission opens, each drain pass locks at most the configured handler
 concurrency and yields after its wall-clock budget; any untouched backlog stays
 broker-owned for the next pass instead of timing out a Celery task.
 
+The Celery fallback owns a 40-second work budget inside its 45-second soft
+deadline. It receives one concurrency-sized batch and derives the OpenAPI
+timeout from the remaining budget after admission, reserving five seconds for
+response staging and settlement. If that reserve is already consumed it does
+not open a receiver. It also disables inline 401 token resync, treating 401 as a
+durable Service Bus retry; the resident consumer retains inline self-heal. Celery
+soft deadlines propagate through the task,
+data-plane, persistence, telemetry, and executor-cleanup layers instead of being
+converted into ordinary retries or degraded-success results. If a soft timeout
+occurs while parallel submit threads may still unwind, the drain lease is not
+deleted; its 900-second crash backstop continues fencing routing changes.
+
 Each newly claimed request re-checks admission immediately before OpenAPI
 submit. Auto-stop also takes a Redis stop-intent fence that is mutually exclusive
 with the queue-scoped drain lease, then re-reads pending depth before creating
 the AKS stop barrier. A PEEK_LOCKed submit and an idle stop therefore cannot
 cross in the decide-to-act window.
+
+Every full-row Settings write first takes a deployment-wide Redis mutation mutex,
+then compares the caller's opaque config revision with the raw persisted row.
+Legacy revisionless rows are upgraded on their first save; stale saves fail with
+`409 servicebus_config_changed`. Deployment queue/topic/kind overrides are
+applied only to runtime copies and are never written back over the raw stored
+values. Actual routing updates additionally use the
+queue-scoped stop-intent fence. They fail while a drain or config-dependent I/O
+pass is active, then verify that both old and proposed request/DLQs, the active bridge set, and
+response outbox are empty before saving. Credential-only recovery probes the
+unchanged queue with the proposed credential, so a broken old secret cannot
+permanently lock Settings.
+
+Dashboard sends, transition/outbox publishing, DLQ reconciliation/cleanup, and
+manual queue mutations register queue-scoped, independently expiring I/O tokens.
+Each re-reads the complete config after token acquisition, so a pass that began
+before a Settings update cannot publish, poll, or settle work against the old
+target. Settings cannot acquire its stop-intent after one of these operations
+starts, and token-specific release cannot remove a newer operation's lease. A
+coordination-Redis outage fails mutations closed (the unified API submit falls
+back to direct execution and periodic workers defer to the next tick).
+Confirmed or ambiguous request sends and DLQ promotions retain a 60-second
+visibility token so runtime-count propagation delay cannot make Settings mistake
+a new request for an empty queue. In-flight tokens, the routing stop-intent, and
+the config mutation mutex all use a 900-second crash backstop so a slow bounded
+management/data-plane pass cannot outlive its fence.
+Drain lease acquisition also fails closed on Redis errors. The
+lease is mandatory for routing-mutation safety; a legacy
+`SERVICEBUS_DRAIN_SINGLEFLIGHT=false` override is ignored.
+The fence cannot stop an independent producer that writes directly to the
+namespace; before changing the namespace or request queue, pause those external
+producers until the Settings update completes. A target-only or credential-only
+update does not orphan the old queue, but still uses the same empty-state checks
+and drain fence.
+
+The optional in-deployment demo completion observer snapshots its namespace and
+completion entity when the worker starts. When
+`SERVICEBUS_EXTERNAL_CONSUMER=true`, restart the local/deployed worker after a
+namespace, completion topic, or completion-kind change so the observer leaves
+the old entity. This affects only the Playground observation ring; the observer
+never executes BLAST or owns producer delivery.
 
 Transient OpenAPI transport, HTTP 408, 429, and 5xx failures are future-scheduled
 with exponential backoff. The retry clone preserves the original correlation
@@ -406,7 +471,9 @@ so the live contract only changes by explicit opt-in:
 - `ENABLE_SB_SUBMIT_INGRESS` — the dashboard submit API enqueues the request to
   Service Bus instead of calling `/v1/jobs` directly, returning the dashboard
   correlation id immediately. A publish failure falls back to the direct path
-  (break-glass), so a Service Bus blip never drops a submit.
+  (break-glass), so a Service Bus blip never drops a submit. A request that
+  explicitly selects a subscription, resource group, or cluster stays on the
+  direct path because the queue has one deployment-wide execution target.
 - `SERVICEBUS_RESIDENT_CONSUMER` — a resident long-polling consumer drains the
   queue within ~1 s instead of waiting the 30 s beat. The beat drain task stays
   registered as the fallback reconcile, so the resident loop is an accelerator,
@@ -414,6 +481,13 @@ so the live contract only changes by explicit opt-in:
   execution-admission decision, queue-scoped single-flight lease, and bounded
   `SERVICEBUS_DRAIN_CONCURRENCY` resolver. Concurrency above one still requires
   the atomic correlation claim.
+
+Dashboard-produced messages retain their historical body shape and do not gain
+automatic target fields. Explicit target fields supplied by an external message
+must match the active deployment target; missing fields remain backward
+compatible. Settings refuses to change request, execution, or completion
+routing while the current queue, active bridge set, or response outbox still
+contains dependent work.
 
 The optional in-deployment completion observer defaults to its dedicated
 `playground-observer` subscription only. It never joins the shared `default`
@@ -492,7 +566,8 @@ safe to dedupe:
 Rules a subscriber must follow:
 
 - **Dedupe on `event_id`.** The same `(correlation_id, status)` always yields the
-  same `event_id`; `attempt` ≥ 2 marks a re-publish. Treat a repeat as a no-op.
+  same `event_id`. `attempt` is informational and currently remains `1` for both
+  an original publish and a retry, so it must not be used as the dedupe key.
 - **Results are pointers, never bytes.** A completion event never carries the
   BLAST result itself (Service Bus message size limits). Fetch the bytes through
   the dashboard API in `result_ref` — results stream through the API proxy and
@@ -507,10 +582,13 @@ Rules a subscriber must follow:
 | Env var | Default | Sidecars | Meaning |
 |---|---|---|---|
 | `SERVICEBUS_ENABLED` | _(empty)_ | api, worker, beat | Three-state deploy-time override of the saved config. **Empty/unset (default)** defers to the Settings config row, so the toggle is a runtime feature flag that survives redeploys. **Truthy** (`true`/`1`/`yes`/`on`) pins the capability on, but activation still requires the config (enabled + namespace). **Falsy** (`false`/`0`/`no`/`off`) is a deployment kill switch that forces the integration OFF regardless of the config. When OFF the drain/publish/cleanup beat tasks no-op and the submit routes do not enqueue. |
-| `ENABLE_SB_SUBMIT_INGRESS` | `false` | api | When true (and Service Bus enabled) the dashboard submit API enqueues to Service Bus instead of calling `/v1/jobs` directly; a publish failure falls back to the direct path. |
+| `ENABLE_SB_SUBMIT_INGRESS` | `false` | api | When true (and Service Bus enabled) an unscoped dashboard submit enqueues to Service Bus instead of calling `/v1/jobs` directly; a publish failure falls back to the direct path and an explicitly scoped request always remains direct. |
 | `SERVICEBUS_RESIDENT_CONSUMER` | `false` | worker | When true (and Service Bus enabled) a resident long-polling consumer drains the queue continuously (~1 s) instead of waiting the 30 s beat; the beat stays as the fallback. |
 | `SERVICEBUS_ATOMIC_CLAIM` | `true` | worker | Required when drain concurrency is greater than 1. Atomically reserves each correlation id before OpenAPI submit; code falls back to serial drain if explicitly disabled. |
-| `SERVICEBUS_DRAIN_SINGLEFLIGHT` | `true` | worker | Takes a queue-scoped Redis lease so the resident consumer and beat fallback do not compete for the same request queue. |
+| `SERVICEBUS_CLAIM_STALE_SECONDS` | `900` | worker | Minimum age before an unconfirmed bridge claim can be stolen after a worker crash. Values below 900 seconds are raised to the floor so a live resident submit cannot be stolen during its complete OpenAPI transport, stale-token retry, and token-resync envelope. |
+| `SERVICEBUS_DRAIN_SINGLEFLIGHT` | `true` | worker | Legacy compatibility setting. Every drain now takes the queue-scoped Redis lease regardless of a false override because Settings uses that lease as its routing-mutation fence. |
+| `SERVICEBUS_DRAIN_LOCK_TTL_SECONDS` | `900` | worker | Drain-lease crash backstop. Values below 900 seconds are raised to the routing-safety floor so the lease cannot expire during a bounded resident submit/pass while Settings relies on it. |
+| `SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS` | `35` | worker | OpenAPI timeout used only by the 45-second Celery fallback task, clamped to 5-35 seconds. The fallback processes one concurrency-sized receive batch and uses no internal transport retry; durable Service Bus retry owns later attempts. The resident consumer keeps the general 90-second policy. |
 | `CELERY_SERVICEBUS_QUEUES` | `servicebus` | worker | Dedicated Celery queue for drain fallback, outbox/transition publication, DLQ response reconciliation, and Service Bus health. `worker-servicebus` consumes it independently of long general reconciliation scans. |
 | `CELERY_SERVICEBUS_CONCURRENCY` | `1` | worker | Prefork concurrency of the dedicated Service Bus worker. The resident request consumer also belongs only to this parent and starts after prefork. |
 | `SERVICEBUS_LIFECYCLE_INTERRUPTION_SECONDS` | `600` | worker | After a newer AKS lifecycle generation and sustained OpenAPI/Kubernetes absence, terminalise an already-accepted bridge as `cluster_lifecycle_interrupted` instead of leaving it active indefinitely. |
@@ -520,13 +598,16 @@ Rules a subscriber must follow:
 
 The runtime configuration (namespace, request queue, optional completion topic,
 cleanup thresholds) lives in the `servicebuspref` Azure Table row and is edited
-from Settings without a redeploy. Enabling the integration there is the
-activation switch: because the config is Table-backed it survives redeploys, and
-all sidecars read the same row, so the toggle takes effect within a gate check
-(~1 minute) without restarting the control plane. `SERVICEBUS_ENABLED` is only a
-deploy-time override on top of that — left empty it defers to the config; set
-falsy it is a kill switch; the integration stays OFF by default until an operator
-opts in (the config defaults disabled).
+from Settings without a redeploy. A deployment-wide mutation mutex serializes
+full-row writes; routing changes then take the queue stop-intent and fail with
+`409 servicebus_reconfigure_busy` while config-dependent I/O is active. Enabling
+the integration there is the activation switch: because the config is
+Table-backed it survives redeploys, and all sidecars read the same row, so the
+toggle takes effect within a gate check (~1 minute) without restarting the
+control plane.
+`SERVICEBUS_ENABLED` is only a deploy-time override on top of that — left empty
+it defers to the config; set falsy it is a kill switch; the integration stays OFF
+by default until an operator opts in (the config defaults disabled).
 
 ## Validation
 

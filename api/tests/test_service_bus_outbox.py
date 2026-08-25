@@ -10,8 +10,11 @@ Validation: ``uv run pytest -q api/tests/test_service_bus_outbox.py``.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from api.services import service_bus_outbox as outbox
+from billiard.exceptions import SoftTimeLimitExceeded
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +89,21 @@ def test_deployed_without_table_endpoint_fails_closed(monkeypatch: pytest.Monkey
         outbox.enqueue_response(_event("evt-no-table"))
 
 
+def test_table_persistence_propagates_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-dashboard")
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://table.example")
+    monkeypatch.setattr(
+        outbox,
+        "_ensure_table",
+        lambda: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        outbox.enqueue_response(_event("evt-soft-limit"))
+
+
 def test_defer_response_persists_bounded_retry_metadata() -> None:
     outbox.enqueue_response(_event("evt-deferred"))
 
@@ -110,3 +128,166 @@ def test_defer_missing_response_is_idempotent_noop() -> None:
         retry_after_seconds=30,
     )
     assert outbox.list_pending_responses() == []
+
+
+def test_table_due_query_skips_a_future_deferred_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    due = {
+        "PartitionKey": "producer_response",
+        "RowKey": "z-due",
+        "created_at": "2026-08-25T00:00:01+00:00",
+        "payload_json": json.dumps(_event("z-due", status="succeeded")),
+        "next_attempt_at": "",
+    }
+    deferred = {
+        "PartitionKey": "producer_response",
+        "RowKey": "a-deferred",
+        "created_at": "2026-08-25T00:00:00+00:00",
+        "payload_json": json.dumps(_event("a-deferred", status="queued")),
+        "next_attempt_at": "2026-08-26T00:00:00+00:00",
+    }
+
+    class _Table:
+        def query_entities(self, query_filter: str, **_kwargs: object):
+            return [due] if "next_attempt_at le" in query_filter else [deferred, due]
+
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-dashboard")
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://table.example")
+    monkeypatch.setattr(outbox, "_ensure_table", lambda: None)
+    monkeypatch.setattr(outbox, "_table_client", lambda: _Table())
+
+    pending = outbox.list_due_responses(
+        limit=1,
+        due_before="2026-08-25T12:00:00+00:00",
+    )
+
+    assert [item.event_id for item in pending] == ["z-due"]
+
+
+def test_table_due_query_uses_fallback_when_filtered_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    due = {
+        "PartitionKey": "producer_response",
+        "RowKey": "due-after-filter-error",
+        "created_at": "2026-08-25T00:00:01+00:00",
+        "payload_json": json.dumps(_event("due-after-filter-error")),
+        "next_attempt_at": "",
+    }
+
+    class _Table:
+        def query_entities(self, query_filter: str, **_kwargs: object):
+            if "next_attempt_at le" in query_filter:
+                raise ValueError("filtered query rejected")
+            return [due]
+
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-dashboard")
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://table.example")
+    monkeypatch.setattr(outbox, "_ensure_table", lambda: None)
+    monkeypatch.setattr(outbox, "_table_client", lambda: _Table())
+
+    pending = outbox.list_due_responses(
+        limit=1,
+        due_before="2026-08-25T12:00:00+00:00",
+    )
+
+    assert [item.event_id for item in pending] == ["due-after-filter-error"]
+
+
+def test_table_scan_counts_malformed_rows_toward_the_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    yielded: list[int] = []
+
+    class _Table:
+        def query_entities(self, **_kwargs: object):
+            for index in range(100):
+                yielded.append(index)
+                yield {
+                    "PartitionKey": "producer_response",
+                    "RowKey": f"bad-{index}",
+                    "created_at": "2026-08-25T00:00:00+00:00",
+                    "payload_json": "not-json",
+                }
+
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-dashboard")
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://table.example")
+    monkeypatch.setattr(outbox, "_TABLE_SCAN_LIMIT", 3)
+    monkeypatch.setattr(outbox, "_ensure_table", lambda: None)
+    monkeypatch.setattr(outbox, "_table_client", lambda: _Table())
+
+    pending = outbox.list_pending_responses(limit=10)
+    assert len(pending) == 3
+    assert all(item.event == {} for item in pending)
+    assert all(item.last_error_code == "outbox_payload_corrupt" for item in pending)
+    assert yielded == [0, 1, 2]
+
+
+def test_table_row_with_malformed_failure_count_does_not_block_valid_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "PartitionKey": "producer_response",
+            "RowKey": "bad-counter",
+            "created_at": "2026-08-25T00:00:00+00:00",
+            "payload_json": json.dumps(_event("bad-counter")),
+            "failure_count": "not-an-int",
+        },
+        {
+            "PartitionKey": "producer_response",
+            "RowKey": "valid",
+            "created_at": "2026-08-25T00:00:01+00:00",
+            "payload_json": json.dumps(_event("valid")),
+            "failure_count": 2,
+        },
+    ]
+
+    class _Table:
+        def query_entities(self, **_kwargs: object):
+            return rows
+
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-dashboard")
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://table.example")
+    monkeypatch.setattr(outbox, "_ensure_table", lambda: None)
+    monkeypatch.setattr(outbox, "_table_client", lambda: _Table())
+
+    pending = outbox.list_pending_responses(limit=10)
+
+    assert [item.event_id for item in pending] == ["bad-counter", "valid"]
+    assert pending[0].failure_count == 0
+    assert pending[0].last_error_code == "outbox_payload_corrupt"
+    assert pending[1].failure_count == 2
+
+
+def test_table_row_without_event_id_is_never_returned_for_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "PartitionKey": "producer_response",
+            "RowKey": "",
+            "created_at": "2026-08-25T00:00:00+00:00",
+            "payload_json": json.dumps(_event("missing-row-key")),
+        },
+        {
+            "PartitionKey": "producer_response",
+            "RowKey": "valid-row-key",
+            "created_at": "2026-08-25T00:00:01+00:00",
+            "payload_json": json.dumps(_event("valid-row-key")),
+        },
+    ]
+
+    class _Table:
+        def query_entities(self, **_kwargs: object):
+            return rows
+
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-dashboard")
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://table.example")
+    monkeypatch.setattr(outbox, "_ensure_table", lambda: None)
+    monkeypatch.setattr(outbox, "_table_client", lambda: _Table())
+
+    pending = outbox.list_pending_responses(limit=10)
+
+    assert [item.event_id for item in pending] == ["valid-row-key"]

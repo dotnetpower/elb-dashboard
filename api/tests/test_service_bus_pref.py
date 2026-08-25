@@ -61,6 +61,20 @@ def test_completion_kind_invalid_coerces_to_topic() -> None:
     assert cfg.completion_kind == "topic"
 
 
+def test_legacy_missing_completion_kind_round_trips_as_topic() -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+
+    legacy = ServiceBusConfig.from_dict(
+        {
+            "enabled": True,
+            "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        }
+    )
+
+    assert legacy.completion_kind == "topic"
+    assert ServiceBusConfig.from_dict(legacy.to_dict()).completion_kind == "topic"
+
+
 def test_round_trip_file_backend() -> None:
     from api.services.service_bus_pref import (
         ServiceBusConfig,
@@ -78,6 +92,31 @@ def test_round_trip_file_backend() -> None:
     loaded = get_service_bus_config()
     assert loaded.enabled is True
     assert loaded.namespace_fqdn == "sb-elb-dashboard-krc.servicebus.windows.net"
+
+
+def test_env_entity_override_does_not_replace_stored_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.service_bus_pref import (
+        ServiceBusConfig,
+        get_service_bus_config,
+        get_stored_service_bus_config,
+        preserve_env_pinned_entity_values,
+        save_service_bus_config,
+    )
+
+    save_service_bus_config(ServiceBusConfig(request_queue="requests-persisted"))
+    monkeypatch.setenv("SERVICEBUS_REQUEST_QUEUE", "requests-pinned")
+    effective = get_service_bus_config()
+    proposed = ServiceBusConfig.from_dict({**effective.to_dict(), "dlq_max_count": 6000})
+
+    save_service_bus_config(
+        preserve_env_pinned_entity_values(proposed, get_stored_service_bus_config())
+    )
+
+    assert get_service_bus_config().request_queue == "requests-pinned"
+    assert get_stored_service_bus_config().request_queue == "requests-persisted"
+    assert get_stored_service_bus_config().dlq_max_count == 6000
 
 
 def test_explicit_blank_completion_topic_is_preserved() -> None:

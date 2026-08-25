@@ -125,6 +125,8 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.delenv("SERVICEBUS_ENABLED", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(service_bus, "acquire_config_io", lambda _cfg: "peek-route-io")
+    monkeypatch.setattr(service_bus, "release_config_io", lambda *_args, **_kwargs: None)
     from api.main import app
 
     return TestClient(app)
@@ -250,9 +252,7 @@ def test_dlq_delete_route_rejects_non_integer_sequence(
     monkeypatch.setattr(route, "get_service_bus_config", lambda: _cfg())
     monkeypatch.setattr(route, "service_bus_enabled", lambda: True)
 
-    r = client.post(
-        "/api/settings/service-bus/dlq/delete", json={"sequence_numbers": ["nope"]}
-    )
+    r = client.post("/api/settings/service-bus/dlq/delete", json={"sequence_numbers": ["nope"]})
     assert r.status_code == 400
     assert r.json()["code"] == "invalid_sequence_number"
 
@@ -275,9 +275,7 @@ def test_dlq_delete_route_invokes_service(
     ) -> Any:
         seen["sequence_numbers"] = sequence_numbers
         seen["before_delete"] = before_delete
-        return service_bus.DeadLetterActionStats(
-            scanned=2, matched=1, deleted=1, kept=1, failed=0
-        )
+        return service_bus.DeadLetterActionStats(scanned=2, matched=1, deleted=1, kept=1, failed=0)
 
     monkeypatch.setattr(route.service_bus, "delete_dead_letter_messages", _delete)
 
@@ -300,11 +298,15 @@ def test_dlq_promote_route_invokes_service(
 
     monkeypatch.setattr(route, "get_service_bus_config", lambda: _cfg())
     monkeypatch.setattr(route, "service_bus_enabled", lambda: True)
+    released: list[tuple[str | None, int]] = []
+    monkeypatch.setattr(
+        route.service_bus,
+        "release_config_io",
+        lambda _cfg, token, *, retain_seconds=0: released.append((token, retain_seconds)),
+    )
 
     def _promote(_cfg: Any, *, sequence_numbers: list[int], max_messages: int) -> Any:
-        return service_bus.DeadLetterActionStats(
-            scanned=1, matched=1, promoted=1, kept=0, failed=0
-        )
+        return service_bus.DeadLetterActionStats(scanned=1, matched=1, promoted=1, kept=0, failed=0)
 
     monkeypatch.setattr(route.service_bus, "promote_dead_letter_messages", _promote)
 
@@ -313,6 +315,12 @@ def test_dlq_promote_route_invokes_service(
     body = r.json()
     assert body["status"] == "promoted"
     assert body["promoted"] == 1
+    assert released == [
+        (
+            "peek-route-io",
+            service_bus._REQUEST_SEND_VISIBILITY_GRACE_SECONDS,
+        )
+    ]
 
 
 def test_dlq_promote_route_rejected_when_disabled(client: TestClient) -> None:

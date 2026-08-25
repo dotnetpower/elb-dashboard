@@ -18,10 +18,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-_FASTA = (
-    ">NC_003310.1 Monkeypox\n"
-    "ATGGAGAAGCGAGAAGTTAATAAAGCTCTGTATGATCTTCAACGTAGTACTATGGTGTAC\n"
-)
+_FASTA = ">NC_003310.1 Monkeypox\nATGGAGAAGCGAGAAGTTAATAAAGCTCTGTATGATCTTCAACGTAGTACTATGGTGTAC\n"
 
 _USER_BODY = {
     "program": "blastn",
@@ -49,10 +46,7 @@ def test_v1_request_accepts_multitoken_std_outfmt() -> None:
     # Caller columns survive; the dashboard appends the result-UI parity columns
     # (sscinames/stitle/qcovs; staxids already present) so Description / Scientific
     # name / Query Cover populate for the tabular run.
-    assert (
-        req.blast_options.outfmt
-        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
-    )
+    assert req.blast_options.outfmt == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
     assert req.blast_options.extra and "-searchsp" in req.blast_options.extra
     assert req.db == "core_nt"
 
@@ -138,6 +132,32 @@ def test_build_v1_payload_preserves_multitoken_and_stamps_metadata() -> None:
     assert payload["external_correlation_id"] == "corr-1"
     # Explicit sharding profile preserved.
     assert payload["resource_profile"] == "core_nt_safe"
+
+
+def test_build_v1_payload_preserves_custom_profile_and_scope() -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    payload = sb._build_v1_jobs_payload(
+        _msg(
+            {
+                **_USER_BODY,
+                "db": "nt",
+                "resource_profile": "memory_optimized",
+                "external_correlation_id": "corr-scope",
+                "subscription_id": "sub-a",
+                "resource_group": "rg-a",
+                "cluster_name": "aks-a",
+            }
+        ),
+        ServiceBusConfig(),
+    )
+
+    assert payload is not None
+    assert payload["resource_profile"] == "memory_optimized"
+    assert payload["subscription_id"] == "sub-a"
+    assert payload["resource_group"] == "rg-a"
+    assert payload["cluster_name"] == "aks-a"
 
 
 def test_build_v1_payload_uses_sibling_accepted_source() -> None:
@@ -340,9 +360,7 @@ def test_build_v1_payload_searchsp_resolution_failure_is_safe(
     def _boom(**_kwargs: object) -> object:
         raise RuntimeError("searchsp resolver exploded")
 
-    monkeypatch.setattr(
-        "api.services.blast.submit_payload.resolve_sharding_plan", _boom
-    )
+    monkeypatch.setattr("api.services.blast.submit_payload.resolve_sharding_plan", _boom)
     payload = sb._build_v1_jobs_payload(_msg(_v1_no_searchsp_body()), ServiceBusConfig())
     assert payload is not None
     # No searchsp injection on failure, but the multi-token submit still goes

@@ -5,9 +5,9 @@ Responsibility: Verify legacy facades inject their current monkeypatchable
 Edit boundaries: Facade delegation and stable task registration only; domain
     behavior remains covered by the existing Service Bus test families.
 Key entry points: the ``test_*`` functions.
-Risky contracts: Existing callers patch ``service_bus._admin_client`` and
-    ``servicebus.tasks._DRAIN_SINGLEFLIGHT``; extraction must not bypass those
-    seams or rename registered Celery tasks.
+Risky contracts: Existing callers patch ``service_bus._admin_client``; drain
+    coordination must remain mandatory even if the legacy
+    ``servicebus.tasks._DRAIN_SINGLEFLIGHT`` symbol is patched false.
 Validation: ``uv run pytest -q api/tests/test_service_bus_srp_boundaries.py``.
 """
 
@@ -38,7 +38,7 @@ def test_drain_facade_injects_current_gate_and_keys(
 
     assert servicebus_tasks._acquire_drain_lock("requests") == (True, "token")
     assert captured["queue_name"] == "requests"
-    assert captured["enabled"] is False
+    assert captured["enabled"] is True
     assert captured["lock_base_key"] == servicebus_tasks._DRAIN_LOCK_KEY
     assert captured["stop_intent_base_key"] == servicebus_tasks._DRAIN_STOP_INTENT_KEY
 

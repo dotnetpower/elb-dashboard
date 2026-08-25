@@ -10,9 +10,11 @@ Edit boundaries: Reusable domain/persistence logic only. HTTP shaping lives in
     ``api.routes.settings.service_bus``; the data-plane client lives in
     ``api.services.service_bus``. No Azure SDK management/data-plane calls here.
 Key entry points: ``ServiceBusConfig``, ``AUTH_MODES``, ``get_service_bus_config``,
-    ``save_service_bus_config``, ``service_bus_enabled``, ``service_bus_enabled_for``,
-    ``service_bus_env_override``, ``service_bus_kill_switch_on``, ``normalise_config``,
-    ``reset_service_bus_table_pool_after_fork``.
+    ``get_stored_service_bus_config``, ``save_service_bus_config``,
+    ``service_bus_config_for_runtime``, ``preserve_env_pinned_entity_values``,
+    ``service_bus_enabled``, ``service_bus_enabled_for``,
+    ``service_bus_env_override``, ``service_bus_kill_switch_on``,
+    ``normalise_config``, ``reset_service_bus_table_pool_after_fork``.
 Risky contracts: ``enabled`` defaults to ``False`` and a missing row reads back
     as a disabled default — the integration stays off until an operator opts in
     (charter §12a Rule 4 default-OFF preserved). The deploy-time env
@@ -22,7 +24,9 @@ Risky contracts: ``enabled`` defaults to ``False`` and a missing row reads back
     ``service_bus_env_override``. So the Settings toggle is a runtime feature
     flag that survives redeploys, while a deployment retains an explicit kill
     switch. The SAS connection string itself is NEVER stored in this row; only
-    the Key Vault secret name is. Table backend is gated by
+    the Key Vault secret name is. Deployment entity overrides are applied only
+    to a copy returned for runtime use; Settings preserves the raw stored values
+    and uses the opaque ``revision`` field for optimistic concurrency. Table backend is gated by
     ``AZURE_TABLE_ENDPOINT`` + ``CONTAINER_APP_NAME`` (mirrors
     ``performance_pref``); local dev falls back to a JSON file.
     A Celery prefork child must drop inherited Table clients and replace copied
@@ -38,7 +42,7 @@ import os
 import re
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -170,6 +174,7 @@ class ServiceBusConfig:
     updated_at: str = ""
     owner_oid: str = ""
     tenant_id: str = ""
+    revision: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -191,6 +196,7 @@ class ServiceBusConfig:
             "updated_at": self.updated_at,
             "owner_oid": self.owner_oid,
             "tenant_id": self.tenant_id,
+            "revision": self.revision,
         }
 
     @classmethod
@@ -230,6 +236,7 @@ class ServiceBusConfig:
             updated_at=str(value.get("updated_at") or ""),
             owner_oid=str(value.get("owner_oid") or ""),
             tenant_id=str(value.get("tenant_id") or ""),
+            revision=str(value.get("revision") or ""),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -270,6 +277,7 @@ def normalise_config(
     cfg.updated_at = _now_iso()
     cfg.owner_oid = owner_oid or cfg.owner_oid
     cfg.tenant_id = tenant_id or cfg.tenant_id
+    cfg.revision = uuid.uuid4().hex
     return cfg
 
 
@@ -373,28 +381,25 @@ def _use_table_backend() -> bool:
 
 def get_service_bus_config() -> ServiceBusConfig:
     """Return the saved config, or a disabled default when no row exists."""
+    return service_bus_config_for_runtime(get_stored_service_bus_config())
+
+
+def get_stored_service_bus_config() -> ServiceBusConfig:
+    """Return persisted config without deployment entity overrides."""
     if _use_table_backend():
         found = _get_table()
     else:
         found = _get_file()
-    cfg = found if found is not None else ServiceBusConfig()
-    return _apply_entity_env_overrides(cfg)
+    return found if found is not None else ServiceBusConfig()
 
 
-def _apply_entity_env_overrides(cfg: ServiceBusConfig) -> ServiceBusConfig:
-    """Overlay ``SERVICEBUS_REQUEST_QUEUE`` / ``SERVICEBUS_RESPONSE_TOPIC``.
-
-    A non-empty, well-formed env value wins over the saved entity name so a
-    deployment can pin the request queue / completion topic without editing the
-    Settings row. Unset env keys leave the config untouched (existing behaviour
-    preserved). A malformed env value is ignored (logged) — never silently
-    points the integration at an invalid entity. Mutates and returns ``cfg`` in
-    place; ``cfg`` is a fresh object per call so this never leaks across rows.
-    """
+def _entity_env_override_values() -> dict[str, str]:
+    """Return validated deployment-level entity overrides by config field."""
+    overrides: dict[str, str] = {}
     queue_override = os.environ.get(_REQUEST_QUEUE_ENV, "").strip()
     if queue_override:
         if _RE_ENTITY.match(queue_override):
-            cfg.request_queue = queue_override
+            overrides["request_queue"] = queue_override
         else:
             LOGGER.warning(
                 "%s=%r is not a valid Service Bus entity name; ignoring override",
@@ -404,7 +409,7 @@ def _apply_entity_env_overrides(cfg: ServiceBusConfig) -> ServiceBusConfig:
     topic_override = os.environ.get(_RESPONSE_TOPIC_ENV, "").strip()
     if topic_override:
         if _RE_ENTITY.match(topic_override):
-            cfg.completion_topic = topic_override
+            overrides["completion_topic"] = topic_override
         else:
             LOGGER.warning(
                 "%s=%r is not a valid Service Bus entity name; ignoring override",
@@ -414,7 +419,7 @@ def _apply_entity_env_overrides(cfg: ServiceBusConfig) -> ServiceBusConfig:
     kind_override = os.environ.get(_COMPLETION_KIND_ENV, "").strip().lower()
     if kind_override:
         if kind_override in COMPLETION_KINDS:
-            cfg.completion_kind = kind_override
+            overrides["completion_kind"] = kind_override
         else:
             LOGGER.warning(
                 "%s=%r is not one of %s; ignoring override",
@@ -422,7 +427,38 @@ def _apply_entity_env_overrides(cfg: ServiceBusConfig) -> ServiceBusConfig:
                 kind_override,
                 COMPLETION_KINDS,
             )
-    return cfg
+    return overrides
+
+
+def service_bus_config_for_runtime(cfg: ServiceBusConfig) -> ServiceBusConfig:
+    """Return a copy with validated deployment entity overrides applied."""
+    overrides = _entity_env_override_values()
+    return replace(
+        cfg,
+        request_queue=overrides.get("request_queue", cfg.request_queue),
+        completion_topic=overrides.get("completion_topic", cfg.completion_topic),
+        completion_kind=overrides.get("completion_kind", cfg.completion_kind),
+    )
+
+
+def preserve_env_pinned_entity_values(
+    proposed: ServiceBusConfig,
+    stored: ServiceBusConfig,
+) -> ServiceBusConfig:
+    """Keep persisted values for fields currently pinned by env overrides."""
+    pinned = _entity_env_override_values()
+    return replace(
+        proposed,
+        request_queue=(
+            stored.request_queue if "request_queue" in pinned else proposed.request_queue
+        ),
+        completion_topic=(
+            stored.completion_topic if "completion_topic" in pinned else proposed.completion_topic
+        ),
+        completion_kind=(
+            stored.completion_kind if "completion_kind" in pinned else proposed.completion_kind
+        ),
+    )
 
 
 def completion_is_queue(cfg: ServiceBusConfig) -> bool:

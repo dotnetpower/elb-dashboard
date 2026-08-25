@@ -18,6 +18,11 @@ Risky contracts: The SAS connection string is never returned to the browser
     dedupes any duplicate). ``send`` is intentionally callable by a subscription
     Reader (Playground) — the enqueue runs under the shared MI and never returns
     a SAS token; keep its allowlist entry in ``persona_reader_allowlist.py``.
+    Every full-row config write is serialized through a deployment-wide mutex
+    and guarded by an opaque config revision so a stale save cannot overwrite a
+    newer update. Routing changes additionally take the queue fence and fail
+    closed while either request endpoint, the bridge set, or response outbox
+    still contains dependent work. Env-pinned entity values remain runtime-only.
 Validation: ``uv run pytest -q api/tests/test_settings_service_bus.py``.
 """
 
@@ -27,6 +32,7 @@ import logging
 import os
 import threading
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -39,13 +45,17 @@ from api.services.sanitise import redact_oid, sanitise
 from api.services.service_bus_pref import (
     ServiceBusConfig,
     get_service_bus_config,
+    get_stored_service_bus_config,
     normalise_config,
+    preserve_env_pinned_entity_values,
     save_service_bus_config,
+    service_bus_config_for_runtime,
     service_bus_enabled,
     service_bus_enabled_for,
     service_bus_env_gate_on,
     service_bus_kill_switch_on,
 )
+from api.services.service_bus_target import target_mismatch_fields
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +76,42 @@ _SEND_MAX_QUEUE_DEPTH = max(1, int(os.environ.get("SERVICEBUS_SEND_MAX_QUEUE_DEP
 # pathological body cannot balloon the 400 response. 20 covers every real
 # multi-field failure; the summary string still reflects the same set.
 _MAX_VALIDATION_ERRORS = 20
+
+_REQUEST_ROUTING_FIELDS = (
+    "auth_mode",
+    "sas_secret_name",
+    "namespace_fqdn",
+    "request_queue",
+    "subscription_id",
+    "resource_group",
+    "cluster_name",
+    "storage_account",
+)
+_BRIDGE_ROUTING_FIELDS = (
+    "namespace_fqdn",
+    "subscription_id",
+    "resource_group",
+    "cluster_name",
+    "storage_account",
+    "completion_topic",
+    "completion_kind",
+)
+_COMPLETION_ROUTING_FIELDS = (
+    "namespace_fqdn",
+    "completion_topic",
+    "completion_kind",
+)
+_RECONFIGURATION_FIELDS = tuple(
+    dict.fromkeys(_REQUEST_ROUTING_FIELDS + _BRIDGE_ROUTING_FIELDS + _COMPLETION_ROUTING_FIELDS)
+)
+_CONFIG_IO_FENCE_FIELDS = (
+    *_RECONFIGURATION_FIELDS,
+    "enabled",
+    "dlq_cleanup_enabled",
+    "dlq_max_age_days",
+    "dlq_max_count",
+    "dlq_cleanup_batch",
+)
 
 # Fail-closed backpressure (charter §12a Rule 4, default-OFF). The capacity check
 # normally fails OPEN: if the queue depth cannot be read (no Manage claim, a
@@ -164,6 +210,21 @@ def _runtime_counts(cfg: ServiceBusConfig) -> dict[str, Any]:
         return {"available": False, "reason": "error"}
 
 
+def _acquire_config_io_or_409(cfg: ServiceBusConfig) -> str:
+    """Acquire a stable-config token for one operator data-plane mutation."""
+    try:
+        return service_bus.acquire_config_io(cfg)
+    except service_bus.ServiceBusUnavailable as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "servicebus_reconfigure_busy",
+                "message": "Service Bus routing is changing; retry this operation.",
+            },
+            headers={"Retry-After": "10"},
+        ) from exc
+
+
 @router.get("")
 def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
     """Return the saved config (no secrets), env gate, and best-effort counts."""
@@ -172,11 +233,7 @@ def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, A
     # request and one consistent snapshot, instead of calling service_bus_enabled()
     # (which re-reads the Table) twice below.
     effective = service_bus_enabled_for(cfg)
-    counts = (
-        _runtime_counts(cfg)
-        if cfg.enabled
-        else {"available": False, "reason": "disabled"}
-    )
+    counts = _runtime_counts(cfg) if cfg.enabled else {"available": False, "reason": "disabled"}
     return {
         "config": cfg.public_dict(),
         "env_enabled": effective or cfg.enabled,
@@ -195,17 +252,246 @@ def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, A
     }
 
 
+def _changed_config_fields(
+    current: ServiceBusConfig,
+    proposed: ServiceBusConfig,
+    fields: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        field
+        for field in fields
+        if str(getattr(current, field, "") or "").strip().casefold()
+        != str(getattr(proposed, field, "") or "").strip().casefold()
+    )
+
+
+def _pending_request_count(cfg: ServiceBusConfig) -> int:
+    """Return active, scheduled, and dead-letter work for one request endpoint."""
+    counts = service_bus.entity_counts(cfg)
+    queue = counts.get("queue") if isinstance(counts, dict) else None
+    if not isinstance(queue, dict):
+        raise ValueError("queue counts missing")
+    return sum(
+        max(0, int(queue.get(field) or 0))
+        for field in (
+            "active_message_count",
+            "scheduled_message_count",
+            "dead_letter_message_count",
+        )
+    )
+
+
+def _assert_reconfiguration_safe(
+    current: ServiceBusConfig,
+    proposed: ServiceBusConfig,
+) -> None:
+    """Reject routing changes while durable work still references the old config."""
+    if not current.namespace_fqdn:
+        return
+    request_changes = _changed_config_fields(
+        current,
+        proposed,
+        _REQUEST_ROUTING_FIELDS,
+    )
+    bridge_changes = _changed_config_fields(
+        current,
+        proposed,
+        _BRIDGE_ROUTING_FIELDS,
+    )
+    completion_changes = _changed_config_fields(
+        current,
+        proposed,
+        _COMPLETION_ROUTING_FIELDS,
+    )
+    if not request_changes and not bridge_changes:
+        return
+
+    if request_changes:
+        auth_changes = _changed_config_fields(
+            current,
+            proposed,
+            ("auth_mode", "sas_secret_name"),
+        )
+        endpoint_changes = _changed_config_fields(
+            current,
+            proposed,
+            ("namespace_fqdn", "request_queue"),
+        )
+        count_configs = [current]
+        if endpoint_changes and proposed.namespace_fqdn:
+            count_configs.append(proposed)
+        elif auth_changes:
+            count_configs[0] = replace(
+                current,
+                auth_mode=proposed.auth_mode,
+                sas_secret_name=proposed.sas_secret_name,
+            )
+        try:
+            pending_requests = sum(_pending_request_count(cfg) for cfg in count_configs)
+        except Exception as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "servicebus_reconfigure_state_unavailable",
+                    "message": (
+                        "Current queue state could not be verified; routing "
+                        "configuration was not changed."
+                    ),
+                },
+                headers={"Retry-After": "30"},
+            ) from exc
+        if pending_requests:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "servicebus_reconfigure_blocked",
+                    "message": (
+                        "Drain the current and proposed request/dead-letter queues "
+                        "before changing Service Bus routing."
+                    ),
+                    "pending_requests": pending_requests,
+                    "changed_fields": list(request_changes),
+                },
+            )
+
+    if bridge_changes:
+        try:
+            from api.services.service_bus_tracking import list_active_bridges_page
+
+            active_bridges, _cursor = list_active_bridges_page(limit=1)
+        except Exception as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "servicebus_reconfigure_state_unavailable",
+                    "message": (
+                        "Active bridge state could not be verified; routing "
+                        "configuration was not changed."
+                    ),
+                },
+                headers={"Retry-After": "30"},
+            ) from exc
+        if active_bridges:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "servicebus_reconfigure_blocked",
+                    "message": (
+                        "Wait for active Service Bus jobs to finish before "
+                        "changing execution or completion routing."
+                    ),
+                    "active_bridges": len(active_bridges),
+                    "changed_fields": list(bridge_changes),
+                },
+            )
+
+    if completion_changes:
+        try:
+            from api.services.service_bus_outbox import list_pending_responses
+
+            pending_responses = list_pending_responses(limit=1)
+        except Exception as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "servicebus_reconfigure_state_unavailable",
+                    "message": (
+                        "Response outbox state could not be verified; completion "
+                        "routing was not changed."
+                    ),
+                },
+                headers={"Retry-After": "30"},
+            ) from exc
+        if pending_responses:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "servicebus_reconfigure_blocked",
+                    "message": (
+                        "Flush pending Service Bus responses before changing completion routing."
+                    ),
+                    "pending_responses": len(pending_responses),
+                    "changed_fields": list(completion_changes),
+                },
+            )
+
+
 @router.put("")
 def put_config(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Validate and persist the Service Bus integration config."""
+    request_revision = str(body.get("revision") or "").strip()
     try:
         cfg = normalise_config(body, owner_oid=caller.object_id, tenant_id=caller.tenant_id)
     except ValueError as exc:
         raise HTTPException(400, detail={"code": "invalid_config", "message": str(exc)}) from exc
-    saved = save_service_bus_config(cfg)
+    from api.tasks.servicebus.drain_coordination import (
+        acquire_config_mutation,
+        release_config_mutation,
+    )
+    from api.tasks.servicebus.tasks import (
+        acquire_drain_stop_intent,
+        release_drain_stop_intent,
+    )
+
+    acquired, mutation_token = acquire_config_mutation()
+    if not acquired:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "servicebus_config_busy",
+                "message": "Another Service Bus settings update is in progress.",
+            },
+            headers={"Retry-After": "10"},
+        )
+    fence_queue = ""
+    fence_token: str | None = None
+    try:
+        stored_current = get_stored_service_bus_config()
+        if stored_current.revision and stored_current.revision != request_revision:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "servicebus_config_changed",
+                    "message": (
+                        "Service Bus settings changed since this form was loaded. "
+                        "Reload the latest settings before retrying."
+                    ),
+                },
+            )
+        current = service_bus_config_for_runtime(stored_current)
+        stored_proposed = preserve_env_pinned_entity_values(cfg, stored_current)
+        proposed = service_bus_config_for_runtime(stored_proposed)
+        config_io_changes = _changed_config_fields(
+            current,
+            proposed,
+            _CONFIG_IO_FENCE_FIELDS,
+        )
+        if current.namespace_fqdn and config_io_changes:
+            fence_queue = current.request_queue
+            fence_acquired, fence_token = acquire_drain_stop_intent(fence_queue)
+            if not fence_acquired:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "servicebus_reconfigure_busy",
+                        "message": (
+                            "Service Bus data-plane activity or another routing "
+                            "change is in progress."
+                        ),
+                        "changed_fields": list(config_io_changes),
+                    },
+                    headers={"Retry-After": "10"},
+                )
+        _assert_reconfiguration_safe(current, proposed)
+        save_service_bus_config(stored_proposed)
+        saved = service_bus_config_for_runtime(stored_proposed)
+    finally:
+        if fence_token:
+            release_drain_stop_intent(fence_queue, fence_token)
+        release_config_mutation(mutation_token)
     LOGGER.info(
         "service bus config saved by oid=%s enabled=%s ns=%s mode=%s",
         redact_oid(caller.object_id),
@@ -292,12 +578,16 @@ def purge(
         if dead_letter
         else (lambda msg: stage_operator_purge_response_and_backup(cfg, msg))
     )
-    removed = service_bus.purge_queue(
-        cfg,
-        dead_letter=dead_letter,
-        max_messages=max_messages,
-        before_delete=before_delete,
-    )
+    io_token = _acquire_config_io_or_409(cfg)
+    try:
+        removed = service_bus.purge_queue(
+            cfg,
+            dead_letter=dead_letter,
+            max_messages=max_messages,
+            before_delete=before_delete,
+        )
+    finally:
+        service_bus.release_config_io(cfg, io_token)
     LOGGER.info(
         "service bus manual purge by oid=%s dead_letter=%s removed=%s",
         redact_oid(caller.object_id),
@@ -529,6 +819,18 @@ def send(
         )
 
     cfg = get_service_bus_config()
+    mismatches = target_mismatch_fields(payload, cfg)
+    if mismatches:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "servicebus_target_mismatch",
+                "message": (
+                    "Request target does not match the configured Service Bus "
+                    f"execution target ({','.join(mismatches)})."
+                ),
+            },
+        )
     _assert_send_capacity(cfg)
     try:
         message_id = service_bus.send_request(
@@ -537,18 +839,33 @@ def send(
             correlation_id=correlation_id,
             subject=build_request_subject(payload),
         )
+    except service_bus.ServiceBusRequestValidationError as exc:
+        raise HTTPException(
+            413,
+            detail={
+                "code": "request_too_large",
+                "message": (
+                    "The request is too large for the Service Bus queue. Use the "
+                    "direct ElasticBLAST submit API for this query."
+                ),
+            },
+        ) from exc
     except service_bus.ServiceBusUnavailable as exc:
-        raise HTTPException(
-            503, detail={"code": "unavailable", "message": str(exc)[:200]}
-        ) from exc
+        raise HTTPException(503, detail={"code": "unavailable", "message": str(exc)[:200]}) from exc
     except service_bus.ServiceBusAuthError as exc:
-        raise HTTPException(
-            403, detail={"code": "auth_failed", "message": str(exc)[:200]}
-        ) from exc
+        raise HTTPException(403, detail={"code": "auth_failed", "message": str(exc)[:200]}) from exc
     except Exception as exc:
         LOGGER.warning("servicebus send failed: %s", type(exc).__name__)
         raise HTTPException(
-            502, detail={"code": "send_failed", "message": "send to Service Bus failed"}
+            502,
+            detail={
+                "code": "send_outcome_unknown",
+                "message": (
+                    "Service Bus did not confirm the send outcome. Check or retry "
+                    "using the same external_correlation_id."
+                ),
+                "external_correlation_id": correlation_id,
+            },
         ) from exc
 
     _record_send_audit(
@@ -745,6 +1062,7 @@ def dlq_delete(
     if not cfg.namespace_fqdn:
         raise HTTPException(400, detail={"code": "not_configured", "message": "namespace required"})
     sequence_numbers = _parse_sequence_numbers(body)
+    io_token = _acquire_config_io_or_409(cfg)
     try:
         from api.tasks.servicebus.tasks import _stage_dead_letter_response_and_backup
 
@@ -763,6 +1081,8 @@ def dlq_delete(
         raise HTTPException(
             502, detail={"code": "delete_failed", "message": "DLQ delete failed"}
         ) from exc
+    finally:
+        service_bus.release_config_io(cfg, io_token)
     LOGGER.info(
         "service bus dlq delete by oid=%s requested=%d deleted=%d matched=%d failed=%d",
         redact_oid(caller.object_id),
@@ -804,7 +1124,10 @@ def dlq_promote(
     if not cfg.namespace_fqdn:
         raise HTTPException(400, detail={"code": "not_configured", "message": "namespace required"})
     sequence_numbers = _parse_sequence_numbers(body)
+    io_token = _acquire_config_io_or_409(cfg)
+    broker_attempted = False
     try:
+        broker_attempted = True
         stats = service_bus.promote_dead_letter_messages(
             cfg, sequence_numbers=sequence_numbers, max_messages=_DLQ_ACTION_MAX
         )
@@ -817,6 +1140,14 @@ def dlq_promote(
         raise HTTPException(
             502, detail={"code": "promote_failed", "message": "DLQ promote failed"}
         ) from exc
+    finally:
+        service_bus.release_config_io(
+            cfg,
+            io_token,
+            retain_seconds=(
+                service_bus._REQUEST_SEND_VISIBILITY_GRACE_SECONDS if broker_attempted else 0
+            ),
+        )
     LOGGER.info(
         "service bus dlq promote by oid=%s requested=%d promoted=%d matched=%d failed=%d",
         redact_oid(caller.object_id),
@@ -834,6 +1165,7 @@ def dlq_promote(
         "kept": stats.kept,
         "failed": stats.failed,
     }
+
 
 @router.get("/observed-completions")
 def observed_completions(

@@ -56,6 +56,10 @@ _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.blast.submit_task.time.time",
     "api.tasks.blast.submit_task.upload_db_order_oracle_pointer_if_available",
     "api.tasks.blast.submit_task.upload_tie_order_oracle_if_present",
+    "api.tasks.servicebus.drain_coordination.acquire_config_mutation",
+    "api.tasks.servicebus.drain_coordination.acquire_request_send",
+    "api.tasks.servicebus.drain_coordination.release_config_mutation",
+    "api.tasks.servicebus.drain_coordination.release_request_send",
     "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
     "api.tasks.servicebus.tasks.release_drain_stop_intent",
     "api.tasks.storage._autowarmup_inflight_acquire",
@@ -151,7 +155,7 @@ def test_facade_contract_covers_all_string_target_monkeypatches() -> None:
     bare_contract.update(contract)
     missing = discovered - bare_contract
     assert not missing, (
-        "These `monkeypatch.setattr(\"api.tasks.…\", …)` targets exist in the "
+        'These `monkeypatch.setattr("api.tasks.…", …)` targets exist in the '
         f"test suite but are not in `_FACADE_CONTRACT`: {sorted(missing)}. "
         "Add them so refactors that drop them fail loudly here instead of "
         "silently breaking individual tests."

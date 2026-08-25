@@ -15,6 +15,9 @@ Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py``.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import json
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -23,6 +26,19 @@ from typing import Any
 import pytest
 from api.services import service_bus
 from api.services.service_bus import MessageAction, ServiceBusConfig
+from billiard.exceptions import SoftTimeLimitExceeded
+
+
+@pytest.fixture(autouse=True)
+def _stub_request_send_coordination(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_request_send",
+        lambda _queue: (True, None),
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.release_request_send",
+        lambda _queue, *, token, retain_seconds=0: None,
+    )
 
 
 class _FakeMessage:
@@ -322,6 +338,33 @@ def test_retry_preserves_original_absolute_expiry(
     assert retry.time_to_live == timedelta(hours=2) - timedelta(seconds=30)
 
 
+def test_retry_message_id_preserves_legacy_correlation_attempt_contract() -> None:
+    left = service_bus.ParsedMessage(
+        body={"db": "core_nt"},
+        raw_body='{"db":"core_nt"}',
+        message_id="left",
+        correlation_id="corr-shared",
+        subject="blast.request",
+        content_type="application/json",
+        enqueued_time_utc=None,
+        sequence_number=1,
+    )
+    right = service_bus.ParsedMessage(
+        body={"db": "nt"},
+        raw_body='{"db":"nt"}',
+        message_id="right",
+        correlation_id="corr-shared",
+        subject="blast.request",
+        content_type="application/json",
+        enqueued_time_utc=None,
+        sequence_number=2,
+    )
+
+    assert (
+        service_bus._retry_message(left).message_id == service_bus._retry_message(right).message_id
+    )
+
+
 def test_retry_expiry_guard_reserves_clock_skew_margin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -488,6 +531,221 @@ def test_send_request_emits_enqueued_observability_event(
     assert "secret" not in str(events)
 
 
+def test_send_request_preserves_legacy_wire_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sender = _FakeTopicSender()
+    captured: dict[str, Any] = {}
+    real_message = service_bus.ServiceBusMessage
+
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield _FakeQueueClient(sender)
+
+    def capture_message(payload: str, **kwargs: Any) -> Any:
+        captured["payload"] = payload
+        captured["kwargs"] = kwargs
+        return real_message(payload, **kwargs)
+
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+    monkeypatch.setattr(service_bus, "ServiceBusMessage", capture_message)
+    monkeypatch.setattr(service_bus, "record_service_bus_request_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "api.services.aks.queue_autostart.request_autostart_evaluation",
+        lambda **_kwargs: None,
+    )
+
+    body = {"program": "blastn", "db": "core_nt", "query_fasta": ">q\nACGT"}
+    service_bus.send_request(
+        _cfg(),
+        body,
+        correlation_id="corr-legacy-wire",
+    )
+
+    assert captured["payload"] == json.dumps(body, default=str)
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["message_id"] is None
+    assert kwargs["correlation_id"] == "corr-legacy-wire"
+    assert kwargs["content_type"] == "application/json"
+    assert kwargs["subject"] == "blast.request"
+    assert kwargs["time_to_live"] == timedelta(hours=24)
+
+
+def test_send_request_rejects_oversized_body_before_opening_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service_bus,
+        "_client",
+        lambda _cfg: (_ for _ in ()).throw(
+            AssertionError("oversized request must fail before Service Bus I/O")
+        ),
+    )
+
+    with pytest.raises(service_bus.ServiceBusRequestValidationError):
+        service_bus.send_request(
+            _cfg(),
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">q\n" + ("A" * service_bus._MAX_REQUEST_MESSAGE_BYTES),
+            },
+            correlation_id="corr-oversized",
+        )
+
+
+def test_send_request_stops_while_reconfiguration_fence_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_request_send",
+        lambda _queue: (False, None),
+    )
+    monkeypatch.setattr(
+        service_bus,
+        "_client",
+        lambda _cfg: (_ for _ in ()).throw(
+            AssertionError("fenced send must fail before Service Bus I/O")
+        ),
+    )
+
+    with pytest.raises(service_bus.ServiceBusUnavailable, match="reconfiguration"):
+        service_bus.send_request(
+            _cfg(),
+            {"program": "blastn", "db": "core_nt", "query_fasta": ">q\nACGT"},
+            correlation_id="corr-reconfigure-fence",
+        )
+
+
+def test_send_request_reports_coordination_outage_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.servicebus.drain_coordination import (
+        RequestSendCoordinationUnavailable,
+    )
+
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_request_send",
+        lambda _queue: (_ for _ in ()).throw(
+            RequestSendCoordinationUnavailable("coordination unavailable")
+        ),
+    )
+
+    with pytest.raises(service_bus.ServiceBusUnavailable, match="coordination unavailable"):
+        service_bus.send_request(
+            _cfg(),
+            {"program": "blastn", "db": "core_nt", "query_fasta": ">q\nACGT"},
+            correlation_id="corr-coordination-outage",
+        )
+
+
+def test_send_request_rejects_stale_routing_config_after_acquiring_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _cfg()
+    stale.revision = "revision-before-change"
+    current = ServiceBusConfig(
+        enabled=True,
+        auth_mode="entra",
+        namespace_fqdn=stale.namespace_fqdn,
+        request_queue="new-request-queue",
+    )
+    monkeypatch.setattr(service_bus, "get_service_bus_config", lambda: current)
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_request_send",
+        lambda _queue: (True, "send-token"),
+    )
+    released: list[tuple[str, str | None, int]] = []
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.release_request_send",
+        lambda queue, *, token, retain_seconds=0: released.append((queue, token, retain_seconds)),
+    )
+    monkeypatch.setattr(
+        service_bus,
+        "_client",
+        lambda _cfg: (_ for _ in ()).throw(
+            AssertionError("stale config must fail before Service Bus I/O")
+        ),
+    )
+
+    with pytest.raises(service_bus.ServiceBusUnavailable, match="configuration changed"):
+        service_bus.send_request(
+            stale,
+            {"program": "blastn", "db": "core_nt", "query_fasta": ">q\nACGT"},
+            correlation_id="corr-stale-routing",
+        )
+
+    assert released == [(stale.request_queue, "send-token", 0)]
+
+
+def test_config_io_guard_rejects_snapshot_changed_after_token_acquire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _cfg()
+    current = ServiceBusConfig(
+        **{
+            **stale.to_dict(),
+            "completion_topic": "new-completions",
+        }
+    )
+    monkeypatch.setattr(service_bus, "get_service_bus_config", lambda: current)
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_request_send",
+        lambda _queue: (True, "io-token"),
+    )
+    released: list[tuple[str, str | None, int]] = []
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.release_request_send",
+        lambda queue, *, token, retain_seconds=0: released.append((queue, token, retain_seconds)),
+    )
+
+    with pytest.raises(service_bus.ServiceBusUnavailable, match="configuration changed"):
+        service_bus.acquire_config_io(stale)
+
+    assert released == [(stale.request_queue, "io-token", 0)]
+
+
+def test_send_request_releases_inflight_lease_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sender = _FakeTopicSender()
+
+    @contextmanager
+    def fake_client(_cfg_arg: ServiceBusConfig):
+        yield _FakeQueueClient(sender)
+
+    monkeypatch.setattr(service_bus, "_client", fake_client)
+    monkeypatch.setattr(service_bus, "record_service_bus_request_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "api.services.aks.queue_autostart.request_autostart_evaluation",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_request_send",
+        lambda _queue: (True, "send-token"),
+    )
+    released: list[tuple[str, str | None, int]] = []
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.release_request_send",
+        lambda queue, *, token, retain_seconds=0: released.append((queue, token, retain_seconds)),
+    )
+
+    service_bus.send_request(
+        _cfg(),
+        {"program": "blastn", "db": "core_nt", "query_fasta": ">q\nACGT"},
+        correlation_id="corr-send-release",
+    )
+
+    assert released == [
+        (
+            "elastic-blast-requests",
+            "send-token",
+            service_bus._REQUEST_SEND_VISIBILITY_GRACE_SECONDS,
+        )
+    ]
+
+
 def test_send_request_emits_failure_before_reraising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -512,7 +770,7 @@ def test_send_request_emits_failure_before_reraising(
         )
 
     assert events[0][0] == "enqueue_failed"
-    assert events[0][1]["action"] == "not_sent"
+    assert events[0][1]["action"] == "outcome_unknown"
     assert events[0][1]["error_code"] == "RuntimeError"
     assert "secret" not in str(events)
 
@@ -594,6 +852,117 @@ def test_parallel_drain_isolates_one_handler_exception(
     assert set(receiver.completed) == {"e0", "e1", "e3"}
     assert "e2" in receiver.abandoned
     assert stats.completed == 3
+
+
+def test_parallel_drain_does_not_wait_for_executor_after_soft_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receiver = _FakeReceiver(
+        [
+            _FakeMessage("soft-pool-1", {"db": "core_nt"}),
+            _FakeMessage("soft-pool-2", {"db": "core_nt"}),
+        ]
+    )
+    _patch_client(monkeypatch, receiver)
+    shutdown_calls: list[tuple[bool, bool]] = []
+
+    class _Future:
+        def result(self) -> MessageAction:
+            raise SoftTimeLimitExceeded()
+
+    class _Pool:
+        def submit(self, *_args: object, **_kwargs: object) -> _Future:
+            return _Future()
+
+        def shutdown(self, wait: bool, *, cancel_futures: bool = False) -> None:
+            shutdown_calls.append((wait, cancel_futures))
+
+    monkeypatch.setattr(service_bus, "ThreadPoolExecutor", lambda **_kwargs: _Pool())
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        service_bus.drain_requests(
+            _cfg(),
+            lambda _message: MessageAction.COMPLETE,
+            max_messages=2,
+            max_concurrency=2,
+        )
+
+    assert shutdown_calls == [(False, True)]
+
+
+def test_safe_drain_handler_propagates_soft_time_limit() -> None:
+    parsed = service_bus.ParsedMessage(
+        body={},
+        raw_body="{}",
+        message_id="soft-limit",
+        correlation_id="soft-limit",
+        subject="blast.request",
+        content_type="application/json",
+        enqueued_time_utc=None,
+        sequence_number=1,
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        service_bus._safe_drain_handler(
+            lambda _message: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+            parsed,
+        )
+
+
+def test_settlement_propagates_soft_time_limit() -> None:
+    parsed = service_bus.ParsedMessage(
+        body={},
+        raw_body="{}",
+        message_id="settle-soft-limit",
+        correlation_id="settle-soft-limit",
+        subject="blast.request",
+        content_type="application/json",
+        enqueued_time_utc=None,
+        sequence_number=1,
+    )
+    receiver = type(
+        "_SoftLimitReceiver",
+        (),
+        {
+            "complete_message": lambda _self, _message: (_ for _ in ()).throw(
+                SoftTimeLimitExceeded()
+            )
+        },
+    )()
+    stats = service_bus.DrainStats()
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        service_bus._settle(
+            receiver,
+            None,
+            object(),
+            parsed,
+            MessageAction.COMPLETE,
+            stats,
+        )
+
+    assert stats.completed == 0
+    assert stats.abandoned == 0
+
+
+def test_service_bus_data_plane_broad_catches_propagate_soft_deadline() -> None:
+    tree = ast.parse(inspect.getsource(service_bus))
+    missing: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        caught_names: set[str] = set()
+        for handler in node.handlers:
+            if isinstance(handler.type, ast.Name):
+                caught_names.add(handler.type.id)
+            elif isinstance(handler.type, ast.Tuple):
+                caught_names.update(
+                    item.id for item in handler.type.elts if isinstance(item, ast.Name)
+                )
+        if "Exception" in caught_names and "SoftTimeLimitExceeded" not in caught_names:
+            missing.append(node.lineno)
+
+    assert missing == [], f"broad catches swallow SoftTimeLimitExceeded at lines {missing}"
 
 
 def test_parallel_drain_actually_runs_handlers_concurrently(
@@ -681,9 +1050,7 @@ def test_receive_batch_is_capped_to_handler_concurrency(
 def test_pass_budget_yields_without_locking_remaining_backlog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    receiver = _FakeReceiver(
-        [_FakeMessage(f"budget-{i}", {"db": "core_nt"}) for i in range(3)]
-    )
+    receiver = _FakeReceiver([_FakeMessage(f"budget-{i}", {"db": "core_nt"}) for i in range(3)])
     _patch_client(monkeypatch, receiver)
     clock = iter((0.0, 241.0))
 

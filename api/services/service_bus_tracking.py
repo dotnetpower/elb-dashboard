@@ -28,7 +28,8 @@ Risky contracts: ``last_status`` is the published-transition marker — the
     ``odata.etag`` is not a key of a deserialized ``TableEntity``, and passing
     ``None`` to ``MatchConditions.IfNotModified`` raises ``ValueError`` out of
     ``claim_bridge`` / silently skips ``release_bridge``, wedging the
-    correlation id.
+    correlation id. The stale-claim floor must exceed the resident consumer's
+    full OpenAPI transport-retry envelope, not just one HTTP timeout.
 Validation: ``uv run pytest -q api/tests/test_service_bus_tracking.py``.
 """
 
@@ -82,31 +83,35 @@ _BRIDGE_TABLE_POOL_LOCK = threading.Lock()
 # Must comfortably exceed the sibling submit timeout so a slow-but-alive submit
 # is never stolen out from under itself.
 #
-# ``_CLAIM_STALE_FLOOR_SECONDS`` is that safety margin made non-negotiable:
-# ``external_blast._DEFAULT_TIMEOUT_SECONDS`` is 90 s, and the winner also runs
-# the pre-submit execution admission before it can confirm the row. Stealing
-# inside that window lets TWO workers submit the same correlation id — a
-# duplicate BLAST run on the cluster. The floor is deliberately above the submit
-# timeout rather than merely non-zero.
-_CLAIM_STALE_FLOOR_SECONDS = 120
+# ``_CLAIM_STALE_FLOOR_SECONDS`` is that safety margin made non-negotiable.
+# The resident consumer keeps the full OpenAPI transport policy: three attempts
+# at up to 90 s each, plus backoff and the post-claim admission re-check. A 120 s
+# floor covered only one attempt and allowed a cross-revision worker to steal a
+# live claim during the second attempt. Each transport attempt may also perform
+# one stale-token 401 self-heal request plus bounded K8s token-resync work. A
+# 15-minute floor covers that complete envelope with margin while keeping a
+# crashed reservation bounded well inside the 24-hour request TTL.
+_CLAIM_STALE_FLOOR_SECONDS = 900
 
 
 def _claim_stale_seconds_from_env() -> int:
     """Resolve the stale-claim threshold from env, floored, fail-safe.
 
     A non-numeric override must never crash module import (which would take the
-    whole worker down on startup); it logs and falls back to the 180s default.
+    whole worker down on startup); it logs and falls back to the 900s floor.
     Values below ``_CLAIM_STALE_FLOOR_SECONDS`` are raised to the floor so an
     over-eager override cannot steal a still-submitting reservation.
     """
-    raw = os.environ.get("SERVICEBUS_CLAIM_STALE_SECONDS", "180")
+    raw = os.environ.get("SERVICEBUS_CLAIM_STALE_SECONDS", str(_CLAIM_STALE_FLOOR_SECONDS))
     try:
         value = int(raw)
     except (TypeError, ValueError):
         LOGGER.warning(
-            "invalid SERVICEBUS_CLAIM_STALE_SECONDS=%r; defaulting to 180", raw
+            "invalid SERVICEBUS_CLAIM_STALE_SECONDS=%r; defaulting to the %ds floor",
+            raw,
+            _CLAIM_STALE_FLOOR_SECONDS,
         )
-        value = 180
+        value = _CLAIM_STALE_FLOOR_SECONDS
     if value < _CLAIM_STALE_FLOOR_SECONDS:
         LOGGER.warning(
             "SERVICEBUS_CLAIM_STALE_SECONDS=%r is below the %ds safety floor "
@@ -460,9 +465,7 @@ def _list_table_page(limit: int, after_row_key: str) -> tuple[list[BridgeRecord]
     return ([rec for _key, rec in out], out[-1][0] if out else "")
 
 
-def _claim_table(
-    correlation_id: str, request_id: str, request_fingerprint: str
-) -> bool:
+def _claim_table(correlation_id: str, request_id: str, request_fingerprint: str) -> bool:
     """Table-backend atomic claim: insert-if-absent, else steal-if-stale."""
     _ensure_table()
     now = _now_iso()
@@ -532,9 +535,7 @@ def _claim_table(
             # (likely crashed mid-submit). It is expected to be rare; log at INFO
             # so an unexpectedly high steal rate is visible as a worker-health or
             # stale-threshold-too-low signal.
-            LOGGER.info(
-                "service bus claim stole stale reservation corr=%s", correlation_id
-            )
+            LOGGER.info("service bus claim stole stale reservation corr=%s", correlation_id)
             return True
         except (ResourceModifiedError, ResourceNotFoundError):
             return False
@@ -588,9 +589,7 @@ def _release_table(correlation_id: str) -> None:
         # Best-effort by contract (a failed release only defers the retry), but
         # NOT silent: a permanently failing release wedges the correlation id
         # until the stale-claim threshold, so it must be visible in the logs.
-        LOGGER.warning(
-            "release_bridge (table) failed corr=%s", correlation_id, exc_info=True
-        )
+        LOGGER.warning("release_bridge (table) failed corr=%s", correlation_id, exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -661,9 +660,7 @@ def _list_file_page(limit: int, after_row_key: str) -> tuple[list[BridgeRecord],
     return ([rec for _key, rec in page], page[-1][0] if page else "")
 
 
-def _claim_file(
-    correlation_id: str, request_id: str, request_fingerprint: str
-) -> bool:
+def _claim_file(correlation_id: str, request_id: str, request_fingerprint: str) -> bool:
     """File-backend atomic claim under the process file lock (single-writer)."""
     now = _now_iso()
     key = _row_key(correlation_id)

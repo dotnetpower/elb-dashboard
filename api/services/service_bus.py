@@ -34,7 +34,14 @@ Risky contracts: Receivers settle EVERY message they receive (complete /
     original, preserving correlation/idempotency metadata and avoiding broker
     delivery-count burn during transient execution-plane failures. Dashboard
     sends carry an explicit request TTL, and retry clones preserve the original
-    broker expiry instead of extending a request's lifetime.
+    broker expiry instead of extending a request's lifetime. Dashboard requests
+    are capped at a 192 KiB serialized body without changing their historical
+    JSON or broker-generated message identity. Config-dependent publishers and
+    queue mutations hold the same Redis I/O token set as internal sends and
+    revalidate their config after
+    token acquisition, so routing changes cannot cross stale data-plane work.
+    Celery soft deadlines propagate through parsing, lock renewal, handler
+    execution, settlement, DLQ, and purge branches.
 Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py
     api/tests/test_servicebus_load.py``.
 """
@@ -64,6 +71,7 @@ from azure.servicebus import (
 )
 from azure.servicebus.exceptions import ServiceBusAuthenticationError, ServiceBusError
 from azure.servicebus.management import ServiceBusAdministrationClient
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.services import get_credential, service_bus_management, service_bus_preview
 from api.services.service_bus_observability import record_service_bus_request_event
@@ -83,6 +91,7 @@ _PEEK_DEFAULT = 5
 # bloat the response or the dashboard. A content preview never needs the full
 # payload; the truncation is flagged via ``body_truncated``.
 _PEEK_BODY_MAX_CHARS = 4000
+_MAX_REQUEST_MESSAGE_BYTES = 192 * 1024
 _MAX_COMPLETION_EVENT_BYTES = 192 * 1024
 _MAX_LOCK_RENEWAL_SECONDS: int = max(
     30,
@@ -101,6 +110,7 @@ _RETRY_MAX_DELAY_SECONDS: int = max(
     min(int(os.environ.get("SERVICEBUS_RETRY_MAX_DELAY_SECONDS", "900")), 3600),
 )
 _DEFAULT_REQUEST_TTL_SECONDS = 24 * 60 * 60
+_REQUEST_SEND_VISIBILITY_GRACE_SECONDS = 60
 
 
 def request_ttl_seconds() -> int:
@@ -152,9 +162,13 @@ class ServiceBusEventValidationError(ValueError):
     """A completion event can never fit the bounded Service Bus wire contract."""
 
 
+class ServiceBusRequestValidationError(ValueError):
+    """A request message can never fit the bounded Service Bus wire contract."""
+
+
 def validate_completion_event(event: dict[str, Any]) -> str:
     """Serialize and enforce the bounded completion-event wire contract."""
-    payload = json.dumps(event, default=str)
+    payload = json.dumps(event, default=str, separators=(",", ":"), sort_keys=True)
     if len(payload.encode("utf-8")) > _MAX_COMPLETION_EVENT_BYTES:
         raise ServiceBusEventValidationError("completion event exceeds the wire-size budget")
     return payload
@@ -288,6 +302,8 @@ def _admin_client(cfg: ServiceBusConfig) -> Iterator[ServiceBusAdministrationCli
 def _parse(message: Any) -> ParsedMessage:
     try:
         raw = b"".join(message.body).decode("utf-8", "replace")
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         raw = str(message)
     try:
@@ -325,6 +341,67 @@ def _parse(message: Any) -> ParsedMessage:
 # --------------------------------------------------------------------------- #
 
 
+def _request_routing_signature(cfg: ServiceBusConfig) -> tuple[str, ...]:
+    """Return config fields that determine where and how a request executes."""
+    return tuple(
+        str(getattr(cfg, field, "") or "").strip()
+        for field in (
+            "auth_mode",
+            "sas_secret_name",
+            "namespace_fqdn",
+            "request_queue",
+            "subscription_id",
+            "resource_group",
+            "cluster_name",
+            "storage_account",
+        )
+    )
+
+
+def acquire_config_io(cfg: ServiceBusConfig) -> str:
+    """Fence one config-dependent data-plane pass and reject a stale snapshot."""
+    from api.tasks.servicebus.drain_coordination import (
+        RequestSendCoordinationUnavailable,
+        acquire_request_send,
+        release_request_send,
+    )
+
+    try:
+        proceed, token = acquire_request_send(cfg.request_queue)
+    except RequestSendCoordinationUnavailable as exc:
+        raise ServiceBusUnavailable(str(exc)) from exc
+    if not proceed or not token:
+        raise ServiceBusUnavailable("Service Bus reconfiguration is in progress")
+    try:
+        current = get_service_bus_config()
+    except SoftTimeLimitExceeded:
+        release_request_send(cfg.request_queue, token=token)
+        raise
+    except Exception as exc:
+        release_request_send(cfg.request_queue, token=token)
+        raise ServiceBusUnavailable("Service Bus configuration could not be revalidated") from exc
+    if current.to_dict() != cfg.to_dict():
+        release_request_send(cfg.request_queue, token=token)
+        raise ServiceBusUnavailable("Service Bus configuration changed before I/O")
+    return token
+
+
+def release_config_io(
+    cfg: ServiceBusConfig,
+    token: str | None,
+    *,
+    retain_seconds: int = 0,
+) -> None:
+    """Release one config-dependent I/O token, optionally retaining visibility."""
+    from api.tasks.servicebus.drain_coordination import release_request_send
+
+    release_request_send(
+        cfg.request_queue,
+        token=token,
+        retain_seconds=retain_seconds,
+    )
+
+
 def send_request(
     cfg: ServiceBusConfig | None,
     body: dict[str, Any],
@@ -335,21 +412,74 @@ def send_request(
 ) -> str:
     """Enqueue a BLAST request message. Returns the message_id used."""
     cfg = _require_enabled_config(cfg)
-    payload = json.dumps(body, default=str)
-    message = ServiceBusMessage(
-        payload,
-        content_type="application/json",
-        subject=subject,
-        message_id=message_id,
-        correlation_id=correlation_id,
-        time_to_live=timedelta(seconds=request_ttl_seconds()),
+    from api.tasks.servicebus.drain_coordination import (
+        RequestSendCoordinationUnavailable,
+        acquire_request_send,
+        release_request_send,
     )
+
     try:
-        with _client(cfg) as client, client.get_queue_sender(cfg.request_queue) as sender:
-            sender.send_messages(message)
-    except Exception as exc:
+        proceed, send_token = acquire_request_send(cfg.request_queue)
+    except RequestSendCoordinationUnavailable as exc:
+        raise ServiceBusUnavailable(str(exc)) from exc
+    if not proceed:
+        raise ServiceBusUnavailable("Service Bus request queue reconfiguration is in progress")
+    broker_attempted = False
+    try:
+        if cfg.revision and _request_routing_signature(
+            get_service_bus_config()
+        ) != _request_routing_signature(cfg):
+            raise ServiceBusUnavailable("Service Bus routing configuration changed before send")
+        payload = json.dumps(body, default=str)
+        payload_bytes = len(payload.encode())
+        if payload_bytes > _MAX_REQUEST_MESSAGE_BYTES:
+            record_service_bus_request_event(
+                "enqueue_rejected",
+                correlation_id=str(correlation_id or body.get("external_correlation_id") or ""),
+                request_id=str(body.get("request_id") or ""),
+                message_id=str(message_id or ""),
+                queue=cfg.request_queue,
+                program=str(body.get("program") or ""),
+                database=str(body.get("db") or ""),
+                action="not_sent",
+                error_code="request_too_large",
+            )
+            raise ServiceBusRequestValidationError(
+                "request message exceeds the Service Bus wire-size budget"
+            )
+        message = ServiceBusMessage(
+            payload,
+            content_type="application/json",
+            subject=subject,
+            message_id=message_id,
+            correlation_id=correlation_id,
+            time_to_live=timedelta(seconds=request_ttl_seconds()),
+        )
+        try:
+            with _client(cfg) as client, client.get_queue_sender(cfg.request_queue) as sender:
+                broker_attempted = True
+                sender.send_messages(message)
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception as exc:
+            record_service_bus_request_event(
+                "enqueue_failed",
+                correlation_id=str(correlation_id or body.get("external_correlation_id") or ""),
+                request_id=str(body.get("request_id") or ""),
+                message_id=str(message.message_id or ""),
+                queue=cfg.request_queue,
+                program=str(body.get("program") or ""),
+                database=str(body.get("db") or ""),
+                taxid=body.get("taxid") if isinstance(body.get("taxid"), int) else None,
+                is_inclusive=(
+                    body.get("is_inclusive") if isinstance(body.get("is_inclusive"), bool) else None
+                ),
+                action="outcome_unknown",
+                error_code=type(exc).__name__,
+            )
+            raise
         record_service_bus_request_event(
-            "enqueue_failed",
+            "enqueued",
             correlation_id=str(correlation_id or body.get("external_correlation_id") or ""),
             request_id=str(body.get("request_id") or ""),
             message_id=str(message.message_id or ""),
@@ -358,30 +488,16 @@ def send_request(
             database=str(body.get("db") or ""),
             taxid=body.get("taxid") if isinstance(body.get("taxid"), int) else None,
             is_inclusive=(
-                body.get("is_inclusive")
-                if isinstance(body.get("is_inclusive"), bool)
-                else None
+                body.get("is_inclusive") if isinstance(body.get("is_inclusive"), bool) else None
             ),
-            action="not_sent",
-            error_code=type(exc).__name__,
+            action="sent",
         )
-        raise
-    record_service_bus_request_event(
-        "enqueued",
-        correlation_id=str(correlation_id or body.get("external_correlation_id") or ""),
-        request_id=str(body.get("request_id") or ""),
-        message_id=str(message.message_id or ""),
-        queue=cfg.request_queue,
-        program=str(body.get("program") or ""),
-        database=str(body.get("db") or ""),
-        taxid=body.get("taxid") if isinstance(body.get("taxid"), int) else None,
-        is_inclusive=(
-            body.get("is_inclusive")
-            if isinstance(body.get("is_inclusive"), bool)
-            else None
-        ),
-        action="sent",
-    )
+    finally:
+        release_request_send(
+            cfg.request_queue,
+            token=send_token,
+            retain_seconds=(_REQUEST_SEND_VISIBILITY_GRACE_SECONDS if broker_attempted else 0),
+        )
     # Event-driven auto-start: the moment a request lands on the queue, kick an
     # immediate idle/auto-start evaluation so a Stopped cluster starts within
     # seconds instead of waiting out the next 5-min beat tick. Gated + best-effort
@@ -390,6 +506,8 @@ def send_request(
         from api.services.aks.queue_autostart import request_autostart_evaluation
 
         request_autostart_evaluation(reason="servicebus_request_enqueued")
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:  # never let the autostart trigger fail a send
         LOGGER.debug("autostart eval trigger import skipped: %s", type(exc).__name__)
     return message.message_id or ""
@@ -628,6 +746,8 @@ def delete_dead_letter_messages(
                         message,
                         max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     LOGGER.warning(
                         "DLQ delete lock renewal registration failed seq=%s",
@@ -640,6 +760,8 @@ def delete_dead_letter_messages(
                             _safe_abandon(receiver, message)
                             stats.failed += 1
                             continue
+                    except SoftTimeLimitExceeded:
+                        raise
                     except Exception:
                         LOGGER.warning(
                             "DLQ delete precondition failed seq=%s; keeping message",
@@ -727,6 +849,8 @@ def promote_dead_letter_messages(
                         message,
                         max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     LOGGER.warning(
                         "DLQ promote lock renewal registration failed seq=%s",
@@ -745,6 +869,8 @@ def promote_dead_letter_messages(
                 )
                 try:
                     sender.send_messages(requeued)
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     LOGGER.warning("DLQ promote re-send failed seq=%s; keeping in DLQ", seq)
                     _safe_abandon(receiver, message)
@@ -779,6 +905,8 @@ def _safe_drain_handler(
     """
     try:
         return handler(parsed)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.exception(
             "service bus drain handler raised; abandoning message seq=%s",
@@ -858,6 +986,7 @@ def drain_requests(
         if concurrency > 1
         else None
     )
+    soft_timed_out = False
     try:
         with (
             _client(cfg) as client,
@@ -906,6 +1035,8 @@ def drain_requests(
                             message,
                             max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
                         )
+                    except SoftTimeLimitExceeded:
+                        raise
                     except Exception as exc:
                         # Continue fail-safe: settlement remains authoritative
                         # and the broker redelivers if the lock expires. Keep
@@ -950,9 +1081,15 @@ def drain_requests(
                     break
                 if wrapped:
                     break
+    except SoftTimeLimitExceeded:
+        soft_timed_out = True
+        raise
     finally:
         if pool is not None:
-            pool.shutdown(wait=True)
+            pool.shutdown(
+                wait=not soft_timed_out,
+                cancel_futures=soft_timed_out,
+            )
     return stats
 
 
@@ -999,6 +1136,8 @@ def drain_dead_letter_messages(
                         message,
                         max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     LOGGER.warning(
                         "DLQ lock renewal registration failed seq=%s",
@@ -1053,6 +1192,7 @@ def _retry_message(parsed: ParsedMessage) -> ServiceBusMessage:
     if not first_enqueued_at:
         first_enqueued_at = _now().isoformat(timespec="seconds")
     correlation_id = str(parsed.correlation_id or parsed.message_id or "")
+    raw_body = parsed.raw_body or json.dumps(parsed.body, default=str)
     retry_message_id = "retry-" + hashlib.sha256(
         f"{correlation_id}:{next_attempt}".encode()
     ).hexdigest()[:40]
@@ -1069,7 +1209,7 @@ def _retry_message(parsed: ParsedMessage) -> ServiceBusMessage:
     if remaining_ttl is not None and remaining_ttl.total_seconds() <= 0:
         raise ValueError("scheduled retry would outlive the original request expiry")
     return ServiceBusMessage(
-        parsed.raw_body or json.dumps(parsed.body, default=str),
+        raw_body,
         content_type=parsed.content_type or "application/json",
         subject=parsed.subject or "blast.request",
         message_id=retry_message_id,
@@ -1111,6 +1251,8 @@ def _settle(
         else:
             receiver.abandon_message(message)
             stats.abandoned += 1
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         # Lock already lost/expired — the broker will redeliver. Count as
         # abandoned for observability; retry scheduling failures deliberately
@@ -1267,6 +1409,8 @@ def purge_dead_letter(
                 backed_up = False
                 try:
                     backed_up = backup(parsed)
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     LOGGER.exception("DLQ backup raised; keeping message")
                 if backed_up:
@@ -1327,6 +1471,8 @@ def purge_queue(
                         message,
                         max_lock_renewal_duration=_MAX_LOCK_RENEWAL_SECONDS,
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     LOGGER.warning(
                         "queue purge lock renewal registration failed seq=%s",
@@ -1335,6 +1481,8 @@ def purge_queue(
                     )
                 try:
                     ready = before_delete(parsed)
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     ready = False
                     LOGGER.warning("queue purge precondition failed", exc_info=True)

@@ -237,6 +237,8 @@ def _outbox_snapshot() -> dict[str, Any]:
             "oldest_age_seconds": None,
             "deferred": None,
             "poison": None,
+            "corrupt": None,
+            "timestamp_corrupt": None,
             **_flush_state(),
         }
 
@@ -245,6 +247,10 @@ def _outbox_snapshot() -> dict[str, Any]:
     oldest = sampled[0].created_at if sampled else ""
     deferred = sum(1 for item in sampled if item.next_attempt_at)
     poison = sum(1 for item in sampled if item.last_error_code == "completion_event_compacted")
+    corrupt = sum(1 for item in sampled if item.last_error_code == "outbox_payload_corrupt")
+    timestamp_corrupt = sum(
+        1 for item in sampled if item.last_error_code == "deferred_timestamp_corrupt"
+    )
     return {
         "available": True,
         "error": "",
@@ -253,6 +259,8 @@ def _outbox_snapshot() -> dict[str, Any]:
         "oldest_age_seconds": _age_seconds(oldest),
         "deferred": deferred,
         "poison": poison,
+        "corrupt": corrupt,
+        "timestamp_corrupt": timestamp_corrupt,
         **_flush_state(),
     }
 
@@ -333,6 +341,10 @@ def collect_service_bus_health(
         warnings.append("outbox_backlog_truncated")
     if _non_negative_int(outbox["poison"]) > 0:
         warnings.append("outbox_compacted_response_pending")
+    if _non_negative_int(outbox["corrupt"]) > 0:
+        warnings.append("outbox_corrupt_response_pending")
+    if _non_negative_int(outbox["timestamp_corrupt"]) > 0:
+        warnings.append("outbox_timestamp_corrupt_pending")
     if _non_negative_int(outbox["last_errors"]) > 0:
         warnings.append("outbox_flush_failed")
     if admission_available and admission_allowed is False and _non_negative_int(queue["active"]):

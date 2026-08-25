@@ -15,6 +15,8 @@ Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py``.
 
 from __future__ import annotations
 
+import ast
+import inspect
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -29,6 +31,8 @@ from billiard.exceptions import SoftTimeLimitExceeded
 from fastapi import HTTPException
 
 _REAL_OPENAPI_READY_FOR_TRANSITION_POLL = sb_tasks._openapi_ready_for_transition_poll
+_REAL_ACQUIRE_DRAIN_LOCK = sb_tasks._acquire_drain_lock
+_REAL_RELEASE_DRAIN_LOCK = sb_tasks._release_drain_lock
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +53,8 @@ def _file_backend(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         "_execution_admission_for_drain",
         lambda _cfg: {"allowed": True, "reason": "ready"},
     )
+    monkeypatch.setattr(service_bus, "acquire_config_io", lambda _cfg: "test-config-io")
+    monkeypatch.setattr(service_bus, "release_config_io", lambda *_args, **_kwargs: None)
 
 
 def _enabled_cfg() -> ServiceBusConfig:
@@ -63,6 +69,8 @@ def _enable(monkeypatch: pytest.MonkeyPatch) -> ServiceBusConfig:
     cfg = _enabled_cfg()
     monkeypatch.setattr(sb_tasks, "service_bus_enabled", lambda: True)
     monkeypatch.setattr(sb_tasks, "get_service_bus_config", lambda: cfg)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "test"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
     return cfg
 
 
@@ -125,15 +133,174 @@ def test_drain_proceeds_when_gate_on_and_cluster_ready(
 ) -> None:
     """R1: gate ON + plane ready → the readiness guard is transparent."""
     _enable(monkeypatch)
-    monkeypatch.setattr(
-        sb_tasks, "_execution_admission_for_drain", lambda _c: {"allowed": True}
-    )
+    monkeypatch.setattr(sb_tasks, "_execution_admission_for_drain", lambda _c: {"allowed": True})
     monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda q="": (True, "tok"))
     monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda t, q="": None)
     monkeypatch.setattr(service_bus, "drain_requests", lambda *a, **k: _DrainStats())
     out = sb_tasks.drain_and_resubmit()
     assert "skipped" not in out
     assert out["received"] == 0
+
+
+def test_drain_rechecks_routing_after_lease_before_receive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _enable(monkeypatch)
+    current = ServiceBusConfig(
+        **{
+            **stale.to_dict(),
+            "cluster_name": "aks-reconfigured",
+        }
+    )
+    monkeypatch.setattr(sb_tasks, "get_service_bus_config", lambda: current)
+    released: list[tuple[str | None, str]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_release_drain_lock",
+        lambda token, queue="": released.append((token, queue)),
+    )
+    received: list[object] = []
+    monkeypatch.setattr(
+        service_bus,
+        "drain_requests",
+        lambda *_args, **_kwargs: received.append(object()) or _DrainStats(),
+    )
+
+    result = sb_tasks._drain_once(
+        stale,
+        max_messages=1,
+        max_wait_seconds=1,
+        max_concurrency=1,
+    )
+
+    assert result == {"skipped": "routing_config_changed"}
+    assert received == []
+    assert released == [("test", stale.request_queue)]
+
+
+def test_fallback_drain_limits_one_batch_to_configured_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_DRAIN_MAX_MESSAGES", 50)
+    monkeypatch.setattr(sb_tasks, "_DRAIN_CONCURRENCY", 4)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _q="": (True, "tok"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
+    captured: dict[str, object] = {}
+
+    def _drain(*_args: object, **kwargs: object) -> _DrainStats:
+        captured.update(kwargs)
+        return _DrainStats()
+
+    monkeypatch.setattr(service_bus, "drain_requests", _drain)
+
+    sb_tasks.drain_and_resubmit()
+
+    assert captured["max_messages"] == 4
+    assert captured["max_concurrency"] == 4
+
+
+def test_fallback_drain_shrinks_submit_timeout_to_remaining_task_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", False)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _q="": (True, "tok"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
+    submit_kwargs: list[dict[str, object]] = []
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda _payload, **kwargs: submit_kwargs.append(kwargs) or {"job_id": "job-budget"},
+    )
+
+    def _drain(_cfg: object, handler: object, **kwargs: object) -> service_bus.DrainStats:
+        captured.update(kwargs)
+        assert callable(handler)
+        action = handler(_claim_msg("corr-budget"))
+        assert action == MessageAction.COMPLETE
+        return service_bus.DrainStats(received=1, completed=1)
+
+    monkeypatch.setattr(service_bus, "drain_requests", _drain)
+
+    result = sb_tasks._drain_once(
+        cfg,
+        max_messages=1,
+        max_wait_seconds=1,
+        max_concurrency=1,
+        submit_timeout_seconds=35,
+        submit_transport_retries=0,
+        pass_deadline=40,
+        clock=lambda: 20,
+    )
+
+    assert result["completed"] == 1
+    assert submit_kwargs[0]["timeout_seconds"] == 15
+    assert captured["max_pass_seconds"] == 15
+    assert captured["clock"]() == 20
+
+
+def test_fallback_drain_does_not_receive_after_task_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _q="": (True, "tok"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
+    received: list[object] = []
+    monkeypatch.setattr(
+        service_bus,
+        "drain_requests",
+        lambda *_args, **_kwargs: received.append(object()) or service_bus.DrainStats(),
+    )
+
+    result = sb_tasks._drain_once(
+        cfg,
+        max_messages=1,
+        max_wait_seconds=1,
+        max_concurrency=1,
+        submit_timeout_seconds=35,
+        submit_transport_retries=0,
+        pass_deadline=40,
+        clock=lambda: 36,
+    )
+
+    assert result == {"skipped": "task_budget_exhausted"}
+    assert received == []
+
+
+def test_drain_handler_releases_claim_when_pre_submit_work_consumes_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": True)
+    released: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "release_bridge",
+        lambda correlation_id: released.append(correlation_id),
+    )
+    submitted: list[object] = []
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda *_args, **_kwargs: submitted.append(object()) or {"job_id": "too-late"},
+    )
+
+    action = sb_tasks._drain_handler(
+        _claim_msg("corr-handler-budget"),
+        cfg,
+        submit_timeout_seconds=35,
+        submit_transport_retries=0,
+        submit_deadline=40,
+        clock=lambda: 36,
+    )
+
+    assert action == MessageAction.RETRY
+    assert released == ["corr-handler-budget"]
+    assert submitted == []
 
 
 def test_drain_cancels_recovered_start_token_before_opening_receiver(
@@ -203,13 +370,9 @@ def test_drain_continues_when_recovered_token_cleanup_fails(
         "api.services.aks.execution_admission.cancel_lifecycle_barrier",
         fail_cleanup,
     )
-    monkeypatch.setattr(
-        sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "tok")
-    )
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "tok"))
     monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
-    monkeypatch.setattr(
-        service_bus, "drain_requests", lambda *_args, **_kwargs: _DrainStats()
-    )
+    monkeypatch.setattr(service_bus, "drain_requests", lambda *_args, **_kwargs: _DrainStats())
 
     out = sb_tasks.drain_and_resubmit()
 
@@ -230,13 +393,9 @@ def test_normal_ready_drain_does_not_touch_lifecycle_state(
         "api.services.aks.execution_admission.cancel_lifecycle_barrier",
         lambda token, *, reason: cancelled.append(f"{token}:{reason}"),
     )
-    monkeypatch.setattr(
-        sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "tok")
-    )
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "tok"))
     monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
-    monkeypatch.setattr(
-        service_bus, "drain_requests", lambda *_args, **_kwargs: _DrainStats()
-    )
+    monkeypatch.setattr(service_bus, "drain_requests", lambda *_args, **_kwargs: _DrainStats())
 
     out = sb_tasks.drain_and_resubmit()
 
@@ -254,8 +413,7 @@ def test_drain_always_enforces_execution_admission(
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _c: probed.append(1)
-        or {"allowed": False, "reason": "database_warmup_in_progress"},
+        lambda _c: probed.append(1) or {"allowed": False, "reason": "database_warmup_in_progress"},
     )
     pulled: list[int] = []
     monkeypatch.setattr(
@@ -442,7 +600,15 @@ def test_drain_bridges_valid_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(external_blast, "submit_job", fake_submit)
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+    def fake_drain(
+        c,
+        handler,
+        *,
+        max_messages,
+        max_wait_seconds=5,
+        max_concurrency=1,
+        **_kwargs,
+    ):
         action = handler(
             _msg(
                 {
@@ -495,16 +661,14 @@ def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) 
         def append_history(self, job_id, event, payload=None):
             history.append((job_id, event, payload or {}))
 
-    monkeypatch.setattr(
-        "api.services.blast.external_jobs._sync_external_jobs_to_table", _fake_sync
-    )
+    monkeypatch.setattr("api.services.blast.external_jobs._sync_external_jobs_to_table", _fake_sync)
     monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FakeRepo())
     monkeypatch.setattr(external_blast, "submit_job", lambda p, **k: {"job_id": "openapi-9"})
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
 
     enq = datetime.datetime(2026, 6, 14, 0, 0, 0, tzinfo=datetime.UTC)
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1, **_kwargs):
         handler(
             _msg(
                 {
@@ -567,7 +731,7 @@ def test_drain_supersedes_send_time_placeholder(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(external_blast, "submit_job", lambda p, **k: {"job_id": "openapi-x"})
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1, **_kwargs):
         handler(
             _msg(
                 {
@@ -607,7 +771,7 @@ def test_drain_fails_placeholder_on_permanent_rejection(monkeypatch: pytest.Monk
 
     actions: list = []
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1, **_kwargs):
         actions.append(
             handler(
                 _msg(
@@ -642,7 +806,7 @@ def test_drain_fails_placeholder_on_malformed_message(monkeypatch: pytest.Monkey
         lambda cid, *, error_code: failed.append((cid, error_code)),
     )
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1, **_kwargs):
         # No query_fasta / db → _build_request_payload returns None.
         handler(_msg({"external_correlation_id": "corr-bad"}))
         from api.services.service_bus import DrainStats
@@ -692,6 +856,30 @@ def test_publish_transitions_records_trace(monkeypatch: pytest.MonkeyPatch) -> N
     assert 0 < float(poll_kwargs[0]["timeout_seconds"]) <= 5
 
 
+def test_publish_transitions_does_not_touch_outbox_when_config_io_is_fenced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        service_bus,
+        "acquire_config_io",
+        lambda _cfg: (_ for _ in ()).throw(
+            service_bus.ServiceBusUnavailable("configuration changed")
+        ),
+    )
+    flushed: list[object] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_flush_response_outbox",
+        lambda *_args, **_kwargs: flushed.append(object()),
+    )
+
+    result = sb_tasks.publish_transitions()
+
+    assert result == {"skipped": "config_fenced"}
+    assert flushed == []
+
+
 def test_publish_transitions_propagates_soft_time_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -729,8 +917,14 @@ def test_drain_dedups_duplicate_correlation(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     action = sb_tasks._drain_handler(
-        _msg({"program": "blastn", "db": "core_nt", "query_fasta": ">s\nACGT",
-              "external_correlation_id": "corr-dup"}),
+        _msg(
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">s\nACGT",
+                "external_correlation_id": "corr-dup",
+            }
+        ),
         _enabled_cfg(),
     )
     assert action == MessageAction.COMPLETE
@@ -812,15 +1006,11 @@ def test_same_correlation_different_execution_publishes_sanitized_conflict(
         "taxid": 884532,
     }
     assert (
-        sb_tasks._drain_handler(
-            _msg({**base, "is_inclusive": True, "request_id": "req-in"}), cfg
-        )
+        sb_tasks._drain_handler(_msg({**base, "is_inclusive": True, "request_id": "req-in"}), cfg)
         == MessageAction.COMPLETE
     )
     assert (
-        sb_tasks._drain_handler(
-            _msg({**base, "is_inclusive": False, "request_id": "req-ex"}), cfg
-        )
+        sb_tasks._drain_handler(_msg({**base, "is_inclusive": False, "request_id": "req-ex"}), cfg)
         == MessageAction.DEAD_LETTER
     )
 
@@ -894,9 +1084,7 @@ def test_conflict_publish_failure_dead_letters_after_durable_outbox(
     )
     conflicting = _msg({**first.body, "is_inclusive": False}, sequence_number=43)
     assert (
-        service_bus._safe_drain_handler(
-            lambda msg: sb_tasks._drain_handler(msg, cfg), conflicting
-        )
+        service_bus._safe_drain_handler(lambda msg: sb_tasks._drain_handler(msg, cfg), conflicting)
         == MessageAction.DEAD_LETTER
     )
 
@@ -921,6 +1109,108 @@ def test_terminal_response_outbox_failure_schedules_retry(
     )
 
     assert sb_tasks._drain_handler(malformed, cfg) == MessageAction.RETRY
+
+
+def test_outbox_flush_backs_up_and_removes_corrupt_payload_without_publishing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.service_bus_outbox import PendingResponse
+
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(
+        sb_tasks,
+        "list_due_responses",
+        lambda **_kwargs: [
+            PendingResponse(
+                event_id="corrupt-event",
+                event={},
+                created_at="2026-08-25T00:00:00+00:00",
+                last_error_code="outbox_payload_corrupt",
+            )
+        ],
+    )
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        service_bus,
+        "publish_event",
+        lambda _cfg, event: published.append(event),
+    )
+    backups: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "backup_dead_letter_message",
+        lambda record: backups.append(record) or True,
+    )
+    removed: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "mark_response_delivered",
+        lambda event_id: removed.append(event_id),
+    )
+
+    result = sb_tasks._flush_response_outbox(cfg)
+
+    assert result == {"scanned": 1, "delivered": 0, "errors": 1}
+    assert published == []
+    assert backups == [
+        {
+            "ts": backups[0]["ts"],
+            "source": "producer_response_outbox",
+            "event_id": "corrupt-event",
+            "created_at": "2026-08-25T00:00:00+00:00",
+            "failure_count": 0,
+            "error_code": "outbox_payload_corrupt",
+        }
+    ]
+    assert removed == ["corrupt-event"]
+
+
+def test_outbox_flush_continues_after_timestamp_repair_persist_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.service_bus_outbox import PendingResponse
+
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(
+        sb_tasks,
+        "list_due_responses",
+        lambda **_kwargs: [
+            PendingResponse(
+                event_id="bad-timestamp",
+                event={"event_id": "bad-timestamp", "status": "queued"},
+                created_at="2026-08-25T00:00:00+00:00",
+                next_attempt_at="not-a-timestamp",
+            ),
+            PendingResponse(
+                event_id="ready-event",
+                event={"event_id": "ready-event", "status": "running"},
+                created_at="2026-08-25T00:00:01+00:00",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "defer_response",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("table row failure")),
+    )
+    published: list[str] = []
+    monkeypatch.setattr(
+        service_bus,
+        "publish_event",
+        lambda _cfg, event: published.append(str(event["event_id"])),
+    )
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "mark_response_delivered",
+        lambda event_id: delivered.append(event_id),
+    )
+
+    result = sb_tasks._flush_response_outbox(cfg)
+
+    assert result == {"scanned": 2, "delivered": 1, "errors": 1}
+    assert published == ["ready-event"]
+    assert delivered == ["ready-event"]
 
 
 def test_request_fingerprint_is_canonical_and_excludes_tracking_fields() -> None:
@@ -1006,6 +1296,60 @@ def test_drain_schedules_retry_on_transient_5xx(monkeypatch: pytest.MonkeyPatch)
         _enabled_cfg(),
     )
     assert action == MessageAction.RETRY
+
+
+def test_drain_retries_openapi_401_instead_of_dead_lettering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+
+    def _unauthorized(_payload: dict[str, Any], **_kwargs: object) -> dict[str, Any]:
+        raise HTTPException(401, detail={"code": "openapi_http_401"})
+
+    monkeypatch.setattr(external_blast, "submit_job", _unauthorized)
+
+    assert (
+        sb_tasks._drain_handler(
+            _claim_msg("corr-401"),
+            _enabled_cfg(),
+        )
+        == MessageAction.RETRY
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(-1, 0), (0, 0), (99, 0), (100, 100), (599, 599), (600, 0), (999999, 0)],
+)
+def test_upstream_http_status_is_bounded(value: object, expected: int) -> None:
+    assert sb_tasks._normalise_http_status(value) == expected
+
+
+def test_fallback_disables_inline_token_resync_but_resident_keeps_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", False)
+    observed: list[object] = []
+
+    def _submit(_payload: dict[str, Any], **kwargs: object) -> dict[str, str]:
+        observed.append(kwargs.get("allow_token_resync"))
+        return {"job_id": f"job-{len(observed)}"}
+
+    monkeypatch.setattr(external_blast, "submit_job", _submit)
+
+    assert (
+        sb_tasks._drain_handler(
+            _claim_msg("corr-fallback-resync"),
+            cfg,
+            submit_allow_token_resync=False,
+        )
+        == MessageAction.COMPLETE
+    )
+    assert (
+        sb_tasks._drain_handler(_claim_msg("corr-resident-resync"), cfg) == MessageAction.COMPLETE
+    )
+    assert observed == [False, None]
 
 
 def test_drain_schedules_retry_on_retryable_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1169,6 +1513,9 @@ def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
             "priority": 70,
             "idempotency_key": "idem-1",
             "resource_profile": "standard",
+            "subscription_id": "sub-a",
+            "resource_group": "rg-a",
+            "cluster_name": "aks-a",
             "sharding_mode": "precise",
         }
     )
@@ -1192,7 +1539,65 @@ def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
     assert payload["is_inclusive"] is True
     assert payload["priority"] == 70
     assert payload["idempotency_key"] == "idem-1"
+    assert payload["subscription_id"] == "sub-a"
+    assert payload["resource_group"] == "rg-a"
+    assert payload["cluster_name"] == "aks-a"
     assert "searchsp" not in payload
+
+
+def test_drain_rejects_message_for_a_different_deployment_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = ServiceBusConfig(
+        enabled=True,
+        auth_mode="entra",
+        namespace_fqdn="sb-elb-dashboard-krc.servicebus.windows.net",
+        subscription_id="sub-current",
+        resource_group="rg-current",
+        cluster_name="aks-current",
+        storage_account="stcurrent",
+    )
+    submitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kwargs: submitted.append(payload) or {"job_id": "wrong-target"},
+    )
+    failures: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_publish_drain_failure_event",
+        lambda _cfg, **kwargs: failures.append(kwargs) or True,
+    )
+    failed_placeholders: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_fail_placeholder",
+        lambda correlation_id, *, error_code: failed_placeholders.append(
+            (correlation_id, error_code)
+        ),
+    )
+
+    message = _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">s\nACGT",
+            "external_correlation_id": "corr-target-mismatch",
+            "subscription_id": "sub-other",
+            "resource_group": "rg-current",
+            "cluster_name": "aks-current",
+            "storage_account": "stcurrent",
+        }
+    )
+
+    action = sb_tasks._drain_handler(message, cfg)
+
+    assert action == MessageAction.DEAD_LETTER
+    assert submitted == []
+    assert failures[0]["error_code"] == "servicebus_target_mismatch"
+    assert failed_placeholders == [("corr-target-mismatch", "servicebus_target_mismatch")]
+    assert message.settlement_reason == "servicebus_target_mismatch"
 
 
 def test_message_payload_accepts_wf3_gene_name_with_spaces() -> None:
@@ -1295,14 +1700,10 @@ def test_transition_event_carries_idempotency_keys() -> None:
 
 def test_extract_request_id_body_then_props_then_missing() -> None:
     # Body wins.
-    assert (
-        sb_tasks._extract_request_id(_msg({"request_id": "  rid-body  "})) == "rid-body"
-    )
+    assert sb_tasks._extract_request_id(_msg({"request_id": "  rid-body  "})) == "rid-body"
     # Falls back to the message application property.
     assert (
-        sb_tasks._extract_request_id(
-            _msg({}, application_properties={"request_id": "rid-prop"})
-        )
+        sb_tasks._extract_request_id(_msg({}, application_properties={"request_id": "rid-prop"}))
         == "rid-prop"
     )
     # Absent → empty string.
@@ -1345,9 +1746,7 @@ def test_error_message_for_event_sanitises_and_bounds() -> None:
     job = {"error": {"code": "x", "message": "  boom  "}}
     assert sb_tasks._error_message_for_event(job) == "boom"
     # falls back to detail when message absent.
-    assert (
-        sb_tasks._error_message_for_event({"error": {"detail": "fallback"}}) == "fallback"
-    )
+    assert sb_tasks._error_message_for_event({"error": {"detail": "fallback"}}) == "fallback"
     # no error block → empty string.
     assert sb_tasks._error_message_for_event({"status": "completed"}) == ""
     # over-long detail is capped.
@@ -1442,7 +1841,7 @@ def test_drain_publishes_failure_event_on_permanent_rejection(
 
     monkeypatch.setattr(external_blast, "submit_job", _reject)
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1, **_kwargs):
         handler(
             _msg(
                 {
@@ -1483,7 +1882,7 @@ def test_drain_publishes_failure_event_on_malformed_message(
     events: list[dict] = []
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
 
-    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1):
+    def fake_drain(c, handler, *, max_messages, max_wait_seconds=5, max_concurrency=1, **_kwargs):
         handler(_msg({"external_correlation_id": "corr-bad"}))
         from api.services.service_bus import DrainStats
 
@@ -1578,9 +1977,7 @@ def test_result_files_for_event_signs_download_urls_when_enabled(
         "/api/v1/elastic-blast/jobs/abc123def456/files/merged_results.out.gz"
     )
     # The embedded token verifies against exactly this (job_id, file_id).
-    assert download_token.verify_download_token(
-        query, "abc123def456", "merged_results.out.gz"
-    )
+    assert download_token.verify_download_token(query, "abc123def456", "merged_results.out.gz")
     assert not download_token.verify_download_token(query, "abc123def456", "other.gz")
     # Still never a Storage SAS (charter §9).
     assert "blob.core.windows.net" not in first["download_url"]
@@ -1592,9 +1989,7 @@ def test_result_files_for_event_omits_url_when_base_unresolved(
 ) -> None:
     from api.services import control_plane_url
 
-    monkeypatch.setattr(
-        control_plane_url, "resolve_control_plane_url", lambda: ("", "none")
-    )
+    monkeypatch.setattr(control_plane_url, "resolve_control_plane_url", lambda: ("", "none"))
     files = sb_tasks._result_files_for_event(_job_with_files(), "op-8")
     assert len(files) == 2
     # No public base → metadata still emitted, download_url omitted so the
@@ -1640,9 +2035,7 @@ def test_publish_transitions_succeeded_attaches_download_urls(
     from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
 
     upsert_bridge(
-        BridgeRecord(
-            correlation_id="corr-dl", openapi_job_id="op-dl", last_status="running"
-        )
+        BridgeRecord(correlation_id="corr-dl", openapi_job_id="op-dl", last_status="running")
     )
     events: list[dict] = []
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
@@ -1673,9 +2066,7 @@ def test_publish_transitions_failed_enriches_coarse_error(
     from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
 
     upsert_bridge(
-        BridgeRecord(
-            correlation_id="corr-ef", openapi_job_id="op-ef", last_status="running"
-        )
+        BridgeRecord(correlation_id="corr-ef", openapi_job_id="op-ef", last_status="running")
     )
     events: list[dict] = []
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: events.append(e))
@@ -1804,9 +2195,7 @@ def test_publish_transitions_marks_terminal_done(monkeypatch: pytest.MonkeyPatch
         BridgeRecord(correlation_id="corr-3", openapi_job_id="op-3", last_status="running")
     )
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
-    monkeypatch.setattr(
-        external_blast, "get_job", lambda jid, **k: {"status": "completed"}
-    )
+    monkeypatch.setattr(external_blast, "get_job", lambda jid, **k: {"status": "completed"})
 
     out = sb_tasks.publish_transitions()
     assert out["finished"] == 1
@@ -1828,9 +2217,7 @@ def test_publish_transitions_idle_skips_openapi_resolution(
     """
     _enable(monkeypatch)
     calls: list[int] = []
-    monkeypatch.setattr(
-        sb_tasks, "_openapi_kwargs", lambda cfg: calls.append(1) or {}
-    )
+    monkeypatch.setattr(sb_tasks, "_openapi_kwargs", lambda cfg: calls.append(1) or {})
 
     out = sb_tasks.publish_transitions()
 
@@ -1853,6 +2240,34 @@ def test_publish_transitions_reads_pending_correlations_once(
 
     assert calls == [1]
     assert out == {"scanned": 0, "published": 0, "finished": 0, "errors": 0}
+
+
+def test_publish_transitions_stops_after_outbox_consumes_task_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    ticks = iter((0.0, 41.0))
+    monkeypatch.setattr(sb_tasks.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        sb_tasks,
+        "_flush_response_outbox",
+        lambda _cfg, **_kwargs: {"scanned": 1, "delivered": 1, "errors": 0},
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "pending_response_correlations",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("ordering query must not start after deadline")
+        ),
+    )
+
+    result = sb_tasks.publish_transitions()
+
+    assert result == {
+        "skipped": "publish_budget_exhausted",
+        "published": 1,
+        "errors": 0,
+    }
 
 
 def test_transition_publish_batch_default_is_bounded_for_live_deadline() -> None:
@@ -1890,6 +2305,57 @@ def test_bridge_without_marker_recovers_queued_ack_before_status_poll(
     assert sb_tasks._publish_one_bridge(cfg, rec, {}) == (0, 0)
     assert events and events[0]["status"] == "queued"
     assert markers == [("corr-queued-recovery", "queued")]
+
+
+def test_expired_unconfirmed_bridge_defers_when_terminal_claim_is_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    rec = BridgeRecord(correlation_id="corr-terminal-race", created_at="2020-01-01T00:00:00Z")
+    monkeypatch.setattr(sb_tasks, "_bridge_expired", lambda _created_at: True)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda *_args: False)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("lost terminal claim must not stage a failure")
+        ),
+    )
+
+    assert sb_tasks._publish_one_bridge(cfg, rec, {}) == (0, 0)
+
+
+def test_expired_unconfirmed_bridge_terminalizes_only_after_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    rec = BridgeRecord(correlation_id="corr-terminal-owner", created_at="2020-01-01T00:00:00Z")
+    monkeypatch.setattr(sb_tasks, "_bridge_expired", lambda _created_at: True)
+    claims: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "claim_bridge",
+        lambda correlation_id, request_id, fingerprint: (
+            claims.append((correlation_id, request_id, fingerprint)) or True
+        ),
+    )
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, event: events.append(event) or (True, False),
+    )
+    completed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "mark_done",
+        lambda correlation_id, status: completed.append((correlation_id, status)),
+    )
+
+    assert sb_tasks._publish_one_bridge(cfg, rec, {}) == (0, 1)
+    assert claims == [("corr-terminal-owner", "", "")]
+    assert events[0]["error_code"] == "bridge_unconfirmed_timeout"
+    assert completed == [("corr-terminal-owner", "failed")]
 
 
 def test_bridge_waits_for_older_outbox_response_before_status_poll(
@@ -1964,9 +2430,7 @@ def test_publish_transitions_finishes_lifecycle_interrupted_bridge_when_offline(
     monkeypatch.setattr(sb_tasks, "_LIFECYCLE_INTERRUPTION_SECONDS", 0)
     monkeypatch.setattr(
         "api.services.aks.execution_admission.lifecycle_barrier_interrupts_job",
-        lambda **_kwargs: SimpleNamespace(
-            action="stop", created_at="2025-01-01T01:00:00Z"
-        ),
+        lambda **_kwargs: SimpleNamespace(action="stop", created_at="2025-01-01T01:00:00Z"),
     )
     events: list[dict] = []
     monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
@@ -1996,9 +2460,7 @@ def test_publish_transition_finishes_scaled_job_after_recovered_openapi_404(
     )
     monkeypatch.setattr(
         "api.services.aks.execution_admission.lifecycle_barrier_interrupts_job",
-        lambda **_kwargs: SimpleNamespace(
-            action="scale", created_at="2025-01-01T01:00:00Z"
-        ),
+        lambda **_kwargs: SimpleNamespace(action="scale", created_at="2025-01-01T01:00:00Z"),
     )
     events: list[dict] = []
     monkeypatch.setattr(service_bus, "publish_event", lambda _cfg, event: events.append(event))
@@ -2023,9 +2485,7 @@ def test_publish_transition_follows_local_lifecycle_interrupted_state(
     monkeypatch.setattr(sb_tasks, "_LIFECYCLE_INTERRUPTION_SECONDS", 0)
     monkeypatch.setattr(
         "api.services.aks.execution_admission.lifecycle_barrier_interrupts_job",
-        lambda **_kwargs: SimpleNamespace(
-            action="scale", created_at="2025-01-01T01:00:00Z"
-        ),
+        lambda **_kwargs: SimpleNamespace(action="scale", created_at="2025-01-01T01:00:00Z"),
     )
     monkeypatch.setattr(
         "api.services.state_repo.get_state_repo",
@@ -2183,8 +2643,11 @@ def test_persist_result_manifest_writes_column(monkeypatch: pytest.MonkeyPatch) 
     job = {
         "result": {
             "files": [
-                {"file_id": "result-001", "filename": "batch_000.out.gz",
-                 "blob_path": "job-x/batch_000.out.gz"},
+                {
+                    "file_id": "result-001",
+                    "filename": "batch_000.out.gz",
+                    "blob_path": "job-x/batch_000.out.gz",
+                },
                 {"file_id": "result-002", "filename": "batch_001.out.gz"},  # no blob_path → skipped
             ]
         }
@@ -2269,6 +2732,61 @@ def test_atomic_claim_releases_on_submit_failure(
     assert released == ["corr-z"]
 
 
+def test_atomic_claim_releases_when_submit_response_has_no_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": True)
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda _payload, **_kwargs: {"status": "queued"},
+    )
+    released: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "release_bridge",
+        lambda correlation_id: released.append(correlation_id),
+    )
+
+    action = sb_tasks._drain_handler(_claim_msg("corr-missing-job-id"), cfg)
+
+    assert action == MessageAction.RETRY
+    assert released == ["corr-missing-job-id"]
+
+
+def test_atomic_claim_releases_when_bridge_confirmation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": True)
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda _payload, **_kwargs: {"job_id": "job-created"},
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "upsert_bridge",
+        lambda _record: (_ for _ in ()).throw(RuntimeError("table unavailable")),
+    )
+    released: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "release_bridge",
+        lambda correlation_id: released.append(correlation_id),
+    )
+
+    action = sb_tasks._drain_handler(_claim_msg("corr-confirm-fail"), cfg)
+
+    assert action == MessageAction.RETRY
+    assert released == ["corr-confirm-fail"]
+
+
 def test_gate_off_keeps_legacy_any_row_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Gate OFF: ANY existing bridge row (even unconfirmed) dedups, and claim_bridge
     is never called — byte-for-byte the legacy behaviour."""
@@ -2277,9 +2795,7 @@ def test_gate_off_keeps_legacy_any_row_dedup(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(sb_tasks, "get_bridge", lambda c: BridgeRecord(correlation_id=c))
     monkeypatch.setattr(service_bus, "publish_event", lambda *_a, **_k: None)
     claimed: list[str] = []
-    monkeypatch.setattr(
-        sb_tasks, "claim_bridge", lambda c, _r="", _f="": claimed.append(c) or True
-    )
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda c, _r="", _f="": claimed.append(c) or True)
     assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.COMPLETE
     assert claimed == []
 
@@ -2298,9 +2814,7 @@ def test_gate_on_confirmed_row_dedups_without_claim(
     )
     monkeypatch.setattr(service_bus, "publish_event", lambda *_a, **_k: None)
     claimed: list[str] = []
-    monkeypatch.setattr(
-        sb_tasks, "claim_bridge", lambda c, _r="", _f="": claimed.append(c) or True
-    )
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda c, _r="", _f="": claimed.append(c) or True)
     assert sb_tasks._drain_handler(_claim_msg(), cfg) == MessageAction.COMPLETE
     assert claimed == []
 
@@ -2377,6 +2891,138 @@ def test_claim_soft_time_limit_is_never_converted_into_a_defer(
         sb_tasks._drain_handler(_claim_msg(), cfg)
 
 
+def test_drain_handler_rechecks_routing_after_claim_before_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    changed = ServiceBusConfig.from_dict({**cfg.to_dict(), "cluster_name": "aks-reconfigured"})
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda *_args: True)
+    monkeypatch.setattr(sb_tasks, "get_service_bus_config", lambda: changed)
+    released: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "release_bridge",
+        lambda correlation_id: released.append(correlation_id),
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale routing must stop before submit")
+        ),
+    )
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "record_service_bus_request_event",
+        lambda stage, **kwargs: events.append({"stage": stage, **kwargs}),
+    )
+
+    action = sb_tasks._drain_handler(_claim_msg("corr-routing-recheck"), cfg)
+
+    assert action == MessageAction.RETRY
+    assert released == ["corr-routing-recheck"]
+    assert [event["error_code"] for event in events if event["stage"] == "deferred"] == [
+        "routing_config_changed"
+    ]
+
+
+def test_drain_soft_timeout_keeps_lease_until_ttl_backstop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "lease"))
+    released: list[tuple[str | None, str]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_release_drain_lock",
+        lambda token, queue="": released.append((token, queue)),
+    )
+    monkeypatch.setattr(
+        service_bus,
+        "drain_requests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        sb_tasks._drain_once(
+            cfg,
+            max_messages=1,
+            max_wait_seconds=1,
+            max_concurrency=1,
+        )
+
+    assert released == []
+
+
+def test_submit_soft_time_limit_releases_claim_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", True)
+    monkeypatch.setattr(sb_tasks, "get_bridge", lambda _c: None)
+    monkeypatch.setattr(sb_tasks, "claim_bridge", lambda _c, _r="", _f="": True)
+    released: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "release_bridge",
+        lambda correlation_id: released.append(correlation_id),
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        sb_tasks._drain_handler(_claim_msg("corr-submit-timeout"), cfg)
+
+    assert released == ["corr-submit-timeout"]
+
+
+def test_servicebus_submit_budget_fits_inside_task_soft_limit() -> None:
+    assert sb_tasks._SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS <= 35
+    assert (
+        sb_tasks._SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS + 5
+        < sb_tasks.drain_and_resubmit.soft_time_limit
+    )
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "nan", "inf"])
+def test_servicebus_submit_budget_invalid_env_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS", value)
+
+    assert sb_tasks._servicebus_task_submit_timeout_from_env() == 35.0
+
+
+def test_servicebus_task_broad_catches_propagate_soft_deadline() -> None:
+    for module in (sb_tasks, sb_tasks.drain_coordination):
+        tree = ast.parse(inspect.getsource(module))
+        missing: list[int] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            caught_names: set[str] = set()
+            for handler in node.handlers:
+                if isinstance(handler.type, ast.Name):
+                    caught_names.add(handler.type.id)
+                elif isinstance(handler.type, ast.Tuple):
+                    caught_names.update(
+                        item.id for item in handler.type.elts if isinstance(item, ast.Name)
+                    )
+            if "Exception" in caught_names and "SoftTimeLimitExceeded" not in caught_names:
+                missing.append(node.lineno)
+
+        assert missing == [], (
+            f"{module.__name__} broad catches swallow SoftTimeLimitExceeded at lines {missing}"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Single-flight drain lease (SERVICEBUS_DRAIN_SINGLEFLIGHT). Default ON after
 # soak; explicit OFF never touches Redis. Redis errors remain fail-open.
@@ -2389,12 +3035,14 @@ class _FakeLockRedis:
         self.set_keys: list[str] = []
         self.eval_keys: list[object] = []
         self.evaled: list[tuple] = []
+        self.eval_calls: list[tuple[str, int, tuple[object, ...]]] = []
 
     def set(self, key: str, value: str, nx: bool = False, ex: int | None = None) -> object:
         self.set_keys.append(key)
         return self._set_result
 
     def eval(self, script: str, numkeys: int, *args: object) -> int:
+        self.eval_calls.append((script, numkeys, args))
         self.evaled.append(args)
         self.eval_keys.append(args[0])  # KEYS[1]
         if numkeys == 2:
@@ -2409,25 +3057,25 @@ def _stats0() -> object:
     return service_bus.DrainStats()
 
 
-def test_singleflight_off_never_touches_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_singleflight_off_override_cannot_disable_mandatory_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", _REAL_ACQUIRE_DRAIN_LOCK)
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", _REAL_RELEASE_DRAIN_LOCK)
     monkeypatch.setattr(sb_tasks, "_DRAIN_SINGLEFLIGHT", False)
-    drained: list[int] = []
-    monkeypatch.setattr(
-        sb_tasks.service_bus, "drain_requests", lambda *a, **k: drained.append(1) or _stats0()
-    )
-
-    def _explode(**_k: object) -> object:
-        raise AssertionError("redis must not be touched when single-flight is off")
-
-    monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", _explode)
+    fake = _FakeLockRedis(set_result=True)
+    monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", lambda **_k: fake)
+    monkeypatch.setattr(sb_tasks.service_bus, "drain_requests", lambda *a, **k: _stats0())
     out = sb_tasks.drain_and_resubmit()
     assert "skipped" not in out
-    assert drained == [1]
+    assert len(fake.evaled) == 2
 
 
 def test_singleflight_acquires_then_releases(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", _REAL_ACQUIRE_DRAIN_LOCK)
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", _REAL_RELEASE_DRAIN_LOCK)
     monkeypatch.setattr(sb_tasks, "_DRAIN_SINGLEFLIGHT", True)
     fake = _FakeLockRedis(set_result=True)
     monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", lambda **_k: fake)
@@ -2442,21 +3090,23 @@ def test_singleflight_acquires_then_releases(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_singleflight_contended_tick_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", _REAL_ACQUIRE_DRAIN_LOCK)
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", _REAL_RELEASE_DRAIN_LOCK)
     monkeypatch.setattr(sb_tasks, "_DRAIN_SINGLEFLIGHT", True)
     fake = _FakeLockRedis(set_result=None)  # NX failed → lease already held
     monkeypatch.setattr("api.services.redis_clients.get_broker_redis_client", lambda **_k: fake)
     drained: list[int] = []
-    monkeypatch.setattr(
-        sb_tasks.service_bus, "drain_requests", lambda *a, **k: drained.append(1)
-    )
+    monkeypatch.setattr(sb_tasks.service_bus, "drain_requests", lambda *a, **k: drained.append(1))
     out = sb_tasks.drain_and_resubmit()
     assert out["skipped"] == "locked"
     assert drained == []  # the held drain covers the backlog; we did not race it
     assert len(fake.evaled) == 1  # atomic acquire attempt only; no release
 
 
-def test_singleflight_redis_error_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_singleflight_redis_error_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", _REAL_ACQUIRE_DRAIN_LOCK)
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", _REAL_RELEASE_DRAIN_LOCK)
     monkeypatch.setattr(sb_tasks, "_DRAIN_SINGLEFLIGHT", True)
 
     def _boom(**_k: object) -> object:
@@ -2468,8 +3118,8 @@ def test_singleflight_redis_error_fails_open(monkeypatch: pytest.MonkeyPatch) ->
         sb_tasks.service_bus, "drain_requests", lambda *a, **k: drained.append(1) or _stats0()
     )
     out = sb_tasks.drain_and_resubmit()
-    assert "skipped" not in out  # fail-open: a broker blip never stalls the drain
-    assert drained == [1]
+    assert out["skipped"] == "locked"
+    assert drained == []
 
 
 def test_drain_lock_key_is_queue_scoped() -> None:
@@ -2478,11 +3128,112 @@ def test_drain_lock_key_is_queue_scoped() -> None:
     assert sb_tasks._drain_lock_key("q1").endswith(":q1")
 
 
+def test_internal_send_lease_is_queue_scoped_and_released() -> None:
+    coordination = sb_tasks.drain_coordination
+    fake = _FakeLockRedis(set_result=True)
+
+    def factory(**_kwargs: object) -> _FakeLockRedis:
+        return fake
+
+    acquired, token = coordination.acquire_request_send(
+        "requests",
+        redis_factory=factory,
+    )
+    assert acquired is True
+    assert token
+    coordination.release_request_send(
+        "requests",
+        token=token,
+        redis_factory=factory,
+    )
+
+    acquire = fake.eval_calls[0]
+    assert acquire[1] == 2
+    assert acquire[2][0].endswith(":requests")
+    assert acquire[2][1].endswith(":requests")
+    release = fake.eval_calls[1]
+    assert release[1] == 1
+    assert release[2][0] == acquire[2][1]
+    assert release[2][1] == acquire[2][2]
+    assert release[2][2] == 0
+    assert "zadd" in coordination.SEND_ACQUIRE_LUA
+    assert "zremrangebyscore" in coordination.SEND_ACQUIRE_LUA
+    assert "zrem" in coordination.SEND_RELEASE_LUA
+    assert "if ttl < retain" in coordination.SEND_RELEASE_LUA
+
+
+def test_internal_send_lease_redis_error_fails_closed() -> None:
+    coordination = sb_tasks.drain_coordination
+
+    def unavailable(**_kwargs: object) -> object:
+        raise RuntimeError("redis unavailable")
+
+    with pytest.raises(coordination.RequestSendCoordinationUnavailable):
+        coordination.acquire_request_send(
+            "requests",
+            redis_factory=unavailable,
+        )
+
+
+def test_reconfiguration_fence_checks_drain_and_internal_sends_atomically() -> None:
+    coordination = sb_tasks.drain_coordination
+    fake = _FakeLockRedis(set_result=True)
+
+    acquired, token = coordination.acquire_drain_stop_intent(
+        "requests",
+        lock_base_key="drain-lock",
+        stop_intent_base_key="stop-intent",
+        stop_intent_ttl=300,
+        logger=sb_tasks.LOGGER,
+        redis_factory=lambda **_kwargs: fake,
+    )
+
+    assert acquired is True
+    assert token
+    call = fake.eval_calls[0]
+    assert call[1] == 3
+    assert call[2][0] == "drain-lock:requests"
+    assert call[2][1] == "stop-intent:requests"
+    assert call[2][2].endswith(":requests")
+    assert "zremrangebyscore" in coordination.STOP_INTENT_ACQUIRE_LUA
+    assert "zcard" in coordination.STOP_INTENT_ACQUIRE_LUA
+
+
+def test_config_mutation_mutex_is_token_owned() -> None:
+    coordination = sb_tasks.drain_coordination
+    fake = _FakeLockRedis(set_result=True)
+
+    acquired, token = coordination.acquire_config_mutation(
+        redis_factory=lambda **_kwargs: fake,
+    )
+    coordination.release_config_mutation(
+        token,
+        redis_factory=lambda **_kwargs: fake,
+    )
+
+    assert acquired is True
+    assert token
+    assert fake.set_keys == [coordination.DEFAULT_CONFIG_MUTATION_KEY]
+    release = fake.eval_calls[-1]
+    assert release[1] == 1
+    assert release[2] == (coordination.DEFAULT_CONFIG_MUTATION_KEY, token)
+    assert (
+        coordination.DEFAULT_CONFIG_MUTATION_TTL_SECONDS >= coordination.MIN_DRAIN_LOCK_TTL_SECONDS
+    )
+    assert sb_tasks._DRAIN_STOP_INTENT_TTL_SECONDS >= coordination.MIN_DRAIN_LOCK_TTL_SECONDS
+
+
 def test_drain_lock_ttl_env_invalid_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "nope")
-    assert sb_tasks._drain_lock_ttl_from_env() == 900
+    assert (
+        sb_tasks._drain_lock_ttl_from_env()
+        == sb_tasks.drain_coordination.MIN_DRAIN_LOCK_TTL_SECONDS
+    )
 
 
 def test_drain_lock_ttl_env_is_floored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERVICEBUS_DRAIN_LOCK_TTL_SECONDS", "3")
-    assert sb_tasks._drain_lock_ttl_from_env() == 10
+    assert (
+        sb_tasks._drain_lock_ttl_from_env()
+        == sb_tasks.drain_coordination.MIN_DRAIN_LOCK_TTL_SECONDS
+    )

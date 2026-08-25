@@ -87,7 +87,7 @@ def test_stale_unconfirmed_reservation_is_stealable(
 
 def test_fresh_reservation_is_not_stolen_under_default_threshold() -> None:
     assert t.claim_bridge("corr-f") is True
-    # Default threshold (>=30s) → a just-made reservation is NOT stale, so a
+    # Default threshold (>=900s) → a just-made reservation is NOT stale, so a
     # racing claim still loses (no accidental double submit).
     assert t.claim_bridge("corr-f") is False
 
@@ -96,8 +96,8 @@ def test_claim_stale_seconds_env_invalid_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SERVICEBUS_CLAIM_STALE_SECONDS", "not-a-number")
-    # A bad override must not crash import; it falls back to the 180s default.
-    assert t._claim_stale_seconds_from_env() == 180
+    # A bad override must not crash import or weaken the live-submit floor.
+    assert t._claim_stale_seconds_from_env() == t._CLAIM_STALE_FLOOR_SECONDS
 
 
 def test_claim_stale_seconds_env_is_floored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,9 +252,7 @@ class _FakeTable:
 
 @pytest.fixture
 def _fake_table(monkeypatch: pytest.MonkeyPatch):
-    def _install(
-        entity: TableEntity, *, delete_error: Exception | None = None
-    ) -> _FakeTable:
+    def _install(entity: TableEntity, *, delete_error: Exception | None = None) -> _FakeTable:
         table = _FakeTable(entity, delete_error=delete_error)
 
         @contextmanager
@@ -315,7 +313,7 @@ def test_entity_etag_prefers_metadata_over_mapping_key() -> None:
     # A deserialized entity never carries the odata key in the mapping itself.
     assert "odata.etag" not in dict(entity)
     # Plain-dict fallback stays supported for fixtures / non-SDK callers.
-    assert t._entity_etag({"odata.etag": "W/\"x\""}) == "W/\"x\""
+    assert t._entity_etag({"odata.etag": 'W/"x"'}) == 'W/"x"'
     assert t._entity_etag({}) == ""
 
 
@@ -366,7 +364,13 @@ def test_stale_claim_threshold_outlives_a_slow_sibling_submit() -> None:
     """
     from api.services import external_blast
 
-    assert t._CLAIM_STALE_FLOOR_SECONDS > external_blast._DEFAULT_TIMEOUT_SECONDS
+    submit_envelope = (
+        external_blast._DEFAULT_TIMEOUT_SECONDS
+        * (1 + external_blast._SUBMIT_MAX_TRANSPORT_RETRIES)
+        * 2  # each transport attempt may perform one token-resync request
+        + sum(external_blast._SUBMIT_RETRY_BACKOFF_SECONDS)
+    )
+    assert t._CLAIM_STALE_FLOOR_SECONDS > submit_envelope
     assert t._claim_stale_seconds_from_env() >= t._CLAIM_STALE_FLOOR_SECONDS
 
 
@@ -376,9 +380,7 @@ def test_release_table_propagates_celery_soft_time_limit(_fake_table) -> None:
     Repo-wide contract: SoftTimeLimitExceeded means the task budget is spent, so
     swallowing it here would let the drain keep working past its limit.
     """
-    _fake_table(
-        _table_entity("corr-soft"), delete_error=SoftTimeLimitExceeded()
-    )
+    _fake_table(_table_entity("corr-soft"), delete_error=SoftTimeLimitExceeded())
 
     with pytest.raises(SoftTimeLimitExceeded):
         t._release_table("corr-soft")

@@ -23,6 +23,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
+from billiard.exceptions import SoftTimeLimitExceeded
 from fastapi import HTTPException
 
 from api.services.sanitise import sanitise
@@ -48,9 +49,7 @@ _READY_TIMEOUT_SECONDS = float(os.environ.get("OPENAPI_READY_TIMEOUT_SECONDS", "
 # real state change (AKS just started / stopped). Set TTL=0 to disable.
 _READY_CACHE_TTL_SECONDS = float(os.environ.get("OPENAPI_READY_CACHE_TTL_SECONDS", "5.0"))
 _READY_CACHE_LOCK = threading.Lock()
-_READY_CACHE: dict[
-    tuple[str, str], tuple[float, dict[str, Any] | HTTPException]
-] = {}
+_READY_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any] | HTTPException]] = {}
 # Per-key in-flight serialisation. When the cache is cold and N workers /
 # concurrent requests miss simultaneously, only the first one fires the
 # upstream HTTP probe; the rest wait on the same Event and then read the
@@ -62,9 +61,7 @@ _READY_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
 # and firing its own request. Tuned slightly above the read timeout so the
 # leader always wins in the happy path; a fall-through to a parallel call
 # is acceptable degradation if the leader stalls.
-_READY_INFLIGHT_WAIT_SECONDS = float(
-    os.environ.get("OPENAPI_READY_INFLIGHT_WAIT_SECONDS", "6.0")
-)
+_READY_INFLIGHT_WAIT_SECONDS = float(os.environ.get("OPENAPI_READY_INFLIGHT_WAIT_SECONDS", "6.0"))
 # Maximum number of "wait on a sibling leader, then re-check the cache"
 # rounds a non-leader caller will perform before giving up and firing its
 # own upstream probe. Capped (critique #20.12) so that a pathological
@@ -73,9 +70,7 @@ _READY_INFLIGHT_WAIT_SECONDS = float(
 # wait = ``_READY_INFLIGHT_MAX_WAIT_ROUNDS * _READY_INFLIGHT_WAIT_SECONDS``.
 # Keep this small \u2014 the cache is the optimisation target, not waiting
 # itself.
-_READY_INFLIGHT_MAX_WAIT_ROUNDS = int(
-    os.environ.get("OPENAPI_READY_INFLIGHT_MAX_WAIT_ROUNDS", "2")
-)
+_READY_INFLIGHT_MAX_WAIT_ROUNDS = int(os.environ.get("OPENAPI_READY_INFLIGHT_MAX_WAIT_ROUNDS", "2"))
 # Token-resync coalescing (see ``_resync_token_after_401``). A redeploy
 # invalidates the cached token for every in-flight call at once; the lock
 # serialises the recovery and the short TTL lets the queued callers reuse the
@@ -224,6 +219,8 @@ def _resync_token_after_401() -> str:
             from api.services.openapi.token import resync_openapi_api_token_from_cluster
 
             token = resync_openapi_api_token_from_cluster() or ""
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.warning("openapi 401 token resync raised %s", type(exc).__name__)
             token = ""
@@ -247,7 +244,6 @@ def reset_token_resync_cache() -> None:
         _RESYNC_RESULT = (0.0, "")
 
 
-
 def _request_with_token_resync(
     *,
     base_url: str,
@@ -258,6 +254,7 @@ def _request_with_token_resync(
     cluster_name: str,
     send: Callable[[httpx.Client], httpx.Response],
     label: str,
+    allow_token_resync: bool = True,
 ) -> httpx.Response:
     """Send a sibling request, self-healing a stale-token 401 exactly once.
 
@@ -276,6 +273,8 @@ def _request_with_token_resync(
     recovered token. Never resyncs more than once, so a pod that genuinely
     rejects a freshly read token cannot loop. Transport errors raised by
     ``send`` propagate to the caller unchanged (the caller owns retry/backoff).
+    ``allow_token_resync=False`` keeps a deadline-bounded caller to one HTTP
+    attempt; the caller can then retry the 401 through its own durable queue.
     """
 
     def _client(token_override: str | None) -> httpx.Client:
@@ -292,7 +291,7 @@ def _request_with_token_resync(
 
     with _client(api_token) as client:
         resp = send(client)
-    if resp.status_code != 401:
+    if resp.status_code != 401 or not allow_token_resync:
         return resp
     healed = _resync_token_after_401()
     if not healed:
@@ -305,7 +304,6 @@ def _request_with_token_resync(
     )
     with _client(healed) as client:
         return send(client)
-
 
 
 def _safe_filename(value: str) -> str:
@@ -324,8 +322,7 @@ def _sanitise_detail(value: Any) -> Any:
         return sanitise(value[:_SANITISE_DETAIL_STRING_MAX_CHARS])
     if isinstance(value, dict):
         return {
-            str(k)[:_SANITISE_DETAIL_KEY_MAX_CHARS]: _sanitise_detail(v)
-            for k, v in value.items()
+            str(k)[:_SANITISE_DETAIL_KEY_MAX_CHARS]: _sanitise_detail(v) for k, v in value.items()
         }
     if isinstance(value, list):
         return [_sanitise_detail(v) for v in value[:_SANITISE_DETAIL_LIST_LIMIT]]
@@ -335,6 +332,8 @@ def _sanitise_detail(value: Any) -> Any:
 def _compact_log_detail(value: Any, *, limit: int = 2000) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         text = str(value)
     return sanitise(text[:limit])
@@ -343,6 +342,8 @@ def _compact_log_detail(value: Any, *, limit: int = 2000) -> str:
 def _upstream_request_url(exc: httpx.HTTPStatusError) -> str:
     try:
         return sanitise(str(exc.request.url))
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         return ""
 
@@ -354,6 +355,8 @@ def _raise_upstream_error(exc: httpx.HTTPStatusError) -> None:
         pass
     try:
         detail: Any = _sanitise_detail(exc.response.json())
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         detail = {"code": "openapi_error", "message": sanitise(exc.response.text[:500])}
     if isinstance(detail, dict):
@@ -387,6 +390,9 @@ def submit_job(
     resource_group: str = "",
     cluster_name: str = "",
     submit_path: str = "/api/v1/elastic-blast/submit",
+    timeout_seconds: float | None = None,
+    max_transport_retries: int | None = None,
+    allow_token_resync: bool = True,
 ) -> dict[str, Any]:
     """POST the canonical submit body to the sibling OpenAPI service.
 
@@ -403,6 +409,11 @@ def submit_job(
     (httpx.ConnectError / httpx.ReadTimeout / etc.). Without one the call is
     surfaced to the caller on the first failure to avoid creating duplicate
     jobs on the cluster.
+
+    ``timeout_seconds``, ``max_transport_retries``, and ``allow_token_resync``
+    optionally narrow that default policy for callers with a shorter outer
+    deadline. Omitting them is backward-compatible and retains the historical
+    90 s timeout, transport retries, and inline 401 self-heal.
 
     The sibling dedupes ONLY on ``idempotency_key`` — ``external_correlation_id``
     is correlation/tracing metadata it deliberately does NOT treat as a dedupe
@@ -440,6 +451,8 @@ def submit_job(
 
             if date_layout_enabled():
                 payload = {**payload, "results_prefix": dated_results_subdir()}
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             # An import/compute failure here means date tiering meant to be on
             # silently degrades to flat — surface it (rare: job_prefix is a core
@@ -447,9 +460,19 @@ def submit_job(
             LOGGER.warning("results_prefix injection skipped", exc_info=True)
 
     has_idempotency_key = bool(isinstance(payload, dict) and payload.get("idempotency_key"))
+    effective_timeout = (
+        _DEFAULT_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else max(0.5, min(float(timeout_seconds), _DEFAULT_TIMEOUT_SECONDS))
+    )
+    transport_retries = (
+        _SUBMIT_MAX_TRANSPORT_RETRIES
+        if max_transport_retries is None
+        else max(0, min(int(max_transport_retries), 10))
+    )
     import time as _time
 
-    attempts = 1 + (_SUBMIT_MAX_TRANSPORT_RETRIES if has_idempotency_key else 0)
+    attempts = 1 + (transport_retries if has_idempotency_key else 0)
     last_transport_exc: HTTPException | None = None
     resolved_base = _base_url(
         base_url,
@@ -464,15 +487,14 @@ def submit_job(
             # a job the first attempt may have created).
             resp = _request_with_token_resync(
                 base_url=resolved_base,
-                timeout=_DEFAULT_TIMEOUT_SECONDS,
+                timeout=effective_timeout,
                 api_token=api_token,
                 subscription_id=subscription_id,
                 resource_group=resource_group,
                 cluster_name=cluster_name,
-                send=lambda client: client.post(
-                    submit_path, json=payload
-                ),
+                send=lambda client: client.post(submit_path, json=payload),
                 label="submit_job",
+                allow_token_resync=allow_token_resync,
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -526,6 +548,9 @@ def submit_job_v1(
     subscription_id: str = "",
     resource_group: str = "",
     cluster_name: str = "",
+    timeout_seconds: float | None = None,
+    max_transport_retries: int | None = None,
+    allow_token_resync: bool = True,
 ) -> dict[str, Any]:
     """Submit via the sibling ``POST /v1/jobs`` (free-form ``blast_options``).
 
@@ -545,6 +570,9 @@ def submit_job_v1(
         resource_group=resource_group,
         cluster_name=cluster_name,
         submit_path="/v1/jobs",
+        timeout_seconds=timeout_seconds,
+        max_transport_retries=max_transport_retries,
+        allow_token_resync=allow_token_resync,
     )
 
 
@@ -576,9 +604,7 @@ def get_job(
             subscription_id=subscription_id,
             resource_group=resource_group,
             cluster_name=cluster_name,
-            send=lambda client: client.get(
-                f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}"
-            ),
+            send=lambda client: client.get(f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}"),
             label="get_job",
         )
         resp.raise_for_status()
@@ -593,7 +619,6 @@ def get_job(
             },
         ) from exc
     return cast(dict[str, Any], resp.json())
-
 
 
 def delete_job(
@@ -979,6 +1004,8 @@ def _ready_probe_upstream(
                 )
 
                 healed = resync_openapi_api_token_from_cluster()
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:  # pragma: no cover - defensive
                 LOGGER.warning(
                     "openapi /v1/ready 401 token resync raised %s",
@@ -1015,6 +1042,8 @@ def _ready_probe_upstream(
             # so SPA / 3rd-party callers can back off cleanly without retrying.
             try:
                 rl_payload: Any = _sanitise_detail(resp.json())
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 rl_payload = {"code": "openapi_ready_rate_limited"}
             upstream_msg = ""
@@ -1023,6 +1052,8 @@ def _ready_probe_upstream(
                 upstream_msg = str(rl_payload.get("message") or "")
                 try:
                     limit = int(rl_payload.get("limit_per_minute") or 0)
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     limit = 0
             err = HTTPException(
@@ -1039,6 +1070,8 @@ def _ready_probe_upstream(
         if resp.status_code == 503:
             try:
                 detail_payload: Any = _sanitise_detail(resp.json())
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 detail_payload = {
                     "code": "openapi_not_ready",
@@ -1259,6 +1292,8 @@ def stream_result_file_from_storage(job_id: str, file_id: str) -> StreamedFile:
 
     try:
         state = get_state_repo().get(job_id)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         state = None
     if state is None:
@@ -1269,6 +1304,8 @@ def stream_result_file_from_storage(job_id: str, file_id: str) -> StreamedFile:
     if raw_manifest:
         try:
             manifest = _json.loads(raw_manifest)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             manifest = []
         for item in manifest if isinstance(manifest, list) else []:

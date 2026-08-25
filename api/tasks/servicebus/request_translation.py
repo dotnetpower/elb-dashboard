@@ -11,8 +11,9 @@ Key entry points: ``build_request_payload``, ``is_v1_jobs_message``,
 Risky contracts: Correlation fallback order is body, Service Bus correlation,
     then message id; invalid requests return ``None`` for terminal rejection;
     producers cannot spoof submission source; core_nt retains its safe sharded
-    profile; caller search-space flags are never overwritten; v1 calibration
-    failure degrades without rejecting an otherwise valid request.
+    profile; custom v1 profiles and target scope survive validation; caller
+    search-space flags are never overwritten; v1 calibration failure degrades
+    without rejecting an otherwise valid request.
 Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py
     api/tests/test_servicebus_v1_multitoken.py
     api/tests/test_blast_submit_route_options.py``.
@@ -21,7 +22,7 @@ Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import Any
 
 from api.services.service_bus import ParsedMessage
 from api.services.service_bus_pref import ServiceBusConfig
@@ -83,6 +84,9 @@ def build_request_payload(
         "batch_len",
         "idempotency_key",
         "resource_profile",
+        "subscription_id",
+        "resource_group",
+        "cluster_name",
     ):
         if body.get(key) is not None:
             candidate[key] = body[key]
@@ -93,7 +97,7 @@ def build_request_payload(
         logger.warning("service bus request validation failed corr=%s", correlation_id)
         return None
 
-    payload = request.model_dump(exclude_none=True)
+    payload: dict[str, Any] = request.model_dump(exclude_none=True)
     payload["resource_profile"] = resolve_sharded_db_resource_profile(
         payload.get("db") or "",
         payload.get("resource_profile"),
@@ -113,7 +117,7 @@ def build_request_payload(
             correlation_id=correlation_id,
         )
     )
-    return cast(dict[str, Any], payload)
+    return payload
 
 
 def is_v1_jobs_message(body: dict[str, Any]) -> bool:
@@ -153,7 +157,17 @@ def build_v1_jobs_payload(
     }
     if isinstance(body.get("blast_options"), dict):
         candidate["blast_options"] = body["blast_options"]
-    for key in ("taxid", "is_inclusive", "priority", "batch_len", "idempotency_key"):
+    for key in (
+        "taxid",
+        "is_inclusive",
+        "priority",
+        "batch_len",
+        "idempotency_key",
+        "resource_profile",
+        "subscription_id",
+        "resource_group",
+        "cluster_name",
+    ):
         if body.get(key) is not None:
             candidate[key] = body[key]
 
@@ -163,7 +177,7 @@ def build_v1_jobs_payload(
         logger.warning("service bus v1 request validation failed corr=%s", correlation_id)
         return None
 
-    payload = request.model_dump(exclude_none=True)
+    payload: dict[str, Any] = request.model_dump(exclude_none=True)
     payload["resource_profile"] = resolve_sharded_db_resource_profile(
         payload.get("db") or "",
         payload.get("resource_profile"),
@@ -225,4 +239,4 @@ def build_v1_jobs_payload(
         )
     )
     payload["submission_source"] = "external_api"
-    return cast(dict[str, Any], payload)
+    return payload

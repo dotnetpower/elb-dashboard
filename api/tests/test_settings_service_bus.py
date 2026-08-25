@@ -7,7 +7,7 @@ Edit boundaries: Route shaping only; persistence + SDK behaviour covered
     elsewhere.
 Key entry points: the ``test_*`` functions.
 Risky contracts: every route enforces ``require_caller``; no secret material in
-    responses.
+    responses; full-row config writes are fenced and reject stale snapshots.
 Validation: ``uv run pytest -q api/tests/test_settings_service_bus.py``.
 """
 
@@ -50,6 +50,32 @@ def _stub_entity_counts(monkeypatch: pytest.MonkeyPatch) -> None:
         raise service_bus.ServiceBusUnavailable("stubbed in tests")
 
     monkeypatch.setattr(service_bus, "entity_counts", _unavailable)
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_config_mutation",
+        lambda: (True, "settings-mutation-fence"),
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.release_config_mutation",
+        lambda _token: None,
+    )
+    monkeypatch.setattr(service_bus, "acquire_config_io", lambda _cfg: "settings-io-token")
+    monkeypatch.setattr(service_bus, "release_config_io", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (True, "settings-test-fence"),
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.release_drain_stop_intent",
+        lambda _queue, _token: None,
+    )
+
+
+def _with_current_revision(client: TestClient, payload: dict[str, object]) -> dict[str, object]:
+    del client
+    from api.services.service_bus_pref import get_stored_service_bus_config
+
+    revision = get_stored_service_bus_config().revision
+    return {**payload, "revision": revision}
 
 
 def test_get_defaults_disabled(client: TestClient) -> None:
@@ -101,6 +127,473 @@ def test_env_override_three_state_in_status(
     assert body["effective_enabled"] is True
 
 
+def test_config_rejects_target_change_while_request_backlog_exists(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "subscription_id": "sub-current",
+        "resource_group": "rg-current",
+        "cluster_name": "aks-current",
+        "storage_account": "stcurrent",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setattr(
+        service_bus,
+        "entity_counts",
+        lambda _cfg: {
+            "queue": {
+                "active_message_count": 2,
+                "scheduled_message_count": 1,
+                "dead_letter_message_count": 0,
+            }
+        },
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "cluster_name": "aks-other"}),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_reconfigure_blocked"
+    assert response.json()["pending_requests"] == 3
+
+
+def test_config_rejects_request_endpoint_change_when_proposed_queue_has_work(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "requests-current",
+        "completion_topic": "elastic-blast-completions",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    observed_queues: list[str] = []
+
+    def _counts(cfg: object) -> dict[str, object]:
+        queue_name = str(getattr(cfg, "request_queue", ""))
+        observed_queues.append(queue_name)
+        return {
+            "queue": {
+                "active_message_count": 2 if queue_name == "requests-proposed" else 0,
+                "scheduled_message_count": 0,
+                "dead_letter_message_count": 0,
+            }
+        }
+
+    monkeypatch.setattr(service_bus, "entity_counts", _counts)
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "request_queue": "requests-proposed"}),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_reconfigure_blocked"
+    assert response.json()["pending_requests"] == 2
+    assert observed_queues == ["requests-current", "requests-proposed"]
+
+
+def test_config_rejects_target_change_while_drain_holds_lease(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "cluster_name": "aks-current",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (False, None),
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "cluster_name": "aks-other"}),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_reconfigure_busy"
+
+
+def test_config_rejects_concurrent_settings_writer(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_config_mutation",
+        lambda: (False, None),
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json={"enabled": False},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_config_busy"
+
+
+def test_cleanup_policy_change_waits_for_active_config_io(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "dlq_cleanup_enabled": False,
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (False, None),
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "dlq_cleanup_enabled": True}),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_reconfigure_busy"
+    assert response.json()["changed_fields"] == ["dlq_cleanup_enabled"]
+
+
+def test_config_releases_reconfiguration_fence_after_blocked_change(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "cluster_name": "aks-current",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (True, "fence-token"),
+    )
+    released: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.release_drain_stop_intent",
+        lambda queue, token: released.append((queue, token)),
+    )
+    monkeypatch.setattr(
+        service_bus,
+        "entity_counts",
+        lambda _cfg: {
+            "queue": {
+                "active_message_count": 1,
+                "scheduled_message_count": 0,
+                "dead_letter_message_count": 0,
+            }
+        },
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "cluster_name": "aks-other"}),
+    )
+
+    assert response.status_code == 409
+    assert released == [("elastic-blast-requests", "fence-token")]
+
+
+def test_config_serialization_reclassifies_stale_nonrouting_put(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+    from api.services.service_bus_pref import (
+        get_service_bus_config,
+        normalise_config,
+        save_service_bus_config,
+    )
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "cluster_name": "aks-current",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+
+    def _acquire_after_concurrent_save() -> tuple[bool, str]:
+        concurrent = normalise_config(
+            {
+                **get_service_bus_config().to_dict(),
+                "cluster_name": "aks-concurrent",
+            }
+        )
+        save_service_bus_config(concurrent)
+        return (True, "fence-token")
+
+    monkeypatch.setattr(
+        "api.tasks.servicebus.drain_coordination.acquire_config_mutation",
+        _acquire_after_concurrent_save,
+    )
+    monkeypatch.setattr(
+        service_bus,
+        "entity_counts",
+        lambda _cfg: {
+            "queue": {
+                "active_message_count": 1,
+                "scheduled_message_count": 0,
+                "dead_letter_message_count": 0,
+            }
+        },
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "dlq_max_count": 6000}),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_config_changed"
+    assert get_service_bus_config().cluster_name == "aks-concurrent"
+
+
+def test_disabled_config_cannot_bypass_pending_request_guard(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "cluster_name": "aks-current",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    assert (
+        client.put(
+            "/api/settings/service-bus",
+            json=_with_current_revision(client, {**initial, "enabled": False}),
+        ).status_code
+        == 200
+    )
+    monkeypatch.setattr(
+        service_bus,
+        "entity_counts",
+        lambda _cfg: {
+            "queue": {
+                "active_message_count": 1,
+                "scheduled_message_count": 0,
+                "dead_letter_message_count": 0,
+            }
+        },
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(
+            client,
+            {**initial, "enabled": False, "cluster_name": "aks-other"},
+        ),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_reconfigure_blocked"
+
+
+def test_config_unchanged_save_does_not_require_queue_counts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    config = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "cluster_name": "aks-current",
+    }
+    assert (
+        client.put(
+            "/api/settings/service-bus",
+            json=_with_current_revision(client, config),
+        ).status_code
+        == 200
+    )
+    monkeypatch.setattr(
+        service_bus,
+        "entity_counts",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("counts must not be read")),
+    )
+
+    assert (
+        client.put(
+            "/api/settings/service-bus",
+            json=_with_current_revision(client, config),
+        ).status_code
+        == 200
+    )
+
+
+def test_auth_change_probes_unchanged_queue_with_proposed_credential(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "sas",
+        "sas_secret_name": "old-secret",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (True, "fence-token"),
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.release_drain_stop_intent",
+        lambda _queue, _token: None,
+    )
+    observed_secrets: list[str] = []
+
+    def _counts(cfg: object) -> dict[str, object]:
+        observed_secrets.append(str(getattr(cfg, "sas_secret_name", "")))
+        return {
+            "queue": {
+                "active_message_count": 0,
+                "scheduled_message_count": 0,
+                "dead_letter_message_count": 0,
+            }
+        }
+
+    monkeypatch.setattr(service_bus, "entity_counts", _counts)
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "sas_secret_name": "new-secret"}),
+    )
+
+    assert response.status_code == 200
+    assert observed_secrets == ["new-secret"]
+
+
+def test_auth_recovery_is_allowed_while_bridge_is_active(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "sas",
+        "sas_secret_name": "old-secret",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.acquire_drain_stop_intent",
+        lambda _queue: (True, "fence-token"),
+    )
+    monkeypatch.setattr(
+        "api.tasks.servicebus.tasks.release_drain_stop_intent",
+        lambda _queue, _token: None,
+    )
+    monkeypatch.setattr(
+        service_bus,
+        "entity_counts",
+        lambda _cfg: {
+            "queue": {
+                "active_message_count": 0,
+                "scheduled_message_count": 0,
+                "dead_letter_message_count": 0,
+            }
+        },
+    )
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-auth-recovery",
+            openapi_job_id="job-auth-recovery",
+            last_status="running",
+        )
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "sas_secret_name": "new-secret"}),
+    )
+
+    assert response.status_code == 200
+
+
+def test_config_rejects_target_change_while_bridge_is_active(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+    from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "cluster_name": "aks-current",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setattr(
+        service_bus,
+        "entity_counts",
+        lambda _cfg: {
+            "queue": {
+                "active_message_count": 0,
+                "scheduled_message_count": 0,
+                "dead_letter_message_count": 0,
+            }
+        },
+    )
+    upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-active-config",
+            openapi_job_id="job-active-config",
+            last_status="running",
+        )
+    )
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json=_with_current_revision(client, {**initial, "cluster_name": "aks-other"}),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_reconfigure_blocked"
+    assert response.json()["active_bridges"] == 1
+
+
 def test_put_then_get_round_trip(client: TestClient) -> None:
     payload = {
         "enabled": True,
@@ -115,6 +608,117 @@ def test_put_then_get_round_trip(client: TestClient) -> None:
 
     g = client.get("/api/settings/service-bus")
     assert g.json()["config"]["namespace_fqdn"] == payload["namespace_fqdn"]
+    assert g.json()["config"]["revision"]
+
+
+def test_put_rejects_stale_config_revision(client: TestClient) -> None:
+    initial = client.put(
+        "/api/settings/service-bus",
+        json={"enabled": False},
+    ).json()["config"]
+    first = client.put(
+        "/api/settings/service-bus",
+        json={**initial, "dlq_max_count": 6000},
+    )
+    assert first.status_code == 200
+
+    stale = client.put(
+        "/api/settings/service-bus",
+        json={**initial, "dlq_cleanup_enabled": True},
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "servicebus_config_changed"
+    current = client.get("/api/settings/service-bus").json()["config"]
+    assert current["dlq_max_count"] == 6000
+    assert current["dlq_cleanup_enabled"] is False
+
+
+def test_put_upgrades_legacy_revisionless_config_once(client: TestClient) -> None:
+    from api.services.service_bus_pref import ServiceBusConfig, save_service_bus_config
+
+    save_service_bus_config(
+        ServiceBusConfig(
+            enabled=False,
+            request_queue="requests-legacy",
+            revision="",
+        )
+    )
+
+    upgraded = client.put(
+        "/api/settings/service-bus",
+        json={"enabled": False, "request_queue": "requests-legacy"},
+    )
+    assert upgraded.status_code == 200
+    assert upgraded.json()["config"]["revision"]
+
+    stale_legacy = client.put(
+        "/api/settings/service-bus",
+        json={"enabled": False, "request_queue": "requests-legacy"},
+    )
+    assert stale_legacy.status_code == 409
+    assert stale_legacy.json()["code"] == "servicebus_config_changed"
+
+
+def test_put_does_not_persist_env_pinned_request_queue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services.service_bus_pref import get_stored_service_bus_config
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "requests-persisted",
+        "completion_topic": "elastic-blast-completions",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setenv("SERVICEBUS_REQUEST_QUEUE", "requests-pinned")
+    effective = client.get("/api/settings/service-bus").json()["config"]
+    assert effective["request_queue"] == "requests-pinned"
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json={**effective, "dlq_max_count": 6000},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["config"]["request_queue"] == "requests-pinned"
+    assert get_stored_service_bus_config().request_queue == "requests-persisted"
+    assert get_stored_service_bus_config().dlq_max_count == 6000
+
+
+def test_put_does_not_persist_env_pinned_completion_entity(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services.service_bus_pref import get_stored_service_bus_config
+
+    initial = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "completions-persisted",
+        "completion_kind": "topic",
+    }
+    assert client.put("/api/settings/service-bus", json=initial).status_code == 200
+    monkeypatch.setenv("SERVICEBUS_RESPONSE_TOPIC", "completions-pinned")
+    monkeypatch.setenv("SERVICEBUS_COMPLETION_KIND", "queue")
+    effective = client.get("/api/settings/service-bus").json()["config"]
+    assert effective["completion_topic"] == "completions-pinned"
+    assert effective["completion_kind"] == "queue"
+
+    response = client.put(
+        "/api/settings/service-bus",
+        json={**effective, "dlq_max_count": 6000},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["config"]["completion_topic"] == "completions-pinned"
+    assert response.json()["config"]["completion_kind"] == "queue"
+    stored = get_stored_service_bus_config()
+    assert stored.completion_topic == "completions-persisted"
+    assert stored.completion_kind == "topic"
 
 
 def test_put_allows_request_only_blank_completion_topic(client: TestClient) -> None:
@@ -311,12 +915,8 @@ def test_send_fail_closed_after_consecutive_failures(
     monkeypatch.setattr(service_bus, "entity_counts", _boom)
     monkeypatch.setattr(service_bus, "send_request", lambda *_a, **_k: "msg-ok")
     # First two failures stay under the threshold → still fail open (200).
-    assert (
-        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
-    )
-    assert (
-        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
-    )
+    assert client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
+    assert client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
     # Third consecutive failure reaches the threshold → fail closed (503).
     r = client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY)
     assert r.status_code == 503, r.text
@@ -346,19 +946,13 @@ def test_send_capacity_success_resets_failclosed_streak(
     monkeypatch.setattr(service_bus, "entity_counts", _counts)
     monkeypatch.setattr(service_bus, "send_request", lambda *_a, **_k: "msg-ok")
     # Fail 1 (streak=1 < 2) → open.
-    assert (
-        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
-    )
+    assert client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
     # Success → streak reset.
     state["mode"] = "ok"
-    assert (
-        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
-    )
+    assert client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
     # Fail again: streak=1 (reset) < 2 → still open, NOT 503.
     state["mode"] = "fail"
-    assert (
-        client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
-    )
+    assert client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY).status_code == 200
 
 
 def test_send_creates_queued_placeholder(
@@ -491,8 +1085,6 @@ def test_format_validation_errors_masks_secrets_in_msg() -> None:
     assert errors[0]["loc"] == "x"
 
 
-
-
 def test_send_enqueues_and_returns_message_id(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -518,6 +1110,115 @@ def test_send_enqueues_and_returns_message_id(
     assert isinstance(sent, dict)
     assert sent["external_correlation_id"] == body["external_correlation_id"]
     assert sent["db"] == "core_nt"
+
+
+def test_send_ambiguous_failure_returns_reusable_correlation_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    monkeypatch.setattr(
+        service_bus,
+        "send_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("sender response lost after transfer")
+        ),
+    )
+
+    response = client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY)
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "send_outcome_unknown"
+    assert response.json()["external_correlation_id"]
+
+
+def test_send_rejects_oversized_request_with_413(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    response = client.post(
+        "/api/settings/service-bus/send",
+        json={
+            **_VALID_SEND_BODY,
+            "query_fasta": ">q\n" + ("A" * service_bus._MAX_REQUEST_MESSAGE_BYTES),
+        },
+    )
+
+    assert response.status_code == 413
+    assert response.json()["code"] == "request_too_large"
+
+
+def test_send_does_not_expand_the_legacy_request_body(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SERVICEBUS_ENABLED", "true")
+    config = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "subscription_id": "sub-current",
+        "resource_group": "rg-current",
+        "cluster_name": "aks-current",
+        "storage_account": "stcurrent",
+    }
+    assert client.put("/api/settings/service-bus", json=config).status_code == 200
+    from api.services import service_bus
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        service_bus,
+        "send_request",
+        lambda _cfg, body, **_kwargs: captured.update(body=body) or "msg-target",
+    )
+
+    response = client.post("/api/settings/service-bus/send", json=_VALID_SEND_BODY)
+
+    assert response.status_code == 200
+    sent = captured["body"]
+    assert isinstance(sent, dict)
+    assert "subscription_id" not in sent
+    assert "resource_group" not in sent
+    assert "cluster_name" not in sent
+    assert "storage_account" not in sent
+
+
+def test_send_rejects_a_different_execution_target_before_enqueue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SERVICEBUS_ENABLED", "true")
+    config = {
+        "enabled": True,
+        "auth_mode": "entra",
+        "namespace_fqdn": "sb-elb-dashboard-krc.servicebus.windows.net",
+        "request_queue": "elastic-blast-requests",
+        "completion_topic": "elastic-blast-completions",
+        "subscription_id": "sub-current",
+        "resource_group": "rg-current",
+        "cluster_name": "aks-current",
+    }
+    assert client.put("/api/settings/service-bus", json=config).status_code == 200
+    from api.services import service_bus
+
+    sent: list[object] = []
+    monkeypatch.setattr(
+        service_bus,
+        "send_request",
+        lambda *_args, **_kwargs: sent.append(object()) or "wrong-target",
+    )
+
+    response = client.post(
+        "/api/settings/service-bus/send",
+        json={**_VALID_SEND_BODY, "subscription_id": "sub-other"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "servicebus_target_mismatch"
+    assert sent == []
 
 
 def test_send_preserves_blast_options_for_v1_path(
@@ -557,8 +1258,7 @@ def test_send_preserves_blast_options_for_v1_path(
     # the dashboard appends the result-UI parity columns (sscinames/stitle/qcovs)
     # so a tabular run's Description / Scientific name / Query Cover populate.
     assert (
-        sent["blast_options"]["outfmt"]
-        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
+        sent["blast_options"]["outfmt"] == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
     )
     assert "-searchsp" in sent["blast_options"]["extra"]
     assert "options" not in sent  # the XML options object is not synthesised

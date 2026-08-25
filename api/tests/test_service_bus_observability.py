@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from api.services import service_bus_observability as observability
+from billiard.exceptions import SoftTimeLimitExceeded
 
 
 def test_records_searchable_scalar_dimensions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,9 +24,7 @@ def test_records_searchable_scalar_dimensions(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         observability,
         "record_feature_event",
-        lambda event, *, status, **attributes: captured.append(
-            (event, status, attributes)
-        ),
+        lambda event, *, status, **attributes: captured.append((event, status, attributes)),
     )
 
     observability.record_service_bus_request_event(
@@ -87,9 +86,7 @@ def test_bounds_caller_controlled_dimensions(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         observability,
         "record_feature_event",
-        lambda _event, *, status, **attributes: captured.append(
-            {"status": status, **attributes}
-        ),
+        lambda _event, *, status, **attributes: captured.append({"status": status, **attributes}),
     )
 
     observability.record_service_bus_request_event(
@@ -118,6 +115,19 @@ def test_never_raises_when_underlying_emitter_fails(
     )
 
     observability.record_service_bus_request_event("accepted", correlation_id="corr-1")
+
+
+def test_request_event_propagates_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        observability,
+        "record_feature_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        observability.record_service_bus_request_event("accepted")
 
 
 def test_records_payload_free_health_dimensions(monkeypatch: pytest.MonkeyPatch) -> None:

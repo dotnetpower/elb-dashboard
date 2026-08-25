@@ -12,7 +12,15 @@
  * SAS connection string lives in a Key Vault secret referenced by name only.
  */
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Check, Copy, Loader2, Plug, RefreshCw, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  Loader2,
+  Plug,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import {
@@ -82,7 +90,9 @@ function CopyCommand({ label, command }: { label: string; command: string }) {
   };
   return (
     <div style={{ marginTop: 8 }}>
-      <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 3 }}>
+        {label}
+      </div>
       <div
         style={{
           display: "flex",
@@ -189,13 +199,17 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
   const handleDiscover = async () => {
     const subscriptionId = config?.subscriptionId?.trim();
     if (!subscriptionId) {
-      setError("Select a subscription in the workspace setup first to discover namespaces.");
+      setError(
+        "Select a subscription in the workspace setup first to discover namespaces.",
+      );
       return;
     }
     setDiscovering(true);
     setError(null);
     try {
-      const res = await settingsApi.discoverServiceBus({ subscription_id: subscriptionId });
+      const res = await settingsApi.discoverServiceBus({
+        subscription_id: subscriptionId,
+      });
       setNamespaces((res.namespaces ?? []).map((n) => n.fqdn).filter(Boolean));
     } catch (err) {
       setError(formatApiError(err));
@@ -285,13 +299,12 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
             {killSwitchEnabled ? (
               <>
                 A deployment kill switch is forcing it off:{" "}
-                <code>SERVICEBUS_ENABLED</code> is set to <code>false</code> on
-                the control plane, which overrides this config. Clear the
-                override (unset it, or set it to <code>true</code>) so the
-                Settings toggle controls the integration; it then goes live
-                within ~1 minute. The config you save here lives in storage and
-                survives redeploys — only an explicit <code>false</code> override
-                holds it off.
+                <code>SERVICEBUS_ENABLED</code> is set to <code>false</code> on the
+                control plane, which overrides this config. Clear the override (unset it,
+                or set it to <code>true</code>) so the Settings toggle controls the
+                integration; it then goes live within ~1 minute. The config you save here
+                lives in storage and survives redeploys — only an explicit{" "}
+                <code>false</code> override holds it off.
                 <div style={{ marginTop: 6, marginBottom: 2 }}>
                   <CopyCommand
                     label="Durable — clears the kill switch on every redeploy (recommended):"
@@ -309,15 +322,14 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
               </>
             ) : !cfg.namespace_fqdn ? (
               <>
-                No namespace is configured yet. Set the{" "}
-                <strong>Namespace FQDN</strong> below and save — the integration
-                only goes live once a namespace is attached.
+                No namespace is configured yet. Set the <strong>Namespace FQDN</strong>{" "}
+                below and save — the integration only goes live once a namespace is
+                attached.
               </>
             ) : (
               <>
-                The integration is not reporting as live. Save the configuration,
-                then use <strong>Test connection</strong> to confirm the
-                namespace is reachable.
+                The integration is not reporting as live. Save the configuration, then use{" "}
+                <strong>Test connection</strong> to confirm the namespace is reachable.
               </>
             )}
           </div>
@@ -353,7 +365,10 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
       </Group>
 
       <Group title="Namespace & entities">
-        <Field label="Namespace FQDN" hint="e.g. sb-elb-dashboard-krc.servicebus.windows.net">
+        <Field
+          label="Namespace FQDN"
+          hint="e.g. sb-elb-dashboard-krc.servicebus.windows.net"
+        >
           <input
             style={inputStyle}
             list="sb-namespace-options"
@@ -372,7 +387,8 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
             onClick={handleDiscover}
             disabled={discovering}
           >
-            {discovering ? <Loader2 size={13} /> : <RefreshCw size={13} />} Discover namespaces
+            {discovering ? <Loader2 size={13} /> : <RefreshCw size={13} />} Discover
+            namespaces
           </button>
         </Field>
         <Field label="Request queue">
@@ -382,13 +398,31 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
             onChange={(e) => patch({ request_queue: e.target.value.trim() })}
           />
         </Field>
-        <Field label="Completion topic" hint="Leave blank to run request-only (no completion events).">
+        <Field
+          label="Completion topic"
+          hint="Leave blank to run request-only (no completion events)."
+        >
           <input
             style={inputStyle}
             value={cfg.completion_topic}
             onChange={(e) => patch({ completion_topic: e.target.value.trim() })}
           />
         </Field>
+        <Row
+          label="Completion kind"
+          hint="Topic fans out to subscriptions; Queue delivers point-to-point to one competing consumer."
+          control={
+            <Segmented<"topic" | "queue">
+              ariaLabel="Service Bus completion entity kind"
+              value={cfg.completion_kind}
+              onChange={(value) => patch({ completion_kind: value })}
+              options={[
+                { value: "topic", label: "Topic" },
+                { value: "queue", label: "Queue" },
+              ]}
+            />
+          }
+        />
         {cfg.auth_mode === "sas" && (
           <Field
             label="SAS secret name (Key Vault)"
@@ -402,7 +436,11 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
           </Field>
         )}
         <div style={{ display: "flex", gap: 8, padding: "10px 0" }}>
-          <button style={buttonStyle} onClick={handleTest} disabled={testing || !cfg.namespace_fqdn}>
+          <button
+            style={buttonStyle}
+            onClick={handleTest}
+            disabled={testing || !cfg.namespace_fqdn}
+          >
             {testing ? <Loader2 size={13} /> : <Plug size={13} />} Test connection
           </button>
           <button style={buttonStyle} onClick={() => void load()} disabled={loading}>
@@ -466,13 +504,18 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
                 onChange={(e) => patch({ dlq_max_count: Number(e.target.value) || 1 })}
               />
             </Field>
-            <Field label="Max messages per cleanup run" hint="Bounded so a backlog drains over several ticks.">
+            <Field
+              label="Max messages per cleanup run"
+              hint="Bounded so a backlog drains over several ticks."
+            >
               <input
                 type="number"
                 min={1}
                 style={inputStyle}
                 value={cfg.dlq_cleanup_batch}
-                onChange={(e) => patch({ dlq_cleanup_batch: Number(e.target.value) || 1 })}
+                onChange={(e) =>
+                  patch({ dlq_cleanup_batch: Number(e.target.value) || 1 })
+                }
               />
             </Field>
           </>
@@ -508,7 +551,12 @@ export function ServiceBusSection({ config }: { config: ResourceConfig | null })
 
       <div style={{ display: "flex", justifyContent: "flex-end", paddingTop: 8 }}>
         <button
-          style={{ ...buttonStyle, background: "var(--accent)", color: "#fff", border: "none" }}
+          style={{
+            ...buttonStyle,
+            background: "var(--accent)",
+            color: "#fff",
+            border: "none",
+          }}
           onClick={handleSave}
           disabled={saving}
         >

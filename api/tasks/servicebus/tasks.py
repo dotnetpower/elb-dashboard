@@ -41,6 +41,16 @@ Risky contracts: Every task no-ops when ``service_bus_enabled()`` is False — t
     request settlement or bridge terminalisation. Transient submit failures are
     future-scheduled with stable execution identity; DB lifecycle admission
     never receives messages and therefore never consumes retry attempts.
+    Target snapshots that differ from the active deployment fail closed with a
+    durable producer response before DLQ settlement. After acquiring the queue
+    lease, every drain re-reads the routing config before receive so a snapshot
+    taken before a Settings update cannot consume work for the new target. The
+    transition publisher and DLQ mutation tasks hold a shared config-I/O token
+    and revalidate the complete config before touching broker or outbox state.
+    The Celery fallback receives one concurrency-sized batch and applies a 35 s /
+    zero-internal-retry submit budget, deferring 401 token repair to the durable
+    queue; the resident consumer retains the full OpenAPI retry and inline
+    token-resync policy.
     Parallel drain requires the atomic correlation-id claim. All three tasks
     are BOUNDED per tick (drain/publish/cleanup caps) so a backlog drains over
     several ticks instead of spinning one tick forever. Transition events are
@@ -62,6 +72,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Callable
@@ -87,7 +98,7 @@ from api.services.service_bus_outbox import (
     defer_response,
     enqueue_response,
     has_pending_response,
-    list_pending_responses,
+    list_due_responses,
     mark_response_delivered,
     pending_response_correlations,
 )
@@ -96,6 +107,7 @@ from api.services.service_bus_pref import (
     get_service_bus_config,
     service_bus_enabled,
 )
+from api.services.service_bus_target import target_mismatch_fields
 from api.services.service_bus_tracking import (
     BridgeRecord,
     claim_bridge,
@@ -122,7 +134,73 @@ _TRANSITION_CURSOR_TTL_SECONDS = 30 * 24 * 60 * 60
 _LOCAL_TRANSITION_CURSOR = ""
 
 # Per-tick bounds (self-critique: no unbounded loop). Tunable via env.
-_DRAIN_MAX_MESSAGES = int(os.environ.get("SERVICEBUS_DRAIN_MAX_MESSAGES", "50"))
+_DRAIN_MAX_MESSAGES = max(1, int(os.environ.get("SERVICEBUS_DRAIN_MAX_MESSAGES", "50")))
+
+
+# The Celery fallback has a 45 s soft deadline. Keep one sibling submit below
+# that boundary and rely on the durable Service Bus retry for another attempt;
+# the resident consumer is not Celery-time-limited and retains the full 90 s /
+# transport-retry policy. One fallback tick receives at most one concurrency
+# batch, so it cannot start a second wave just before its deadline.
+def _servicebus_task_submit_timeout_from_env() -> float:
+    raw = os.environ.get("SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS", "35")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "invalid SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS=%r; defaulting to 35",
+            raw,
+        )
+        value = 35.0
+    if not math.isfinite(value):
+        LOGGER.warning(
+            "non-finite SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS=%r; defaulting to 35",
+            raw,
+        )
+        value = 35.0
+    return max(5.0, min(value, 35.0))
+
+
+_SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS = _servicebus_task_submit_timeout_from_env()
+_SERVICEBUS_TASK_SUBMIT_TRANSPORT_RETRIES = 0
+_SERVICEBUS_TASK_SUBMIT_ALLOW_TOKEN_RESYNC = False
+_SERVICEBUS_TASK_WORK_BUDGET_SECONDS = 40.0
+_SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS = 5.0
+_DRAIN_ROUTING_FIELDS = (
+    "auth_mode",
+    "sas_secret_name",
+    "namespace_fqdn",
+    "request_queue",
+    "subscription_id",
+    "resource_group",
+    "cluster_name",
+    "storage_account",
+    "completion_topic",
+    "completion_kind",
+)
+
+
+def _drain_routing_signature(cfg: ServiceBusConfig) -> tuple[bool | str, ...]:
+    """Return the config values that must stay fixed for one drain pass."""
+    return (
+        bool(cfg.enabled),
+        *(str(getattr(cfg, field, "") or "").strip().casefold() for field in _DRAIN_ROUTING_FIELDS),
+    )
+
+
+def _acquire_task_config_io(cfg: ServiceBusConfig, operation: str) -> str | None:
+    """Acquire a config-stability token or defer this periodic operation."""
+    try:
+        return service_bus.acquire_config_io(cfg)
+    except SoftTimeLimitExceeded:
+        raise
+    except service_bus.ServiceBusUnavailable as exc:
+        LOGGER.info(
+            "servicebus %s skipped: config I/O fence unavailable (%s)",
+            operation,
+            type(exc).__name__,
+        )
+        return None
 
 
 # How many request messages may be bridged to the sibling /v1/jobs plane
@@ -164,21 +242,20 @@ if _DRAIN_CONCURRENCY > 1 and not _ATOMIC_CLAIM:
     )
     _DRAIN_CONCURRENCY = 1
 
-# Single-flight drain gate. It shipped default-OFF, completed the same June
-# soak/load validation, and now defaults ON. When ON, a drain
-# tick takes a short-lived Redis lease before draining so two overlapping beat
-# ticks (a tick that ran longer than the 10s interval) or two workers cannot
-# drain the same queue at once. The atomic claim (#2) already prevents duplicate
-# submits; this just removes the wasted receiver contention / lock churn / log
-# noise of N workers racing the same queue. FAIL-OPEN: a Redis error never
-# blocks a drain (the lease is an optimisation, not a correctness gate), so a
-# broker blip degrades to the legacy every-tick drain instead of stalling.
-_DRAIN_SINGLEFLIGHT = os.environ.get(
-    "SERVICEBUS_DRAIN_SINGLEFLIGHT", "true"
-).strip().lower() in {"1", "true", "yes"}
+# The queue-scoped drain lease shipped behind SERVICEBUS_DRAIN_SINGLEFLIGHT and
+# completed its June soak. It is now mandatory: Settings uses the same lease as
+# the routing-mutation fence, so allowing an untracked drain would reintroduce a
+# config-change race even though the atomic bridge claim still protects submit
+# idempotency. Keep the legacy symbol for monkeypatch/import compatibility, but
+# `_acquire_drain_lock` deliberately ignores a false value.
+_DRAIN_SINGLEFLIGHT = os.environ.get("SERVICEBUS_DRAIN_SINGLEFLIGHT", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 _DRAIN_LOCK_KEY = "servicebus:drain:singleflight"
-_DRAIN_STOP_INTENT_KEY = "servicebus:drain:stop-intent"
-_DRAIN_STOP_INTENT_TTL_SECONDS = 300
+_DRAIN_STOP_INTENT_KEY = drain_coordination.DEFAULT_STOP_INTENT_BASE_KEY
+_DRAIN_STOP_INTENT_TTL_SECONDS = drain_coordination.MIN_DRAIN_LOCK_TTL_SECONDS
 
 
 def _drain_lock_key(queue_name: str) -> str:
@@ -194,12 +271,11 @@ def _drain_stop_intent_key(queue_name: str) -> str:
 
 
 def _drain_lock_ttl_from_env() -> int:
-    """Lease TTL in seconds, floored at 10s, fail-safe on a bad value.
+    """Lease TTL in seconds, floored at 900s, fail-safe on a bad value.
 
-    Must exceed a normal tick's drain time so the holder finishes before it
-    expires, but stay small enough that a crashed holder (which never runs the
-    release) frees the lease quickly. The release is best-effort; the TTL is the
-    backstop.
+    Must exceed the complete resident drain/submit envelope because Settings
+    treats this lease as a routing-mutation fence. The release is best-effort;
+    the TTL is the crashed-holder backstop.
     """
     return drain_coordination.drain_lock_ttl_from_env(LOGGER)
 
@@ -215,14 +291,14 @@ def _acquire_drain_lock(queue_name: str = "") -> tuple[bool, str | None]:
     """Try to take the single-flight drain lease for ``queue_name``.
 
     Returns ``(proceed, token)``. ``proceed`` is False ONLY when another drain
-    demonstrably holds the lease (skip this tick). It is True both when we won
-    the lease (``token`` is the release handle) and when the gate is off or Redis
-    is unreachable (``token`` is None → nothing to release, fail-open so a broker
-    blip never stalls the drain).
+    demonstrably holds the lease or Redis cannot prove ownership (skip this
+    tick). It is True only when we won the lease (``token`` is the release
+    handle). The legacy disable env is ignored because routing safety now
+    depends on every drain being tracked.
     """
     return drain_coordination.acquire_drain_lock(
         queue_name,
-        enabled=_DRAIN_SINGLEFLIGHT,
+        enabled=True,
         lock_ttl=_DRAIN_LOCK_TTL,
         lock_base_key=_DRAIN_LOCK_KEY,
         stop_intent_base_key=_DRAIN_STOP_INTENT_KEY,
@@ -278,9 +354,7 @@ _PUBLISH_BUDGET_SECONDS = max(
     min(float(os.environ.get("SERVICEBUS_PUBLISH_BUDGET_SECONDS", "40")), 45.0),
 )
 _OUTBOX_MAX_EVENTS = int(os.environ.get("SERVICEBUS_OUTBOX_MAX_EVENTS", "200"))
-_DLQ_RESPONSE_MAX_MESSAGES = int(
-    os.environ.get("SERVICEBUS_DLQ_RESPONSE_MAX_MESSAGES", "100")
-)
+_DLQ_RESPONSE_MAX_MESSAGES = int(os.environ.get("SERVICEBUS_DLQ_RESPONSE_MAX_MESSAGES", "100"))
 # Give-up deadline for a bridge whose sibling job never reaches a terminal
 # status — without it a permanently-stuck job's row would stay "active" forever
 # and be polled every tick, growing the active set without bound (liveness).
@@ -328,6 +402,8 @@ def _transition_cursor() -> str:
             return raw.decode("utf-8", "replace")[:512]
         if isinstance(raw, str):
             return raw[:512]
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.debug("transition cursor read degraded to process-local state", exc_info=True)
     return _LOCAL_TRANSITION_CURSOR
@@ -347,6 +423,8 @@ def _save_transition_cursor(cursor: str) -> None:
             _TRANSITION_CURSOR_TTL_SECONDS,
             _LOCAL_TRANSITION_CURSOR,
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.debug("transition cursor persist degraded to process-local state", exc_info=True)
 
@@ -367,6 +445,15 @@ def _bridge_expired(created_at: str) -> bool:
     if created.tzinfo is None:
         created = created.replace(tzinfo=UTC)
     return (datetime.now(UTC) - created).total_seconds() > _BRIDGE_MAX_AGE_SECONDS
+
+
+def _normalise_http_status(value: Any) -> int:
+    """Return a valid HTTP status or zero for a malformed upstream value."""
+    try:
+        status = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return status if 100 <= status <= 599 else 0
 
 
 def _retry_exhausted(msg: ParsedMessage) -> bool:
@@ -429,9 +516,7 @@ def _result_ref(openapi_job_id: str) -> dict[str, str]:
 _MAX_RESULT_FILES = 25
 
 
-def _result_files_for_event(
-    job: dict[str, Any], openapi_job_id: str
-) -> list[dict[str, Any]]:
+def _result_files_for_event(job: dict[str, Any], openapi_job_id: str) -> list[dict[str, Any]]:
     """Build the succeeded event's ``result_files`` with concrete download URLs.
 
     Each entry carries the file metadata plus a ``download_url`` pointing at the
@@ -484,9 +569,7 @@ def _result_files_for_event(
             "media_type": result_media_type(name),
         }
         if base:
-            url = (
-                f"{base}/api/v1/elastic-blast/jobs/{openapi_job_id}/files/{file_id}"
-            )
+            url = f"{base}/api/v1/elastic-blast/jobs/{openapi_job_id}/files/{file_id}"
             # Sign the link so a topic consumer can download by URL alone (no
             # bearer / interactive az login). Still the dashboard's own
             # streaming gateway — never a Storage SAS (charter §9). When signing
@@ -528,10 +611,10 @@ def _persist_result_manifest(openapi_job_id: str, job: dict[str, Any]) -> None:
         from api.services.state_repo import get_state_repo
 
         get_state_repo().update(openapi_job_id, result_manifest=_json.dumps(manifest))
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
-        LOGGER.debug(
-            "result manifest persist skipped job_id=%s", openapi_job_id, exc_info=True
-        )
+        LOGGER.debug("result manifest persist skipped job_id=%s", openapi_job_id, exc_info=True)
 
 
 # Bound the pass-through value so a hostile/oversized producer value cannot bloat
@@ -588,9 +671,7 @@ _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
 def _request_fingerprint(payload: dict[str, Any]) -> str:
     """Hash the canonical execution semantics without persisting request data."""
     canonical = {
-        key: value
-        for key, value in payload.items()
-        if key not in _FINGERPRINT_EXCLUDED_FIELDS
+        key: value for key, value in payload.items() if key not in _FINGERPRINT_EXCLUDED_FIELDS
     }
     encoded = json.dumps(
         canonical,
@@ -721,15 +802,14 @@ def _enrich_failure_message_for_event(
         storage_account = extract_trusted_storage_account(str(job.get("db") or ""))
         if not storage_account:
             return None
-        return cast(
-            str | None,
-            _enrich_external_failure_detail(
-                status="failed",
-                current_error=current_error,
-                storage_account=storage_account,
-                results_job_id=openapi_job_id,
-            ),
+        return _enrich_external_failure_detail(
+            status="failed",
+            current_error=current_error,
+            storage_account=storage_account,
+            results_job_id=openapi_job_id,
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.debug(
             "completion failure-detail enrichment skipped job=%s",
@@ -763,6 +843,8 @@ def _record_transition_trace(openapi_job_id: str, status: str) -> None:
         elif status == _STATUS_FAILED:
             record_stage(repo, openapi_job_id, "failed")
         record_stage(repo, openapi_job_id, "completion_published", status=status)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:  # pragma: no cover - best-effort
         LOGGER.debug("transition trace skipped job=%s: %s", openapi_job_id, type(exc).__name__)
 
@@ -784,12 +866,11 @@ def _openapi_kwargs(cfg: ServiceBusConfig) -> dict[str, str]:
     try:
         from api.services.blast.external_jobs import _openapi_client_kwargs_from_cluster
 
-        return cast(
-            dict[str, str],
-            _openapi_client_kwargs_from_cluster(
-                cfg.subscription_id, cfg.resource_group, cfg.cluster_name
-            ),
+        return _openapi_client_kwargs_from_cluster(
+            cfg.subscription_id, cfg.resource_group, cfg.cluster_name
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.debug("openapi kwargs resolution failed", exc_info=True)
         return {}
@@ -828,6 +909,8 @@ def _resolve_drain_cluster_context(cfg: ServiceBusConfig) -> tuple[str, str, str
         if len(pairs) == 1:
             _rg, _cluster = pairs[0]
             return (sub, rg or _rg, cluster or _cluster)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.debug("drain cluster context discovery failed", exc_info=True)
     return (sub, rg, cluster)
@@ -902,6 +985,8 @@ def _reconcile_recovered_start_failure(admission: dict[str, Any]) -> bool:
             barrier_token=token[:12],
             target_node_count=int(admission.get("target_node_count") or 0),
         )
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.debug("servicebus admission recovery telemetry failed", exc_info=True)
     return True
@@ -917,9 +1002,7 @@ def _is_v1_jobs_message(body: dict[str, Any]) -> bool:
     return request_translation.is_v1_jobs_message(body)
 
 
-def _build_v1_jobs_payload(
-    msg: ParsedMessage, cfg: ServiceBusConfig
-) -> dict[str, Any] | None:
+def _build_v1_jobs_payload(msg: ParsedMessage, cfg: ServiceBusConfig) -> dict[str, Any] | None:
     """Compatibility facade for free-form Service Bus request translation."""
     return request_translation.build_v1_jobs_payload(msg, cfg, logger=LOGGER)
 
@@ -930,6 +1013,8 @@ def _supersede_placeholder(correlation_id: str) -> None:
         from api.services.blast.servicebus_placeholder import supersede_placeholder
 
         supersede_placeholder(correlation_id)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:  # pragma: no cover - best-effort
         LOGGER.debug(
             "placeholder supersede skipped corr=%s: %s", correlation_id, type(exc).__name__
@@ -942,6 +1027,8 @@ def _fail_placeholder(correlation_id: str, *, error_code: str) -> None:
         from api.services.blast.servicebus_placeholder import fail_placeholder
 
         fail_placeholder(correlation_id, error_code=error_code)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:  # pragma: no cover - best-effort
         LOGGER.debug("placeholder fail skipped corr=%s: %s", correlation_id, type(exc).__name__)
 
@@ -1006,6 +1093,8 @@ def _publish_drain_failure_event(
         )
         durable, _delivered = _stage_response_event(cfg, event)
         return durable
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:  # pragma: no cover - best-effort
         LOGGER.warning(
             "drain failure response staging failed corr=%s: %s",
@@ -1101,6 +1190,8 @@ def _publish_jobs_cache_invalidate(reason: str) -> None:
         from api.services.blast.jobs_cache_signal import publish_jobs_cache_invalidate
 
         publish_jobs_cache_invalidate(reason)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:  # pragma: no cover - best-effort
         LOGGER.debug("jobs cache invalidate publish skipped: %s", type(exc).__name__)
 
@@ -1163,6 +1254,8 @@ def _stage_response_event(
         return (True, False)
     try:
         service_bus.publish_event(cfg, event)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.warning(
             "producer response publish deferred to outbox event_id=%s",
@@ -1171,6 +1264,8 @@ def _stage_response_event(
         return (True, False)
     try:
         mark_response_delivered(event_id)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.warning(
             "producer response outbox confirm failed event_id=%s; may redeliver",
@@ -1179,22 +1274,80 @@ def _stage_response_event(
     return (True, True)
 
 
-def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
+def _flush_response_outbox(
+    cfg: ServiceBusConfig,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> dict[str, int]:
     """Publish a bounded oldest-first pass of durable producer responses."""
     stats = {"scanned": 0, "delivered": 0, "errors": 0}
     if not cfg.completion_topic:
         note_outbox_flush(stats, attempted=False)
         return stats
     try:
-        pending = list_pending_responses(limit=_OUTBOX_MAX_EVENTS)
+        pending = list_due_responses(limit=_OUTBOX_MAX_EVENTS)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.warning("producer response outbox list failed", exc_info=True)
         stats["errors"] = 1
         note_outbox_flush(stats)
         return stats
+    monotonic = clock or time.monotonic
     blocked_correlations: set[str] = set()
     for item in pending:
+        if deadline is not None and monotonic() >= deadline:
+            LOGGER.info(
+                "producer response outbox flush budget exhausted scanned=%d remaining=%d",
+                stats["scanned"],
+                len(pending) - stats["scanned"],
+            )
+            break
         stats["scanned"] += 1
+        if item.last_error_code == "outbox_payload_corrupt" or not item.event:
+            LOGGER.error(
+                "producer response outbox payload corrupt event_id=%s",
+                item.event_id,
+            )
+            stats["errors"] += 1
+            backed_up = backup_dead_letter_message(
+                {
+                    "ts": _now_iso(),
+                    "source": "producer_response_outbox",
+                    "event_id": item.event_id,
+                    "created_at": item.created_at,
+                    "failure_count": item.failure_count,
+                    "error_code": "outbox_payload_corrupt",
+                }
+            )
+            if backed_up:
+                try:
+                    mark_response_delivered(item.event_id)
+                except SoftTimeLimitExceeded:
+                    raise
+                except Exception:
+                    LOGGER.warning(
+                        "corrupt producer response removal failed event_id=%s",
+                        item.event_id,
+                        exc_info=True,
+                    )
+            else:
+                try:
+                    defer_response(
+                        item.event_id,
+                        error_code="outbox_payload_corrupt",
+                        retry_after_seconds=24 * 60 * 60,
+                    )
+                except SoftTimeLimitExceeded:
+                    raise
+                except Exception:
+                    LOGGER.warning(
+                        "corrupt producer response quarantine failed event_id=%s",
+                        item.event_id,
+                        exc_info=True,
+                    )
+            continue
         correlation_id = str(item.event.get("external_correlation_id") or "")
         if correlation_id and correlation_id in blocked_correlations:
             continue
@@ -1219,9 +1372,11 @@ def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
                         error_code="deferred_timestamp_corrupt",
                         retry_after_seconds=300,
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     LOGGER.warning("producer response timestamp repair failed", exc_info=True)
-                    break
+                    continue
                 if correlation_id:
                     blocked_correlations.add(correlation_id)
                 continue
@@ -1268,9 +1423,12 @@ def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
                         error_code="completion_event_irrecoverable",
                         retry_after_seconds=24 * 60 * 60,
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     LOGGER.warning("irrecoverable response deferral persist failed", exc_info=True)
-                break
+                    continue
+                continue
             try:
                 defer_response(
                     item.event_id,
@@ -1278,14 +1436,18 @@ def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
                     retry_after_seconds=1,
                     replacement_event=compact_event,
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 LOGGER.warning("producer response poison deferral persist failed", exc_info=True)
-                break
+                continue
             # Keep queued→running→terminal ordered for this request while
             # allowing unrelated producers to make progress. The failed row
             # remains durable and is retried on the next tick.
             if correlation_id:
                 blocked_correlations.add(correlation_id)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             LOGGER.warning(
                 "producer response outbox flush paused event_id=%s",
@@ -1298,6 +1460,8 @@ def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
                     error_code="completion_publish_failed",
                     retry_after_seconds=30,
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 LOGGER.warning("producer response retry deferral persist failed", exc_info=True)
             # A broker/auth/network failure is entity-wide. Stop this bounded
@@ -1307,7 +1471,16 @@ def _flush_response_outbox(cfg: ServiceBusConfig) -> dict[str, int]:
     return stats
 
 
-def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
+def _drain_handler(
+    msg: ParsedMessage,
+    cfg: ServiceBusConfig,
+    *,
+    submit_timeout_seconds: float | None = None,
+    submit_transport_retries: int | None = None,
+    submit_allow_token_resync: bool | None = None,
+    submit_deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> MessageAction:
     body = dict(msg.body or {})
     if _is_v1_jobs_message(body):
         # Multi-token / tabular outfmt path: forward the producer's
@@ -1352,6 +1525,43 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
     request_id = _extract_request_id(msg)
     request_fingerprint = _request_fingerprint(payload)
 
+    mismatches = target_mismatch_fields(body, cfg)
+    if mismatches:
+        mismatch_names = ",".join(mismatches)
+        response_durable = _publish_drain_failure_event(
+            cfg,
+            correlation_id=correlation_id,
+            request_id=request_id,
+            error_code="servicebus_target_mismatch",
+            error_message=(
+                "request target does not match the configured Service Bus "
+                f"execution target ({mismatch_names})"
+            ),
+        )
+        if not response_durable:
+            return _transient_action(msg)
+        _fail_placeholder(
+            correlation_id,
+            error_code="servicebus_target_mismatch",
+        )
+        _publish_jobs_cache_invalidate("servicebus_target_mismatch")
+        _record_drain_request_event(
+            "rejected",
+            msg,
+            cfg,
+            payload=payload,
+            action=MessageAction.DEAD_LETTER,
+            error_code="servicebus_target_mismatch",
+        )
+        return _dead_letter_action(
+            msg,
+            reason="servicebus_target_mismatch",
+            description=(
+                "request target does not match the configured Service Bus "
+                f"execution target ({mismatch_names})"
+            ),
+        )
+
     # Date-tiered layout: stamp the YYYY/MM/DD/ prefix ONCE here (not inside the
     # submit_job choke point) so the SAME value reaches both the sibling (which
     # writes results under it) AND the durable jobstate row below (which the
@@ -1364,6 +1574,8 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
 
         if date_layout_enabled() and "results_prefix" not in payload:
             payload["results_prefix"] = dated_results_subdir()
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.debug("drain results_prefix stamp skipped corr=%s", correlation_id, exc_info=True)
 
@@ -1465,6 +1677,43 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
             )
             return action
 
+    # Redis is intentionally ephemeral. If it restarts after this pass acquired
+    # its drain lease, Settings can no longer observe that lease. Re-read the
+    # durable routing immediately before admission/submit so a concurrent config
+    # change cannot send this already-received message to the stale target.
+    try:
+        current_cfg = get_service_bus_config()
+    except SoftTimeLimitExceeded:
+        if _ATOMIC_CLAIM:
+            release_bridge(correlation_id)
+        raise
+    except Exception:
+        if _ATOMIC_CLAIM:
+            release_bridge(correlation_id)
+        action = _transient_action(msg)
+        _record_drain_request_event(
+            "deferred",
+            msg,
+            cfg,
+            payload=payload,
+            action=action,
+            error_code="routing_config_unavailable",
+        )
+        return action
+    if _drain_routing_signature(current_cfg) != _drain_routing_signature(cfg):
+        if _ATOMIC_CLAIM:
+            release_bridge(correlation_id)
+        action = _transient_action(msg)
+        _record_drain_request_event(
+            "deferred",
+            msg,
+            cfg,
+            payload=payload,
+            action=action,
+            error_code="routing_config_changed",
+        )
+        return action
+
     # Close the final receive/build/claim → submit race. A lifecycle barrier can
     # be created after the handler's entry check; never let that message leave
     # the broker for execution while start/scale/stop/DB warmup admission has
@@ -1491,8 +1740,53 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         )
         return action
 
+    effective_submit_timeout = submit_timeout_seconds
+    if submit_deadline is not None:
+        monotonic = clock or time.monotonic
+        remaining = submit_deadline - monotonic()
+        if remaining <= _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS:
+            if _ATOMIC_CLAIM:
+                release_bridge(correlation_id)
+            action = _transient_action(msg)
+            _record_drain_request_event(
+                "deferred",
+                msg,
+                cfg,
+                payload=payload,
+                action=action,
+                error_code="task_budget_exhausted",
+            )
+            return action
+        if effective_submit_timeout is not None:
+            effective_submit_timeout = min(
+                effective_submit_timeout,
+                max(
+                    0.5,
+                    remaining - _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS,
+                ),
+            )
+
+    submit_kwargs: dict[str, Any] = _openapi_kwargs(cfg)
+    if effective_submit_timeout is not None:
+        submit_kwargs["timeout_seconds"] = effective_submit_timeout
+    if submit_transport_retries is not None:
+        submit_kwargs["max_transport_retries"] = submit_transport_retries
+    if submit_allow_token_resync is not None:
+        submit_kwargs["allow_token_resync"] = submit_allow_token_resync
     try:
-        upstream = submit(payload, **_openapi_kwargs(cfg))
+        upstream = submit(payload, **submit_kwargs)
+        if not str(upstream.get("job_id") or "").strip():
+            raise HTTPException(
+                502,
+                detail={
+                    "code": "openapi_response_missing_job_id",
+                    "message": "OpenAPI accepted the request without returning a job_id",
+                },
+            )
+    except SoftTimeLimitExceeded:
+        if _ATOMIC_CLAIM:
+            release_bridge(correlation_id)
+        raise
     except HTTPException as exc:
         # Distinguish a permanent rejection from a transient one. A 4xx (e.g.
         # the sibling 400s a bad option / unsupported field, or a 422 validation
@@ -1501,14 +1795,21 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         # (~10 retries) re-POSTing a request the sibling already rejected, which
         # delays the rest of the queue and floods the logs. A 5xx (sibling
         # overloaded / mid-restart) or a 503 transport error IS transient, so
-        # abandon it for redelivery. 408/429 are retryable 4xx exceptions.
-        status = int(getattr(exc, "status_code", 0) or 0)
-        permanent = 400 <= status < 500 and status not in (408, 429)
+        # abandon it for redelivery. 401/408/429 are retryable 4xx exceptions;
+        # the bounded Celery fallback leaves token repair to a later delivery,
+        # while the resident consumer retains inline 401 self-heal.
+        status = _normalise_http_status(getattr(exc, "status_code", 0))
+        permanent = 400 <= status < 500 and status not in (401, 408, 429)
         retry_exhausted = not permanent and _retry_exhausted(msg)
+        detail_code = str(exc.detail.get("code") or "") if isinstance(exc.detail, dict) else ""
         failure_code = (
             f"servicebus_submit_rejected_{status}"
             if permanent
-            else f"openapi_http_{status or 'unknown'}"
+            else (
+                "openapi_response_missing_job_id"
+                if detail_code == "openapi_response_missing_job_id"
+                else f"openapi_http_{status or 'unknown'}"
+            )
         )
         LOGGER.warning(
             "service bus → OpenAPI submit %s corr=%s status=%s",
@@ -1624,16 +1925,41 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         return action
 
     openapi_job_id = str(upstream.get("job_id") or "")
-    upsert_bridge(
-        BridgeRecord(
-            correlation_id=correlation_id,
-            openapi_job_id=openapi_job_id,
-            last_status="",
-            done=False,
-            request_id=request_id,
-            request_fingerprint=request_fingerprint,
+    try:
+        upsert_bridge(
+            BridgeRecord(
+                correlation_id=correlation_id,
+                openapi_job_id=openapi_job_id,
+                last_status="",
+                done=False,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
         )
-    )
+    except SoftTimeLimitExceeded:
+        if _ATOMIC_CLAIM:
+            release_bridge(correlation_id)
+        raise
+    except Exception:
+        LOGGER.warning(
+            "service bus bridge confirmation failed corr=%s job=%s — retrying idempotently",
+            correlation_id,
+            openapi_job_id,
+            exc_info=True,
+        )
+        if _ATOMIC_CLAIM:
+            release_bridge(correlation_id)
+        action = _transient_action(msg)
+        _record_drain_request_event(
+            "retry_scheduled",
+            msg,
+            cfg,
+            payload=payload,
+            openapi_job_id=openapi_job_id,
+            action=action,
+            error_code="bridge_confirmation_failed",
+        )
+        return action
     # Consumer is the writer: persist the durable jobstate row NOW (at drain
     # time) so the dashboard tracks the job immediately instead of waiting for
     # the periodic ~70 s /v1/jobs discovery poll to create it. Reuses the proven
@@ -1677,6 +2003,8 @@ def _drain_handler(msg: ParsedMessage, cfg: ServiceBusConfig) -> MessageAction:
         )
         if queued_durable:
             mark_published(correlation_id, _STATUS_QUEUED)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.warning("queued response staging failed corr=%s (bridge will retry)", correlation_id)
     _record_drain_request_event(
@@ -1764,6 +2092,8 @@ def _persist_drain_row_and_trace(
             _query_meta = query_meta_from_fasta(payload.get("query_fasta"))
             if _query_meta:
                 ext_row["query_meta"] = _query_meta
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             LOGGER.debug("drain query meta capture skipped corr=%s", correlation_id, exc_info=True)
         # Resolve + stamp the region durably in the worker so the jobs-list
@@ -1775,6 +2105,8 @@ def _persist_drain_row_and_trace(
             _region = resolve_cluster_region(_sub, _rg, _cluster)
             if _region:
                 ext_row["region"] = _region
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             LOGGER.debug("drain region stamp skipped corr=%s", correlation_id, exc_info=True)
         # Date-tiered layout: the sibling wrote results under
@@ -1786,6 +2118,8 @@ def _persist_drain_row_and_trace(
         if _date_prefix:
             ext_row["results_prefix"] = f"{_date_prefix}{openapi_job_id}/"
         _sync_external_jobs_to_table([ext_row], caller_oid="", tenant_id="")
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         LOGGER.warning(
             "drain jobstate row create failed corr=%s: %s", correlation_id, type(exc).__name__
@@ -1800,10 +2134,10 @@ def _persist_drain_row_and_trace(
         record_stage(repo, openapi_job_id, "row_created")
         record_stage(repo, openapi_job_id, "routed", target="openapi")
         record_stage(repo, openapi_job_id, "submitted", openapi_job_id=openapi_job_id)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
-        LOGGER.debug(
-            "drain trace record skipped corr=%s: %s", correlation_id, type(exc).__name__
-        )
+        LOGGER.debug("drain trace record skipped corr=%s: %s", correlation_id, type(exc).__name__)
 
 
 def _openapi_ready_for_drain(cfg: ServiceBusConfig) -> bool:
@@ -1856,14 +2190,19 @@ def _openapi_ready_for_transition_poll(openapi_kwargs: dict[str, str]) -> bool:
 @skip_tick_on_transient_infra
 def drain_and_resubmit() -> dict[str, Any]:
     """Drain the request queue → bridge each message to the OpenAPI plane."""
+    pass_deadline = time.monotonic() + _SERVICEBUS_TASK_WORK_BUDGET_SECONDS
     if not service_bus_enabled():
         return {"skipped": "disabled"}
     cfg = get_service_bus_config()
     return _drain_once(
         cfg,
-        max_messages=_DRAIN_MAX_MESSAGES,
+        max_messages=min(_DRAIN_MAX_MESSAGES, _DRAIN_CONCURRENCY),
         max_wait_seconds=1,
         max_concurrency=_DRAIN_CONCURRENCY,
+        submit_timeout_seconds=_SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS,
+        submit_transport_retries=_SERVICEBUS_TASK_SUBMIT_TRANSPORT_RETRIES,
+        submit_allow_token_resync=_SERVICEBUS_TASK_SUBMIT_ALLOW_TOKEN_RESYNC,
+        pass_deadline=pass_deadline,
     )
 
 
@@ -1873,6 +2212,11 @@ def _drain_once(
     max_messages: int,
     max_wait_seconds: int,
     max_concurrency: int,
+    submit_timeout_seconds: float | None = None,
+    submit_transport_retries: int | None = None,
+    submit_allow_token_resync: bool | None = None,
+    pass_deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
     """Run one admission-gated, queue-scoped, bounded drain pass."""
     admission = _execution_admission_for_drain(cfg)
@@ -1888,9 +2232,9 @@ def _drain_once(
                     request_autostart_for_pending_queue,
                 )
 
-                request_autostart_for_pending_queue(
-                    reason=f"servicebus_drain:{reason}"
-                )
+                request_autostart_for_pending_queue(reason=f"servicebus_drain:{reason}")
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 LOGGER.debug("queue-demand auto-start trigger failed", exc_info=True)
         LOGGER.info(
@@ -1915,14 +2259,66 @@ def _drain_once(
             cfg.request_queue,
         )
         return {"skipped": "locked"}
+    release_lease = True
     try:
-        stats = service_bus.drain_requests(
-            cfg,
-            lambda m: _drain_handler(m, cfg),
-            max_messages=max_messages,
-            max_wait_seconds=max_wait_seconds,
-            max_concurrency=max_concurrency,
-        )
+        try:
+            current_cfg = get_service_bus_config()
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception:
+            LOGGER.warning(
+                "servicebus drain tick skipped: routing config unavailable after lease",
+                exc_info=True,
+            )
+            return {"skipped": "routing_config_unavailable"}
+        if _drain_routing_signature(current_cfg) != _drain_routing_signature(cfg):
+            LOGGER.info(
+                "servicebus drain tick skipped: routing config changed before receive queue=%s",
+                cfg.request_queue,
+            )
+            return {"skipped": "routing_config_changed"}
+        effective_submit_timeout = submit_timeout_seconds
+        drain_pass_seconds: float | None = None
+        monotonic = clock or time.monotonic
+        if pass_deadline is not None:
+            remaining = pass_deadline - monotonic()
+            if remaining <= _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS:
+                LOGGER.info("servicebus drain tick skipped: task budget exhausted before receive")
+                return {"skipped": "task_budget_exhausted"}
+            drain_pass_seconds = max(
+                1.0,
+                remaining - _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS,
+            )
+
+        def handle_message(message: ParsedMessage) -> MessageAction:
+            return _drain_handler(
+                message,
+                cfg,
+                submit_timeout_seconds=effective_submit_timeout,
+                submit_transport_retries=submit_transport_retries,
+                submit_allow_token_resync=submit_allow_token_resync,
+                submit_deadline=pass_deadline,
+                clock=clock,
+            )
+
+        if drain_pass_seconds is None:
+            stats = service_bus.drain_requests(
+                cfg,
+                handle_message,
+                max_messages=max_messages,
+                max_wait_seconds=max_wait_seconds,
+                max_concurrency=max_concurrency,
+            )
+        else:
+            stats = service_bus.drain_requests(
+                cfg,
+                handle_message,
+                max_messages=max_messages,
+                max_wait_seconds=max_wait_seconds,
+                max_concurrency=max_concurrency,
+                max_pass_seconds=drain_pass_seconds,
+                clock=monotonic,
+            )
         # Observability (self-critique #6): one structured line per non-empty tick
         # so drain throughput / fan-out effectiveness is visible in App Insights
         # without parsing per-message logs. Silent on an idle tick (received==0)
@@ -1930,11 +2326,11 @@ def _drain_once(
         if stats.received:
             LOGGER.info(
                 "servicebus drain tick received=%d completed=%d abandoned=%d "
-                    "retried=%d dead_lettered=%d concurrency=%d",
+                "retried=%d dead_lettered=%d concurrency=%d",
                 stats.received,
                 stats.completed,
                 stats.abandoned,
-                    getattr(stats, "retried", 0),
+                getattr(stats, "retried", 0),
                 stats.dead_lettered,
                 max_concurrency,
             )
@@ -1949,14 +2345,18 @@ def _drain_once(
             ),
             "dead_lettered": stats.dead_lettered,
             "concurrency": max_concurrency,
-            **(
-                {"budget_exhausted": True}
-                if getattr(stats, "budget_exhausted", False)
-                else {}
-            ),
+            **({"budget_exhausted": True} if getattr(stats, "budget_exhausted", False) else {}),
         }
+    except SoftTimeLimitExceeded:
+        release_lease = False
+        LOGGER.warning(
+            "servicebus drain soft timeout; retaining lease until TTL backstop queue=%s",
+            cfg.request_queue,
+        )
+        raise
     finally:
-        _release_drain_lock(lock_token, cfg.request_queue)
+        if release_lease:
+            _release_drain_lock(lock_token, cfg.request_queue)
 
 
 def _publish_one_bridge(
@@ -1979,6 +2379,26 @@ def _publish_one_bridge(
         # Never bridged to a job id (drain crashed mid-flight). Give up once it
         # ages past the deadline, but first stage a terminal producer response.
         if _bridge_expired(rec.created_at):
+            try:
+                terminal_claim_won = claim_bridge(
+                    rec.correlation_id,
+                    rec.request_id,
+                    rec.request_fingerprint,
+                )
+            except SoftTimeLimitExceeded:
+                raise
+            except Exception:
+                LOGGER.warning(
+                    "expired bridge terminal claim failed corr=%s",
+                    rec.correlation_id,
+                    exc_info=True,
+                )
+                return (0, 0)
+            if not terminal_claim_won:
+                # A drain confirmed or freshly claimed the request after this
+                # publisher read ``rec``. Defer instead of emitting a false
+                # failure for a job that may now exist.
+                return (0, 0)
             event = _transition_event(
                 correlation_id=rec.correlation_id,
                 openapi_job_id="",
@@ -1990,6 +2410,7 @@ def _publish_one_bridge(
             )
             durable, delivered = _stage_response_event(cfg, event)
             if not durable:
+                release_bridge(rec.correlation_id)
                 return (0, 0)
             mark_done(rec.correlation_id, _STATUS_FAILED)
             return (int(delivered), 1)
@@ -2022,6 +2443,8 @@ def _publish_one_bridge(
             # is temporarily unavailable. The outbox flush publishes the
             # older response first; this bridge is polled on the next tick.
             return (0, 0)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.warning(
             "producer response ordering check failed corr=%s",
@@ -2088,9 +2511,7 @@ def _publish_one_bridge(
         # (metadata/FAILURE.txt + BLAST_RUNTIME exit code) — the same enrichment
         # the dashboard detail view applies — so a completion-topic subscriber
         # sees an actionable cause. Best-effort + sanitised (charter §12).
-        enriched = _enrich_failure_message_for_event(
-            job, rec.openapi_job_id, error_message
-        )
+        enriched = _enrich_failure_message_for_event(job, rec.openapi_job_id, error_message)
         if enriched:
             error_message = enriched
     # On a succeeded transition, attach the result-file download links so a
@@ -2102,10 +2523,10 @@ def _publish_one_bridge(
     if status == _STATUS_SUCCEEDED:
         try:
             result_files = _result_files_for_event(job, rec.openapi_job_id)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
-            LOGGER.debug(
-                "result-file link build failed corr=%s", rec.correlation_id, exc_info=True
-            )
+            LOGGER.debug("result-file link build failed corr=%s", rec.correlation_id, exc_info=True)
             result_files = []
         # Durably capture the file_id -> blob_path manifest (best-effort) so the
         # download route can serve results from Storage after the cluster
@@ -2167,13 +2588,13 @@ def _finish_lifecycle_interrupted_bridge(
                 row = get_state_repo().get(rec.openapi_job_id)
                 payload = getattr(row, "payload", None)
                 payload = payload if isinstance(payload, dict) else {}
-                error_code = str(
-                    getattr(row, "error_code", "") or payload.get("error_code") or ""
-                )
+                error_code = str(getattr(row, "error_code", "") or payload.get("error_code") or "")
                 local_interrupted = (
                     str(getattr(row, "status", "") or "").lower() == "failed"
                     and error_code == "cluster_lifecycle_interrupted"
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 local_interrupted = False
             if not local_interrupted:
@@ -2199,6 +2620,8 @@ def _finish_lifecycle_interrupted_bridge(
         _record_transition_trace(rec.openapi_job_id, _STATUS_FAILED)
         mark_done(rec.correlation_id, _STATUS_FAILED)
         return True
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.warning(
             "lifecycle interruption publish failed corr=%s",
@@ -2222,19 +2645,21 @@ def _stage_dead_letter_response_and_backup(
         # failure that would contradict the live bridge/job.
         if not _publish_duplicate_ack(cfg, existing, request_id=request_id):
             return False
-        return bool(backup_dead_letter_message(
-            {
-                "ts": _now_iso(),
-                "correlation_id": correlation_id,
-                "request_id": request_id,
-                "message_id": msg.message_id,
-                "sequence_number": msg.sequence_number,
-                "dead_letter_reason": msg.dead_letter_reason,
-                "delivery_count": msg.delivery_count,
-                "duplicate_of_openapi_job_id": existing.openapi_job_id,
-                "body": msg.body,
-            }
-        ))
+        return bool(
+            backup_dead_letter_message(
+                {
+                    "ts": _now_iso(),
+                    "correlation_id": correlation_id,
+                    "request_id": request_id,
+                    "message_id": msg.message_id,
+                    "sequence_number": msg.sequence_number,
+                    "dead_letter_reason": msg.dead_letter_reason,
+                    "delivery_count": msg.delivery_count,
+                    "duplicate_of_openapi_job_id": existing.openapi_job_id,
+                    "body": msg.body,
+                }
+            )
+        )
     raw_reason = str(msg.dead_letter_reason or "servicebus_dead_lettered")
     reason_key = raw_reason.strip().lower().replace(" ", "_")
     if "ttl" in reason_key or "expired" in reason_key:
@@ -2293,18 +2718,20 @@ def stage_operator_purge_response_and_backup(
     if existing is not None and existing.openapi_job_id:
         if not _publish_duplicate_ack(cfg, existing, request_id=request_id):
             return False
-        return bool(backup_dead_letter_message(
-            {
-                "ts": _now_iso(),
-                "correlation_id": correlation_id,
-                "request_id": request_id,
-                "message_id": msg.message_id,
-                "sequence_number": msg.sequence_number,
-                "dead_letter_reason": "operator_purged_duplicate",
-                "duplicate_of_openapi_job_id": existing.openapi_job_id,
-                "body": msg.body,
-            }
-        ))
+        return bool(
+            backup_dead_letter_message(
+                {
+                    "ts": _now_iso(),
+                    "correlation_id": correlation_id,
+                    "request_id": request_id,
+                    "message_id": msg.message_id,
+                    "sequence_number": msg.sequence_number,
+                    "dead_letter_reason": "operator_purged_duplicate",
+                    "duplicate_of_openapi_job_id": existing.openapi_job_id,
+                    "body": msg.body,
+                }
+            )
+        )
     event = _transition_event(
         correlation_id=correlation_id,
         openapi_job_id="",
@@ -2372,7 +2799,14 @@ def reconcile_dead_letter_responses() -> dict[str, Any]:
     """Turn every terminal DLQ request into a durable producer response."""
     if not service_bus_enabled():
         return {"skipped": "disabled"}
-    return _reconcile_dead_letter_responses(get_service_bus_config())
+    cfg = get_service_bus_config()
+    io_token = _acquire_task_config_io(cfg, "DLQ response reconciliation")
+    if not io_token:
+        return {"skipped": "config_fenced"}
+    try:
+        return _reconcile_dead_letter_responses(cfg)
+    finally:
+        service_bus.release_config_io(cfg, io_token)
 
 
 @shared_task(
@@ -2429,6 +2863,8 @@ def emit_service_bus_health() -> dict[str, Any]:
         outbox_last_errors=int(outbox["last_errors"]),
         outbox_deferred=cast(int | None, outbox.get("deferred")),
         outbox_poison=cast(int | None, outbox.get("poison")),
+        outbox_corrupt=cast(int | None, outbox.get("corrupt")),
+        outbox_timestamp_corrupt=cast(int | None, outbox.get("timestamp_corrupt")),
         admission_available=bool(snapshot["admission_available"]),
         admission_allowed=cast(bool | None, snapshot["admission_allowed"]),
         admission_reason=str(snapshot["admission_reason"]),
@@ -2476,21 +2912,20 @@ def emit_service_bus_health() -> dict[str, Any]:
     return snapshot
 
 
-@shared_task(
-    name="api.tasks.servicebus.publish_transitions",
-    soft_time_limit=50,
-    time_limit=60,
-)
-@skip_tick_on_transient_infra
-def publish_transitions() -> dict[str, Any]:
-    """Poll sibling status for active bridges and emit one event per change."""
+def _publish_transitions(cfg: ServiceBusConfig) -> dict[str, Any]:
+    """Run one bounded transition/outbox pass under a stable config token."""
     deadline = time.monotonic() + _PUBLISH_BUDGET_SECONDS
-    if not service_bus_enabled():
-        return {"skipped": "disabled"}
-    cfg = get_service_bus_config()
-    outbox = _flush_response_outbox(cfg)
+    outbox = _flush_response_outbox(cfg, deadline=deadline)
+    if time.monotonic() >= deadline:
+        return {
+            "skipped": "publish_budget_exhausted",
+            "published": outbox["delivered"],
+            "errors": outbox["errors"],
+        }
     try:
         pending_correlations, pending_snapshot_complete = pending_response_correlations()
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.warning("producer response ordering snapshot failed", exc_info=True)
         return {
@@ -2498,10 +2933,14 @@ def publish_transitions() -> dict[str, Any]:
             "published": outbox["delivered"],
             "errors": outbox["errors"] + 1,
         }
+    if time.monotonic() >= deadline:
+        return {
+            "skipped": "publish_budget_exhausted",
+            "published": outbox["delivered"],
+            "errors": outbox["errors"],
+        }
     if not pending_snapshot_complete:
-        LOGGER.warning(
-            "producer response ordering snapshot truncated; bridge polling deferred"
-        )
+        LOGGER.warning("producer response ordering snapshot truncated; bridge polling deferred")
         return {
             "skipped": "outbox_ordering_truncated",
             "published": outbox["delivered"],
@@ -2531,9 +2970,7 @@ def publish_transitions() -> dict[str, Any]:
         }
     openapi_kwargs = _openapi_kwargs(cfg)
     if not _openapi_ready_for_transition_poll(openapi_kwargs):
-        finished = sum(
-            1 for rec in bridges if _finish_lifecycle_interrupted_bridge(cfg, rec)
-        )
+        finished = sum(1 for rec in bridges if _finish_lifecycle_interrupted_bridge(cfg, rec))
         LOGGER.info(
             "servicebus publish tick deferred: OpenAPI plane not ready active_bridges=%d "
             "lifecycle_finished=%d",
@@ -2596,9 +3033,27 @@ def publish_transitions() -> dict[str, Any]:
     return {"scanned": scanned, "published": published, "finished": finished, "errors": errors}
 
 
-def _dlq_predicate(
-    cfg: ServiceBusConfig, total_dlq: int
-) -> Callable[[ParsedMessage], bool]:
+@shared_task(
+    name="api.tasks.servicebus.publish_transitions",
+    soft_time_limit=50,
+    time_limit=60,
+)
+@skip_tick_on_transient_infra
+def publish_transitions() -> dict[str, Any]:
+    """Poll sibling status and publish transitions under a stable config."""
+    if not service_bus_enabled():
+        return {"skipped": "disabled"}
+    cfg = get_service_bus_config()
+    io_token = _acquire_task_config_io(cfg, "transition publish")
+    if not io_token:
+        return {"skipped": "config_fenced"}
+    try:
+        return _publish_transitions(cfg)
+    finally:
+        service_bus.release_config_io(cfg, io_token)
+
+
+def _dlq_predicate(cfg: ServiceBusConfig, total_dlq: int) -> Callable[[ParsedMessage], bool]:
     """Return a predicate(ParsedMessage) -> bool for cleanup-eligible messages.
 
     Age-based: enqueued older than ``dlq_max_age_days``. Count-based: when the
@@ -2619,13 +3074,8 @@ def _dlq_predicate(
     return predicate
 
 
-@shared_task(name="api.tasks.servicebus.dlq_cleanup")
-@skip_tick_on_transient_infra
-def dlq_cleanup() -> dict[str, Any]:
-    """Enforce the dead-letter retention policy (backup-then-delete)."""
-    if not service_bus_enabled():
-        return {"skipped": "disabled"}
-    cfg = get_service_bus_config()
+def _dlq_cleanup(cfg: ServiceBusConfig) -> dict[str, Any]:
+    """Run one bounded DLQ retention pass under a stable config token."""
     if not cfg.dlq_cleanup_enabled:
         return {"skipped": "cleanup_disabled"}
 
@@ -2636,6 +3086,8 @@ def dlq_cleanup() -> dict[str, Any]:
     except service_bus.ServiceBusAuthError:
         # No Manage claim → cannot read counts; fall back to age-only cleanup.
         LOGGER.info("DLQ count unavailable (no Manage claim); age-only cleanup")
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         LOGGER.debug("DLQ count read failed", exc_info=True)
 
@@ -2657,3 +3109,19 @@ def dlq_cleanup() -> dict[str, Any]:
         "backup_failed": stats.backup_failed,
         "total_dlq_observed": total_dlq,
     }
+
+
+@shared_task(name="api.tasks.servicebus.dlq_cleanup")
+@skip_tick_on_transient_infra
+def dlq_cleanup() -> dict[str, Any]:
+    """Enforce the dead-letter retention policy (backup-then-delete)."""
+    if not service_bus_enabled():
+        return {"skipped": "disabled"}
+    cfg = get_service_bus_config()
+    io_token = _acquire_task_config_io(cfg, "DLQ cleanup")
+    if not io_token:
+        return {"skipped": "config_fenced"}
+    try:
+        return _dlq_cleanup(cfg)
+    finally:
+        service_bus.release_config_io(cfg, io_token)

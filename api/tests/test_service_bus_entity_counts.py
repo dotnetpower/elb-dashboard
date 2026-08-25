@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 from api.services import service_bus
+from billiard.exceptions import SoftTimeLimitExceeded
 
 
 def _cfg() -> SimpleNamespace:
@@ -315,6 +316,18 @@ def test_pending_request_count_none_on_admin_failure(monkeypatch: pytest.MonkeyP
 
     with _patched_admin(monkeypatch, _Boom()):
         assert service_bus.pending_request_count(_cfg()) is None
+
+
+def test_pending_request_count_propagates_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SoftLimit:
+        def get_queue_runtime_properties(self, _queue: str) -> Any:
+            raise SoftTimeLimitExceeded()
+
+    with _patched_admin(monkeypatch, _SoftLimit()):
+        with pytest.raises(SoftTimeLimitExceeded):
+            service_bus.pending_request_count(_cfg())
 
 
 def test_pending_request_count_none_when_unconfigured() -> None:

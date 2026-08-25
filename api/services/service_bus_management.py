@@ -11,6 +11,8 @@ Risky contracts: The legacy counter keys and additive ``telemetry`` payload must
     remain stable; optional static policy reads degrade without hiding runtime
     counters; auth failures are normalized through the injected domain error;
     pending-count failures return ``None`` so auto-stop does not strand a cluster.
+    Celery soft deadlines are process-control signals and never degrade to
+    ``None`` or a partial timestamp.
 Validation: ``uv run pytest -q api/tests/test_service_bus_entity_counts.py
     api/tests/test_settings_service_bus.py api/tests/test_auto_stop_sb_signal.py``.
 """
@@ -25,6 +27,7 @@ from typing import Any
 
 from azure.core.exceptions import ClientAuthenticationError
 from azure.servicebus.exceptions import ServiceBusAuthenticationError, ServiceBusError
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.services.service_bus_pref import ServiceBusConfig
 
@@ -43,6 +46,8 @@ def _iso_or_none(value: Any) -> str | None:
         if value.tzinfo is None:
             value = value.replace(tzinfo=UTC)
         return str(value.isoformat().replace("+00:00", "Z"))
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         return None
 
@@ -89,6 +94,8 @@ def pending_request_count(
     """Return active plus scheduled request messages, or ``None`` on failure."""
     try:
         resolved = require_config(cfg)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         return None
     try:
@@ -97,6 +104,8 @@ def pending_request_count(
             active = int(getattr(queue, "active_message_count", 0) or 0)
             scheduled = int(getattr(queue, "scheduled_message_count", 0) or 0)
             return max(0, active + scheduled)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         logger.debug("pending_request_count unavailable", exc_info=True)
         return None

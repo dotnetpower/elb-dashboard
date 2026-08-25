@@ -15,11 +15,14 @@ Validation: `uv run pytest -q api/tests/test_external_blast_api.py`.
 
 from __future__ import annotations
 
+import ast
+import inspect
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import httpx
 import pytest
+from billiard.exceptions import SoftTimeLimitExceeded
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -188,6 +191,68 @@ def test_request_with_token_resync_surfaces_401_when_no_token(monkeypatch):
     )
     assert resp.status_code == 401
     assert len(calls) == 1  # no retry without a recovered token
+
+
+def test_request_with_token_resync_can_be_disabled(monkeypatch):
+    from api.services import external_blast
+
+    resynced: list[int] = []
+    monkeypatch.setattr(
+        external_blast,
+        "_resync_token_after_401",
+        lambda: resynced.append(1) or "healed-token",
+    )
+    calls: list[int] = []
+
+    resp = external_blast._request_with_token_resync(
+        base_url="http://sibling.invalid",
+        timeout=5.0,
+        api_token=None,
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        send=lambda _client: calls.append(1) or SimpleNamespace(status_code=401),
+        label="submit_job",
+        allow_token_resync=False,
+    )
+
+    assert resp.status_code == 401
+    assert calls == [1]
+    assert resynced == []
+
+
+def test_request_token_resync_propagates_soft_time_limit(monkeypatch):
+    from api.services import external_blast
+
+    monkeypatch.setattr(
+        "api.services.openapi.token.resync_openapi_api_token_from_cluster",
+        lambda: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        external_blast._resync_token_after_401()
+
+
+def test_external_blast_broad_catches_propagate_soft_deadline() -> None:
+    from api.services import external_blast
+
+    tree = ast.parse(inspect.getsource(external_blast))
+    missing: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        caught_names: set[str] = set()
+        for handler in node.handlers:
+            if isinstance(handler.type, ast.Name):
+                caught_names.add(handler.type.id)
+            elif isinstance(handler.type, ast.Tuple):
+                caught_names.update(
+                    item.id for item in handler.type.elts if isinstance(item, ast.Name)
+                )
+        if "Exception" in caught_names and "SoftTimeLimitExceeded" not in caught_names:
+            missing.append(node.lineno)
+
+    assert missing == [], f"broad catches swallow SoftTimeLimitExceeded at lines {missing}"
 
 
 def test_request_with_token_resync_passthrough_on_success(monkeypatch):
@@ -429,7 +494,6 @@ def test_stream_result_file_from_storage_404_without_account(monkeypatch):
     with pytest.raises(HTTPException) as raised:
         external_blast.stream_result_file_from_storage("abc123", "result-001")
     assert raised.value.status_code == 404
-
 
 
 def test_token_resync_coalesces_concurrent_callers(monkeypatch):
@@ -1351,9 +1415,7 @@ def test_download_decompress_gunzips_gzip_result(monkeypatch):
     assert response.status_code == 200
     assert response.content == _DL_TABULAR.encode("utf-8")
     assert response.headers["content-type"].startswith("text/plain")
-    assert response.headers["content-disposition"] == (
-        'attachment; filename="merged_results.out"'
-    )
+    assert response.headers["content-disposition"] == ('attachment; filename="merged_results.out"')
 
 
 def test_download_format_csv_transcodes_gzip_tabular(monkeypatch):
@@ -1374,9 +1436,7 @@ def test_download_format_csv_transcodes_gzip_tabular(monkeypatch):
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
-    assert response.headers["content-disposition"] == (
-        'attachment; filename="merged_results.csv"'
-    )
+    assert response.headers["content-disposition"] == ('attachment; filename="merged_results.csv"')
     rows = list(csv.DictReader(io.StringIO(response.text)))
     assert rows[0]["sseqid"] == "NR_1"
 
@@ -1751,9 +1811,7 @@ def test_canonical_jobs_list_subscription_scope_discovers_clusters(monkeypatch):
         external_jobs,
         "_openapi_client_kwargs_from_cluster",
         lambda subscription_id, resource_group, cluster_name: (
-            {"base_url": f"http://{cluster_name}", "api_token": "tok"}
-            if cluster_name
-            else {}
+            {"base_url": f"http://{cluster_name}", "api_token": "tok"} if cluster_name else {}
         ),
     )
     # Active rows (the "running" job below) trigger a per-job detail refresh
@@ -1839,9 +1897,7 @@ def test_canonical_jobs_list_subscription_scope_partial_cluster_failure(monkeypa
 
     def list_jobs(**kwargs):
         if kwargs.get("base_url") == "http://down-cluster":
-            raise HTTPException(
-                503, detail={"code": "openapi_unreachable", "message": "down"}
-            )
+            raise HTTPException(503, detail={"code": "openapi_unreachable", "message": "down"})
         return {
             "jobs": [
                 {
@@ -1893,9 +1949,7 @@ def test_canonical_jobs_list_subscription_scope_all_clusters_down(monkeypatch):
     )
 
     def list_jobs(**_kwargs):
-        raise HTTPException(
-            503, detail={"code": "openapi_unreachable", "message": "down"}
-        )
+        raise HTTPException(503, detail={"code": "openapi_unreachable", "message": "down"})
 
     monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
     client = TestClient(app)
@@ -2315,9 +2369,7 @@ def test_sync_external_backfills_runtime_id_without_status_change(monkeypatch):
         caller_oid="oid-1",
     )
 
-    assert updates == [
-        {"elastic_blast_job_id": "job-deadbeefdeadbeefdeadbeefdeadbeef"}
-    ]
+    assert updates == [{"elastic_blast_job_id": "job-deadbeefdeadbeefdeadbeefdeadbeef"}]
     assert invalidations == [
         {
             "job_id": "runtime-backfill-1",
@@ -2693,8 +2745,7 @@ def test_sync_external_failed_transition_recovers_error(monkeypatch):
     assert result[1] == 1  # updated
     assert calls == ["fail-tx-1"]
     assert any(
-        "selected machine type too small" in str(kw.get("error_code") or "")
-        for _jid, kw in updated
+        "selected machine type too small" in str(kw.get("error_code") or "") for _jid, kw in updated
     )
 
 
@@ -2805,7 +2856,6 @@ def test_sync_external_failed_recovery_never_breaks_sync_on_sibling_outage(monke
 
     assert result[0] == 1  # created despite the sibling outage
     assert created[0].kwargs.get("error_code") is None
-
 
 
 def test_sync_external_jobs_persists_remembered_query_label(monkeypatch):
@@ -2932,9 +2982,7 @@ def test_sync_external_jobs_updates_drifted_status(monkeypatch):
 
     assert result == (0, 1, set())
     assert created == []
-    assert updated_calls == [
-        {"job_id": "abc123", "status": "completed", "phase": "completed"}
-    ]
+    assert updated_calls == [{"job_id": "abc123", "status": "completed", "phase": "completed"}]
 
 
 def test_sync_external_jobs_heals_placeholder_query_label(monkeypatch):
@@ -3813,7 +3861,6 @@ def test_download_route_propagates_non_offline_storage_errors(monkeypatch):
     assert reached["proxy"] is False
 
 
-
 def test_canonical_local_result_file_id_must_match_job_prefix(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
@@ -4012,8 +4059,7 @@ def test_canonical_jobs_list_refreshes_active_local_rows(monkeypatch):
 
     client = TestClient(app)
     response = client.get(
-        "/api/blast/jobs"
-        "?subscription_id=sub-1&resource_group=rg-elb-01&cluster_name=elb-cluster"
+        "/api/blast/jobs?subscription_id=sub-1&resource_group=rg-elb-01&cluster_name=elb-cluster"
     )
 
     assert response.status_code == 200
@@ -4252,10 +4298,7 @@ def test_external_blast_ready_404_fails_open(monkeypatch, caplog) -> None:
     assert result["skipped"] == "version_mismatch"
     # Operators must see a structured warning so a pre-4.15 sibling cannot
     # silently degrade the gate.
-    assert any(
-        getattr(rec, "event", None) == "ready_probe_stale_sibling"
-        for rec in caplog.records
-    )
+    assert any(getattr(rec, "event", None) == "ready_probe_stale_sibling" for rec in caplog.records)
 
 
 def test_external_blast_ready_caches_success_within_ttl(monkeypatch) -> None:
@@ -4738,6 +4781,59 @@ def test_submit_job_retry_resends_same_idempotency_key(monkeypatch) -> None:
     assert bodies[0]["idempotency_key"] == bodies[1]["idempotency_key"] == "corr-retry"
 
 
+def test_submit_job_accepts_a_call_specific_timeout_and_retry_budget(monkeypatch) -> None:
+    from api.services import external_blast
+
+    captured: list[dict[str, Any]] = []
+
+    def _request(**kwargs: Any) -> httpx.Response:
+        captured.append(kwargs)
+        return httpx.Response(
+            202,
+            json={"job_id": "j-budget", "status": "queued"},
+            request=httpx.Request("POST", "http://openapi/v1/jobs"),
+        )
+
+    monkeypatch.setattr(external_blast, "_request_with_token_resync", _request)
+
+    result = external_blast.submit_job(
+        {"external_correlation_id": "corr-budget", "program": "blastn", "db": "core_nt"},
+        base_url="http://openapi",
+        timeout_seconds=35,
+        max_transport_retries=0,
+    )
+
+    assert result["job_id"] == "j-budget"
+    assert len(captured) == 1
+    assert captured[0]["timeout"] == 35
+
+
+def test_submit_job_can_disable_inline_token_resync(monkeypatch) -> None:
+    from api.services import external_blast
+
+    captured: list[dict[str, Any]] = []
+
+    def _request(**kwargs: Any) -> httpx.Response:
+        captured.append(kwargs)
+        return httpx.Response(
+            401,
+            json={"detail": "stale token"},
+            request=httpx.Request("POST", "http://openapi/v1/jobs"),
+        )
+
+    monkeypatch.setattr(external_blast, "_request_with_token_resync", _request)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.submit_job(
+            {"external_correlation_id": "corr-no-resync", "db": "core_nt"},
+            base_url="http://openapi",
+            allow_token_resync=False,
+        )
+
+    assert raised.value.status_code == 401
+    assert captured[0]["allow_token_resync"] is False
+
+
 def test_submit_job_without_any_key_does_not_retry(monkeypatch) -> None:
     """No idempotency_key AND no external_correlation_id → the sibling cannot
     dedupe, so a transport failure must surface immediately (no retry) to avoid
@@ -4792,9 +4888,7 @@ def test_download_file_accepts_valid_signed_token_without_bearer(monkeypatch):
     assert token is not None
     client = TestClient(app)
 
-    response = client.get(
-        f"/api/v1/elastic-blast/jobs/abc123def456/files/result-001?token={token}"
-    )
+    response = client.get(f"/api/v1/elastic-blast/jobs/abc123def456/files/result-001?token={token}")
 
     assert response.status_code == 200
     assert response.content == b"RESULT-BYTES"
@@ -4824,9 +4918,7 @@ def test_download_file_rejects_token_scoped_to_other_file(monkeypatch):
     assert token is not None
     client = TestClient(app)
 
-    response = client.get(
-        f"/api/v1/elastic-blast/jobs/abc123def456/files/result-999?token={token}"
-    )
+    response = client.get(f"/api/v1/elastic-blast/jobs/abc123def456/files/result-999?token={token}")
 
     assert response.status_code == 401
 
@@ -4929,9 +5021,7 @@ def test_sync_external_caches_sibling_stats_on_update_path(monkeypatch):
 
 
 @pytest.mark.parametrize("terminal_status", ["completed", "succeeded", "failed", "cancelled"])
-def test_sync_external_caches_sibling_stats_for_every_terminal_status(
-    monkeypatch, terminal_status
-):
+def test_sync_external_caches_sibling_stats_for_every_terminal_status(monkeypatch, terminal_status):
     """All four terminal statuses populate the cache. The live verification
     after 833f4b1 only exercised ``completed`` (no failed jobs in the dev env
     at the time); this test pins the remaining three so the populate guard

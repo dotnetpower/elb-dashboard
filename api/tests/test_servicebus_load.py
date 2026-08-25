@@ -149,6 +149,9 @@ def _enable(monkeypatch: pytest.MonkeyPatch) -> ServiceBusConfig:
     )
     monkeypatch.setattr(sb_tasks, "service_bus_enabled", lambda: True)
     monkeypatch.setattr(sb_tasks, "get_service_bus_config", lambda: cfg)
+    monkeypatch.setattr(sb_tasks, "_DRAIN_CONCURRENCY", 4)
+    monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "test"))
+    monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
     # Keep the heavy best-effort persistence out of the hot loop; it is covered
     # by its own tests. The drain contract under test is settle + dedup + bound.
     monkeypatch.setattr(sb_tasks, "_persist_drain_row_and_trace", lambda *a, **k: None)
@@ -165,7 +168,7 @@ def _request_body(corr: str) -> dict[str, Any]:
     }
 
 
-def _drain_until_empty(receiver: _LoadReceiver, *, max_ticks: int = 40) -> list[int]:
+def _drain_until_empty(receiver: _LoadReceiver, *, max_ticks: int = 100) -> list[int]:
     """Run drain_and_resubmit ticks until the queue is drained. Returns per-tick
     received counts so the caller can assert the per-tick bound."""
     per_tick: list[int] = []
@@ -209,9 +212,14 @@ def test_large_backlog_drains_fully_bounded_and_idempotent(
     assert receiver.dead_lettered == []
     # Every tick respected the per-tick bound.
     assert per_tick, "expected at least one drain tick"
-    assert max(per_tick) <= sb_tasks._DRAIN_MAX_MESSAGES
-    # A 300-message backlog cannot drain in one tick at the default bound.
-    assert len(per_tick) >= n // sb_tasks._DRAIN_MAX_MESSAGES
+    effective_batch = min(
+        sb_tasks._DRAIN_MAX_MESSAGES,
+        sb_tasks._DRAIN_CONCURRENCY,
+    )
+    assert max(per_tick) <= effective_batch
+    # The Celery fallback deliberately receives one concurrency-sized batch;
+    # the continuously looping resident consumer remains the throughput path.
+    assert len(per_tick) >= (n + effective_batch - 1) // effective_batch
     # Exactly one submit per distinct correlation — no loss, no duplicate.
     assert len(submits) == n
     assert len(set(submits)) == n
@@ -241,8 +249,10 @@ def test_duplicate_redelivery_is_deduped_under_load(
     monkeypatch.setattr(
         external_blast,
         "submit_job",
-        lambda p, **k: submits.append(p["external_correlation_id"])
-        or {"job_id": "op-" + p["external_correlation_id"]},
+        lambda p, **k: (
+            submits.append(p["external_correlation_id"])
+            or {"job_id": "op-" + p["external_correlation_id"]}
+        ),
     )
 
     _drain_until_empty(receiver)
@@ -284,8 +294,12 @@ def test_permanent_rejection_flood_dead_letters_without_retry_storm(
     assert receiver.abandoned == []
     # The sibling was hit once per message — not ~10x (no delivery-count burn).
     assert len(calls) == n
-    # Bounded drain: ceil(n / max) ticks, never an unbounded loop.
-    assert len(per_tick) <= (n // sb_tasks._DRAIN_MAX_MESSAGES) + 2
+    # Bounded fallback: one concurrency-sized receive batch per tick.
+    effective_batch = min(
+        sb_tasks._DRAIN_MAX_MESSAGES,
+        sb_tasks._DRAIN_CONCURRENCY,
+    )
+    assert len(per_tick) <= ((n + effective_batch - 1) // effective_batch) + 1
 
 
 def test_transient_failure_is_scheduled_for_retry(
@@ -361,9 +375,7 @@ def test_rate_limiter_distinct_keys_are_independent() -> None:
     for k in range(20):
         key = f"token:caller-{k}"
         admitted = sum(
-            counter.check_and_record(
-                key, max_requests=max_requests, window_seconds=window
-            )[0]
+            counter.check_and_record(key, max_requests=max_requests, window_seconds=window)[0]
             for _ in range(max_requests + 5)
         )
         assert admitted == max_requests

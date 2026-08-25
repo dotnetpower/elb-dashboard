@@ -154,6 +154,66 @@ def test_outbox_scan_is_bounded_and_reports_truncation(
     assert "outbox_backlog_truncated" in snapshot["warnings"]
 
 
+def test_outbox_corrupt_payload_is_reported_without_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        health.service_bus,
+        "entity_counts",
+        lambda _cfg: {"queue": {"active_message_count": 0}, "subscriptions": []},
+    )
+    monkeypatch.setattr(
+        health,
+        "list_pending_responses",
+        lambda **_kwargs: [
+            PendingResponse(
+                event_id="secret-corrupt-event",
+                event={},
+                created_at="2026-08-25T00:00:00+00:00",
+                last_error_code="outbox_payload_corrupt",
+            )
+        ],
+    )
+
+    snapshot = health.collect_service_bus_health(
+        _cfg(),
+        admission={"allowed": True},
+    )
+
+    assert snapshot["outbox"]["corrupt"] == 1
+    assert "outbox_corrupt_response_pending" in snapshot["warnings"]
+    assert "secret-corrupt-event" not in str(snapshot)
+
+
+def test_outbox_corrupt_timestamp_is_reported_without_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        health.service_bus,
+        "entity_counts",
+        lambda _cfg: {"queue": {"active_message_count": 0}, "subscriptions": []},
+    )
+    monkeypatch.setattr(
+        health,
+        "list_pending_responses",
+        lambda **_kwargs: [
+            PendingResponse(
+                event_id="secret-timestamp-event",
+                event={"status": "queued"},
+                created_at="2026-08-25T00:00:00+00:00",
+                next_attempt_at="2026-08-25T00:05:00+00:00",
+                last_error_code="deferred_timestamp_corrupt",
+            )
+        ],
+    )
+
+    snapshot = health.collect_service_bus_health(_cfg(), admission={"allowed": True})
+
+    assert snapshot["outbox"]["timestamp_corrupt"] == 1
+    assert "outbox_timestamp_corrupt_pending" in snapshot["warnings"]
+    assert "secret-timestamp-event" not in str(snapshot)
+
+
 def test_warns_on_unsafe_entity_policy_and_counts_warmup_without_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -334,7 +394,7 @@ def test_outbox_flush_always_records_health_state(
         event={"event": "blast.transition", "event_id": "evt-1"},
         created_at="2026-07-30T12:00:00+00:00",
     )
-    monkeypatch.setattr(sb_tasks, "list_pending_responses", lambda *, limit: [pending])
+    monkeypatch.setattr(sb_tasks, "list_due_responses", lambda *, limit: [pending])
     monkeypatch.setattr(sb_tasks, "mark_response_delivered", lambda _event_id: None)
     monkeypatch.setattr(
         sb_tasks,
@@ -352,6 +412,82 @@ def test_outbox_flush_always_records_health_state(
 
     assert result == expected
     assert recorded == [(expected, True)]
+
+
+@pytest.mark.parametrize("failure_stage", ["list", "publish"])
+def test_outbox_flush_propagates_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    pending = PendingResponse(
+        event_id="evt-soft-limit",
+        event={"event": "blast.transition", "event_id": "evt-soft-limit"},
+        created_at="2026-08-25T00:00:00+00:00",
+    )
+    if failure_stage == "list":
+        monkeypatch.setattr(
+            sb_tasks,
+            "list_due_responses",
+            lambda **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+        )
+    else:
+        monkeypatch.setattr(sb_tasks, "list_due_responses", lambda **_kwargs: [pending])
+        monkeypatch.setattr(
+            sb_tasks.service_bus,
+            "publish_event",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+        )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        sb_tasks._flush_response_outbox(_cfg())
+
+
+def test_response_staging_propagates_publish_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sb_tasks, "enqueue_response", lambda _event: True)
+    monkeypatch.setattr(
+        sb_tasks.service_bus,
+        "publish_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        sb_tasks._stage_response_event(
+            _cfg(),
+            {"event": "blast.transition", "event_id": "evt-stage-soft-limit"},
+        )
+
+
+def test_outbox_flush_stops_before_starting_work_past_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = [
+        PendingResponse(
+            event_id=f"evt-{index}",
+            event={"event": "blast.transition", "event_id": f"evt-{index}"},
+            created_at=f"2026-08-25T00:00:0{index}+00:00",
+        )
+        for index in range(2)
+    ]
+    monkeypatch.setattr(sb_tasks, "list_due_responses", lambda **_kwargs: pending)
+    published: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks.service_bus,
+        "publish_event",
+        lambda _cfg, event: published.append(str(event["event_id"])),
+    )
+    monkeypatch.setattr(sb_tasks, "mark_response_delivered", lambda _event_id: None)
+    clock = iter((0.0, 10.0))
+
+    result = sb_tasks._flush_response_outbox(
+        _cfg(),
+        deadline=5.0,
+        clock=lambda: next(clock),
+    )
+
+    assert published == ["evt-0"]
+    assert result == {"scanned": 1, "delivered": 1, "errors": 0}
 
 
 def test_outbox_poison_isolates_only_its_correlation(
@@ -376,7 +512,7 @@ def test_outbox_poison_isolates_only_its_correlation(
     ]
     sent: list[str] = []
     deferred: list[str] = []
-    monkeypatch.setattr(sb_tasks, "list_pending_responses", lambda *, limit: pending)
+    monkeypatch.setattr(sb_tasks, "list_due_responses", lambda *, limit: pending)
     monkeypatch.setattr(sb_tasks, "mark_response_delivered", lambda event_id: None)
     monkeypatch.setattr(
         sb_tasks,

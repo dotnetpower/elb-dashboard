@@ -22,6 +22,14 @@ def test_job_detail_recovers_query_label_for_external_job(monkeypatch) -> None:
     the Query ID durably from the query blob on the detail view."""
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.blast.external_query_labels.recall_query_label",
+        lambda _job_id: "",
+    )
+    monkeypatch.setattr(
+        "api.services.blast.query_label_recovery.query_label_miss_recorded",
+        lambda _job_id: False,
+    )
 
     owner_oid = "00000000-0000-0000-0000-000000000000"
 
@@ -51,7 +59,7 @@ def test_job_detail_recovers_query_label_for_external_job(monkeypatch) -> None:
         reads.append((container, blob_path))
         return ">myquery some description\nACGTACGT\n"
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: Repo())
     monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     from api.main import app
@@ -78,6 +86,14 @@ def test_job_detail_recovers_query_label_over_generic_placeholder(monkeypatch) -
     """
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.blast.external_query_labels.recall_query_label",
+        lambda _job_id: "",
+    )
+    monkeypatch.setattr(
+        "api.services.blast.query_label_recovery.query_label_miss_recorded",
+        lambda _job_id: False,
+    )
 
     owner_oid = "00000000-0000-0000-0000-000000000000"
     updates: list[dict[str, object]] = []
@@ -112,7 +128,7 @@ def test_job_detail_recovers_query_label_over_generic_placeholder(monkeypatch) -
         assert (container, blob_path) == ("queries", "openapi-ph.fa")
         return ">warmup\nATGTCTGATAATGGACCCCAAAATCAGCGAAATGCACCCCGCA\n"
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: Repo())
     monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     from api.main import app
@@ -631,9 +647,7 @@ def _pagination_route_setup(monkeypatch, *, row_count: int):
         },
     )
     monkeypatch.setattr(jobs_mod, "_local_state_matches_job_scope", lambda *a, **k: True)
-    monkeypatch.setattr(
-        jobs_mod, "_local_list_row_may_have_split_children", lambda _row: False
-    )
+    monkeypatch.setattr(jobs_mod, "_local_list_row_may_have_split_children", lambda _row: False)
     monkeypatch.setattr(jobs_mod, "_blocked_refresh_reasons", lambda _rows: {})
     monkeypatch.setattr(
         jobs_mod,
@@ -718,9 +732,7 @@ def _cursor_route_setup(monkeypatch, *, row_count: int):
             calls["first_page_limit"] = limit
             return indexed[:limit]
 
-        def list_owner_page(
-            self, owner_oid, *, limit=50, include_payload=True, cursor=""
-        ):
+        def list_owner_page(self, owner_oid, *, limit=50, include_payload=True, cursor=""):
             calls["cursor"] = cursor
             calls["page_limit"] = limit
             boundary = decode_cursor(cursor)
@@ -742,9 +754,7 @@ def _cursor_route_setup(monkeypatch, *, row_count: int):
         },
     )
     monkeypatch.setattr(jobs_mod, "_local_state_matches_job_scope", lambda *a, **k: True)
-    monkeypatch.setattr(
-        jobs_mod, "_local_list_row_may_have_split_children", lambda _row: False
-    )
+    monkeypatch.setattr(jobs_mod, "_local_list_row_may_have_split_children", lambda _row: False)
     monkeypatch.setattr(jobs_mod, "_blocked_refresh_reasons", lambda _rows: {})
     monkeypatch.setattr(
         jobs_mod,
@@ -784,18 +794,14 @@ def test_jobs_list_cursor_page_continues_without_overlap(monkeypatch) -> None:
     client, calls, rows = _cursor_route_setup(monkeypatch, row_count=5)
 
     cursor = encode_cursor(row_key(rows[1].created_at, "job-1"))
-    body = client.get(
-        "/api/blast/jobs", params={"limit": 2, "cursor": cursor}
-    ).json()
+    body = client.get("/api/blast/jobs", params={"limit": 2, "cursor": cursor}).json()
 
     # Page two = the next two strictly-older rows, no overlap with [job-0, job-1].
     assert [j["job_id"] for j in body["jobs"]] == ["job-2", "job-3"]
     assert body["page"]["has_more"] is True
     assert calls["cursor"] == cursor
     # next_cursor advances to the last displayed row of page two.
-    assert body["page"]["next_cursor"] == encode_cursor(
-        row_key(rows[3].created_at, "job-3")
-    )
+    assert body["page"]["next_cursor"] == encode_cursor(row_key(rows[3].created_at, "job-3"))
 
 
 def test_jobs_list_no_next_cursor_when_index_disabled(monkeypatch) -> None:
@@ -963,9 +969,7 @@ def test_blast_job_query_rejects_path_traversal(monkeypatch) -> None:
     def _should_not_call(*_args, **_kwargs):
         raise AssertionError("Storage SDK must not be invoked on a traversal path")
 
-    monkeypatch.setattr(
-        "api.services.storage.data._blob_service", _should_not_call
-    )
+    monkeypatch.setattr("api.services.storage.data._blob_service", _should_not_call)
     monkeypatch.setattr("api.services.get_credential", lambda: object())
 
     from api.main import app
@@ -1137,9 +1141,7 @@ def test_blast_job_cancel_external_routes_to_sibling_delete(monkeypatch) -> None
     assert body["status"] == "cancelled"
     assert body["openapi_job_id"] == "abc123"
     assert deleted["job_id"] == "abc123"
-    assert repo_cls.updates == [
-        {"job_id": "abc123", "status": "cancelled", "phase": "cancelled"}
-    ]
+    assert repo_cls.updates == [{"job_id": "abc123", "status": "cancelled", "phase": "cancelled"}]
 
 
 def test_blast_job_cancel_dashboard_uses_k8s_task(monkeypatch) -> None:
@@ -1220,9 +1222,7 @@ def test_blast_job_cancel_external_sibling_unreachable_returns_503(monkeypatch) 
     from fastapi import HTTPException
 
     def unreachable(*_a, **_k):
-        raise HTTPException(
-            503, detail={"code": "openapi_unreachable", "message": "down"}
-        )
+        raise HTTPException(503, detail={"code": "openapi_unreachable", "message": "down"})
 
     monkeypatch.setattr("api.services.external_blast.delete_job", unreachable)
     monkeypatch.setattr(
@@ -1443,9 +1443,7 @@ def test_job_detail_merges_sibling_stats_and_caches(monkeypatch) -> None:
 
     client, _fake = _detail_test_harness(monkeypatch, fake_get_job)
 
-    r1 = client.get(
-        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
-    )
+    r1 = client.get("/api/blast/jobs/ext-done", params={"include_database_metadata": "false"})
     assert r1.status_code == 200
     b1 = r1.json()
     assert b1["db_version"] == "2026-06-06-01-05-02"
@@ -1453,9 +1451,7 @@ def test_job_detail_merges_sibling_stats_and_caches(monkeypatch) -> None:
     assert b1["run_seconds"] == 95
     assert calls == ["ext-done"]  # exactly one live fetch
 
-    r2 = client.get(
-        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
-    )
+    r2 = client.get("/api/blast/jobs/ext-done", params={"include_database_metadata": "false"})
     assert r2.status_code == 200
     assert r2.json()["db_version"] == "2026-06-06-01-05-02"
     assert calls == ["ext-done"]  # cache hit — no second get_job
@@ -1474,16 +1470,12 @@ def test_job_detail_sibling_stats_negative_marker_bounds_refetch(monkeypatch) ->
 
     client, _fake = _detail_test_harness(monkeypatch, fake_get_job)
 
-    r1 = client.get(
-        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
-    )
+    r1 = client.get("/api/blast/jobs/ext-done", params={"include_database_metadata": "false"})
     assert r1.status_code == 200  # detail renders despite the timeout
     assert not r1.json().get("db_version")
     assert calls == ["ext-done"]
 
-    r2 = client.get(
-        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
-    )
+    r2 = client.get("/api/blast/jobs/ext-done", params={"include_database_metadata": "false"})
     assert r2.status_code == 200
     assert calls == ["ext-done"]  # negative marker prevented the re-fetch
 
@@ -1500,9 +1492,7 @@ def test_job_detail_legacy_external_row_renders_without_stats(monkeypatch) -> No
 
     client, _fake = _detail_test_harness(monkeypatch, fake_get_job)
 
-    r1 = client.get(
-        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
-    )
+    r1 = client.get("/api/blast/jobs/ext-done", params={"include_database_metadata": "false"})
     assert r1.status_code == 200
     b1 = r1.json()
     assert not b1.get("db_version")
@@ -1511,9 +1501,6 @@ def test_job_detail_legacy_external_row_renders_without_stats(monkeypatch) -> No
     assert not b1.get("molecule")
     assert calls == ["ext-done"]
 
-    r2 = client.get(
-        "/api/blast/jobs/ext-done", params={"include_database_metadata": "false"}
-    )
+    r2 = client.get("/api/blast/jobs/ext-done", params={"include_database_metadata": "false"})
     assert r2.status_code == 200
     assert calls == ["ext-done"]  # negative marker bounds the re-fetch
-
