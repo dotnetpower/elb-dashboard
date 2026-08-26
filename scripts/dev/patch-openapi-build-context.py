@@ -5,7 +5,8 @@
 Responsibility: Patch the sibling docker-openapi build context for dashboard runtime policy
 Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
 Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
-`_disable_warmed_cache_skip`, `_harden_openapi_runtime_ids`, `patch_app`, `main`
+`_disable_warmed_cache_skip`, `_harden_openapi_runtime_ids`,
+`_harden_elb_scripts_configmap_reconciliation`, `patch_app`, `main`
 Risky contracts: Assume local developer context only; avoid broad production-side effects.
 Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
@@ -260,6 +261,126 @@ def _harden_openapi_runtime_id_consumers(path: Path) -> None:
     path.write_text(text)
 
 
+def _harden_elb_scripts_configmap_reconciliation(path: Path) -> None:
+    """Reconcile installed ElasticBLAST scripts instead of trusting stale keys."""
+
+    text = path.read_text()
+    marker = "ELB scripts ConfigMap drift detected"
+    if marker in text:
+        return
+    function_name = "def _ensure_elb_scripts_configmap() -> None:\n"
+    if text.count(function_name) != 1:
+        raise RuntimeError("expected exactly one ELB scripts ConfigMap helper")
+    start = text.index(function_name)
+    end = text.find("\n\ndef ", start + len(function_name))
+    if end < 0:
+        raise RuntimeError("could not isolate ELB scripts ConfigMap helper")
+    replacement = '''def _ensure_elb_scripts_configmap() -> None:
+    required_scripts = {
+        "blast-run-aks.sh",
+        "elb-finalizer-aks.sh",
+        "init-db-download-aks.sh",
+        "init-db-shard-aks.sh",
+        "query-download-ssd-aks.sh",
+        "results-export-aks.sh",
+    }
+    scripts_dir = files("elastic_blast").joinpath("templates/scripts")
+    scripts_path = Path(str(scripts_dir))
+    desired_scripts = {
+        script_path.name: script_path.read_text(encoding="utf-8")
+        for script_path in scripts_path.iterdir()
+        if script_path.is_file() and script_path.suffix == ".sh"
+    }
+    desired_size = sum(
+        len(name.encode("utf-8")) + len(content.encode("utf-8"))
+        for name, content in desired_scripts.items()
+    )
+    if desired_size > 900_000:
+        raise RuntimeError(
+            f"Installed ElasticBLAST scripts exceed ConfigMap limit: {desired_size} bytes"
+        )
+    missing = sorted(required_scripts.difference(desired_scripts))
+    if missing:
+        raise RuntimeError(f"Installed ElasticBLAST scripts are incomplete: {missing}")
+
+    existing_data: dict[str, str] = {}
+    try:
+        existing = safe_exec(
+            ["kubectl", "get", "configmap", "elb-scripts", "-o", "json"],
+            timeout=10,
+        )
+        raw_data = json.loads(existing.stdout or "{}").get("data", {})
+        if isinstance(raw_data, dict):
+            existing_data = {
+                str(name): str(content) for name, content in raw_data.items()
+            }
+    except Exception as exc:
+        logger.info(
+            "ELB scripts ConfigMap lookup unavailable; reconciling reason=%s",
+            type(exc).__name__,
+        )
+
+    drifted = sorted(
+        name
+        for name, content in desired_scripts.items()
+        if existing_data.get(name) != content
+    )
+    if not drifted:
+        return
+    logger.info(
+        "ELB scripts ConfigMap drift detected; reconciling scripts=%s",
+        ",".join(drifted),
+    )
+    dry_run = subprocess.run(
+        [
+            "kubectl",
+            "create",
+            "configmap",
+            "elb-scripts",
+            f"--from-file={scripts_path}",
+            "--dry-run=client",
+            "-o",
+            "yaml",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    subprocess.run(
+        ["kubectl", "apply", "-f", "-"],
+        input=dry_run.stdout,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    try:
+        applied = safe_exec(
+            ["kubectl", "get", "configmap", "elb-scripts", "-o", "json"],
+            timeout=10,
+        )
+        applied_data = json.loads(applied.stdout or "{}").get("data", {})
+    except Exception as exc:
+        raise RuntimeError(
+            "ELB scripts ConfigMap verification failed "
+            f"reason={type(exc).__name__}"
+        ) from None
+    if not isinstance(applied_data, dict):
+        raise RuntimeError("ELB scripts ConfigMap verification returned invalid data")
+    remaining_drift = sorted(
+        name
+        for name, content in desired_scripts.items()
+        if applied_data.get(name) != content
+    )
+    if remaining_drift:
+        raise RuntimeError(
+            "ELB scripts ConfigMap verification found drift scripts="
+            + ",".join(remaining_drift)
+        )'''
+    path.write_text(text[:start] + replacement + text[end:])
+
+
 def _validate_dockerfile_runtime_policy(path: Path) -> None:
     """Verify safety semantics independently from idempotency markers."""
 
@@ -297,7 +418,18 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
 
     text = path.read_text()
     required = (
+        "import json\n",
+        "import subprocess\n",
+        "from importlib.resources import files",
+        "from pathlib import Path",
+        "from util import run_cancellable, safe_exec",
+        'logger = logging.getLogger("elb-openapi")',
         'config["cluster"].pop("exp-skip-warmed-ssd-init", None)',
+        '"init-db-shard-aks.sh",',
+        'script_path.read_text(encoding="utf-8")',
+        "desired_size > 900_000",
+        "ELB scripts ConfigMap drift detected",
+        "ELB scripts ConfigMap verification found drift",
         "def _discover_elb_job_id_from_submit_output(",
         "def _effective_elb_job_id(",
         'canonical_current = re.fullmatch(r"job-[0-9a-f]{32}"',
@@ -309,6 +441,7 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
     )
     missing = [fragment for fragment in required if fragment not in text]
     forbidden = (
+        "required_scripts.issubset(set(data))",
         'runtime_job_id.startswith("job-")',
         'elb_job_id.startswith("job-")',
         'effective_elb_job_id.startswith("job-")',
@@ -625,6 +758,7 @@ def patch_app(root: Path) -> None:
             ),
         )
     _harden_openapi_runtime_ids(path)
+    _harden_elb_scripts_configmap_reconciliation(path)
     _insert_once(
         path,
         (

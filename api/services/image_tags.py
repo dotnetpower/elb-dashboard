@@ -69,7 +69,13 @@ from __future__ import annotations
 # Dockerfile runtime patch hook; ACR run de4n produced digest sha256:210d0103….
 # 4.29/4.30 were intermediate incident builds. 4.31 rebuilds sibling commit
 # 352a1f4 after the final retry review raised the bounded transient budget to
-# six attempts and closed the remaining monitoring GET retry paths.
+# six attempts and closed the remaining monitoring GET retry paths. 4.34 uses
+# the same verified sibling commit and ElasticBLAST source pin, with
+# content-aware reconciliation for the image-installed elb-scripts ConfigMap.
+# 4.35 adds a 900 KiB size bound and post-apply content verification. Tags 4.32
+# and 4.33 were older June builds, so the rollout intentionally skipped them
+# rather than overwriting an existing rollback boundary. ACR run de5f produced
+# digest sha256:7bac4202…581fbf4.
 # The dashboard's
 # terminal/patch_elastic_blast.py layer adds bounded replay-safe kubectl retries
 # and ttlSecondsAfterFinished; the build context asserts that source/system/venv
@@ -93,7 +99,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.31",
+    "elb-openapi": "4.35",
 }
 
 # GitHub source repo for ACR Build Tasks.

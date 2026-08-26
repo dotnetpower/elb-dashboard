@@ -1,20 +1,26 @@
 """Tests for the OpenAPI image build-context patcher.
 
-Responsibility: Verify that OpenAPI Dockerfile patching fails the image build when
-ElasticBLAST runtime TTL policy is missing.
+Responsibility: Verify OpenAPI image patching enforces runtime policy and refreshes stale
+ElasticBLAST scripts.
 Edit boundaries: Use temporary build contexts only; never invoke Docker or Azure.
-Key entry points: `test_patch_dockerfile_asserts_ttl_in_all_runtime_copies`.
+Key entry points: `test_patch_dockerfile_asserts_ttl_in_all_runtime_copies`,
+`test_patch_app_reconciles_elb_scripts_by_content`.
 Risky contracts: The assertions must cover source, system Python, and venv templates; OpenAPI
-submits must never trust historical warmup Jobs as node-local cache-presence proof.
+submits must never trust historical warmup Jobs or name-only ConfigMap checks as node-local
+cache-presence proof.
 Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 
 def _load_module():
@@ -24,6 +30,98 @@ def _load_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _build_configmap_reconciliation_fixture(
+    tmp_path: Path,
+) -> tuple[
+    Any,
+    dict[str, Any],
+    list[tuple[object, dict[str, Any]]],
+    list[tuple[object, ...]],
+    dict[str, str],
+]:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def _ensure_elb_scripts_configmap() -> None:\n"
+        "    required_scripts = {'blast-run-aks.sh'}\n"
+        "    data = {'blast-run-aks.sh': 'stale'}\n"
+        "    if required_scripts.issubset(set(data)):\n"
+        "        return\n"
+        "\n\n"
+        "def _run_submit_bg(job_id: str) -> None:\n"
+        "    pass\n"
+    )
+    module._harden_elb_scripts_configmap_reconciliation(path)
+    patched = path.read_text()
+    module._harden_elb_scripts_configmap_reconciliation(path)
+    assert path.read_text() == patched
+
+    scripts_path = tmp_path / "templates" / "scripts"
+    scripts_path.mkdir(parents=True)
+    required_scripts = {
+        "blast-run-aks.sh",
+        "elb-finalizer-aks.sh",
+        "init-db-download-aks.sh",
+        "init-db-shard-aks.sh",
+        "query-download-ssd-aks.sh",
+        "results-export-aks.sh",
+    }
+    desired_data = {}
+    for name in required_scripts:
+        content = f"#!/bin/bash\necho secret-{name}\n"
+        (scripts_path / name).write_text(content)
+        desired_data[name] = content
+
+    state: dict[str, Any] = {
+        "existing_data": dict(desired_data),
+        "lookup_error": None,
+        "run_error_at": None,
+        "post_apply_data": None,
+    }
+    subprocess_calls: list[tuple[object, dict[str, Any]]] = []
+    log_messages: list[tuple[object, ...]] = []
+
+    def safe_exec(_command: object, **_kwargs: Any) -> SimpleNamespace:
+        if state["lookup_error"] is not None:
+            lookup_error = state["lookup_error"]
+            state["lookup_error"] = None
+            raise lookup_error
+        return SimpleNamespace(stdout=json.dumps({"data": state["existing_data"]}))
+
+    def run(command: object, **kwargs: Any) -> SimpleNamespace:
+        subprocess_calls.append((command, kwargs))
+        if state["run_error_at"] == len(subprocess_calls):
+            raise RuntimeError("kubectl apply failed")
+        if len(subprocess_calls) == 2:
+            post_apply_data = state["post_apply_data"]
+            state["existing_data"] = dict(
+                desired_data if post_apply_data is None else post_apply_data
+            )
+        return SimpleNamespace(stdout="apiVersion: v1\nkind: ConfigMap\n")
+
+    namespace: dict[str, Any] = {
+        "Path": Path,
+        "files": lambda _package: tmp_path,
+        "json": json,
+        "logger": SimpleNamespace(info=lambda *args: log_messages.append(args)),
+        "safe_exec": safe_exec,
+        "subprocess": SimpleNamespace(run=run),
+    }
+    function_source = patched[
+        patched.index("def _ensure_elb_scripts_configmap()") : patched.index(
+            "\n\ndef _run_submit_bg"
+        )
+    ]
+    exec(function_source, namespace)  # noqa: S102 - generated temporary fixture code.
+    return (
+        namespace["_ensure_elb_scripts_configmap"],
+        state,
+        subprocess_calls,
+        log_messages,
+        desired_data,
+    )
 
 
 def test_patch_dockerfile_asserts_ttl_in_all_runtime_copies(tmp_path: Path) -> None:
@@ -159,8 +257,6 @@ def test_patch_app_rejects_late_warmed_cache_skip_assignment(tmp_path: Path) -> 
         '    config["cluster"]["exp-skip-warmed-ssd-init"] = "true"\n'
     )
 
-    import pytest
-
     with pytest.raises(RuntimeError, match="assignment appears after"):
         module._disable_warmed_cache_skip(path)
 
@@ -173,10 +269,143 @@ def test_patch_app_rejects_marker_without_warmed_cache_removal(tmp_path: Path) -
         "    # Completed warmup Jobs are not node-local cache-presence proofs.\n"
     )
 
-    import pytest
-
     with pytest.raises(RuntimeError, match="safety removal is missing"):
         module._disable_warmed_cache_skip(path)
+
+
+def test_patch_app_replaces_name_only_configmap_check_idempotently(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def _ensure_elb_scripts_configmap() -> None:\n"
+        "    required_scripts = {'blast-run-aks.sh'}\n"
+        "    data = {'blast-run-aks.sh': 'stale'}\n"
+        "    if required_scripts.issubset(set(data)):\n"
+        "        return\n"
+        "\n\n"
+        "def _run_submit_bg(job_id: str) -> None:\n"
+        "    pass\n"
+    )
+
+    module._harden_elb_scripts_configmap_reconciliation(path)
+    first = path.read_text()
+    module._harden_elb_scripts_configmap_reconciliation(path)
+
+    assert path.read_text() == first
+    assert "required_scripts.issubset(set(data))" not in first
+    assert '"init-db-shard-aks.sh",' in first
+
+
+def test_configmap_exact_content_skips_apply(tmp_path: Path) -> None:
+    reconcile, _state, subprocess_calls, log_messages, _desired = (
+        _build_configmap_reconciliation_fixture(tmp_path)
+    )
+
+    reconcile()
+
+    assert subprocess_calls == []
+    assert log_messages == []
+
+
+def test_configmap_missing_entry_triggers_apply(tmp_path: Path) -> None:
+    reconcile, state, subprocess_calls, log_messages, desired = (
+        _build_configmap_reconciliation_fixture(tmp_path)
+    )
+    state["existing_data"].pop("init-db-shard-aks.sh")
+
+    reconcile()
+
+    assert len(subprocess_calls) == 2
+    assert subprocess_calls[1][1]["input"] == "apiVersion: v1\nkind: ConfigMap\n"
+    rendered_logs = repr(log_messages)
+    assert "init-db-shard-aks.sh" in rendered_logs
+    assert all(content not in rendered_logs for content in desired.values())
+
+
+def test_configmap_stale_content_triggers_apply(tmp_path: Path) -> None:
+    reconcile, state, subprocess_calls, log_messages, desired = (
+        _build_configmap_reconciliation_fixture(tmp_path)
+    )
+    state["existing_data"]["init-db-shard-aks.sh"] = "#!/bin/bash\necho stale-secret\n"
+
+    reconcile()
+
+    assert len(subprocess_calls) == 2
+    rendered_logs = repr(log_messages)
+    assert "init-db-shard-aks.sh" in rendered_logs
+    assert "stale-secret" not in rendered_logs
+    assert all(content not in rendered_logs for content in desired.values())
+
+
+def test_configmap_lookup_failure_reconciles_without_logging_detail(tmp_path: Path) -> None:
+    reconcile, state, subprocess_calls, log_messages, desired = (
+        _build_configmap_reconciliation_fixture(tmp_path)
+    )
+    state["lookup_error"] = RuntimeError("Bearer secret-value was rejected")
+
+    reconcile()
+
+    assert len(subprocess_calls) == 2
+    rendered_logs = repr(log_messages)
+    assert "RuntimeError" in rendered_logs
+    assert "secret-value" not in rendered_logs
+    assert all(content not in rendered_logs for content in desired.values())
+
+
+def test_configmap_apply_failure_propagates(tmp_path: Path) -> None:
+    reconcile, state, subprocess_calls, _log_messages, _desired = (
+        _build_configmap_reconciliation_fixture(tmp_path)
+    )
+    state["existing_data"].pop("init-db-shard-aks.sh")
+    state["run_error_at"] = 2
+
+    with pytest.raises(RuntimeError, match="kubectl apply failed"):
+        reconcile()
+
+    assert len(subprocess_calls) == 2
+
+
+def test_configmap_post_apply_drift_fails_closed(tmp_path: Path) -> None:
+    reconcile, state, subprocess_calls, _log_messages, desired = (
+        _build_configmap_reconciliation_fixture(tmp_path)
+    )
+    state["existing_data"].pop("init-db-shard-aks.sh")
+    state["post_apply_data"] = {
+        **desired,
+        "init-db-shard-aks.sh": "#!/bin/bash\necho concurrent-stale\n",
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"verification found drift scripts=init-db-shard-aks\.sh",
+    ):
+        reconcile()
+
+    assert len(subprocess_calls) == 2
+
+
+def test_configmap_oversized_scripts_fail_before_kubectl(tmp_path: Path) -> None:
+    reconcile, _state, subprocess_calls, _log_messages, _desired = (
+        _build_configmap_reconciliation_fixture(tmp_path)
+    )
+    (tmp_path / "templates/scripts/init-db-shard-aks.sh").write_text("x" * 900_001)
+
+    with pytest.raises(RuntimeError, match="exceed ConfigMap limit"):
+        reconcile()
+
+    assert subprocess_calls == []
+
+
+def test_missing_installed_script_fails_before_configmap_lookup(tmp_path: Path) -> None:
+    reconcile, _state, subprocess_calls, _log_messages, _desired = (
+        _build_configmap_reconciliation_fixture(tmp_path)
+    )
+    (tmp_path / "templates/scripts/init-db-shard-aks.sh").unlink()
+
+    with pytest.raises(RuntimeError, match="Installed ElasticBLAST scripts are incomplete"):
+        reconcile()
+
+    assert subprocess_calls == []
 
 
 def test_patch_app_restricts_runtime_ids_to_canonical_values(tmp_path: Path) -> None:
@@ -255,8 +484,6 @@ def test_patch_app_rejects_duplicate_runtime_id_helpers(tmp_path: Path) -> None:
         "def next_helper():\n"
         "    pass\n"
     )
-
-    import pytest
 
     with pytest.raises(RuntimeError, match="exactly one OpenAPI effective"):
         module._harden_openapi_runtime_ids(path)
