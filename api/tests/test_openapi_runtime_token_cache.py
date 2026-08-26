@@ -73,6 +73,20 @@ def test_get_falls_back_to_global_key_when_no_per_cluster_entry() -> None:
     assert runtime.get_openapi_api_token(client=client, **_CLUSTER_A) == "legacy-tok"
 
 
+def test_get_can_disable_global_fallback_for_cluster_reader() -> None:
+    client = FakeRedis()
+    runtime.save_openapi_api_token("other-cluster-token", metadata=_CLUSTER_B, client=client)
+
+    assert (
+        runtime.get_openapi_api_token(
+            client=client,
+            allow_global_fallback=False,
+            **_CLUSTER_A,
+        )
+        == ""
+    )
+
+
 def test_get_prefers_per_cluster_over_global() -> None:
     client = FakeRedis()
     # Global says B, per-cluster A says A. Context A must win.

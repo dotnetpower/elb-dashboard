@@ -4,7 +4,8 @@ Responsibility: Generate, read, and apply the sibling OpenAPI API token
 Edit boundaries: Keep Kubernetes token storage and runtime cache synchronization here; routes
 should only validate HTTP input and shape responses.
 Key entry points: `get_openapi_api_token_status`, `ensure_openapi_api_token`,
-`read_cluster_openapi_token`, `resync_openapi_api_token_from_cluster`
+`read_cluster_openapi_token`, `resync_openapi_api_token_for_cluster`,
+`resync_openapi_api_token_from_cluster`
 Risky contracts: Never log token values; keep tokens in server-side env/runtime cache and only
 return them to authenticated dashboard callers.
 Validation: `uv run pytest -q api/tests/test_openapi_token.py`.
@@ -443,6 +444,54 @@ def read_cluster_openapi_token(
         session.close()
 
 
+def resync_openapi_api_token_for_cluster(
+    credential: TokenCredential,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str = K8S_NAMESPACE,
+) -> str:
+    """Synchronize one cluster's live deployment token without rotating it.
+
+    Returns the live token, or ``""`` when the deployment token cannot be
+    read. This explicit-context variant is used by callers such as the OpenAPI
+    proxy that already know their target cluster and therefore must not depend
+    on global runtime endpoint metadata.
+    """
+    token = read_cluster_openapi_token(
+        credential,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        namespace=namespace,
+    )
+    if not token:
+        LOGGER.info(
+            "openapi token resync: elb-openapi deployment has no "
+            "ELB_OPENAPI_API_TOKEN env entry — nothing to resync"
+        )
+        return ""
+
+    _sync_runtime_token(
+        token,
+        {
+            "subscription_id": subscription_id,
+            "resource_group": resource_group,
+            "cluster_name": cluster_name,
+            "deployment_name": OPENAPI_DEPLOYMENT_NAME,
+            "namespace": namespace,
+            "source": "token_resync_on_401",
+        },
+    )
+    LOGGER.warning(
+        "openapi token resynced from cluster after 401 cluster=%s rg=%s",
+        cluster_name,
+        resource_group,
+    )
+    return token
+
+
 def resync_openapi_api_token_from_cluster(*, namespace: str = K8S_NAMESPACE) -> str:
     """Re-read the live ``ELB_OPENAPI_API_TOKEN`` from the elb-openapi
     deployment and sync it into the runtime token cache. Returns the synced
@@ -490,40 +539,13 @@ def resync_openapi_api_token_from_cluster(*, namespace: str = K8S_NAMESPACE) -> 
         )
         return ""
 
-    token = read_cluster_openapi_token(
+    return resync_openapi_api_token_for_cluster(
         credential,
         subscription_id=subscription_id,
         resource_group=resource_group,
         cluster_name=cluster_name,
         namespace=namespace,
     )
-
-    if not token:
-        LOGGER.info(
-            "openapi token resync: elb-openapi deployment has no "
-            "ELB_OPENAPI_API_TOKEN env entry — nothing to resync"
-        )
-        return ""
-
-    _sync_runtime_token(
-        token,
-        {
-            "subscription_id": subscription_id,
-            "resource_group": resource_group,
-            "cluster_name": cluster_name,
-            "deployment_name": OPENAPI_DEPLOYMENT_NAME,
-            "namespace": namespace,
-            "source": "token_resync_on_401",
-        },
-    )
-    # WARNING so App Insights / operator alerts can fire on the self-heal —
-    # a recurring resync points at an ephemeral-Redis churn worth noticing.
-    LOGGER.warning(
-        "openapi token resynced from cluster after 401 cluster=%s rg=%s",
-        cluster_name,
-        resource_group,
-    )
-    return token
 
 
 def get_openapi_api_token_status(

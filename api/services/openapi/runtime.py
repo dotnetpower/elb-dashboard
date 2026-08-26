@@ -384,17 +384,20 @@ def get_openapi_api_token(
     subscription_id: str = "",
     resource_group: str = "",
     cluster_name: str = "",
+    allow_global_fallback: bool = True,
     client: Any | None = None,
 ) -> str:
     """Return the cached OpenAPI API token, or an empty string if unavailable.
 
     When the caller passes ``subscription_id`` / ``resource_group`` /
-    ``cluster_name`` the per-cluster key is tried first so a multi-cluster
+    cluster_name`` the per-cluster key is tried first so a multi-cluster
     dashboard reads the token for the *requested* cluster rather than the
     globally most-recently-written one. Falls back to the legacy global
-    key when no per-cluster entry exists yet (e.g. a token minted before
-    this keying landed). Context-less callers keep reading the global key
-    unchanged.
+    key by default when no per-cluster entry exists yet (e.g. a token minted
+    before this keying landed). Cluster-aware callers may disable that fallback
+    so they can try a separate static source without accepting another
+    cluster's most-recent global token. Context-less callers keep reading the
+    global key unchanged.
     """
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     cluster_key = _token_cluster_key(
@@ -408,6 +411,8 @@ def get_openapi_api_token(
         token = _read_token_key(redis_client, cluster_key)
         if token:
             return token
+        if not allow_global_fallback:
+            return ""
     token = _read_token_key(redis_client, _TOKEN_KEY)
     if token:
         return token

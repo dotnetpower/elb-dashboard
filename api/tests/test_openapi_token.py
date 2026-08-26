@@ -678,6 +678,48 @@ def test_resync_from_cluster_reads_pod_token_and_syncs(monkeypatch) -> None:
     assert session.closed is True
 
 
+def test_resync_for_explicit_cluster_does_not_read_global_context(monkeypatch) -> None:
+    """A cluster-aware caller must not depend on global endpoint metadata."""
+    from api.services.openapi import token as openapi_token
+
+    read_calls: list[dict[str, Any]] = []
+    synced: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_read(_credential: object, **kwargs: Any) -> str:
+        read_calls.append(kwargs)
+        return "pod-live-token"
+
+    monkeypatch.setattr(openapi_token, "read_cluster_openapi_token", fake_read)
+    monkeypatch.setattr(
+        openapi_token,
+        "_sync_runtime_token",
+        lambda token, metadata: synced.append((token, metadata)),
+    )
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_runtime_metadata",
+        lambda: (_ for _ in ()).throw(AssertionError("global context must not be read")),
+    )
+
+    result = openapi_token.resync_openapi_api_token_for_cluster(
+        object(),
+        subscription_id="sub-explicit",
+        resource_group="rg-explicit",
+        cluster_name="aks-explicit",
+    )
+
+    assert result == "pod-live-token"
+    assert read_calls == [
+        {
+            "subscription_id": "sub-explicit",
+            "resource_group": "rg-explicit",
+            "cluster_name": "aks-explicit",
+            "namespace": "default",
+        }
+    ]
+    assert synced[0][1]["subscription_id"] == "sub-explicit"
+    assert synced[0][1]["cluster_name"] == "aks-explicit"
+
+
 def test_sync_runtime_token_updates_both_env_aliases(monkeypatch) -> None:
     from api.services.openapi import token as openapi_token
 

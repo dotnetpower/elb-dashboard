@@ -249,11 +249,12 @@ def test_openapi_proxy_threads_cluster_context_into_token_lookup(
     than the globally most-recently-written one (issue #26).
     """
     _patch_service_ip(monkeypatch, "10.0.0.50")
-    monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "other-cluster-global-token")
 
     from api.services.openapi import runtime as openapi_runtime
 
     token_calls: list[dict[str, Any]] = []
+    sent_tokens: list[str] = []
 
     def fake_token(**kwargs: Any) -> str:
         token_calls.append(kwargs)
@@ -286,6 +287,7 @@ def test_openapi_proxy_threads_cluster_context_into_token_lookup(
         async def send(
             self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
         ) -> httpx.Response:
+            sent_tokens.append(str(self._captured["headers"].get("X-ELB-API-Token") or ""))
             resp = httpx.Response(200, json={"status": "ok"})
             if stream:
                 body = resp.content
@@ -317,7 +319,119 @@ def test_openapi_proxy_threads_cluster_context_into_token_lookup(
         "subscription_id": "sub-123",
         "resource_group": "rg-elb",
         "cluster_name": "aks-elb",
+        "allow_global_fallback": False,
     }
+    assert sent_tokens == ["cluster-scoped-token"]
+
+
+@pytest.mark.parametrize(
+    ("healed_token", "upstream_statuses", "expected_status", "expected_tokens"),
+    [
+        ("live-token", [401, 200], 200, ["stale-token", "live-token"]),
+        ("", [401], 401, ["stale-token"]),
+        ("live-token", [401, 401], 401, ["stale-token", "live-token"]),
+    ],
+)
+def test_openapi_proxy_resyncs_stale_token_once_after_401(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    healed_token: str,
+    upstream_statuses: list[int],
+    expected_status: int,
+    expected_tokens: list[str],
+) -> None:
+    """A stale static token self-heals once from the explicit target cluster.
+
+    An unavailable live token preserves the original 401, and a second 401 is
+    returned without a retry loop.
+    """
+    _patch_service_ip(monkeypatch, "10.0.0.50")
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "stale-token")
+
+    from api.services.openapi import runtime as openapi_runtime
+    from api.services.openapi import token as openapi_token
+
+    monkeypatch.setattr(
+        openapi_runtime,
+        "get_openapi_api_token",
+        lambda **_kwargs: "",
+    )
+
+    resync_calls: list[dict[str, Any]] = []
+
+    def fake_resync(_credential: object, **kwargs: Any) -> str:
+        resync_calls.append(kwargs)
+        return healed_token
+
+    monkeypatch.setattr(
+        openapi_token,
+        "resync_openapi_api_token_for_cluster",
+        fake_resync,
+    )
+    calls: list[dict[str, Any]] = []
+
+    class StubAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {
+                "method": method,
+                "url": url,
+                "headers": dict(headers or {}),
+                "content": content,
+            }
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self,
+            _request: httpx.Request,
+            *,
+            stream: bool = False,
+            **_kwargs: Any,
+        ) -> httpx.Response:
+            captured = dict(self._captured)
+            calls.append(captured)
+            status = upstream_statuses[len(calls) - 1]
+            payload = json.dumps({"status": "ok" if status == 200 else "unauthorized"})
+            return httpx.Response(
+                status,
+                headers={"content-type": "application/json"},
+                stream=httpx.ByteStream(payload.encode()),
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubAsyncClient)
+
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={
+            "subscription_id": "sub-123",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "path": "/v1/jobs",
+        },
+    )
+
+    assert response.status_code == expected_status
+    assert [call["headers"]["X-ELB-API-Token"] for call in calls] == expected_tokens
+    assert resync_calls == [
+        {
+            "subscription_id": "sub-123",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        }
+    ]
 
 
 def test_openapi_proxy_forwards_query_path_and_json_body(

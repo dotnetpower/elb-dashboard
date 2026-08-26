@@ -403,22 +403,21 @@ async def aks_openapi_proxy(
         for key, value in request.headers.items()
         if key.lower() in _OPENAPI_PROXY_ALLOWED_HEADERS
     }
-    api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
-    if not api_token:
-        from api.services.openapi.runtime import get_openapi_api_token
+    from api.services.openapi.runtime import get_openapi_api_token
 
-        # Thread the cluster context so a multi-cluster dashboard reads the
-        # token cached for *this* cluster rather than the globally
-        # most-recently-written one (issue #26). The per-cluster key falls
-        # back to the legacy global key on a miss, so single-cluster
-        # behaviour is unchanged. Mirrors the cluster context already passed
-        # to get_public_tls_base_url / get_openapi_api_token_status above and
-        # below.
-        api_token = get_openapi_api_token(
-            subscription_id=sub,
-            resource_group=resource_group,
-            cluster_name=cluster_name,
-        )
+    # Prefer this target cluster's cache entry over the process-global static
+    # token. A 401 resync updates both for backward compatibility, but in a
+    # multi-cluster revision the global value necessarily belongs to only the
+    # most recently synced cluster. On a per-cluster miss, retain the existing
+    # static env fallback so legacy single-cluster deployments are unchanged.
+    api_token = get_openapi_api_token(
+        subscription_id=sub,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        allow_global_fallback=False,
+    )
+    if not api_token:
+        api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
     if not api_token:
         try:
             from api.services.openapi.token import get_openapi_api_token_status
@@ -481,6 +480,45 @@ async def aks_openapi_proxy(
             content=body if body else None,
         )
         upstream = await client.send(upstream_req, stream=True)
+        if upstream.status_code == 401:
+            healed_token = ""
+            try:
+                from api.services.openapi.token import (
+                    resync_openapi_api_token_for_cluster,
+                )
+
+                healed_token = await asyncio.to_thread(
+                    resync_openapi_api_token_for_cluster,
+                    cred,
+                    subscription_id=sub,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "openapi/proxy: token resync after 401 failed: %s",
+                    type(exc).__name__,
+                )
+            previous_token = headers.get("X-ELB-API-Token", "")
+            if healed_token and healed_token != previous_token:
+                try:
+                    await upstream.aclose()
+                except Exception:
+                    LOGGER.debug("openapi/proxy: stale 401 response close failed")
+                headers["X-ELB-API-Token"] = healed_token
+                LOGGER.warning(
+                    "openapi/proxy: upstream returned 401; token resynced from "
+                    "cluster and request retried once cluster=%s",
+                    cluster_name,
+                    extra={"event": "openapi_proxy_token_resync_retry"},
+                )
+                upstream_req = client.build_request(
+                    request.method,
+                    f"{upstream_base}{target_path}",
+                    headers=headers,
+                    content=body if body else None,
+                )
+                upstream = await client.send(upstream_req, stream=True)
     except httpx.RequestError as exc:
         await client.aclose()
         LOGGER.warning(
