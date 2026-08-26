@@ -5,7 +5,9 @@ Edit boundaries: Cluster discovery and task orchestration only; Kubernetes delet
 in `api.services.k8s.runtime_gc`.
 Key entry points: `collect_k8s_runtime_garbage`.
 Risky contracts: The task is idempotent, processes at most two clusters per run, and has hard
-Celery deadlines. `K8S_RUNTIME_GC_ENABLED=false` disables all mutations.
+Celery deadlines. `K8S_RUNTIME_GC_ENABLED=false` disables all mutations. Proven stopped or
+missing clusters must be skipped before any Kubernetes API call; an unavailable ARM gate
+degrades open through `get_cluster_health`.
 Validation: `uv run pytest -q api/tests/test_k8s_runtime_gc.py
 api/tests/test_celery_queue_isolation.py`.
 """
@@ -122,6 +124,7 @@ def collect_k8s_runtime_garbage() -> dict[str, Any]:
             return {"skipped": "no_cluster_scope"}
 
         from api.services import get_credential
+        from api.services.cluster_health import CLUSTER_SKIP_REASONS, get_cluster_health
         from api.services.env import env_int
         from api.services.feature_events import record_feature_event
         from api.services.k8s.runtime_gc import collect_runtime_garbage
@@ -154,6 +157,24 @@ def collect_k8s_runtime_garbage() -> dict[str, Any]:
         per_cluster_deadline = min(90, total_deadline_seconds // len(scopes))
         results: list[dict[str, Any]] = []
         for scope in scopes:
+            health = get_cluster_health(credential, **scope)
+            skip_reason = health.get("reason")
+            if skip_reason in CLUSTER_SKIP_REASONS:
+                LOGGER.info(
+                    "k8s runtime GC skipped cluster=%s reason=%s power_state=%s",
+                    scope["cluster_name"],
+                    skip_reason,
+                    health.get("power_state"),
+                )
+                results.append(
+                    {
+                        "cluster_name": scope["cluster_name"],
+                        "skipped": skip_reason,
+                        "power_state": health.get("power_state"),
+                        "errors": [],
+                    }
+                )
+                continue
             try:
                 results.append(
                     collect_runtime_garbage(
@@ -184,6 +205,7 @@ def collect_k8s_runtime_garbage() -> dict[str, Any]:
             int(item.get("configmaps_deleted") or 0) for item in results
         )
         error_count = sum(len(item.get("errors") or []) for item in results)
+        skipped_count = sum(bool(item.get("skipped")) for item in results)
         record_feature_event(
             "k8s_runtime_gc",
             status="failed" if error_count else "completed",
@@ -191,6 +213,7 @@ def collect_k8s_runtime_garbage() -> dict[str, Any]:
             jobs_deleted=deleted_jobs,
             configmaps_deleted=deleted_configmaps,
             error_count=error_count,
+            skipped_count=skipped_count,
             job_retention_seconds=job_retention_seconds,
             configmap_retention_seconds=configmap_retention_seconds,
             max_deletes=max_deletes,
@@ -201,6 +224,7 @@ def collect_k8s_runtime_garbage() -> dict[str, Any]:
             "jobs_deleted": deleted_jobs,
             "configmaps_deleted": deleted_configmaps,
             "errors": error_count,
+            "skipped": skipped_count,
         }
     finally:
         _release_gc_lock(lock_handle)

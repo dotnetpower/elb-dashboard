@@ -227,3 +227,69 @@ def test_runtime_gc_preserves_malformed_status_counts(monkeypatch) -> None:
 
     assert result["jobs_deleted"] == 0
     assert session.deletes == []
+
+
+def test_runtime_gc_task_skips_stopped_cluster_before_k8s(monkeypatch) -> None:
+    from api.services import cluster_health, feature_events
+    from api.services.k8s import runtime_gc
+    from api.tasks.blast import runtime_gc_task
+
+    scope = {
+        "subscription_id": "sub-1",
+        "resource_group": "rg-1",
+        "cluster_name": "aks-stopped",
+    }
+    released: list[tuple[Any, str]] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(runtime_gc_task, "_enabled", lambda: True)
+    monkeypatch.setattr(
+        runtime_gc_task,
+        "_acquire_gc_lock",
+        lambda: ((object(), "token"), ""),
+    )
+    monkeypatch.setattr(
+        runtime_gc_task,
+        "_release_gc_lock",
+        lambda handle: released.append(handle),
+    )
+    monkeypatch.setattr(runtime_gc_task, "_cluster_scopes", lambda: [scope])
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        cluster_health,
+        "get_cluster_health",
+        lambda *_args, **_kwargs: {
+            "healthy": False,
+            "exists": True,
+            "power_state": "Stopped",
+            "provisioning_state": "Succeeded",
+            "reason": "cluster_stopped",
+        },
+    )
+    monkeypatch.setattr(
+        runtime_gc,
+        "collect_runtime_garbage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stopped cluster must not reach Kubernetes")
+        ),
+    )
+    monkeypatch.setattr(
+        feature_events,
+        "record_feature_event",
+        lambda name, **kwargs: events.append((name, kwargs)),
+    )
+
+    result = runtime_gc_task.collect_k8s_runtime_garbage.run()
+
+    assert result["errors"] == 0
+    assert result["skipped"] == 1
+    assert result["clusters"] == [
+        {
+            "cluster_name": "aks-stopped",
+            "skipped": "cluster_stopped",
+            "power_state": "Stopped",
+            "errors": [],
+        }
+    ]
+    assert events[0][1]["status"] == "completed"
+    assert events[0][1]["skipped_count"] == 1
+    assert released and released[0][1] == "token"

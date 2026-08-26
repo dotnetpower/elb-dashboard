@@ -17,9 +17,9 @@ This beat task closes the gap by re-resolving the live ``elb-openapi`` Service I
 for the configured cluster and re-stamping the durable row (refreshing
 ``updated_at``) on every tick the cluster is reachable, so the durable copy
 stays inside the freshness window and post-restart cold reads keep working with
-no manual pin. When the cluster is Stopped the live IP does not resolve and the
-row is left to age out correctly (the freshness gate must still reject a
-long-Stopped cluster's unreachable IP).
+no manual pin. When ARM proves the cluster is Stopped or missing, the task skips
+the Kubernetes API call and leaves the row to age out correctly (the freshness
+gate must still reject a long-Stopped cluster's unreachable IP).
 
 Responsibility: Run as a Celery beat task. No-op unless ``SERVICEBUS_ENABLED``
     (the deadlock-prone consumer). Resolve the cluster context from the saved
@@ -35,7 +35,8 @@ Risky contracts: Must never raise — a periodic task that crashes spams the
     ``api.tasks.openapi.reconcile_runtime_endpoint`` is referenced by
     ``api/celery_app.py::beat_schedule`` and tests; do not rename. Only
     re-stamps on a real IP so a Stopped cluster's stale endpoint is never
-    refreshed back to fresh.
+    refreshed back to fresh. ARM lookup uncertainty degrades open and preserves
+    the existing Kubernetes resolution attempt.
 Validation: ``uv run pytest -q api/tests/test_openapi_runtime_endpoint_reconcile.py``.
 """
 
@@ -117,10 +118,35 @@ def reconcile_openapi_runtime_endpoint(self: Any) -> dict[str, Any]:
 
     try:
         from api.services import get_credential
+
+        credential = get_credential()
+    except Exception as exc:
+        LOGGER.debug("runtime endpoint reconcile: credential lookup raised: %s", type(exc).__name__)
+        return {"status": "skipped", "reason": "service_ip_error"}
+
+    try:
+        from api.services.cluster_health import CLUSTER_SKIP_REASONS, get_cluster_health
+
+        health = get_cluster_health(
+            credential,
+            subscription_id,
+            resource_group,
+            cluster_name,
+        )
+        if health.get("reason") in CLUSTER_SKIP_REASONS:
+            return {
+                "status": "skipped",
+                "reason": health["reason"],
+                "power_state": health.get("power_state"),
+            }
+    except Exception as exc:  # pragma: no cover - helper already degrades open
+        LOGGER.debug("runtime endpoint reconcile: ARM gate raised: %s", type(exc).__name__)
+
+    try:
         from api.services.k8s.monitoring import k8s_get_service_ip
 
         ip = k8s_get_service_ip(
-            get_credential(),
+            credential,
             subscription_id,
             resource_group,
             cluster_name,
@@ -131,8 +157,8 @@ def reconcile_openapi_runtime_endpoint(self: Any) -> dict[str, Any]:
         return {"status": "skipped", "reason": "service_ip_error"}
 
     if not ip:
-        # Cluster Stopped / Service not yet provisioned: leave the durable row to
-        # age out so the freshness gate keeps rejecting an unreachable endpoint.
+        # Service not yet provisioned: leave the durable row to age out so the
+        # freshness gate keeps rejecting an unreachable endpoint.
         return {"status": "skipped", "reason": "service_ip_unresolved"}
 
     try:

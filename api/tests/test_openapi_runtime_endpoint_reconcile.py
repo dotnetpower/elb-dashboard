@@ -39,6 +39,21 @@ def _run() -> dict[str, Any]:
     return mod.reconcile_openapi_runtime_endpoint.run()
 
 
+@pytest.fixture(autouse=True)
+def _running_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_args, **_kwargs: {
+            "healthy": True,
+            "exists": True,
+            "power_state": "Running",
+            "provisioning_state": "Succeeded",
+            "reason": None,
+        },
+    )
+
+
 def test_skips_when_servicebus_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(service_bus_pref, "service_bus_enabled", lambda: False)
     saved = _patch_save(monkeypatch)
@@ -111,11 +126,29 @@ def test_skips_restamp_when_cluster_stopped(monkeypatch: pytest.MonkeyPatch) -> 
             subscription_id="sub-1", resource_group="rg-1", cluster_name="elb-cluster"
         ),
     )
+    from api.services import cluster_health
     from api.services.k8s import monitoring
 
-    # Stopped cluster: the live Service IP does not resolve.
-    monkeypatch.setattr(monitoring, "k8s_get_service_ip", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        cluster_health,
+        "get_cluster_health",
+        lambda *_args, **_kwargs: {
+            "healthy": False,
+            "exists": True,
+            "power_state": "Stopped",
+            "provisioning_state": "Succeeded",
+            "reason": "cluster_stopped",
+        },
+    )
+    monkeypatch.setattr(
+        monitoring,
+        "k8s_get_service_ip",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stopped cluster must not reach Kubernetes")
+        ),
+    )
     saved = _patch_save(monkeypatch)
     result = _run()
-    assert result["reason"] == "service_ip_unresolved"
+    assert result["reason"] == "cluster_stopped"
+    assert result["power_state"] == "Stopped"
     assert saved == []
