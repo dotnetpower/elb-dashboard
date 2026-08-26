@@ -12,8 +12,9 @@ Edit boundaries: Message data-plane operations, shared SDK client construction,
     health, and discovery projection lives in ``service_bus_management``;
     non-destructive peek presentation lives in ``service_bus_preview``. No HTTP
     shaping, Celery task bodies, or config-row persistence belongs here.
-Key entry points: ``send_request``, ``publish_event``, ``peek_requests``,
-    ``peek_request_previews``, ``peek_dead_letter_previews``, ``drain_requests``,
+Key entry points: ``serialise_request_message``, ``send_request``, ``publish_event``,
+    ``peek_requests``, ``peek_request_previews``, ``peek_dead_letter_previews``,
+    ``drain_requests``,
     ``drain_dead_letter_messages``, ``entity_counts``, ``purge_dead_letter``,
     ``delete_dead_letter_messages``,
     ``promote_dead_letter_messages``, ``test_connection``,
@@ -42,8 +43,8 @@ Risky contracts: Receivers settle EVERY message they receive (complete /
     token acquisition, so routing changes cannot cross stale data-plane work.
     Celery soft deadlines propagate through parsing, lock renewal, handler
     execution, settlement, DLQ, and purge branches.
-Validation: ``uv run pytest -q api/tests/test_service_bus_drain_loop.py
-    api/tests/test_servicebus_load.py``.
+Validation: ``uv run pytest -q api/tests/test_settings_service_bus.py
+    api/tests/test_service_bus_drain_loop.py api/tests/test_servicebus_load.py``.
 """
 
 from __future__ import annotations
@@ -402,6 +403,17 @@ def release_config_io(
     )
 
 
+def serialise_request_message(body: dict[str, Any]) -> str:
+    """Return the legacy request wire payload or reject an oversized body."""
+
+    payload = json.dumps(body, default=str)
+    if len(payload.encode()) > _MAX_REQUEST_MESSAGE_BYTES:
+        raise ServiceBusRequestValidationError(
+            "request message exceeds the Service Bus wire-size budget"
+        )
+    return payload
+
+
 def send_request(
     cfg: ServiceBusConfig | None,
     body: dict[str, Any],
@@ -430,9 +442,9 @@ def send_request(
             get_service_bus_config()
         ) != _request_routing_signature(cfg):
             raise ServiceBusUnavailable("Service Bus routing configuration changed before send")
-        payload = json.dumps(body, default=str)
-        payload_bytes = len(payload.encode())
-        if payload_bytes > _MAX_REQUEST_MESSAGE_BYTES:
+        try:
+            payload = serialise_request_message(body)
+        except ServiceBusRequestValidationError:
             record_service_bus_request_event(
                 "enqueue_rejected",
                 correlation_id=str(correlation_id or body.get("external_correlation_id") or ""),
@@ -444,9 +456,7 @@ def send_request(
                 action="not_sent",
                 error_code="request_too_large",
             )
-            raise ServiceBusRequestValidationError(
-                "request message exceeds the Service Bus wire-size budget"
-            )
+            raise
         message = ServiceBusMessage(
             payload,
             content_type="application/json",

@@ -831,6 +831,19 @@ def send(
                 ),
             },
         )
+    try:
+        service_bus.serialise_request_message(payload)
+    except service_bus.ServiceBusRequestValidationError as exc:
+        raise HTTPException(
+            413,
+            detail={
+                "code": "request_too_large",
+                "message": (
+                    "The request is too large for the Service Bus queue. Use the "
+                    "direct ElasticBLAST submit API for this query."
+                ),
+            },
+        ) from exc
     _assert_send_capacity(cfg)
     try:
         message_id = service_bus.send_request(

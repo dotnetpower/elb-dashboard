@@ -1139,6 +1139,14 @@ def test_send_rejects_oversized_request_with_413(
     _enable_service_bus(client, monkeypatch)
     from api.services import service_bus
 
+    monkeypatch.setenv("SERVICEBUS_SEND_FAILCLOSED", "true")
+    monkeypatch.setenv("SERVICEBUS_SEND_FAILCLOSED_STREAK", "1")
+
+    def _capacity_must_not_run(_cfg: object) -> dict:
+        raise AssertionError("oversized request must fail before capacity lookup")
+
+    monkeypatch.setattr(service_bus, "entity_counts", _capacity_must_not_run)
+
     response = client.post(
         "/api/settings/service-bus/send",
         json={
