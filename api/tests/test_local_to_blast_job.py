@@ -104,6 +104,83 @@ def test_local_to_blast_job_surfaces_correlation_from_payload():
     assert out["external_correlation_id"] == "corr-legacy-2"
 
 
+def test_local_to_blast_job_surfaces_external_runtime_identities():
+    openapi_job_id = "7f7d3a3fc2aa"
+    out = _local_to_blast_job(
+        _state(
+            job_id=openapi_job_id,
+            status="completed",
+            phase="completed",
+            elastic_blast_job_id=_RUNTIME_ID,
+            submission_source="servicebus",
+            payload={"external": {"submission_source": "servicebus"}},
+        )
+    )
+
+    assert out["openapi_job_id"] == openapi_job_id
+    assert out["elastic_blast_job_id"] == _RUNTIME_ID
+    assert out["target"]["openapi_job_id"] == openapi_job_id
+
+
+def test_local_to_blast_job_list_row_uses_durable_runtime_identity():
+    openapi_job_id = "7f7d3a3fc2aa"
+    out = _local_to_blast_job(
+        _state(
+            job_id=openapi_job_id,
+            elastic_blast_job_id=_RUNTIME_ID,
+            submission_source="servicebus",
+            payload={},
+        )
+    )
+
+    assert out["openapi_job_id"] == openapi_job_id
+    assert out["elastic_blast_job_id"] == _RUNTIME_ID
+
+
+def test_local_to_blast_job_servicebus_row_exposes_openapi_id_before_runtime_backfill():
+    openapi_job_id = "7f7d3a3fc2aa"
+    out = _local_to_blast_job(
+        _state(
+            job_id=openapi_job_id,
+            elastic_blast_job_id=None,
+            submission_source="servicebus",
+            payload={},
+        )
+    )
+
+    assert out["openapi_job_id"] == openapi_job_id
+    assert out["elastic_blast_job_id"] is None
+
+
+def test_local_to_blast_job_rejects_unsafe_payload_openapi_id():
+    out = _local_to_blast_job(
+        _state(
+            job_id="7f7d3a3fc2aa",
+            payload={
+                "openapi_job_id": "../wrong/job",
+                "external": {"submission_source": "external_api"},
+            },
+        )
+    )
+
+    assert out["openapi_job_id"] == "7f7d3a3fc2aa"
+    assert out["target"]["openapi_job_id"] == "7f7d3a3fc2aa"
+
+
+def test_local_to_blast_job_placeholder_does_not_invent_openapi_identity():
+    out = _local_to_blast_job(
+        _state(
+            job_id="corr-queue-1",
+            submission_source="servicebus",
+            payload={"submission_source": "servicebus", "placeholder": True},
+        )
+    )
+
+    assert out["openapi_job_id"] is None
+    assert out["elastic_blast_job_id"] is None
+    assert out["target"]["openapi_job_id"] is None
+
+
 def test_local_to_blast_job_native_row_has_no_correlation():
     # A dashboard-native row keeps source=dashboard and a null correlation id.
     out = _local_to_blast_job(_state())

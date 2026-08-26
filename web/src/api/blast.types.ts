@@ -178,6 +178,8 @@ export interface BlastJobSummary {
   job_id_kind?: "dashboard" | "openapi" | string;
   dashboard_job_id?: string | null;
   openapi_job_id?: string | null;
+  /** Canonical `job-<32 hex>` identity stamped on ElasticBLAST Kubernetes objects. */
+  elastic_blast_job_id?: string | null;
   instance_id?: string;
   job_title: string;
   program: string;

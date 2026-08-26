@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
@@ -26,6 +27,16 @@ from api.services.response_contracts import build_target
 from api.services.state.job_state import canonical_elastic_blast_job_id
 
 LOGGER = logging.getLogger(__name__)
+
+_SAFE_OPENAPI_JOB_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+_CURRENT_OPENAPI_JOB_ID_RE = re.compile(r"[0-9a-f]{12}", re.IGNORECASE)
+
+
+def _safe_openapi_job_id(value: Any) -> str:
+    """Return a URL-safe OpenAPI id while preserving legacy safe formats."""
+
+    text = str(value or "").strip()
+    return text if _SAFE_OPENAPI_JOB_ID_RE.fullmatch(text) else ""
 
 from api.services.blast.external_jobs import (  # noqa: E402
     _EXTERNAL_DETAIL_ENRICH_LIMIT as _EXTERNAL_DETAIL_ENRICH_LIMIT,
@@ -856,6 +867,30 @@ def _local_to_blast_job(
         str(getattr(state, "external_correlation_id", "") or "")
         or _resolve_external_correlation_id(payload)
     )
+    _external_snapshot = payload.get("external") if isinstance(payload, dict) else None
+    _elastic_blast_job_id = ""
+    for _runtime_identity in (
+        getattr(state, "elastic_blast_job_id", ""),
+        _payload_value(payload, "elastic_blast_job_id", "k8s_job_id"),
+        (_external_snapshot or {}).get("elb_job_id")
+        if isinstance(_external_snapshot, dict)
+        else "",
+    ):
+        _elastic_blast_job_id = canonical_elastic_blast_job_id(_runtime_identity)
+        if _elastic_blast_job_id:
+            break
+    _openapi_job_id = _safe_openapi_job_id(_payload_value(payload, "openapi_job_id"))
+    _state_openapi_job_id = _safe_openapi_job_id(state.job_id)
+    if not _openapi_job_id and (
+        is_external_origin
+        or _row_submission_source == "external_api"
+        or bool(_elastic_blast_job_id)
+        or (
+            _row_submission_source == "servicebus"
+            and bool(_CURRENT_OPENAPI_JOB_ID_RE.fullmatch(_state_openapi_job_id))
+        )
+    ):
+        _openapi_job_id = _state_openapi_job_id
     # config_snapshot for an external-origin stored row lives under
     # ``payload.external.config_snapshot`` (stamped by the drain); a local
     # dashboard job keeps it at the payload top level.
@@ -897,7 +932,8 @@ def _local_to_blast_job(
         "job_id": state.job_id,
         "job_id_kind": "dashboard",
         "dashboard_job_id": state.job_id,
-        "openapi_job_id": _payload_value(payload, "openapi_job_id"),
+        "openapi_job_id": _openapi_job_id or None,
+        "elastic_blast_job_id": _elastic_blast_job_id or None,
         "instance_id": state.task_id,
         "job_title": str(getattr(state, "job_title", None) or state.job_id),
         "program": program,
@@ -962,7 +998,7 @@ def _local_to_blast_job(
         job_id=str(state.job_id),
         job_id_kind="dashboard",
         dashboard_job_id=str(state.job_id),
-        openapi_job_id=_payload_value(payload, "openapi_job_id"),
+        openapi_job_id=_openapi_job_id or None,
         links={
             "dashboard_status": f"/api/blast/jobs/{state.job_id}",
             "events": f"/api/blast/jobs/{state.job_id}/events",
