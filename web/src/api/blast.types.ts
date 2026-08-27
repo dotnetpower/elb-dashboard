@@ -538,6 +538,34 @@ export interface BlastDatabase {
     expected_parts?: number;
     ready_parts?: number;
     part_prefix?: string | null;
+    active?: {
+      status: string;
+      phase?: string | null;
+      run_id?: string | null;
+      started_at?: string | null;
+      source_version?: string | null;
+      expected_parts?: number;
+      ready_parts?: number;
+      automatic?: boolean;
+    };
+    automation?: {
+      status?: string | null;
+      failure_count?: number | null;
+      retry_exhausted?: boolean | null;
+      next_retry_at?: string | null;
+      last_run_id?: string | null;
+      last_error_code?: string | null;
+      blocked_reason?: string | null;
+      updated_at?: string | null;
+    };
+    last_attempt?: {
+      status: string;
+      phase?: string | null;
+      run_id: string;
+      error_code?: string | null;
+      finished_at?: string | null;
+      automatic?: boolean;
+    };
   };
   /**
    * Server-computed warmup feasibility. Only present when listDatabases was

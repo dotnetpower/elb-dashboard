@@ -219,8 +219,16 @@ def test_graceful_dedups_repeated_warnings_per_op_and_reason(
         # Same op, different classification, also fresh WARNING.
         _graceful("aks_list", _http_error(403), empty={"clusters": []})
 
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == common_module.LOGGER.name and record.levelname == "WARNING"
+    ]
+    debugs = [
+        record
+        for record in caplog.records
+        if record.name == common_module.LOGGER.name and record.levelname == "DEBUG"
+    ]
     # 3 distinct (op, classification) tuples → 3 WARNINGs.
     assert len(warnings) == 3
     # 3 repeats of the first tuple → 3 deduped DEBUGs.

@@ -6,7 +6,9 @@ test("Terminal side panels expose cockpit/manual events without a live websocket
   await expect(uiPage.getByLabel("Terminal cockpit")).toBeVisible();
 
   await uiPage.getByLabel("Command to preview").fill("blastn -query q.fa -db core_nt -out results.xml");
-  await uiPage.getByLabel("Re-check az login status").click();
+  const refreshLogin = uiPage.getByLabel("Re-check az login status");
+  await expect(refreshLogin).toBeEnabled({ timeout: 20_000 });
+  await refreshLogin.click();
   await uiPage.getByRole("button", { name: /Manual/i }).click();
   await expect(uiPage.getByLabel("Terminal user manual")).toBeVisible();
   await uiPage.getByRole("button", { name: /Cockpit/i }).click();

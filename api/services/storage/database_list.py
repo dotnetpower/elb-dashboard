@@ -1,7 +1,8 @@
 """BLAST database discovery from the `blast-db` Storage container.
 
 Responsibility: Inspect BLAST database blobs, metadata JSON, oracle status, and
-BLAST v5 `.njs` files to produce the dashboard database catalogue payload.
+    oracle automation control documents, plus BLAST v5 `.njs` files to produce
+    the dashboard database catalogue payload.
 Edit boundaries: Database catalogue/listing only. Generic blob I/O and Storage
 failure classification live in sibling modules.
 Key entry points: `list_databases`.
@@ -74,8 +75,12 @@ def list_databases(
     cc = svc.get_container_client(container)
     db_info: dict[str, dict[str, Any]] = {}
     metadata_blobs: dict[str, str] = {}  # db_name -> metadata json content
-    oracle_status_blobs: dict[str, str] = {}  # db_name -> oracle status json content
-    oracle_part_counts: dict[str, int] = {}
+    oracle_status_blobs: dict[str, str] = {}  # db_name -> current-ready json
+    oracle_active_blobs: dict[str, str] = {}  # db_name -> active run json
+    oracle_automation_blobs: dict[str, str] = {}  # db_name -> retry state json
+    oracle_latest_run_names: dict[str, str] = {}  # db_name -> latest run status path
+    oracle_latest_run_blobs: dict[str, str] = {}
+    oracle_part_names: dict[tuple[str, str], set[str]] = {}
     blastdb_json_blobs: dict[str, str] = {}  # db_name -> BLAST v5 .njs content
     # Per-base name of the .njs blob we will download for display metadata.
     # A multi-volume DB (e.g. core_nt.00.njs … core_nt.99.njs) has one .njs per
@@ -104,16 +109,34 @@ def list_databases(
                 LOGGER.debug("metadata blob read skipped for %s: %s", blob.name, exc)
             continue
         if (
+            len(parts) == 6
+            and parts[0] == "metadata"
+            and parts[1] == "oracles"
+            and parts[3] == "runs"
+            and parts[5] == "status.json"
+        ):
+            db_name = parts[2]
+            previous = oracle_latest_run_names.get(db_name, "")
+            if blob.name > previous:
+                oracle_latest_run_names[db_name] = blob.name
+            continue
+        if (
             len(parts) == 4
             and parts[0] == "metadata"
             and parts[1] == "oracles"
-            and parts[3] == "status.json"
+            and parts[3] in {"status.json", "active.json", "automation.json"}
         ):
             try:
                 bc = cc.get_blob_client(blob.name)
-                oracle_status_blobs[parts[2]] = read_metadata_blob_text(
+                content = read_metadata_blob_text(
                     bc, max_bytes=4 * 1024 * 1024, label="oracle-status.json"
                 )
+                if parts[3] == "status.json":
+                    oracle_status_blobs[parts[2]] = content
+                elif parts[3] == "active.json":
+                    oracle_active_blobs[parts[2]] = content
+                else:
+                    oracle_automation_blobs[parts[2]] = content
             except Exception as exc:
                 LOGGER.debug("oracle status blob read skipped for %s: %s", blob.name, exc)
             continue
@@ -122,8 +145,10 @@ def list_databases(
             and parts[0] == "metadata"
             and parts[1] == "oracles"
             and parts[3] == "parts"
+            and name.endswith(".txt")
         ):
-            oracle_part_counts[parts[2]] = oracle_part_counts.get(parts[2], 0) + 1
+            oracle_part_key = (parts[2], parts[4])
+            oracle_part_names.setdefault(oracle_part_key, set()).add(blob.name)
             continue
         if name.endswith(".njs"):
             base = re.sub(r"\.\d+$", "", name[:-4])
@@ -197,6 +222,17 @@ def list_databases(
             blastdb_json_blobs[base] = read_metadata_blob_text(bc, label="blast-db-njs")
         except Exception as exc:
             LOGGER.debug("BLAST DB metadata read skipped for %s: %s", njs_name, exc)
+    for base, status_name in oracle_latest_run_names.items():
+        if base not in db_info:
+            continue
+        try:
+            oracle_latest_run_blobs[base] = read_metadata_blob_text(
+                cc.get_blob_client(status_name),
+                max_bytes=4 * 1024 * 1024,
+                label="oracle-run-status.json",
+            )
+        except Exception as exc:
+            LOGGER.debug("oracle run status read skipped for %s: %s", status_name, exc)
     # Enrich with metadata (source_version, downloaded_at, sharding info)
     import json as _json
 
@@ -342,18 +378,36 @@ def list_databases(
                         break
             except Exception as exc:
                 LOGGER.debug("metadata blob parse skipped for %s: %s", db_name, exc)
+        oracle_payload: dict[str, Any] | None = None
         if db_name in oracle_status_blobs:
             try:
                 oracle = _json.loads(oracle_status_blobs[db_name])
                 if isinstance(oracle, dict):
+                    run_id = str(oracle.get("run_id") or "")
                     expected_parts = int(oracle.get("expected_parts") or 0)
-                    ready_parts = int(oracle_part_counts.get(db_name, 0))
+                    names = oracle_part_names.get((db_name, run_id), set())
+                    expected_shards = [
+                        shard
+                        for shard in oracle.get("expected_shards", [])
+                        if isinstance(shard, str)
+                    ]
+                    ready_parts = (
+                        len(
+                            names
+                            & {
+                                f"metadata/oracles/{db_name}/parts/{run_id}/{shard}.txt"
+                                for shard in expected_shards
+                            }
+                        )
+                        if expected_shards
+                        else len(names)
+                    )
                     db_source_version = str(info.get("source_version") or "")
                     oracle_source_version = str(oracle.get("source_version") or "")
                     source_version_stale = bool(
                         db_source_version and oracle_source_version != db_source_version
                     )
-                    info["db_order_oracle"] = {
+                    oracle_payload = {
                         "status": (
                             "stale"
                             if source_version_stale
@@ -370,6 +424,100 @@ def list_databases(
                     }
             except Exception as exc:
                 LOGGER.debug("oracle status blob parse skipped for %s: %s", db_name, exc)
+        if db_name in oracle_active_blobs:
+            try:
+                active = _json.loads(oracle_active_blobs[db_name])
+                if isinstance(active, dict):
+                    active_run_id = str(active.get("run_id") or "")
+                    active_names = oracle_part_names.get((db_name, active_run_id), set())
+                    active_shards = [
+                        shard
+                        for shard in active.get("expected_shards", [])
+                        if isinstance(shard, str)
+                    ]
+                    active_payload = {
+                        "status": str(active.get("status") or "building"),
+                        "phase": active.get("phase"),
+                        "run_id": active.get("run_id"),
+                        "started_at": active.get("started_at"),
+                        "source_version": active.get("source_version"),
+                        "expected_parts": int(active.get("expected_parts") or 0),
+                        "ready_parts": (
+                            len(
+                                active_names
+                                & {
+                                    f"metadata/oracles/{db_name}/parts/{active_run_id}/{shard}.txt"
+                                    for shard in active_shards
+                                }
+                            )
+                            if active_shards
+                            else len(active_names)
+                        ),
+                        "automatic": bool(active.get("automatic")),
+                    }
+                    if oracle_payload is None:
+                        oracle_payload = dict(active_payload)
+                    oracle_payload["active"] = active_payload
+            except Exception as exc:
+                LOGGER.debug("oracle active blob parse skipped for %s: %s", db_name, exc)
+        if db_name in oracle_automation_blobs:
+            try:
+                automation = _json.loads(oracle_automation_blobs[db_name])
+                if isinstance(automation, dict):
+                    automation_payload = {
+                        key: automation.get(key)
+                        for key in (
+                            "status",
+                            "failure_count",
+                            "retry_exhausted",
+                            "next_retry_at",
+                            "last_run_id",
+                            "last_error_code",
+                            "blocked_reason",
+                            "updated_at",
+                        )
+                    }
+                    if oracle_payload is None:
+                        oracle_payload = {
+                            "status": str(automation.get("status") or "idle"),
+                            "expected_parts": 0,
+                            "ready_parts": 0,
+                        }
+                    oracle_payload["automation"] = automation_payload
+            except Exception as exc:
+                LOGGER.debug("oracle automation blob parse skipped for %s: %s", db_name, exc)
+        if db_name in oracle_latest_run_blobs:
+            try:
+                latest_attempt = _json.loads(oracle_latest_run_blobs[db_name])
+                latest_status = str(latest_attempt.get("status") or "")
+                latest_run_id = str(latest_attempt.get("run_id") or "")
+                current_run_id = str((oracle_payload or {}).get("run_id") or "")
+                if (
+                    isinstance(latest_attempt, dict)
+                    and latest_status in {"failed", "superseded", "timeout"}
+                    and latest_run_id
+                    and latest_run_id != current_run_id
+                ):
+                    last_attempt = {
+                        "status": latest_status,
+                        "phase": latest_attempt.get("phase"),
+                        "run_id": latest_run_id,
+                        "error_code": latest_attempt.get("error_code"),
+                        "finished_at": latest_attempt.get("finished_at"),
+                        "automatic": bool(latest_attempt.get("automatic")),
+                    }
+                    if oracle_payload is None:
+                        oracle_payload = {
+                            "status": latest_status,
+                            "run_id": latest_run_id,
+                            "expected_parts": int(latest_attempt.get("expected_parts") or 0),
+                            "ready_parts": int(latest_attempt.get("ready_parts") or 0),
+                        }
+                    oracle_payload["last_attempt"] = last_attempt
+            except Exception as exc:
+                LOGGER.debug("latest oracle run parse skipped for %s: %s", db_name, exc)
+        if oracle_payload is not None:
+            info["db_order_oracle"] = oracle_payload
         default_searchsp = WEB_BLAST_SEARCHSP_DEFAULTS.get(db_name)
         if default_searchsp is not None:
             # Recompute the verified Web BLAST search space from the LIVE

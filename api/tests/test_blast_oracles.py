@@ -107,12 +107,16 @@ def test_upload_db_order_oracle_pointer_writes_url_manifest(monkeypatch) -> None
     def fake_upload_blob_text(*args, **kwargs) -> None:
         uploads.append({"args": args, "kwargs": kwargs})
 
-    def fake_part_urls(**kwargs):
+    def fake_resolution(**kwargs):
         oracle_calls.append(kwargs)
-        return [
-            "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run/00.txt",
-            "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run/01.txt",
-        ]
+        return blast_oracles.DbOrderOracleResolution(
+            run_id="run",
+            source_version="v1",
+            part_urls=(
+                "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run/00.txt",
+                "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run/01.txt",
+            ),
+        )
 
     monkeypatch.setattr("api.services.get_credential", lambda: "credential")
     monkeypatch.setattr("api.services.storage.data.upload_blob_text", fake_upload_blob_text)
@@ -121,7 +125,12 @@ def test_upload_db_order_oracle_pointer_writes_url_manifest(monkeypatch) -> None
         "resolve_db_metadata",
         lambda *_args: {"source_version": "v1"},
     )
-    monkeypatch.setattr(blast_oracles, "db_order_oracle_part_urls", fake_part_urls)
+    monkeypatch.setattr(blast_oracles, "resolve_db_order_oracle", fake_resolution)
+    references: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "api.services.db.oracle_references.create_oracle_reference",
+        lambda *_args, **kwargs: references.append(kwargs) or "reference.json",
+    )
 
     result = blast_oracles.upload_db_order_oracle_pointer_if_available(
         storage_account="stelb",
@@ -135,6 +144,8 @@ def test_upload_db_order_oracle_pointer_writes_url_manifest(monkeypatch) -> None
         "db_name": "core_nt",
         "part_count": 2,
         "source_version": "v1",
+        "oracle_run_id": "run",
+        "reference_blob": "reference.json",
     }
     assert oracle_calls == [
         {
@@ -146,6 +157,8 @@ def test_upload_db_order_oracle_pointer_writes_url_manifest(monkeypatch) -> None
     assert uploads[0]["args"][3] == "job-123/metadata/tie-order-oracle-urls.txt"
     assert "00.txt" in uploads[0]["args"][4]
     assert uploads[0]["kwargs"] == {"content_type": "text/plain; charset=utf-8"}
+    assert references[0]["run_id"] == "run"
+    assert references[0]["job_id"] == "job-123"
 
 
 def test_upload_db_order_oracle_pointer_requires_explicit_opt_in() -> None:
@@ -180,8 +193,8 @@ def test_db_order_oracle_part_urls_rejects_source_version_mismatch(monkeypatch) 
 
         def list_blobs(self, *, name_starts_with: str):
             return [
-                SimpleNamespace(name=f"{name_starts_with}00.txt"),
-                SimpleNamespace(name=f"{name_starts_with}01.txt"),
+                SimpleNamespace(name=f"{name_starts_with}00.txt", size=10),
+                SimpleNamespace(name=f"{name_starts_with}01.txt", size=10),
             ]
 
     class FakeService:
@@ -207,3 +220,46 @@ def test_db_order_oracle_part_urls_rejects_source_version_mismatch(monkeypatch) 
         "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run-1/00.txt",
         "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run-1/01.txt",
     ]
+
+
+def test_db_order_oracle_resolver_rejects_extra_or_empty_parts(monkeypatch) -> None:
+    class FakeStatusDownload:
+        def readall(self) -> bytes:
+            return json.dumps(
+                {
+                    "run_id": "run-1",
+                    "expected_parts": 2,
+                    "expected_shards": ["00", "01"],
+                    "source_version": "v1",
+                }
+            ).encode()
+
+    class FakeBlobClient:
+        def download_blob(self, **_kwargs) -> FakeStatusDownload:
+            return FakeStatusDownload()
+
+    class FakeContainer:
+        mode = "extra"
+
+        def get_blob_client(self, _name: str) -> FakeBlobClient:
+            return FakeBlobClient()
+
+        def list_blobs(self, *, name_starts_with: str):
+            parts = [
+                SimpleNamespace(name=f"{name_starts_with}00.txt", size=10),
+                SimpleNamespace(name=f"{name_starts_with}01.txt", size=10),
+            ]
+            if self.mode == "extra":
+                parts.append(SimpleNamespace(name=f"{name_starts_with}99.txt", size=10))
+            else:
+                parts[1].size = 0
+            return parts
+
+    container = FakeContainer()
+    service = SimpleNamespace(get_container_client=lambda _name: container)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.storage.data._blob_service", lambda *_args: service)
+
+    assert blast_oracles.resolve_db_order_oracle(storage_account="stelb", db_name="core_nt") is None
+    container.mode = "empty"
+    assert blast_oracles.resolve_db_order_oracle(storage_account="stelb", db_name="core_nt") is None

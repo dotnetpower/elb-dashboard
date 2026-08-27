@@ -148,6 +148,23 @@ export interface AutoWarmupPreference {
   updated_at?: string;
 }
 
+export interface AutoOraclePreference {
+  subscription_id: string;
+  cluster_resource_group: string;
+  cluster_name: string;
+  storage_resource_group: string;
+  storage_account: string;
+  db_name: string;
+  acr_name?: string;
+  image?: string;
+  enabled: boolean;
+  reset_retry?: boolean;
+  owner_oid?: string;
+  tenant_id?: string;
+  updated_at?: string;
+  version?: string;
+}
+
 export interface StorageSummary {
   name: string;
   region: string;
@@ -750,6 +767,46 @@ export const monitoringApi = {
       "/warmup/auto-preference",
       body,
     ),
+
+  listAutoOraclePreferences: (
+    subscriptionId: string,
+    clusterResourceGroup: string,
+    clusterName: string,
+    storageAccount: string,
+  ) => {
+    const load = async (): Promise<{
+      preferences: AutoOraclePreference[];
+      truncated: boolean;
+    }> => {
+      const preferences = new Map<string, AutoOraclePreference>();
+      let cursor = "";
+      for (let page = 0; page < 25; page += 1) {
+        const result = await api.get<{
+          preferences: AutoOraclePreference[];
+          next_cursor?: string;
+        }>(
+          `/warmup/oracle-preferences?subscription_id=${encodeURIComponent(subscriptionId)}&cluster_resource_group=${encodeURIComponent(clusterResourceGroup)}&cluster_name=${encodeURIComponent(clusterName)}&storage_account=${encodeURIComponent(storageAccount)}&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+        );
+        for (const preference of result.preferences) {
+          preferences.set(preference.db_name, preference);
+        }
+        cursor = result.next_cursor ?? "";
+        if (!cursor) {
+          return { preferences: [...preferences.values()], truncated: false };
+        }
+      }
+      return { preferences: [...preferences.values()], truncated: true };
+    };
+    return load();
+  },
+
+  saveAutoOraclePreference: (body: AutoOraclePreference) =>
+    api.put<{
+      status: string;
+      preference: AutoOraclePreference;
+      reconcile_task_id: string;
+      modifier_changed?: boolean;
+    }>("/warmup/oracle-preference", body),
 
   /** Per-process API request metrics. Window in seconds (60..86400). */
   requestMetrics: (

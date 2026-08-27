@@ -9,7 +9,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import {
   computeWindowedBytesPerSec,
@@ -26,7 +26,10 @@ import {
   formatStorageDate,
   ncbiBlastDbFtpUrl,
 } from "@/components/cards/storageDbCatalog";
-import type { DownloadedDbMeta } from "@/components/cards/storage/useBlastDb";
+import type {
+  DownloadedDbMeta,
+  PendingDbUpdate,
+} from "@/components/cards/storage/useBlastDb";
 import type { DbPreviewMeta } from "@/components/cards/storage/useDbPreviews";
 import { useMonotonicPercent } from "@/hooks/useMonotonicPercent";
 
@@ -45,6 +48,7 @@ interface BlastDbRowProps {
   isCopying: boolean;
   inProgressInfo: { expectedFiles: number; startTime: number } | undefined;
   hasUpdate: boolean;
+  updatePending?: PendingDbUpdate;
   latestVersion: string | null;
   elapsed: number;
   downloadDisabled: boolean;
@@ -58,6 +62,10 @@ interface BlastDbRowProps {
   oracleDisabledReason?: string;
   autoWarmupChecked: boolean;
   autoWarmupDisabled: boolean;
+  autoOracleChecked: boolean;
+  autoOracleDisabled: boolean;
+  autoOracleDisabledReason?: string;
+  autoOracleSaving: boolean;
   /**
    * When true the caller lacks the Azure RBAC role needed to mutate this
    * database (Reader-only at the requested scope). Every write action
@@ -94,6 +102,8 @@ interface BlastDbRowProps {
    */
   isDeleting?: boolean;
   onToggleAutoWarmup: (checked: boolean) => void;
+  onToggleAutoOracle: (checked: boolean) => void;
+  onRetryAutoOracle: () => void;
 }
 
 /**
@@ -152,6 +162,7 @@ export function BlastDbRow({
   isCopying,
   inProgressInfo,
   hasUpdate,
+  updatePending,
   latestVersion,
   elapsed,
   downloadDisabled,
@@ -160,6 +171,10 @@ export function BlastDbRow({
   oracleDisabledReason,
   autoWarmupChecked,
   autoWarmupDisabled,
+  autoOracleChecked,
+  autoOracleDisabled,
+  autoOracleDisabledReason,
+  autoOracleSaving,
   writeDisabled = false,
   writeDisabledReason,
   onDownload,
@@ -171,7 +186,10 @@ export function BlastDbRow({
   onDelete,
   isDeleting = false,
   onToggleAutoWarmup,
+  onToggleAutoOracle,
+  onRetryAutoOracle,
 }: BlastDbRowProps) {
+  const autoOracleHelpId = useId();
   const triggerDownload = () => {
     if (db.category === "Large") {
       onConfirmLarge();
@@ -201,6 +219,17 @@ export function BlastDbRow({
   const serverCopyActive =
     copyPhase === "copying" || copyPhase === "queued" || isUpdating;
   const copyActive = (isCopying && Boolean(inProgressInfo)) || serverCopyActive;
+  const oracle = meta?.db_order_oracle;
+  const activeOracle = oracle?.active;
+  const oracleAutomation = oracle?.automation;
+  const oracleRetryExhausted = oracleAutomation?.retry_exhausted === true;
+  const oracleBlocked = oracleAutomation?.status === "blocked";
+  const oracleBackoff =
+    oracleAutomation?.status === "failed" && !oracleRetryExhausted;
+  const lastOracleAttemptFailed =
+    oracle?.last_attempt?.status === "failed" ||
+    oracle?.last_attempt?.status === "timeout" ||
+    oracle?.last_attempt?.status === "superseded";
 
   const cs = meta?.copy_status;
   // The server-side copy path reports a per-file `success`; the AKS-fanout
@@ -732,16 +761,24 @@ export function BlastDbRow({
               {meta.db_order_oracle && (
                 <span
                   className="db-shard-chip"
-                  title={`DB order oracle: ${meta.db_order_oracle.ready_parts ?? 0}/${meta.db_order_oracle.expected_parts ?? 0} parts`}
+                  title={
+                    activeOracle
+                      ? `Current oracle: ${oracle?.ready_parts ?? 0}/${oracle?.expected_parts ?? 0} parts. Rebuild: ${activeOracle.ready_parts ?? 0}/${activeOracle.expected_parts ?? 0} parts.`
+                      : `DB order oracle: ${oracle?.ready_parts ?? 0}/${oracle?.expected_parts ?? 0} parts`
+                  }
                   style={{
                     fontSize: 10,
                     padding: "1px 6px",
                     borderRadius: 3,
                     color:
-                      meta.db_order_oracle.status === "ready"
+                      activeOracle
+                        ? "var(--accent)"
+                        : meta.db_order_oracle.status === "ready"
                         ? "var(--success)"
                         : meta.db_order_oracle.status === "stale"
                           ? "var(--warning)"
+                          : meta.db_order_oracle.status === "failed"
+                            ? "var(--danger)"
                         : "var(--accent)",
                     background:
                       meta.db_order_oracle.status === "stale"
@@ -756,9 +793,47 @@ export function BlastDbRow({
                     letterSpacing: 0,
                   }}
                 >
-                  {meta.db_order_oracle.status === "stale"
-                    ? "Order stale"
-                    : `Order · ${meta.db_order_oracle.status}`}
+                  {activeOracle ? (
+                    <>
+                      <Loader2 size={9} className="spin" /> Order ·{" "}
+                      {activeOracle.ready_parts ?? 0}/{activeOracle.expected_parts ?? 0}
+                    </>
+                  ) : meta.db_order_oracle.status === "stale" ? (
+                    "Order stale"
+                  ) : (
+                    `Order · ${meta.db_order_oracle.status}`
+                  )}
+                </span>
+              )}
+              {oracleBlocked && (
+                <span
+                  className="gt gt-o"
+                  style={{ fontSize: 9 }}
+                  title={`Auto oracle blocked: ${oracleAutomation?.blocked_reason || "readiness or permission check failed"}`}
+                >
+                  Order blocked
+                </span>
+              )}
+              {oracleBackoff && (
+                <span
+                  className="gt gt-o"
+                  style={{ fontSize: 9 }}
+                  title={
+                    oracleAutomation?.next_retry_at
+                      ? `Auto oracle retries after ${new Date(oracleAutomation.next_retry_at).toLocaleString()}`
+                      : "Auto oracle retry is pending"
+                  }
+                >
+                  Order retry pending
+                </span>
+              )}
+              {lastOracleAttemptFailed && oracleAutomation?.status !== "failed" && (
+                <span
+                  className="gt gt-r"
+                  style={{ fontSize: 9 }}
+                  title={`Last order build failed (${oracle?.last_attempt?.error_code || oracle?.last_attempt?.status})`}
+                >
+                  Order build failed
                 </span>
               )}
             </>
@@ -795,6 +870,74 @@ export function BlastDbRow({
             />
             Auto warm
           </label>
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              minWidth: 88,
+              color: autoOracleChecked ? "var(--success)" : "var(--text-muted)",
+              cursor:
+                autoOracleDisabled || writeDisabled ? "not-allowed" : "pointer",
+              opacity: autoOracleDisabled || writeDisabled ? 0.55 : 1,
+            }}
+            title={
+              writeDisabled
+                ? writeDisabledReason
+                : autoOracleDisabled
+                  ? autoOracleDisabledReason
+                  : "Build a new order oracle automatically after Auto warm is ready"
+            }
+          >
+            <input
+              type="checkbox"
+              checked={autoOracleChecked}
+              disabled={autoOracleDisabled || writeDisabled}
+              onChange={(event) => onToggleAutoOracle(event.target.checked)}
+              aria-describedby={autoOracleHelpId}
+              style={{ accentColor: "var(--success)", margin: 0 }}
+            />
+            Auto oracle
+            {autoOracleSaving && <Loader2 size={10} className="spin" />}
+            <span
+              id={autoOracleHelpId}
+              style={{
+                position: "absolute",
+                width: 1,
+                height: 1,
+                padding: 0,
+                margin: -1,
+                overflow: "hidden",
+                clip: "rect(0, 0, 0, 0)",
+                whiteSpace: "nowrap",
+                border: 0,
+              }}
+            >
+              Requires Auto warm for the same database and cluster.
+            </span>
+          </label>
+          {autoOracleChecked && oracleRetryExhausted && (
+            <button
+              className="glass-button"
+              style={{
+                fontSize: 9,
+                padding: "2px 6px",
+                color: "var(--warning)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 3,
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRetryAutoOracle();
+              }}
+              disabled={autoOracleSaving || writeDisabled}
+              title={`Retry Auto oracle after ${oracleAutomation?.failure_count ?? 3} failed attempts (${oracleAutomation?.last_error_code || "unknown error"})`}
+              aria-label={`Retry Auto oracle for ${db.value}`}
+            >
+              <RefreshCw size={9} /> Retry
+            </button>
+          )}
         </div>
         {copyActive && progressTotal > 0 && (
           <div
@@ -909,6 +1052,28 @@ export function BlastDbRow({
                 ? writeDisabledReason
                 : `Update from ${formatNcbiVersion(meta!.source_version!)} to ${formatNcbiVersion(latestVersion!)}`
             }
+          >
+            <RefreshCw size={11} /> Update
+          </button>
+        ) : updatePending ? (
+          <button
+            className="glass-button"
+            style={{
+              fontSize: 11,
+              padding: "3px 10px",
+              color: "var(--warning)",
+              borderColor: "rgba(240,198,116,0.3)",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+            disabled
+            aria-label="Update pending NCBI cloud mirror"
+            title={`NCBI published a newer release${
+              updatePending.publishedAt
+                ? ` on ${formatStorageDate(updatePending.publishedAt)}`
+                : ""
+            }; waiting for the cloud mirror before Update can run.`}
           >
             <RefreshCw size={11} /> Update
           </button>

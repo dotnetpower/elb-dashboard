@@ -111,6 +111,23 @@ def test_aged_out_async_row_fails_worker_lost() -> None:
     assert d.reason == "aged-out-worker-lost"
 
 
+def test_oracle_uses_task_bounded_stale_threshold() -> None:
+    old = _NOW - timedelta(seconds=stale_dbops._ORACLE_STALE_SECONDS + 1)
+    decision = classify_dbops_row(
+        row_type="oracle",
+        status="running",
+        updated_at=_iso(old),
+        created_at=_iso(old),
+        has_task_id=True,
+        celery_state=None,
+        now=_NOW,
+    )
+
+    assert stale_dbops._ORACLE_STALE_SECONDS < stale_dbops._PREPARE_DB_STALE_SECONDS
+    assert decision.action == "terminalize"
+    assert decision.error_code == "worker_lost"
+
+
 def test_live_download_within_threshold_is_skipped() -> None:
     """A real download legitimately runs for hours — a row a few minutes old
     with a PENDING task must NOT be aged out."""

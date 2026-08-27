@@ -47,6 +47,7 @@ from api.routes import (
     aks,
     arm,
     audit,
+    auto_oracle,
     blast,
     client_log,
     cost,
@@ -157,9 +158,7 @@ def _document_common_error_responses(schema: dict[str, Any]) -> None:
             "required": ["detail"],
         },
     )
-    error_ref = {
-        "application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}
-    }
+    error_ref = {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}
     common = {
         "401": {
             "description": "Missing or invalid bearer token.",
@@ -220,8 +219,7 @@ def _install_openapi_security_scheme(app: FastAPI) -> None:
             "scheme": "bearer",
             "bearerFormat": "JWT",
             "description": (
-                "Microsoft Entra ID (MSAL) access token. Send as "
-                "`Authorization: Bearer <token>`."
+                "Microsoft Entra ID (MSAL) access token. Send as `Authorization: Bearer <token>`."
             ),
         }
         schema["security"] = [{"BearerAuth": []}]
@@ -386,6 +384,7 @@ def create_app() -> FastAPI:
     app.include_router(acr.acr_build_router)
     app.include_router(blast.blast_router)
     app.include_router(warmup.warmup_router)
+    app.include_router(auto_oracle.router)
     app.include_router(audit.audit_router)
     app.include_router(notifications.notifications_router)
     app.include_router(cost.router)

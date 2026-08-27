@@ -121,14 +121,20 @@ export function StorageCard({
   // stopped/half-provisioned cluster makes the build fail. Evaluate readiness
   // against the exact cluster the oracle build will use and degrade open
   // (ready=true) while the AKS list is unknown or the cluster is not found.
-  const oracleClusterName = clusterName ?? "elb-cluster";
+  const oracleClusterName = aksDownloadCoords.clusterName;
+  const oracleClusterResourceGroup = aksDownloadCoords.resourceGroup;
   const clusterReady = useMemo(() => {
     const clusters = clusterQuery.data?.clusters;
     if (!clusters) return true;
-    const match = clusters.find((c) => c.name === oracleClusterName);
+    const match = clusters.find(
+      (c) =>
+        c.name === oracleClusterName &&
+        (!oracleClusterResourceGroup ||
+          c.resource_group === oracleClusterResourceGroup),
+    );
     if (!match) return true;
     return isAksWorkloadReady(match);
-  }, [clusterQuery.data, oracleClusterName]);
+  }, [clusterQuery.data, oracleClusterName, oracleClusterResourceGroup]);
 
   const status = !enabled
     ? "idle"

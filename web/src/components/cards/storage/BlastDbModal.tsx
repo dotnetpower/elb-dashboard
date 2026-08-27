@@ -171,16 +171,24 @@ export function BlastDbModal({
     isDbReady,
     updatesAvailable,
     updatesAvailableByDb,
+    updatesPending,
+    updatesPendingByDb,
     updatesEvaluated,
     downloading,
     oracleBuilding,
+    autoOracleSaving,
+    autoOraclePreferences,
     inProgress,
     elapsed,
     pendingAction,
     downloadResult,
     dismissDownloadResult,
+    refreshDatabaseStatus,
+    refreshingDatabaseStatus,
     handleDownload,
     handleBuildOracle,
+    handleToggleAutoOracle,
+    handleRetryAutoOracle,
     handleCancel,
     handleDelete,
   } = state;
@@ -293,15 +301,15 @@ export function BlastDbModal({
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <button
               className="glass-button"
-              onClick={() => dbQuery.refetch()}
-              disabled={dbQuery.isFetching}
+              onClick={() => void refreshDatabaseStatus()}
+              disabled={refreshingDatabaseStatus}
               style={{ padding: "4px 6px", border: "none" }}
               title="Refresh database status"
             >
               <RefreshCw
                 size={14}
                 strokeWidth={1.5}
-                className={dbQuery.isFetching ? "spin" : ""}
+                className={refreshingDatabaseStatus ? "spin" : ""}
               />
             </button>
             <button
@@ -346,9 +354,17 @@ export function BlastDbModal({
               {updatesAvailable} update{updatesAvailable > 1 ? "s" : ""} available
             </span>
           )}
+          {updatesPending > 0 && (
+            <span
+              style={{ color: "var(--warning)", fontWeight: 600 }}
+              title="Published by NCBI; waiting for the cloud mirror used by database downloads."
+            >
+              {updatesPending} update{updatesPending > 1 ? "s" : ""} pending
+            </span>
+          )}
           {latestVersion && (
             <span>
-              NCBI latest:{" "}
+              NCBI cloud snapshot:{" "}
               <code style={{ fontSize: 9 }}>{formatNcbiVersion(latestVersion)}</code>
             </span>
           )}
@@ -618,6 +634,35 @@ export function BlastDbModal({
                       updatesEvaluated,
                       latestVersion,
                     });
+                    const autoOracleChecked =
+                      autoOraclePreferences.get(db.value)?.enabled === true;
+                    const autoWarmupChecked = autoWarmupDbs.has(db.value);
+                    const autoOracleDisabled =
+                      autoOracleSaving !== null ||
+                      state.autoOraclePreferencesLoading ||
+                      state.autoOraclePreferencesError ||
+                      (!autoOracleChecked &&
+                        (!autoWarmupChecked ||
+                          !isDownloaded ||
+                          hasUpdate ||
+                          !!meta?.update_in_progress ||
+                          !state.autoOracleCoordinatesReady));
+                    const autoOracleDisabledReason =
+                      autoOracleSaving !== null
+                        ? "Saving Auto oracle preference"
+                        : state.autoOraclePreferencesLoading
+                          ? "Loading Auto oracle preferences"
+                          : state.autoOraclePreferencesError
+                            ? "Auto oracle preferences could not be loaded"
+                        : !autoWarmupChecked
+                          ? "Enable Auto warm for this database first"
+                          : !isDownloaded
+                            ? "Download this database before enabling Auto oracle"
+                            : hasUpdate || meta?.update_in_progress
+                              ? "Update this database before enabling Auto oracle"
+                              : !state.autoOracleCoordinatesReady
+                                ? "A resolved AKS cluster and ACR are required"
+                                : undefined;
                     return (
                       <BlastDbRow
                         key={db.value}
@@ -629,6 +674,7 @@ export function BlastDbModal({
                         isCopying={isCopying}
                         inProgressInfo={inProgressInfo}
                         hasUpdate={hasUpdate}
+                        updatePending={updatesPendingByDb.get(db.value)}
                         latestVersion={latestVersion}
                         elapsed={elapsed}
                         downloadDisabled={downloading !== null}
@@ -641,10 +687,14 @@ export function BlastDbModal({
                             ? "AKS cluster is not running — start it before building the order oracle"
                             : undefined
                         }
-                        autoWarmupChecked={autoWarmupDbs.has(db.value)}
+                        autoWarmupChecked={autoWarmupChecked}
                         autoWarmupDisabled={
                           !isDownloaded || hasUpdate || !!meta?.update_in_progress
                         }
+                        autoOracleChecked={autoOracleChecked}
+                        autoOracleDisabled={autoOracleDisabled}
+                        autoOracleDisabledReason={autoOracleDisabledReason}
+                        autoOracleSaving={autoOracleSaving === db.value}
                         writeDisabled={writeDisabled}
                         writeDisabledReason={writeDisabledReason}
                         onDownload={() => requestDownload(db.value, false)}
@@ -657,6 +707,12 @@ export function BlastDbModal({
                         isDeleting={pendingAction.get(db.value) === "delete"}
                         onToggleAutoWarmup={(checked) =>
                           toggleAutoWarmup(db.value, checked)
+                        }
+                        onToggleAutoOracle={(checked) =>
+                          void handleToggleAutoOracle(db.value, checked)
+                        }
+                        onRetryAutoOracle={() =>
+                          void handleRetryAutoOracle(db.value)
                         }
                       />
                     );

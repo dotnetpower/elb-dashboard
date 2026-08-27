@@ -12,6 +12,8 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -24,7 +26,13 @@ from api.services.warmup.jobs import (
 
 ORACLE_PREFIX_ROOT = "metadata/oracles"
 ORACLE_STATUS_BLOB_NAME = "status.json"
+ORACLE_ACTIVE_BLOB_NAME = "active.json"
+ORACLE_AUTOMATION_BLOB_NAME = "automation.json"
+ORACLE_RETENTION_CURSOR_BLOB_NAME = "retention.json"
+ORACLE_RUNS_DIR = "runs"
 ORACLE_PARTS_DIR = "parts"
+ORACLE_REFERENCES_DIR = "references"
+ORACLE_GC_DIR = "gc"
 
 _SAFE_DB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_NODE_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
@@ -58,12 +66,86 @@ def oracle_status_blob_path(db_name: str) -> str:
     return f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_STATUS_BLOB_NAME}"
 
 
+def oracle_active_blob_path(db_name: str) -> str:
+    _validate_db_name(db_name)
+    return f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_ACTIVE_BLOB_NAME}"
+
+
+def oracle_automation_blob_path(db_name: str) -> str:
+    _validate_db_name(db_name)
+    return f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_AUTOMATION_BLOB_NAME}"
+
+
+def oracle_retention_cursor_blob_path(db_name: str) -> str:
+    _validate_db_name(db_name)
+    return f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_RETENTION_CURSOR_BLOB_NAME}"
+
+
+def oracle_run_status_blob_path(db_name: str, run_id: str) -> str:
+    _validate_db_name(db_name)
+    _validate_run_id(run_id)
+    return f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_RUNS_DIR}/{run_id}/status.json"
+
+
 def oracle_part_blob_path(db_name: str, run_id: str, shard: str) -> str:
     _validate_db_name(db_name)
     _validate_run_id(run_id)
     if not _SAFE_SHARD_RE.match(shard):
         raise ValueError(f"invalid shard: {shard!r}")
     return f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_PARTS_DIR}/{run_id}/{shard}.txt"
+
+
+def oracle_reference_blob_path(db_name: str, run_id: str, job_id: str) -> str:
+    _validate_db_name(db_name)
+    _validate_run_id(run_id)
+    if not job_id or len(job_id) > 512:
+        raise ValueError("job_id must contain 1-512 characters")
+    reference_id = hashlib.sha256(job_id.encode("utf-8")).hexdigest()
+    return f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_REFERENCES_DIR}/{run_id}/{reference_id}.json"
+
+
+def oracle_gc_marker_blob_path(db_name: str, run_id: str) -> str:
+    _validate_db_name(db_name)
+    _validate_run_id(run_id)
+    return f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_GC_DIR}/{run_id}.json"
+
+
+def oracle_layout_fingerprint(
+    *,
+    source_version: str,
+    shards: list[str],
+    shard_host_paths: dict[str, str] | None = None,
+    layout_schema: int = 0,
+) -> str:
+    """Return a stable identity for one database generation and shard layout.
+
+    Node names are deliberately excluded: an AKS stop/start or node rotation
+    can move the same immutable layout without changing accession ordering.
+    Host paths are included because they identify the selected published shard
+    set when warmup status exposes more than one layout.
+    """
+    if not source_version.strip():
+        raise ValueError("source_version must not be empty")
+    normalised_shards = sorted(set(shards))
+    if not normalised_shards or any(
+        not _SAFE_SHARD_RE.fullmatch(shard) for shard in normalised_shards
+    ):
+        raise ValueError("shards must contain safe two-digit shard ids")
+    paths = shard_host_paths or {}
+    normalised_paths: dict[str, str] = {}
+    for shard in normalised_shards:
+        path = str(paths.get(shard) or "")
+        if path:
+            _validate_node_db_path(path)
+            normalised_paths[shard] = path.rstrip("/")
+    payload = {
+        "layout_schema": max(int(layout_schema), 0),
+        "shard_host_paths": normalised_paths,
+        "shards": normalised_shards,
+        "source_version": source_version.strip(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:24]
 
 
 def oracle_part_url(storage_account: str, db_name: str, run_id: str, shard: str) -> str:

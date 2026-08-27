@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { formatApiError } from "@/api/client";
 import { blastApi, monitoringApi, storageApi } from "@/api/endpoints";
+import type { AutoOraclePreference } from "@/api/monitoring";
 import type { StorageLocalDebugStatus } from "@/api/storage";
 import { isBlastDbReady } from "@/utils/blastDbReady";
 
@@ -97,7 +98,42 @@ export interface DownloadedDbMeta {
     expected_parts?: number;
     ready_parts?: number;
     part_prefix?: string | null;
+    active?: {
+      status: string;
+      phase?: string | null;
+      run_id?: string | null;
+      started_at?: string | null;
+      source_version?: string | null;
+      expected_parts?: number;
+      ready_parts?: number;
+      automatic?: boolean;
+    };
+    automation?: {
+      status?: string | null;
+      failure_count?: number | null;
+      retry_exhausted?: boolean | null;
+      next_retry_at?: string | null;
+      last_run_id?: string | null;
+      last_error_code?: string | null;
+      blocked_reason?: string | null;
+      updated_at?: string | null;
+    };
+    last_attempt?: {
+      status: string;
+      phase?: string | null;
+      run_id: string;
+      error_code?: string | null;
+      finished_at?: string | null;
+      automatic?: boolean;
+    };
   };
+}
+
+export interface PendingDbUpdate {
+  publishedAt?: string | null;
+  cloudSnapshot?: string | null;
+  numberOfVolumes?: number;
+  bytesTotal?: number;
 }
 
 interface UseBlastDbArgs {
@@ -107,11 +143,12 @@ interface UseBlastDbArgs {
   clusterName: string;
   /**
    * AKS workload cluster coordinates (name + RG) used to opt `prepare-db`
-   * into the fast AKS-fanout azcopy path. Resolved from the subscription-wide
-   * cluster list so the pair is self-consistent (the workload cluster usually
-   * lives in its own RG, not the Storage RG). When either is absent the
-   * download uses the server-side copy. The backend still falls back to the
-   * server-side copy when the cluster cannot serve the download.
+    * into the fast AKS-fanout azcopy path and to target order-oracle Jobs.
+    * Resolved from the subscription-wide cluster list so the pair is
+    * self-consistent (the workload cluster usually lives in its own RG, not the
+    * Storage RG). When either is absent the download uses the server-side copy.
+    * The backend still falls back to the server-side copy when the cluster
+    * cannot serve the download.
    */
   aksClusterName?: string;
   aksResourceGroup?: string;
@@ -139,6 +176,7 @@ export function useBlastDb({
   >(() => new Map());
   const [elapsed, setElapsed] = useState(0);
   const [oracleBuilding, setOracleBuilding] = useState<string | null>(null);
+  const [autoOracleSaving, setAutoOracleSaving] = useState<string | null>(null);
   // Per-DB in-flight lifecycle action (cancel / delete). These network calls
   // take a few seconds; tracking them lets the row show an immediate
   // "Cancelling…" / "Deleting…" spinner instead of looking unchanged until the
@@ -157,6 +195,35 @@ export function useBlastDb({
     enabled,
     staleTime: 60_000,
   });
+
+  const autoOracleQuery = useQuery({
+    queryKey: [
+      "auto-oracle-preferences",
+      subscriptionId,
+      aksResourceGroup,
+      aksClusterName,
+      accountName,
+      acrName,
+    ],
+    queryFn: () =>
+      monitoringApi.listAutoOraclePreferences(
+        subscriptionId,
+        aksResourceGroup!,
+        aksClusterName!,
+        accountName,
+      ),
+    enabled:
+      enabled &&
+      Boolean(subscriptionId && aksResourceGroup && aksClusterName && accountName),
+    staleTime: 30_000,
+  });
+  const autoOraclePreferences = useMemo(() => {
+    const preferences = new Map<string, AutoOraclePreference>();
+    for (const preference of autoOracleQuery.data?.preferences ?? []) {
+      preferences.set(preference.db_name, preference);
+    }
+    return preferences;
+  }, [autoOracleQuery.data?.preferences]);
 
   const latestQuery = useQuery({
     queryKey: [
@@ -196,6 +263,20 @@ export function useBlastDb({
     }
     return map;
   }, [latestQuery.data?.updates_available]);
+  const updatesPendingByDb = useMemo(() => {
+    const map = new Map<string, PendingDbUpdate>();
+    for (const item of latestQuery.data?.updates_pending ?? []) {
+      if (item?.db) {
+        map.set(item.db, {
+          publishedAt: item.published_at,
+          cloudSnapshot: item.cloud_snapshot,
+          numberOfVolumes: item.number_of_volumes,
+          bytesTotal: item.bytes_total,
+        });
+      }
+    }
+    return map;
+  }, [latestQuery.data?.updates_pending]);
 
   // The backend signals "local laptop cannot reach data plane" through either
   // private-only accounts or selected-network firewall rejects. Treat both as
@@ -284,6 +365,14 @@ export function useBlastDb({
         d.source_version && d.source_version !== latestVersion && !d.update_in_progress,
     ).length;
   }, [downloadedDbs, latestVersion, updatesAvailableByDb, updatesEvaluated]);
+  const updatesPending = useMemo(() => {
+    let count = 0;
+    for (const [name] of updatesPendingByDb) {
+      const meta = downloadedDbs.get(name);
+      if (meta && !meta.update_in_progress) count += 1;
+    }
+    return count;
+  }, [downloadedDbs, updatesPendingByDb]);
 
   // Tick elapsed seconds while ANY copy is in-flight — either the API ack
   // is pending (``downloading``) or the server-side copy daemon is polling
@@ -332,13 +421,48 @@ export function useBlastDb({
       ),
     [downloadedDbs],
   );
+  const oracleServerActive = useMemo(
+    () =>
+      [...downloadedDbs.values()].some((meta) => {
+        const oracle = meta.db_order_oracle;
+        return (
+          Boolean(oracle?.active) ||
+          oracle?.automation?.status === "queued" ||
+          oracle?.automation?.status === "running"
+        );
+      }),
+    [downloadedDbs],
+  );
+  const oracleServerPending = useMemo(
+    () =>
+      [...downloadedDbs.values()].some((meta) => {
+        const automation = meta.db_order_oracle?.automation;
+        return (
+          automation?.status === "blocked" ||
+          (automation?.status === "failed" && automation.retry_exhausted !== true)
+        );
+      }),
+    [downloadedDbs],
+  );
   useEffect(() => {
-    if (inProgress.size === 0 && !serverCopyActive) return;
+    if (
+      inProgress.size === 0 &&
+      !serverCopyActive &&
+      !oracleServerActive &&
+      !oracleServerPending
+    )
+      return;
     const t = setInterval(() => {
       void refetchDbList();
-    }, 10_000);
+    }, oracleServerActive ? 5_000 : oracleServerPending ? 30_000 : 10_000);
     return () => clearInterval(t);
-  }, [inProgress.size, serverCopyActive, refetchDbList]);
+  }, [
+    inProgress.size,
+    serverCopyActive,
+    oracleServerActive,
+    oracleServerPending,
+    refetchDbList,
+  ]);
 
   // Clear the stale "Update available" badge/button the instant a copy or
   // update finishes. The check-updates query (`blast-db-latest-version`) has a
@@ -356,6 +480,10 @@ export function useBlastDb({
       void refetchLatest();
     }
   }, [serverCopyActive, refetchLatest]);
+
+  const refreshDatabaseStatus = async (): Promise<void> => {
+    await Promise.all([dbQuery.refetch(), latestQuery.refetch()]);
+  };
 
   // Detect copy completion honestly — the hardened prepare-db pipeline writes
   // ``copy_status.phase`` into ``{db}-metadata.json``. Only ``completed`` is
@@ -577,7 +705,8 @@ export function useBlastDb({
   };
 
   const handleBuildOracle = async (dbName: string) => {
-    if (!enabled || !clusterName) return;
+    const oracleClusterName = aksClusterName ?? clusterName;
+    if (!enabled || !oracleClusterName) return;
     setOracleBuilding(dbName);
     setDownloadResult(null);
     try {
@@ -586,8 +715,9 @@ export function useBlastDb({
         {
           subscription_id: subscriptionId,
           resource_group: resourceGroup,
+          aks_resource_group: aksResourceGroup,
           account_name: accountName,
-          cluster_name: clusterName,
+          cluster_name: oracleClusterName,
           acr_name: acrName,
           source_version: meta?.source_version,
         },
@@ -605,6 +735,88 @@ export function useBlastDb({
       setOracleBuilding(null);
     }
   };
+
+  const saveAutoOracle = async (
+    dbName: string,
+    preferenceEnabled: boolean,
+    resetRetry = false,
+  ): Promise<void> => {
+    if (!enabled) return;
+    const existingPreference = autoOraclePreferences.get(dbName);
+    const targetClusterResourceGroup =
+      (preferenceEnabled ? aksResourceGroup : existingPreference?.cluster_resource_group) ??
+      aksResourceGroup;
+    const targetClusterName =
+      (preferenceEnabled ? aksClusterName : existingPreference?.cluster_name) ??
+      aksClusterName;
+    const targetStorageResourceGroup =
+      existingPreference?.storage_resource_group ?? resourceGroup;
+    const targetStorageAccount = existingPreference?.storage_account ?? accountName;
+    const targetAcrName = acrName ?? existingPreference?.acr_name;
+    if (
+      !targetClusterResourceGroup ||
+      !targetClusterName ||
+      !targetStorageResourceGroup ||
+      !targetStorageAccount ||
+      (preferenceEnabled && !targetAcrName)
+    ) {
+      setDownloadResult({
+        db: dbName,
+        msg: "A resolved AKS cluster, Storage account, and ACR are required for Auto oracle.",
+        type: "err",
+      });
+      return;
+    }
+    setAutoOracleSaving(dbName);
+    setDownloadResult(null);
+    try {
+      const response = await monitoringApi.saveAutoOraclePreference({
+        subscription_id: subscriptionId,
+        cluster_resource_group: targetClusterResourceGroup,
+        cluster_name: targetClusterName,
+        storage_resource_group: targetStorageResourceGroup,
+        storage_account: targetStorageAccount,
+        db_name: dbName,
+        acr_name: targetAcrName,
+        enabled: preferenceEnabled,
+        reset_retry: resetRetry,
+        version: existingPreference?.version,
+      });
+      setDownloadResult({
+        db: dbName,
+        msg: resetRetry
+          ? response.status === "saved_inactive"
+            ? "Retry state reset. Auto oracle execution is inactive for this deployment."
+            : response.status === "saved_no_immediate_enqueue"
+            ? "Retry state reset. The recovery scheduler will queue Auto oracle shortly."
+            : "Auto oracle retry queued."
+          : preferenceEnabled
+            ? response.status === "saved_inactive"
+              ? "Auto oracle preference saved. Execution is inactive for this deployment."
+              : response.status === "saved_no_immediate_enqueue"
+              ? "Auto oracle enabled. The recovery scheduler will queue it shortly."
+              : "Auto oracle enabled. It will build after Auto warm is ready."
+            : "Auto oracle disabled.",
+        type: "ok",
+      });
+      await Promise.all([autoOracleQuery.refetch(), dbQuery.refetch()]);
+    } catch (error) {
+      void autoOracleQuery.refetch();
+      setDownloadResult({
+        db: dbName,
+        msg: formatApiError(error, "blast"),
+        type: "err",
+      });
+    } finally {
+      setAutoOracleSaving(null);
+    }
+  };
+
+  const handleToggleAutoOracle = (dbName: string, preferenceEnabled: boolean) =>
+    saveAutoOracle(dbName, preferenceEnabled);
+
+  const handleRetryAutoOracle = (dbName: string) =>
+    saveAutoOracle(dbName, true, true);
 
   // Aggregate "is anything happening" — used by parent for shimmer
   const activeDownload =
@@ -723,7 +935,11 @@ export function useBlastDb({
     isDbReady,
     updatesAvailable,
     updatesAvailableByDb,
+    updatesPending,
+    updatesPendingByDb,
     updatesEvaluated,
+    refreshDatabaseStatus,
+    refreshingDatabaseStatus: dbQuery.isFetching || latestQuery.isFetching,
     // Local-debug state (only meaningful when the api process is local)
     canEnableLocalAccess,
     canGrantLocalRbac,
@@ -736,6 +952,15 @@ export function useBlastDb({
     // In-flight state
     downloading,
     oracleBuilding,
+    autoOracleSaving,
+    autoOraclePreferences,
+    autoOraclePreferencesLoading:
+      Boolean(aksResourceGroup && aksClusterName) && autoOracleQuery.isPending,
+    autoOraclePreferencesError:
+      autoOracleQuery.isError || autoOracleQuery.data?.truncated === true,
+    autoOracleCoordinatesReady: Boolean(
+      aksResourceGroup && aksClusterName && acrName
+    ),
     elapsed,
     inProgress,
     activeDownload,
@@ -747,6 +972,8 @@ export function useBlastDb({
     handleDownload,
     handleUpdate,
     handleBuildOracle,
+    handleToggleAutoOracle,
+    handleRetryAutoOracle,
     handleCancel,
     handleDelete,
   };

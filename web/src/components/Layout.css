@@ -345,3 +345,14 @@
     display: none !important;
   }
 }
+
+@media (max-width: 480px) {
+  .layout__topbar {
+    padding-inline: 10px;
+    gap: 8px;
+  }
+
+  .layout__logo {
+    min-width: 0;
+  }
+}

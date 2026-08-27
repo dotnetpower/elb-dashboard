@@ -166,3 +166,68 @@ def test_purge_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     out = job_purge.purge_job_result_storage(_state())
     assert out["purged"] is False
     assert out["reason"] == "error"
+
+
+def test_purge_deletes_only_reconstructed_oracle_reference(
+    monkeypatch: pytest.MonkeyPatch, _patch_fs
+) -> None:
+    monkeypatch.setenv("STORAGE_DFS_ENABLED", "true")
+    monkeypatch.setattr(job_purge, "_is_external", lambda _s: False)
+    credential = object()
+    monkeypatch.setattr("api.services.get_credential", lambda: credential)
+    _patch_fs(_FakeFs())
+    from api.services.db.order_oracle import oracle_reference_blob_path
+
+    reference = oracle_reference_blob_path("core_nt", "run-1", "job-1")
+    deleted: list[str] = []
+    blob = type("Blob", (), {"delete_blob": lambda _self: deleted.append(reference)})()
+    container = type(
+        "Container",
+        (),
+        {"get_blob_client": lambda _self, path: blob if path == reference else None},
+    )()
+    monkeypatch.setattr(
+        "api.services.db.oracle_state.oracle_container",
+        lambda value, account: container,
+    )
+    state = _state(
+        payload={
+            "db_order_oracle": {
+                "db_name": "core_nt",
+                "oracle_run_id": "run-1",
+                "reference_blob": reference,
+            }
+        }
+    )
+
+    out = job_purge.purge_job_result_storage(state)
+
+    assert out["reference_deleted"] is True
+    assert deleted == [reference]
+
+
+def test_purge_never_deletes_unverified_oracle_reference(
+    monkeypatch: pytest.MonkeyPatch, _patch_fs
+) -> None:
+    monkeypatch.setenv("STORAGE_DFS_ENABLED", "true")
+    monkeypatch.setattr(job_purge, "_is_external", lambda _s: False)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    _patch_fs(_FakeFs())
+    monkeypatch.setattr(
+        job_purge,
+        "_delete_oracle_reference",
+        lambda *_args, **_kwargs: pytest.fail("unverified path must not delete"),
+    )
+    state = _state(
+        payload={
+            "db_order_oracle": {
+                "db_name": "core_nt",
+                "oracle_run_id": "run-1",
+                "reference_blob": "metadata/oracles/core_nt/references/run-1/attacker.json",
+            }
+        }
+    )
+
+    out = job_purge.purge_job_result_storage(state)
+
+    assert out["reference_deleted"] is False

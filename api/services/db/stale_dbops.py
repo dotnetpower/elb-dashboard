@@ -73,6 +73,14 @@ _PREPARE_DB_STALE_SECONDS = _env_int(
     _METADATA_PREPARE_DB_STALE_SECONDS,
     minimum=_METADATA_PREPARE_DB_STALE_SECONDS,
 )
+_ORACLE_BUILD_TIMEOUT_SECONDS = _env_int(
+    "ORACLE_BUILD_TIMEOUT_SECONDS", 1800, minimum=60, maximum=7200
+)
+_ORACLE_STALE_SECONDS = _env_int(
+    "STALE_DBOPS_ORACLE_SECONDS",
+    _ORACLE_BUILD_TIMEOUT_SECONDS + 600,
+    minimum=_ORACLE_BUILD_TIMEOUT_SECONDS + 120,
+)
 
 
 # Per-type reconciliation policy.
@@ -93,7 +101,7 @@ _TYPE_POLICY: dict[str, _TypePolicy] = {
     "prepare_db": _TypePolicy(synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS),
     "prepare_db_aks": _TypePolicy(synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS),
     "shard": _TypePolicy(synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS),
-    "oracle": _TypePolicy(synchronous=False, stale_seconds=_PREPARE_DB_STALE_SECONDS),
+    "oracle": _TypePolicy(synchronous=False, stale_seconds=_ORACLE_STALE_SECONDS),
     # Synchronous-by-design ops: born terminal at the source now, but mop up any
     # pre-existing rows that leaked while the source still wrote ``queued``.
     "prepare_db_cancel": _TypePolicy(synchronous=True, stale_seconds=0),

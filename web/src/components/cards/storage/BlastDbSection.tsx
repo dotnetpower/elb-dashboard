@@ -30,8 +30,9 @@ interface BlastDbSectionProps {
   clusterName: string;
   /**
    * AKS workload cluster coordinates (name + RG) when known. Threaded to
-   * `useBlastDb` so a download can opt into the fast AKS-fanout azcopy path;
-   * the backend falls back to the server-side copy when AKS cannot serve it.
+    * `useBlastDb` so downloads can opt into AKS fan-out and order-oracle Jobs
+    * target the same cluster; downloads still fall back to the server-side copy
+    * when AKS cannot serve them.
    */
   aksClusterName?: string;
   aksResourceGroup?: string;
@@ -102,6 +103,7 @@ export function BlastDbSection({
     dbQuery,
     downloadedDbs,
     updatesAvailable,
+    updatesPending,
     publicAccessDisabled,
     canEnableLocalAccess,
     canGrantLocalRbac,
@@ -111,6 +113,7 @@ export function BlastDbSection({
     grantLocalRbac,
     storageAccessTitle,
     storageAccessHint,
+    refreshDatabaseStatus,
   } = state;
 
   const showLocalDebugBanner = publicAccessDisabled && canEnableLocalAccess;
@@ -167,6 +170,14 @@ export function BlastDbSection({
               {updatesAvailable} update{updatesAvailable > 1 ? "s" : ""}
             </span>
           )}
+          {updatesPending > 0 && (
+            <span
+              className="dv3-pill dv3-pill-warning"
+              title="Published by NCBI; waiting for the cloud mirror used by database downloads."
+            >
+              {updatesPending} pending
+            </span>
+          )}
           <span className="counts">
             {downloadedDbs.size}/{DB_CATALOG.length} catalog
           </span>
@@ -175,7 +186,7 @@ export function BlastDbSection({
             style={{ padding: "3px 6px", border: "none" }}
             onClick={() => {
               setShowPopup(true);
-              dbQuery.refetch();
+              void refreshDatabaseStatus();
             }}
             title="Open database manager"
           >

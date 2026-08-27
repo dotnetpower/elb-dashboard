@@ -452,6 +452,16 @@ export const blastApi = {
         stored_composite_signature?: string | null;
         stored_source_version?: string | null;
       }>;
+      updates_pending?: Array<{
+        db: string;
+        published_at?: string | null;
+        source?: string;
+        reason?: string;
+        cloud_snapshot?: string | null;
+        stored_source_version?: string | null;
+        number_of_volumes?: number;
+        bytes_total?: number;
+      }>;
       /**
        * True only when the backend actually ran the per-DB NCBI signature
        * comparison (storage scope supplied AND the downloaded-DB list
@@ -461,6 +471,7 @@ export const blastApi = {
        * merely rotated. When false/undefined the SPA may use that fallback.
        */
       updates_available_evaluated?: boolean;
+      updates_pending_evaluated?: boolean;
       degraded?: boolean;
       degraded_reason?: string;
       message?: string;
@@ -520,6 +531,7 @@ export const blastApi = {
     body: {
       subscription_id: string;
       resource_group: string;
+      aks_resource_group?: string;
       account_name: string;
       cluster_name: string;
       acr_name?: string;

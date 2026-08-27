@@ -96,9 +96,7 @@ _RESULT_EXPIRES_SECONDS = int(os.environ.get("CELERY_RESULT_EXPIRES", "3600"))
 # crash loop that killed in-flight BLAST tasks with WorkerLostError. Give child
 # boot real headroom; raising the ceiling only delays detection of a genuinely
 # stuck child, which does not happen in practice.
-_WORKER_PROC_ALIVE_TIMEOUT = float(
-    os.environ.get("CELERY_WORKER_PROC_ALIVE_TIMEOUT", "30.0")
-)
+_WORKER_PROC_ALIVE_TIMEOUT = float(os.environ.get("CELERY_WORKER_PROC_ALIVE_TIMEOUT", "30.0"))
 if _WORKER_PROC_ALIVE_TIMEOUT <= 0:
     raise ValueError("CELERY_WORKER_PROC_ALIVE_TIMEOUT must be > 0")
 if _RESULT_EXPIRES_SECONDS > 7200:
@@ -118,9 +116,7 @@ celery_app.conf.update(
     worker_prefetch_multiplier=max(
         1, int(os.environ.get("CELERY_WORKER_PREFETCH_MULTIPLIER", "4"))
     ),
-    worker_max_tasks_per_child=int(
-        os.environ.get("CELERY_WORKER_MAX_TASKS_PER_CHILD", "200")
-    ),
+    worker_max_tasks_per_child=int(os.environ.get("CELERY_WORKER_MAX_TASKS_PER_CHILD", "200")),
     worker_proc_alive_timeout=_WORKER_PROC_ALIVE_TIMEOUT,
     task_soft_time_limit=_TASK_SOFT_TIME_LIMIT,
     task_time_limit=_TASK_TIME_LIMIT,
@@ -143,9 +139,7 @@ celery_app.conf.update(
         )
     },
     broker_transport_options={
-        "socket_connect_timeout": float(
-            os.environ.get("CELERY_BROKER_CONNECT_TIMEOUT", "5")
-        )
+        "socket_connect_timeout": float(os.environ.get("CELERY_BROKER_CONNECT_TIMEOUT", "5"))
     },
     # Belt-and-braces for the redis result backend: the keyword above is
     # consumed by kombu-style backends, but Celery's redis backend reads
@@ -154,9 +148,7 @@ celery_app.conf.update(
     # the OS socket timeout when the result backend is unreachable.
     # Both bounds are env-tunable so ops can relax them without a redeploy
     # if a deployment ever puts the worker on a high-latency link.
-    redis_socket_connect_timeout=float(
-        os.environ.get("CELERY_REDIS_SOCKET_CONNECT_TIMEOUT", "5")
-    ),
+    redis_socket_connect_timeout=float(os.environ.get("CELERY_REDIS_SOCKET_CONNECT_TIMEOUT", "5")),
     redis_socket_timeout=float(os.environ.get("CELERY_REDIS_SOCKET_TIMEOUT", "30")),
     task_default_queue="default",
     task_routes={
@@ -181,11 +173,19 @@ celery_app.conf.update(
             "schedule": float(os.environ.get("CELERY_BEAT_AUTO_WARMUP_SECONDS", "120")),
             "options": {"queue": "reconcile", "expires": 110.0},
         },
+        "auto-oracle-reconcile": {
+            "task": "api.tasks.storage.reconcile_auto_oracle",
+            "schedule": float(os.environ.get("CELERY_BEAT_AUTO_ORACLE_SECONDS", "120")),
+            "options": {"queue": "reconcile", "expires": 110.0},
+        },
+        "oracle-dispatch-reconcile": {
+            "task": "api.tasks.storage.reconcile_oracle_dispatches",
+            "schedule": float(os.environ.get("CELERY_BEAT_ORACLE_DISPATCH_SECONDS", "120")),
+            "options": {"queue": "reconcile", "expires": 110.0},
+        },
         "prepare-db-orphan-reconcile": {
             "task": "api.tasks.storage.reconcile_orphaned_prepare_db",
-            "schedule": float(
-                os.environ.get("CELERY_BEAT_PREPARE_DB_ORPHAN_SECONDS", "300")
-            ),
+            "schedule": float(os.environ.get("CELERY_BEAT_PREPARE_DB_ORPHAN_SECONDS", "300")),
             "options": {"queue": "reconcile"},
         },
         # Self-heal DB volume/shard drift: prune ghost volumes left when NCBI
@@ -196,9 +196,7 @@ celery_app.conf.update(
         # scheduling it while dormant is harmless (charter §12a Rule 4).
         "db-consistency-reconcile": {
             "task": "api.tasks.storage.reconcile_db_consistency",
-            "schedule": float(
-                os.environ.get("CELERY_BEAT_DB_CONSISTENCY_SECONDS", "1800")
-            ),
+            "schedule": float(os.environ.get("CELERY_BEAT_DB_CONSISTENCY_SECONDS", "1800")),
             "options": {"queue": "reconcile"},
         },
         # Terminalise warmup / prepare_db_* / shard / oracle jobstate rows stuck
@@ -207,9 +205,7 @@ celery_app.conf.update(
         # the Table rows so the job list / auto-stop no longer see phantom work.
         "stale-dbops-reconcile": {
             "task": "api.tasks.storage.reconcile_stale_dbops_jobs",
-            "schedule": float(
-                os.environ.get("CELERY_BEAT_STALE_DBOPS_SECONDS", "300")
-            ),
+            "schedule": float(os.environ.get("CELERY_BEAT_STALE_DBOPS_SECONDS", "300")),
             "options": {"queue": "reconcile"},
         },
         "blast-reconcile-stale-jobs": {
@@ -219,9 +215,7 @@ celery_app.conf.update(
         },
         "blast-reconcile-terminal-artifacts": {
             "task": "api.tasks.blast.artifacts.reconcile_terminal_artifacts",
-            "schedule": float(
-                os.environ.get("CELERY_BEAT_BLAST_ARTIFACT_RECONCILE_SECONDS", "90")
-            ),
+            "schedule": float(os.environ.get("CELERY_BEAT_BLAST_ARTIFACT_RECONCILE_SECONDS", "90")),
             "options": {"queue": "reconcile", "expires": 80.0},
         },
         # Auto-resubmit transient-failed BLAST jobs. The task itself is a no-op
@@ -260,9 +254,7 @@ celery_app.conf.update(
         # every deployment is free — one cheap env check per tick.
         "blast-reconcile-time-index": {
             "task": "api.tasks.blast.reconcile_time_index",
-            "schedule": float(
-                os.environ.get("CELERY_BEAT_TIME_INDEX_RECONCILE_SECONDS", "3600")
-            ),
+            "schedule": float(os.environ.get("CELERY_BEAT_TIME_INDEX_RECONCILE_SECONDS", "3600")),
             "options": {"queue": "reconcile"},
         },
         "upgrade-check-latest": {
@@ -342,9 +334,7 @@ celery_app.conf.update(
         # response-outbox liveness. No-op unless Service Bus is enabled.
         "servicebus-health-telemetry": {
             "task": "api.tasks.servicebus.emit_service_bus_health",
-            "schedule": float(
-                os.environ.get("CELERY_BEAT_SERVICEBUS_HEALTH_SECONDS", "300")
-            ),
+            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_HEALTH_SECONDS", "300")),
             "options": {
                 "queue": "servicebus",
                 "expires": 240.0,
@@ -352,9 +342,7 @@ celery_app.conf.update(
         },
         "servicebus-reconcile-dead-letter-responses": {
             "task": "api.tasks.servicebus.reconcile_dead_letter_responses",
-            "schedule": float(
-                os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_RESPONSE_SECONDS", "60")
-            ),
+            "schedule": float(os.environ.get("CELERY_BEAT_SERVICEBUS_DLQ_RESPONSE_SECONDS", "60")),
             "options": {
                 "queue": "servicebus",
                 "expires": 120.0,
@@ -371,6 +359,13 @@ celery_app.conf.update(
         "blast-retention-purge": {
             "task": "api.tasks.storage.purge_aged_results",
             "schedule": float(os.environ.get("CELERY_BEAT_RETENTION_SECONDS", str(24 * 60 * 60))),
+            "options": {"queue": "reconcile"},
+        },
+        "oracle-retention-purge": {
+            "task": "api.tasks.storage.purge_oracle_history",
+            "schedule": float(
+                os.environ.get("CELERY_BEAT_ORACLE_RETENTION_SECONDS", str(24 * 60 * 60))
+            ),
             "options": {"queue": "reconcile"},
         },
     },

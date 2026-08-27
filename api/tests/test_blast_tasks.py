@@ -170,10 +170,7 @@ def test_config_preview_resolves_external_job_identity(monkeypatch) -> None:
 
     assert captured["resource_group"] == "rg-elb-cluster"
     assert captured["cluster_name"] == "elb-cluster-01"
-    assert (
-        captured["database"]
-        == "https://stelbx.blob.core.windows.net/blast-db/core_nt/core_nt"
-    )
+    assert captured["database"] == "https://stelbx.blob.core.windows.net/blast-db/core_nt/core_nt"
     # Reconstructed from external.job_id -> queries/<openapi_id>.fa
     assert captured["query_file"] == "openapi-abc123.fa"
 
@@ -203,10 +200,7 @@ def test_config_preview_prefers_top_level_dashboard_keys(monkeypatch) -> None:
     assert captured["resource_group"] == "rg-dash"
     assert captured["cluster_name"] == "aks-dash"
     assert captured["database"] == "https://stelbx.blob.core.windows.net/blast-db/nt/nt"
-    assert (
-        captured["query_file"]
-        == "https://stelbx.blob.core.windows.net/queries/job-1.fa"
-    )
+    assert captured["query_file"] == "https://stelbx.blob.core.windows.net/queries/job-1.fa"
 
 
 def _capture_build(monkeypatch) -> dict[str, object]:
@@ -414,9 +408,12 @@ def test_extract_elastic_blast_job_id_requires_canonical_identity() -> None:
     output = f"results: /results/dashboard-job/{upper_runtime_id}/metadata/SUCCESS.txt"
 
     assert blast._extract_elastic_blast_job_id(output) == _RUNTIME_ID
-    assert blast._extract_elastic_blast_job_id(
-        "results: /results/dashboard-job/job-deadbeef/metadata/SUCCESS.txt"
-    ) == ""
+    assert (
+        blast._extract_elastic_blast_job_id(
+            "results: /results/dashboard-job/job-deadbeef/metadata/SUCCESS.txt"
+        )
+        == ""
+    )
 
 
 def test_external_reconcile_job_id_rejects_short_identity() -> None:
@@ -427,7 +424,6 @@ def test_external_reconcile_job_id_rejects_short_identity() -> None:
     )
 
     assert blast._external_reconcile_job_id(row) == ""
-
 
 
 def test_submit_task_helpers_are_reexported_on_blast_package() -> None:
@@ -649,12 +645,7 @@ def test_stream_submit_command_defers_log_artifact_writes(monkeypatch) -> None:
 
 
 def test_strip_optional_unrecognized_params_only_strips_whitelisted() -> None:
-    config = (
-        "[cluster]\n"
-        "name = c1\n"
-        "exp-use-local-ssd = true\n"
-        "exp-skip-warmed-ssd-init = true\n"
-    )
+    config = "[cluster]\nname = c1\nexp-use-local-ssd = true\nexp-skip-warmed-ssd-init = true\n"
     # Optional hint is stripped.
     new_content, stripped = blast._strip_optional_unrecognized_params(
         config,
@@ -669,8 +660,7 @@ def test_strip_optional_unrecognized_params_only_strips_whitelisted() -> None:
     # A non-whitelisted (required) param is never silently dropped.
     unchanged, stripped_required = blast._strip_optional_unrecognized_params(
         config,
-        'ERROR: Unrecognized configuration parameter "exp-use-local-ssd" '
-        'in section "cluster".',
+        'ERROR: Unrecognized configuration parameter "exp-use-local-ssd" in section "cluster".',
     )
     assert stripped_required == []
     assert unchanged == config
@@ -688,7 +678,7 @@ def test_stream_submit_command_retries_without_optional_unrecognized_param(
             yield {
                 "stream": "stderr",
                 "line": (
-                    'ERROR: Unrecognized configuration parameter '
+                    "ERROR: Unrecognized configuration parameter "
                     '"exp-skip-warmed-ssd-init" in section "cluster".'
                 ),
             }
@@ -709,12 +699,7 @@ def test_stream_submit_command_retries_without_optional_unrecognized_param(
     monkeypatch.setattr(blast, "_update_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(blast, "_progress", lambda *args, **kwargs: None)
 
-    config = (
-        "[cluster]\n"
-        "name = c1\n"
-        "exp-use-local-ssd = true\n"
-        "exp-skip-warmed-ssd-init = true\n"
-    )
+    config = "[cluster]\nname = c1\nexp-use-local-ssd = true\nexp-skip-warmed-ssd-init = true\n"
     result = blast._stream_submit_command(
         job_id="job-skew",
         task=FakeTask(),
@@ -1743,9 +1728,7 @@ def test_dispatch_split_child_submits_k8s_gated_acquires_and_releases(
         "wait_for_k8s_admission",
         lambda *a, **k: (waited.append(k["job_id"]), handle)[1],
     )
-    monkeypatch.setattr(
-        k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1])
-    )
+    monkeypatch.setattr(k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1]))
 
     def fake_terminal_run(
         *, argv: list[str], stdin: str, stdin_file: str, timeout_seconds: int
@@ -1786,9 +1769,7 @@ def test_dispatch_split_child_submits_k8s_gate_timeout_fails_child(
 
     monkeypatch.setattr(k8s_gate, "wait_for_k8s_admission", _boom)
     released: list[object] = []
-    monkeypatch.setattr(
-        k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1])
-    )
+    monkeypatch.setattr(k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1]))
 
     terminal_ran = False
 
@@ -1814,9 +1795,7 @@ def test_dispatch_split_child_submits_k8s_gate_timeout_fails_child(
     assert released == []  # no Lease acquired → nothing to release
     # A contention timeout is bucketed distinctly from a genuine apiserver
     # failure: same greppable error_code, but the history detail says timeout.
-    assert any(
-        rec[2].get("detail") == "submit_lease_wait_timeout" for rec in history
-    )
+    assert any(rec[2].get("detail") == "submit_lease_wait_timeout" for rec in history)
 
 
 def test_dispatch_split_child_submits_lease_api_error_distinct_code(
@@ -1839,9 +1818,7 @@ def test_dispatch_split_child_submits_lease_api_error_distinct_code(
 
     monkeypatch.setattr(k8s_gate, "wait_for_k8s_admission", _boom)
     released: list[object] = []
-    monkeypatch.setattr(
-        k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1])
-    )
+    monkeypatch.setattr(k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1]))
 
     terminal_ran = False
 
@@ -1865,9 +1842,7 @@ def test_dispatch_split_child_submits_lease_api_error_distinct_code(
     assert result[0]["error"] == "blast_submit_lease_api_error"
     assert terminal_ran is False
     assert released == []  # no Lease acquired → nothing to release
-    assert any(
-        rec[2].get("detail") == "submit_lease_api_error" for rec in history
-    )
+    assert any(rec[2].get("detail") == "submit_lease_api_error" for rec in history)
 
 
 def test_dispatch_split_child_submits_state_write_failure_does_not_abandon_siblings(
@@ -1889,14 +1864,10 @@ def test_dispatch_split_child_submits_state_write_failure_does_not_abandon_sibli
         def update(self, job_id: str, **_kwargs: object) -> JobState:
             raise RuntimeError("table throttled 429")
 
-        def append_history(
-            self, job_id: str, event: str, payload: dict[str, object]
-        ) -> None:
+        def append_history(self, job_id: str, event: str, payload: dict[str, object]) -> None:
             raise RuntimeError("table throttled 429")
 
-    monkeypatch.setattr(
-        "api.services.state_repo.JobStateRepository", lambda: FlakyRepo()
-    )
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: FlakyRepo())
 
     ran: list[str] = []
 
@@ -1969,9 +1940,7 @@ def test_dispatch_split_child_submits_parent_budget_exhausted_fails_fast(
     assert result[0]["error"] == "blast_submit_gate_unavailable"
     # The human-readable cause moves to the history detail (greppable error_code
     # in the state row, detail in history).
-    assert any(
-        rec[2].get("detail") == "parent_gate_budget_exhausted" for rec in history
-    )
+    assert any(rec[2].get("detail") == "parent_gate_budget_exhausted" for rec in history)
     assert waited == []  # never even attempted a gate wait
     assert terminal_ran is False
 
@@ -2031,7 +2000,7 @@ def test_ensure_terminal_kubeconfig_context_runs_get_credentials() -> None:
     def fake_terminal_run(*, argv: list[str], timeout_seconds: int, **_kwargs: object):
         calls.append(argv)
         assert timeout_seconds == 90
-        return {"exit_code": 0, "stdout": "Merged \"cluster\" as current context.", "stderr": ""}
+        return {"exit_code": 0, "stdout": 'Merged "cluster" as current context.', "stderr": ""}
 
     blast._ensure_terminal_kubeconfig_context(
         fake_terminal_run,
@@ -3225,6 +3194,51 @@ def test_merge_progress_payload_keeps_submit_context_and_live_output() -> None:
     assert "ignored" not in payload["_progress"]["steps"]["submitting"]
 
 
+def test_merge_progress_payload_records_oracle_run_in_provenance() -> None:
+    payload = blast._merge_progress_payload(
+        {"provenance": {"database": {"name": "core_nt", "snapshot": "v1"}}},
+        phase="db_order_oracle_attached",
+        status="running",
+        error_code="",
+        details={
+            "db_order_oracle": {
+                "oracle_run_id": "run-1",
+                "source_version": "v1",
+                "part_count": 10,
+            }
+        },
+    )
+
+    assert payload["provenance"]["database"] == {
+        "name": "core_nt",
+        "snapshot": "v1",
+        "oracle_run_id": "run-1",
+        "oracle_source_version": "v1",
+        "oracle_part_count": 10,
+    }
+    assert payload["db_order_oracle"]["oracle_run_id"] == "run-1"
+
+
+def test_merge_progress_payload_rejects_malformed_oracle_metadata() -> None:
+    payload = blast._merge_progress_payload(
+        {"provenance": {"database": {"name": "core_nt"}}},
+        phase="db_order_oracle_attached",
+        status="running",
+        error_code="",
+        details={
+            "db_order_oracle": {
+                "oracle_run_id": {"unexpected": "object"},
+                "source_version": ["v1"],
+                "part_count": True,
+                "unknown": "value",
+            }
+        },
+    )
+
+    assert payload["db_order_oracle"] == {}
+    assert payload["provenance"]["database"] == {"name": "core_nt"}
+
+
 def test_merge_progress_payload_keeps_completed_submit_output() -> None:
     payload = blast._merge_progress_payload(
         {"program": "blastn", "db": "core_nt"},
@@ -4276,9 +4290,7 @@ def test_backfill_completed_runtime_metrics_uses_nested_k8s_job_id(
                     "subscription_id": "sub-1",
                     "resource_group": "rg-elb",
                     "cluster_name": "elb-cluster",
-                    "_progress": {
-                        "steps": {"running": {"k8s": {"job_id": _RUNTIME_ID}}}
-                    },
+                    "_progress": {"steps": {"running": {"k8s": {"job_id": _RUNTIME_ID}}}},
                 },
             )
         ]
@@ -4459,9 +4471,7 @@ def test_reconcile_recovers_completed_quiet_row_from_success_marker(
     # The stale error_code column is cleared on the recovery write.
     assert update["error_code"] == ""
     recovered_history = [
-        payload
-        for _job, event, payload in repo.history
-        if event == "reconcile_results_recovered"
+        payload for _job, event, payload in repo.history if event == "reconcile_results_recovered"
     ]
     assert recovered_history, "expected a reconcile_results_recovered history entry"
 

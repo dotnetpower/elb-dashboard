@@ -57,6 +57,7 @@ def test_warmup_start_forwards_cluster_topology_to_task(
             "subscription_id": "00000000-0000-0000-0000-000000000001",
             "resource_group": "rg-elb",
             "storage_account": "elbstg01",
+            "storage_resource_group": "rg-elb",
             "db": "blast-db/core_nt",
             "program": "blastn",
             "aks_cluster_name": "aks-elb",
@@ -75,6 +76,37 @@ def test_warmup_start_forwards_cluster_topology_to_task(
     assert calls[0]["kwargs"]["machine_type"] == "Standard_E16s_v5"
     assert calls[0]["kwargs"]["num_nodes"] == 10
     assert calls[0]["kwargs"]["acr_name"] == "elbacr01"
+
+
+def test_warmup_start_rejects_missing_scope_before_side_effects(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: pytest.fail("JobState must not be created for an invalid request"),
+    )
+    monkeypatch.setattr(
+        "api.celery_app.celery_app.send_task",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Celery must not be called for an invalid request"
+        ),
+    )
+
+    response = client.post("/api/warmup/start", json={})
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["code"] == "invalid_warmup_request"
+    assert payload["message"] == "Missing required warmup fields."
+    assert payload["missing"] == [
+        "subscription_id",
+        "resource_group",
+        "storage_account",
+        "storage_resource_group",
+        "database_name",
+        "aks_cluster_name",
+    ]
+    assert payload["request_id"]
 
 
 def test_aks_start_forwards_auto_warmup_payload(

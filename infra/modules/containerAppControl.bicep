@@ -445,6 +445,12 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             //   UPGRADE_CONFIRM_WINDOW_SECONDS (default 300)
             //   UPGRADE_REVISION_KEEP_N (default 2)
             { name: 'STRICT_BLUEGREEN', value: controlPlaneEnv.api.STRICT_BLUEGREEN }
+            // Auto oracle is deployed dormant for its initial soak. The API
+            // saves preferences while this gate is OFF but does not emit the
+            // low-latency targeted reconcile until worker execution is enabled.
+            { name: 'AUTO_ORACLE_RECONCILE_ENABLED', value: controlPlaneEnv.api.AUTO_ORACLE_RECONCILE_ENABLED }
+            { name: 'AUTO_ORACLE_RETENTION_ENABLED', value: controlPlaneEnv.api.AUTO_ORACLE_RETENTION_ENABLED }
+            { name: 'ENFORCE_AUTO_ORACLE_RBAC', value: controlPlaneEnv.api.ENFORCE_AUTO_ORACLE_RBAC }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ], !empty(openApiSharedToken) ? [
             // Universal M2M shared-token env — added only when the operator
@@ -653,6 +659,12 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // worker to prune ghost volumes + rebuild stale shard layouts that
             // drift when NCBI shrinks a DB; must match the beat sidecar.
             { name: 'DB_CONSISTENCY_RECONCILE_ENABLED', value: controlPlaneEnv.worker.DB_CONSISTENCY_RECONCILE_ENABLED }
+            { name: 'AUTO_ORACLE_RECONCILE_ENABLED', value: controlPlaneEnv.worker.AUTO_ORACLE_RECONCILE_ENABLED }
+            { name: 'AUTO_ORACLE_RETENTION_ENABLED', value: controlPlaneEnv.worker.AUTO_ORACLE_RETENTION_ENABLED }
+            { name: 'ENFORCE_AUTO_ORACLE_RBAC', value: controlPlaneEnv.worker.ENFORCE_AUTO_ORACLE_RBAC }
+            { name: 'AUTO_ORACLE_MAX_ENQUEUES_PER_TICK', value: controlPlaneEnv.worker.AUTO_ORACLE_MAX_ENQUEUES_PER_TICK }
+            { name: 'AUTO_ORACLE_MAX_ENQUEUES_PER_STORAGE', value: controlPlaneEnv.worker.AUTO_ORACLE_MAX_ENQUEUES_PER_STORAGE }
+            { name: 'AUTO_ORACLE_MAX_INSPECTIONS_PER_TICK', value: controlPlaneEnv.worker.AUTO_ORACLE_MAX_INSPECTIONS_PER_TICK }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
@@ -719,6 +731,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // CELERY_BEAT_DB_CONSISTENCY_SECONDS); the flag must match the
             // worker so the scheduled tick and its executor gate identically.
             { name: 'DB_CONSISTENCY_RECONCILE_ENABLED', value: controlPlaneEnv.beat.DB_CONSISTENCY_RECONCILE_ENABLED }
+            { name: 'AUTO_ORACLE_RECONCILE_ENABLED', value: controlPlaneEnv.beat.AUTO_ORACLE_RECONCILE_ENABLED }
+            { name: 'AUTO_ORACLE_RETENTION_ENABLED', value: controlPlaneEnv.beat.AUTO_ORACLE_RETENTION_ENABLED }
+            { name: 'CELERY_BEAT_AUTO_ORACLE_SECONDS', value: controlPlaneEnv.beat.CELERY_BEAT_AUTO_ORACLE_SECONDS }
+            { name: 'CELERY_BEAT_ORACLE_DISPATCH_SECONDS', value: controlPlaneEnv.beat.CELERY_BEAT_ORACLE_DISPATCH_SECONDS }
+            { name: 'CELERY_BEAT_ORACLE_RETENTION_SECONDS', value: controlPlaneEnv.beat.CELERY_BEAT_ORACLE_RETENTION_SECONDS }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }

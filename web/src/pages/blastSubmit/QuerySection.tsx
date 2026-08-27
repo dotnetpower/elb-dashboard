@@ -239,14 +239,16 @@ export function QuerySection({
           opacity: dbSelected ? 1 : 0.55,
         }}
       >
-        <span
+        <label
+          htmlFor="blast-query-accession"
           className="glass-label"
           style={{ fontSize: 11, minWidth: "fit-content", marginBottom: 0 }}
         >
           Or fetch by NCBI accession
           <Tip text="Submit the search using an NCBI nuccore accession (e.g. NM_000546.6). The backend fetches the FASTA via E-utilities at submit time. Inline FASTA above takes precedence when both are filled." />
-        </span>
+        </label>
         <input
+          id="blast-query-accession"
           className="glass-input blast-small-input"
           value={form.query_accession}
           onChange={(event) => set("query_accession", event.target.value)}

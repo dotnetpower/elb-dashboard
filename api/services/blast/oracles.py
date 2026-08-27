@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from api.services.blast.db_metadata import extract_db_name, resolve_db_metadata
@@ -26,6 +27,13 @@ TIE_ORDER_ORACLE_BLOB = "metadata/tie-order-oracle.txt"
 TIE_ORDER_ORACLE_URLS_BLOB = "metadata/tie-order-oracle-urls.txt"
 TIE_ORDER_ORACLE_STRICT_BLOB = "metadata/tie-order-oracle-strict.txt"
 TIE_ORDER_ORACLE_MAX_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class DbOrderOracleResolution:
+    run_id: str
+    source_version: str
+    part_urls: tuple[str, ...]
 
 
 def upload_tie_order_oracle_if_present(
@@ -87,30 +95,42 @@ def upload_db_order_oracle_pointer_if_available(
         return None
     metadata = resolve_db_metadata(storage_account, db_name)
     source_version = str(metadata.get("source_version") or "") if metadata else ""
-    part_urls = db_order_oracle_part_urls(
+    resolution = resolve_db_order_oracle(
         storage_account=storage_account,
         db_name=db_name,
         expected_source_version=source_version or None,
     )
-    if not part_urls:
+    if resolution is None:
         return None
     from api.services import get_credential
+    from api.services.db.oracle_references import create_oracle_reference
     from api.services.storage.data import upload_blob_text
 
+    credential = get_credential()
+    reference_blob = create_oracle_reference(
+        credential,
+        storage_account=storage_account,
+        db_name=db_name,
+        run_id=resolution.run_id,
+        job_id=job_id,
+        source_version=resolution.source_version,
+    )
     blob_path = f"{_job_results_prefix(job_id)}/{TIE_ORDER_ORACLE_URLS_BLOB}"
     upload_blob_text(
-        get_credential(),
+        credential,
         storage_account,
         "results",
         blob_path,
-        "\n".join(part_urls) + "\n",
+        "\n".join(resolution.part_urls) + "\n",
         content_type="text/plain; charset=utf-8",
     )
     return {
         "blob_path": blob_path,
         "db_name": db_name,
-        "part_count": len(part_urls),
+        "part_count": len(resolution.part_urls),
         "source_version": source_version or None,
+        "oracle_run_id": resolution.run_id,
+        "reference_blob": reference_blob,
     }
 
 
@@ -120,8 +140,26 @@ def db_order_oracle_part_urls(
     db_name: str,
     expected_source_version: str | None = None,
 ) -> list[str]:
+    resolution = resolve_db_order_oracle(
+        storage_account=storage_account,
+        db_name=db_name,
+        expected_source_version=expected_source_version,
+    )
+    return list(resolution.part_urls) if resolution is not None else []
+
+
+def resolve_db_order_oracle(
+    *,
+    storage_account: str,
+    db_name: str,
+    expected_source_version: str | None = None,
+) -> DbOrderOracleResolution | None:
     from api.services import get_credential
-    from api.services.db.order_oracle import ORACLE_PARTS_DIR, ORACLE_PREFIX_ROOT
+    from api.services.db.order_oracle import (
+        ORACLE_PARTS_DIR,
+        ORACLE_PREFIX_ROOT,
+        oracle_part_blob_path,
+    )
     from api.services.storage.data import _blob_service
 
     svc = _blob_service(get_credential(), storage_account)
@@ -138,9 +176,9 @@ def db_order_oracle_part_urls(
             )
         )
     except Exception:
-        return []
+        return None
     if not isinstance(status, dict):
-        return []
+        return None
     run_id = str(status.get("run_id") or "")
     expected_parts = int(status.get("expected_parts") or 0)
     oracle_source_version = str(status.get("source_version") or "")
@@ -151,21 +189,40 @@ def db_order_oracle_part_urls(
             oracle_source_version or "<missing>",
             expected_source_version,
         )
-        return []
+        return None
     if not run_id or expected_parts <= 0:
-        return []
+        return None
     prefix = f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_PARTS_DIR}/{run_id}/"
-    part_names = sorted(
-        blob.name
+    part_blobs = [
+        blob
         for blob in container.list_blobs(name_starts_with=prefix)
         if str(blob.name).endswith(".txt")
-    )
-    if len(part_names) < expected_parts:
-        return []
+    ]
+    part_names = sorted(str(blob.name) for blob in part_blobs)
+    expected_shards = [
+        str(shard) for shard in status.get("expected_shards", []) if isinstance(shard, str)
+    ]
+    if expected_shards:
+        try:
+            expected_names = {
+                oracle_part_blob_path(db_name, run_id, shard) for shard in expected_shards
+            }
+        except ValueError:
+            return None
+        if len(expected_names) != expected_parts or set(part_names) != expected_names:
+            return None
+    elif len(part_names) != expected_parts:
+        return None
+    if any(int(getattr(blob, "size", 0) or 0) <= 0 for blob in part_blobs):
+        return None
     from api.services.storage.endpoint import blob_account_url
 
     base = blob_account_url(storage_account)
-    return [f"{base}/blast-db/{name}" for name in part_names]
+    return DbOrderOracleResolution(
+        run_id=run_id,
+        source_version=oracle_source_version,
+        part_urls=tuple(f"{base}/blast-db/{name}" for name in part_names),
+    )
 
 
 def _normalise_tie_order_oracle(value: object) -> tuple[str, int] | None:

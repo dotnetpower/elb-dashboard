@@ -22,6 +22,8 @@ export interface UiMockState {
   customDbBuilds: Array<Record<string, unknown>>;
   dbCancels: string[];
   dbDownloads: Array<Record<string, unknown>>;
+  dbOracleBuilds: Array<Record<string, unknown>>;
+  autoOracleSaves: Array<Record<string, unknown>>;
   jobDeletes: string[];
   scheduleRuns: string[];
   scheduleDeletes: string[];
@@ -36,7 +38,8 @@ export interface UiMockState {
    *  first fetch. */
   setPermissions: (partial: Partial<CallerPermissionsFixture>) => void;
   /** Per-endpoint response overrides for network / performance scenarios.
-   *  Keys: `databases`, `storage`, `topNodes`, `warmup`, `acr`, `startStats`.
+  *  Keys: `databases`, `checkUpdates`, `storage`, `topNodes`, `warmup`,
+  *  `acr`, `startStats`.
    *  When unset, the route serves its default payload, so existing scenarios
    *  are unaffected. Set BEFORE navigating. */
   responses: Record<string, unknown>;
@@ -83,7 +86,7 @@ const recentNow = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
 export const e2eCluster = {
   name: "aks-e2e",
-  resource_group: workspaceConfig.workloadResourceGroup,
+  resource_group: "rg-aks-e2e",
   region: workspaceConfig.region,
   k8s_version: "1.34.0",
   provisioning_state: "Succeeded",
@@ -122,6 +125,27 @@ export const e2eDatabases = [
     source_version: "2026-05-20",
     shard_sets: [1, 3],
     sharded: true,
+    copy_status: { phase: "completed" },
+    db_order_oracle: {
+      status: "ready",
+      run_id: "oracle-ready-e2e",
+      expected_parts: 3,
+      ready_parts: 3,
+      active: {
+        status: "running",
+        phase: "waiting_parts",
+        run_id: "oracle-building-e2e",
+        expected_parts: 3,
+        ready_parts: 1,
+        automatic: true,
+      },
+      automation: {
+        status: "running",
+        failure_count: 0,
+        retry_exhausted: false,
+        last_run_id: "oracle-building-e2e",
+      },
+    },
   },
   {
     name: "16S_ribosomal_RNA",
@@ -162,6 +186,8 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     customDbBuilds: [],
     dbCancels: [],
     dbDownloads: [],
+    dbOracleBuilds: [],
+    autoOracleSaves: [],
     jobDeletes: [],
     scheduleRuns: [],
     scheduleDeletes: [],
@@ -300,6 +326,53 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/warmup/auto-preference**", (route) =>
     jsonResponse(route, { enabled: false, databases: [] }),
   );
+  const defaultAutoOraclePreferences = {
+    preferences: [
+      {
+        subscription_id: workspaceConfig.subscriptionId,
+        cluster_resource_group: "rg-aks-e2e",
+        cluster_name: "aks-e2e",
+        storage_resource_group: workspaceConfig.workloadResourceGroup,
+        storage_account: workspaceConfig.storageAccountName,
+        db_name: "core_nt",
+        acr_name: workspaceConfig.acrName,
+        enabled: true,
+        version: "e2e-version-1",
+      },
+    ],
+  };
+  await page.route("**/api/warmup/oracle-preferences?**", (route) =>
+    jsonResponse(
+      route,
+      state.responses.autoOraclePreferences ?? defaultAutoOraclePreferences,
+    ),
+  );
+  await page.route("**/api/warmup/oracle-preference", async (route) => {
+    const payload = route.request().postDataJSON() as Record<string, unknown>;
+    const current = (state.responses.autoOraclePreferences ??
+      defaultAutoOraclePreferences) as {
+      preferences: Array<Record<string, unknown>>;
+    };
+    const savedPreference = {
+      ...payload,
+      version:
+        typeof payload.version === "string" ? payload.version : "e2e-version-1",
+    };
+    state.autoOracleSaves.push(payload);
+    state.responses.autoOraclePreferences = {
+      preferences: [
+        ...current.preferences.filter(
+          (preference) => preference.db_name !== payload.db_name,
+        ),
+        savedPreference,
+      ],
+    };
+    await jsonResponse(route, {
+      status: "saved",
+      preference: savedPreference,
+      reconcile_task_id: "oracle-reconcile-e2e",
+    });
+  });
   await page.route("**/api/monitor/aks/top-nodes**", (route) =>
     jsonResponse(route, state.responses.topNodes ?? { nodes: [] }),
   );
@@ -505,6 +578,18 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     jsonResponse(
       route,
       state.responses.databases ?? { databases: e2eDatabases, public_access_disabled: false },
+    ),
+  );
+  await page.route("**/api/blast/databases/check-updates?**", (route) =>
+    jsonResponse(
+      route,
+      state.responses.checkUpdates ?? {
+        latest_version: "2026-05-20",
+        updates_available: [],
+        updates_pending: [],
+        updates_available_evaluated: true,
+        updates_pending_evaluated: true,
+      },
     ),
   );
   await page.route("**/api/blast/databases/build", async (route) => {
@@ -715,6 +800,20 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     const payload = route.request().postDataJSON() as Record<string, unknown>;
     state.dbDownloads.push(payload);
     await jsonResponse(route, { ok: true, db_name: payload.db_name, async: true, output: "queued" });
+  });
+  await page.route(/\/api\/blast\/databases\/[^/]+\/oracle$/, async (route) => {
+    const payload = route.request().postDataJSON() as Record<string, unknown>;
+    state.dbOracleBuilds.push(payload);
+    await jsonResponse(route, {
+      accepted: true,
+      db_name: "core_nt",
+      run_id: "oracle-e2e",
+      expected_parts: 3,
+      created: ["oracle-e2e-00", "oracle-e2e-01", "oracle-e2e-02"],
+      existing: [],
+      status_blob: "metadata/oracles/core_nt/status.json",
+      part_urls: [],
+    });
   });
   await page.route(/\/api\/storage\/prepare-db\/[^/]+\/cancel$/, async (route) => {
     state.dbCancels.push(route.request().url());

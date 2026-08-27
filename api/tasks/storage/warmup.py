@@ -734,6 +734,31 @@ def warmup_database(
                 }
 
         _update_state(job_id, "completed", status="completed")
+        try:
+            from api.celery_app import celery_app
+            from api.services.auto_oracle import get_auto_oracle_preference
+            from api.services.auto_oracle_reconcile import (
+                enqueue_targeted_auto_oracle,
+            )
+
+            oracle_preference = get_auto_oracle_preference(
+                subscription_id,
+                resource_group,
+                cluster_name,
+                storage_account,
+                database_name,
+            )
+            if oracle_preference is not None:
+                enqueue_targeted_auto_oracle(
+                    oracle_preference,
+                    send_task=celery_app.send_task,
+                )
+        except Exception as exc:
+            LOGGER.warning(
+                "post-warmup auto oracle trigger skipped db=%s reason=%s",
+                database_name,
+                type(exc).__name__,
+            )
         return {
             "database": database_name,
             "status": "completed",

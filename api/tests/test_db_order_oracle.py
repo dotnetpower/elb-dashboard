@@ -17,17 +17,67 @@ from __future__ import annotations
 import pytest
 from api.services.db.order_oracle import (
     build_db_order_oracle_job_plan,
+    oracle_active_blob_path,
+    oracle_layout_fingerprint,
     oracle_part_blob_path,
     oracle_part_url,
+    oracle_run_status_blob_path,
     oracle_status_blob_path,
 )
 
 
 def test_oracle_blob_paths_are_stable() -> None:
     assert oracle_status_blob_path("core_nt") == "metadata/oracles/core_nt/status.json"
+    assert oracle_active_blob_path("core_nt") == "metadata/oracles/core_nt/active.json"
+    assert oracle_run_status_blob_path("core_nt", "20260518120000-abcd1234") == (
+        "metadata/oracles/core_nt/runs/20260518120000-abcd1234/status.json"
+    )
     assert (
         oracle_part_blob_path("core_nt", "20260518120000-abcd1234", "09")
         == "metadata/oracles/core_nt/parts/20260518120000-abcd1234/09.txt"
+    )
+
+
+def test_oracle_layout_fingerprint_ignores_node_assignment_and_input_order() -> None:
+    first = oracle_layout_fingerprint(
+        source_version="2026-07-21-01-05-02",
+        shards=["01", "00"],
+        shard_host_paths={
+            "00": "/workspace/blastdb/core_nt/00/",
+            "01": "/workspace/blastdb/core_nt/01",
+        },
+        layout_schema=1,
+    )
+    second = oracle_layout_fingerprint(
+        source_version="2026-07-21-01-05-02",
+        shards=["00", "01"],
+        shard_host_paths={
+            "01": "/workspace/blastdb/core_nt/01",
+            "00": "/workspace/blastdb/core_nt/00",
+        },
+        layout_schema=1,
+    )
+
+    assert first == second
+    assert len(first) == 24
+
+
+def test_oracle_layout_fingerprint_changes_with_generation_or_layout() -> None:
+    baseline = oracle_layout_fingerprint(
+        source_version="v1",
+        shards=["00", "01"],
+        layout_schema=1,
+    )
+
+    assert baseline != oracle_layout_fingerprint(
+        source_version="v2",
+        shards=["00", "01"],
+        layout_schema=1,
+    )
+    assert baseline != oracle_layout_fingerprint(
+        source_version="v1",
+        shards=["00", "01", "02"],
+        layout_schema=1,
     )
     assert oracle_part_url("elbstg01", "core_nt", "20260518120000-abcd1234", "09") == (
         "https://elbstg01.blob.core.windows.net/blast-db/"

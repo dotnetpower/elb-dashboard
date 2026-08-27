@@ -1,32 +1,26 @@
-"""/api/blast database order-oracle route.
+"""Task-backed `/api/blast/databases/{db}/oracle` dispatch route.
 
-Synchronous DB-order-oracle build trigger for a warmed, sharded database.
-Split out of `api/routes/blast/databases.py` so the catalogue, sharding, and
-order-oracle concerns each own a single-responsibility route module under the
-shared `blast_router`.
-
-Responsibility: Accept `POST /databases/{db}/oracle`, gate on AKS health +
-    storage/warmup readiness, map every warmed shard to a Ready node, write the
-    building-status blob, and dispatch the per-shard `blastdbcmd` Jobs.
-Edit boundaries: HTTP validation + readiness gating + dispatch only; the Job
-    plan math lives in `api/services/db/order_oracle.py` and the K8s apply in
-    `api/services/k8s/monitoring.py`.
-Key entry points: `blast_database_order_oracle`.
-Risky contracts: Every non-health `/api/*` route must enforce `require_caller`.
-    The route MUST refuse (409) when storage / warmup source versions disagree
-    so an oracle is never built against a stale DB generation.
-Validation: `uv run pytest -q api/tests/test_route_contracts.py
-    api/tests/test_blast_results_routes.py`.
+Responsibility: Validate and authorize manual DB order-oracle requests, open
+    sanctioned local Storage access when applicable, resolve the container
+    image, and shape the shared durable-dispatch result.
+Edit boundaries: HTTP/auth/validation/response shaping only; readiness, Blob
+    claims, JobState creation, broker enqueue, and Kubernetes execution live in
+    `api.services.db.oracle_*` and `api.tasks.storage.oracle`.
+Key entry points: `blast_database_order_oracle`, `OracleBuildRequest`.
+Risky contracts: Every request enforces `require_caller`; `resource_group`
+    scopes Storage while optional `aks_resource_group` scopes AKS; the route
+    preserves legacy same-RG fallback and existing response fields.
+Validation: `uv run pytest -q api/tests/test_blast_oracle_aks_route.py
+    api/tests/test_oracle_dispatch.py api/tests/test_oracle_task.py`.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
-from datetime import UTC
-from typing import Any
+import re
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _maybe_open_local_storage_access
@@ -36,55 +30,74 @@ from api.routes.blast.databases import (
     _STORAGE_ACCOUNT_RE,
     _SUBSCRIPTION_RE,
 )
-from api.services.sanitise import redact_oid
+from api.services.db.oracle_build import OracleBuildBlocked
+from api.services.db.oracle_state import OracleBuildInProgress, OracleStateConflict
 
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
+class OracleBuildRequest(BaseModel):
+    """Validated manual oracle request with legacy aliases retained."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    subscription_id: str = ""
+    resource_group: str = ""
+    aks_resource_group: str | None = None
+    account_name: str | None = None
+    storage_account: str | None = None
+    cluster_name: str | None = None
+    aks_cluster_name: str | None = None
+    acr_name: str | None = None
+    image: str | None = None
+    source_version: str | None = None
+
+
+def _http_blocked(exc: OracleBuildBlocked) -> HTTPException:
+    detail: dict[str, object] = {
+        "code": exc.code,
+        "message": str(exc),
+    }
+    cluster_reason = str(exc.details.get("cluster_reason") or "")
+    if cluster_reason in {"cluster_stopped", "cluster_not_found"}:
+        detail["cluster_reason"] = cluster_reason
+    power_state = str(exc.details.get("cluster_power_state") or "")
+    if re.fullmatch(r"[A-Za-z]{1,32}", power_state):
+        detail["cluster_power_state"] = power_state
+    return HTTPException(status_code=exc.status_code, detail=detail)
+
+
 @router.post("/databases/{db_name}/oracle")
 def blast_database_order_oracle(
     db_name: str,
-    body: dict[str, Any] = Body(default_factory=dict),
+    body: OracleBuildRequest,
     caller: CallerIdentity = Depends(require_caller),
-) -> dict[str, Any]:
-    """Create cached DB-order oracle parts for a warmed sharded database.
-
-    This is intentionally a user/DB-update action, not part of BLAST submit.
-    The created Jobs run on the already-warmed nodes, dump each shard's BLAST DB
-    accession order with ``blastdbcmd``, and upload the part files to Storage.
-    Later BLAST submissions attach only a tiny pointer list, so the search path
-    remains fast.
-    """
-
-    import json
-    from datetime import datetime
-
+) -> dict[str, object]:
+    """Claim and enqueue a cached DB-order oracle build."""
     from api.services import get_credential
-    from api.services.db.order_oracle import (
-        ORACLE_PARTS_DIR,
-        ORACLE_PREFIX_ROOT,
-        build_db_order_oracle_job_plan,
-        oracle_status_blob_path,
-    )
+    from api.services.db.oracle_dispatch import start_oracle_build
     from api.services.image_tags import IMAGE_TAGS
-    from api.services.k8s.monitoring import (
-        k8s_ensure_job_manifests,
-        k8s_ready_warmup_node_names,
-        k8s_warmup_status,
-    )
-    from api.services.storage.data import list_databases, upload_blob_text
 
-    sub = str(body.get("subscription_id") or "")
-    storage_rg = str(body.get("resource_group") or "")
-    account_name = str(body.get("account_name") or body.get("storage_account") or "")
-    cluster_name = str(body.get("cluster_name") or body.get("aks_cluster_name") or "")
-    acr_name = str(body.get("acr_name") or "")
-    image = str(body.get("image") or "")
+    subscription_id = body.subscription_id.strip()
+    storage_resource_group = body.resource_group.strip()
+    cluster_resource_group = (body.aks_resource_group or storage_resource_group).strip()
+    storage_account = (body.account_name or body.storage_account or "").strip()
+    cluster_name = (body.cluster_name or body.aks_cluster_name or "").strip()
+    acr_name = (body.acr_name or "").strip().lower()
+    image = (body.image or "").strip()
     if not image and acr_name:
-        image = f"{acr_name.strip().lower()}.azurecr.io/ncbi/elb:{IMAGE_TAGS['ncbi/elb']}"
-    if not all([sub, storage_rg, account_name, cluster_name, image]):
+        image = f"{acr_name}.azurecr.io/ncbi/elb:{IMAGE_TAGS['ncbi/elb']}"
+    if not all(
+        [
+            subscription_id,
+            storage_resource_group,
+            storage_account,
+            cluster_name,
+            image,
+        ]
+    ):
         raise HTTPException(
             400,
             (
@@ -92,233 +105,101 @@ def blast_database_order_oracle(
                 "and acr_name or image required"
             ),
         )
-
-    if not _DB_NAME_RE.match(db_name):
+    if not _DB_NAME_RE.fullmatch(db_name):
         raise HTTPException(400, "invalid db_name")
-    if not _SUBSCRIPTION_RE.match(sub):
+    if not _SUBSCRIPTION_RE.fullmatch(subscription_id):
         raise HTTPException(400, "invalid subscription_id")
-    if not _RESOURCE_GROUP_RE.match(storage_rg):
+    if not _RESOURCE_GROUP_RE.fullmatch(storage_resource_group):
         raise HTTPException(400, "invalid resource_group")
-    if not _STORAGE_ACCOUNT_RE.match(account_name):
+    if not _RESOURCE_GROUP_RE.fullmatch(cluster_resource_group):
+        raise HTTPException(400, "invalid aks_resource_group")
+    if not _STORAGE_ACCOUNT_RE.fullmatch(storage_account):
         raise HTTPException(400, "invalid account_name")
 
-    cred = get_credential()
+    credential = get_credential()
+    from api.services.auto_oracle_reconcile import (
+        oracle_caller_write_authorized,
+    )
+
+    authorized, _reason = oracle_caller_write_authorized(
+        credential,
+        caller_oid=caller.object_id,
+        subscription_id=subscription_id,
+        cluster_resource_group=cluster_resource_group,
+        cluster_name=cluster_name,
+        storage_resource_group=storage_resource_group,
+    )
+    if not authorized:
+        raise HTTPException(
+            403,
+            {
+                "code": "oracle_build_permission_denied",
+                "message": (
+                    "AKS and Storage write permissions are required to build an order oracle."
+                ),
+            },
+        )
     _maybe_open_local_storage_access(
-        cred,
-        sub,
-        storage_rg,
-        account_name,
+        credential,
+        subscription_id,
+        storage_resource_group,
+        storage_account,
         context="blast_database_order_oracle",
     )
-
-    # ARM-level powerState gate first — a stopped cluster yields a clean 409
-    # instead of letting the K8s warmup/job calls below time out (~10 s).
-    # Mirrors the precheck in /api/storage/prepare-db (mode=aks).
-    from api.services.cluster_health import get_cluster_health
-
     try:
-        health = get_cluster_health(cred, sub, storage_rg, cluster_name)
+        result = start_oracle_build(
+            credential,
+            subscription_id=subscription_id,
+            storage_resource_group=storage_resource_group,
+            storage_account=storage_account,
+            cluster_resource_group=cluster_resource_group,
+            cluster_name=cluster_name,
+            db_name=db_name,
+            image=image,
+            requested_source_version=(body.source_version or "").strip(),
+            owner_oid=caller.object_id,
+            tenant_id=caller.tenant_id,
+            automatic=False,
+        )
+    except OracleBuildBlocked as exc:
+        raise _http_blocked(exc) from exc
+    except OracleBuildInProgress as exc:
+        raise HTTPException(
+            409,
+            {"code": "oracle_build_in_progress", "message": str(exc)},
+        ) from exc
+    except OracleStateConflict as exc:
+        raise HTTPException(
+            409,
+            {"code": "oracle_state_conflict", "message": str(exc)},
+        ) from exc
     except Exception as exc:
-        LOGGER.debug(
-            "cluster_health probe raised for order-oracle build: %s",
+        LOGGER.warning(
+            "db-order oracle dispatch failed db=%s reason=%s",
+            db_name,
             type(exc).__name__,
         )
-        health = None
-    if health is not None and not health.get("healthy", True):
-        reason = health.get("reason")
-        power_state = health.get("power_state")
         raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "aks_unavailable",
-                "message": (
-                    "AKS cluster is not Running "
-                    f"(reason={reason}, power_state={power_state}). "
-                    "Start the cluster from the dashboard before building the "
-                    "order oracle."
-                ),
-                "cluster_reason": reason,
-                "cluster_power_state": power_state,
+            503,
+            {
+                "code": "oracle_dispatch_failed",
+                "message": "Order oracle dispatch failed; retry shortly.",
             },
-        )
+        ) from exc
 
-    db_meta = next(
-        (
-            item
-            for item in list_databases(cred, account_name, "blast-db")
-            if isinstance(item, dict) and item.get("name") == db_name
-        ),
-        None,
-    )
-    if not isinstance(db_meta, dict):
-        raise HTTPException(404, f"database {db_name} is not downloaded")
-    storage_source_version = str(db_meta.get("source_version") or "")
-    requested_source_version = str(body.get("source_version") or "")
-    if requested_source_version and storage_source_version != requested_source_version:
-        raise HTTPException(
-            409,
-            (
-                f"database {db_name} source_version changed; refresh before building "
-                "the order oracle"
-            ),
-        )
-    if db_meta.get("update_in_progress"):
-        raise HTTPException(409, f"database {db_name} is updating; wait for promotion")
-    # Reject when the DB's last prepare-db ended in partial/init_failed —
-    # the on-disk files may be missing volumes and the oracle would produce
-    # an incomplete pointer list. Require a clean Ready state.
-    copy_status = db_meta.get("copy_status")
-    if isinstance(copy_status, dict):
-        phase = str(copy_status.get("phase") or "")
-        if phase in {"partial", "init_failed", "copying"}:
-            raise HTTPException(
-                409,
-                (
-                    f"database {db_name} download is not Ready (phase={phase}); "
-                    "retry Download before building the order oracle"
-                ),
-            )
-    if db_meta.get("shards_stale"):
-        raise HTTPException(409, f"database {db_name} shard layouts are stale; rebuild shards")
-
-    warmup = k8s_warmup_status(cred, sub, storage_rg, cluster_name)
-    db_status = next(
-        (
-            item
-            for item in warmup.get("databases", [])
-            if isinstance(item, dict) and item.get("name") == db_name
-        ),
-        None,
-    )
-    if not isinstance(db_status, dict) or db_status.get("status") != "Ready":
-        raise HTTPException(
-            409,
-            f"node-local warmup for {db_name} must be Ready before building its order oracle",
-        )
-    warm_source_version = str(db_status.get("source_version") or "")
-    warm_source_versions = [
-        str(item) for item in db_status.get("source_versions", []) or [] if str(item)
-    ]
-    if db_status.get("status") == "Stale" or len(set(warm_source_versions)) > 1:
-        raise HTTPException(409, f"node-local warmup for {db_name} has stale source versions")
-    if (
-        storage_source_version
-        and warm_source_version
-        and warm_source_version != storage_source_version
-    ):
-        raise HTTPException(409, f"node-local warmup for {db_name} is for a stale DB generation")
-
-    pod_nodes: dict[str, str] = {}
-    for pod in db_status.get("pod_statuses", []) or []:
-        if not isinstance(pod, dict):
-            continue
-        shard = str(pod.get("shard") or "")
-        node = str(pod.get("node") or "")
-        if shard and node:
-            pod_nodes[shard] = node
-    shards = sorted(str(shard) for shard in db_status.get("shards", []) or [] if str(shard))
-    if not shards:
-        shard_count = int(body.get("shard_count") or db_status.get("total_jobs") or 1)
-        shards = [f"{idx:02d}" for idx in range(shard_count)]
-    nodes = k8s_ready_warmup_node_names(cred, sub, storage_rg, cluster_name)
-    raw_host_paths = db_status.get("shard_host_paths") or {}
-    shard_host_paths = raw_host_paths if isinstance(raw_host_paths, dict) else {}
-    shard_nodes: list[tuple[str, str] | tuple[str, str, str]] = []
-    for idx, shard in enumerate(shards):
-        node = pod_nodes.get(shard) or (nodes[idx] if idx < len(nodes) else "")
-        if node:
-            host_path = shard_host_paths.get(shard)
-            if isinstance(host_path, str) and host_path:
-                shard_nodes.append((shard, node, host_path))
-            else:
-                shard_nodes.append((shard, node))
-    if len(shard_nodes) != len(shards):
-        raise HTTPException(409, "could not map every warmed shard to a Ready node")
-
-    run_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
-    source_version = storage_source_version or warm_source_version
-    part_prefix = f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_PARTS_DIR}/{run_id}/"
-    status_blob = oracle_status_blob_path(db_name)
-    status_payload = {
-        "status": "building",
-        "run_id": run_id,
-        "db_name": db_name,
-        "source_version": source_version,
-        "started_at": datetime.now(UTC).isoformat(),
-        "expected_parts": len(shard_nodes),
-        "ready_parts": 0,
-        "part_prefix": part_prefix,
-        "requested_by": caller.object_id,
+    response: dict[str, object] = {
+        "accepted": result.accepted,
+        "status": result.status,
+        "db_name": result.db_name,
+        "run_id": result.run_id,
+        "job_id": result.job_id,
+        "task_id": result.task_id,
+        "expected_parts": result.expected_parts,
+        "status_blob": result.status_blob,
+        "part_prefix": result.part_prefix,
+        "adopted": result.adopted,
     }
-    upload_blob_text(
-        cred,
-        account_name,
-        "blast-db",
-        status_blob,
-        json.dumps(status_payload, sort_keys=True) + "\n",
-        content_type="application/json; charset=utf-8",
-    )
-
-    plan = build_db_order_oracle_job_plan(
-        db_name=db_name,
-        storage_account=account_name,
-        run_id=run_id,
-        shard_nodes=shard_nodes,
-        image=image,
-    )
-    apply_summary = k8s_ensure_job_manifests(
-        cred,
-        sub,
-        storage_rg,
-        cluster_name,
-        list(plan.jobs),
-    )
-    if apply_summary.get("error_count"):
-        status_payload["status"] = "failed"
-        status_payload["error"] = str(apply_summary.get("errors") or [])[:300]
-        upload_blob_text(
-            cred,
-            account_name,
-            "blast-db",
-            status_blob,
-            json.dumps(status_payload, sort_keys=True) + "\n",
-            content_type="application/json; charset=utf-8",
-        )
-        raise HTTPException(502, "oracle Job creation failed")
-
-    # Audit — capture run_id + expected_parts so a later /api/audit/log query
-    # can correlate this oracle run with its part blobs.
-    try:
-        from api.services.db.ops_audit import record_db_op
-
-        record_db_op(
-            op="oracle",
-            caller=caller,
-            account_name=account_name,
-            db_name=db_name,
-            extra={
-                "run_id": run_id,
-                "expected_parts": len(shard_nodes),
-                "cluster_name": cluster_name,
-            },
-        )
-    except Exception as exc:
-        LOGGER.debug("oracle audit record skipped: %s", type(exc).__name__)
-
-    LOGGER.info(
-        "db-order oracle accepted oid=%s db=%s run_id=%s parts=%d",
-        redact_oid(caller.object_id),
-        db_name,
-        run_id,
-        len(shard_nodes),
-    )
-    return {
-        "accepted": True,
-        "db_name": db_name,
-        "run_id": run_id,
-        "expected_parts": len(shard_nodes),
-        "created": apply_summary.get("created", []),
-        "existing": apply_summary.get("existing", []),
-        "status_blob": status_blob,
-        "part_urls": list(plan.part_urls),
-    }
+    # Preserve the synchronous route's legacy arrays while execution is now
+    # task-backed. URLs remain empty so no browser Storage access is introduced.
+    response.update({"created": [], "existing": [], "part_urls": []})
+    return response

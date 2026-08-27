@@ -8,7 +8,8 @@ Key entry points: `_resolve_warmup_db_name`, `_jobstate_terminal_snapshot`,
 `warmup_auto_preference_get`, `warmup_start`, `warmup_release`, `warmup_status`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
-Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
+Validation: `uv run pytest -q api/tests/test_warmup_route.py
+    api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -156,8 +157,38 @@ def warmup_start(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    job_id = str(uuid.uuid4())
     database_name = _resolve_warmup_db_name(body)
+    subscription_id = str(body.get("subscription_id") or "").strip()
+    resource_group = str(body.get("resource_group") or "").strip()
+    storage_account = str(body.get("storage_account") or "").strip()
+    storage_resource_group = str(body.get("storage_resource_group") or "").strip()
+    cluster_name = str(
+        body.get("aks_cluster_name") or body.get("cluster_name") or ""
+    ).strip()
+    required = (
+        ("subscription_id", subscription_id),
+        ("resource_group", resource_group),
+        ("storage_account", storage_account),
+        ("storage_resource_group", storage_resource_group),
+        ("database_name", database_name),
+        ("aks_cluster_name", cluster_name),
+    )
+    missing = [field for field, value in required if not value]
+    if missing:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "invalid_warmup_request",
+                "message": "Missing required warmup fields.",
+                "missing": missing,
+            },
+        )
+    try:
+        num_nodes = int(body.get("num_nodes") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "num_nodes must be an integer") from exc
+
+    job_id = str(uuid.uuid4())
     # Create job state
     try:
         from datetime import datetime
@@ -182,24 +213,19 @@ def warmup_start(
     except Exception as exc:
         LOGGER.warning("failed to create warmup job state: %s", exc)
 
-    try:
-        num_nodes = int(body.get("num_nodes") or 0)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(400, "num_nodes must be an integer") from exc
-
     result = _safe_send_task(
         "api.tasks.storage.warmup_database",
         queue="storage",
         job_id=job_id,
-        subscription_id=body.get("subscription_id", ""),
-        resource_group=body.get("resource_group", ""),
-        storage_account=body.get("storage_account", ""),
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        storage_account=storage_account,
         # The Storage account may live in a different RG than the AKS cluster;
         # forwarding the explicit value avoids the historical silent fall-back
         # to the cluster RG that broke RBAC ensure in `warmup_database`.
-        storage_resource_group=body.get("storage_resource_group", ""),
+        storage_resource_group=storage_resource_group,
         database_name=database_name,
-        cluster_name=body.get("aks_cluster_name") or body.get("cluster_name", ""),
+        cluster_name=cluster_name,
         machine_type=body.get("machine_type", ""),
         num_nodes=num_nodes,
         acr_resource_group=body.get("acr_resource_group", ""),

@@ -123,9 +123,7 @@ def test_list_result_blobs_caps_results(monkeypatch: pytest.MonkeyPatch) -> None
     )
     monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: fake_service)
 
-    blobs = storage_data.list_result_blobs(
-        object(), "elbstg01", "results", "job-1/", max_results=2
-    )
+    blobs = storage_data.list_result_blobs(object(), "elbstg01", "results", "job-1/", max_results=2)
 
     assert [blob["name"] for blob in blobs] == ["job-1/a.out", "job-1/b.out"]
 
@@ -331,12 +329,9 @@ def test_classify_storage_failure_returns_not_found_for_blob_not_found_str() -> 
     _FakeBlobNotFound.__name__ = "ResourceNotFoundError"
 
     exc = _FakeBlobNotFound(
-        "The specified blob does not exist.\n"
-        "RequestId: deadbeef\nErrorCode:BlobNotFound"
+        "The specified blob does not exist.\nRequestId: deadbeef\nErrorCode:BlobNotFound"
     )
-    result = storage_data.classify_storage_failure(
-        object(), "sub", "rg-elb-01", "elbstg01", exc
-    )
+    result = storage_data.classify_storage_failure(object(), "sub", "rg-elb-01", "elbstg01", exc)
     assert result["degraded_reason"] == "not_found"
     assert "not found" in result["message"]
 
@@ -346,9 +341,7 @@ def test_classify_storage_failure_returns_not_found_for_blob_not_found_substring
     message carries the BlobNotFound token but whose class name is something
     other than ResourceNotFoundError (e.g. HttpResponseError)."""
     exc = RuntimeError("ErrorCode:BlobNotFound")
-    result = storage_data.classify_storage_failure(
-        object(), "sub", "rg-elb-01", "elbstg01", exc
-    )
+    result = storage_data.classify_storage_failure(object(), "sub", "rg-elb-01", "elbstg01", exc)
     assert result["degraded_reason"] == "not_found"
 
 
@@ -561,7 +554,6 @@ def test_list_databases_recomputes_web_blast_searchsp_from_live_stats(
     assert databases["core_nt"]["web_blast_searchsp_source"] == "recomputed_live_snapshot"
 
 
-
 def test_list_databases_reads_blastdb_json_display_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -702,6 +694,8 @@ def test_list_databases_surfaces_db_order_oracle_status(
         _blob("metadata/oracles/core_nt/status.json"),
         _blob("metadata/oracles/core_nt/parts/run-1/00.txt"),
         _blob("metadata/oracles/core_nt/parts/run-1/01.txt"),
+        _blob("metadata/oracles/core_nt/parts/old-run/00.txt"),
+        _blob("metadata/oracles/core_nt/parts/run-1/stray.json"),
     ]
     payloads = {
         "metadata/oracles/core_nt/status.json": json.dumps(
@@ -732,6 +726,122 @@ def test_list_databases_surfaces_db_order_oracle_status(
         "expected_parts": 2,
         "ready_parts": 2,
         "part_prefix": "metadata/oracles/core_nt/parts/run-1/",
+    }
+
+
+def test_list_databases_keeps_ready_oracle_while_rebuild_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blobs = [
+        _blob("core_nt.nsq"),
+        _blob("metadata/oracles/core_nt/status.json"),
+        _blob("metadata/oracles/core_nt/active.json"),
+        _blob("metadata/oracles/core_nt/automation.json"),
+        _blob("metadata/oracles/core_nt/parts/run-ready/00.txt"),
+        _blob("metadata/oracles/core_nt/parts/run-build/00.txt"),
+    ]
+    payloads = {
+        "metadata/oracles/core_nt/status.json": json.dumps(
+            {
+                "status": "ready",
+                "run_id": "run-ready",
+                "expected_parts": 1,
+                "source_version": "snapshot-1",
+            }
+        ),
+        "metadata/oracles/core_nt/active.json": json.dumps(
+            {
+                "status": "running",
+                "phase": "waiting",
+                "run_id": "run-build",
+                "expected_parts": 2,
+                "source_version": "snapshot-2",
+                "automatic": True,
+            }
+        ),
+        "metadata/oracles/core_nt/automation.json": json.dumps(
+            {
+                "status": "queued",
+                "failure_count": 1,
+                "retry_exhausted": False,
+                "next_retry_at": "",
+                "last_run_id": "run-build",
+            }
+        ),
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    databases = {
+        item["name"]: item for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+    }
+
+    oracle = databases["core_nt"]["db_order_oracle"]
+    assert oracle["status"] == "ready"
+    assert oracle["ready_parts"] == 1
+    assert oracle["active"] == {
+        "status": "running",
+        "phase": "waiting",
+        "run_id": "run-build",
+        "started_at": None,
+        "source_version": "snapshot-2",
+        "expected_parts": 2,
+        "ready_parts": 1,
+        "automatic": True,
+    }
+    assert oracle["automation"]["last_run_id"] == "run-build"
+
+
+def test_list_databases_surfaces_latest_failed_attempt_without_replacing_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blobs = [
+        _blob("core_nt.nsq"),
+        _blob("metadata/oracles/core_nt/status.json"),
+        _blob("metadata/oracles/core_nt/runs/run-ready/status.json"),
+        _blob("metadata/oracles/core_nt/runs/run-z-failed/status.json"),
+        _blob("metadata/oracles/core_nt/parts/run-ready/00.txt"),
+    ]
+    payloads = {
+        "metadata/oracles/core_nt/status.json": json.dumps(
+            {"status": "ready", "run_id": "run-ready", "expected_parts": 1}
+        ),
+        "metadata/oracles/core_nt/runs/run-ready/status.json": json.dumps(
+            {"status": "ready", "run_id": "run-ready"}
+        ),
+        "metadata/oracles/core_nt/runs/run-z-failed/status.json": json.dumps(
+            {
+                "status": "failed",
+                "phase": "failed",
+                "run_id": "run-z-failed",
+                "error_code": "oracle_job_failed",
+                "finished_at": "2026-08-27T10:00:00Z",
+                "automatic": False,
+            }
+        ),
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    database = storage_data.list_databases(object(), "elbstg01", "blast-db")[0]
+
+    assert database["db_order_oracle"]["status"] == "ready"
+    assert database["db_order_oracle"]["run_id"] == "run-ready"
+    assert database["db_order_oracle"]["last_attempt"] == {
+        "status": "failed",
+        "phase": "failed",
+        "run_id": "run-z-failed",
+        "error_code": "oracle_job_failed",
+        "finished_at": "2026-08-27T10:00:00Z",
+        "automatic": False,
     }
 
 

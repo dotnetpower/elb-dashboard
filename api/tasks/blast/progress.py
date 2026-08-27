@@ -117,6 +117,29 @@ def _merge_progress_payload(
     details: Mapping[str, Any],
 ) -> dict[str, Any]:
     payload = dict(existing_payload or {})
+    oracle_details = details.get("db_order_oracle")
+    if isinstance(oracle_details, Mapping):
+        oracle: dict[str, Any] = {}
+        for key in ("blob_path", "db_name", "source_version", "oracle_run_id", "reference_blob"):
+            value = oracle_details.get(key)
+            if isinstance(value, str):
+                oracle[key] = value
+        part_count = oracle_details.get("part_count")
+        if isinstance(part_count, int) and not isinstance(part_count, bool) and part_count >= 0:
+            oracle["part_count"] = part_count
+        payload["db_order_oracle"] = oracle
+        raw_provenance = payload.get("provenance")
+        provenance = dict(raw_provenance) if isinstance(raw_provenance, Mapping) else {}
+        raw_database = provenance.get("database")
+        database = dict(raw_database) if isinstance(raw_database, Mapping) else {}
+        if "oracle_run_id" in oracle:
+            database["oracle_run_id"] = oracle["oracle_run_id"]
+        if "source_version" in oracle:
+            database["oracle_source_version"] = oracle["source_version"]
+        if "part_count" in oracle:
+            database["oracle_part_count"] = oracle["part_count"]
+        provenance["database"] = database
+        payload["provenance"] = provenance
     _raw_progress = payload.get("_progress")
     progress = dict(_raw_progress) if isinstance(_raw_progress, dict) else {}
     _raw_steps = progress.get("steps")
@@ -356,9 +379,7 @@ def _synthesise_completed_runtime_steps(
                 "updated_at": completed_at,
                 "source": exporting.get("source")
                 or (
-                    "result_artifact_verification"
-                    if complete_exporting
-                    else "result_artifact_wait"
+                    "result_artifact_verification" if complete_exporting else "result_artifact_wait"
                 ),
             }
         )

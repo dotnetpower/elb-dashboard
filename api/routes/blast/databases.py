@@ -9,7 +9,9 @@ Key entry points: `blast_databases`, `blast_databases_recommend`, `blast_databas
 `blast_databases_versions`, `blast_databases_build_stub`, `blast_database_preview`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate. The compiled `_*_RE` patterns are the shared validation source-of-truth imported by
-the sibling `databases_shard` / `databases_oracle` modules.
+the sibling `databases_shard` / `databases_oracle` modules. `updates_available` contains only
+cloud-copyable releases; newer FTP-only releases belong in additive `updates_pending` so the SPA
+never offers a mutation that would re-copy an older cloud snapshot.
 Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
 api/tests/test_route_contracts.py api/tests/test_blast_databases_preview.py
 api/tests/test_blast_databases_check_updates.py`.
@@ -145,7 +147,7 @@ def blast_databases_check_updates(
 ) -> dict[str, Any]:
     """Return NCBI's current snapshot plus a per-DB update list.
 
-    Two-tier response:
+        Three-part response:
 
     * ``latest_version`` — the bucket-wide ``latest-dir`` tag (back-compat).
     * ``updates_available`` — per-DB list ``[{db, snapshot, signature_etag,
@@ -155,6 +157,9 @@ def blast_databases_check_updates(
       ``source_version != latest-dir`` heuristic, which produced false
       positives every time NCBI rotated ``latest-dir`` even when the
       requested DB itself had not changed.
+        * ``updates_pending`` — per-DB releases published on NCBI FTP but not yet
+            available from the raw-file cloud mirror used by prepare-db. These are
+            visible but not actionable so Update never re-copies the old snapshot.
 
     Optional query params drive the per-DB enrichment. With no storage
     account the response is the back-compat shape ``{latest_version,
@@ -168,6 +173,8 @@ def blast_databases_check_updates(
     base: dict[str, Any] = {
         "latest_version": "",
         "updates_available": [],
+        "updates_pending": [],
+        "updates_pending_evaluated": False,
         # True only once the per-DB NCBI signature comparison has actually
         # run (storage scope supplied AND the downloaded-DB list resolved).
         # The SPA uses this to decide whether an EMPTY ``updates_available``
@@ -235,7 +242,26 @@ def blast_databases_check_updates(
         LOGGER.warning("check-updates list_databases failed: %s", type(exc).__name__)
         return base
 
+    from api.services.ncbi_releases import (
+        ftp_release_is_newer,
+        latest_ftp_releases,
+    )
+
+    ftp_releases: dict[str, Any] = {}
+    if downloaded:
+        try:
+            ftp_releases = latest_ftp_releases()
+            base["updates_pending_evaluated"] = True
+        except (NcbiAccessDenied, NcbiUnavailable) as exc:
+            LOGGER.debug(
+                "check-updates FTP release index unavailable: %s",
+                type(exc).__name__,
+            )
+    else:
+        base["updates_pending_evaluated"] = True
+
     updates: list[dict[str, Any]] = []
+    pending_updates: list[dict[str, Any]] = []
     for db in downloaded:
         if not isinstance(db, dict):
             continue
@@ -245,6 +271,24 @@ def blast_databases_check_updates(
         stored_etag = str(db.get("signature_etag") or "").strip()
         stored_composite = str(db.get("composite_signature") or "").strip()
         stored_version = str(db.get("source_version") or "").strip()
+        ftp_release = ftp_releases.get(name)
+        if isinstance(ftp_release, dict) and ftp_release_is_newer(
+            str(ftp_release.get("last_updated") or ""),
+            str(base.get("latest_version") or ""),
+            stored_version,
+        ):
+            pending_updates.append(
+                {
+                    "db": name,
+                    "published_at": ftp_release.get("last_updated"),
+                    "source": "ncbi-ftp",
+                    "reason": "cloud_mirror_pending",
+                    "cloud_snapshot": base.get("latest_version") or None,
+                    "stored_source_version": stored_version or None,
+                    "number_of_volumes": int(ftp_release.get("number_of_volumes") or 0),
+                    "bytes_total": int(ftp_release.get("bytes_total") or 0),
+                }
+            )
         try:
             preview = preview_database(name)
         except (NcbiAccessDenied, NcbiUnavailable, ValueError) as exc:
@@ -286,6 +330,7 @@ def blast_databases_check_updates(
             )
 
     base["updates_available"] = updates
+    base["updates_pending"] = pending_updates
     base["updates_available_evaluated"] = True
     return base
 
@@ -323,9 +368,7 @@ def blast_database_preview(
             "NCBI bucket refused the request (likely rate-limited); retry shortly.",
         ) from exc
     except NcbiUnavailable as exc:
-        LOGGER.warning(
-            "preview %s: NCBI unavailable: %s: %s", db_name, type(exc).__name__, exc
-        )
+        LOGGER.warning("preview %s: NCBI unavailable: %s: %s", db_name, type(exc).__name__, exc)
         raise HTTPException(
             502,
             f"Could not contact NCBI: {type(exc).__name__}",
@@ -369,9 +412,7 @@ def blast_databases_versions(
         return {
             "versions": [],
             "total": 0,
-            **classify_storage_failure(
-                cred, subscription_id, resource_group, storage_account, exc
-            ),
+            **classify_storage_failure(cred, subscription_id, resource_group, storage_account, exc),
         }
 
     versions: list[dict[str, Any]] = []

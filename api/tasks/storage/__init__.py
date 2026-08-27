@@ -6,7 +6,8 @@ Responsibility: Re-export the public task entry points and helpers that external
 Edit boundaries: Imports and re-exports only. Add new tasks in dedicated sibling modules
     and re-export them here; do not grow this file with logic.
 Key entry points: `warmup_database`, `check_database_updates`, `reconcile_auto_warmup`,
-    `reconcile_orphaned_prepare_db`, plus the helpers and constants exported below.
+    `build_db_order_oracle`, `reconcile_orphaned_prepare_db`, plus the helpers
+    and constants exported below.
 Risky contracts: Several tests monkeypatch attributes on this package directly
     (`api.tasks.storage.get_credential`, `_autowarmup_inflight_acquire`, `_update_state`,
     `_record_task_progress`). These names must remain importable from the package and
@@ -48,9 +49,15 @@ from api.tasks.storage.helpers import (
 from api.tasks.storage.helpers import (
     wait_for_warmup_jobs as _wait_for_warmup_jobs,
 )
+from api.tasks.storage.oracle import build_db_order_oracle
+from api.tasks.storage.oracle_retention import purge_oracle_history_task
 from api.tasks.storage.prepare_db_via_aks import prepare_db_via_aks
 from api.tasks.storage.reconcile import reconcile_auto_warmup
+from api.tasks.storage.reconcile_auto_oracle import reconcile_auto_oracle
 from api.tasks.storage.reconcile_db_consistency import reconcile_db_consistency
+from api.tasks.storage.reconcile_oracle_dispatches import (
+    reconcile_oracle_dispatches,
+)
 from api.tasks.storage.reconcile_orphan_prepare_db import reconcile_orphaned_prepare_db
 from api.tasks.storage.reconcile_stale_dbops import reconcile_stale_dbops_jobs
 from api.tasks.storage.retention_task import purge_aged_results_task
@@ -68,12 +75,16 @@ __all__ = (
     "_select_warmup_shard_count",
     "_update_state",
     "_wait_for_warmup_jobs",
+    "build_db_order_oracle",
     "check_database_updates",
     "get_credential",
     "prepare_db_via_aks",
     "purge_aged_results_task",
+    "purge_oracle_history_task",
+    "reconcile_auto_oracle",
     "reconcile_auto_warmup",
     "reconcile_db_consistency",
+    "reconcile_oracle_dispatches",
     "reconcile_orphaned_prepare_db",
     "reconcile_stale_dbops_jobs",
     "warmup_database",

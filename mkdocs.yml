@@ -120,6 +120,7 @@ nav:
       - Deployment Reference: deployment-reference.md
       - CLI Rolling Update: operate/cli-upgrade.md
       - Feature Gate Registry: operate/feature-gates.md
+      - Auto Oracle: operate/auto-oracle.md
       - Incident Response Runbook: operate/incident-runbook.md
       - OpenAPI Execution RBAC Gate: operate/openapi-exec-rbac-gate.md
       - OpenAPI Direct Access: operate/openapi-direct-access.md
