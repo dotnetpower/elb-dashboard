@@ -37,6 +37,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _JSON_PATH = _REPO_ROOT / "infra" / "control-plane-env.json"
 _BICEP_PATH = _REPO_ROOT / "infra" / "modules" / "containerAppControl.bicep"
 _QUICK_DEPLOY_PATH = _REPO_ROOT / "scripts" / "dev" / "quick-deploy.sh"
+_POSTPROVISION_PATH = _REPO_ROOT / "scripts" / "dev" / "postprovision.sh"
 _SERVICE_BUS_UI_PATH = (
     _REPO_ROOT
     / "web"
@@ -217,5 +218,37 @@ def test_guard_values_have_no_whitespace_or_comma() -> None:
             assert value == value.strip(), f"{sidecar}.{key} has surrounding whitespace"
             assert " " not in value, f"{sidecar}.{key} value contains a space"
             assert "," not in value, f"{sidecar}.{key} value contains a comma"
+
+
+def _control_plane_pairs(sidecar: str) -> list[str]:
+    script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
+    start = script.index("control_plane_env_pairs() {")
+    end = script.index("\n}\n\n# Upsert the shared M2M token", start) + len("\n}")
+    function = script[start:end]
+    command = (
+        f"CONTROL_PLANE_ENV_FILE='{_JSON_PATH}'; "
+        "LOG_ANALYTICS_WORKSPACE_ID=648cd0d4-a8b7-41da-a22c-050b5217b153; "
+        f"{function}; control_plane_env_pairs '{sidecar}'"
+    )
+    result = subprocess.run(  # noqa: S603 -- repository-controlled function.
+        ["/bin/bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.splitlines()
+
+
+def test_quick_deploy_upserts_live_wall_workspace_on_api_only() -> None:
+    expected = "LOG_ANALYTICS_WORKSPACE_ID=648cd0d4-a8b7-41da-a22c-050b5217b153"
+    assert expected in _control_plane_pairs("api")
+    assert expected not in _control_plane_pairs("worker")
+    assert expected not in _control_plane_pairs("beat")
+
+
+def test_postprovision_prefers_container_environment_workspace() -> None:
+    script = _POSTPROVISION_PATH.read_text(encoding="utf-8")
+    assert "resolve_live_wall_workspace_customer_id" in script
+    assert 'LOG_ANALYTICS_WORKSPACE_ID_VAL="$(resolve_live_wall_workspace_customer_id' in script
 
 

@@ -44,6 +44,7 @@ for v in "${REQUIRED_VARS[@]}"; do
 done
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$REPO_ROOT/scripts/dev/az-context.sh"
 
 progress() {
   bash "$REPO_ROOT/scripts/dev/azd-progress.sh" "$@"
@@ -610,22 +611,19 @@ else
 fi
 ts "    AKS BYO subnet: ${PLATFORM_AKS_SUBNET_ID_VAL:-<unset>}"
 
-# Resolve the Live Wall LA workspace from the Container Apps Environment
-# itself when the operator's shell did not export LOG_ANALYTICS_WORKSPACE_ID.
-# Container Apps strips env entries with empty values, so deploying with an
-# empty string here leaves the api sidecar with NO LOG_ANALYTICS_WORKSPACE_ID
-# at all — `_use_la_fallback()` returns False and the Live Wall stays blank.
-if [ -z "$LOG_ANALYTICS_WORKSPACE_ID_VAL" ]; then
-  LOG_ANALYTICS_WORKSPACE_ID_VAL="$(az containerapp env show \
-    --name "${CONTAINER_ENV_NAME:-cae-elb-dashboard}" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --query 'properties.appLogsConfiguration.logAnalyticsConfiguration.customerId' \
-    -o tsv 2>/dev/null || true)"
-  if [ -n "$LOG_ANALYTICS_WORKSPACE_ID_VAL" ]; then
-    ts "    Live Wall LA workspace resolved from env: $LOG_ANALYTICS_WORKSPACE_ID_VAL"
-  else
-    ts "    Live Wall LA workspace: unset (Live Wall tiles will stay blank)"
-  fi
+# Resolve the Live Wall workspace from the Container Apps Environment on every
+# run. That customer GUID is authoritative for ContainerAppConsoleLogs_CL.
+# Existing azd envs may carry an ARM resource id from older az-context.sh
+# versions; the shared resolver normalises that fallback too.
+LOG_ANALYTICS_WORKSPACE_ID_VAL="$(resolve_live_wall_workspace_customer_id \
+  "$LOG_ANALYTICS_WORKSPACE_ID_VAL" \
+  "${CONTAINER_ENV_NAME:-cae-elb-dashboard}" \
+  "$AZURE_RESOURCE_GROUP" \
+  "$AZURE_SUBSCRIPTION_ID")"
+if [ -n "$LOG_ANALYTICS_WORKSPACE_ID_VAL" ]; then
+  ts "    Live Wall LA workspace customer id: $LOG_ANALYTICS_WORKSPACE_ID_VAL"
+else
+  ts "    Live Wall LA workspace: unset (Live Wall tiles will stay blank)"
 fi
 
 # Grant Log Analytics Reader on the workspace the env actually uses. The

@@ -6,7 +6,7 @@ Edit boundaries: Test module only. Stubs ``az`` / ``azd`` on PATH and runs the
     real ``prepare_deploy_env_from_az_login`` bash function in a subshell.
 Key entry points: ``test_*``.
 Risky contracts: Mirrors the ACR guard's exit code (3), its explicit escape
-    hatch, and the supported azd command used before persisting discovered values.
+    hatch, the supported azd command, and the Live Wall workspace customer GUID.
 Validation: ``uv run pytest -q api/tests/test_az_context_acr_guard.py -m subprocess``.
 """
 
@@ -32,6 +32,10 @@ case "$*" in
   *"acr list"*) echo "$FAKE_ACR" ;;
   *"acr show"*loginServer*) echo "$FAKE_ACR.azurecr.io" ;;
   *"group show"*location*) echo "koreacentral" ;;
+    *"containerapp env list"*) echo "cae-elb-test" ;;
+    *"containerapp env show"*customerId*) echo "$FAKE_LA_CUSTOMER_ID" ;;
+    *"monitor log-analytics workspace show"*) echo "$FAKE_ARM_CUSTOMER_ID" ;;
+    *"monitor log-analytics workspace list"*) echo "$FAKE_LIST_CUSTOMER_ID" ;;
   *) printf '' ;;
 esac
 exit 0
@@ -140,3 +144,96 @@ def test_selected_azd_environment_uses_supported_get_value_command(tmp_path: Pat
     )
 
     assert result.stdout == "testenv"
+
+
+def test_discovery_exports_container_environment_workspace_customer_id(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_exec(bin_dir / "az", _FAKE_AZ)
+    _write_exec(bin_dir / "azd", _FAKE_AZD)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_ACR": "acrelbdashboardcyutlgcnv3",
+        "FAKE_LA_CUSTOMER_ID": "648cd0d4-a8b7-41da-a22c-050b5217b153",
+        "ACR_NAME": "acrelbdashboardcyutlgcnv3",
+        "AZURE_RESOURCE_GROUP": "rg-elb-dashboard",
+        "AZURE_EXTENSION_USE_DYNAMIC_INSTALL": "no",
+    }
+    env.pop("AZURE_SUBSCRIPTION_ID", None)
+
+    result = subprocess.run(  # noqa: S603 -- repository-controlled script.
+        [
+            "/bin/bash",
+            "-c",
+            (
+                f"source '{_AZ_CONTEXT}'; prepare_deploy_env_from_az_login >/dev/null; "
+                "printf '%s' \"$LOG_ANALYTICS_WORKSPACE_ID\""
+            ),
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "648cd0d4-a8b7-41da-a22c-050b5217b153"
+
+
+def _run_workspace_resolver(
+    tmp_path: Path,
+    *,
+    candidate: str,
+    environment_customer_id: str = "",
+    arm_customer_id: str = "",
+    list_customer_id: str = "",
+) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_exec(bin_dir / "az", _FAKE_AZ)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_LA_CUSTOMER_ID": environment_customer_id,
+        "FAKE_ARM_CUSTOMER_ID": arm_customer_id,
+        "FAKE_LIST_CUSTOMER_ID": list_customer_id,
+    }
+    command = (
+        f"source '{_AZ_CONTEXT}'; "
+        f"resolve_live_wall_workspace_customer_id '{candidate}' '' 'rg-elb' 'sub-1'"
+    )
+    result = subprocess.run(  # noqa: S603 -- repository-controlled function.
+        ["/bin/bash", "-c", command],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def test_workspace_resolver_converts_legacy_arm_id(tmp_path: Path) -> None:
+    result = _run_workspace_resolver(
+        tmp_path,
+        candidate=(
+            "/subscriptions/sub-1/resourceGroups/rg-elb/providers/"
+            "Microsoft.OperationalInsights/workspaces/log-elb"
+        ),
+        arm_customer_id="648cd0d4-a8b7-41da-a22c-050b5217b153",
+    )
+
+    assert result == "648cd0d4-a8b7-41da-a22c-050b5217b153"
+
+
+def test_workspace_resolver_falls_back_to_current_resource_group(
+    tmp_path: Path,
+) -> None:
+    result = _run_workspace_resolver(
+        tmp_path,
+        candidate="",
+        list_customer_id="648cd0d4-a8b7-41da-a22c-050b5217b153",
+    )
+
+    assert result == "648cd0d4-a8b7-41da-a22c-050b5217b153"

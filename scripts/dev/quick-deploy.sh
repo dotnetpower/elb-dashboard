@@ -114,6 +114,14 @@ for k, v in section.items():
     value = os.environ[k] if k in os.environ else v
     print(f"{k}={value}")
 PY
+  # Live Wall queries ContainerAppConsoleLogs_CL through LogsQueryClient,
+  # whose workspace_id contract is the customer GUID, not an ARM resource id.
+  # az-context resolves that authoritative value from the Container Apps
+  # Environment. Upsert it on every api PATCH so an old malformed deployment
+  # converges even when the image itself is unchanged.
+  if [[ "$sidecar" == "api" && -n "${LOG_ANALYTICS_WORKSPACE_ID:-}" ]]; then
+    printf 'LOG_ANALYTICS_WORKSPACE_ID=%s\n' "$LOG_ANALYTICS_WORKSPACE_ID"
+  fi
   # Extra M2M wiring for the api sidecar only: when the operator has set
   # AZURE_OPENAPI_SHARED_TOKEN (via `azd env set`), emit an extra pair that
   # references the Container App secret `elb-openapi-api-token`. The secret

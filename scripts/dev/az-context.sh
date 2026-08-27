@@ -9,7 +9,7 @@
 #     AZURE_TENANT_ID are exported to match the active `az login`.
 #   * AZURE_RESOURCE_GROUP, ACR_NAME, ACR_LOGIN_SERVER, CONTAINER_APP_NAME,
 #     CONTAINER_APP_FQDN, CONTAINER_ENV_NAME, STORAGE_ACCOUNT_NAME,
-#     KEY_VAULT_NAME, LOG_ANALYTICS_WORKSPACE_ID,
+#     KEY_VAULT_NAME, LOG_ANALYTICS_WORKSPACE_ID (customer GUID),
 #     APPLICATIONINSIGHTS_CONNECTION_STRING, SHARED_IDENTITY_RESOURCE_ID,
 #     SHARED_IDENTITY_CLIENT_ID, SHARED_IDENTITY_PRINCIPAL_ID,
 #     API_CLIENT_ID, VITE_AZURE_CLIENT_ID — all populated from ARM lookups
@@ -71,6 +71,51 @@ _AZ_CONTEXT_SUBSCRIPTION_SCOPED_VARS=(
 
 _az_context_log() { printf '[az-context] %s\n' "$*" >&2; }
 _az_context_warn() { printf '[az-context] ⚠ %s\n' "$*" >&2; }
+
+resolve_live_wall_workspace_customer_id() {
+  local candidate="${1:-}"
+  local environment_name="${2:-}"
+  local resource_group="${3:-}"
+  local subscription_id="${4:-}"
+  local customer_id=""
+  # Keep this initialized: quoted empty-array expansion is safe under set -u.
+  local subscription_args=()
+  [[ -n "$subscription_id" ]] && subscription_args=(--subscription "$subscription_id")
+
+  if [[ -n "$environment_name" && -n "$resource_group" ]]; then
+    customer_id=$(az containerapp env show \
+      --name "$environment_name" \
+      --resource-group "$resource_group" \
+      "${subscription_args[@]}" \
+      --query 'properties.appLogsConfiguration.logAnalyticsConfiguration.customerId' \
+      -o tsv 2>/dev/null || printf '')
+  fi
+  if [[ -n "$customer_id" ]]; then
+    printf '%s' "$customer_id"
+    return 0
+  fi
+
+  if [[ "$candidate" == /subscriptions/* ]]; then
+    customer_id=$(az monitor log-analytics workspace show \
+      --ids "$candidate" \
+      --query customerId \
+      -o tsv 2>/dev/null || printf '')
+  elif [[ -n "$candidate" ]]; then
+    customer_id="$candidate"
+  fi
+  if [[ -n "$customer_id" ]]; then
+    printf '%s' "$customer_id"
+    return 0
+  fi
+
+  if [[ -n "$resource_group" ]]; then
+    az monitor log-analytics workspace list \
+      --resource-group "$resource_group" \
+      "${subscription_args[@]}" \
+      --query "[?starts_with(name, 'log-elb-')] | [0].customerId" \
+      -o tsv 2>/dev/null || printf ''
+  fi
+}
 
 _az_context_current_azd_env_name() {
   command -v azd >/dev/null 2>&1 || { printf ''; return; }
@@ -177,8 +222,7 @@ _az_context_discover_workload_env() {
 
   local law_id=""
   _az_context_log "  [7/9] log analytics workspace"
-  law_id=$(az monitor log-analytics workspace list -g "$rg" --subscription "$sub" --query "[?starts_with(name, 'log-elb-')] | [0].id" -o tsv 2>/dev/null || printf '')
-  [[ -z "$law_id" ]] && law_id=$(az monitor log-analytics workspace list -g "$rg" --subscription "$sub" --query "[0].id" -o tsv 2>/dev/null || printf '')
+  law_id=$(resolve_live_wall_workspace_customer_id "" "$cae_name" "$rg" "$sub")
 
   local mi_name="" mi_resource="" mi_client="" mi_principal=""
   _az_context_log "  [8/9] managed identity + app insights"
