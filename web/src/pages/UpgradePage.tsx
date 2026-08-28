@@ -306,17 +306,20 @@ export function UpgradePage() {
       // discovered release is actually selectable, not just shown in a stat.
       await refreshAll();
       const latest = updated.latest_version;
-      const newerThanRunning =
+      const newerRelease =
         latest &&
         (!updated.running_version ||
           compareSemver(latest, updated.running_version) > 0);
+      const newerCommit = isCommitUpdateAvailable(updated, __APP_COMMIT__);
       toast(
-        latest
-          ? newerThanRunning
-            ? `Checked remote — v${latest} is available to upgrade.`
-            : `Checked remote — you are on the latest (v${latest}).`
+        newerRelease
+          ? `Checked remote — v${latest} is available to upgrade.`
+          : newerCommit
+            ? `Checked remote — main @ ${updated.latest_commit_sha.slice(0, 7)} is available to upgrade.`
+            : latest
+              ? `Checked remote — you are on the latest (v${latest}).`
           : "Checked remote — no releases found for the configured remote.",
-        newerThanRunning ? "success" : "info",
+        newerRelease || newerCommit ? "success" : "info",
       );
     } catch (err) {
       const raw = err instanceof Error ? err.message : "check failed";

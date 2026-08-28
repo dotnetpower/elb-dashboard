@@ -175,6 +175,9 @@ test("Upgrade start, remote check, rollback, and escape commands are mocked", as
   await expect(uiPage.getByRole("heading", { name: "Self-upgrade" })).toBeVisible();
 
   await uiPage.getByRole("button", { name: "Check remote" }).click();
+  await expect(
+    uiPage.getByText("Checked remote — main @ 3333333 is available to upgrade."),
+  ).toBeVisible();
   await uiPage.locator("#upgrade-target").selectOption("0.3.0");
   await uiPage.getByLabel(/short downtime/i).check();
   await uiPage.getByRole("button", { name: /Start upgrade/i }).click();

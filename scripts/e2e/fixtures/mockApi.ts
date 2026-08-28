@@ -392,7 +392,14 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/upgrade/history?**", (route) =>
     jsonResponse(route, { events: [{ ts: now, job_id: "upgrade-e2e", event: "checked", version: "0.3.0" }] }),
   );
-  await page.route("**/api/upgrade/check", (route) => jsonResponse(route, { ...upgradeStatus, latest_checked_at: now }));
+  await page.route("**/api/upgrade/check", (route) =>
+    jsonResponse(route, {
+      ...upgradeStatus,
+      latest_version: upgradeStatus.running_version,
+      latest_commit_sha: "3333333333333333333333333333333333333333",
+      latest_checked_at: now,
+    }),
+  );
   await page.route("**/api/upgrade/start", async (route) => {
     const payload = route.request().postDataJSON() as Record<string, unknown>;
     state.upgradeStarts.push(payload);
