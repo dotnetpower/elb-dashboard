@@ -7,17 +7,16 @@
 # script does a far smaller cycle:
 #
 #   1. Build ONE image via `az acr build` (cached layers, ~30-90 s).
-#   2. Patch ONLY that container's image via `az containerapp update`
-#      (one ARM transaction, ~20-30 s — does NOT touch sidecar layout,
-#      secrets, probes, or scale rules).
+#   2. Patch ONLY that container's image/resources/runtime env through one
+#      template-only ARM transaction (does NOT touch secrets, probes, volumes,
+#      or scale rules).
 #   3. (Optional) tail the new revision's logs.
 #
 # It refuses to touch sidecar structure (secrets, probes, volumes) — for
 # those changes you still need a Bicep redeploy via postprovision.sh
 # or `az deployment group create --template-file containerAppControl.bicep`.
-# The frontend sidecar is the only exception for env vars: its runtime
-# config is generated from server environment variables at startup, so
-# this script keeps those values in sync during fast frontend deploys.
+# Frontend runtime config and the server-side guard/platform coordinates below
+# are exact-key upserts; unrelated environment values stay untouched.
 #
 # Control-plane GUARD env exception: api/worker/beat PATCHes also upsert the
 # policy toggles from infra/control-plane-env.json (ENFORCE_DASHBOARD_RBAC,
@@ -70,21 +69,21 @@ die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 # a guard default changed in Bicep (e.g. ENFORCE_DASHBOARD_RBAC=true) would
 # never reach a fast deploy OR the GitHub Actions deploy.yml path (which also
 # calls this script) — a no-RBAC user could still load the dashboard after an
-# apparent redeploy. We read the SAME JSON Bicep reads and apply the per-
-# sidecar guard toggles as `--set-env-vars` on every api/worker/beat PATCH so
-# both deploy paths converge to the repo's source of truth. `--set-env-vars`
-# is an upsert: it only touches the listed keys, leaving image/secret/other
-# env entries intact.
+# apparent redeploy. We read the SAME JSON Bicep reads and apply each sidecar's
+# values through a fresh-snapshot-checked, template-only ARM PATCH so both
+# deploy paths converge to the repo's source of truth without Azure CLI
+# silently targeting the default API container.
 # ---------------------------------------------------------------------------
 CONTROL_PLANE_ENV_FILE="$REPO_ROOT/infra/control-plane-env.json"
+CONTAINER_APP_API_VERSION="${CONTAINER_APP_API_VERSION:-2026-01-01}"
+[[ "$CONTAINER_APP_API_VERSION" =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}(-preview)?$ ]] \
+  || die "invalid CONTAINER_APP_API_VERSION: $CONTAINER_APP_API_VERSION"
 
-# Fail fast on a malformed source file (runs in the parent shell so `die`
-# actually aborts). A missing file is tolerated (older checkouts) — the
-# per-sidecar helper then yields no pairs and the PATCH stays image-only.
-if [[ -f "$CONTROL_PLANE_ENV_FILE" ]]; then
-  python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$CONTROL_PLANE_ENV_FILE" \
-    || die "control-plane-env: $CONTROL_PLANE_ENV_FILE is not valid JSON"
-fi
+# Guard/policy convergence is part of a deploy, not an optional follow-up.
+[[ -f "$CONTROL_PLANE_ENV_FILE" ]] \
+  || die "control-plane env file missing: $CONTROL_PLANE_ENV_FILE"
+python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$CONTROL_PLANE_ENV_FILE" \
+  || die "control-plane-env: $CONTROL_PLANE_ENV_FILE is not valid JSON"
 
 # Echo `KEY=VALUE` lines for the given sidecar (api|worker|beat|...), or
 # nothing when the file is absent or the sidecar has no guard toggles.
@@ -136,8 +135,8 @@ PY
   # provision paths — quick-deploy just mirrors the same wiring so a fast
   # deploy converges to the same runtime shape). Fail-safe: an unset env
   # var means the pair is omitted entirely and the api container's
-  # existing secretRef (if any) is left untouched by the upsert-style
-  # `--set-env-vars`.
+  # existing secretRef (if any) is left untouched by the exact-container
+  # template patch.
   if [[ "$sidecar" == "api" && -n "${AZURE_OPENAPI_SHARED_TOKEN:-}" ]]; then
     printf 'ELB_OPENAPI_API_TOKEN=secretref:elb-openapi-api-token\n'
   fi
@@ -158,22 +157,140 @@ sync_openapi_shared_token() {
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --secrets "elb-openapi-api-token=$AZURE_OPENAPI_SHARED_TOKEN" \
     -o none \
-    || ts "    ! failed to upsert 'elb-openapi-api-token' — the api PATCH may leave the M2M gate rejecting every request"
+    || die "failed to upsert Container App secret 'elb-openapi-api-token'"
+}
+
+# Apply image, resources, and env to one sidecar through one template ARM PATCH.
+# Azure CLI 2.81's `containerapp update --container-name <non-default>
+# --set-env-vars ...` can report success while applying no env change. Reading
+# a fresh template, rechecking its ETag immediately before PATCH, and verifying
+# the active revision avoids split image/env revisions and silent sidecar drift.
+containerapp_patch_container() {
+  local target="${1:?container name required}"
+  local image="${2:?image required}"
+  local cpu="${3:-}"
+  local memory="${4:-}"
+  shift 4
+
+  (
+    set -Eeuo pipefail
+    umask 077
+    local snapshot patch suffix status app_id etag current_etag revision_name
+    local active_revision verify_status deadline
+    local -a snapshot_meta helper_args
+    snapshot="$(mktemp)"
+    patch="$(mktemp)"
+    trap 'rm -f "$snapshot" "$patch"' EXIT
+    suffix="env-${target}-$(date +%s)-${RANDOM}"
+
+    timeout 45s az containerapp show \
+      --name "$CONTAINER_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      -o json > "$snapshot"
+    helper_args=(
+      --input "$snapshot"
+      --output "$patch"
+      --container "$target"
+      --revision-suffix "$suffix"
+      --image "$image"
+    )
+    [[ -n "$cpu" ]] && helper_args+=(--cpu "$cpu")
+    [[ -n "$memory" ]] && helper_args+=(--memory "$memory")
+    for _pair in "$@"; do
+      helper_args+=(--env "$_pair")
+    done
+    status="$(python3 "$REPO_ROOT/scripts/dev/patch_containerapp_env.py" "${helper_args[@]}")"
+    if [[ "$status" == "unchanged" ]]; then
+      ts "    = '$target' image/resources/env already converged"
+      return 0
+    fi
+    [[ "$status" == "changed" ]] || die "unexpected container patch status for '$target': $status"
+
+    mapfile -t snapshot_meta < <(python3 - "$snapshot" <<'PY'
+import json, sys
+resource = json.load(open(sys.argv[1], encoding="utf-8"))
+print(resource.get("id", ""))
+print(resource.get("etag", ""))
+PY
+)
+    app_id="${snapshot_meta[0]:-}"
+    etag="${snapshot_meta[1]:-}"
+    [[ -n "$app_id" && -n "$etag" ]] || die "Container App snapshot is missing id/etag"
+    current_etag="$(timeout 30s az containerapp show \
+      --name "$CONTAINER_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --query etag \
+      -o tsv)"
+    [[ "$current_etag" == "$etag" ]] || die "Container App template changed before '$target' PATCH; retry the deploy"
+
+    timeout 120s az rest \
+      --method patch \
+      --url "https://management.azure.com${app_id}?api-version=${CONTAINER_APP_API_VERSION}" \
+      --headers "Content-Type=application/json" "If-Match=$etag" \
+      --body "@$patch" \
+      -o none
+
+    revision_name="${CONTAINER_APP_NAME}--${suffix}"
+    local ready=false
+    deadline=$((SECONDS + 300))
+    while (( SECONDS < deadline )); do
+      local revision_state provisioning running
+      revision_state="$(timeout 15s az containerapp revision show \
+        --name "$CONTAINER_APP_NAME" \
+        --resource-group "$AZURE_RESOURCE_GROUP" \
+        --revision "$revision_name" \
+        --query "join(' ', [properties.provisioningState, properties.runningState])" \
+        -o tsv 2>/dev/null || true)"
+      read -r provisioning running <<< "$revision_state"
+      if [[ "$provisioning" == "Provisioned" && "$running" == Running* ]]; then
+        ready=true
+        break
+      fi
+      if [[ "$provisioning" == "Failed" || "$provisioning" == "Canceled" ]]; then
+        die "container revision failed for '$target': $revision_name ($provisioning/$running)"
+      fi
+      sleep 5
+    done
+    $ready || die "timed out waiting for container revision: $revision_name"
+
+    timeout 45s az containerapp show \
+      --name "$CONTAINER_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      -o json > "$snapshot"
+    helper_args=(
+      --input "$snapshot"
+      --output "$patch"
+      --container "$target"
+      --revision-suffix "${suffix}-verify"
+      --image "$image"
+    )
+    [[ -n "$cpu" ]] && helper_args+=(--cpu "$cpu")
+    [[ -n "$memory" ]] && helper_args+=(--memory "$memory")
+    for _pair in "$@"; do
+      helper_args+=(--env "$_pair")
+    done
+    verify_status="$(python3 "$REPO_ROOT/scripts/dev/patch_containerapp_env.py" "${helper_args[@]}")"
+    [[ "$verify_status" == "unchanged" ]] || die "container verification failed for '$target'"
+    active_revision="$(timeout 30s az containerapp show \
+      --name "$CONTAINER_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --query properties.latestRevisionName \
+      -o tsv)"
+    [[ "$active_revision" == "$revision_name" ]] || die "active revision changed during '$target' PATCH; retry the deploy"
+    ts "    ✓ '$target' image/resources/env converged on $revision_name"
+  )
 }
 
 # ---------------------------------------------------------------------------
 # Per-sidecar resource (cpu/memory) reconciliation.
 #
-# Why: this script PATCHes a container's image with `az containerapp update
-# --container-name X --image …`, a read-modify-write that PRESERVES the live
-# container's cpu/memory. So a sizing change committed to the Bicep template
-# (e.g. worker 0.5 vCPU/1.0Gi → 1.0 vCPU/2.0Gi) NEVER reaches the running app
-# through a fast or GitHub-Actions deploy — it only lands on a full `azd
-# provision`. The worker silently ran under-provisioned for weeks and its
-# Celery prefork pool OOM-looped (signal 9 WorkerLostError) as a direct result.
+# Why: fast deploy must include the Bicep-owned cpu/memory values in the same
+# exact-container template patch as image/env. Otherwise a sizing change lands
+# only on a full `azd provision`; the worker previously remained
+# under-provisioned and its Celery prefork pool OOM-looped as a result.
 #
 # Fix: read the DESIRED cpu/memory for each sidecar straight from the Bicep
-# template (the single source of truth) and pass --cpu/--memory on every image
+# template (the single source of truth) and pass them into every container
 # PATCH so the running container converges to the committed sizing. Container
 # Apps requires the per-replica total to stay a valid combo (sum memory GiB ==
 # 2 × sum CPU cores, ≤ 4 vCPU / 8 GiB); every sidecar's Bicep value is
@@ -181,8 +298,8 @@ sync_openapi_shared_token() {
 # value keeps the running total valid.
 #
 # Best-effort: on any parse failure (template moved / reformatted) the helper
-# yields nothing and the PATCH stays image-only (live resources preserved) with
-# a warning — a sizing reconcile must never block a code deploy.
+# yields nothing and the exact-container patch preserves live resources with a
+# warning — a sizing reconcile must never block a code deploy.
 # ---------------------------------------------------------------------------
 CONTROL_PLANE_BICEP_FILE="$REPO_ROOT/infra/modules/containerAppControl.bicep"
 
@@ -350,11 +467,11 @@ SKIP_CONFIRM=false
 # straight to an EXISTING image tag in ACR. Used by the GitHub Actions
 # deploy workflow, which builds in a separate `build-images.yml` job and
 # then triggers deploy.yml with the resulting tag. When set, the frontend
-# PATCH also skips --set-env-vars so the runtime env baked at build time
-# (or applied by the last full deploy) is preserved.
+# PATCH also skips frontend runtime-env convergence, so values from the last
+# full or source-building deploy are preserved.
 NO_BUILD=false
 # --build-only: opposite of --no-build. Build the image(s) via `az acr build`
-# and skip the `az containerapp update` PATCH. Used by build-images.yml in
+# and skip the Container App template PATCH. Used by build-images.yml in
 # GitHub Actions so a push to main produces images in ACR without changing
 # the running Container App; deploy.yml then triggers a separate run with
 # --no-build to actually swap the revision.
@@ -494,7 +611,7 @@ preflight_permission_check() {
   fi
 
   if ! az containerapp show -n "$CONTAINER_APP_NAME" -g "$AZURE_RESOURCE_GROUP" -o none 2>/dev/null; then
-    die "Cannot read Container App '$CONTAINER_APP_NAME' in '$AZURE_RESOURCE_GROUP'. The signed-in identity needs 'Contributor' on the Container App for the upcoming 'az containerapp update' to succeed."
+    die "Cannot read Container App '$CONTAINER_APP_NAME' in '$AZURE_RESOURCE_GROUP'. The signed-in identity needs 'Contributor' on the Container App for the upcoming ARM template PATCH to succeed."
   fi
 
   ts "preflight: ARM read access OK on rg/acr/containerApp"
@@ -585,20 +702,22 @@ ensure_workspace_tags() {
 # rebuilt image pushed under the SAME tag is silently ignored -- the deploy
 # "succeeds" but the old image keeps running and the version stamp never
 # changes. Resolving the tag to registry/image@sha256:... makes every
-# distinct build a distinct template -> a new revision always rolls. Falls
-# back to the tag ref (with a warning) when the manifest lookup fails, so a
-# transient ACR read error degrades to the old behaviour rather than
-# aborting the deploy.
+# distinct build a distinct template -> a new revision always rolls. Digest
+# resolution is required: after three bounded attempts, fail instead of falling
+# back to a mutable tag that could make a deploy report success without rolling.
 # ---------------------------------------------------------------------------
 resolve_image_digest() {
-  local ref="$1" digest
-  digest="$(az acr manifest show-metadata "$ref" --query digest -o tsv 2>/dev/null | tr -d '[:space:]')" || true
-  if [[ "$digest" == sha256:* ]]; then
-    printf '%s@%s' "${ref%:*}" "$digest"
-  else
-    printf 'WARN: could not resolve digest for %s; patching with the mutable tag (a re-pushed tag may not roll a new revision)\n' "$ref" >&2
-    printf '%s' "$ref"
-  fi
+  local ref="$1" digest attempt
+  for attempt in 1 2 3; do
+    digest="$(timeout 30s az acr manifest show-metadata "$ref" --query digest -o tsv 2>/dev/null | tr -d '[:space:]')" || true
+    if [[ "$digest" == sha256:* ]]; then
+      printf '%s@%s' "${ref%:*}" "$digest"
+      return 0
+    fi
+    (( attempt < 3 )) && sleep "$((attempt * 2))"
+  done
+  printf 'ERROR: could not resolve immutable digest for %s after 3 attempts\n' "$ref" >&2
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -736,11 +855,9 @@ if [[ "$SIDECAR" == "all" ]]; then
   #      "network not allowed". Open ONCE in the parent, close ONCE after
   #      `wait`.
   #
-  #   2. `az containerapp update --container-name X` is read-modify-write
-  #      against the same template with no ETag protection. Running three
-  #      PATCHes in parallel against a single Container App is a classic
-  #      last-write-wins race -- some sidecars get reverted on the final
-  #      active revision. PATCHes stay sequential.
+  #   2. Every exact-container PATCH still starts from a full template snapshot.
+  #      Running them in parallel would race the ETag precheck and latest-
+  #      revision verification. PATCHes stay sequential.
   #
   # Net result vs the old recursive-sequential loop: build time drops from
   # ~3 min (3 x ~60 s sequential) to ~60-90 s (parallel; bound by the
@@ -983,81 +1100,52 @@ fi
     ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $img"
     # Reconcile cpu/memory to the Bicep template so a committed sizing change
     # lands on a fast deploy instead of being silently preserved at the live
-    # (possibly under-provisioned) value. Empty when unparseable → image-only.
-    _res_flags=()
+    # (possibly under-provisioned) value. Empty when unparseable preserves live resources.
+    _cpu=""
+    _memory=""
     _res="$(container_desired_resources "$tgt")"
     if [[ -n "$_res" ]]; then
-      _res_flags=(--cpu "${_res%% *}" --memory "${_res##* }")
+      _cpu="${_res%% *}"
+      _memory="${_res##* }"
       ts "    + reconciling '$tgt' resources from Bicep → cpu=${_res%% *} memory=${_res##* }"
     elif [[ -f "$CONTROL_PLANE_BICEP_FILE" ]]; then
       ts "    ! could not parse '$tgt' resources from Bicep — PATCH keeps live cpu/memory"
     fi
+    _env_pairs=()
     if [[ "$tgt" == "frontend" && "$NO_BUILD" != "true" ]]; then
       # Full deploy resolved VITE_* / API_CLIENT_ID on the host; mirror them
       # to the frontend runtime env so runtime-config.js stays in sync with
       # the image we just built.
-      az containerapp update \
-        --name "$CONTAINER_APP_NAME" \
-        --resource-group "$AZURE_RESOURCE_GROUP" \
-        --container-name "$tgt" \
-        --image "$img" \
-        ${_res_flags[@]+"${_res_flags[@]}"} \
-        --set-env-vars \
-          "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL" \
-          "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL" \
-          "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL" \
-          "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
-          "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL" \
-          "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL" \
-          "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL" \
-          "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL" \
-          "API_CLIENT_ID=$API_CLIENT_ID_VAL" \
-          "AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
-        -o none
+      _env_pairs=(
+        "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL"
+        "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL"
+        "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL"
+        "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL"
+        "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL"
+        "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL"
+        "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
+        "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
+        "API_CLIENT_ID=$API_CLIENT_ID_VAL"
+        "AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL"
+      )
     else
-      # --no-build path (or non-frontend sidecar): swap image only and leave
-      # the container's existing runtime env vars untouched — EXCEPT the
-      # control-plane guard toggles, which we upsert from the shared JSON so a
-      # Bicep guard-default change (e.g. ENFORCE_DASHBOARD_RBAC) actually lands
-      # on a fast / GitHub-Actions deploy instead of waiting for a full
-      # `azd provision`. The frontend's baked VITE_* values stay authoritative;
-      # all other runtime env from the last full deploy / Bicep is preserved.
-      mapfile -t _cp_pairs < <(control_plane_env_pairs "$tgt")
+      # --no-build frontend keeps its live runtime config. Runtime sidecars
+      # converge guard toggles and non-secret platform coordinates.
+      mapfile -t _env_pairs < <(control_plane_env_pairs "$tgt")
       case "$tgt" in api | worker | beat) servicebus_gate_notice ;; esac
-      # api sidecar only: make sure the Container App secret backing the
-      # M2M shared token exists BEFORE the PATCH references it via
-      # secretRef. Idempotent + no-op when AZURE_OPENAPI_SHARED_TOKEN is
-      # unset (M2M path opt-out).
+      # The secret must exist before the exact-container env patch references it.
       [[ "$tgt" == "api" ]] && sync_openapi_shared_token
-      if [[ ${#_cp_pairs[@]} -gt 0 ]]; then
-        ts "    + applying ${#_cp_pairs[@]} control-plane guard env var(s) for '$tgt'"
-        az containerapp update \
-          --name "$CONTAINER_APP_NAME" \
-          --resource-group "$AZURE_RESOURCE_GROUP" \
-          --container-name "$tgt" \
-          --image "$img" \
-          ${_res_flags[@]+"${_res_flags[@]}"} \
-          --set-env-vars "${_cp_pairs[@]}" \
-          -o none
-      else
-        # No guard toggles for this sidecar (terminal/redis), OR the shared
-        # JSON is missing/moved. Log it so a vanished source file cannot
-        # silently degrade an api/worker/beat PATCH to image-only and leave
-        # a security guard (ENFORCE_DASHBOARD_RBAC) stale without warning.
-        if [[ ! -f "$CONTROL_PLANE_ENV_FILE" ]]; then
-          ts "    ! control-plane env file missing ($CONTROL_PLANE_ENV_FILE) — '$tgt' PATCHed image-only, guard env NOT applied"
-        else
-          ts "    (no control-plane guard env for '$tgt')"
-        fi
-        az containerapp update \
-          --name "$CONTAINER_APP_NAME" \
-          --resource-group "$AZURE_RESOURCE_GROUP" \
-          --container-name "$tgt" \
-          --image "$img" \
-          ${_res_flags[@]+"${_res_flags[@]}"} \
-          -o none
-      fi
     fi
+
+    if [[ ${#_env_pairs[@]} -gt 0 ]]; then
+      ts "    + applying ${#_env_pairs[@]} exact-container runtime env var(s) for '$tgt'"
+    elif [[ ! -f "$CONTROL_PLANE_ENV_FILE" && "$tgt" != "frontend" ]]; then
+      ts "    ! control-plane env file missing ($CONTROL_PLANE_ENV_FILE) — '$tgt' guard env NOT applied"
+    else
+      ts "    (no runtime env changes for '$tgt')"
+    fi
+    containerapp_patch_container \
+      "$tgt" "$img" "$_cpu" "$_memory" "${_env_pairs[@]}"
   done
 
   ts "==> Latest revision:"
@@ -1234,75 +1322,46 @@ for tgt in "${TARGETS[@]}"; do
   ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $NEW_IMAGE"
   # Reconcile cpu/memory to the Bicep template (single source of truth) so a
   # committed sizing change lands on a fast deploy instead of being preserved
-  # at the live value. Empty when unparseable → image-only PATCH.
-  _res_flags=()
+  # at the live value. Empty when unparseable preserves live resources.
+  _cpu=""
+  _memory=""
   _res="$(container_desired_resources "$tgt")"
   if [[ -n "$_res" ]]; then
-    _res_flags=(--cpu "${_res%% *}" --memory "${_res##* }")
+    _cpu="${_res%% *}"
+    _memory="${_res##* }"
     ts "    + reconciling '$tgt' resources from Bicep → cpu=${_res%% *} memory=${_res##* }"
   elif [[ -f "$CONTROL_PLANE_BICEP_FILE" ]]; then
     ts "    ! could not parse '$tgt' resources from Bicep — PATCH keeps live cpu/memory"
   fi
+  _env_pairs=()
   if [[ "$tgt" == "frontend" && "$NO_BUILD" != "true" ]]; then
-    az containerapp update \
-      --name "$CONTAINER_APP_NAME" \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
-      --container-name "$tgt" \
-      --image "$NEW_IMAGE" \
-      ${_res_flags[@]+"${_res_flags[@]}"} \
-      --set-env-vars \
-        "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL" \
-        "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL" \
-        "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL" \
-        "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
-        "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL" \
-        "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL" \
-        "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL" \
-        "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL" \
-        "API_CLIENT_ID=$API_CLIENT_ID_VAL" \
-        "AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
-      -o none
+    _env_pairs=(
+      "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL"
+      "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL"
+      "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL"
+      "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL"
+      "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL"
+      "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL"
+      "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
+      "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
+      "API_CLIENT_ID=$API_CLIENT_ID_VAL"
+      "AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL"
+    )
   else
-    # Non-frontend sidecar: swap image and upsert the control-plane guard
-    # toggles from the shared JSON (see the helper near the top of this file).
-    # This keeps a fast single-sidecar deploy in sync with a Bicep guard
-    # default instead of silently leaving the live env stale.
-    mapfile -t _cp_pairs < <(control_plane_env_pairs "$tgt")
+    mapfile -t _env_pairs < <(control_plane_env_pairs "$tgt")
     case "$tgt" in api | worker | beat) servicebus_gate_notice ;; esac
-    # api sidecar only: make sure the Container App secret backing the
-    # M2M shared token exists BEFORE the PATCH references it via
-    # secretRef. Idempotent + no-op when AZURE_OPENAPI_SHARED_TOKEN is
-    # unset (M2M path opt-out). Mirrors the same guard in the `all` PATCH
-    # loop above.
     [[ "$tgt" == "api" ]] && sync_openapi_shared_token
-    if [[ ${#_cp_pairs[@]} -gt 0 ]]; then
-      ts "    + applying ${#_cp_pairs[@]} control-plane guard env var(s) for '$tgt'"
-      az containerapp update \
-        --name "$CONTAINER_APP_NAME" \
-        --resource-group "$AZURE_RESOURCE_GROUP" \
-        --container-name "$tgt" \
-        --image "$NEW_IMAGE" \
-        ${_res_flags[@]+"${_res_flags[@]}"} \
-        --set-env-vars "${_cp_pairs[@]}" \
-        -o none
-    else
-      # No guard toggles for this sidecar, OR the shared JSON is missing.
-      # Log it so a vanished source cannot silently leave a security guard
-      # stale on an api/worker/beat PATCH (see the `all` path for rationale).
-      if [[ ! -f "$CONTROL_PLANE_ENV_FILE" ]]; then
-        ts "    ! control-plane env file missing ($CONTROL_PLANE_ENV_FILE) — '$tgt' PATCHed image-only, guard env NOT applied"
-      else
-        ts "    (no control-plane guard env for '$tgt')"
-      fi
-      az containerapp update \
-        --name "$CONTAINER_APP_NAME" \
-        --resource-group "$AZURE_RESOURCE_GROUP" \
-        --container-name "$tgt" \
-        --image "$NEW_IMAGE" \
-        ${_res_flags[@]+"${_res_flags[@]}"} \
-        -o none
-    fi
   fi
+
+  if [[ ${#_env_pairs[@]} -gt 0 ]]; then
+    ts "    + applying ${#_env_pairs[@]} exact-container runtime env var(s) for '$tgt'"
+  elif [[ ! -f "$CONTROL_PLANE_ENV_FILE" && "$tgt" != "frontend" ]]; then
+    ts "    ! control-plane env file missing ($CONTROL_PLANE_ENV_FILE) — '$tgt' guard env NOT applied"
+  else
+    ts "    (no runtime env changes for '$tgt')"
+  fi
+  containerapp_patch_container \
+    "$tgt" "$NEW_IMAGE" "$_cpu" "$_memory" "${_env_pairs[@]}"
 done
 
 ts "==> Latest revision:"

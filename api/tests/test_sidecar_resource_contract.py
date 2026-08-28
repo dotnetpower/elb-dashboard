@@ -116,5 +116,7 @@ def test_quick_deploy_reconciles_resources_in_both_patch_paths() -> None:
     script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
 
     assert script.count('_res="$(container_desired_resources "$tgt")"') == 2
-    assert script.count('_res_flags=(--cpu "${_res%% *}" --memory "${_res##* }")') == 2
-    assert script.count('${_res_flags[@]+"${_res_flags[@]}"}') >= 6
+    assert script.count('_cpu="${_res%% *}"') == 2
+    assert script.count('_memory="${_res##* }"') == 2
+    assert script.count('"$tgt" "$NEW_IMAGE" "$_cpu" "$_memory"') == 1
+    assert script.count('"$tgt" "$img" "$_cpu" "$_memory"') == 1

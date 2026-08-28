@@ -4,10 +4,10 @@ Module summary: `infra/control-plane-env.json` is the single source of truth
 for the Container App GUARD/POLICY env toggles. It is read by BOTH
 `infra/modules/containerAppControl.bicep` (loadJsonContent, applied on a full
 `azd provision` / postprovision deploy) AND `scripts/dev/quick-deploy.sh`
-(applied as `--set-env-vars` on every api/worker/beat PATCH, including the
-GitHub Actions `deploy.yml` path). Without this file both fast deploy paths
-patch images only and silently skip a Bicep guard-default change, which is how
-a no-RBAC user could still load the dashboard after an apparent redeploy.
+(applied through an exact-container template PATCH, including the GitHub
+Actions `deploy.yml` path). Without this file both fast deploy paths patch
+images only and silently skip a Bicep guard-default change, which is how a
+no-RBAC user could still load the dashboard after an apparent redeploy.
 The same fast path also backfills non-secret platform coordinates required by
 runtime maintenance, including `PLATFORM_ACR_NAME` on the four Bicep-owned
 runtime sidecars.
@@ -44,13 +44,7 @@ _BICEP_PATH = _REPO_ROOT / "infra" / "modules" / "containerAppControl.bicep"
 _QUICK_DEPLOY_PATH = _REPO_ROOT / "scripts" / "dev" / "quick-deploy.sh"
 _POSTPROVISION_PATH = _REPO_ROOT / "scripts" / "dev" / "postprovision.sh"
 _SERVICE_BUS_UI_PATH = (
-    _REPO_ROOT
-    / "web"
-    / "src"
-    / "components"
-    / "settings"
-    / "sections"
-    / "ServiceBusSection.tsx"
+    _REPO_ROOT / "web" / "src" / "components" / "settings" / "sections" / "ServiceBusSection.tsx"
 )
 
 
@@ -165,11 +159,7 @@ def test_bicep_references_every_guard_key() -> None:
             if ref in bicep:
                 continue
             override_var = override_vars.get(key)
-            if (
-                override_var
-                and override_var in bicep
-                and f"controlPlaneEnv.api.{key}" in bicep
-            ):
+            if override_var and override_var in bicep and f"controlPlaneEnv.api.{key}" in bicep:
                 continue
             missing.append(ref)
     assert not missing, f"Bicep is missing references: {missing}"
@@ -178,8 +168,8 @@ def test_bicep_references_every_guard_key() -> None:
 @pytest.mark.parametrize("sidecar", ["api", "worker", "beat"])
 def test_no_secretref_keys_in_guard_json(sidecar: str) -> None:
     """The JSON only carries plain string toggles; secret-backed env (e.g.
-    EXEC_TOKEN via secretRef) must never move here — quick-deploy applies these
-    as literal `--set-env-vars`, which would expose a secret value."""
+    EXEC_TOKEN via secretRef) must never move here; secret lifecycle remains an
+    explicit Container App operation rather than a plain JSON value."""
     data = _load()
     assert "EXEC_TOKEN" not in data[sidecar]
 
@@ -191,11 +181,7 @@ def test_shared_keys_match_across_sidecars() -> None:
     between sidecars is a latent split-brain bug. Assert every key shared by
     >1 sidecar carries the same value everywhere it appears."""
     data = _load()
-    sections = {
-        name: section
-        for name, section in data.items()
-        if not name.startswith("_")
-    }
+    sections = {name: section for name, section in data.items() if not name.startswith("_")}
     # Collect, per key, the set of (sidecar -> value) where it appears.
     key_values: dict[str, dict[str, str]] = {}
     for sidecar, section in sections.items():
@@ -210,11 +196,11 @@ def test_shared_keys_match_across_sidecars() -> None:
 
 
 def test_guard_values_have_no_whitespace_or_comma() -> None:
-    """quick-deploy applies each pair as a literal `KEY=VALUE` token to
-    `az containerapp update --set-env-vars`. A value containing whitespace or a
-    comma would be mis-split by the CLI, silently truncating or mangling the
-    env var. All current toggles are `true`/`false`; this guards a future
-    value that would break the shell wiring."""
+    """Guard values remain simple literal tokens for shell transport.
+
+    All current toggles are `true`/`false`; rejecting whitespace and commas
+    prevents an ambiguous future value from crossing the shell boundary.
+    """
     data = _load()
     for sidecar, section in data.items():
         if sidecar.startswith("_"):
@@ -259,9 +245,220 @@ def test_quick_deploy_backfills_platform_acr_on_runtime_sidecars() -> None:
     assert expected not in _control_plane_pairs("frontend")
 
 
+def test_quick_deploy_uses_exact_container_env_patches() -> None:
+    script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
+    assert script.count("containerapp_patch_container \\") == 2
+    assert '--set-env-vars "${_cp_pairs[@]}"' not in script
+    assert "Content-Type=application/json" in script
+    assert '"If-Match=$etag"' in script
+    assert '[[ "$current_etag" == "$etag" ]]' in script
+    assert '[[ "$verify_status" == "unchanged" ]]' in script
+    assert 'CONTAINER_APP_API_VERSION="${CONTAINER_APP_API_VERSION:-2026-01-01}"' in script
+    assert "deadline=$((SECONDS + 300))" in script
+    assert "join(' ', [properties.provisioningState, properties.runningState])" in script
+    assert "control-plane env file missing" in script
+    assert "failed to upsert Container App secret" in script
+    assert "could not resolve immutable digest" in script
+    assert "patching with the mutable tag" not in script
+
+
+def _exact_env_patch_result(
+    tmp_path: Path,
+    *,
+    current_etag: str,
+) -> subprocess.CompletedProcess[str]:
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    rest_log = tmp_path / "rest.log"
+    before.write_text(
+        json.dumps(
+            {
+                "id": (
+                    "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/containerApps/ca"
+                ),
+                "etag": "etag-1",
+                "properties": {
+                    "template": {
+                        "containers": [
+                            {"name": "api", "image": "api:v1", "env": []},
+                            {"name": "worker", "image": "api:v1", "env": []},
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    after.write_text(
+        json.dumps(
+            {
+                "id": (
+                    "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/containerApps/ca"
+                ),
+                "etag": "etag-2",
+                "properties": {
+                    "template": {
+                        "containers": [
+                            {"name": "api", "image": "api:v1", "env": []},
+                            {
+                                "name": "worker",
+                                "image": "api:v1",
+                                "env": [
+                                    {
+                                        "name": "PLATFORM_ACR_NAME",
+                                        "value": "acrelbdashboardtest",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
+    start = script.index("containerapp_patch_container() {")
+    marker = (
+        "\n}\n\n# "
+        "---------------------------------------------------------------------------"
+        "\n# Per-sidecar"
+    )
+    end = script.index(marker, start) + len("\n}")
+    function = script[start:end]
+    command = f"""
+set -Eeuo pipefail
+REPO_ROOT={_REPO_ROOT!s}
+CONTAINER_APP_NAME=ca
+AZURE_RESOURCE_GROUP=rg
+CONTAINER_APP_API_VERSION=2026-01-01
+BEFORE={before!s}
+AFTER={after!s}
+REST_LOG={rest_log!s}
+ACTIVE_FILE={tmp_path / "active-revision.txt"!s}
+CURRENT_ETAG={current_etag}
+rest_called=0
+ts() {{ printf '%s\n' "$*"; }}
+die() {{ printf 'ERROR: %s\n' "$*" >&2; return 1; }}
+timeout() {{ shift; "$@"; }}
+az() {{
+  if [[ "$1 $2" == "containerapp show" ]]; then
+    if [[ " $* " == *" --query etag "* ]]; then
+      printf '%s\n' "$CURRENT_ETAG"
+        elif [[ " $* " == *" --query properties.latestRevisionName "* ]]; then
+            cat "$ACTIVE_FILE"
+    elif (( rest_called )); then
+      cat "$AFTER"
+    else
+      cat "$BEFORE"
+    fi
+  elif [[ "$1" == "rest" ]]; then
+    printf '%s\n' "$*" > "$REST_LOG"
+    rest_called=1
+  elif [[ "$1 $2 $3" == "containerapp revision show" ]]; then
+        previous=""
+        for arg in "$@"; do
+            if [[ "$previous" == "--revision" ]]; then
+                printf '%s\n' "$arg" > "$ACTIVE_FILE"
+            fi
+            previous="$arg"
+        done
+    printf 'Provisioned RunningAtMaxScale\n'
+  else
+    printf 'unexpected az invocation: %s\n' "$*" >&2
+    return 99
+  fi
+}}
+{function}
+containerapp_patch_container worker api:v1 "" "" PLATFORM_ACR_NAME=acrelbdashboardtest
+"""
+    return subprocess.run(  # noqa: S603 -- repository-controlled function and fixture paths.
+        ["/bin/bash", "-c", command],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_exact_container_env_shell_flow_patches_and_verifies(tmp_path: Path) -> None:
+    result = _exact_env_patch_result(tmp_path, current_etag="etag-1")
+
+    assert result.returncode == 0, result.stderr
+    assert "image/resources/env converged" in result.stdout
+    rest_call = (tmp_path / "rest.log").read_text(encoding="utf-8")
+    assert "api-version=2026-01-01" in rest_call
+    assert "Content-Type=application/json" in rest_call
+    assert "If-Match=etag-1" in rest_call
+
+
+def test_exact_container_env_shell_flow_stops_on_etag_drift(tmp_path: Path) -> None:
+    result = _exact_env_patch_result(tmp_path, current_etag="etag-concurrent")
+
+    assert result.returncode != 0
+    assert "template changed" in result.stderr
+    assert not (tmp_path / "rest.log").exists()
+
+
+def _resolve_digest_result(
+    tmp_path: Path,
+    *,
+    succeeds_on: int,
+) -> subprocess.CompletedProcess[str]:
+    script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
+    start = script.index("resolve_image_digest() {")
+    marker = (
+        "\n}\n\n# "
+        "---------------------------------------------------------------------------"
+        "\n# acr_prune"
+    )
+    end = script.index(marker, start) + len("\n}")
+    function = script[start:end]
+    counter = tmp_path / "digest-attempts.txt"
+    command = f"""
+set -Eeuo pipefail
+COUNTER={counter!s}
+SUCCEEDS_ON={succeeds_on}
+printf '0' > "$COUNTER"
+sleep() {{ :; }}
+timeout() {{ shift; "$@"; }}
+az() {{
+  count="$(cat "$COUNTER")"
+  count=$((count + 1))
+  printf '%s' "$count" > "$COUNTER"
+  if (( count >= SUCCEEDS_ON )); then
+    printf 'sha256:abcdef\n'
+  fi
+}}
+{function}
+resolve_image_digest acrelb.azurecr.io/elb-api:latest-main
+"""
+    return subprocess.run(  # noqa: S603 -- repository-controlled function.
+        ["/bin/bash", "-c", command],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_digest_resolution_retries_then_returns_immutable_ref(tmp_path: Path) -> None:
+    result = _resolve_digest_result(tmp_path, succeeds_on=3)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "acrelb.azurecr.io/elb-api@sha256:abcdef"
+    assert (tmp_path / "digest-attempts.txt").read_text(encoding="utf-8") == "3"
+
+
+def test_digest_resolution_fails_instead_of_returning_mutable_tag(tmp_path: Path) -> None:
+    result = _resolve_digest_result(tmp_path, succeeds_on=99)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "could not resolve immutable digest" in result.stderr
+    assert (tmp_path / "digest-attempts.txt").read_text(encoding="utf-8") == "3"
+
+
 def test_postprovision_prefers_container_environment_workspace() -> None:
     script = _POSTPROVISION_PATH.read_text(encoding="utf-8")
     assert "resolve_live_wall_workspace_customer_id" in script
     assert 'LOG_ANALYTICS_WORKSPACE_ID_VAL="$(resolve_live_wall_workspace_customer_id' in script
-
-
