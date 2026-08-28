@@ -5,7 +5,7 @@ Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data
 services or tasks.
 Key entry points: `_get_client`, `reverse_proxy`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
-auth gate.
+auth gate; this internal multi-method catch-all stays out of the public OpenAPI schema.
 Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
@@ -137,6 +137,7 @@ def _allowed_methods_for_known_path(request: Request) -> set[str]:
 @router.api_route(
     "/{full_path:path}",
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
 )
 async def reverse_proxy(full_path: str, request: Request) -> Response:
     """Forward the request to the frontend sidecar and stream the response.
@@ -163,24 +164,14 @@ async def reverse_proxy(full_path: str, request: Request) -> Response:
             allow_header = ", ".join(sorted(allowed))
             return Response(
                 content=(
-                    '{"detail":"method not allowed","path":"/'
-                    + full_path
-                    + '"'
-                    + rid_field
-                    + "}"
+                    '{"detail":"method not allowed","path":"/' + full_path + '"' + rid_field + "}"
                 ),
                 status_code=405,
                 media_type="application/json",
                 headers={"Allow": allow_header},
             )
         return Response(
-            content=(
-                '{"detail":"unknown api route","path":"/'
-                + full_path
-                + '"'
-                + rid_field
-                + "}"
-            ),
+            content=('{"detail":"unknown api route","path":"/' + full_path + '"' + rid_field + "}"),
             status_code=404,
             media_type="application/json",
         )

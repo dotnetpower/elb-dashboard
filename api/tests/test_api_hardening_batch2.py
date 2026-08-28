@@ -4,7 +4,7 @@ Responsibility: Lock in the request-id error envelopes (#15), the 405-vs-404
 distinction with an `Allow` header on unknown api routes (#7), the default-OFF
 `STRICT_READINESS_DETAIL` body slimming (#3), the default-OFF
 `ALLOW_ANONYMOUS_CLIENT_LOG` opt-in (#14), and the documented common error
-responses in the OpenAPI spec (#10).
+responses plus unique public operations in the OpenAPI spec (#10).
 Edit boundaries: Assertions only — no Azure or network calls. Builds isolated
 apps via `create_app()` so the env gates can be exercised in both states.
 Key entry points: `test_error_body_carries_request_id`,
@@ -12,9 +12,11 @@ Key entry points: `test_error_body_carries_request_id`,
 `test_readiness_detail_default_on`, `test_readiness_detail_stripped_when_strict`,
 `test_client_log_requires_auth_by_default`,
 `test_client_log_allows_anonymous_when_enabled`,
-`test_openapi_documents_common_error_responses`.
+`test_openapi_documents_common_error_responses`,
+`test_openapi_operation_ids_are_unique_and_internal_proxies_are_hidden`.
 Risky contracts: The default-OFF gates must preserve existing behaviour; the
-405/404 guard must never forward unknown `/api/*` paths to the SPA.
+405/404 guard must never forward unknown `/api/*` paths to the SPA; internal
+multi-method proxies must remain routable without entering the public schema.
 Validation: `uv run pytest -q api/tests/test_api_hardening_batch2.py`.
 """
 
@@ -111,9 +113,7 @@ def test_client_log_requires_auth_by_default(
 ) -> None:
     monkeypatch.delenv("ALLOW_ANONYMOUS_CLIENT_LOG", raising=False)
     client = _fresh_client(monkeypatch)
-    r = client.post(
-        "/api/client-log", json={"level": "error", "message": "boom"}
-    )
+    r = client.post("/api/client-log", json={"level": "error", "message": "boom"})
     assert r.status_code == 401
 
 
@@ -122,9 +122,7 @@ def test_client_log_allows_anonymous_when_enabled(
 ) -> None:
     monkeypatch.setenv("ALLOW_ANONYMOUS_CLIENT_LOG", "true")
     client = _fresh_client(monkeypatch)
-    r = client.post(
-        "/api/client-log", json={"level": "error", "message": "boom"}
-    )
+    r = client.post("/api/client-log", json={"level": "error", "message": "boom"})
     assert r.status_code == 204
 
 
@@ -142,3 +140,21 @@ def test_openapi_documents_common_error_responses(
     op = spec["paths"]["/api/me"]["get"]
     for code in ("401", "403", "404", "500"):
         assert code in op["responses"], f"missing {code} response on /api/me"
+
+
+def test_openapi_operation_ids_are_unique_and_internal_proxies_are_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENABLE_DOCS", "true")
+    client = _fresh_client(monkeypatch)
+    spec = client.get("/openapi.json").json()
+
+    assert "/api/aks/openapi/proxy" not in spec["paths"]
+    assert "/{full_path}" not in spec["paths"]
+    operation_ids = [
+        operation["operationId"]
+        for path_item in spec["paths"].values()
+        for operation in path_item.values()
+        if isinstance(operation, dict) and "operationId" in operation
+    ]
+    assert len(operation_ids) == len(set(operation_ids))

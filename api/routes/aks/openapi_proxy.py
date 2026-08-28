@@ -18,7 +18,8 @@ Key entry points: `aks_openapi_proxy`, `_enforce_openapi_proxy_target_path`,
 Risky contracts: The admin token MUST NOT be forwarded to a non-private IP
     unless `OPENAPI_ALLOW_PUBLIC_LB=true`; the path allowlist + deny-token list
     MUST stay so an authenticated caller cannot ride the admin token into
-    `/admin/*` on the upstream. Every non-health `/api/*` route enforces
+    `/admin/*` on the upstream. This internal multi-method transport stays out
+    of the public OpenAPI schema. Every non-health `/api/*` route enforces
     `require_caller`.
 Validation: `uv run pytest -q api/tests/test_openapi_proxy_route.py
     api/tests/test_openapi_rate_limit.py api/tests/test_route_contracts.py`.
@@ -237,8 +238,7 @@ def _enforce_openapi_proxy_target_path(target_path: str) -> None:
         detail={
             "code": "openapi_path_not_allowlisted",
             "message": (
-                "path must start with one of: "
-                + ", ".join(_OPENAPI_PROXY_ALLOWED_PATH_PREFIXES)
+                "path must start with one of: " + ", ".join(_OPENAPI_PROXY_ALLOWED_PATH_PREFIXES)
             ),
         },
     )
@@ -247,6 +247,7 @@ def _enforce_openapi_proxy_target_path(target_path: str) -> None:
 @router.api_route(
     "/openapi/proxy",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    include_in_schema=False,
 )
 async def aks_openapi_proxy(
     request: Request,
@@ -346,9 +347,7 @@ async def aks_openapi_proxy(
             # "Grant LB subnet RBAC" one-click fix; the async-safe helper
             # offloads the events read to a thread and degrades to the
             # generic peering hint when the RBAC signature is absent.
-            lb_hint = await _lb_pending_recovery_hint_async(
-                cred, sub, resource_group, cluster_name
-            )
+            lb_hint = await _lb_pending_recovery_hint_async(cred, sub, resource_group, cluster_name)
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -521,9 +520,7 @@ async def aks_openapi_proxy(
                 upstream = await client.send(upstream_req, stream=True)
     except httpx.RequestError as exc:
         await client.aclose()
-        LOGGER.warning(
-            "openapi/proxy: upstream request failed for %s: %s", upstream_base, exc
-        )
+        LOGGER.warning("openapi/proxy: upstream request failed for %s: %s", upstream_base, exc)
         raise HTTPException(
             status_code=502,
             detail={
