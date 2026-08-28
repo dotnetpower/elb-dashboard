@@ -30,9 +30,9 @@ interface BlastDbSectionProps {
   clusterName: string;
   /**
    * AKS workload cluster coordinates (name + RG) when known. Threaded to
-    * `useBlastDb` so downloads can opt into AKS fan-out and order-oracle Jobs
-    * target the same cluster; downloads still fall back to the server-side copy
-    * when AKS cannot serve them.
+   * `useBlastDb` so downloads can opt into AKS fan-out and order-oracle Jobs
+   * target the same cluster; downloads still fall back to the server-side copy
+   * when AKS cannot serve them.
    */
   aksClusterName?: string;
   aksResourceGroup?: string;
@@ -303,13 +303,15 @@ export function BlastDbSection({
           {[...downloadedDbs.entries()].map(([name, meta]) => {
             const readiness = getBlastDbReadiness(meta);
             const tone = blastDbReadinessTone(readiness);
-              const pillClass = TONE_PILL_CLASS[tone] ?? "dv3-pill-faint";
+            const pillClass = TONE_PILL_CLASS[tone] ?? "dv3-pill-faint";
             const inFlight = tone === "loading";
             return (
               <span
                 key={name}
                 className={`dv3-pill ${pillClass}`}
-                title={readiness.ready ? name : `${name} — ${blastDbReadinessLabel(readiness)}`}
+                title={
+                  readiness.ready ? name : `${name} — ${blastDbReadinessLabel(readiness)}`
+                }
                 style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
               >
                 {inFlight && <Loader2 size={10} className="spin" strokeWidth={2} />}

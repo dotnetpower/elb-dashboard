@@ -775,7 +775,8 @@ export type BlastExportFormat =
   | "json-seqalign"
   | "ncbi-hit-table-text"
   | "ncbi-hit-table-csv"
-  | "ncbi-report-text"  | "xml"
+  | "ncbi-report-text"
+  | "xml"
   | "text";
 
 export type BlastCitationFormat = "text" | "markdown" | "bibtex";

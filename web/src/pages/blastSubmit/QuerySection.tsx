@@ -265,9 +265,7 @@ export function QuerySection({
               color: form.query_data.trim() ? "var(--text-faint)" : "var(--success)",
             }}
           >
-            {form.query_data.trim()
-              ? "FASTA above will be used"
-              : "Will fetch at submit"}
+            {form.query_data.trim() ? "FASTA above will be used" : "Will fetch at submit"}
           </span>
         )}
       </div>

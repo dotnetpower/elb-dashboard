@@ -141,7 +141,10 @@ export function ShortcutOverlay({ onClose }: { onClose: () => void }) {
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <HelpCircle size={18} style={{ color: "var(--accent)" }} />
-            <h3 id="shortcut-dialog-title" style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
+            <h3
+              id="shortcut-dialog-title"
+              style={{ margin: 0, fontSize: 16, fontWeight: 700 }}
+            >
               Help & Information
             </h3>
           </div>
@@ -242,13 +245,7 @@ const kbdStyle: React.CSSProperties = {
   textAlign: "center",
 };
 
-function ShortcutGroup({
-  title,
-  shortcuts,
-}: {
-  title: string;
-  shortcuts: Shortcut[];
-}) {
+function ShortcutGroup({ title, shortcuts }: { title: string; shortcuts: Shortcut[] }) {
   return (
     <div>
       <div

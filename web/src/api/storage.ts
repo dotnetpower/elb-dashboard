@@ -61,11 +61,7 @@ export const storageApi = {
     ),
 
   /** Open the storage account's public surface to the caller's IP (local only). */
-  localDebugOpen: (
-    subscriptionId: string,
-    resourceGroup: string,
-    accountName: string,
-  ) =>
+  localDebugOpen: (subscriptionId: string, resourceGroup: string, accountName: string) =>
     api.post<StorageLocalDebugOpenResult>("/storage/local-debug/open", {
       subscription_id: subscriptionId,
       resource_group: resourceGroup,

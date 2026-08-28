@@ -129,8 +129,7 @@ export function StorageCard({
     const match = clusters.find(
       (c) =>
         c.name === oracleClusterName &&
-        (!oracleClusterResourceGroup ||
-          c.resource_group === oracleClusterResourceGroup),
+        (!oracleClusterResourceGroup || c.resource_group === oracleClusterResourceGroup),
     );
     if (!match) return true;
     return isAksWorkloadReady(match);
