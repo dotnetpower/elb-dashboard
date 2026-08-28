@@ -3,13 +3,14 @@
 Module summary: Drives `api.services.upgrade.git_workspace.clone` with a
 fake `runner` so no real terminal sidecar / git binary is needed.
 
-Responsibility: Verify argv shape, exit-code interpretation, and shape
-  guards on caller-supplied version/job_id.
+Responsibility: Verify argv shape, release-relative build metadata,
+    exit-code interpretation, and shape guards on caller-supplied version/job_id.
 Edit boundaries: When the clone argv contract changes, update these tests.
 Key entry points: Tests for happy path, failure exit, invalid inputs,
   cleanup safety guard.
 Risky contracts: Confirms the absolute target path lives under
-  `/tmp/elb-upgrade/` so cleanup cannot escape the upgrade root.  # noqa: S108
+    `/tmp/elb-upgrade/` so cleanup cannot escape the upgrade root, and commit
+    checkouts unshallow before counting `vA.B.0..HEAD`.  # noqa: S108
 Validation: `uv run pytest -q api/tests/test_upgrade_git_workspace.py`.
 """
 
@@ -19,7 +20,7 @@ from typing import Any
 
 import pytest
 from api.services import terminal_exec
-from api.services.upgrade import git_workspace
+from api.services.upgrade import git_workspace, image_builder
 
 
 class _Recorder:
@@ -32,7 +33,12 @@ class _Recorder:
 
     def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
         self.calls.append({"argv": argv, "cwd": cwd, "timeout_seconds": timeout_seconds})
-        return {"exit_code": self._exit_code, "stdout": "", "stderr": self._stderr}
+        stdout = ""
+        if argv[-2:] == ["rev-parse", "--is-shallow-repository"]:
+            stdout = "true\n"
+        elif "rev-list" in argv and "--count" in argv:
+            stdout = "35\n"
+        return {"exit_code": self._exit_code, "stdout": stdout, "stderr": self._stderr}
 
 
 def test_clone_happy_path_builds_expected_argv() -> None:
@@ -45,6 +51,7 @@ def test_clone_happy_path_builds_expected_argv() -> None:
     )
     assert result.target_dir == "/tmp/elb-upgrade/job1234"  # noqa: S108
     assert result.target_version == "0.3.0"
+    assert result.build_number == "0"
     # First call: git clone. Second call (best-effort): git config read.
     assert rec.calls[0]["argv"] == [
         "git",
@@ -159,7 +166,30 @@ def test_clone_propagates_non_zero_exit() -> None:
     assert "exit=128" in str(exc.value)
 
 
-def test_commit_clone_builds_blobless_clone_then_checkout() -> None:
+def test_clone_failure_redacts_remote_url_credentials() -> None:
+    secret = "private-password-value"
+    rec = _Recorder(
+        exit_code=128,
+        stderr=(
+            "fatal: unable to access "
+            f"'https://operator:{secret}@example.test/foo.git/'"
+        ),
+    )
+
+    with pytest.raises(git_workspace.WorkspaceError) as exc:
+        git_workspace.clone(
+            git_remote=f"https://operator:{secret}@example.test/foo.git",
+            target_version="0.3.0",
+            job_id="jobREDACT",
+            runner=rec,
+        )
+
+    message = str(exc.value)
+    assert secret not in message
+    assert "https://<credentials-redacted>@example.test" in message
+
+
+def test_commit_clone_builds_shallow_clone_then_checkout() -> None:
     rec = _Recorder(exit_code=0)
     sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
     result = git_workspace.clone(
@@ -171,6 +201,7 @@ def test_commit_clone_builds_blobless_clone_then_checkout() -> None:
         runner=rec,
     )
     assert result.target_dir == "/tmp/elb-upgrade/jobCMT1"  # noqa: S108
+    assert result.build_number == "35"
     # First: shallow no-checkout clone (mirrors the working release path's
     # --depth 1 shape, see _clone_commit).
     assert rec.calls[0]["argv"] == [
@@ -202,6 +233,15 @@ def test_commit_clone_builds_blobless_clone_then_checkout() -> None:
         "--detach",
         sha,
     ]
+    assert rec.calls[3]["argv"][-2:] == ["rev-parse", "--is-shallow-repository"]
+    assert rec.calls[4]["argv"][-4:] == ["fetch", "--unshallow", "--tags", "origin"]
+    assert rec.calls[5]["argv"][-3:] == [
+        "rev-parse",
+        "--verify",
+        "refs/tags/v0.2.0^{commit}",
+    ]
+    assert rec.calls[6]["argv"][-4:] == ["merge-base", "--is-ancestor", "v0.2.0", "HEAD"]
+    assert rec.calls[7]["argv"][-3:] == ["rev-list", "--count", "v0.2.0..HEAD"]
 
 
 def test_commit_clone_requires_full_40_hex_sha() -> None:
@@ -215,6 +255,24 @@ def test_commit_clone_requires_full_40_hex_sha() -> None:
             runner=_Recorder(),
         )
     assert "40-hex" in str(exc.value)
+
+
+def test_commit_clone_fails_before_build_when_history_fetch_fails() -> None:
+    class _HistoryFetchFails(_Recorder):
+        def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
+            if "--unshallow" in argv:
+                return {"exit_code": 128, "stdout": "", "stderr": "remote unavailable"}
+            return super().run(argv, cwd=cwd, timeout_seconds=timeout_seconds)
+
+    with pytest.raises(git_workspace.WorkspaceError, match="git history fetch"):
+        git_workspace.clone(
+            git_remote="https://example.test/foo.git",
+            target_version="0.2.0-commit.a1b2c3d",
+            job_id="jobCMT4",
+            target_kind="commit",
+            target_sha="a" * 40,
+            runner=_HistoryFetchFails(),
+        )
 
 
 def test_commit_clone_propagates_checkout_failure() -> None:
@@ -258,6 +316,12 @@ def test_clone_runs_build_file_verification_after_clone() -> None:
         assert expected in status_calls[0]["argv"]
 
 
+def test_expected_build_files_match_image_builder_plans() -> None:
+    assert set(git_workspace._EXPECTED_BUILD_FILES) == {
+        plan.dockerfile for plan in image_builder._PLANS.values()
+    }
+
+
 def test_clone_fails_when_working_tree_missing_build_files() -> None:
     """A checkout that exits 0 but leaves an empty working tree (git status
     reports the Dockerfiles as deleted) must abort the clone with a clear
@@ -277,7 +341,7 @@ def test_clone_fails_when_working_tree_missing_build_files() -> None:
                     ),
                     "stderr": "",
                 }
-            return {"exit_code": 0, "stdout": "", "stderr": ""}
+            return super().run(argv, cwd=cwd, timeout_seconds=timeout_seconds)
 
     with pytest.raises(git_workspace.WorkspaceError) as exc:
         git_workspace.clone(

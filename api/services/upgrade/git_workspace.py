@@ -1,22 +1,24 @@
 """Terminal-sidecar git clone helper for the self-upgrade flow.
 
-Module summary: Drives `git clone --depth 1 --single-branch --branch v<ver>`
-through `api.services.terminal_exec.run()` so the build pipeline has a
-local source tree of the target release. The target directory is an
-absolute path outside the exec server's owned temp dir so the clone
-survives request completion; cleanup is best-effort (`/tmp` is tmpfs in
-the terminal sidecar and is reclaimed on revision restart).
+Module summary: Drives release/commit git checkouts through
+`api.services.terminal_exec.run()` so the build pipeline has a local source
+tree and an exact release-relative build number. The target directory is an
+absolute path outside the exec server's owned temp dir so the clone survives
+request completion; cleanup is best-effort (`/tmp` is tmpfs in the terminal
+sidecar and is reclaimed on revision restart).
 
-Responsibility: Single-purpose git checkout via the terminal sidecar.
+Responsibility: Git checkout and release-relative build metadata via the terminal sidecar.
 Edit boundaries: All shell-out lives in `terminal_exec`; this module only
   constructs argv and interprets the result.
 Key entry points: `WorkspacePath`, `clone`, `cleanup`, `WorkspaceError`,
-  `target_dir_for_job`.
+    `target_dir_for_job`, `_commit_build_number`.
 Risky contracts: `target_version` and `git_remote` must already be
   validated by the upstream state row (semver shape, URL regex). This
   module does not re-validate the URL — `terminal_exec` rejects garbage
   argv shapes, and the URL itself flows from `UPGRADE_GIT_REMOTE` env via
-  the upgrade-state row.
+    the upgrade-state row. Commit checkouts calculate the numeric
+    `vA.B.0..HEAD` count from complete history, then scrub credentials before
+    build-context upload.
 Validation: `uv run pytest -q api/tests/test_upgrade_git_workspace.py`.
 """
 
@@ -27,6 +29,7 @@ import re
 from dataclasses import dataclass
 
 from api.services import terminal_exec
+from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +39,7 @@ _CLONE_ROOT = "/tmp/elb-upgrade"  # noqa: S108 — terminal sidecar tmpfs
 # full 40-hex target_sha (validated in `_clone_commit`).
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(-commit\.[0-9a-f]{7,40})?$")
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{4,64}$")
+_GIT_URL_USERINFO_RE = re.compile(r"(?i)(https?://)[^/\s'\"@]+@")
 CLONE_TIMEOUT_SECONDS = 300
 
 # Files the build pipeline (api.services.upgrade.image_builder._PLANS) feeds to
@@ -64,6 +68,7 @@ class WorkspacePath:
     target_dir: str
     target_version: str
     job_id: str
+    build_number: str = "0"
 
 
 def target_dir_for_job(job_id: str) -> str:
@@ -87,8 +92,8 @@ def clone(
     ``target_kind`` selects the checkout strategy:
       * ``"release"`` — shallow ``git clone --depth 1 --branch v<ver>`` (fast,
         the historical path). ``target_sha`` is ignored.
-      * ``"commit"`` — a blobless ``git clone --no-checkout`` of the whole
-        repo followed by ``git checkout --detach <full_sha>``. The full sha
+            * ``"commit"`` — a shallow ``git clone --no-checkout`` followed by
+                ``git checkout --detach <full_sha>``. The full sha
         (``target_sha``) is required because a shallow ``--branch <sha>`` is
         not possible; blobless keeps it fast while preserving commit
         reachability so any reachable commit can be checked out.
@@ -99,11 +104,17 @@ def clone(
     if not _VERSION_RE.match(target_version):
         raise WorkspaceError(f"invalid target_version shape: {target_version!r}")
     target_dir = target_dir_for_job(job_id)
+    build_number = "0"
     if target_kind == "commit":
         _clone_commit(
             git_remote=git_remote,
             target_sha=target_sha,
             target_dir=target_dir,
+            runner=runner,
+        )
+        build_number = _commit_build_number(
+            target_dir,
+            target_version=target_version,
             runner=runner,
         )
     else:
@@ -115,7 +126,12 @@ def clone(
         )
     _scrub_remote_credentials(target_dir, runner=runner)
     _verify_build_files_materialised(target_dir, runner=runner)
-    return WorkspacePath(target_dir=target_dir, target_version=target_version, job_id=job_id)
+    return WorkspacePath(
+        target_dir=target_dir,
+        target_version=target_version,
+        job_id=job_id,
+        build_number=build_number,
+    )
 
 
 def _run_git(argv: list[str], *, runner: object, what: str) -> dict:
@@ -126,7 +142,8 @@ def _run_git(argv: list[str], *, runner: object, what: str) -> dict:
         raise WorkspaceError(f"terminal_exec {what} error: {exc}") from exc
     exit_code = int(result.get("exit_code", -1))
     if exit_code != 0:
-        stderr = str(result.get("stderr", ""))[:1024]
+        stderr = sanitise(str(result.get("stderr", "")))
+        stderr = _GIT_URL_USERINFO_RE.sub(r"\1<credentials-redacted>@", stderr)[:1024]
         raise WorkspaceError(f"{what} failed (exit={exit_code}): {stderr}")
     return result
 
@@ -242,6 +259,53 @@ def _clone_commit(
     _run_git(fetch_argv, runner=runner, what="git fetch")
     checkout_argv = ["git", "-C", target_dir, "checkout", "--detach", sha]
     _run_git(checkout_argv, runner=runner, what="git checkout")
+
+
+def _commit_build_number(
+    target_dir: str,
+    *,
+    target_version: str,
+    runner: object,
+) -> str:
+    """Return the exact commit count since the target release tag."""
+    release = target_version.split("-", 1)[0]
+    tag = f"v{release}"
+    shallow = _run_git(
+        ["git", "-C", target_dir, "rev-parse", "--is-shallow-repository"],
+        runner=runner,
+        what="git shallow check",
+    )
+    if str(shallow.get("stdout") or "").strip().lower() == "true":
+        _run_git(
+            ["git", "-C", target_dir, "fetch", "--unshallow", "--tags", "origin"],
+            runner=runner,
+            what="git history fetch",
+        )
+    else:
+        _run_git(
+            ["git", "-C", target_dir, "fetch", "--tags", "origin"],
+            runner=runner,
+            what="git tag fetch",
+        )
+    _run_git(
+        ["git", "-C", target_dir, "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"],
+        runner=runner,
+        what="release tag verification",
+    )
+    _run_git(
+        ["git", "-C", target_dir, "merge-base", "--is-ancestor", tag, "HEAD"],
+        runner=runner,
+        what="release ancestry verification",
+    )
+    count = _run_git(
+        ["git", "-C", target_dir, "rev-list", "--count", f"{tag}..HEAD"],
+        runner=runner,
+        what="build number calculation",
+    )
+    value = str(count.get("stdout") or "").strip()
+    if not value.isdigit():
+        raise WorkspaceError("build number calculation returned a non-numeric value")
+    return value
 
 
 def _scrub_remote_credentials(target_dir: str, *, runner: object) -> None:

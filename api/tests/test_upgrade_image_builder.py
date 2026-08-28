@@ -5,11 +5,12 @@ fake `runner` and the in-memory build-log backend so no terminal sidecar
 or Azure Blob endpoint is touched.
 
 Responsibility: Verify argv shape, log streaming, exit-code handling, and
-  per-component result envelopes.
+    per-component result envelopes, including frontend build-number stamping.
 Edit boundaries: Update when build plans or argv shape change.
 Key entry points: Tests for happy path, failure, log capture, env guards.
 Risky contracts: Confirms `PLATFORM_ACR_NAME` is required and that
-  `target_version` must be semver.
+    `target_version` must be semver; only the frontend receives the numeric
+    `APP_BUILD_NUMBER` argument.
 Validation: `uv run pytest -q api/tests/test_upgrade_image_builder.py`.
 """
 
@@ -78,6 +79,7 @@ def test_build_happy_path_returns_image_ref_and_logs() -> None:
     # detection depends on it.
     assert "--build-arg" in argv
     assert "APP_VERSION=0.3.0" in argv
+    assert not any(a.startswith("APP_BUILD_NUMBER=") for a in argv)
 
 
 def test_build_propagates_non_zero_exit_as_error() -> None:
@@ -106,6 +108,29 @@ def test_build_rejects_invalid_target_version() -> None:
         )
 
 
+def test_build_rejects_non_numeric_build_number() -> None:
+    with pytest.raises(image_builder.ImageBuilderError, match="build_number"):
+        image_builder.build(
+            component="frontend",
+            target_version="0.3.0",
+            source_dir="/tmp/elb-upgrade/jobABCD",  # noqa: S108
+            job_id="jobABCD",
+            build_number="unknown",
+            runner=_StreamingRunner(exit_code=0, lines=[]),
+        )
+
+
+def test_commit_build_requires_explicit_build_number() -> None:
+    with pytest.raises(image_builder.ImageBuilderError, match="required for commit"):
+        image_builder.build(
+            component="frontend",
+            target_version="0.3.0-commit.a1b2c3d",
+            source_dir="/tmp/elb-upgrade/jobABCD",  # noqa: S108
+            job_id="jobABCD",
+            runner=_StreamingRunner(exit_code=0, lines=[]),
+        )
+
+
 def test_build_commit_version_tags_image_and_stamps_frontend_commit() -> None:
     # api: commit-versioned tag, APP_VERSION baked, no GIT_COMMIT (api Dockerfile
     # does not declare it).
@@ -115,6 +140,7 @@ def test_build_commit_version_tags_image_and_stamps_frontend_commit() -> None:
         target_version="0.2.0-commit.a1b2c3d",
         source_dir="/tmp/elb-upgrade/jobCMT",  # noqa: S108
         job_id="jobCMT",
+        build_number="35",
         runner=runner,
     )
     assert result.image_ref == "myacr.azurecr.io/elb-api:v0.2.0-commit.a1b2c3d"
@@ -131,10 +157,12 @@ def test_build_commit_version_tags_image_and_stamps_frontend_commit() -> None:
         target_version="0.2.0-commit.a1b2c3d",
         source_dir="/tmp/elb-upgrade/jobCMT",  # noqa: S108
         job_id="jobCMT",
+        build_number="35",
         runner=fe_runner,
     )
     fe_argv = fe_runner.calls[0]["argv"]
     assert "GIT_COMMIT=a1b2c3d" in fe_argv
+    assert "APP_BUILD_NUMBER=35" in fe_argv
 
 
 def test_build_terminal_passes_acr_base_image_arg() -> None:
@@ -147,6 +175,7 @@ def test_build_terminal_passes_acr_base_image_arg() -> None:
         target_version="0.2.0-commit.a1b2c3d",
         source_dir="/tmp/elb-upgrade/jobCMT",  # noqa: S108
         job_id="jobCMT",
+        build_number="35",
         runner=runner,
     )
     argv = runner.calls[0]["argv"]
@@ -158,6 +187,7 @@ def test_build_terminal_passes_acr_base_image_arg() -> None:
         target_version="0.2.0-commit.a1b2c3d",
         source_dir="/tmp/elb-upgrade/jobCMT",  # noqa: S108
         job_id="jobCMT",
+        build_number="35",
         runner=api_runner,
     )
     assert not any(
@@ -181,13 +211,15 @@ def test_build_all_iterates_components_in_order() -> None:
     runner = _StreamingRunner(exit_code=0, lines=["ok"])
     results = list(
         image_builder.build_all(
-            target_version="0.3.0",
+            target_version="0.3.0-commit.a1b2c3d",
             source_dir="/tmp/elb-upgrade/jobABCD",  # noqa: S108
             job_id="jobABCD",
+            build_number="35",
             runner=runner,
         )
     )
     assert [r.component for r in results] == ["api", "frontend", "terminal"]
+    assert "APP_BUILD_NUMBER=35" in runner.calls[1]["argv"]
 
 
 class _RunRecorder:

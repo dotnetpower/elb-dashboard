@@ -6,8 +6,8 @@ rolling_out -> succeeded) can be exercised without a terminal sidecar
 or ARM. Also covers the rollback + reconciler paths added in PR3.
 
 Responsibility: Verify state-machine transitions, CAS gating against
-  concurrent operators, `failed_pre`/`failed_rollout`, rollback, and
-  the post-rollout reconciler.
+    concurrent operators, workspace build-number propagation,
+    `failed_pre`/`failed_rollout`, rollback, and the post-rollout reconciler.
 Edit boundaries: Update when the state machine or transition labels
   change.
 Key entry points: Tests for happy path, double-start refusal,
@@ -49,7 +49,12 @@ class _FakeRunner:
 
     def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
         self.run_calls.append({"argv": argv})
-        return {"exit_code": self._clone_exit, "stdout": "", "stderr": ""}
+        stdout = ""
+        if argv[-2:] == ["rev-parse", "--is-shallow-repository"]:
+            stdout = "true\n"
+        elif "rev-list" in argv and "--count" in argv:
+            stdout = "35\n"
+        return {"exit_code": self._clone_exit, "stdout": stdout, "stderr": ""}
 
     def stream(
         self, argv: list[str], *, cwd: str | None = None, timeout_seconds: int
@@ -231,6 +236,12 @@ def test_commit_execute_uses_commit_clone_and_reaches_rolling_out(env: None) -> 
     )
     # Images + swap carry the commit-versioned tag.
     assert aca.swap_calls[0][0] == "0.2.0-commit.a1b2c3d"
+    assert "APP_BUILD_NUMBER=35" in runner.stream_calls[1]["argv"]
+    assert not any(
+        arg.startswith("APP_BUILD_NUMBER=")
+        for call in (runner.stream_calls[0], runner.stream_calls[2])
+        for arg in call["argv"]
+    )
 
 
 def test_failed_swap_marks_failed_rollout(env: None) -> None:

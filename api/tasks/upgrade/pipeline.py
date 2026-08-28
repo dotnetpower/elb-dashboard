@@ -17,10 +17,11 @@ Key entry points: `start_upgrade_inline`, `execute_upgrade_inline`,
   `STATE_TRANSITION_TIMELINE`.
 Risky contracts: `start_upgrade_inline` and the pipeline are the single
   funnel through which concurrent operators are serialised via state
-  CAS. `execute_upgrade_inline` commits `state=rolling_out` BEFORE the
-  ARM PATCH so the row survives the producing revision being torn
-  down — the reconciler on the freshly booted revision then finalises
-  the state.
+    CAS. The workspace's verified build number must reach every image build so
+    the frontend stamp identifies the target commit. `execute_upgrade_inline`
+    commits `state=rolling_out` BEFORE the ARM PATCH so the row survives the
+    producing revision being torn down — the reconciler on the freshly booted
+    revision then finalises the state.
 Validation: `uv run pytest -q api/tests/test_upgrade_task.py`.
 """
 
@@ -434,6 +435,7 @@ def execute_upgrade_inline(
                 target_version=target_version,
                 source_dir=workspace.target_dir,
                 job_id=job_id,
+                build_number=workspace.build_number,
                 runner=runner,
             )
         except image_builder.ImageBuilderError as exc:

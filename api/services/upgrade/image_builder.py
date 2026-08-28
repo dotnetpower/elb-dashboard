@@ -12,8 +12,9 @@ Key entry points: `BuildPlan`, `plan_builds`, `build`, `build_all`,
   `ImageBuilderError`, `ImageBuildResult`.
 Risky contracts: Reads the platform ACR name from `PLATFORM_ACR_NAME` env;
   the image tag must already be a validated target version (`A.B.C` release or
-  `A.B.C-commit.<sha>` commit form). The injected `runner` defaults to
-  `terminal_exec` and is replaced in tests.
+    `A.B.C-commit.<sha>` commit form). Frontend builds must receive the numeric
+    release-relative build number resolved by `git_workspace`. The injected
+    `runner` defaults to `terminal_exec` and is replaced in tests.
 Validation: `uv run pytest -q api/tests/test_upgrade_image_builder.py`.
 """
 
@@ -93,9 +94,16 @@ def plan_builds(components: list[str] | None = None) -> list[BuildPlan]:
     return out
 
 
-def _validate_inputs(target_version: str) -> None:
+def _validate_inputs(target_version: str, build_number: str | None) -> str:
     if not _VERSION_RE.match(target_version):
         raise ImageBuilderError(f"invalid target_version: {target_version!r}")
+    if build_number is None:
+        if "-commit." in target_version:
+            raise ImageBuilderError("build_number is required for commit builds")
+        return "0"
+    if not build_number.isdigit():
+        raise ImageBuilderError(f"invalid build_number: {build_number!r}")
+    return build_number
 
 
 def _acr_name() -> str:
@@ -145,7 +153,13 @@ def ensure_exec_az_login(*, runner: object = terminal_exec) -> None:
         )
 
 
-def _argv_for(plan: BuildPlan, *, target_version: str, source_dir: str) -> list[str]:
+def _argv_for(
+    plan: BuildPlan,
+    *,
+    target_version: str,
+    source_dir: str,
+    build_number: str,
+) -> list[str]:
     acr = _acr_name()
     tag = f"v{target_version}"
     argv = [
@@ -174,8 +188,10 @@ def _argv_for(plan: BuildPlan, *, target_version: str, source_dir: str) -> list[
     from api.services.upgrade.version_target import commit_short_sha
 
     short_sha = commit_short_sha(target_version)
-    if short_sha and plan.component == "frontend":
-        argv += ["--build-arg", f"GIT_COMMIT={short_sha}"]
+    if plan.component == "frontend":
+        argv += ["--build-arg", f"APP_BUILD_NUMBER={build_number}"]
+        if short_sha:
+            argv += ["--build-arg", f"GIT_COMMIT={short_sha}"]
     # The terminal runtime image is a thin overlay on a heavy toolchain base
     # (terminal/Dockerfile.runtime: `FROM ${TERMINAL_BASE_IMAGE}`). Its default
     # ARG value `elb-terminal-base:latest` has no registry prefix, so an ACR
@@ -203,12 +219,18 @@ def build(
     target_version: str,
     source_dir: str,
     job_id: str,
+    build_number: str | None = None,
     runner: object = terminal_exec,
 ) -> ImageBuildResult:
     """Build a single component image into the platform ACR."""
-    _validate_inputs(target_version)
+    build_number = _validate_inputs(target_version, build_number)
     plan = plan_builds([component])[0]
-    argv = _argv_for(plan, target_version=target_version, source_dir=source_dir)
+    argv = _argv_for(
+        plan,
+        target_version=target_version,
+        source_dir=source_dir,
+        build_number=build_number,
+    )
     writer = build_logs.open_writer(job_id, plan.component)
     # Diagnostic: confirm the Dockerfile is physically present in the cloned
     # context right before `az acr build` checks `os.path.isfile`. `git status`
@@ -264,6 +286,7 @@ def build_all(
     target_version: str,
     source_dir: str,
     job_id: str,
+    build_number: str | None = None,
     components: list[str] | None = None,
     runner: object = terminal_exec,
 ) -> Iterator[ImageBuildResult]:
@@ -279,5 +302,6 @@ def build_all(
             target_version=target_version,
             source_dir=source_dir,
             job_id=job_id,
+            build_number=build_number,
             runner=runner,
         )
