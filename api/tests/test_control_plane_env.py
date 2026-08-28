@@ -1,4 +1,4 @@
-"""Guard: control-plane env single-source-of-truth stays consistent.
+"""Guard: control-plane env and platform coordinates stay consistent.
 
 Module summary: `infra/control-plane-env.json` is the single source of truth
 for the Container App GUARD/POLICY env toggles. It is read by BOTH
@@ -8,6 +8,9 @@ for the Container App GUARD/POLICY env toggles. It is read by BOTH
 GitHub Actions `deploy.yml` path). Without this file both fast deploy paths
 patch images only and silently skip a Bicep guard-default change, which is how
 a no-RBAC user could still load the dashboard after an apparent redeploy.
+The same fast path also backfills non-secret platform coordinates required by
+runtime maintenance, including `PLATFORM_ACR_NAME` on the four Bicep-owned
+runtime sidecars.
 
 This test fails loudly when the file is malformed, when a guard key Bicep
 references disappears, or when the security-critical default
@@ -20,7 +23,9 @@ Edit boundaries: Only asserts the JSON shape + that Bicep references every key.
 Key entry points: `test_*`.
 Risky contracts: The JSON keys and the `controlPlaneEnv.<sidecar>.<KEY>`
     references in the Bicep module must stay in lockstep; this test cross-checks
-    them so a rename in one place fails CI instead of drifting silently.
+    them so a rename in one place fails CI instead of drifting silently. Core
+    coordinate backfills must match Bicep sidecar ownership and remain
+    non-secret.
 Validation: `uv run pytest -q api/tests/test_control_plane_env.py`.
 """
 
@@ -227,6 +232,7 @@ def _control_plane_pairs(sidecar: str) -> list[str]:
     function = script[start:end]
     command = (
         f"CONTROL_PLANE_ENV_FILE='{_JSON_PATH}'; "
+        "ACR_NAME=acrelbdashboardtest; "
         "LOG_ANALYTICS_WORKSPACE_ID=648cd0d4-a8b7-41da-a22c-050b5217b153; "
         f"{function}; control_plane_env_pairs '{sidecar}'"
     )
@@ -244,6 +250,13 @@ def test_quick_deploy_upserts_live_wall_workspace_on_api_only() -> None:
     assert expected in _control_plane_pairs("api")
     assert expected not in _control_plane_pairs("worker")
     assert expected not in _control_plane_pairs("beat")
+
+
+def test_quick_deploy_backfills_platform_acr_on_runtime_sidecars() -> None:
+    expected = "PLATFORM_ACR_NAME=acrelbdashboardtest"
+    for sidecar in ("api", "worker", "beat", "terminal"):
+        assert expected in _control_plane_pairs(sidecar)
+    assert expected not in _control_plane_pairs("frontend")
 
 
 def test_postprovision_prefers_container_environment_workspace() -> None:

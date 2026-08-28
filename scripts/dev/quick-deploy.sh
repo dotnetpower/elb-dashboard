@@ -114,6 +114,12 @@ for k, v in section.items():
     value = os.environ[k] if k in os.environ else v
     print(f"{k}={value}")
 PY
+  # Core platform coordinate declared on the same four sidecars in Bicep.
+  # Backfill it on every fast patch so an older live template converges instead
+  # of leaving self-upgrade/revision-GC unable to resolve the platform ACR.
+  if [[ "$sidecar" =~ ^(api|worker|beat|terminal)$ && -n "${ACR_NAME:-}" ]]; then
+    printf 'PLATFORM_ACR_NAME=%s\n' "$ACR_NAME"
+  fi
   # Live Wall queries ContainerAppConsoleLogs_CL through LogsQueryClient,
   # whose workspace_id contract is the customer GUID, not an ARM resource id.
   # az-context resolves that authoritative value from the Container Apps
