@@ -7,7 +7,7 @@ import {
   BookOpen,
   Github,
   Server,
-  Activity,
+  Dna,
   Code2,
   HelpCircle,
   X,
@@ -15,6 +15,7 @@ import {
 
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { formatBuildVersion } from "@/utils/buildVersion";
 
 type Shortcut = { key: string; label: string; action: string };
 
@@ -290,6 +291,8 @@ function ShortcutGroup({
 }
 
 function AboutTab() {
+  const buildVersion = formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* App info */}
@@ -307,12 +310,12 @@ function AboutTab() {
               width: 40,
               height: 40,
               borderRadius: 10,
-              background: "linear-gradient(135deg, var(--accent), var(--purple))",
+              background: "linear-gradient(135deg, #6e9fff, #b877d9)",
               display: "grid",
               placeItems: "center",
             }}
           >
-            <Activity size={20} style={{ color: "#fff" }} />
+            <Dna size={20} strokeWidth={1.5} style={{ color: "#fff" }} />
           </div>
           <div>
             <div style={{ fontSize: 15, fontWeight: 700 }}>
@@ -324,10 +327,10 @@ function AboutTab() {
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <InfoItem label="Version" value="0.1.0" />
-          <InfoItem label="Runtime" value="Azure Functions + SWA" />
+          <InfoItem label="Version" value={`v${buildVersion} · ${__APP_COMMIT__}`} />
+          <InfoItem label="Runtime" value="Azure Container Apps" />
           <InfoItem label="Auth" value="Microsoft Entra ID" />
-          <InfoItem label="Backend" value="Python 3.11" />
+          <InfoItem label="Backend" value="FastAPI / Python 3.12" />
           <InfoItem label="Frontend" value="React + TypeScript" />
           <InfoItem label="BLAST+" value="2.17.0 (NCBI)" />
         </div>
@@ -349,13 +352,16 @@ function AboutTab() {
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {[
+            "Azure Container Apps",
             "Azure Kubernetes Service",
-            "Durable Functions",
-            "Azure Blob Storage",
+            "FastAPI",
+            "Celery",
+            "Redis",
+            "Azure Storage",
             "Azure Container Registry",
             "MSAL.js",
             "Key Vault",
-            "Workload Identity",
+            "Managed Identity",
             "Vite",
             "TanStack Query",
             "Pydantic",
