@@ -17,7 +17,8 @@ Risky contracts: The authoritative orphan signal is the K8s Job lookup, NOT age 
     ``nt`` download can run for many hours, so age-only resets would abort
     live downloads. Age is used only as a fallback when no ``aks_job_ref`` is recorded
     (server-side mode). The reset mutator re-validates both ``update_started_at`` and the
-    owner token under the ETag so an interleaved new dispatch is never reset.
+    owner token under the ETag so an interleaved new dispatch is never reset. NCBI Direct
+    recovery terminalizes only ``pending_generation`` and preserves active copy/shard state.
 Validation: ``uv run pytest -q api/tests/test_orphan_prepare_db_reconcile.py``.
 """
 
@@ -37,7 +38,7 @@ LOGGER = logging.getLogger(__name__)
 # An empty phase is treated as non-terminal because every dispatch writes
 # ``phase="queued"`` first; a missing phase therefore implies an odd/old row
 # that should still be eligible for the authoritative Job check.
-_NON_TERMINAL_PHASES = frozenset({"", "queued", "copying", "running"})
+_NON_TERMINAL_PHASES = frozenset({"", "queued", "copying", "downloading", "running"})
 
 _METADATA_SUFFIX = "-metadata.json"
 
@@ -102,10 +103,14 @@ def classify_prepare_db_entry(
     phase = ""
     if isinstance(copy_status, dict):
         phase = str(copy_status.get("phase") or "").lower()
+    ref = metadata.get("aks_job_ref")
+    isolated_direct = bool(isinstance(ref, dict) and ref.get("source_provider") == "ncbi-direct")
+    pending_generation = metadata.get("pending_generation")
+    if isolated_direct and isinstance(pending_generation, dict):
+        phase = str(pending_generation.get("phase") or "").lower()
     if phase not in _NON_TERMINAL_PHASES:
         return ("skip-terminal", f"copy_status.phase={phase!r} is terminal")
 
-    ref = metadata.get("aks_job_ref")
     has_ref = isinstance(ref, dict) and bool(ref.get("job_name")) and bool(ref.get("cluster_name"))
 
     if has_ref:
@@ -316,6 +321,9 @@ def reconcile_orphaned_prepare_db(
         # action == "reset"
         observed_started_at = str(metadata.get("update_started_at") or "")
         observed_operation_id = str(metadata.get("prepare_operation_id") or "")
+        isolated_direct = bool(
+            isinstance(ref, dict) and ref.get("source_provider") == "ncbi-direct"
+        )
         staged = _count_staged_blobs(container, db_name)
         success = staged[0] if staged else None
         copy_status = metadata.get("copy_status")
@@ -331,6 +339,7 @@ def reconcile_orphaned_prepare_db(
             _mode: str = mode_label,
             _success: int | None = success,
             _total: Any = total_files,
+            _isolated_direct: bool = isolated_direct,
         ) -> dict[str, Any]:
             # Re-validate under the ETag — a fresh dispatch may have replaced
             # this orphan between our read and this write.
@@ -338,6 +347,10 @@ def reconcile_orphaned_prepare_db(
                 raise _SkipReset
             cs = meta.get("copy_status")
             phase = str(cs.get("phase") or "").lower() if isinstance(cs, dict) else ""
+            if _isolated_direct:
+                pending = meta.get("pending_generation")
+                if isinstance(pending, dict):
+                    phase = str(pending.get("phase") or "").lower()
             if phase not in _NON_TERMINAL_PHASES:
                 raise _SkipReset
             if str(meta.get("update_started_at") or "") != _started:
@@ -360,9 +373,16 @@ def reconcile_orphaned_prepare_db(
                 summary["total_files"] = _total
             if _success is not None:
                 summary["success"] = _success
-            meta["copy_status"] = summary
+            if _isolated_direct:
+                pending = dict(meta.get("pending_generation") or {})
+                pending.update(summary)
+                meta["pending_generation"] = pending
+            else:
+                meta["copy_status"] = summary
             meta.pop("aks_job_ref", None)
             meta.pop("updating_to_source_version", None)
+            if _isolated_direct:
+                return meta
             return invalidate_shard_publication(
                 meta,
                 error=f"prepare-db reconciler: {_reason}",
@@ -384,6 +404,17 @@ def reconcile_orphaned_prepare_db(
             continue
 
         LOGGER.info("orphan reconcile reset db=%s reason=%s", db_name, reason)
+        if isolated_direct and observed_operation_id:
+            try:
+                from api.services.ncbi_direct_lock import release_direct_lock
+
+                release_direct_lock(observed_operation_id)
+            except Exception as exc:
+                LOGGER.warning(
+                    "orphan reconcile Direct lock release failed db=%s: %s",
+                    db_name,
+                    type(exc).__name__,
+                )
         result["reset"].append(db_name)
 
     return result

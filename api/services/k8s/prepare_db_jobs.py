@@ -440,6 +440,11 @@ def build_prepare_db_scripts_configmap(
         # Each shard list is newline-joined. Empty trailing newline so
         # `read -r` in the shell sees the last line.
         data[f"shard-{i:02d}.txt"] = ("\n".join(files) + "\n") if files else ""
+    encoded_size = sum(len(value.encode("utf-8")) for value in data.values())
+    if encoded_size > 900 * 1024:
+        raise ValueError(
+            f"prepare-db ConfigMap exceeds the 900 KiB safety cap ({encoded_size} bytes)"
+        )
     return {
         "apiVersion": "v1",
         "kind": "ConfigMap",
@@ -788,9 +793,7 @@ def delete_prepare_db_job(
             "ok": job_resp.status_code in (200, 202, 404),
         }
         if configmap_name:
-            cm_url = (
-                f"{server}/api/v1/namespaces/{namespace}/configmaps/{configmap_name}"
-            )
+            cm_url = f"{server}/api/v1/namespaces/{namespace}/configmaps/{configmap_name}"
             cm_resp = session.delete(cm_url, timeout=10)
             results["configmap"] = {
                 "status_code": cm_resp.status_code,
@@ -887,9 +890,7 @@ def _create_job_if_absent(
             terminating = False
             try:
                 body = existing.json()
-                terminating = bool(
-                    (body.get("metadata") or {}).get("deletionTimestamp")
-                )
+                terminating = bool((body.get("metadata") or {}).get("deletionTimestamp"))
             except Exception:
                 terminating = False
             if not terminating:
@@ -900,10 +901,7 @@ def _create_job_if_absent(
                     "status": "error",
                     "name": name,
                     "terminating": True,
-                    "error": (
-                        "previous Job is still terminating after a cancel; "
-                        "retry shortly"
-                    ),
+                    "error": ("previous Job is still terminating after a cancel; retry shortly"),
                 }
             time.sleep(min(poll_interval_seconds, remaining))
             continue
@@ -934,4 +932,3 @@ def _create_job_if_absent(
             "status_code": create.status_code,
             "error": create.text[:300],
         }
-

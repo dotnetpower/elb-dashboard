@@ -268,6 +268,21 @@ def test_mode_aks_requires_aks_resource_group_and_cluster_name(
     assert "aks_resource_group" in resp.json()["detail"]
 
 
+def test_ncbi_direct_source_requires_explicit_aks_mode(client: TestClient) -> None:
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+        "db_name": "core_nt",
+        "source": "ncbi-direct",
+    }
+
+    resp = client.post("/api/storage/prepare-db", json=body)
+
+    assert resp.status_code == 400
+    assert "requires mode=aks" in resp.json()["detail"]
+
+
 def test_mode_aks_unavailable_returns_409(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -797,8 +812,11 @@ def test_mode_aks_persists_aks_job_ref_in_metadata(
     assert ref["started_at"]
 
 
+@pytest.mark.parametrize("isolated_direct", [False, True])
 def test_cancel_aks_path_deletes_k8s_job(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_direct: bool,
 ) -> None:
     """The cancel endpoint must delete the K8s Job + ConfigMap when the
     in-flight prepare-db was dispatched via mode=aks. Without this fix,
@@ -814,12 +832,30 @@ def test_cancel_aks_path_deletes_k8s_job(
         "configmap_name": "prepare-db-core-nt-260521010502",
         "started_at": "2026-05-28T00:00:00+00:00",
     }
+    if isolated_direct:
+        aks_ref["source_provider"] = "ncbi-direct"
     container._meta = {
         "db_name": "core_nt",
         "update_in_progress": True,
+        "prepare_operation_id": "prepare-owner",
         "copy_status": {"phase": "copying", "mode": "aks"},
         "aks_job_ref": aks_ref,
     }
+    if isolated_direct:
+        container._meta.update(
+            {
+                "active_prefix": "core_nt/generations/ncbi-direct-20260801-aaaaaaaaaaaa/core_nt",
+                "sharded": True,
+                "shard_sets": [1, 2],
+                "pending_generation": {
+                    "id": "ncbi-direct-20260819-bbbbbbbbbbbb",
+                    "phase": "downloading",
+                    "source_provider": "ncbi-direct",
+                    "data_prefix": "core_nt/generations/ncbi-direct-20260819-bbbbbbbbbbbb",
+                },
+                "copy_status": {"phase": "completed", "mode": "aks"},
+            }
+        )
     monkeypatch.setattr(
         "azure.storage.blob.BlobServiceClient",
         lambda **_kw: _FakeBlobSvc(container),
@@ -869,6 +905,11 @@ def test_cancel_aks_path_deletes_k8s_job(
         _fake_delete,
         raising=True,
     )
+    released_locks: list[str] = []
+    monkeypatch.setattr(
+        "api.services.ncbi_direct_lock.release_direct_lock",
+        lambda owner: released_locks.append(owner) or True,
+    )
 
     body = {
         "subscription_id": "00000000-0000-0000-0000-000000000001",
@@ -892,10 +933,17 @@ def test_cancel_aks_path_deletes_k8s_job(
 
     # Metadata cleared
     assert container._meta["update_in_progress"] is False
-    assert container._meta["copy_status"]["phase"] == "cancelled"
-    assert container._meta["copy_status"]["mode"] == "aks"
-    assert container._meta["copy_status"]["aks_job_deleted"]["status"] == "deleted"
+    if isolated_direct:
+        assert container._meta["copy_status"] == {"phase": "completed", "mode": "aks"}
+        assert container._meta["pending_generation"]["phase"] == "cancelled"
+        assert container._meta["sharded"] is True
+        assert container._meta["shard_sets"] == [1, 2]
+    else:
+        assert container._meta["copy_status"]["phase"] == "cancelled"
+        assert container._meta["copy_status"]["mode"] == "aks"
+        assert container._meta["copy_status"]["aks_job_deleted"]["status"] == "deleted"
     assert "aks_job_ref" not in container._meta
+    assert released_locks == (["prepare-owner"] if isolated_direct else [])
 
 
 def test_cancel_server_side_path_skips_aks_delete(

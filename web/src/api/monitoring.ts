@@ -618,7 +618,11 @@ export const monitoringApi = {
      * lacks Storage Blob Data Contributor. Omitting the coordinates preserves
      * the legacy server-side-only behaviour.
      */
-    aks?: { resourceGroup?: string; clusterName?: string },
+    aks?: {
+      resourceGroup?: string;
+      clusterName?: string;
+      source?: "s3" | "ncbi-direct";
+    },
   ) => {
     const useAks = Boolean(aks?.resourceGroup && aks?.clusterName);
     return api.post<{
@@ -641,6 +645,12 @@ export const monitoringApi = {
             mode: "auto",
             aks_resource_group: aks!.resourceGroup,
             cluster_name: aks!.clusterName,
+            ...(aks!.source
+              ? {
+                  source: aks!.source,
+                  mode: aks!.source === "ncbi-direct" ? "aks" : "auto",
+                }
+              : {}),
           }
         : {}),
     });

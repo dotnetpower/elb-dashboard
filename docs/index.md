@@ -47,7 +47,7 @@ jsonld: |
         "name": "Who actually downloads BLAST databases from NCBI — the api sidecar, the terminal sidecar, or AKS?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "None of them transfer the bytes. The api sidecar's /api/storage/prepare-db route orchestrates the work by issuing per-file Azure Blob server-side copies (start_copy_from_url) from the public NCBI S3 mirror straight into the workload Storage account's blast-db container. Azure Storage itself performs the copy; the api sidecar only kicks off the operations, polls copy.status in a background daemon, and promotes the new source_version once every file reaches success. The terminal sidecar and AKS are not involved in the download path."
+          "text": "The default S3 path is orchestrated by the api sidecar and transfers bytes through Azure Blob server-side copy or AKS azcopy fan-out. When an official NCBI release has not reached S3 and the deployment explicitly enables NCBI Direct, an AKS Indexed Job downloads the pinned HTTPS archives, verifies MD5, stages a generation, and promotes it only after complete validation. The browser and terminal sidecar never carry the database bytes."
         }
       },
       {
@@ -227,17 +227,16 @@ concurrent transfers). The browser never receives a SAS URL.
 
 ### Who actually downloads BLAST databases from NCBI — the `api` sidecar, the `terminal` sidecar, or AKS?
 
-None of them transfer the bytes. The `api` sidecar's
-`POST /api/storage/prepare-db` route orchestrates the work by issuing per-file
-Azure Blob server-side copies (`start_copy_from_url`) from the public
+The `api` sidecar's `POST /api/storage/prepare-db` route orchestrates both
+paths. The default path issues per-file Azure Blob server-side copies
+(`start_copy_from_url`) or an AKS `azcopy` fan-out from the public
 [NCBI BLAST S3 mirror](https://registry.opendata.aws/ncbi-blast-databases/)
-straight into the workload Storage account's `blast-db` container. Azure
-Storage itself performs the copy; the `api` sidecar only kicks off the
-operations, polls `copy.status` in a background daemon every 60 s, and
-only promotes the new `source_version` once every file reaches `success`
-(atomic generation cut-over). The `terminal` sidecar and AKS are not
-involved in the download path — AKS only enters later for the warmup
-`vmtouch` DaemonSet and the BLAST job pods themselves.
+into the workload Storage account's `blast-db` container. When an official
+NCBI release has not reached S3 and the deployment explicitly enables
+**NCBI Direct (HTTPS)**, an AKS Indexed Job downloads pinned archives,
+verifies their official MD5 values, stages a generation-specific prefix, and
+promotes it only after every file and shard layout passes validation. The
+browser and `terminal` sidecar never carry the database bytes.
 
 ### Does it support AWS or GCP?
 

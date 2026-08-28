@@ -393,7 +393,16 @@ def _base_kwargs(**overrides: Any) -> dict[str, Any]:
 
 
 def test_aks_task_happy_path_promotes_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    container = _FakeContainer({"db_name": "core_nt"})
+    container = _FakeContainer(
+        {
+            "db_name": "core_nt",
+            "active_prefix": "core_nt/generations/ncbi-direct-20260819-aaaaaaaaaaaa/core_nt",
+            "active_generation": {"id": "ncbi-direct-20260819-aaaaaaaaaaaa"},
+            "shard_layout_prefix": "core_nt/generations/ncbi-direct-20260819-aaaaaaaaaaaa/shards",
+            "source_release_at": "2026-08-19T00:00:00",
+            "release_fingerprint": "a" * 64,
+        }
+    )
     _set_container(container)
 
     submit_calls: list[dict[str, Any]] = []
@@ -434,6 +443,12 @@ def test_aks_task_happy_path_promotes_metadata(monkeypatch: pytest.MonkeyPatch) 
     meta = container.meta
     assert meta["update_in_progress"] is False
     assert meta["source_version"] == "2026-05-21-01-05-02"
+    assert meta["source_provider"] == "s3"
+    assert "active_prefix" not in meta
+    assert "active_generation" not in meta
+    assert "shard_layout_prefix" not in meta
+    assert "source_release_at" not in meta
+    assert "release_fingerprint" not in meta
     assert meta["copy_status"]["mode"] == "aks"
     assert meta["copy_status"]["phase"] == "completed"
     assert meta["copy_status"]["failed"] == 0

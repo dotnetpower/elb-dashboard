@@ -490,6 +490,45 @@ def test_list_databases_prefix_is_blob_directory_not_filename_base(
     assert databases["standalone"]["prefix"] == ""
 
 
+def test_list_databases_exposes_only_selected_active_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = "ncbi-direct-20260819-0123456789ab"
+    active_prefix = f"core_nt/generations/{generation}/core_nt"
+    pending_prefix = "core_nt/generations/ncbi-direct-20260820-bbbbbbbbbbbb/core_nt"
+    blobs = [
+        _blob("core_nt/core_nt.00.nsq", 10),
+        _blob(f"{active_prefix}.00.nsq", 20),
+        _blob(f"{active_prefix}.njs", 5),
+        _blob(f"{pending_prefix}.00.nsq", 99),
+        _blob("core_nt-metadata.json"),
+    ]
+    payloads = {
+        "core_nt-metadata.json": json.dumps({"active_prefix": active_prefix}),
+        f"{active_prefix}.njs": json.dumps(
+            {"number-of-sequences": 123, "last-updated": "2026-08-19"}
+        ),
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    database = next(
+        item
+        for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+        if item["name"] == "core_nt"
+    )
+
+    assert database["prefix"] == active_prefix.rsplit("/", 1)[0]
+    assert database["file_count"] == 2
+    assert database["total_bytes"] == 25
+    assert database["total_sequences"] == 123
+    assert database["active_prefix"] == active_prefix
+
+
 def test_list_databases_only_marks_verified_defaults_as_web_blast_searchsp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -684,10 +684,17 @@ def reconcile_auto_warmup_preferences(
                     result["skipped"].append({"db": db_name, "reason": "not_downloaded"})
                     continue
                 db_source_version = str(db_meta.get("source_version") or "")
+                from api.services.db.generations import release_is_at_least
+
+                source_is_current = release_is_at_least(
+                    str(db_meta.get("source_release_at") or db_source_version),
+                    latest_source_version,
+                )
                 if (
                     latest_source_version
                     and db_source_version
                     and db_source_version != latest_source_version
+                    and not source_is_current
                 ):
                     # An NCBI snapshot newer than the downloaded generation
                     # exists. Auto-warmup intentionally does NOT auto-download a

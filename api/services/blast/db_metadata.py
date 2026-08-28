@@ -368,6 +368,7 @@ def publish_blast_db_metadata_invalidate(
         )
         return False
 
+
 def _invalidate_blast_db_listing_cache_local(storage_account: str | None) -> None:
     """Drop the account-scoped catalogue listing cache, best-effort.
 
@@ -523,8 +524,13 @@ def resolve_blastdb_json_metadata(storage_account: str, db_name: str) -> dict[st
         container = service.get_container_client("blast-db")
         from api.services.storage.data import read_metadata_blob_bytes
 
+        metadata = resolve_db_metadata(storage_account, db_name)
+        from api.services.db.generations import resolve_active_db_prefix
+
+        active_prefix = resolve_active_db_prefix(db_name, metadata)
+
         for blob_name in (
-            f"{db_name}/{db_name}.njs",
+            f"{active_prefix}.njs",
             f"{db_name}.njs",
             f"custom_db/{db_name}/{db_name}.njs",
         ):

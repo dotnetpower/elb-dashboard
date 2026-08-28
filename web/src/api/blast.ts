@@ -314,9 +314,7 @@ export const blastApi = {
       const text = await response.text();
       throw new Error(text || `HTTP ${response.status}`);
     }
-    const filename = filenameFromDisposition(
-      response.headers.get("Content-Disposition"),
-    );
+    const filename = filenameFromDisposition(response.headers.get("Content-Disposition"));
     const contentType =
       response.headers.get("Content-Type") ?? "application/octet-stream";
     const totalHeader = response.headers.get("Content-Length");
@@ -443,6 +441,7 @@ export const blastApi = {
     }
     return api.get<{
       latest_version: string;
+      ncbi_direct_enabled?: boolean;
       updates_available: Array<{
         db: string;
         snapshot?: string;

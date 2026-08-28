@@ -279,6 +279,48 @@ def test_reconcile_missing_job_resets_to_partial() -> None:
     assert "sharded_at" not in meta
 
 
+def test_reconcile_missing_direct_job_preserves_active_generation() -> None:
+    container = _FakeContainer()
+    candidate = _candidate_meta()
+    candidate["prepare_operation_id"] = "direct-owner"
+    candidate["aks_job_ref"]["source_provider"] = "ncbi-direct"
+    candidate.update(
+        {
+            "source_version": "2026-07-21-01-05-02",
+            "copy_status": {"phase": "completed", "success": 727},
+            "pending_generation": {
+                "id": "ncbi-direct-20260819-aaaaaaaaaaaa",
+                "phase": "downloading",
+                "source_provider": "ncbi-direct",
+                "data_prefix": "nt/generations/ncbi-direct-20260819-aaaaaaaaaaaa",
+            },
+            "sharded": True,
+            "shard_sets": [1, 2],
+            "shard_layout_schema": 1,
+            "shard_source_version": "2026-07-21-01-05-02",
+        }
+    )
+    container.set_metadata("nt", candidate)
+
+    out = reconcile_orphaned_prepare_db(
+        credential=None,
+        storage_account="acct",
+        container=container,
+        job_lookup=lambda *a, **k: {"missing": True},
+        now=NOW,
+        stale_seconds=STALE,
+    )
+
+    assert out["reset"] == ["nt"]
+    meta = container.metadata("nt")
+    assert meta["update_in_progress"] is False
+    assert meta["copy_status"] == {"phase": "completed", "success": 727}
+    assert meta["pending_generation"]["phase"] == "partial"
+    assert meta["sharded"] is True
+    assert meta["shard_sets"] == [1, 2]
+    assert meta["shard_source_version"] == "2026-07-21-01-05-02"
+
+
 def test_reconcile_running_job_leaves_row_untouched() -> None:
     container = _FakeContainer()
     container.set_metadata("nt", _candidate_meta())

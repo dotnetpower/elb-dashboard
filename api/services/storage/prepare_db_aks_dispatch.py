@@ -252,6 +252,25 @@ def try_dispatch_aks_mode(
             rbac.reason,
         )
 
+    if str(body.get("source") or "s3").strip().lower() == "ncbi-direct":
+        from api.services.storage.prepare_db_direct_dispatch import (
+            DirectDispatchError,
+            dispatch_ncbi_direct,
+        )
+
+        try:
+            return dispatch_ncbi_direct(
+                caller=caller,
+                credential=cred,
+                subscription_id=sub,
+                storage_account=account_name,
+                db_name=db_name,
+                aks_resource_group=aks_rg,
+                cluster_name=cluster_name,
+            )
+        except DirectDispatchError as exc:
+            raise AksDispatchError(exc.status_code, exc.detail) from exc
+
     from api.routes._blast_shared import _safe_send_task
     from api.routes.storage import common as _common
     from api.services.k8s.prepare_db_jobs import (

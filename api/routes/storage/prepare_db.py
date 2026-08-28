@@ -147,6 +147,17 @@ def prepare_db(
             400,
             f"invalid mode: {raw_mode!r} (must be server-side, aks, or auto)",
         )
+    source = str(body.get("source") or "s3").strip().lower()
+    if source not in {"s3", "ncbi-direct"}:
+        raise HTTPException(
+            400,
+            f"invalid source: {source!r} (must be s3 or ncbi-direct)",
+        )
+    if source == "ncbi-direct" and raw_mode != "aks":
+        raise HTTPException(
+            400,
+            "source=ncbi-direct requires mode=aks; it never falls back to stale S3",
+        )
 
     cred = get_credential()
 
@@ -572,6 +583,16 @@ def prepare_db(
                 _require_prepare_operation_owner(meta, operation_id)
                 meta["db_name"] = db_name
                 meta["source_version"] = latest_dir
+                meta["source_provider"] = "s3"
+                meta.pop("active_prefix", None)
+                meta.pop("active_generation", None)
+                meta.pop("pending_generation", None)
+                meta.pop("shard_layout_prefix", None)
+                meta.pop("source_release_at", None)
+                meta.pop("release_fingerprint", None)
+                meta.pop("transfer_manifest_sha256", None)
+                meta.pop("taxonomy_release_at", None)
+                meta.pop("taxonomy_release_fingerprint", None)
                 if new_signature_etag:
                     meta["signature_etag"] = new_signature_etag
                 if new_composite_signature:
@@ -769,6 +790,7 @@ def prepare_db_cancel(
     container = blob_svc.get_container_client("blast-db")
     meta, _etag = _download_blob_with_etag(container, db_name)
     copy_status = meta.get("copy_status") or {}
+    direct_lock_owner = str(meta.get("prepare_operation_id") or "")
     phase = str(copy_status.get("phase") or "") if isinstance(copy_status, dict) else ""
     if phase == "completed" and not meta.get("update_in_progress"):
         raise HTTPException(409, f"database {db_name} download already completed")
@@ -887,6 +909,7 @@ def prepare_db_cancel(
         _require_prepare_operation_owner(meta_in, cancel_operation_id)
         meta_in["db_name"] = db_name
         _cancel_oid = redact_oid(caller.object_id) or "caller"
+        isolated_direct = bool(aks_job_ref and aks_job_ref.get("source_provider") == "ncbi-direct")
         cancellation_side_effect_failed = aks_job_delete_failed or errors > 0
         if cancellation_side_effect_failed:
             meta_in["update_in_progress"] = True
@@ -894,15 +917,21 @@ def prepare_db_cancel(
                 f"cancellation by {_cancel_oid} could not stop every active transfer"
             )
             meta_in["update_failed_at"] = datetime.now(UTC).isoformat()
-            meta_in["copy_status"] = {
+            cancel_status = {
                 "phase": "cancel_failed",
                 "aborted": aborted,
                 "skipped": skipped,
                 "errors": errors,
             }
             if aks_job_ref:
-                meta_in["copy_status"]["mode"] = "aks"
-                meta_in["copy_status"]["aks_job_deleted"] = aks_job_deleted or {"status": "unknown"}
+                cancel_status["mode"] = "aks"
+                cancel_status["aks_job_deleted"] = aks_job_deleted or {"status": "unknown"}
+            if isolated_direct:
+                pending = dict(meta_in.get("pending_generation") or {})
+                pending.update(cancel_status)
+                meta_in["pending_generation"] = pending
+                return meta_in
+            meta_in["copy_status"] = cancel_status
             return _invalidate_shard_publication(
                 meta_in,
                 error="prepare-db cancellation could not stop every active transfer",
@@ -926,9 +955,16 @@ def prepare_db_cancel(
         if aks_job_ref:
             cs["mode"] = "aks"
             cs["aks_job_deleted"] = aks_job_deleted or {"status": "unknown"}
-        meta_in["copy_status"] = cs
+        if isolated_direct:
+            pending = dict(meta_in.get("pending_generation") or {})
+            pending.update(cs)
+            meta_in["pending_generation"] = pending
+        else:
+            meta_in["copy_status"] = cs
         meta_in.pop("updating_to_source_version", None)
         meta_in.pop("aks_job_ref", None)
+        if isolated_direct:
+            return meta_in
         return _invalidate_shard_publication(
             meta_in,
             error="prepare-db was cancelled after database artifacts may have changed",
@@ -954,6 +990,18 @@ def prepare_db_cancel(
             "Not every active transfer was stopped; cancellation remains "
             "pending and can be retried.",
         )
+
+    if aks_job_ref and aks_job_ref.get("source_provider") == "ncbi-direct" and direct_lock_owner:
+        try:
+            from api.services.ncbi_direct_lock import release_direct_lock
+
+            release_direct_lock(direct_lock_owner)
+        except Exception as exc:
+            LOGGER.warning(
+                "prepare_db_cancel Direct lock release failed db=%s: %s",
+                db_name,
+                type(exc).__name__,
+            )
 
     try:
         from api.services.db.ops_audit import record_db_op

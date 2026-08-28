@@ -116,6 +116,32 @@ def test_build_config_content_preserves_full_blob_urls() -> None:
     assert cfg.get("blast", "queries") == "https://stelb.blob.core.windows.net/queries/custom.fa"
 
 
+@pytest.mark.slow
+def test_build_config_content_resolves_active_generation_for_logical_name() -> None:
+    from api.services.blast.task_config import build_config_content
+
+    generation = "ncbi-direct-20260819-0123456789ab"
+    active_prefix = f"core_nt/generations/{generation}/core_nt"
+    content = build_config_content(
+        job_id="job-generation",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        storage_account="stelb",
+        database="core_nt",
+        query_file="queries/input.fa",
+        metadata_resolver=lambda _account, _db: {
+            "db_name": "core_nt",
+            "active_prefix": active_prefix,
+        },
+    )
+
+    cfg = _parse_ini(content)
+
+    assert cfg.get("blast", "db") == (
+        f"https://stelb.blob.core.windows.net/blast-db/{active_prefix}"
+    )
+
+
 def test_build_config_content_rejects_mismatched_storage_blob_urls() -> None:
     with pytest.raises(ValueError, match="database URL must belong"):
         blast._build_config_content(

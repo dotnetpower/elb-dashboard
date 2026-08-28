@@ -53,6 +53,26 @@ def _patch_blob_names(monkeypatch: pytest.MonkeyPatch, names: list[str]) -> None
     )
 
 
+def test_validate_blast_database_available_uses_active_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = "ncbi-direct-20260819-0123456789ab"
+    prefix = f"core_nt/generations/{generation}/core_nt"
+    _patch_blob_names(monkeypatch, [f"{prefix}.00.nsq"])
+    monkeypatch.setattr(
+        "api.services.blast.task_config.resolve_db_metadata",
+        lambda _account, _db: {"active_prefix": prefix},
+    )
+
+    result = validate_blast_database_available(
+        storage_account="elbstg01",
+        database="core_nt",
+    )
+
+    assert result["blob_prefix"] == prefix
+    assert result["marker_blob"] == f"{prefix}.00.nsq"
+
+
 def test_validate_blast_database_available_accepts_sequence_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

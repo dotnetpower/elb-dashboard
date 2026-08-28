@@ -426,6 +426,39 @@ def blast_submit(
         if value not in (None, ""):
             submit_options.setdefault(key, value)
 
+    # Pin the selected DB generation at request acceptance. A logical name
+    # such as `core_nt` must not be re-resolved after sitting in the queue: an
+    # active-generation promotion during that wait would silently change the
+    # scientific input. Explicit URLs are already pinned and pass through.
+    resolved_database = req.database
+    try:
+        from api.services.blast.db_metadata import extract_db_name, resolve_db_metadata
+        from api.services.blast.task_config import resolve_database_url
+
+        db_name = extract_db_name(req.database) or req.database
+        db_metadata = resolve_db_metadata(req.storage_account, db_name)
+        if isinstance(db_metadata, dict):
+            active = db_metadata.get("active_generation")
+            pending = db_metadata.get("pending_generation")
+            generation_managed = isinstance(active, dict) or (
+                isinstance(pending, dict) and pending.get("source_provider") == "ncbi-direct"
+            )
+            if generation_managed:
+                resolved_database = resolve_database_url(
+                    req.storage_account,
+                    req.database,
+                    db_metadata,
+                )
+                normalised_body["resolved_database_url"] = resolved_database
+            if isinstance(active, dict):
+                normalised_body["db_generation_id"] = active.get("id")
+                normalised_body["db_release_fingerprint"] = active.get("release_fingerprint")
+    except Exception as exc:
+        # Existing readiness gates remain authoritative and will produce the
+        # actionable Storage error. Preserve legacy resolution if metadata is
+        # temporarily unavailable rather than rejecting before state creation.
+        LOGGER.debug("DB generation pinning skipped job_id=%s: %s", job_id, type(exc).__name__)
+
     # Create job state record
     repo: Any = None
     try:
@@ -501,7 +534,7 @@ def blast_submit(
             cluster_name=req.cluster_name,
             storage_account=req.storage_account,
             program=req.program,
-            database=req.database,
+            database=resolved_database,
             query_file=req.query_file,
             options=submit_options,
             caller_oid=caller.object_id,

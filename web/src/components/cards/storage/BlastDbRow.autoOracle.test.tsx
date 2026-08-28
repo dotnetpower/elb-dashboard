@@ -127,3 +127,46 @@ describe("BlastDbRow Auto oracle", () => {
     expect(html).toMatch(/<input type="checkbox"[^>]*disabled=""[^>]*\/>Auto oracle/);
   });
 });
+
+describe("BlastDbRow NCBI Direct update", () => {
+  const pending = {
+    publishedAt: "2026-08-19T00:00:00",
+    cloudSnapshot: "2026-07-21-01-05-02",
+    numberOfVolumes: 84,
+    bytesTotal: 282_692_127_129,
+  };
+
+  it("keeps pending update disabled when the deployment gate is off", () => {
+    const html = renderRow({ updatePending: pending });
+
+    expect(html).toContain('aria-label="Update pending NCBI cloud mirror"');
+    expect(html).toContain("disabled");
+  });
+
+  it("enables the explicit NCBI Direct action when the gate is on", () => {
+    const html = renderRow({
+      updatePending: pending,
+      ncbiDirectEnabled: true,
+      onDirectUpdate: vi.fn(),
+    });
+
+    expect(html).toContain('aria-label="Update via NCBI Direct"');
+    expect(html).not.toMatch(/aria-label="Update via NCBI Direct"[^>]*disabled/);
+  });
+
+  it("disables NCBI Direct while the AKS cluster is unavailable", () => {
+    const html = renderRow({
+      updatePending: pending,
+      ncbiDirectEnabled: true,
+      directUpdateDisabled: true,
+      directUpdateDisabledReason: "Start the AKS cluster first",
+      onDirectUpdate: vi.fn(),
+    });
+
+    const button = html.match(
+      /<button[^>]*aria-label="Update via NCBI Direct"[^>]*>/,
+    )?.[0];
+    expect(button).toContain('disabled=""');
+    expect(html).toContain("Start the AKS cluster first");
+  });
+});

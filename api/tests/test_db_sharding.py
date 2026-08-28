@@ -294,6 +294,19 @@ def test_partition_prefix_matches_v3_layout_convention() -> None:
     assert p == ("https://elbstg01.blob.core.windows.net/blast-db/10shards/core_nt_shard_")
 
 
+def test_partition_prefix_for_generation_layout() -> None:
+    p = dbs.partition_prefix_for(
+        "elbstg01",
+        "core_nt",
+        10,
+        layout_prefix="core_nt/generations/ncbi-direct-20260819-0123456789ab/shards",
+    )
+    assert p == (
+        "https://elbstg01.blob.core.windows.net/blast-db/core_nt/generations/"
+        "ncbi-direct-20260819-0123456789ab/shards/10shards/core_nt_shard_"
+    )
+
+
 # ---------------------------------------------------------------------------
 # list_db_volumes (with fake blob storage)
 # ---------------------------------------------------------------------------

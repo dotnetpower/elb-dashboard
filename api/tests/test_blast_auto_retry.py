@@ -55,6 +55,25 @@ def test_restore_submit_kwargs_complete() -> None:
     assert kwargs["caller_oid"] == "oid-1"
 
 
+def test_restore_submit_kwargs_prefers_pinned_generation_url() -> None:
+    pinned = (
+        "https://st1.blob.core.windows.net/blast-db/core_nt/generations/"
+        "ncbi-direct-20260819-0123456789ab/core_nt"
+    )
+    state = FakeState(
+        db="core_nt",
+        payload={
+            "query_file": "q.fa",
+            "resolved_database_url": pinned,
+        },
+    )
+
+    kwargs = auto_retry.restore_submit_kwargs(state)
+
+    assert kwargs is not None
+    assert kwargs["database"] == pinned
+
+
 @pytest.mark.parametrize("missing", ["cluster_name", "storage_account", "program"])
 def test_restore_returns_none_when_required_column_missing(missing: str) -> None:
     state = FakeState()

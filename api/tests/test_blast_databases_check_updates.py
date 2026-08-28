@@ -352,6 +352,62 @@ def test_newer_ftp_release_is_pending_while_cloud_mirror_is_stale(
     ]
 
 
+def test_direct_active_release_does_not_regress_to_older_cloud_snapshot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cloud_snapshot = "2026-07-21-01-05-02"
+    _patch_resolve(monkeypatch, cloud_snapshot)
+    _patch_dbs(
+        monkeypatch,
+        [
+            {
+                "name": "core_nt",
+                "source_version": "ncbi-direct-20260819-aaaaaaaaaaaa",
+                "source_provider": "ncbi-direct",
+                "source_release_at": "2026-08-19T00:00:00",
+                "signature_etag": "direct-transfer",
+                "composite_signature": "direct-transfer-composite",
+            }
+        ],
+    )
+    _patch_preview(
+        monkeypatch,
+        {
+            "core_nt": {
+                "available": True,
+                "snapshot": cloud_snapshot,
+                "signature_etag": "older-cloud",
+                "composite_signature": "older-cloud-composite",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.ncbi_releases.latest_ftp_releases",
+        lambda: {
+            "core_nt": {
+                "db_name": "core_nt",
+                "last_updated": "2026-08-19T00:00:00",
+                "number_of_volumes": 84,
+                "bytes_total": 282_692_127_129,
+                "number_of_sequences": 130_155_243,
+            }
+        },
+    )
+
+    resp = client.get(
+        "/api/blast/databases/check-updates",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_account": "stworkload",
+            "resource_group": "rg-workload",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["updates_available"] == []
+    assert resp.json()["updates_pending"] == []
+
+
 def test_ftp_index_failure_preserves_actionable_cloud_updates(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

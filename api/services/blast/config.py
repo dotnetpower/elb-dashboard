@@ -237,6 +237,7 @@ def generate_config(params: dict[str, Any]) -> str:
                 db_name=str(params["db_name"]),
                 num_shards=n,
                 container=container_name,
+                layout_prefix=str(params.get("db_shard_layout_prefix") or ""),
             ),
         )
         # Sharding requires the local-SSD init script

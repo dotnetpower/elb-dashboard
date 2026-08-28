@@ -9,9 +9,9 @@ Key entry points: `blast_databases`, `blast_databases_recommend`, `blast_databas
 `blast_databases_versions`, `blast_databases_build_stub`, `blast_database_preview`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate. The compiled `_*_RE` patterns are the shared validation source-of-truth imported by
-the sibling `databases_shard` / `databases_oracle` modules. `updates_available` contains only
-cloud-copyable releases; newer FTP-only releases belong in additive `updates_pending` so the SPA
-never offers a mutation that would re-copy an older cloud snapshot.
+the sibling `databases_shard` / `databases_oracle` modules. `updates_available` contains
+cloud-copyable releases; newer official releases belong in additive `updates_pending`, which is
+actionable through NCBI Direct only when the deployment gate is explicitly enabled.
 Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
 api/tests/test_route_contracts.py api/tests/test_blast_databases_preview.py
 api/tests/test_blast_databases_check_updates.py`.
@@ -20,6 +20,7 @@ api/tests/test_blast_databases_check_updates.py`.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -172,6 +173,8 @@ def blast_databases_check_updates(
 
     base: dict[str, Any] = {
         "latest_version": "",
+        "ncbi_direct_enabled": os.environ.get("PREPARE_DB_NCBI_DIRECT_ENABLED", "false").lower()
+        == "true",
         "updates_available": [],
         "updates_pending": [],
         "updates_pending_evaluated": False,
@@ -242,6 +245,7 @@ def blast_databases_check_updates(
         LOGGER.warning("check-updates list_databases failed: %s", type(exc).__name__)
         return base
 
+    from api.services.db.generations import release_is_at_least
     from api.services.ncbi_releases import (
         ftp_release_is_newer,
         latest_ftp_releases,
@@ -271,11 +275,14 @@ def blast_databases_check_updates(
         stored_etag = str(db.get("signature_etag") or "").strip()
         stored_composite = str(db.get("composite_signature") or "").strip()
         stored_version = str(db.get("source_version") or "").strip()
+        stored_provider = str(db.get("source_provider") or "").strip()
+        stored_release_at = str(db.get("source_release_at") or "").strip()
         ftp_release = ftp_releases.get(name)
         if isinstance(ftp_release, dict) and ftp_release_is_newer(
             str(ftp_release.get("last_updated") or ""),
             str(base.get("latest_version") or ""),
             stored_version,
+            stored_release_at,
         ):
             pending_updates.append(
                 {
@@ -310,7 +317,11 @@ def blast_databases_check_updates(
         #      before composite signatures landed).
         #   3. source_version vs snapshot — coarsest fallback for DBs whose
         #      metadata predates ETag tracking.
-        if stored_composite:
+        if stored_provider == "ncbi-direct" and release_is_at_least(
+            stored_release_at, ncbi_snapshot
+        ):
+            changed = False
+        elif stored_composite:
             changed = bool(ncbi_composite) and ncbi_composite != stored_composite
         elif stored_etag:
             changed = bool(ncbi_etag) and ncbi_etag != stored_etag

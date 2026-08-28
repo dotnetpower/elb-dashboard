@@ -49,7 +49,7 @@ class _BlobClient:
             raise FileNotFoundError("blob not found")
         data = self._payload
         if length is not None:
-            data = data[: length]
+            data = data[:length]
         return _Reader(data)
 
 
@@ -109,9 +109,7 @@ def test_validate_blast_database_ready_passes_when_phase_completed(
         },
     )
 
-    result = validate_blast_database_ready(
-        storage_account="elbstg01", database="core_nt"
-    )
+    result = validate_blast_database_ready(storage_account="elbstg01", database="core_nt")
     assert result["marker_blob"].endswith(".nsq")
 
 
@@ -131,9 +129,7 @@ def test_validate_blast_database_ready_rejects_phase_copying(
     )
 
     with pytest.raises(BlastDatabaseAvailabilityError) as err:
-        validate_blast_database_ready(
-            storage_account="elbstg01", database="core_nt"
-        )
+        validate_blast_database_ready(storage_account="elbstg01", database="core_nt")
 
     assert err.value.code == "database_not_ready"
     msg = str(err.value)
@@ -153,9 +149,7 @@ def test_validate_blast_database_ready_rejects_phase_partial(
     )
 
     with pytest.raises(BlastDatabaseAvailabilityError) as err:
-        validate_blast_database_ready(
-            storage_account="elbstg01", database="core_nt"
-        )
+        validate_blast_database_ready(storage_account="elbstg01", database="core_nt")
 
     assert err.value.code == "database_not_ready"
 
@@ -175,12 +169,61 @@ def test_validate_blast_database_ready_rejects_update_in_progress(
     )
 
     with pytest.raises(BlastDatabaseAvailabilityError) as err:
-        validate_blast_database_ready(
-            storage_account="elbstg01", database="core_nt"
-        )
+        validate_blast_database_ready(storage_account="elbstg01", database="core_nt")
 
     assert err.value.code == "database_updating"
     assert "BLAST_DB-2026-05-20" in str(err.value)
+
+
+def test_validate_blast_database_ready_keeps_active_generation_during_direct_staging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = "core_nt/generations/ncbi-direct-20260801-aaaaaaaaaaaa/core_nt"
+    _install_fake_service(
+        monkeypatch,
+        names=[f"{active}.00.nsq"],
+        metadata={
+            "source_version": "ncbi-direct-20260801-aaaaaaaaaaaa",
+            "active_prefix": active,
+            "active_generation": {"id": "ncbi-direct-20260801-aaaaaaaaaaaa"},
+            "pending_generation": {
+                "id": "ncbi-direct-20260819-bbbbbbbbbbbb",
+                "phase": "downloading",
+                "source_provider": "ncbi-direct",
+                "data_prefix": "core_nt/generations/ncbi-direct-20260819-bbbbbbbbbbbb",
+            },
+            "update_in_progress": True,
+            "copy_status": {"phase": "completed"},
+        },
+    )
+
+    result = validate_blast_database_ready(storage_account="elbstg01", database="core_nt")
+
+    assert result["blob_prefix"] == active
+
+
+def test_validate_blast_database_ready_keeps_legacy_active_during_first_direct_staging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_service(
+        monkeypatch,
+        names=["core_nt/core_nt.00.nsq"],
+        metadata={
+            "source_version": "2026-07-21-01-05-02",
+            "pending_generation": {
+                "id": "ncbi-direct-20260819-bbbbbbbbbbbb",
+                "phase": "downloading",
+                "source_provider": "ncbi-direct",
+                "data_prefix": "core_nt/generations/ncbi-direct-20260819-bbbbbbbbbbbb",
+            },
+            "update_in_progress": True,
+            "copy_status": {"phase": "completed"},
+        },
+    )
+
+    result = validate_blast_database_ready(storage_account="elbstg01", database="core_nt")
+
+    assert result["blob_prefix"] == "core_nt/core_nt"
 
 
 def test_validate_blast_database_ready_passes_when_metadata_missing(
@@ -197,9 +240,7 @@ def test_validate_blast_database_ready_passes_when_metadata_missing(
         metadata=None,
     )
 
-    result = validate_blast_database_ready(
-        storage_account="elbstg01", database="16S_ribosomal_RNA"
-    )
+    result = validate_blast_database_ready(storage_account="elbstg01", database="16S_ribosomal_RNA")
     assert result["marker_blob"].endswith(".nsq")
 
 

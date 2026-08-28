@@ -51,6 +51,7 @@ from api.tasks.storage.helpers import (
 )
 from api.tasks.storage.oracle import build_db_order_oracle
 from api.tasks.storage.oracle_retention import purge_oracle_history_task
+from api.tasks.storage.prepare_db_direct import prepare_db_via_ncbi_direct
 from api.tasks.storage.prepare_db_via_aks import prepare_db_via_aks
 from api.tasks.storage.reconcile import reconcile_auto_warmup
 from api.tasks.storage.reconcile_auto_oracle import reconcile_auto_oracle
@@ -79,6 +80,7 @@ __all__ = (
     "check_database_updates",
     "get_credential",
     "prepare_db_via_aks",
+    "prepare_db_via_ncbi_direct",
     "purge_aged_results_task",
     "purge_oracle_history_task",
     "reconcile_auto_oracle",

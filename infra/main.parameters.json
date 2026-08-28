@@ -32,6 +32,9 @@
     "storageDateLayoutEnabled": {
       "value": "${STORAGE_DATE_LAYOUT_ENABLED=}"
     },
+    "prepareDbNcbiDirectEnabled": {
+      "value": "${PREPARE_DB_NCBI_DIRECT_ENABLED=false}"
+    },
     "lockdownPrivateNetworking": {
       "value": "${LOCKDOWN_PRIVATE_NETWORKING=false}"
     },

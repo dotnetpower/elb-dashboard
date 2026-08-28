@@ -103,6 +103,34 @@ def test_plan_omits_azcopy_env_by_default_for_auto_tuning() -> None:
         assert "AZCOPY_BUFFER_GB" not in names
 
 
+def test_plan_injects_generation_scoped_data_and_layout_urls() -> None:
+    generation = "ncbi-direct-20260819-0123456789ab"
+    root = f"core_nt/generations/{generation}"
+    plan = build_warmup_job_plan(
+        db_name="core_nt",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=1,
+        nodes=_nodes(1),
+        image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+        source_version=generation,
+        db_prefix=f"{root}/core_nt",
+        layout_prefix=f"{root}/shards",
+    )
+
+    env = {
+        item["name"]: item["value"]
+        for item in plan.jobs[0]["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["ELB_PARTITION_PREFIX"] == (
+        f"https://elbstg01.blob.core.windows.net/blast-db/{root}/shards/1shards/core_nt_shard_"
+    )
+    assert env["ELB_DB_URL"] == (f"https://elbstg01.blob.core.windows.net/blast-db/{root}/")
+    assert env["ELB_METADATA_URL"] == (
+        "https://elbstg01.blob.core.windows.net/blast-db/core_nt-metadata.json"
+    )
+
+
 def test_plan_injects_azcopy_env_only_when_overridden() -> None:
     # An operator override (worker env -> plan args) is injected so azcopy
     # honours it; a None for one of them keeps that var unset.

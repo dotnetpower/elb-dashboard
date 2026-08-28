@@ -227,8 +227,16 @@ def _backfill_legacy_shard_layout(
         )
         marker_written = True
         source_version = str(started.get("source_version") or "")
+        active_prefix = str(started.get("active_prefix") or "")
+        layout_prefix = str(started.get("shard_layout_prefix") or "")
 
-        summary = ensure_shard_sets(credential, storage_account, database_name)
+        summary = ensure_shard_sets(
+            credential,
+            storage_account,
+            database_name,
+            db_prefix=active_prefix or None,
+            layout_prefix=layout_prefix,
+        )
         complete_sets = require_complete_shard_summary(summary)
 
         def _mark_completed(meta: dict[str, Any]) -> dict[str, Any]:
@@ -554,6 +562,8 @@ def warmup_database(
                     azcopy_concurrency=azcopy_concurrency,
                     azcopy_buffer_gb=azcopy_buffer_gb,
                     source_version=str(match.get("source_version") or ""),
+                    db_prefix=str(match.get("active_prefix") or ""),
+                    layout_prefix=str(match.get("shard_layout_prefix") or ""),
                 )
 
                 role_summary: dict[str, str] = {"status": "skipped"}

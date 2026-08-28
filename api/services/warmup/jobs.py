@@ -132,6 +132,8 @@ def build_warmup_job_plan(
     azcopy_concurrency: int | None = None,
     azcopy_buffer_gb: int | None = None,
     source_version: str = "",
+    db_prefix: str = "",
+    layout_prefix: str = "",
 ) -> WarmupJobPlan:
     """Build one Kubernetes Job per shard, pinned one-to-one onto nodes.
 
@@ -163,7 +165,19 @@ def build_warmup_job_plan(
             f"need at least {num_shards} nodes for one-shard-per-node warmup, got {len(nodes)}"
         )
 
-    prefix = partition_prefix_for(storage_account, db_name, num_shards, container=container)
+    prefix = partition_prefix_for(
+        storage_account,
+        db_name,
+        num_shards,
+        container=container,
+        layout_prefix=layout_prefix,
+    )
+    from api.services.storage.endpoint import blob_account_url
+
+    container_url = f"{blob_account_url(storage_account)}/{container}"
+    resolved_db_prefix = (db_prefix or f"{db_name}/{db_name}").strip("/")
+    db_url = f"{container_url}/{resolved_db_prefix.rsplit('/', 1)[0]}/"
+    metadata_url = f"{container_url}/{db_name}-metadata.json"
     # A single-shard DB is the *full* database — the search batch can land on any
     # ``workload=blast`` node, so the full DB must be staged on every Ready node,
     # not just node 0. Broadcast one Job per node (all staging shard-00 content)
@@ -186,6 +200,8 @@ def build_warmup_job_plan(
             azcopy_concurrency=azcopy_concurrency,
             azcopy_buffer_gb=azcopy_buffer_gb,
             source_version=source_version,
+            db_url=db_url,
+            metadata_url=metadata_url,
             db_content_shard_idx=0 if broadcast_full_db else idx,
         )
         for idx in range(job_count)
@@ -692,6 +708,8 @@ def _build_job(
     azcopy_concurrency: int | None,
     azcopy_buffer_gb: int | None,
     source_version: str,
+    db_url: str = "",
+    metadata_url: str = "",
     db_content_shard_idx: int | None = None,
 ) -> dict[str, Any]:
     # ``shard_idx`` is the *tracking* ordinal used for the Job name, labels, and
@@ -719,6 +737,10 @@ def _build_job(
         {"name": "ELB_DB_SOURCE_VERSION", "value": source_version},
         {"name": "ELB_DB_MOL_TYPE", "value": mol_type},
     ]
+    if db_url:
+        env.append({"name": "ELB_DB_URL", "value": db_url})
+    if metadata_url:
+        env.append({"name": "ELB_METADATA_URL", "value": metadata_url})
     if azcopy_concurrency is not None:
         env.append({"name": "AZCOPY_CONCURRENCY_VALUE", "value": str(azcopy_concurrency)})
     if azcopy_buffer_gb is not None:

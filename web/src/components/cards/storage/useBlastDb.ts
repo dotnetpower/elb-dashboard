@@ -39,6 +39,22 @@ export interface DownloadedDbMeta {
   total_bytes?: number;
   last_modified?: string;
   source_version?: string;
+  source_provider?: "s3" | "ncbi-direct" | string;
+  source_release_at?: string;
+  update_date?: string;
+  release_fingerprint?: string;
+  active_prefix?: string;
+  active_generation?: {
+    id?: string;
+    source_provider?: string;
+    source_release_at?: string;
+    release_fingerprint?: string;
+  };
+  pending_generation?: {
+    id?: string;
+    phase?: string;
+    source_release_at?: string;
+  };
   signature_etag?: string;
   downloaded_at?: string;
   /** True when prepare-db has uploaded preset shard layouts for this DB. */
@@ -143,12 +159,12 @@ interface UseBlastDbArgs {
   clusterName: string;
   /**
    * AKS workload cluster coordinates (name + RG) used to opt `prepare-db`
-    * into the fast AKS-fanout azcopy path and to target order-oracle Jobs.
-    * Resolved from the subscription-wide cluster list so the pair is
-    * self-consistent (the workload cluster usually lives in its own RG, not the
-    * Storage RG). When either is absent the download uses the server-side copy.
-    * The backend still falls back to the server-side copy when the cluster
-    * cannot serve the download.
+   * into the fast AKS-fanout azcopy path and to target order-oracle Jobs.
+   * Resolved from the subscription-wide cluster list so the pair is
+   * self-consistent (the workload cluster usually lives in its own RG, not the
+   * Storage RG). When either is absent the download uses the server-side copy.
+   * The backend still falls back to the server-side copy when the cluster
+   * cannot serve the download.
    */
   aksClusterName?: string;
   aksResourceGroup?: string;
@@ -181,9 +197,9 @@ export function useBlastDb({
   // take a few seconds; tracking them lets the row show an immediate
   // "Cancelling…" / "Deleting…" spinner instead of looking unchanged until the
   // request resolves.
-  const [pendingAction, setPendingAction] = useState<
-    Map<string, "cancel" | "delete">
-  >(() => new Map());
+  const [pendingAction, setPendingAction] = useState<Map<string, "cancel" | "delete">>(
+    () => new Map(),
+  );
   // Dedup key for the completion-detection effect: we toast at most once per
   // (db, terminal phase) so a 10 s dbQuery refetch interval doesn't re-fire
   // the partial-error toast every poll while the row sits in `partial` state.
@@ -226,12 +242,7 @@ export function useBlastDb({
   }, [autoOracleQuery.data?.preferences]);
 
   const latestQuery = useQuery({
-    queryKey: [
-      "blast-db-latest-version",
-      subscriptionId,
-      accountName,
-      resourceGroup,
-    ],
+    queryKey: ["blast-db-latest-version", subscriptionId, accountName, resourceGroup],
     queryFn: () =>
       blastApi.checkUpdates(
         subscriptionId && accountName && resourceGroup
@@ -245,6 +256,7 @@ export function useBlastDb({
     staleTime: 300_000,
   });
   const latestVersion = latestQuery.data?.latest_version ?? null;
+  const ncbiDirectEnabled = latestQuery.data?.ncbi_direct_enabled === true;
   // True when the backend actually ran the per-DB NCBI signature comparison.
   // When true, an empty `updates_available` is authoritative: the SPA must
   // NOT fall back to the coarse `source_version !== latest_version` heuristic
@@ -343,8 +355,7 @@ export function useBlastDb({
    * Authoritative "this DB is genuinely usable for BLAST" predicate. Delegates
    * to the shared `isBlastDbReady` so Warmup / Storage card / Submit all agree.
    */
-  const isDbReady = (meta: DownloadedDbMeta | undefined): boolean =>
-    isBlastDbReady(meta);
+  const isDbReady = (meta: DownloadedDbMeta | undefined): boolean => isBlastDbReady(meta);
 
   const updatesAvailable = useMemo(() => {
     // Prefer the server-side per-DB list (compares NCBI ETag against the
@@ -452,9 +463,12 @@ export function useBlastDb({
       !oracleServerPending
     )
       return;
-    const t = setInterval(() => {
-      void refetchDbList();
-    }, oracleServerActive ? 5_000 : oracleServerPending ? 30_000 : 10_000);
+    const t = setInterval(
+      () => {
+        void refetchDbList();
+      },
+      oracleServerActive ? 5_000 : oracleServerPending ? 30_000 : 10_000,
+    );
     return () => clearInterval(t);
   }, [
     inProgress.size,
@@ -499,11 +513,7 @@ export function useBlastDb({
       for (const [name, info] of prev) {
         const actual = downloadedDbs.get(name);
         const phase = actual?.copy_status?.phase;
-        if (
-          phase === "completed" ||
-          phase === "partial" ||
-          phase === "init_failed"
-        ) {
+        if (phase === "completed" || phase === "partial" || phase === "init_failed") {
           next.delete(name);
           changed = true;
           if (phase === "completed") {
@@ -518,8 +528,7 @@ export function useBlastDb({
             const fileCount = actual?.copy_status?.success ?? 0;
             const total = actual?.copy_status?.total_files ?? info.expectedFiles;
             const failed =
-              (actual?.copy_status?.failed ?? 0) +
-              (actual?.copy_status?.aborted ?? 0);
+              (actual?.copy_status?.failed ?? 0) + (actual?.copy_status?.aborted ?? 0);
             setDownloadResult({
               db: name,
               msg:
@@ -537,6 +546,7 @@ export function useBlastDb({
   const handleDownload = async (
     dbName: string,
     mode: "download" | "update" = "download",
+    source: "s3" | "ncbi-direct" = "s3",
   ) => {
     if (!enabled) return;
     setDownloading(dbName);
@@ -552,7 +562,11 @@ export function useBlastDb({
         accountName,
         dbName,
         aksResourceGroup && aksClusterName
-          ? { resourceGroup: aksResourceGroup, clusterName: aksClusterName }
+          ? {
+              resourceGroup: aksResourceGroup,
+              clusterName: aksClusterName,
+              source,
+            }
           : undefined,
       );
       const total =
@@ -589,6 +603,8 @@ export function useBlastDb({
   };
 
   const handleUpdate = (dbName: string) => handleDownload(dbName, "update");
+  const handleDirectUpdate = (dbName: string) =>
+    handleDownload(dbName, "update", "ncbi-direct");
 
   const handleCancel = async (dbName: string) => {
     if (!enabled) return;
@@ -744,8 +760,9 @@ export function useBlastDb({
     if (!enabled) return;
     const existingPreference = autoOraclePreferences.get(dbName);
     const targetClusterResourceGroup =
-      (preferenceEnabled ? aksResourceGroup : existingPreference?.cluster_resource_group) ??
-      aksResourceGroup;
+      (preferenceEnabled
+        ? aksResourceGroup
+        : existingPreference?.cluster_resource_group) ?? aksResourceGroup;
     const targetClusterName =
       (preferenceEnabled ? aksClusterName : existingPreference?.cluster_name) ??
       aksClusterName;
@@ -788,14 +805,14 @@ export function useBlastDb({
           ? response.status === "saved_inactive"
             ? "Retry state reset. Auto oracle execution is inactive for this deployment."
             : response.status === "saved_no_immediate_enqueue"
-            ? "Retry state reset. The recovery scheduler will queue Auto oracle shortly."
-            : "Auto oracle retry queued."
+              ? "Retry state reset. The recovery scheduler will queue Auto oracle shortly."
+              : "Auto oracle retry queued."
           : preferenceEnabled
             ? response.status === "saved_inactive"
               ? "Auto oracle preference saved. Execution is inactive for this deployment."
               : response.status === "saved_no_immediate_enqueue"
-              ? "Auto oracle enabled. The recovery scheduler will queue it shortly."
-              : "Auto oracle enabled. It will build after Auto warm is ready."
+                ? "Auto oracle enabled. The recovery scheduler will queue it shortly."
+                : "Auto oracle enabled. It will build after Auto warm is ready."
             : "Auto oracle disabled.",
         type: "ok",
       });
@@ -815,8 +832,7 @@ export function useBlastDb({
   const handleToggleAutoOracle = (dbName: string, preferenceEnabled: boolean) =>
     saveAutoOracle(dbName, preferenceEnabled);
 
-  const handleRetryAutoOracle = (dbName: string) =>
-    saveAutoOracle(dbName, true, true);
+  const handleRetryAutoOracle = (dbName: string) => saveAutoOracle(dbName, true, true);
 
   // Aggregate "is anything happening" — used by parent for shimmer
   const activeDownload =
@@ -906,7 +922,8 @@ export function useBlastDb({
       if (alreadyAssigned.length === result.roles.length) {
         return {
           ok: true,
-          message: "Storage RBAC already assigned. Wait a few minutes for token/RBAC propagation, then refresh.",
+          message:
+            "Storage RBAC already assigned. Wait a few minutes for token/RBAC propagation, then refresh.",
         };
       }
       return {
@@ -926,6 +943,7 @@ export function useBlastDb({
     // Query state
     dbQuery,
     latestVersion,
+    ncbiDirectEnabled,
     publicAccessDisabled,
     localFirewallBlocked,
     storageAccessDenied,
@@ -958,9 +976,7 @@ export function useBlastDb({
       Boolean(aksResourceGroup && aksClusterName) && autoOracleQuery.isPending,
     autoOraclePreferencesError:
       autoOracleQuery.isError || autoOracleQuery.data?.truncated === true,
-    autoOracleCoordinatesReady: Boolean(
-      aksResourceGroup && aksClusterName && acrName
-    ),
+    autoOracleCoordinatesReady: Boolean(aksResourceGroup && aksClusterName && acrName),
     elapsed,
     inProgress,
     activeDownload,
@@ -971,6 +987,7 @@ export function useBlastDb({
     // Actions
     handleDownload,
     handleUpdate,
+    handleDirectUpdate,
     handleBuildOracle,
     handleToggleAutoOracle,
     handleRetryAutoOracle,

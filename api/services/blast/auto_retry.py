@@ -160,7 +160,8 @@ def restore_submit_kwargs(state: Any) -> dict[str, Any] | None:
         "cluster_name": col_or_payload("cluster_name", "cluster_name"),
         "storage_account": col_or_payload("storage_account", "storage_account"),
         "program": col_or_payload("program", "program"),
-        "database": col_or_payload("db", "database", "db"),
+        "database": str(payload.get("resolved_database_url") or "")
+        or col_or_payload("db", "database", "db"),
         "query_file": str(payload.get("query_file") or ""),
         "caller_oid": str(getattr(state, "owner_oid", "") or ""),
         "caller_tenant_id": str(getattr(state, "tenant_id", "") or ""),

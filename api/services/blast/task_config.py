@@ -4,9 +4,10 @@ Responsibility: BLAST task config building and submit readiness helpers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `WarmupNotReadyError`, `snippet`, `storage_url`, `relative_blob_path`,
-`validate_storage_blob_reference`, `normalise_query_url`, `query_blob_path_from_query_file`
+`validate_storage_blob_reference`, `normalise_query_url`, `query_blob_path_from_query_file`,
+`resolve_database_url`, `validate_blast_database_ready`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
+log boundaries. Bare DB names follow `active_prefix`; explicit generation URLs stay pinned.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
 api/tests/test_blast_tasks.py`.
 """
@@ -19,6 +20,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from api.services.blast.db_metadata import extract_db_name, resolve_db_metadata
+from api.services.db.generations import resolve_active_db_prefix
 from api.services.storage.url_validation import (
     validate_storage_blob_reference as validate_storage_blob_reference,
 )
@@ -131,6 +133,25 @@ def normalise_database_url(storage_account: str, database: str) -> str:
     )
 
 
+def resolve_database_url(
+    storage_account: str,
+    database: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> str:
+    """Resolve a logical DB name to its pinned active generation URL.
+
+    Explicit URLs/paths remain pinned exactly as supplied. Only a bare logical
+    database name follows the metadata pointer; queued jobs can therefore carry
+    a resolved generation URL without a later pointer flip retargeting them.
+    """
+    db = database.strip()
+    if "/" in db or db.startswith("https://") or db.startswith("az://"):
+        return normalise_database_url(storage_account, db)
+    db_name = relative_blob_path(db, "database")
+    prefix = resolve_active_db_prefix(db_name, metadata)
+    return storage_url(storage_account, "blast-db", prefix)
+
+
 _BLAST_DB_READY_SUFFIXES = (".nsq", ".psq", ".nal", ".pal")
 
 
@@ -153,7 +174,9 @@ def validate_blast_database_available(
         )
 
     try:
-        db_url = normalise_database_url(storage_account, database)
+        db_name = extract_db_name(database) or database
+        metadata = resolve_db_metadata(storage_account, db_name)
+        db_url = resolve_database_url(storage_account, database, metadata)
     except ValueError as exc:
         raise BlastDatabaseAvailabilityError(str(exc), code="invalid_database_reference") from exc
 
@@ -198,8 +221,7 @@ def validate_blast_database_available(
     except Exception as exc:
         db_label = extract_db_name(database) or database
         raise BlastDatabaseAvailabilityError(
-            f"Could not verify BLAST database '{db_label}' in Storage: "
-            f"{type(exc).__name__}.",
+            f"Could not verify BLAST database '{db_label}' in Storage: {type(exc).__name__}.",
             code="database_check_unavailable",
         ) from exc
 
@@ -268,9 +290,7 @@ def validate_blast_database_ready(
     cached = _readiness_cache_get(cache_key)
     if cached is not None:
         return cached
-    info = validate_blast_database_available(
-        storage_account=storage_account, database=database
-    )
+    info = validate_blast_database_available(storage_account=storage_account, database=database)
     db_name = extract_db_name(database) or database
     try:
         import json
@@ -283,9 +303,7 @@ def validate_blast_database_ready(
         cc = svc.get_container_client("blast-db")
         bc = cc.get_blob_client(f"{db_name}-metadata.json")
         try:
-            raw = read_metadata_blob_text(
-                bc, max_bytes=1024 * 1024, label="db-metadata.json"
-            )
+            raw = read_metadata_blob_text(bc, max_bytes=1024 * 1024, label="db-metadata.json")
         except Exception:
             # Legacy DB without metadata.json, or transient Storage error.
             # Availability already passed — keep current behaviour.
@@ -312,7 +330,13 @@ def validate_blast_database_ready(
                     "Wait for the download to finish before submitting.",
                     code="database_not_ready",
                 )
-        if meta.get("update_in_progress"):
+        pending_generation = meta.get("pending_generation")
+        has_isolated_pending_generation = bool(
+            isinstance(pending_generation, dict)
+            and pending_generation.get("source_provider") == "ncbi-direct"
+            and pending_generation.get("data_prefix")
+        )
+        if meta.get("update_in_progress") and not has_isolated_pending_generation:
             target = meta.get("updating_to_source_version")
             suffix = f" to {target}" if isinstance(target, str) and target else ""
             raise BlastDatabaseAvailabilityError(
@@ -401,7 +425,11 @@ def build_config_content(
         db_name = extract_db_name(database)
         meta = metadata_resolver(storage_account, db_name)
         if meta is not None:
+            params["db"] = resolve_database_url(storage_account, database, meta)
             params.setdefault("db_name", db_name)
+            layout_prefix = meta.get("shard_layout_prefix")
+            if isinstance(layout_prefix, str) and layout_prefix.strip("/"):
+                params.setdefault("db_shard_layout_prefix", layout_prefix.strip("/"))
             if metadata_has_prepared_shard_layout(db_name, meta):
                 params.setdefault("db_sharded", True)
             else:

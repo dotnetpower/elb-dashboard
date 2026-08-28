@@ -296,13 +296,13 @@ done
 echo "Volumes: ${VOLUMES[*]}"
 
 DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
-DB_URL="${DB_BASE_URL}${ORIG_DB}/"
+DB_URL="${ELB_DB_URL:-${DB_BASE_URL}${ORIG_DB}/}"
 echo "DB base URL: ${DB_URL}"
 
 EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
 METADATA_SOURCE_VERSION=""
 SHARD_LAYOUT_SCHEMA="0"
-METADATA_URL="${DB_BASE_URL}${ORIG_DB}-metadata.json"
+METADATA_URL="${ELB_METADATA_URL:-${DB_BASE_URL}${ORIG_DB}-metadata.json}"
 echo "Resolving DB metadata: ${METADATA_URL}"
 if retry_azcopy cp "${METADATA_URL}" /tmp/db-metadata.json --log-level=ERROR; then
     if command -v python3 >/dev/null 2>&1; then

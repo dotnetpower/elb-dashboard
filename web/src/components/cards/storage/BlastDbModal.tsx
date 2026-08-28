@@ -15,16 +15,14 @@ import {
   formatNcbiVersion,
 } from "@/components/cards/storageDbCatalog";
 import { BlastDbCustomInput } from "@/components/cards/storage/BlastDbCustomInput";
+import { BlastDbDirectUpdateConfirm } from "@/components/cards/storage/BlastDbDirectUpdateConfirm";
 import {
   BlastDbClusterConfirm,
   type BlastDbClusterTopology,
   shouldConfirmDownloadBeforeAks,
 } from "@/components/cards/storage/BlastDbClusterConfirm";
 import { BlastDbLargeConfirm } from "@/components/cards/storage/BlastDbLargeConfirm";
-import {
-  BlastDbRow,
-  BlastDbRowSkeleton,
-} from "@/components/cards/storage/BlastDbRow";
+import { BlastDbRow, BlastDbRowSkeleton } from "@/components/cards/storage/BlastDbRow";
 import { BlastDbUpdateConfirm } from "@/components/cards/storage/BlastDbUpdateConfirm";
 import { dbHasUpdate } from "@/components/cards/storage/blastDbUpdates";
 import {
@@ -118,6 +116,7 @@ export function BlastDbModal({
   );
   const [confirmLargeDb, setConfirmLargeDb] = useState<string | null>(null);
   const [confirmUpdateDb, setConfirmUpdateDb] = useState<string | null>(null);
+  const [confirmDirectDb, setConfirmDirectDb] = useState<string | null>(null);
   const [confirmCancelDb, setConfirmCancelDb] = useState<string | null>(null);
   const [confirmDeleteDb, setConfirmDeleteDb] = useState<string | null>(null);
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
@@ -138,6 +137,7 @@ export function BlastDbModal({
         setConfirmClusterDb(null);
         setConfirmLargeDb(null);
         setConfirmUpdateDb(null);
+        setConfirmDirectDb(null);
         setConfirmCancelDb(null);
         setConfirmDeleteDb(null);
       }
@@ -158,6 +158,7 @@ export function BlastDbModal({
   const {
     dbQuery,
     latestVersion,
+    ncbiDirectEnabled,
     publicAccessDisabled,
     canEnableLocalAccess,
     canGrantLocalRbac,
@@ -245,6 +246,11 @@ export function BlastDbModal({
     setConfirmClusterDb(null);
     setConfirmUpdateDb(null);
     setConfirmLargeDb(null);
+  };
+
+  const startDirectUpdate = (name: string) => {
+    void state.handleDirectUpdate(name);
+    setConfirmDirectDb(null);
   };
 
   const toggleAutoWarmup = (name: string, checked: boolean) => {
@@ -392,7 +398,11 @@ export function BlastDbModal({
             flexWrap: "wrap",
           }}
         >
-          <div className="db-filter-tabs" role="tablist" aria-label="Filter databases by molecule type">
+          <div
+            className="db-filter-tabs"
+            role="tablist"
+            aria-label="Filter databases by molecule type"
+          >
             {(
               [
                 { key: "all", label: "All" },
@@ -411,9 +421,7 @@ export function BlastDbModal({
                   aria-selected={active}
                   className={`db-filter-tab${active ? " db-filter-tab--active" : ""}`}
                   onClick={() => setMoleculeFilter(tab.key)}
-                  title={
-                    programs ? `Databases for ${programs}` : "Show every database"
-                  }
+                  title={programs ? `Databases for ${programs}` : "Show every database"}
                 >
                   {tab.label}
                   {programs && (
@@ -558,168 +566,170 @@ export function BlastDbModal({
                 className="muted"
                 style={{ fontSize: 12, padding: "16px 4px", textAlign: "center" }}
               >
-                No databases match this filter. Enable “Show unavailable” to see
-                databases NCBI does not publish as a pullable BLAST DB.
+                No databases match this filter. Enable “Show unavailable” to see databases
+                NCBI does not publish as a pullable BLAST DB.
               </div>
             )}
             {!dbInitialLoading &&
               CATEGORIES.map((cat) => {
-              const dbs = filterDbCatalog(
-                DB_CATALOG.filter((d) => d.category === cat),
-                moleculeFilter,
-                showUnavailable,
-              );
-              if (dbs.length === 0) return null;
-              const downloadedInCat = dbs.filter((d) =>
-                isDbReady(downloadedDbs.get(d.value)),
-              ).length;
-              return (
-                <div key={cat}>
-                  <div
-                    style={{
-                      position: "sticky",
-                      top: 0,
-                      zIndex: 1,
-                      background: "var(--bg-secondary)",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "8px 4px 6px",
-                      marginBottom: 2,
-                      borderBottom: "1px solid var(--border-weak)",
-                    }}
-                  >
-                    <span
+                const dbs = filterDbCatalog(
+                  DB_CATALOG.filter((d) => d.category === cat),
+                  moleculeFilter,
+                  showUnavailable,
+                );
+                if (dbs.length === 0) return null;
+                const downloadedInCat = dbs.filter((d) =>
+                  isDbReady(downloadedDbs.get(d.value)),
+                ).length;
+                return (
+                  <div key={cat}>
+                    <div
                       style={{
-                        fontSize: 11,
-                        fontWeight: 600,
-                        color: "var(--text-muted)",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.08em",
+                        position: "sticky",
+                        top: 0,
+                        zIndex: 1,
+                        background: "var(--bg-secondary)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "8px 4px 6px",
+                        marginBottom: 2,
+                        borderBottom: "1px solid var(--border-weak)",
                       }}
                     >
-                      {cat}
-                    </span>
-                    <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                      · {downloadedInCat}/{dbs.length}
-                    </span>
-                    {cat === "Large" && (
                       <span
-                        className="gt gt-o"
                         style={{
-                          fontSize: 9,
-                          marginLeft: "auto",
+                          fontSize: 11,
                           fontWeight: 600,
+                          color: "var(--text-muted)",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.08em",
                         }}
                       >
-                        May take hours
+                        {cat}
                       </span>
-                    )}
+                      <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
+                        · {downloadedInCat}/{dbs.length}
+                      </span>
+                      {cat === "Large" && (
+                        <span
+                          className="gt gt-o"
+                          style={{
+                            fontSize: 9,
+                            marginLeft: "auto",
+                            fontWeight: 600,
+                          }}
+                        >
+                          May take hours
+                        </span>
+                      )}
+                    </div>
+                    {dbs.map((db) => {
+                      const inProgressInfo = inProgress.get(db.value);
+                      const isCopying = Boolean(inProgressInfo);
+                      const meta = downloadedDbs.get(db.value);
+                      const isDownloaded = !isCopying && isDbReady(meta);
+                      const isDownloading = downloading === db.value;
+                      const preview = previewByName.get(db.value);
+                      // Per-DB update detection prefers the server-side ETag
+                      // map; fall back to the legacy snapshot comparison only
+                      // when the server did NOT evaluate per-DB (no storage
+                      // scope / list failed). See dbHasUpdate for the rule.
+                      const hasUpdate = dbHasUpdate({
+                        meta,
+                        isDownloaded,
+                        inUpdateMap: updatesAvailableByDb.has(db.value),
+                        updatesEvaluated,
+                        latestVersion,
+                      });
+                      const autoOracleChecked =
+                        autoOraclePreferences.get(db.value)?.enabled === true;
+                      const autoWarmupChecked = autoWarmupDbs.has(db.value);
+                      const autoOracleDisabled =
+                        autoOracleSaving !== null ||
+                        state.autoOraclePreferencesLoading ||
+                        state.autoOraclePreferencesError ||
+                        (!autoOracleChecked &&
+                          (!autoWarmupChecked ||
+                            !isDownloaded ||
+                            hasUpdate ||
+                            !!meta?.update_in_progress ||
+                            !state.autoOracleCoordinatesReady));
+                      const autoOracleDisabledReason =
+                        autoOracleSaving !== null
+                          ? "Saving Auto oracle preference"
+                          : state.autoOraclePreferencesLoading
+                            ? "Loading Auto oracle preferences"
+                            : state.autoOraclePreferencesError
+                              ? "Auto oracle preferences could not be loaded"
+                              : !autoWarmupChecked
+                                ? "Enable Auto warm for this database first"
+                                : !isDownloaded
+                                  ? "Download this database before enabling Auto oracle"
+                                  : hasUpdate || meta?.update_in_progress
+                                    ? "Update this database before enabling Auto oracle"
+                                    : !state.autoOracleCoordinatesReady
+                                      ? "A resolved AKS cluster and ACR are required"
+                                      : undefined;
+                      return (
+                        <BlastDbRow
+                          key={db.value}
+                          db={db}
+                          meta={meta}
+                          preview={preview}
+                          isDownloaded={isDownloaded}
+                          isDownloading={isDownloading}
+                          isCopying={isCopying}
+                          inProgressInfo={inProgressInfo}
+                          hasUpdate={hasUpdate}
+                          updatePending={updatesPendingByDb.get(db.value)}
+                          ncbiDirectEnabled={ncbiDirectEnabled}
+                          directUpdateDisabled={!clusterReady}
+                          directUpdateDisabledReason="AKS cluster is not running — start it before downloading an NCBI Direct generation"
+                          latestVersion={latestVersion}
+                          elapsed={elapsed}
+                          downloadDisabled={downloading !== null}
+                          oracleBuilding={oracleBuilding === db.value}
+                          oracleDisabled={
+                            !isDownloaded || oracleBuilding !== null || !clusterReady
+                          }
+                          oracleDisabledReason={
+                            !clusterReady
+                              ? "AKS cluster is not running — start it before building the order oracle"
+                              : undefined
+                          }
+                          autoWarmupChecked={autoWarmupChecked}
+                          autoWarmupDisabled={
+                            !isDownloaded || hasUpdate || !!meta?.update_in_progress
+                          }
+                          autoOracleChecked={autoOracleChecked}
+                          autoOracleDisabled={autoOracleDisabled}
+                          autoOracleDisabledReason={autoOracleDisabledReason}
+                          autoOracleSaving={autoOracleSaving === db.value}
+                          writeDisabled={writeDisabled}
+                          writeDisabledReason={writeDisabledReason}
+                          onDownload={() => requestDownload(db.value, false)}
+                          onUpdate={() => setConfirmUpdateDb(db.value)}
+                          onDirectUpdate={() => setConfirmDirectDb(db.value)}
+                          onBuildOracle={() => void handleBuildOracle(db.value)}
+                          onConfirmLarge={() => requestDownload(db.value, true)}
+                          onCancel={() => setConfirmCancelDb(db.value)}
+                          isCancelling={pendingAction.get(db.value) === "cancel"}
+                          onDelete={() => setConfirmDeleteDb(db.value)}
+                          isDeleting={pendingAction.get(db.value) === "delete"}
+                          onToggleAutoWarmup={(checked) =>
+                            toggleAutoWarmup(db.value, checked)
+                          }
+                          onToggleAutoOracle={(checked) =>
+                            void handleToggleAutoOracle(db.value, checked)
+                          }
+                          onRetryAutoOracle={() => void handleRetryAutoOracle(db.value)}
+                        />
+                      );
+                    })}
                   </div>
-                  {dbs.map((db) => {
-                    const inProgressInfo = inProgress.get(db.value);
-                    const isCopying = Boolean(inProgressInfo);
-                    const meta = downloadedDbs.get(db.value);
-                    const isDownloaded = !isCopying && isDbReady(meta);
-                    const isDownloading = downloading === db.value;
-                    const preview = previewByName.get(db.value);
-                    // Per-DB update detection prefers the server-side ETag
-                    // map; fall back to the legacy snapshot comparison only
-                    // when the server did NOT evaluate per-DB (no storage
-                    // scope / list failed). See dbHasUpdate for the rule.
-                    const hasUpdate = dbHasUpdate({
-                      meta,
-                      isDownloaded,
-                      inUpdateMap: updatesAvailableByDb.has(db.value),
-                      updatesEvaluated,
-                      latestVersion,
-                    });
-                    const autoOracleChecked =
-                      autoOraclePreferences.get(db.value)?.enabled === true;
-                    const autoWarmupChecked = autoWarmupDbs.has(db.value);
-                    const autoOracleDisabled =
-                      autoOracleSaving !== null ||
-                      state.autoOraclePreferencesLoading ||
-                      state.autoOraclePreferencesError ||
-                      (!autoOracleChecked &&
-                        (!autoWarmupChecked ||
-                          !isDownloaded ||
-                          hasUpdate ||
-                          !!meta?.update_in_progress ||
-                          !state.autoOracleCoordinatesReady));
-                    const autoOracleDisabledReason =
-                      autoOracleSaving !== null
-                        ? "Saving Auto oracle preference"
-                        : state.autoOraclePreferencesLoading
-                          ? "Loading Auto oracle preferences"
-                          : state.autoOraclePreferencesError
-                            ? "Auto oracle preferences could not be loaded"
-                        : !autoWarmupChecked
-                          ? "Enable Auto warm for this database first"
-                          : !isDownloaded
-                            ? "Download this database before enabling Auto oracle"
-                            : hasUpdate || meta?.update_in_progress
-                              ? "Update this database before enabling Auto oracle"
-                              : !state.autoOracleCoordinatesReady
-                                ? "A resolved AKS cluster and ACR are required"
-                                : undefined;
-                    return (
-                      <BlastDbRow
-                        key={db.value}
-                        db={db}
-                        meta={meta}
-                        preview={preview}
-                        isDownloaded={isDownloaded}
-                        isDownloading={isDownloading}
-                        isCopying={isCopying}
-                        inProgressInfo={inProgressInfo}
-                        hasUpdate={hasUpdate}
-                        updatePending={updatesPendingByDb.get(db.value)}
-                        latestVersion={latestVersion}
-                        elapsed={elapsed}
-                        downloadDisabled={downloading !== null}
-                        oracleBuilding={oracleBuilding === db.value}
-                        oracleDisabled={
-                          !isDownloaded || oracleBuilding !== null || !clusterReady
-                        }
-                        oracleDisabledReason={
-                          !clusterReady
-                            ? "AKS cluster is not running — start it before building the order oracle"
-                            : undefined
-                        }
-                        autoWarmupChecked={autoWarmupChecked}
-                        autoWarmupDisabled={
-                          !isDownloaded || hasUpdate || !!meta?.update_in_progress
-                        }
-                        autoOracleChecked={autoOracleChecked}
-                        autoOracleDisabled={autoOracleDisabled}
-                        autoOracleDisabledReason={autoOracleDisabledReason}
-                        autoOracleSaving={autoOracleSaving === db.value}
-                        writeDisabled={writeDisabled}
-                        writeDisabledReason={writeDisabledReason}
-                        onDownload={() => requestDownload(db.value, false)}
-                        onUpdate={() => setConfirmUpdateDb(db.value)}
-                        onBuildOracle={() => void handleBuildOracle(db.value)}
-                        onConfirmLarge={() => requestDownload(db.value, true)}
-                        onCancel={() => setConfirmCancelDb(db.value)}
-                        isCancelling={pendingAction.get(db.value) === "cancel"}
-                        onDelete={() => setConfirmDeleteDb(db.value)}
-                        isDeleting={pendingAction.get(db.value) === "delete"}
-                        onToggleAutoWarmup={(checked) =>
-                          toggleAutoWarmup(db.value, checked)
-                        }
-                        onToggleAutoOracle={(checked) =>
-                          void handleToggleAutoOracle(db.value, checked)
-                        }
-                        onRetryAutoOracle={() =>
-                          void handleRetryAutoOracle(db.value)
-                        }
-                      />
-                    );
-                  })}
-                </div>
-              );
-            })}
+                );
+              })}
           </div>
 
           <div style={{ marginTop: "var(--space-2)" }}>
@@ -760,6 +770,17 @@ export function BlastDbModal({
                 latestVersion={latestVersion}
                 onConfirm={() => startUpdate(confirmUpdateDb)}
                 onCancel={() => setConfirmUpdateDb(null)}
+              />
+            </ConfirmOverlay>
+          )}
+
+          {confirmDirectDb && updatesPendingByDb.get(confirmDirectDb) && (
+            <ConfirmOverlay onDismiss={() => setConfirmDirectDb(null)}>
+              <BlastDbDirectUpdateConfirm
+                dbValue={confirmDirectDb}
+                pending={updatesPendingByDb.get(confirmDirectDb)!}
+                onConfirm={() => startDirectUpdate(confirmDirectDb)}
+                onCancel={() => setConfirmDirectDb(null)}
               />
             </ConfirmOverlay>
           )}

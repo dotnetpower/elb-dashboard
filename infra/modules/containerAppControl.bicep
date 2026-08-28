@@ -62,6 +62,9 @@ param serviceBusEnabled string = ''
 @description('Per-deployment override for the date-tiered results storage layout env (STORAGE_DATE_LAYOUT_ENABLED). Empty (default) keeps the repo default from control-plane-env.json (false, charter section 12a Rule 4). A truthy value pins it ON so native AND external (SB/OpenAPI) jobs write results under results/YYYY/MM/DD/<job_id>/; a falsy value forces flat. Set via azd env so the choice survives every redeploy. Mirrors the override scripts/dev/quick-deploy.sh applies on its api/worker/beat PATCH path.')
 param storageDateLayoutEnabled string = ''
 
+@description('Explicit deployment opt-in for NCBI Direct database generation downloads. Default false.')
+param prepareDbNcbiDirectEnabled string = 'false'
+
 @description('App Insights connection string for telemetry from inside the containers.')
 param applicationInsightsConnectionString string
 
@@ -312,6 +315,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // the public azure-cli image + entrypoint download (unchanged
             // legacy behaviour).
             { name: 'PREPARE_DB_AKS_AZCOPY_IMAGE', value: prepareDbImage }
+            // Explicit NCBI Direct generation downloads remain opt-in until
+            // a deployment has validated its AKS scratch capacity and NCBI
+            // egress behavior. The UI can disclose the newer release while
+            // this gate is off, but cannot enqueue the large HTTPS transfer.
+            { name: 'PREPARE_DB_NCBI_DIRECT_ENABLED', value: prepareDbNcbiDirectEnabled }
             // Live Wall log-tail fallback target. When non-empty,
             // `api.services.sidecar_logs` switches from local file tailing
             // to KQL against the LA workspace. Empty disables the fallback

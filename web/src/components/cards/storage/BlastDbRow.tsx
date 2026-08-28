@@ -49,6 +49,9 @@ interface BlastDbRowProps {
   inProgressInfo: { expectedFiles: number; startTime: number } | undefined;
   hasUpdate: boolean;
   updatePending?: PendingDbUpdate;
+  ncbiDirectEnabled?: boolean;
+  directUpdateDisabled?: boolean;
+  directUpdateDisabledReason?: string;
   latestVersion: string | null;
   elapsed: number;
   downloadDisabled: boolean;
@@ -76,6 +79,7 @@ interface BlastDbRowProps {
   writeDisabledReason?: string;
   onDownload: () => void;
   onUpdate: () => void;
+  onDirectUpdate?: () => void;
   onBuildOracle: () => void;
   onConfirmLarge: () => void;
   /**
@@ -137,18 +141,12 @@ export function BlastDbRowSkeleton() {
         marginBottom: 2,
       }}
     >
-      <span
-        className="skeleton"
-        style={{ width: 14, height: 14, borderRadius: "50%" }}
-      />
+      <span className="skeleton" style={{ width: 14, height: 14, borderRadius: "50%" }} />
       <span style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <span className="skeleton" style={{ width: "42%", height: 12 }} />
         <span className="skeleton" style={{ width: "68%", height: 9 }} />
       </span>
-      <span
-        className="skeleton"
-        style={{ width: 84, height: 24, borderRadius: 6 }}
-      />
+      <span className="skeleton" style={{ width: 84, height: 24, borderRadius: 6 }} />
     </div>
   );
 }
@@ -163,6 +161,9 @@ export function BlastDbRow({
   inProgressInfo,
   hasUpdate,
   updatePending,
+  ncbiDirectEnabled = false,
+  directUpdateDisabled = false,
+  directUpdateDisabledReason,
   latestVersion,
   elapsed,
   downloadDisabled,
@@ -179,6 +180,7 @@ export function BlastDbRow({
   writeDisabledReason,
   onDownload,
   onUpdate,
+  onDirectUpdate,
   onBuildOracle,
   onConfirmLarge,
   onCancel,
@@ -224,8 +226,7 @@ export function BlastDbRow({
   const oracleAutomation = oracle?.automation;
   const oracleRetryExhausted = oracleAutomation?.retry_exhausted === true;
   const oracleBlocked = oracleAutomation?.status === "blocked";
-  const oracleBackoff =
-    oracleAutomation?.status === "failed" && !oracleRetryExhausted;
+  const oracleBackoff = oracleAutomation?.status === "failed" && !oracleRetryExhausted;
   const lastOracleAttemptFailed =
     oracle?.last_attempt?.status === "failed" ||
     oracle?.last_attempt?.status === "timeout" ||
@@ -311,11 +312,7 @@ export function BlastDbRow({
     }
     if (bytesDone === null) return;
     const now = Date.now();
-    speedSamplesRef.current = recordSpeedSample(
-      speedSamplesRef.current,
-      bytesDone,
-      now,
-    );
+    speedSamplesRef.current = recordSpeedSample(speedSamplesRef.current, bytesDone, now);
     setSpeedLabel(computeWindowedSpeed(speedSamplesRef.current, now));
     // Byte-based ETA: bytes still to land over the trailing-window throughput.
     // The windowed rate reflects only recent movement, so it is immune to the
@@ -488,9 +485,7 @@ export function BlastDbRow({
               Recommended
             </span>
           )}
-          <span
-            style={{ fontSize: 11, color: "var(--text-muted)", flexShrink: 0 }}
-          >
+          <span style={{ fontSize: 11, color: "var(--text-muted)", flexShrink: 0 }}>
             {db.size}
           </span>
         </div>
@@ -551,8 +546,8 @@ export function BlastDbRow({
                   }}
                   onClick={(event) => event.stopPropagation()}
                 >
-                  <AlertCircle size={10} />{" "}
-                  {unsupportedReasonLabel[unsupported.reason]} → source
+                  <AlertCircle size={10} /> {unsupportedReasonLabel[unsupported.reason]} →
+                  source
                 </a>
               ) : preview?.available ? (
                 <>
@@ -624,10 +619,7 @@ export function BlastDbRow({
                 </span>
               ) : (
                 etaLabel && (
-                  <span style={{ color: "var(--text-faint)" }}>
-                    {" "}
-                    · {etaLabel}
-                  </span>
+                  <span style={{ color: "var(--text-faint)" }}> · {etaLabel}</span>
                 )
               )}
             </span>
@@ -636,8 +628,7 @@ export function BlastDbRow({
             <span
               className="db-shard-chip"
               title={
-                meta.update_error ??
-                "Last download did not complete. Click Get to retry."
+                meta.update_error ?? "Last download did not complete. Click Get to retry."
               }
               style={{
                 fontSize: 10,
@@ -659,9 +650,7 @@ export function BlastDbRow({
               {meta.copy_status?.failed != null
                 ? ` · ${meta.copy_status.failed} failed`
                 : ""}
-              {meta.copy_status?.pending
-                ? ` · ${meta.copy_status.pending} pending`
-                : ""}
+              {meta.copy_status?.pending ? ` · ${meta.copy_status.pending} pending` : ""}
             </span>
           )}
           {isDownloaded && meta && (
@@ -720,14 +709,26 @@ export function BlastDbRow({
                 </span>
               ) : null}
               {meta.file_count ? <span>{meta.file_count} files</span> : null}
-              {meta.last_modified ? (
-                <span>{formatStorageDate(meta.last_modified)}</span>
+              {meta.source_release_at || meta.update_date ? (
+                <span title="NCBI database content release date">
+                  Content ·{" "}
+                  {formatStorageDate(meta.source_release_at ?? meta.update_date)}
+                </span>
+              ) : null}
+              {meta.downloaded_at ? (
+                <span title="Date this generation was activated in Azure Storage">
+                  Downloaded · {formatStorageDate(meta.downloaded_at)}
+                </span>
+              ) : meta.last_modified ? (
+                <span title="Latest file modification in Azure Storage">
+                  Stored · {formatStorageDate(meta.last_modified)}
+                </span>
               ) : null}
               {meta.source_version && (
                 <NcbiVersionBadge
                   version={meta.source_version}
                   href={ncbiFtpUrl}
-                  title={`Open ${db.value} metadata on the NCBI BLAST DB FTP server`}
+                  title={`${meta.source_provider === "ncbi-direct" ? "NCBI Direct generation" : "NCBI cloud snapshot"}: ${formatNcbiVersion(meta.source_version)}. Open ${db.value} metadata on the NCBI BLAST DB server.`}
                 />
               )}
               {meta.sharded && (meta.shard_sets?.length ?? 0) > 0 && (
@@ -770,16 +771,15 @@ export function BlastDbRow({
                     fontSize: 10,
                     padding: "1px 6px",
                     borderRadius: 3,
-                    color:
-                      activeOracle
-                        ? "var(--accent)"
-                        : meta.db_order_oracle.status === "ready"
+                    color: activeOracle
+                      ? "var(--accent)"
+                      : meta.db_order_oracle.status === "ready"
                         ? "var(--success)"
                         : meta.db_order_oracle.status === "stale"
                           ? "var(--warning)"
                           : meta.db_order_oracle.status === "failed"
                             ? "var(--danger)"
-                        : "var(--accent)",
+                            : "var(--accent)",
                     background:
                       meta.db_order_oracle.status === "stale"
                         ? "rgba(240,198,116,0.08)"
@@ -851,14 +851,14 @@ export function BlastDbRow({
               writeDisabled
                 ? writeDisabledReason
                 : autoWarmupDisabled
-                ? !isDownloaded
-                  ? "Download this database before enabling automatic warmup"
-                  : isUpdating
-                    ? "Automatic warmup waits until this update finishes"
-                    : hasUpdate
-                      ? "Update this database before enabling automatic warmup"
-                      : "Automatic warmup is unavailable"
-                : "Warm this database automatically when an AKS workload cluster is running"
+                  ? !isDownloaded
+                    ? "Download this database before enabling automatic warmup"
+                    : isUpdating
+                      ? "Automatic warmup waits until this update finishes"
+                      : hasUpdate
+                        ? "Update this database before enabling automatic warmup"
+                        : "Automatic warmup is unavailable"
+                  : "Warm this database automatically when an AKS workload cluster is running"
             }
           >
             <input
@@ -877,8 +877,7 @@ export function BlastDbRow({
               gap: 5,
               minWidth: 88,
               color: autoOracleChecked ? "var(--success)" : "var(--text-muted)",
-              cursor:
-                autoOracleDisabled || writeDisabled ? "not-allowed" : "pointer",
+              cursor: autoOracleDisabled || writeDisabled ? "not-allowed" : "pointer",
               opacity: autoOracleDisabled || writeDisabled ? 0.55 : 1,
             }}
             title={
@@ -1016,9 +1015,7 @@ export function BlastDbRow({
                   onCancel();
                 }}
                 disabled={writeDisabled || isCancelling}
-                title={
-                  writeDisabled ? writeDisabledReason : "Cancel in-flight update"
-                }
+                title={writeDisabled ? writeDisabledReason : "Cancel in-flight update"}
               >
                 {isCancelling ? (
                   <>
@@ -1067,13 +1064,35 @@ export function BlastDbRow({
               alignItems: "center",
               gap: 4,
             }}
-            disabled
-            aria-label="Update pending NCBI cloud mirror"
-            title={`NCBI published a newer release${
-              updatePending.publishedAt
-                ? ` on ${formatStorageDate(updatePending.publishedAt)}`
-                : ""
-            }; waiting for the cloud mirror before Update can run.`}
+            disabled={
+              !ncbiDirectEnabled ||
+              !onDirectUpdate ||
+              directUpdateDisabled ||
+              downloadDisabled ||
+              writeDisabled
+            }
+            onClick={(event) => {
+              event.stopPropagation();
+              onDirectUpdate?.();
+            }}
+            aria-label={
+              ncbiDirectEnabled
+                ? "Update via NCBI Direct"
+                : "Update pending NCBI cloud mirror"
+            }
+            title={
+              writeDisabled
+                ? writeDisabledReason
+                : directUpdateDisabled
+                  ? directUpdateDisabledReason
+                  : ncbiDirectEnabled
+                    ? `Update the ${formatStorageDate(updatePending.publishedAt)} release via NCBI Direct (HTTPS)`
+                    : `NCBI published a newer release${
+                        updatePending.publishedAt
+                          ? ` on ${formatStorageDate(updatePending.publishedAt)}`
+                          : ""
+                      }; waiting for the cloud mirror before Update can run.`
+            }
           >
             <RefreshCw size={11} /> Update
           </button>
@@ -1201,13 +1220,13 @@ export function BlastDbRow({
                 writeDisabled
                   ? writeDisabledReason
                   : isUnsupported && unsupported
-                  ? unsupported.hint
-                  : previewUnavailable
-                    ? (preview?.message ??
-                      "Not in current NCBI S3 snapshot. Retry once the snapshot rotates.")
-                    : downloadDisabled
-                      ? "Another download is in progress"
-                      : `Download ${db.value}`
+                    ? unsupported.hint
+                    : previewUnavailable
+                      ? (preview?.message ??
+                        "Not in current NCBI S3 snapshot. Retry once the snapshot rotates.")
+                      : downloadDisabled
+                        ? "Another download is in progress"
+                        : `Download ${db.value}`
               }
             >
               <Download size={11} /> {isPartial ? "Retry" : "Get"}

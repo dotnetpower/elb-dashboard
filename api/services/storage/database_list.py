@@ -92,6 +92,8 @@ def list_databases(
     # enumeration loop, preserving the exact "last wins" content while paying
     # one download per base instead of one per volume.
     blastdb_json_names: dict[str, str] = {}  # db_name -> .njs blob name (last wins)
+    generation_info: dict[str, dict[str, Any]] = {}  # active basename prefix -> stats
+    generation_njs_names: dict[str, str] = {}  # active basename prefix -> .njs blob
     for blob in cc.list_blobs():
         parts = blob.name.split("/")
         name = parts[-1]  # file name without directory prefix
@@ -149,6 +151,45 @@ def list_databases(
         ):
             oracle_part_key = (parts[2], parts[4])
             oracle_part_names.setdefault(oracle_part_key, set()).add(blob.name)
+            continue
+        # Generation-scoped files are invisible until metadata.active_prefix
+        # selects their exact basename prefix. Keeping them out of the legacy
+        # aggregation prevents an in-progress Direct download from inflating
+        # file_count/bytes or replacing the displayed .njs before promotion.
+        if len(parts) >= 4 and parts[1] == "generations":
+            for ext in _DB_EXTS:
+                if not name.endswith(ext):
+                    continue
+                base = re.sub(r"\.\d+$", "", name[: -len(ext)])
+                if not base:
+                    break
+                directory = "/".join(parts[:-1])
+                db_prefix = f"{directory}/{base}"
+                info = generation_info.setdefault(
+                    db_prefix,
+                    {
+                        "name": base,
+                        "container": container,
+                        "prefix": directory,
+                        "source": "ncbi",
+                        "file_count": 0,
+                        "total_bytes": 0,
+                        "last_modified": None,
+                    },
+                )
+                info["file_count"] += 1
+                info["total_bytes"] += blob.size or 0
+                if blob.last_modified:
+                    modified = (
+                        blob.last_modified.isoformat()
+                        if hasattr(blob.last_modified, "isoformat")
+                        else str(blob.last_modified)
+                    )
+                    if not info["last_modified"] or modified > info["last_modified"]:
+                        info["last_modified"] = modified
+                if ext == ".njs":
+                    generation_njs_names[db_prefix] = blob.name
+                break
             continue
         if name.endswith(".njs"):
             base = re.sub(r"\.\d+$", "", name[:-4])
@@ -209,6 +250,24 @@ def list_databases(
                         if not prev or mod_str > prev:
                             db_info[base]["last_modified"] = mod_str
                 break
+    # Select a staged generation only after its metadata pointer is active.
+    # Legacy databases without active_prefix retain the original aggregation.
+    import json as _json
+
+    for db_name, raw_metadata in metadata_blobs.items():
+        try:
+            metadata = _json.loads(raw_metadata)
+        except (TypeError, _json.JSONDecodeError) as exc:
+            LOGGER.debug("active generation metadata parse skipped for %s: %s", db_name, exc)
+            continue
+        active_prefix = str(metadata.get("active_prefix") or "").strip("/")
+        active_info = generation_info.get(active_prefix)
+        if active_info is None:
+            continue
+        db_info[db_name] = dict(active_info)
+        active_njs = generation_njs_names.get(active_prefix)
+        if active_njs:
+            blastdb_json_names[db_name] = active_njs
     # Deferred single .njs download per base (see blastdb_json_names above).
     # Only read the .njs for bases that actually registered as a database;
     # the enrichment loop below reads blastdb_json_blobs[db_name] only for
@@ -234,8 +293,6 @@ def list_databases(
         except Exception as exc:
             LOGGER.debug("oracle run status read skipped for %s: %s", status_name, exc)
     # Enrich with metadata (source_version, downloaded_at, sharding info)
-    import json as _json
-
     from api.services.web_blast_searchsp import (
         WEB_BLAST_SEARCHSP_DEFAULTS,
         compute_web_blast_searchsp,
@@ -287,6 +344,12 @@ def list_databases(
                 meta = _json.loads(metadata_blobs[db_name])
                 info["source_version"] = meta.get("source_version")
                 info["downloaded_at"] = meta.get("downloaded_at")
+                info["active_prefix"] = meta.get("active_prefix")
+                info["active_generation"] = meta.get("active_generation")
+                info["pending_generation"] = meta.get("pending_generation")
+                info["source_provider"] = meta.get("source_provider")
+                info["source_release_at"] = meta.get("source_release_at")
+                info["release_fingerprint"] = meta.get("release_fingerprint")
                 # Sharding metadata written by the prepare-db pipeline once
                 # the per-DB shard set upload completes. Both keys are
                 # optional — older metadata blobs (pre-2026-05) won't have

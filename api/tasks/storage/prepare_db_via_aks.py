@@ -887,6 +887,7 @@ def _promote_success(
     prepare_operation_id: str = "",
 ) -> None:
     """Run auto-shard + promote `source_version`, byte-shape identical to server-side."""
+
     def _verify_owner(meta: dict[str, Any]) -> dict[str, Any]:
         require_prepare_operation_owner(meta, prepare_operation_id)
         return meta
@@ -949,6 +950,16 @@ def _promote_success(
         previous_source_version = str(meta.get("source_version") or "")
         meta["db_name"] = db_name
         meta["source_version"] = source_version
+        meta["source_provider"] = "s3"
+        meta.pop("active_prefix", None)
+        meta.pop("active_generation", None)
+        meta.pop("pending_generation", None)
+        meta.pop("shard_layout_prefix", None)
+        meta.pop("source_release_at", None)
+        meta.pop("release_fingerprint", None)
+        meta.pop("transfer_manifest_sha256", None)
+        meta.pop("taxonomy_release_at", None)
+        meta.pop("taxonomy_release_fingerprint", None)
         if new_signature_etag:
             meta["signature_etag"] = new_signature_etag
         if new_composite_signature:

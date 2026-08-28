@@ -143,6 +143,7 @@ def _list_db_volume_details(
     db_name: str,
     *,
     container: str = DEFAULT_CONTAINER,
+    db_prefix: str | None = None,
 ) -> tuple[list[str], dict[str, int], int]:
     """Return volume names, exact volume bytes, and shared-file bytes.
 
@@ -163,7 +164,8 @@ def _list_db_volume_details(
     _validate_db_name(db_name)
     svc = _blob_service(credential, account_name)
     cc = svc.get_container_client(container)
-    prefix = f"{db_name}/"
+    base_prefix = (db_prefix or f"{db_name}/{db_name}").strip("/")
+    prefix = f"{base_prefix.rsplit('/', 1)[0]}/"
     # First pass: discover volumes by their unique sequence file.
     volume_size: dict[str, int] = {}
     # Track every blob's size so we can report total DB bytes (the marker
@@ -245,12 +247,13 @@ def read_blastdb_stats(
     db_name: str,
     *,
     container: str = DEFAULT_CONTAINER,
+    db_prefix: str | None = None,
 ) -> dict[str, int]:
     """Read full-DB statistics from the BLAST v5 ``.njs`` metadata file."""
     _validate_db_name(db_name)
     svc = _blob_service(credential, account_name)
     cc = svc.get_container_client(container)
-    bc = cc.get_blob_client(f"{db_name}/{db_name}.njs")
+    bc = cc.get_blob_client(f"{(db_prefix or f'{db_name}/{db_name}').strip('/')}.njs")
     try:
         from api.services.storage.data import read_metadata_blob_bytes
 
@@ -410,9 +413,16 @@ class ShardUploadResult:
     error: str | None = None
 
 
-def _shard_blob_paths(db_name: str, num_shards: int, shard_idx: int) -> tuple[str, str]:
+def _shard_blob_paths(
+    db_name: str,
+    num_shards: int,
+    shard_idx: int,
+    *,
+    layout_prefix: str = "",
+) -> tuple[str, str]:
     shard_name = f"{db_name}_shard_{shard_idx:02d}"
-    base = f"{num_shards}shards/{shard_name}"
+    root = layout_prefix.strip("/")
+    base = f"{root}/{num_shards}shards/{shard_name}" if root else f"{num_shards}shards/{shard_name}"
     return f"{base}/{shard_name}.manifest", f"{base}/{shard_name}.nal"
 
 
@@ -465,6 +475,7 @@ def upload_shard_set(
     local_db_dir: str = AKS_LOCAL_DB_DIR,
     volume_bytes: dict[str, int] | None = None,
     shared_bytes: int = 0,
+    layout_prefix: str = "",
 ) -> ShardUploadResult:
     """Idempotently upload manifest + .nal for one ``N``-shard layout.
 
@@ -490,7 +501,9 @@ def upload_shard_set(
     created = 0
     skipped = 0
     for i, shard_volumes in enumerate(layout.shards):
-        manifest_path, nal_path = _shard_blob_paths(db_name, num_shards, i)
+        manifest_path, nal_path = _shard_blob_paths(
+            db_name, num_shards, i, layout_prefix=layout_prefix
+        )
         manifest_text = render_manifest(shard_volumes)
         nal_text = render_nal(
             db_name=db_name,
@@ -551,6 +564,8 @@ def ensure_shard_sets(
     *,
     presets: Iterable[int] = PRESET_SHARD_SETS,
     container: str = DEFAULT_CONTAINER,
+    db_prefix: str | None = None,
+    layout_prefix: str = "",
 ) -> dict[str, Any]:
     """Ensure every preset N has a shard layout uploaded for ``db_name``.
 
@@ -572,9 +587,16 @@ def ensure_shard_sets(
         account_name,
         db_name,
         container=container,
+        db_prefix=db_prefix,
     )
     total_bytes = sum(volume_bytes.values())
-    stats = read_blastdb_stats(credential, account_name, db_name, container=container)
+    stats = read_blastdb_stats(
+        credential,
+        account_name,
+        db_name,
+        container=container,
+        db_prefix=db_prefix,
+    )
 
     successful: list[int] = []
     created = 0
@@ -602,6 +624,7 @@ def ensure_shard_sets(
                 container=container,
                 volume_bytes=volume_bytes,
                 shared_bytes=shared_bytes,
+                layout_prefix=layout_prefix,
             )
             successful.append(n)
             created += result.created
@@ -713,6 +736,7 @@ def partition_prefix_for(
     num_shards: int,
     *,
     container: str = DEFAULT_CONTAINER,
+    layout_prefix: str = "",
 ) -> str:
     """Build the ``db-partition-prefix`` URL for an INI ``[blast]`` section.
 
@@ -724,4 +748,8 @@ def partition_prefix_for(
     _validate_shard_count(num_shards)
     from api.services.storage.endpoint import blob_account_url
 
-    return f"{blob_account_url(account_name)}/{container}/{num_shards}shards/{db_name}_shard_"
+    root = layout_prefix.strip("/")
+    middle = f"{root}/" if root else ""
+    return (
+        f"{blob_account_url(account_name)}/{container}/{middle}{num_shards}shards/{db_name}_shard_"
+    )
