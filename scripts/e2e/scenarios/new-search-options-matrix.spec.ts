@@ -1,7 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installClientIssueCollector } from "./helpers/assertions";
-import { installNewSearchApiMocks, type MockSubmitCapture } from "./helpers/apiMocks";
+import {
+  installNewSearchApiMocks,
+  type MockSubmitCapture,
+} from "./helpers/apiMocks";
 import { seedWorkspaceConfig } from "./helpers/workspace";
 
 const nucleotideQuery =
@@ -13,66 +16,100 @@ test.beforeEach(async ({ page }) => {
   await seedWorkspaceConfig(page);
 });
 
-test("New Search option matrix produces accepted submit payloads", async ({ page }) => {
-  const collector = installClientIssueCollector(page);
-  const capture = await installNewSearchApiMocks(page);
-
-  await runCase(page, capture, "default blastn", async () => {
+optionCase(
+  "default blastn",
+  async (page) => {
     await fillBaseForm(page, nucleotideQuery);
-  }, (payload) => {
+  },
+  (payload) => {
     expect(payload.program).toBe("blastn");
     expect(payload.db).toBe("blast-db/core_nt/core_nt");
     expect(payload.disable_sharding).toBe(false);
-  });
+  },
+);
 
-  await runCase(page, capture, "blastn short query", async () => {
+optionCase(
+  "blastn short query",
+  async (page) => {
     await fillBaseForm(page, shortNucleotideQuery);
     await openAlgorithmParameters(page);
-  }, (payload) => {
+  },
+  (payload) => {
     expect(payload.additional_options).toContain("-task blastn-short");
-  });
+  },
+);
 
-  await runCase(page, capture, "taxonomy include", async () => {
+optionCase(
+  "taxonomy include",
+  async (page) => {
     await fillBaseForm(page, nucleotideQuery);
-    await page.getByRole("button", { name: /Homo sapiens/i }).first().click();
-  }, (payload) => {
+    await page
+      .getByRole("button", { name: /Homo sapiens/i })
+      .first()
+      .click();
+  },
+  (payload) => {
     expect(payload.taxid).toBe(9606);
     expect(payload.is_inclusive).toBe(true);
-  });
+  },
+);
 
-  await runCase(page, capture, "algorithm parameters", async () => {
+optionCase(
+  "algorithm parameters",
+  async (page) => {
     await fillBaseForm(page, nucleotideQuery);
     await openAlgorithmParameters(page);
     await page.getByLabel("Max target sequences").fill("50");
     await page.getByLabel("Expect threshold").fill("0.00001");
     await page.getByRole("spinbutton", { name: /Word size/i }).fill("11");
     await page.getByLabel("Output format").selectOption("6");
-  }, (payload) => {
+  },
+  (payload) => {
     expect(payload.max_target_seqs).toBe(50);
     expect(payload.evalue).toBe(0.00001);
     expect(payload.word_size).toBe(11);
     expect(payload.outfmt).toBe(6);
-  });
+  },
+);
 
-  await runCase(page, capture, "masking options", async () => {
+optionCase(
+  "masking options",
+  async (page) => {
     await fillBaseForm(page, nucleotideQuery.toLowerCase());
     await openAlgorithmParameters(page);
     await page.getByLabel("Mask lower case letters").check();
-  }, (payload) => {
+  },
+  (payload) => {
     expect(payload.additional_options).toContain("-lcase_masking");
-  });
+  },
+);
 
-  await runCase(page, capture, "protein blastp", async () => {
+optionCase(
+  "protein blastp",
+  async (page) => {
     await fillBaseForm(page, proteinQuery);
     await page.getByRole("button", { name: /^blastp/i }).click();
     await page.getByRole("radio", { name: /swissprot/i }).click();
-  }, (payload) => {
+  },
+  (payload) => {
     expect(payload.program).toBe("blastp");
     expect(payload.db).toBe("blast-db/swissprot/swissprot");
-  });
+  },
+);
 
-  await collector.assertClean();
-});
+function optionCase(
+  name: string,
+  arrange: (page: Page) => Promise<void>,
+  assertPayload: (payload: Record<string, unknown>) => void,
+) {
+  test(`New Search option matrix: ${name}`, async ({ page }) => {
+    const collector = installClientIssueCollector(page);
+    const capture = await installNewSearchApiMocks(page);
+
+    await runCase(page, capture, name, () => arrange(page), assertPayload);
+    await collector.assertClean();
+  });
+}
 
 async function runCase(
   page: Page,
