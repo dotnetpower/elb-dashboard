@@ -17,13 +17,22 @@ from api.services.k8s import prepare_db_jobs
 
 
 class _Response:
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, body: dict | None = None) -> None:
         self.status_code = status_code
+        self._body = body or {}
+
+    def json(self) -> dict:
+        return self._body
 
 
 class _Session:
-    def __init__(self, get_statuses: list[int]) -> None:
-        self.get_statuses = list(get_statuses)
+    def __init__(
+        self,
+        job_statuses: list[int],
+        pod_lists: list[list[str]] | None = None,
+    ) -> None:
+        self.job_statuses = list(job_statuses)
+        self.pod_lists = list(pod_lists or [])
         self.delete_calls: list[tuple[str, dict[str, str] | None]] = []
 
     def delete(
@@ -37,9 +46,22 @@ class _Session:
         self.delete_calls.append((url, params))
         return _Response(200)
 
-    def get(self, _url: str, *, timeout: int) -> _Response:
+    def get(
+        self,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+        timeout: int,
+    ) -> _Response:
         del timeout
-        return _Response(self.get_statuses.pop(0) if self.get_statuses else 200)
+        if url.endswith("/pods"):
+            assert params and params["labelSelector"].startswith("batch.kubernetes.io/job-name=")
+            names = self.pod_lists.pop(0) if self.pod_lists else []
+            return _Response(
+                200,
+                {"items": [{"metadata": {"name": name}} for name in names]},
+            )
+        return _Response(self.job_statuses.pop(0) if self.job_statuses else 200)
 
     def close(self) -> None:
         return None
@@ -57,7 +79,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, session: _Session) -> None:
 def test_foreground_delete_waits_for_job_absence_before_configmap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = _Session([200, 404])
+    session = _Session([200, 404], [["prepare-core-0-abc"], []])
     _install(monkeypatch, session)
 
     result = prepare_db_jobs.delete_prepare_db_job(
@@ -73,15 +95,20 @@ def test_foreground_delete_waits_for_job_absence_before_configmap(
 
     assert result["status"] == "deleted"
     assert result["job"]["absent"] is True
+    assert result["job"]["pods_absent"] is True
     assert result["job"]["waited"] is True
     assert session.delete_calls[0][1] == {"propagationPolicy": "Foreground"}
-    assert session.delete_calls[1][0].endswith("/configmaps/prepare-core")
+    assert session.delete_calls[1] == (
+        "https://aks/api/v1/namespaces/default/pods/prepare-core-0-abc",
+        {"gracePeriodSeconds": "0", "propagationPolicy": "Background"},
+    )
+    assert session.delete_calls[2][0].endswith("/configmaps/prepare-core")
 
 
 def test_foreground_delete_timeout_defers_configmap_and_reports_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = _Session([200])
+    session = _Session([200], [["prepare-core-0-abc"]])
     _install(monkeypatch, session)
     monotonic_values = iter([0.0, 0.0, 61.0])
     monkeypatch.setattr(prepare_db_jobs.time, "monotonic", lambda: next(monotonic_values))
@@ -100,7 +127,7 @@ def test_foreground_delete_timeout_defers_configmap_and_reports_partial(
     assert result["status"] == "partial"
     assert result["job"]["wait_timed_out"] is True
     assert result["configmap"]["deferred"] is True
-    assert len(session.delete_calls) == 1
+    assert len(session.delete_calls) == 2
 
 
 def test_default_delete_remains_background_and_non_blocking(

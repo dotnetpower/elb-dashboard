@@ -804,29 +804,84 @@ def delete_prepare_db_job(
         )
         delete_accepted = job_resp.status_code in (200, 202, 404)
         job_absent = job_resp.status_code == 404
+        pods_absent = wait_seconds == 0
+        pods_remaining = 0
+        pod_delete_errors = 0
         wait_timed_out = False
         wait_status_code: int | None = None
-        if delete_accepted and wait_seconds > 0 and not job_absent:
+        pod_status_code: int | None = None
+        if delete_accepted and wait_seconds > 0:
             deadline = time.monotonic() + wait_seconds
             while time.monotonic() < deadline:
-                check = session.get(job_url, timeout=10)
-                wait_status_code = check.status_code
-                if check.status_code == 404:
-                    job_absent = True
+                if not job_absent:
+                    check = session.get(job_url, timeout=10)
+                    wait_status_code = check.status_code
+                    if check.status_code == 404:
+                        job_absent = True
+                    elif check.status_code != 200:
+                        break
+
+                pods_url = f"{server}/api/v1/namespaces/{namespace}/pods"
+                pod_response = session.get(
+                    pods_url,
+                    params={"labelSelector": f"batch.kubernetes.io/job-name={job_name}"},
+                    timeout=10,
+                )
+                pod_status_code = pod_response.status_code
+                if pod_response.status_code != 200:
                     break
-                if check.status_code != 200:
+                items = pod_response.json().get("items") or []
+                pods = [
+                    item
+                    for item in items
+                    if isinstance(item, dict)
+                    and isinstance(item.get("metadata"), dict)
+                    and item["metadata"].get("name")
+                ]
+                pods_remaining = len(pods)
+                if not pods:
+                    pods_absent = True
+                else:
+                    for pod in pods:
+                        pod_name = str(pod["metadata"]["name"])
+                        pod_url = f"{pods_url}/{pod_name}"
+                        pod_delete = session.delete(
+                            pod_url,
+                            params={
+                                "gracePeriodSeconds": "0",
+                                "propagationPolicy": "Background",
+                            },
+                            timeout=10,
+                        )
+                        if pod_delete.status_code not in (200, 202, 404):
+                            pod_delete_errors += 1
+                    pods_absent = False
+                if job_absent and pods_absent:
                     break
                 time.sleep(min(DEFAULT_TERMINATING_POLL_SECONDS, wait_seconds))
-            wait_timed_out = not job_absent and wait_status_code in {None, 200}
+            wait_timed_out = (
+                not (job_absent and pods_absent)
+                and wait_status_code in {None, 200, 404}
+                and pod_status_code in {None, 200}
+                and pod_delete_errors == 0
+            )
         results["job"] = {
             "status_code": job_resp.status_code,
-            "ok": delete_accepted and (wait_seconds == 0 or job_absent),
+            "ok": delete_accepted
+            and (wait_seconds == 0 or (job_absent and pods_absent))
+            and pod_delete_errors == 0,
             "absent": job_absent,
+            "pods_absent": pods_absent,
+            "pods_remaining": pods_remaining,
+            "pod_status_code": pod_status_code,
+            "pod_delete_errors": pod_delete_errors,
             "waited": wait_seconds > 0,
             "wait_status_code": wait_status_code,
             "wait_timed_out": wait_timed_out,
         }
-        if configmap_name and (wait_seconds == 0 or job_absent):
+        if configmap_name and (
+            wait_seconds == 0 or (job_absent and pods_absent and pod_delete_errors == 0)
+        ):
             cm_url = f"{server}/api/v1/namespaces/{namespace}/configmaps/{configmap_name}"
             cm_resp = session.delete(cm_url, timeout=10)
             results["configmap"] = {

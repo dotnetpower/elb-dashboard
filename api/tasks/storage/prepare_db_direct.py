@@ -72,7 +72,9 @@ def _ownership_loss_outcome(metadata: dict[str, Any], expected_owner: str) -> st
         return None
     pending = metadata.get("pending_generation")
     phase = str(pending.get("phase") or "") if isinstance(pending, dict) else ""
-    if not metadata.get("update_in_progress") and phase == "cancelled":
+    if metadata.get("cancel_operation_id") or (
+        not metadata.get("update_in_progress") and phase == "cancelled"
+    ):
         return "cancelled"
     return "superseded"
 
@@ -345,7 +347,6 @@ def prepare_db_via_ncbi_direct(
                 type(read_exc).__name__,
             )
             current = {}
-        cleanup_job = True
         return _finish_owner_loss(current)
     except Exception as exc:
         # Redis lock loss and other failures can race a cancellation after the
@@ -359,7 +360,6 @@ def prepare_db_via_ncbi_direct(
             current = {}
             owner_outcome = None
         if owner_outcome is not None:
-            cleanup_job = True
             return _finish_owner_loss(current)
         reason = f"NCBI Direct prepare failed: {type(exc).__name__}: {exc}"
 

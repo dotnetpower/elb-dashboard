@@ -96,6 +96,18 @@ def test_direct_ownership_loss_classifies_cancel_without_touching_metadata() -> 
             {
                 "update_in_progress": True,
                 "prepare_operation_id": "new-owner",
+                "cancel_operation_id": "new-owner",
+                "pending_generation": {"phase": "queued"},
+            },
+            "old-owner",
+        )
+        == "cancelled"
+    )
+    assert (
+        _ownership_loss_outcome(
+            {
+                "update_in_progress": True,
+                "prepare_operation_id": "new-owner",
                 "pending_generation": {"phase": "queued"},
             },
             "old-owner",
