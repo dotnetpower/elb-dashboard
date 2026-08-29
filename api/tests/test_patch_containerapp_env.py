@@ -107,6 +107,30 @@ def test_patch_is_noop_when_exact_value_already_exists() -> None:
     assert patch["properties"]["template"]["revisionSuffix"] == "old-revision"
 
 
+@pytest.mark.parametrize(
+    ("arm_value", "desired"),
+    [("2Gi", "2.0Gi"), ("1024Mi", "1Gi"), ("0.5Gi", "512Mi")],
+)
+def test_patch_treats_equivalent_arm_memory_quantities_as_unchanged(
+    arm_value: str,
+    desired: str,
+) -> None:
+    resource = _resource()
+    resource["properties"]["template"]["containers"][1]["resources"]["memory"] = arm_value
+
+    patch, changed = build_template_patch(
+        resource,
+        container_name="worker",
+        env_pairs=[],
+        revision_suffix="must-not-land",
+        memory=desired,
+    )
+
+    assert changed is False
+    assert patch["properties"]["template"]["revisionSuffix"] == "old-revision"
+    assert patch["properties"]["template"]["containers"][1]["resources"]["memory"] == (arm_value)
+
+
 def test_patch_treats_arm_null_opposite_field_as_unchanged() -> None:
     resource = _resource()
     resource["properties"]["template"]["containers"][1]["env"].append(

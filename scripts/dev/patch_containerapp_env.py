@@ -20,10 +20,40 @@ import argparse
 import copy
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MEMORY_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)(Ki|Mi|Gi|Ti)?$")
+_MEMORY_FACTORS = {
+    None: Decimal(1),
+    "Ki": Decimal(1024),
+    "Mi": Decimal(1024**2),
+    "Gi": Decimal(1024**3),
+    "Ti": Decimal(1024**4),
+}
+
+
+def _memory_bytes(value: object) -> Decimal | None:
+    """Normalize a Container Apps memory quantity for semantic comparison."""
+    if not isinstance(value, str):
+        return None
+    match = _MEMORY_RE.fullmatch(value)
+    if match is None:
+        return None
+    try:
+        return Decimal(match.group(1)) * _MEMORY_FACTORS[match.group(2)]
+    except (InvalidOperation, KeyError):
+        return None
+
+
+def _memory_equal(current: object, desired: str) -> bool:
+    current_bytes = _memory_bytes(current)
+    desired_bytes = _memory_bytes(desired)
+    if current_bytes is not None and desired_bytes is not None:
+        return current_bytes == desired_bytes
+    return current == desired
 
 
 def parse_env_pair(pair: str) -> tuple[str, str, bool]:
@@ -93,7 +123,7 @@ def build_template_patch(
             if float(resources.get("cpu") or 0) != desired_cpu:
                 resources["cpu"] = desired_cpu
                 changed = True
-        if memory is not None and resources.get("memory") != memory:
+        if memory is not None and not _memory_equal(resources.get("memory"), memory):
             resources["memory"] = memory
             changed = True
         container["resources"] = resources
@@ -110,10 +140,10 @@ def build_template_patch(
         if len(existing) == 1:
             record = existing[0]
             if is_secret_ref:
-                matches = record.get("secretRef") == value and not record.get("value")
+                env_matches = record.get("secretRef") == value and not record.get("value")
             else:
-                matches = record.get("value") == value and not record.get("secretRef")
-            if matches:
+                env_matches = record.get("value") == value and not record.get("secretRef")
+            if env_matches:
                 continue
         env = [item for item in env if item.get("name") != name]
         env.append(desired)
