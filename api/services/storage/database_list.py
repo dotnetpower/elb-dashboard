@@ -262,12 +262,51 @@ def list_databases(
             continue
         active_prefix = str(metadata.get("active_prefix") or "").strip("/")
         active_info = generation_info.get(active_prefix)
-        if active_info is None:
+        if active_info is not None:
+            db_info[db_name] = dict(active_info)
+            active_njs = generation_njs_names.get(active_prefix)
+            if active_njs:
+                blastdb_json_names[db_name] = active_njs
             continue
-        db_info[db_name] = dict(active_info)
-        active_njs = generation_njs_names.get(active_prefix)
-        if active_njs:
-            blastdb_json_names[db_name] = active_njs
+        # A first-time Direct download can be cancelled before enough files
+        # arrive to identify a database, and generation-scoped files are
+        # deliberately hidden until promotion. Keep a terminal pending
+        # generation visible as a non-ready row so the UI can offer Delete;
+        # otherwise its metadata and partial blobs become an invisible leak.
+        # Existing legacy/active DBs remain authoritative and are never
+        # replaced by this cleanup-only projection.
+        pending = metadata.get("pending_generation")
+        pending_phase = str(pending.get("phase") or "").lower() if isinstance(pending, dict) else ""
+        if (
+            db_name not in db_info
+            and isinstance(pending, dict)
+            and pending.get("source_provider") == "ncbi-direct"
+            and not metadata.get("update_in_progress")
+            and pending_phase in {"cancelled", "failed", "partial"}
+        ):
+            data_prefix = str(pending.get("data_prefix") or "").strip("/")
+            pending_db_prefix = f"{data_prefix}/{db_name}" if data_prefix else ""
+            pending_info = dict(
+                generation_info.get(
+                    pending_db_prefix,
+                    {
+                        "name": db_name,
+                        "container": container,
+                        "prefix": data_prefix,
+                        "source": "ncbi",
+                        "file_count": 0,
+                        "total_bytes": 0,
+                        "last_modified": None,
+                    },
+                )
+            )
+            pending_info["copy_status"] = {
+                "phase": pending_phase,
+                "mode": "ncbi-direct",
+                "success": int(pending.get("succeeded_archives") or 0),
+                "total_files": int(pending.get("archive_count") or 0),
+            }
+            db_info[db_name] = pending_info
     # Deferred single .njs download per base (see blastdb_json_names above).
     # Only read the .njs for bases that actually registered as a database;
     # the enrichment loop below reads blastdb_json_blobs[db_name] only for

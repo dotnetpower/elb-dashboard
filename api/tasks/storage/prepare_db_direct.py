@@ -10,6 +10,8 @@ Key entry points: `prepare_db_via_ncbi_direct` Celery task.
 Risky contracts: Every side-effect boundary revalidates `prepare_operation_id`;
     promotion requires the pinned transfer hash, all archive markers, all staged
     files, and complete shard layouts. Failure never changes `active_prefix`.
+    A cancel route intentionally replaces the operation owner; that ownership
+    loss terminates this task as cancelled without rewriting the cancel metadata.
 Validation: `uv run pytest -q api/tests/test_prepare_db_direct_task.py`.
 """
 
@@ -62,6 +64,15 @@ def _update_state(job_id: str, phase: str, status: str = "running", **extra: Any
             outcome=extra.get("outcome"),
             error_code=extra.get("error_code"),
         )
+
+
+def _ownership_loss_outcome(metadata: dict[str, Any]) -> str:
+    """Classify an owner-fenced task as cancelled or superseded."""
+    pending = metadata.get("pending_generation")
+    phase = str(pending.get("phase") or "") if isinstance(pending, dict) else ""
+    if not metadata.get("update_in_progress") and phase == "cancelled":
+        return "cancelled"
+    return "superseded"
 
 
 def _poll_job(
@@ -285,7 +296,32 @@ def prepare_db_via_ncbi_direct(
             "elapsed_seconds": round(time.monotonic() - started, 2),
         }
     except DatabaseOperationOwnershipError:
-        raise
+        # Cancellation takes ownership under the metadata ETag before deleting
+        # the Job. The old worker must stop without touching that committed
+        # terminal state or emitting an unexpected task failure. A rapid
+        # cancel/resubmit may already show a fresh owner; classify that as
+        # superseded for the old JobState while preserving the new operation.
+        try:
+            from api.services.storage.prepare_db_metadata import download_blob_with_etag
+
+            current, _etag = download_blob_with_etag(container, db_name)
+            outcome = _ownership_loss_outcome(current)
+        except Exception as read_exc:
+            LOGGER.warning(
+                "NCBI Direct ownership-loss state read failed db=%s: %s",
+                db_name,
+                type(read_exc).__name__,
+            )
+            outcome = "superseded"
+        _update_state(job_id, outcome, status="cancelled", outcome=outcome)
+        return {
+            "ok": False,
+            "mode": "ncbi-direct",
+            "db_name": db_name,
+            "generation_id": generation_id,
+            "cancelled": True,
+            "outcome": outcome,
+        }
     except Exception as exc:
         reason = f"NCBI Direct prepare failed: {type(exc).__name__}: {exc}"
 

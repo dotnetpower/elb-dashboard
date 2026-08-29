@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from api.services.storage import direct_promotion
 from api.services.storage.direct_promotion import verify_direct_generation
+from api.tasks.storage.prepare_db_direct import _ownership_loss_outcome
 
 
 class _Download:
@@ -76,6 +77,27 @@ def test_verify_generation_requires_marker_and_exact_blob_size() -> None:
 
     assert files == ["core_nt.00.nsq"]
     assert size == len(data)
+
+
+def test_direct_ownership_loss_classifies_cancel_without_touching_metadata() -> None:
+    assert (
+        _ownership_loss_outcome(
+            {
+                "update_in_progress": False,
+                "pending_generation": {"phase": "cancelled"},
+            }
+        )
+        == "cancelled"
+    )
+    assert (
+        _ownership_loss_outcome(
+            {
+                "update_in_progress": True,
+                "pending_generation": {"phase": "queued"},
+            }
+        )
+        == "superseded"
+    )
 
 
 def test_verify_generation_rejects_transfer_hash_mismatch() -> None:

@@ -529,6 +529,54 @@ def test_list_databases_exposes_only_selected_active_generation(
     assert database["active_prefix"] == active_prefix
 
 
+def test_list_databases_exposes_cancelled_direct_staging_for_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = "ncbi-direct-20260825-4947f244d084"
+    data_prefix = f"16S_ribosomal_RNA/generations/{generation}"
+    blobs = [
+        _blob(f"{data_prefix}/16S_ribosomal_RNA.ndb", 10),
+        _blob("16S_ribosomal_RNA-metadata.json"),
+    ]
+    payloads = {
+        "16S_ribosomal_RNA-metadata.json": json.dumps(
+            {
+                "update_in_progress": False,
+                "pending_generation": {
+                    "id": generation,
+                    "source_provider": "ncbi-direct",
+                    "data_prefix": data_prefix,
+                    "phase": "cancelled",
+                    "archive_count": 2,
+                    "succeeded_archives": 0,
+                },
+            }
+        )
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    database = next(
+        item
+        for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+        if item["name"] == "16S_ribosomal_RNA"
+    )
+
+    assert database["ready"] is False
+    assert database["not_ready_reason"] == "cancelled"
+    assert database["copy_status"] == {
+        "phase": "cancelled",
+        "mode": "ncbi-direct",
+        "success": 0,
+        "total_files": 2,
+    }
+    assert database["pending_generation"]["id"] == generation
+
+
 def test_list_databases_only_marks_verified_defaults_as_web_blast_searchsp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
