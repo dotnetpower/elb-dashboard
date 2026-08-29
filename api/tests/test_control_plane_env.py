@@ -273,7 +273,10 @@ def test_quick_deploy_uses_exact_container_env_patches() -> None:
     assert "could not resolve immutable digest" in script
     assert "patching with the mutable tag" not in script
     assert 'if [[ "$SIDECAR" == "api" ]]; then' in script
-    assert '--image "elb-prepare-db:${TAG}"' in script
+    # Single-api and all-sidecar/GHA build paths both produce the matching
+    # prepare image before either path can inject its tag into the api env.
+    assert script.count('--image "elb-prepare-db:${TAG}"') == 2
+    assert '["elb-prepare-db"]=$PID_PREPARE_DB' in script
 
 
 def _exact_env_patch_result(

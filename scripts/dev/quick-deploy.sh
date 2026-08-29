@@ -968,7 +968,7 @@ if ! $NO_BUILD; then
   TERMINAL_BASE_REBUILD="$REBUILD_TERMINAL_BASE" ensure_terminal_base_image
   TERMINAL_BASE_IMAGE_VAL="$(terminal_base_image)"
 
-  ts "==> Building 3 images in parallel via az acr build"
+  ts "==> Building 4 images in parallel via az acr build"
   {
     echo "[build-elb-api] starting at $(date -u +%H:%M:%S)"
     az acr build \
@@ -985,6 +985,21 @@ if ! $NO_BUILD; then
     exit $rc
   } > "$LOG_DIR/build-elb-api.log" 2>&1 &
   PID_API=$!
+
+  {
+    echo "[build-elb-prepare-db] starting at $(date -u +%H:%M:%S)"
+    az acr build \
+      --registry "$ACR_NAME" \
+      --image "elb-prepare-db:${TAG}" \
+      --image "elb-prepare-db:latest" \
+      --file "aks/prepare-db/Dockerfile" \
+      "aks/prepare-db" \
+      -o none
+    rc=$?
+    echo "[build-elb-prepare-db] finished at $(date -u +%H:%M:%S), rc=$rc"
+    exit $rc
+  } > "$LOG_DIR/build-elb-prepare-db.log" 2>&1 &
+  PID_PREPARE_DB=$!
 
   {
     echo "[build-elb-frontend] starting at $(date -u +%H:%M:%S)"
@@ -1028,11 +1043,13 @@ if ! $NO_BUILD; then
   PID_TERMINAL=$!
 
   ts "    elb-api:      pid=$PID_API"
+  ts "    elb-prepare-db: pid=$PID_PREPARE_DB"
   ts "    elb-frontend: pid=$PID_FRONTEND"
   ts "    elb-terminal: pid=$PID_TERMINAL"
 
   declare -A RUNNING=(
     ["elb-api"]=$PID_API
+    ["elb-prepare-db"]=$PID_PREPARE_DB
     ["elb-frontend"]=$PID_FRONTEND
     ["elb-terminal"]=$PID_TERMINAL
   )
@@ -1064,7 +1081,7 @@ if ! $NO_BUILD; then
   done
 
   fail=0
-  for name in elb-api elb-frontend elb-terminal; do
+  for name in elb-api elb-prepare-db elb-frontend elb-terminal; do
     if ! grep -q "rc=0$" "$LOG_DIR/build-$name.log" 2>/dev/null; then
       fail=1
       ts "✗ build $name did not produce rc=0"
@@ -1074,13 +1091,13 @@ if ! $NO_BUILD; then
     ts "Aborting: at least one image build failed (ACR firewall will be restored on exit)."
     exit 1
   fi
-  ts "==> All 3 images built and pushed"
+  ts "==> All 4 images built and pushed"
 
   # Prune older manifests WHILE the ACR firewall is still open. Steady-state
   # ACR is publicNetworkAccess=Disabled, so the data-plane list/delete calls
   # below only work before acr_restore_build_access re-locks the registry.
   # Best-effort: a delete failure never aborts the deploy.
-  acr_prune_targets elb-api elb-frontend elb-terminal
+  acr_prune_targets elb-api elb-prepare-db elb-frontend elb-terminal
 
   acr_restore_build_access "$ACR_NAME"
   trap - EXIT
