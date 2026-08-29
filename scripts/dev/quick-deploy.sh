@@ -182,17 +182,24 @@ containerapp_patch_container() {
   (
     set -Eeuo pipefail
     umask 077
-    local snapshot patch suffix status app_id etag current_etag revision_name
-    local active_revision verify_status deadline
+    local snapshot current_snapshot patch suffix status app_id template_hash
+    local current_template_hash revision_name active_revision verify_status deadline
     local -a snapshot_meta helper_args
     snapshot="$(mktemp)"
+    current_snapshot="$(mktemp)"
     patch="$(mktemp)"
-    trap 'rm -f "$snapshot" "$patch"' EXIT
+    trap 'rm -f "$snapshot" "$current_snapshot" "$patch"' EXIT
     suffix="env-${target}-$(date +%s)-${RANDOM}"
+    app_id="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${CONTAINER_APP_NAME}"
 
-    timeout 45s az containerapp show \
-      --name "$CONTAINER_APP_NAME" \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
+    # `az containerapp show` and the Container Apps ARM GET currently omit an
+    # ETag in both body and response headers. Read the raw ARM resource twice
+    # and compare a canonical template fingerprint immediately before PATCH;
+    # this preserves the stale-snapshot halt instead of silently dropping the
+    # concurrency guard when the service exposes no conditional version token.
+    timeout 45s az rest \
+      --method get \
+      --url "https://management.azure.com${app_id}?api-version=${CONTAINER_APP_API_VERSION}" \
       -o json > "$snapshot"
     helper_args=(
       --input "$snapshot"
@@ -214,26 +221,35 @@ containerapp_patch_container() {
     [[ "$status" == "changed" ]] || die "unexpected container patch status for '$target': $status"
 
     mapfile -t snapshot_meta < <(python3 - "$snapshot" <<'PY'
-import json, sys
+import hashlib, json, sys
 resource = json.load(open(sys.argv[1], encoding="utf-8"))
+template = resource.get("properties", {}).get("template")
 print(resource.get("id", ""))
-print(resource.get("etag", ""))
+print(hashlib.sha256(json.dumps(template, sort_keys=True, separators=(",", ":")).encode()).hexdigest() if isinstance(template, dict) else "")
 PY
 )
     app_id="${snapshot_meta[0]:-}"
-    etag="${snapshot_meta[1]:-}"
-    [[ -n "$app_id" && -n "$etag" ]] || die "Container App snapshot is missing id/etag"
-    current_etag="$(timeout 30s az containerapp show \
-      --name "$CONTAINER_APP_NAME" \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
-      --query etag \
-      -o tsv)"
-    [[ "$current_etag" == "$etag" ]] || die "Container App template changed before '$target' PATCH; retry the deploy"
+    template_hash="${snapshot_meta[1]:-}"
+    [[ -n "$app_id" && -n "$template_hash" ]] \
+      || die "Container App snapshot is missing id/template"
+    timeout 30s az rest \
+      --method get \
+      --url "https://management.azure.com${app_id}?api-version=${CONTAINER_APP_API_VERSION}" \
+      -o json > "$current_snapshot"
+    current_template_hash="$(python3 - "$current_snapshot" <<'PY'
+import hashlib, json, sys
+resource = json.load(open(sys.argv[1], encoding="utf-8"))
+template = resource.get("properties", {}).get("template")
+print(hashlib.sha256(json.dumps(template, sort_keys=True, separators=(",", ":")).encode()).hexdigest() if isinstance(template, dict) else "")
+PY
+)"
+    [[ -n "$current_template_hash" && "$current_template_hash" == "$template_hash" ]] \
+      || die "Container App template changed before '$target' PATCH; retry the deploy"
 
     timeout 120s az rest \
       --method patch \
       --url "https://management.azure.com${app_id}?api-version=${CONTAINER_APP_API_VERSION}" \
-      --headers "Content-Type=application/json" "If-Match=$etag" \
+      --headers "Content-Type=application/json" "If-Match=*" \
       --body "@$patch" \
       -o none
 
@@ -260,9 +276,9 @@ PY
     done
     $ready || die "timed out waiting for container revision: $revision_name"
 
-    timeout 45s az containerapp show \
-      --name "$CONTAINER_APP_NAME" \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
+    timeout 45s az rest \
+      --method get \
+      --url "https://management.azure.com${app_id}?api-version=${CONTAINER_APP_API_VERSION}" \
       -o json > "$snapshot"
     helper_args=(
       --input "$snapshot"

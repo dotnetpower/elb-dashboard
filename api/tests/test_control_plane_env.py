@@ -262,8 +262,8 @@ def test_quick_deploy_uses_exact_container_env_patches() -> None:
     assert script.count("containerapp_patch_container \\") == 2
     assert '--set-env-vars "${_cp_pairs[@]}"' not in script
     assert "Content-Type=application/json" in script
-    assert '"If-Match=$etag"' in script
-    assert '[[ "$current_etag" == "$etag" ]]' in script
+    assert '"If-Match=*"' in script
+    assert '"$current_template_hash" == "$template_hash"' in script
     assert '[[ "$verify_status" == "unchanged" ]]' in script
     assert 'CONTAINER_APP_API_VERSION="${CONTAINER_APP_API_VERSION:-2026-01-01}"' in script
     assert "deadline=$((SECONDS + 300))" in script
@@ -279,10 +279,11 @@ def test_quick_deploy_uses_exact_container_env_patches() -> None:
 def _exact_env_patch_result(
     tmp_path: Path,
     *,
-    current_etag: str,
+    template_drift: bool,
 ) -> subprocess.CompletedProcess[str]:
     before = tmp_path / "before.json"
     after = tmp_path / "after.json"
+    drifted = tmp_path / "drifted.json"
     rest_log = tmp_path / "rest.log"
     before.write_text(
         json.dumps(
@@ -290,7 +291,6 @@ def _exact_env_patch_result(
                 "id": (
                     "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/containerApps/ca"
                 ),
-                "etag": "etag-1",
                 "properties": {
                     "template": {
                         "containers": [
@@ -309,7 +309,6 @@ def _exact_env_patch_result(
                 "id": (
                     "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/containerApps/ca"
                 ),
-                "etag": "etag-2",
                 "properties": {
                     "template": {
                         "containers": [
@@ -324,6 +323,24 @@ def _exact_env_patch_result(
                                     }
                                 ],
                             },
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    drifted.write_text(
+        json.dumps(
+            {
+                "id": (
+                    "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/containerApps/ca"
+                ),
+                "properties": {
+                    "template": {
+                        "containers": [
+                            {"name": "api", "image": "api:v1", "env": []},
+                            {"name": "worker", "image": "api:concurrent", "env": []},
                         ]
                     }
                 },
@@ -346,30 +363,40 @@ set -Eeuo pipefail
 REPO_ROOT={_REPO_ROOT!s}
 CONTAINER_APP_NAME=ca
 AZURE_RESOURCE_GROUP=rg
+AZURE_SUBSCRIPTION_ID=sub
 CONTAINER_APP_API_VERSION=2026-01-01
 BEFORE={before!s}
 AFTER={after!s}
+DRIFTED={drifted!s}
 REST_LOG={rest_log!s}
 ACTIVE_FILE={tmp_path / "active-revision.txt"!s}
-CURRENT_ETAG={current_etag}
-rest_called=0
+TEMPLATE_DRIFT={str(template_drift).lower()}
+get_count=0
+patched=0
 ts() {{ printf '%s\n' "$*"; }}
 die() {{ printf 'ERROR: %s\n' "$*" >&2; return 1; }}
 timeout() {{ shift; "$@"; }}
 az() {{
   if [[ "$1 $2" == "containerapp show" ]]; then
-    if [[ " $* " == *" --query etag "* ]]; then
-      printf '%s\n' "$CURRENT_ETAG"
-        elif [[ " $* " == *" --query properties.latestRevisionName "* ]]; then
+        if [[ " $* " == *" --query properties.latestRevisionName "* ]]; then
             cat "$ACTIVE_FILE"
-    elif (( rest_called )); then
-      cat "$AFTER"
-    else
-      cat "$BEFORE"
-    fi
+        fi
   elif [[ "$1" == "rest" ]]; then
-    printf '%s\n' "$*" > "$REST_LOG"
-    rest_called=1
+        if [[ " $* " == *" --method get "* ]]; then
+            if (( patched )); then
+                cat "$AFTER"
+            elif (( get_count == 0 )); then
+                cat "$BEFORE"
+            elif $TEMPLATE_DRIFT; then
+                cat "$DRIFTED"
+            else
+                cat "$BEFORE"
+            fi
+            get_count=$((get_count + 1))
+        elif [[ " $* " == *" --method patch "* ]]; then
+            printf '%s\n' "$*" > "$REST_LOG"
+            patched=1
+        fi
   elif [[ "$1 $2 $3" == "containerapp revision show" ]]; then
         previous=""
         for arg in "$@"; do
@@ -396,18 +423,18 @@ containerapp_patch_container worker api:v1 "" "" PLATFORM_ACR_NAME=acrelbdashboa
 
 
 def test_exact_container_env_shell_flow_patches_and_verifies(tmp_path: Path) -> None:
-    result = _exact_env_patch_result(tmp_path, current_etag="etag-1")
+    result = _exact_env_patch_result(tmp_path, template_drift=False)
 
     assert result.returncode == 0, result.stderr
     assert "image/resources/env converged" in result.stdout
     rest_call = (tmp_path / "rest.log").read_text(encoding="utf-8")
     assert "api-version=2026-01-01" in rest_call
     assert "Content-Type=application/json" in rest_call
-    assert "If-Match=etag-1" in rest_call
+    assert "If-Match=*" in rest_call
 
 
-def test_exact_container_env_shell_flow_stops_on_etag_drift(tmp_path: Path) -> None:
-    result = _exact_env_patch_result(tmp_path, current_etag="etag-concurrent")
+def test_exact_container_env_shell_flow_stops_on_template_drift(tmp_path: Path) -> None:
+    result = _exact_env_patch_result(tmp_path, template_drift=True)
 
     assert result.returncode != 0
     assert "template changed" in result.stderr
