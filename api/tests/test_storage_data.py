@@ -573,8 +573,64 @@ def test_list_databases_exposes_cancelled_direct_staging_for_cleanup(
         "mode": "ncbi-direct",
         "success": 0,
         "total_files": 2,
+        "active_pods": 0,
+        "failed": 0,
     }
     assert database["pending_generation"]["id"] == generation
+
+
+def test_list_databases_exposes_first_direct_download_after_revision_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = "ncbi-direct-20260826-e7bb0b728805"
+    data_prefix = f"pataa/generations/{generation}"
+    blobs = [
+        _blob(f"{data_prefix}/pataa.phr", 10),
+        _blob("pataa-metadata.json"),
+    ]
+    payloads = {
+        "pataa-metadata.json": json.dumps(
+            {
+                "update_in_progress": True,
+                "prepare_operation_id": "durable-owner",
+                "pending_generation": {
+                    "id": generation,
+                    "source_provider": "ncbi-direct",
+                    "data_prefix": data_prefix,
+                    "phase": "downloading",
+                    "archive_count": 2,
+                    "succeeded_archives": 1,
+                    "active_pods": 1,
+                    "failed_pods": 0,
+                },
+            }
+        )
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    database = next(
+        item
+        for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+        if item["name"] == "pataa"
+    )
+
+    assert database["ready"] is False
+    assert database["not_ready_reason"] == "copying"
+    assert database["update_in_progress"] is True
+    assert database["copy_status"] == {
+        "phase": "copying",
+        "mode": "ncbi-direct",
+        "success": 1,
+        "total_files": 2,
+        "active_pods": 1,
+        "failed": 0,
+    }
+    assert database["pending_generation"]["phase"] == "downloading"
 
 
 def test_list_databases_only_marks_verified_defaults_as_web_blast_searchsp(
