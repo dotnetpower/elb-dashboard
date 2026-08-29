@@ -887,6 +887,7 @@ def test_cancel_aks_path_deletes_k8s_job(
         namespace: str,
         job_name: str,
         configmap_name: Any = None,
+        wait_for_absence_seconds: float = 0.0,
     ) -> dict[str, Any]:
         delete_calls.append(
             {
@@ -896,6 +897,7 @@ def test_cancel_aks_path_deletes_k8s_job(
                 "namespace": namespace,
                 "job_name": job_name,
                 "configmap_name": configmap_name,
+                "wait_for_absence_seconds": wait_for_absence_seconds,
             }
         )
         return {"status": "deleted", "job": {"ok": True}, "configmap": {"ok": True}}
@@ -930,6 +932,7 @@ def test_cancel_aks_path_deletes_k8s_job(
     assert call["namespace"] == "default"
     assert call["job_name"] == aks_ref["job_name"]
     assert call["configmap_name"] == aks_ref["configmap_name"]
+    assert call["wait_for_absence_seconds"] == 60.0
 
     # Metadata cleared
     assert container._meta["update_in_progress"] is False

@@ -96,6 +96,7 @@ DEFAULT_MAX_PARALLELISM = 10
 # "existing" run, and never spawns new pods.
 DEFAULT_TERMINATING_WAIT_SECONDS = 60.0
 DEFAULT_TERMINATING_POLL_SECONDS = 2.0
+DEFAULT_DELETE_WAIT_SECONDS = 60.0
 SOURCE_VERSION_ANNOTATION = "elb.dashboard/source-version"
 
 _SAFE_DB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -766,10 +767,20 @@ def delete_prepare_db_job(
     namespace: str,
     job_name: str,
     configmap_name: str | None = None,
+    wait_for_absence_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    """Delete the Job (Background propagation) and optionally its ConfigMap.
+    """Delete the Job and optionally its ConfigMap.
 
-    Idempotent — a 404 on either resource is treated as success.
+    The default remains non-blocking Background propagation for best-effort
+    worker cleanup. A positive ``wait_for_absence_seconds`` switches to
+    Foreground propagation and verifies the Job reaches 404 before deleting
+    the ConfigMap or reporting success. Foreground Job absence guarantees its
+    dependent pods are gone, so a cancel route can safely commit terminal
+    metadata without a pod recreating blobs afterward.
+
+    Idempotent — a 404 on either resource is treated as success. The wait is
+    clamped to 120 seconds so a degraded Kubernetes API cannot pin an HTTP
+    cancel request indefinitely.
     """
     if not _SAFE_LABEL_RE.match(namespace):
         raise ValueError(f"invalid namespace: {namespace!r}")
@@ -777,6 +788,9 @@ def delete_prepare_db_job(
         raise ValueError(f"invalid job_name: {job_name!r}")
     if configmap_name is not None and not _SAFE_K8S_NAME_RE.match(configmap_name):
         raise ValueError(f"invalid configmap_name: {configmap_name!r}")
+    if not isinstance(wait_for_absence_seconds, (int, float)):
+        raise ValueError("wait_for_absence_seconds must be numeric")
+    wait_seconds = min(max(float(wait_for_absence_seconds), 0.0), 120.0)
     session, server = _get_k8s_session(
         credential, subscription_id, resource_group, cluster_name, admin=True
     )
@@ -785,19 +799,45 @@ def delete_prepare_db_job(
         job_url = f"{server}/apis/batch/v1/namespaces/{namespace}/jobs/{job_name}"
         job_resp = session.delete(
             job_url,
-            params={"propagationPolicy": "Background"},
+            params={"propagationPolicy": "Foreground" if wait_seconds > 0 else "Background"},
             timeout=10,
         )
+        delete_accepted = job_resp.status_code in (200, 202, 404)
+        job_absent = job_resp.status_code == 404
+        wait_timed_out = False
+        wait_status_code: int | None = None
+        if delete_accepted and wait_seconds > 0 and not job_absent:
+            deadline = time.monotonic() + wait_seconds
+            while time.monotonic() < deadline:
+                check = session.get(job_url, timeout=10)
+                wait_status_code = check.status_code
+                if check.status_code == 404:
+                    job_absent = True
+                    break
+                if check.status_code != 200:
+                    break
+                time.sleep(min(DEFAULT_TERMINATING_POLL_SECONDS, wait_seconds))
+            wait_timed_out = not job_absent and wait_status_code in {None, 200}
         results["job"] = {
             "status_code": job_resp.status_code,
-            "ok": job_resp.status_code in (200, 202, 404),
+            "ok": delete_accepted and (wait_seconds == 0 or job_absent),
+            "absent": job_absent,
+            "waited": wait_seconds > 0,
+            "wait_status_code": wait_status_code,
+            "wait_timed_out": wait_timed_out,
         }
-        if configmap_name:
+        if configmap_name and (wait_seconds == 0 or job_absent):
             cm_url = f"{server}/api/v1/namespaces/{namespace}/configmaps/{configmap_name}"
             cm_resp = session.delete(cm_url, timeout=10)
             results["configmap"] = {
                 "status_code": cm_resp.status_code,
                 "ok": cm_resp.status_code in (200, 202, 404),
+            }
+        elif configmap_name:
+            results["configmap"] = {
+                "status_code": None,
+                "ok": False,
+                "deferred": True,
             }
         results["status"] = (
             "deleted"

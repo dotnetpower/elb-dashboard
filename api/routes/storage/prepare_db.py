@@ -861,6 +861,12 @@ def prepare_db_cancel(
                     aks_job_ref.get("configmap_name") or aks_job_ref.get("job_name") or ""
                 )
                 or None,
+                # A terminal cancel response means no pod can write another
+                # byte. Foreground Job deletion + bounded 404 confirmation
+                # closes the race where Background deletion returned 200 but
+                # terminating Direct pods recreated generation files after an
+                # immediate Delete action.
+                wait_for_absence_seconds=60.0,
             )
             aks_job_delete_failed = aks_job_deleted.get("status") != "deleted"
         except Exception as exc:
