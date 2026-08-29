@@ -1,12 +1,8 @@
 """Reconcile orphaned AKS-fanout prepare-db state back to a terminal phase.
 
-Responsibility: Detect ``{db}-metadata.json`` rows whose ``update_in_progress`` flag is
-    stuck on a non-terminal ``copy_status.phase`` even though the AKS-fanout Job that was
-    driving the download no longer exists (or has Failed), and drive each one to a terminal
-    ``partial`` phase so the SPA stops showing a perpetual download spinner and the 409
-    in-progress gate clears. A worker/beat revision restart kills the in-flight poller in
-    ``prepare_db_via_aks`` before it can write the terminal ``copy_status``; without this
-    reconciler the row freezes until the shared bounded stale window or a manual Cancel.
+Responsibility: Reconcile orphaned prepare-db metadata after worker/revision loss: recover a
+    fully staged NCBI Direct generation through immutable validation and atomic promotion, or
+    drive missing/failed partial work to a terminal phase so the SPA and operation gate converge.
 Edit boundaries: Pure-Python decision + Storage/Kubernetes read-modify-write only. Do NOT
     re-dispatch downloads from here (no auto-relaunch — that belongs to an explicit user
     Update click). Metadata writes go through the shared ETag-guarded ``update_metadata``
@@ -19,6 +15,9 @@ Risky contracts: The authoritative orphan signal is the K8s Job lookup, NOT age 
     (server-side mode). The reset mutator re-validates both ``update_started_at`` and the
     owner token under the ETag so an interleaved new dispatch is never reset. NCBI Direct
     recovery terminalizes only ``pending_generation`` and preserves active copy/shard state.
+    A completed Direct Job gets a grace window for its original worker, then recovery uses the
+    persisted owner/release/hash/count contract; an absent Redis lock may be reclaimed only by
+    that same durable owner.
 Validation: ``uv run pytest -q api/tests/test_orphan_prepare_db_reconcile.py``.
 """
 
@@ -38,7 +37,9 @@ LOGGER = logging.getLogger(__name__)
 # An empty phase is treated as non-terminal because every dispatch writes
 # ``phase="queued"`` first; a missing phase therefore implies an odd/old row
 # that should still be eligible for the authoritative Job check.
-_NON_TERMINAL_PHASES = frozenset({"", "queued", "copying", "downloading", "running"})
+_NON_TERMINAL_PHASES = frozenset(
+    {"", "queued", "copying", "downloading", "running", "verifying", "sharding", "promoting"}
+)
 
 _METADATA_SUFFIX = "-metadata.json"
 
@@ -83,6 +84,7 @@ def classify_prepare_db_entry(
     *,
     now: datetime,
     stale_seconds: float,
+    direct_recovery_grace_seconds: float = 120.0,
 ) -> tuple[str, str]:
     """Decide what to do with a single ``{db}-metadata.json`` row.
 
@@ -91,6 +93,7 @@ def classify_prepare_db_entry(
     or ``None`` when there is no ref or the lookup failed.
 
     Returns ``(action, reason)`` where ``action`` is one of
+    ``"recover-direct"`` (validate/promote a completed Direct generation),
     ``"reset"`` (drive to terminal partial), ``"skip-running"`` (Job alive),
     ``"skip-recent"`` (no ref, marker still within the stale window),
     ``"skip-terminal"`` (already terminal / not in progress), or
@@ -112,6 +115,7 @@ def classify_prepare_db_entry(
         return ("skip-terminal", f"copy_status.phase={phase!r} is terminal")
 
     has_ref = isinstance(ref, dict) and bool(ref.get("job_name")) and bool(ref.get("cluster_name"))
+    job_name = str(ref.get("job_name") or "") if isinstance(ref, dict) else ""
 
     if has_ref:
         if job_status is None:
@@ -119,17 +123,51 @@ def classify_prepare_db_entry(
             # error). Resetting here could abort a live download, so wait for
             # a future tick when the lookup succeeds.
             return ("skip-error", "AKS Job lookup unavailable")
-        if job_status.get("missing"):
+        live_status = job_status
+        if int(live_status.get("status_code") or 200) != 200:
+            return ("skip-error", "AKS Job lookup returned a non-success status")
+        if isolated_direct:
+            pending = pending_generation if isinstance(pending_generation, dict) else {}
+            archive_count = int(pending.get("archive_count") or 0)
+            succeeded = int(live_status.get("succeeded") or 0)
+            if archive_count > 0 and succeeded >= archive_count:
+                completion_text = str(live_status.get("completion_time") or "")
+                if completion_text:
+                    try:
+                        completion = datetime.fromisoformat(completion_text.replace("Z", "+00:00"))
+                        if completion.tzinfo is None:
+                            completion = completion.replace(tzinfo=UTC)
+                        completion_age = (now - completion).total_seconds()
+                    except (TypeError, ValueError):
+                        completion_age = -1.0
+                    if 0 <= completion_age < direct_recovery_grace_seconds:
+                        return (
+                            "skip-running",
+                            "completed Direct Job is inside the "
+                            f"{direct_recovery_grace_seconds:.0f}s recovery grace",
+                        )
+                elif not live_status.get("missing"):
+                    # Do not race the original worker when Kubernetes omitted
+                    # the completion timestamp. The Job TTL eventually turns
+                    # this into the unambiguous missing-Job recovery branch.
+                    return ("skip-running", "completed Direct Job has no completion timestamp")
+                return ("recover-direct", "completed Direct Job needs generation promotion")
+            if live_status.get("missing"):
+                # The Job may have completed and then expired before the first
+                # post-revision reconcile tick. Marker verification decides
+                # whether this is promotable or a terminal partial generation.
+                return ("recover-direct", "Direct Job is gone; verify persisted generation markers")
+        if live_status.get("missing"):
             return (
                 "reset",
-                f"AKS Job {ref.get('job_name')} no longer exists and the "
+                f"AKS Job {job_name} no longer exists and the "
                 "polling task did not record a terminal state",
             )
-        if _job_has_failed(job_status):
-            return ("reset", f"AKS Job {ref.get('job_name')} failed")
+        if _job_has_failed(live_status):
+            return ("reset", f"AKS Job {job_name} failed")
         # Job is present and not Failed (active / complete / retrying). A live
         # poller owns the lifecycle; do not interfere.
-        return ("skip-running", f"AKS Job {ref.get('job_name')} still present")
+        return ("skip-running", f"AKS Job {job_name} still present")
 
     # No AKS job ref recorded (server-side mode, or a dispatch that crashed
     # before persisting the ref). The K8s Job check is unavailable, so fall
@@ -195,6 +233,8 @@ def reconcile_orphaned_prepare_db(
     job_lookup: Callable[..., dict[str, Any]] | None = None,
     now: datetime | None = None,
     stale_seconds: float | None = None,
+    direct_recovery_grace_seconds: float | None = None,
+    direct_recover: Callable[..., dict[str, Any]] | None = None,
     limit: int = 200,
     enabled: bool | None = None,
 ) -> dict[str, Any]:
@@ -235,6 +275,14 @@ def reconcile_orphaned_prepare_db(
         stale_seconds = float(_PREPARE_DB_STALE_SECONDS)
     if now is None:
         now = datetime.now(UTC)
+    if direct_recovery_grace_seconds is None:
+        try:
+            configured_grace = float(
+                os.environ.get("PREPARE_DB_DIRECT_RECOVERY_GRACE_SECONDS", "120")
+            )
+        except ValueError:
+            configured_grace = 120.0
+        direct_recovery_grace_seconds = min(max(configured_grace, 30.0), 3600.0)
 
     account = (storage_account or _resolve_workload_storage_account()).strip()
     if not account:
@@ -260,6 +308,7 @@ def reconcile_orphaned_prepare_db(
         "skipped_terminal": [],
         "skipped_error": [],
         "skipped_raced": [],
+        "recovered_direct": [],
         "errors": [],
     }
 
@@ -302,7 +351,11 @@ def reconcile_orphaned_prepare_db(
                 job_status = None
 
         action, reason = classify_prepare_db_entry(
-            metadata, job_status, now=now, stale_seconds=stale_seconds
+            metadata,
+            job_status,
+            now=now,
+            stale_seconds=stale_seconds,
+            direct_recovery_grace_seconds=direct_recovery_grace_seconds,
         )
 
         if action == "skip-running":
@@ -317,6 +370,60 @@ def reconcile_orphaned_prepare_db(
         if action == "skip-error":
             result["skipped_error"].append(db_name)
             continue
+
+        if action == "recover-direct":
+            if direct_recover is None:
+                from api.services.storage.direct_promotion import (
+                    recover_direct_generation as direct_recover_impl,
+                )
+
+                direct_recover = direct_recover_impl
+            try:
+                recovered = direct_recover(
+                    credential=credential,
+                    storage_account=account,
+                    db_name=db_name,
+                    metadata=metadata,
+                    container=container,
+                )
+            except Exception as exc:
+                from api.services.storage.direct_promotion import (
+                    DirectGenerationIncompleteError,
+                    DirectRecoveryBusyError,
+                )
+                from api.services.storage.prepare_db_metadata import (
+                    DatabaseOperationOwnershipError,
+                )
+
+                if isinstance(exc, DatabaseOperationOwnershipError):
+                    result["skipped_raced"].append(db_name)
+                    continue
+                if isinstance(exc, DirectRecoveryBusyError):
+                    result["skipped_error"].append(db_name)
+                    continue
+                if isinstance(exc, DirectGenerationIncompleteError):
+                    reason = f"Direct recovery validation failed: {exc}"
+                    action = "reset"
+                else:
+                    LOGGER.warning(
+                        "orphan reconcile Direct recovery deferred db=%s: %s",
+                        db_name,
+                        type(exc).__name__,
+                    )
+                    result["errors"].append(db_name)
+                    continue
+            else:
+                pending = metadata.get("pending_generation")
+                job_id = str(pending.get("job_id") or "") if isinstance(pending, dict) else ""
+                result["recovered_direct"].append(
+                    {"db_name": db_name, "job_id": job_id, **recovered}
+                )
+                LOGGER.info(
+                    "orphan reconcile promoted Direct generation db=%s generation=%s",
+                    db_name,
+                    recovered.get("generation_id"),
+                )
+                continue
 
         # action == "reset"
         observed_started_at = str(metadata.get("update_started_at") or "")
@@ -383,9 +490,11 @@ def reconcile_orphaned_prepare_db(
             meta.pop("updating_to_source_version", None)
             if _isolated_direct:
                 return meta
-            return invalidate_shard_publication(
-                meta,
-                error=f"prepare-db reconciler: {_reason}",
+            return dict(
+                invalidate_shard_publication(
+                    meta,
+                    error=f"prepare-db reconciler: {_reason}",
+                )
             )
 
         try:

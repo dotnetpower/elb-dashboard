@@ -219,6 +219,8 @@ def _control_plane_pairs(sidecar: str) -> list[str]:
     command = (
         f"CONTROL_PLANE_ENV_FILE='{_JSON_PATH}'; "
         "ACR_NAME=acrelbdashboardtest; "
+        "ACR_LOGIN_SERVER=acrelbdashboardtest.azurecr.io; "
+        "TAG=v0.3.0-test; "
         "LOG_ANALYTICS_WORKSPACE_ID=648cd0d4-a8b7-41da-a22c-050b5217b153; "
         f"{function}; control_plane_env_pairs '{sidecar}'"
     )
@@ -245,6 +247,16 @@ def test_quick_deploy_backfills_platform_acr_on_runtime_sidecars() -> None:
     assert expected not in _control_plane_pairs("frontend")
 
 
+def test_quick_deploy_backfills_prepare_db_image_on_api_only() -> None:
+    expected = (
+        "PREPARE_DB_AKS_AZCOPY_IMAGE="
+        "acrelbdashboardtest.azurecr.io/elb-prepare-db:v0.3.0-test"
+    )
+    assert expected in _control_plane_pairs("api")
+    assert expected not in _control_plane_pairs("worker")
+    assert expected not in _control_plane_pairs("beat")
+
+
 def test_quick_deploy_uses_exact_container_env_patches() -> None:
     script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
     assert script.count("containerapp_patch_container \\") == 2
@@ -260,6 +272,8 @@ def test_quick_deploy_uses_exact_container_env_patches() -> None:
     assert "failed to upsert Container App secret" in script
     assert "could not resolve immutable digest" in script
     assert "patching with the mutable tag" not in script
+    assert 'if [[ "$SIDECAR" == "api" ]]; then' in script
+    assert '--image "elb-prepare-db:${TAG}"' in script
 
 
 def _exact_env_patch_result(

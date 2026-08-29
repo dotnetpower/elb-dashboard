@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from api.services.storage.direct_promotion import DirectGenerationIncompleteError
 from api.services.storage.orphan_prepare_db import (
     classify_prepare_db_entry,
     reconcile_orphaned_prepare_db,
@@ -43,6 +44,26 @@ def _candidate_meta(**overrides: Any) -> dict[str, Any]:
             "namespace": "default",
         },
     }
+    meta.update(overrides)
+    return meta
+
+
+def _direct_candidate_meta(**overrides: Any) -> dict[str, Any]:
+    meta = _candidate_meta(
+        prepare_operation_id="direct-owner",
+        source_version="2026-07-21-01-05-02",
+        copy_status={"phase": "completed", "success": 727},
+        pending_generation={
+            "id": "ncbi-direct-20260819-aaaaaaaaaaaa",
+            "phase": "downloading",
+            "source_provider": "ncbi-direct",
+            "data_prefix": "nt/generations/ncbi-direct-20260819-aaaaaaaaaaaa",
+            "transfer_manifest_sha256": "a" * 64,
+            "archive_count": 2,
+            "job_id": "prepare-db-direct-nt-1",
+        },
+    )
+    meta["aks_job_ref"]["source_provider"] = "ncbi-direct"
     meta.update(overrides)
     return meta
 
@@ -83,6 +104,59 @@ def test_classify_complete_job_skips() -> None:
     }
     action, _ = classify_prepare_db_entry(_candidate_meta(), job, now=NOW, stale_seconds=STALE)
     assert action == "skip-running"
+
+
+def test_classify_completed_direct_job_recovers_after_grace() -> None:
+    job = {
+        "missing": False,
+        "active": 0,
+        "succeeded": 2,
+        "completions": 2,
+        "conditions": [{"type": "Complete", "status": "True"}],
+        "completion_time": (NOW - timedelta(minutes=5)).isoformat(),
+    }
+
+    action, _ = classify_prepare_db_entry(
+        _direct_candidate_meta(),
+        job,
+        now=NOW,
+        stale_seconds=STALE,
+        direct_recovery_grace_seconds=120,
+    )
+
+    assert action == "recover-direct"
+
+
+def test_classify_completed_direct_job_waits_for_original_worker_grace() -> None:
+    job = {
+        "missing": False,
+        "active": 0,
+        "succeeded": 2,
+        "completions": 2,
+        "conditions": [{"type": "Complete", "status": "True"}],
+        "completion_time": (NOW - timedelta(seconds=30)).isoformat(),
+    }
+
+    action, _ = classify_prepare_db_entry(
+        _direct_candidate_meta(),
+        job,
+        now=NOW,
+        stale_seconds=STALE,
+        direct_recovery_grace_seconds=120,
+    )
+
+    assert action == "skip-running"
+
+
+def test_classify_missing_direct_job_verifies_markers_before_reset() -> None:
+    action, _ = classify_prepare_db_entry(
+        _direct_candidate_meta(),
+        {"missing": True},
+        now=NOW,
+        stale_seconds=STALE,
+    )
+
+    assert action == "recover-direct"
 
 
 def test_classify_job_lookup_unavailable_skips() -> None:
@@ -281,19 +355,9 @@ def test_reconcile_missing_job_resets_to_partial() -> None:
 
 def test_reconcile_missing_direct_job_preserves_active_generation() -> None:
     container = _FakeContainer()
-    candidate = _candidate_meta()
-    candidate["prepare_operation_id"] = "direct-owner"
-    candidate["aks_job_ref"]["source_provider"] = "ncbi-direct"
+    candidate = _direct_candidate_meta()
     candidate.update(
         {
-            "source_version": "2026-07-21-01-05-02",
-            "copy_status": {"phase": "completed", "success": 727},
-            "pending_generation": {
-                "id": "ncbi-direct-20260819-aaaaaaaaaaaa",
-                "phase": "downloading",
-                "source_provider": "ncbi-direct",
-                "data_prefix": "nt/generations/ncbi-direct-20260819-aaaaaaaaaaaa",
-            },
             "sharded": True,
             "shard_sets": [1, 2],
             "shard_layout_schema": 1,
@@ -307,6 +371,9 @@ def test_reconcile_missing_direct_job_preserves_active_generation() -> None:
         storage_account="acct",
         container=container,
         job_lookup=lambda *a, **k: {"missing": True},
+        direct_recover=lambda **_kwargs: (_ for _ in ()).throw(
+            DirectGenerationIncompleteError("markers incomplete")
+        ),
         now=NOW,
         stale_seconds=STALE,
     )
@@ -319,6 +386,51 @@ def test_reconcile_missing_direct_job_preserves_active_generation() -> None:
     assert meta["sharded"] is True
     assert meta["shard_sets"] == [1, 2]
     assert meta["shard_source_version"] == "2026-07-21-01-05-02"
+
+
+def test_reconcile_completed_direct_job_invokes_durable_recovery() -> None:
+    container = _FakeContainer()
+    container.set_metadata("nt", _direct_candidate_meta())
+    calls: list[dict[str, Any]] = []
+
+    def recover(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "outcome": "promoted",
+            "generation_id": "ncbi-direct-20260819-aaaaaaaaaaaa",
+            "files_total": 20,
+            "bytes_total": 200,
+        }
+
+    out = reconcile_orphaned_prepare_db(
+        credential="credential",
+        storage_account="acct",
+        container=container,
+        job_lookup=lambda *a, **k: {
+            "missing": False,
+            "succeeded": 2,
+            "completions": 2,
+            "completion_time": (NOW - timedelta(minutes=5)).isoformat(),
+            "conditions": [{"type": "Complete", "status": "True"}],
+        },
+        direct_recover=recover,
+        direct_recovery_grace_seconds=120,
+        now=NOW,
+        stale_seconds=STALE,
+    )
+
+    assert calls[0]["credential"] == "credential"
+    assert calls[0]["db_name"] == "nt"
+    assert out["recovered_direct"] == [
+        {
+            "db_name": "nt",
+            "job_id": "prepare-db-direct-nt-1",
+            "outcome": "promoted",
+            "generation_id": "ncbi-direct-20260819-aaaaaaaaaaaa",
+            "files_total": 20,
+            "bytes_total": 200,
+        }
+    ]
 
 
 def test_reconcile_running_job_leaves_row_untouched() -> None:

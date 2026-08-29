@@ -118,6 +118,17 @@ def _positive_int(value: Any, label: str) -> int:
     return parsed
 
 
+def _nonnegative_int(value: Any, label: str) -> int:
+    """Validate counts for non-searchable support archives such as taxdb."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise NcbiUnavailable(f"NCBI Direct metadata had invalid {label}") from exc
+    if parsed < 0:
+        raise NcbiUnavailable(f"NCBI Direct metadata had negative {label}")
+    return parsed
+
+
 def _fetch_archive(client: httpx.Client, url: str, member_prefix: str) -> NcbiDirectArchive:
     md5_url = f"{url}.md5"
     try:
@@ -219,14 +230,21 @@ def build_direct_manifest(
         }
         fingerprint = release_fingerprint(db_name, logical)
         transfer_sha = transfer_manifest_sha256(archives)
+        # ``taxdb`` is a taxonomy lookup bundle rather than a searchable BLAST
+        # database. Its official metadata intentionally reports zero letters
+        # and sequences; every searchable database must retain the stricter
+        # positive-count contract used by planning and result metadata.
+        count_validator = _nonnegative_int if db_name == "taxdb" else _positive_int
         manifest = NcbiDirectManifest(
             db_name=db_name,
             released_at=released_at,
             release_fingerprint=fingerprint,
             generation_id=generation_id("ncbi-direct", released_at, fingerprint),
             transfer_manifest_sha256=transfer_sha,
-            number_of_letters=_positive_int(release.get("number-of-letters"), "letter count"),
-            number_of_sequences=_positive_int(release.get("number-of-sequences"), "sequence count"),
+            number_of_letters=count_validator(release.get("number-of-letters"), "letter count"),
+            number_of_sequences=count_validator(
+                release.get("number-of-sequences"), "sequence count"
+            ),
             bytes_total=_positive_int(release.get("bytes-total"), "database size"),
             bytes_total_compressed=_positive_int(
                 release.get("bytes-total-compressed"), "compressed size"

@@ -18,7 +18,8 @@
     "STRICT_CLIENT_LOG_REDACTION": "false",
     "AUTO_ORACLE_RECONCILE_ENABLED": "false",
     "AUTO_ORACLE_RETENTION_ENABLED": "false",
-    "ENFORCE_AUTO_ORACLE_RBAC": "false"
+    "ENFORCE_AUTO_ORACLE_RBAC": "false",
+    "PREPARE_DB_NCBI_DIRECT_ENABLED": "false"
   },
   "worker": {
     "BLAST_GATE_ENABLED": "false",

@@ -15,7 +15,6 @@ Validation: `uv run pytest -q api/tests/test_prepare_db_direct_task.py`.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import UTC, datetime
@@ -24,8 +23,6 @@ from typing import Any
 from celery import shared_task
 
 import api.tasks.storage as _facade
-from api.services.db.generations import generation_db_prefix
-from api.services.db.sharding import ensure_shard_sets, require_complete_shard_summary
 from api.services.feature_events import TERMINAL_STATUSES, record_feature_event
 from api.services.k8s.prepare_db_direct_jobs import (
     build_direct_job_manifest,
@@ -37,6 +34,7 @@ from api.services.k8s.prepare_db_jobs import (
     get_prepare_db_job,
     submit_prepare_db_job,
 )
+from api.services.storage.direct_promotion import promote_direct_generation
 from api.services.storage.prepare_db_metadata import (
     _PREPARE_DB_STALE_SECONDS,
     DatabaseOperationOwnershipError,
@@ -115,62 +113,6 @@ def _poll_job(
         time.sleep(interval)
         interval = min(interval * 2, _POLL_INTERVAL)
     return {**latest, "timed_out": True}
-
-
-def _verify_generation(
-    container: Any,
-    *,
-    data_prefix: str,
-    archive_count: int,
-    transfer_sha: str,
-) -> tuple[list[str], int]:
-    from api.services.storage.blob_io import read_metadata_blob_text
-
-    expected_markers = {
-        f"{data_prefix}/.manifests/{index:02d}.json" for index in range(archive_count)
-    }
-    present: dict[str, Any] = {}
-    blob_sizes: dict[str, int] = {}
-    for blob in container.list_blobs(name_starts_with=f"{data_prefix}/"):
-        name = str(getattr(blob, "name", "") or "")
-        blob_sizes[name] = int(getattr(blob, "size", 0) or 0)
-        if name in expected_markers:
-            present[name] = blob
-    if set(present) != expected_markers:
-        raise RuntimeError(f"Direct generation markers incomplete ({len(present)}/{archive_count})")
-
-    files: dict[str, int] = {}
-    for marker_name in sorted(expected_markers):
-        raw = read_metadata_blob_text(
-            container.get_blob_client(marker_name),
-            max_bytes=1024 * 1024,
-            label="direct-generation-marker",
-        )
-        marker = json.loads(raw)
-        if marker.get("transfer_manifest_sha256") != transfer_sha:
-            raise RuntimeError("Direct generation marker transfer hash mismatch")
-        entries = marker.get("files")
-        if not isinstance(entries, list) or not entries:
-            raise RuntimeError("Direct generation marker had no extracted files")
-        for entry in entries:
-            if not isinstance(entry, dict):
-                raise RuntimeError("Direct generation marker file entry was invalid")
-            name = str(entry.get("name") or "")
-            size = int(entry.get("size") or 0)
-            if not name or "/" in name or size <= 0 or name in files:
-                raise RuntimeError("Direct generation marker file identity was invalid")
-            files[name] = size
-
-    missing = []
-    for name, size in files.items():
-        blob_name = f"{data_prefix}/{name}"
-        if blob_sizes.get(blob_name) != size:
-            missing.append(name)
-    if missing:
-        raise RuntimeError(
-            f"Direct generation files incomplete ({len(missing)} missing/mismatched)"
-        )
-    return sorted(files), sum(files.values())
 
 
 @shared_task(
@@ -320,90 +262,26 @@ def prepare_db_via_ncbi_direct(
         )
         if int(job_status.get("succeeded") or 0) < len(pinned):
             raise RuntimeError("NCBI Direct Kubernetes Job did not complete")
-        files, staged_bytes = _verify_generation(
-            container,
+        promoted = promote_direct_generation(
+            credential=credential,
+            storage_account=storage_account,
+            db_name=db_name,
+            operation_id=prepare_operation_id,
+            generation_id=generation_id,
             data_prefix=data_prefix,
-            archive_count=len(pinned),
+            release=release,
             transfer_sha=transfer_manifest_sha256,
+            archive_count=len(pinned),
+            container=container,
         )
-        active_prefix = generation_db_prefix(db_name, generation_id)
-        layout_prefix = f"{data_prefix}/shards"
-        shard_summary = ensure_shard_sets(
-            credential,
-            storage_account,
-            db_name,
-            db_prefix=active_prefix,
-            layout_prefix=layout_prefix,
-        )
-        shard_sets = require_complete_shard_summary(shard_summary)
-
-        def _promote(meta: dict[str, Any]) -> dict[str, Any]:
-            require_prepare_operation_owner(meta, prepare_operation_id)
-            previous = meta.get("active_generation")
-            if previous:
-                meta["previous_generation"] = previous
-            now = datetime.now(UTC).isoformat()
-            active = {
-                "id": generation_id,
-                "prefix": active_prefix,
-                "data_prefix": data_prefix,
-                "source_provider": "ncbi-direct",
-                "source_release_at": release["released_at"],
-                "release_fingerprint": release["release_fingerprint"],
-                "transfer_manifest_sha256": transfer_manifest_sha256,
-                "activated_at": now,
-            }
-            meta["active_generation"] = active
-            meta["active_prefix"] = active_prefix
-            meta["shard_layout_prefix"] = layout_prefix
-            meta["source_provider"] = "ncbi-direct"
-            meta["source_release_at"] = release["released_at"]
-            meta["release_fingerprint"] = release["release_fingerprint"]
-            meta["transfer_manifest_sha256"] = transfer_manifest_sha256
-            meta["taxonomy_release_at"] = release.get("taxonomy_release_at")
-            meta["taxonomy_release_fingerprint"] = release.get("taxonomy_release_fingerprint")
-            meta["source_version"] = generation_id
-            meta["downloaded_at"] = now
-            meta["file_count"] = len(files)
-            meta["total_bytes"] = staged_bytes
-            meta["total_letters"] = int(release["number_of_letters"])
-            meta["total_sequences"] = int(release["number_of_sequences"])
-            meta["sharded"] = True
-            meta["shard_sets"] = shard_sets
-            meta["shard_source_version"] = generation_id
-            meta["shard_layout_schema"] = int(shard_summary["layout_schema"])
-            meta["sharded_at"] = now
-            meta["update_in_progress"] = False
-            meta["update_completed_at"] = now
-            meta["copy_status"] = {
-                "phase": "completed",
-                "mode": "ncbi-direct",
-                "total_files": len(files),
-                "success": len(files),
-                "failed": 0,
-                "pending": 0,
-            }
-            meta.pop("pending_generation", None)
-            meta.pop("prepare_operation_id", None)
-            meta.pop("updating_to_source_version", None)
-            meta.pop("update_error", None)
-            meta.pop("update_failed_at", None)
-            meta.pop("aks_job_ref", None)
-            if isinstance(meta.get("db_order_oracle"), dict):
-                oracle = dict(meta["db_order_oracle"])
-                oracle["status"] = "stale"
-                meta["db_order_oracle"] = oracle
-            return meta
-
-        update_metadata(container, db_name, storage_account, _promote)
         _update_state(job_id, "completed", status="completed", outcome="promoted")
         return {
             "ok": True,
             "mode": "ncbi-direct",
             "db_name": db_name,
             "generation_id": generation_id,
-            "files_total": len(files),
-            "bytes_total": staged_bytes,
+            "files_total": promoted["files_total"],
+            "bytes_total": promoted["bytes_total"],
             "elapsed_seconds": round(time.monotonic() - started, 2),
         }
     except DatabaseOperationOwnershipError:

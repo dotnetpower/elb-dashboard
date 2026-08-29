@@ -77,6 +77,30 @@ def test_build_direct_manifest_normalizes_official_ftp_urls_to_https() -> None:
     assert manifest.archives[0].url == ("https://ftp.ncbi.nlm.nih.gov/blast/db/core_nt.00.tar.gz")
 
 
+def test_build_direct_manifest_accepts_official_zero_counts_for_taxdb() -> None:
+    reset_direct_manifest_cache()
+    release = {
+        **_release(["ftp://ftp.ncbi.nlm.nih.gov/blast/db/taxdb.tar.gz"]),
+        "dbname": "taxdb",
+        "number-of-letters": 0,
+        "number-of-sequences": 0,
+    }
+
+    manifest = build_direct_manifest("taxdb", client=_Client(release), ttl_seconds=0)
+
+    assert manifest.number_of_letters == 0
+    assert manifest.number_of_sequences == 0
+    assert manifest.archives[0].member_prefix == "taxdb"
+
+
+def test_build_direct_manifest_keeps_searchable_database_counts_positive() -> None:
+    reset_direct_manifest_cache()
+    release = {**_release(), "number-of-letters": 0}
+
+    with pytest.raises(NcbiUnavailable, match="non-positive letter count"):
+        build_direct_manifest("core_nt", client=_Client(release), ttl_seconds=0)
+
+
 def test_build_direct_manifest_rejects_untrusted_archive_host() -> None:
     reset_direct_manifest_cache()
     release = _release(["https://attacker.example/blast/db/core_nt.00.tar.gz"])

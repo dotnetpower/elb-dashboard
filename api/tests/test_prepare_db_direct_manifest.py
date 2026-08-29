@@ -9,6 +9,13 @@ Risky contracts: Parallelism stays capped, source specs remain immutable, and
 Validation: `uv run pytest -q api/tests/test_prepare_db_direct_manifest.py`.
 """
 
+import hashlib
+import io
+import subprocess
+import sys
+import tarfile
+from pathlib import Path
+
 from api.services.k8s.prepare_db_direct_jobs import (
     DIRECT_PREPARE_SCRIPT,
     build_direct_job_manifest,
@@ -78,6 +85,105 @@ def test_direct_script_verifies_before_upload_and_rejects_links() -> None:
     assert "name != os.path.basename(name)" in DIRECT_PREPARE_SCRIPT
     assert "archive expansion exceeded the bounded ratio" in DIRECT_PREPARE_SCRIPT
     assert ".manifests/${INDEX}.json" in DIRECT_PREPARE_SCRIPT
+
+
+def _extraction_python() -> str:
+    start = DIRECT_PREPARE_SCRIPT.index("import hashlib\n")
+    end = DIRECT_PREPARE_SCRIPT.index("\nPY\nrm -f", start)
+    return DIRECT_PREPARE_SCRIPT[start:end]
+
+
+def _write_archive(path: Path, files: dict[str, bytes]) -> None:
+    with tarfile.open(path, "w:gz") as bundle:
+        for name, content in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            bundle.addfile(info, io.BytesIO(content))
+
+
+def _extract_archive(tmp_path: Path, files: dict[str, bytes], member_prefix: str) -> set[str]:
+    archive = tmp_path / "archive.tar.gz"
+    output = tmp_path / "out"
+    output.mkdir()
+    _write_archive(archive, files)
+    payload = archive.read_bytes()
+    subprocess.run(  # noqa: S603 - fixed interpreter executes the shipped script fixture
+        [
+            sys.executable,
+            "-c",
+            _extraction_python(),
+            str(archive),
+            str(output),
+            member_prefix,
+            hashlib.md5(payload, usedforsecurity=False).hexdigest(),
+            str(len(payload)),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {path.name for path in output.iterdir()}
+
+
+def test_direct_extraction_skips_taxonomy_embedded_in_search_database(tmp_path: Path) -> None:
+    extracted = _extract_archive(
+        tmp_path,
+        {
+            "16S_ribosomal_RNA.nhr": b"database",
+            "taxdb.btd": b"embedded taxonomy",
+            "taxdb.bti": b"embedded taxonomy",
+            "taxonomy4blast.sqlite3": b"embedded taxonomy",
+        },
+        "16S_ribosomal_RNA",
+    )
+
+    assert extracted == {"16S_ribosomal_RNA.nhr", ".files.json"}
+
+
+def test_direct_extraction_accepts_exact_standalone_taxonomy_members(tmp_path: Path) -> None:
+    extracted = _extract_archive(
+        tmp_path,
+        {
+            "taxdb.btd": b"taxonomy",
+            "taxdb.bti": b"taxonomy",
+            "taxonomy4blast.sqlite3": b"taxonomy",
+        },
+        "taxdb",
+    )
+
+    assert extracted == {
+        "taxdb.btd",
+        "taxdb.bti",
+        "taxonomy4blast.sqlite3",
+        ".files.json",
+    }
+
+
+def test_direct_extraction_rejects_unrelated_archive_member(tmp_path: Path) -> None:
+    archive = tmp_path / "archive.tar.gz"
+    output = tmp_path / "out"
+    output.mkdir()
+    _write_archive(archive, {"16S_ribosomal_RNA.nhr": b"db", "unexpected.txt": b"bad"})
+    payload = archive.read_bytes()
+
+    result = subprocess.run(  # noqa: S603 - fixed interpreter executes the shipped script fixture
+        [
+            sys.executable,
+            "-c",
+            _extraction_python(),
+            str(archive),
+            str(output),
+            "16S_ribosomal_RNA",
+            hashlib.md5(payload, usedforsecurity=False).hexdigest(),
+            str(len(payload)),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "unsafe archive member" in result.stderr
 
 
 def test_direct_job_name_is_deterministic_and_kubernetes_safe() -> None:

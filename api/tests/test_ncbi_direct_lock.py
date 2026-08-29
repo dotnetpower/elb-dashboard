@@ -3,7 +3,7 @@
 Responsibility: Verify bounded acquisition and owner-checked refresh/release
     calls without connecting to Redis.
 Edit boundaries: Pure fake-client tests for `api.services.ncbi_direct_lock`.
-Key entry points: Tests for acquire, refresh, and release.
+Key entry points: Tests for acquire, restart reclaim, refresh, and release.
 Risky contracts: A stale owner must never refresh or delete a replacement lock.
 Validation: `uv run pytest -q api/tests/test_ncbi_direct_lock.py`.
 """
@@ -53,3 +53,16 @@ def test_direct_lock_refresh_and_release_are_owner_checked(
     scripts = [call[1] for call in client.calls if call[0] == "eval"]
     assert any("EXPIRE" in script and "GET" in script for script in scripts)
     assert any("DEL" in script and "GET" in script for script in scripts)
+
+
+def test_direct_lock_restart_recovery_claims_only_absent_or_same_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Redis()
+    monkeypatch.setattr(ncbi_direct_lock, "_client", lambda: client)
+
+    assert ncbi_direct_lock.claim_or_refresh_direct_lock("durable-owner") is True
+    script = next(call[1] for call in client.calls if call[0] == "eval")
+    assert "current == ARGV[1]" in script
+    assert "if not current" in script
+    assert "'NX'" in script

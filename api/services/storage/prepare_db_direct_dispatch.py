@@ -88,6 +88,7 @@ def dispatch_ncbi_direct(
         raise DirectDispatchError(409, "This NCBI database release is already active.")
 
     operation_id = uuid.uuid4().hex
+    job_id = f"prepare-db-direct-{db_name}-{int(time.time())}"
     from api.services.ncbi_direct_lock import acquire_direct_lock
 
     try:
@@ -130,11 +131,15 @@ def dispatch_ncbi_direct(
             "source_release_at": manifest.released_at,
             "release_fingerprint": manifest.release_fingerprint,
             "transfer_manifest_sha256": transfer_sha,
+            "number_of_letters": manifest.number_of_letters,
+            "number_of_sequences": manifest.number_of_sequences,
+            "bytes_total": manifest.bytes_total,
             "taxonomy_release_at": taxonomy.released_at if taxonomy else None,
             "taxonomy_release_fingerprint": (taxonomy.release_fingerprint if taxonomy else None),
             "phase": "queued",
             "archive_count": len(archives),
             "bytes_total_compressed": sum(item.size for item in archives),
+            "job_id": job_id,
             "started_at": started_at,
         }
         meta["aks_job_ref"] = job_ref
@@ -184,7 +189,6 @@ def dispatch_ncbi_direct(
         3600,
         int(os.environ.get("PREPARE_DB_NCBI_DIRECT_TIMEOUT_SECONDS", str(8 * 60 * 60))),
     )
-    job_id = f"prepare-db-direct-{db_name}-{int(time.time())}"
     task_kwargs = {
         "job_id": job_id,
         "prepare_operation_id": operation_id,

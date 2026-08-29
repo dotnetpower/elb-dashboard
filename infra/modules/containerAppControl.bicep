@@ -160,6 +160,9 @@ var effectiveServiceBusEnabled = empty(serviceBusEnabled)
 var effectiveStorageDateLayout = empty(storageDateLayoutEnabled)
   ? controlPlaneEnv.api.STORAGE_DATE_LAYOUT_ENABLED
   : storageDateLayoutEnabled
+var effectivePrepareDbNcbiDirectEnabled = empty(prepareDbNcbiDirectEnabled)
+  ? controlPlaneEnv.api.PREPARE_DB_NCBI_DIRECT_ENABLED
+  : prepareDbNcbiDirectEnabled
 
 resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
@@ -319,7 +322,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // a deployment has validated its AKS scratch capacity and NCBI
             // egress behavior. The UI can disclose the newer release while
             // this gate is off, but cannot enqueue the large HTTPS transfer.
-            { name: 'PREPARE_DB_NCBI_DIRECT_ENABLED', value: prepareDbNcbiDirectEnabled }
+            { name: 'PREPARE_DB_NCBI_DIRECT_ENABLED', value: effectivePrepareDbNcbiDirectEnabled }
             // Live Wall log-tail fallback target. When non-empty,
             // `api.services.sidecar_logs` switches from local file tailing
             // to KQL against the LA workspace. Empty disables the fallback

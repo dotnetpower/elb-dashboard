@@ -119,6 +119,13 @@ PY
   if [[ "$sidecar" =~ ^(api|worker|beat|terminal)$ && -n "${ACR_NAME:-}" ]]; then
     printf 'PLATFORM_ACR_NAME=%s\n' "$ACR_NAME"
   fi
+  # The Direct/AKS prepare task is emitted by the api but runs in AKS from a
+  # dedicated Azure CLI + pinned-azcopy image. Full postprovision wires this
+  # value through Bicep; mirror it on fast api deploys so an older live
+  # template converges instead of rejecting Direct dispatch as image-missing.
+  if [[ "$sidecar" == "api" && -n "${ACR_LOGIN_SERVER:-}" && -n "${TAG:-}" ]]; then
+    printf 'PREPARE_DB_AKS_AZCOPY_IMAGE=%s/elb-prepare-db:%s\n' "$ACR_LOGIN_SERVER" "$TAG"
+  fi
   # Live Wall queries ContainerAppConsoleLogs_CL through LogsQueryClient,
   # whose workspace_id contract is the customer GUID, not an ARM resource id.
   # az-context resolves that authoritative value from the Container Apps
@@ -1278,10 +1285,25 @@ if ! $NO_BUILD; then
     "$BUILD_CTX" \
     -o none
 
+  if [[ "$SIDECAR" == "api" ]]; then
+    ts "==> Building elb-prepare-db:$TAG via ACR for AKS database transfers"
+    az acr build \
+      --registry "$ACR_NAME" \
+      --image "elb-prepare-db:${TAG}" \
+      --image "elb-prepare-db:latest" \
+      --file "$REPO_ROOT/aks/prepare-db/Dockerfile" \
+      "$REPO_ROOT/aks/prepare-db" \
+      -o none
+  fi
+
   # Prune older manifests for this repo WHILE the ACR firewall is still open.
   # Steady-state ACR is publicNetworkAccess=Disabled, so this MUST precede
   # acr_restore_build_access below. Best-effort: never aborts the deploy.
-  acr_prune_targets "$IMAGE_NAME"
+  if [[ "$SIDECAR" == "api" ]]; then
+    acr_prune_targets "$IMAGE_NAME" elb-prepare-db
+  else
+    acr_prune_targets "$IMAGE_NAME"
+  fi
 
   acr_restore_build_access "$ACR_NAME"
   trap - EXIT

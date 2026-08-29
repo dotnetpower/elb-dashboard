@@ -1,10 +1,7 @@
 """`reconcile_orphaned_prepare_db` Celery task — recover stuck prepare-db markers.
 
-Responsibility: Beat-scheduled reconciler that drives ``{db}-metadata.json`` rows whose
-    ``update_in_progress`` flag is stuck on a non-terminal ``copy_status.phase`` (because
-    the worker that was polling an AKS-fanout download died before writing the terminal
-    state) to a terminal ``partial`` phase. This clears the perpetual SPA spinner and the
-    409 in-progress gate without human intervention.
+Responsibility: Beat-scheduled wrapper that recovers fully staged Direct generations after
+    revision loss and terminalizes genuinely partial orphaned prepare-db metadata.
 Edit boundaries: Thin Celery wrapper. The detection + reset logic lives in
     `api.services.storage.orphan_prepare_db.reconcile_orphaned_prepare_db`. Do not add
     business logic here.
@@ -38,13 +35,23 @@ def reconcile_orphaned_prepare_db(
 ) -> dict[str, Any]:
     """Recover orphaned AKS-fanout prepare-db markers.
 
-    Side effects: reads Storage metadata + AKS Job status and rewrites
-    ``{db}-metadata.json`` for rows whose driving Job is gone/failed. Never
-    re-dispatches a download.
+    Side effects: reads Storage metadata + AKS Job status, promotes a fully
+    validated Direct generation, or rewrites partial rows whose Job is gone/failed.
     """
 
     from api.services.storage.orphan_prepare_db import (
         reconcile_orphaned_prepare_db as _reconcile,
     )
 
-    return _reconcile(credential=_facade.get_credential(), limit=limit)
+    result = _reconcile(credential=_facade.get_credential(), limit=limit)
+    for recovered in result.get("recovered_direct", []):
+        job_id = str(recovered.get("job_id") or "")
+        if job_id:
+            _facade._update_state(
+                job_id,
+                "completed",
+                "completed",
+                outcome="promoted_after_restart",
+                generation_id=recovered.get("generation_id"),
+            )
+    return result

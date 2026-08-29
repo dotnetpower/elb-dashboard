@@ -69,11 +69,43 @@ def _manifest() -> NcbiDirectManifest:
     )
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, container: _Container) -> list[dict[str, Any]]:
+def _taxonomy_manifest() -> NcbiDirectManifest:
+    return NcbiDirectManifest(
+        db_name="taxdb",
+        released_at="2026-08-26T16:23:01.207937",
+        release_fingerprint="d" * 64,
+        generation_id="ncbi-direct-20260826-dddddddddddd",
+        transfer_manifest_sha256="e" * 64,
+        number_of_letters=0,
+        number_of_sequences=0,
+        bytes_total=200,
+        bytes_total_compressed=100,
+        archives=(
+            NcbiDirectArchive(
+                url="https://ftp.ncbi.nlm.nih.gov/blast/db/taxdb.tar.gz",
+                md5_url="https://ftp.ncbi.nlm.nih.gov/blast/db/taxdb.tar.gz.md5",
+                md5="f" * 32,
+                size=100,
+                member_prefix="taxdb",
+            ),
+        ),
+    )
+
+
+def _install(
+    monkeypatch: pytest.MonkeyPatch,
+    container: _Container,
+    *,
+    include_taxonomy: bool = False,
+) -> list[dict[str, Any]]:
     monkeypatch.setenv("PREPARE_DB_NCBI_DIRECT_ENABLED", "true")
-    monkeypatch.setenv("PREPARE_DB_INCLUDE_TAXONOMY", "false")
+    monkeypatch.setenv("PREPARE_DB_INCLUDE_TAXONOMY", str(include_taxonomy).lower())
     monkeypatch.setenv("PREPARE_DB_AKS_AZCOPY_IMAGE", "acr/prepare:tag")
-    monkeypatch.setattr(dispatch, "build_direct_manifest", lambda _db: _manifest())
+    monkeypatch.setattr(
+        dispatch,
+        "build_direct_manifest",
+        lambda db: _taxonomy_manifest() if db == "taxdb" else _manifest(),
+    )
     monkeypatch.setattr("api.services.ncbi_direct_lock.acquire_direct_lock", lambda _owner: True)
     monkeypatch.setattr("api.services.ncbi_direct_lock.release_direct_lock", lambda _owner: True)
     monkeypatch.setattr(
@@ -137,9 +169,37 @@ def test_direct_dispatch_claims_generation_and_pins_task(
     pending = container.metadata["pending_generation"]
     assert pending["release_fingerprint"] == "a" * 64
     assert pending["transfer_manifest_sha256"] == transfer_manifest_sha256(_manifest().archives)
+    assert pending["number_of_letters"] == 100
+    assert pending["number_of_sequences"] == 10
+    assert pending["bytes_total"] == 200
+    assert pending["job_id"].startswith("prepare-db-direct-core_nt-")
     assert container.metadata["aks_job_ref"]["source_provider"] == "ncbi-direct"
     assert sent[0]["name"] == "api.tasks.storage.prepare_db_via_ncbi_direct"
     assert sent[0]["kwargs"]["archives"][0]["md5"] == "c" * 32
+
+
+def test_direct_dispatch_pins_standalone_taxonomy_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _Container()
+    sent = _install(monkeypatch, container, include_taxonomy=True)
+
+    response = dispatch.dispatch_ncbi_direct(
+        caller=_caller(),
+        credential=object(),
+        subscription_id="sub",
+        storage_account="stelb",
+        db_name="core_nt",
+        aks_resource_group="rg-aks",
+        cluster_name="aks",
+    )
+
+    assert response["files_total"] == 2
+    archives = sent[0]["kwargs"]["archives"]
+    assert [archive["member_prefix"] for archive in archives] == ["core_nt", "taxdb"]
+    assert container.metadata["pending_generation"]["taxonomy_release_at"] == (
+        "2026-08-26T16:23:01.207937"
+    )
 
 
 def test_direct_dispatch_rejects_active_same_release(

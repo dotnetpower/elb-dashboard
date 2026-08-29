@@ -108,6 +108,7 @@ with archive.open("rb") as handle:
 if h.hexdigest() != expected_md5:
     raise SystemExit("archive MD5 mismatch")
 allowed = re.compile(rf"^{re.escape(member_prefix)}(?:\.\d+)?\.[A-Za-z0-9]+$")
+shared_taxonomy = {"taxdb.btd", "taxdb.bti", "taxonomy4blast.sqlite3"}
 max_expanded = max(expected_size * 5, 1024 * 1024)
 expanded = 0
 written = []
@@ -117,12 +118,22 @@ with tarfile.open(archive, "r:gz") as bundle:
         raise SystemExit("archive contained no members")
     for member in members:
         name = member.name
-        if not member.isfile() or name != os.path.basename(name) or not allowed.fullmatch(name):
+        if (
+            not member.isfile()
+            or name != os.path.basename(name)
+            or not (allowed.fullmatch(name) or name in shared_taxonomy)
+        ):
             raise SystemExit(f"unsafe archive member: {name!r}")
         expanded += member.size
         if expanded > max_expanded:
             raise SystemExit("archive expansion exceeded the bounded ratio")
     for member in members:
+        # NCBI embeds shared taxonomy files in ordinary DB archives and also
+        # publishes the authoritative taxdb archive. Skip the embedded copies
+        # so parallel volume pods never race or publish duplicate marker files;
+        # the separately pinned taxdb archive uploads each support file once.
+        if member.name in shared_taxonomy and member_prefix != "taxdb":
+            continue
         source = bundle.extractfile(member)
         if source is None:
             raise SystemExit(f"could not read archive member: {member.name}")

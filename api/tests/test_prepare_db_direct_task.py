@@ -13,7 +13,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from api.tasks.storage.prepare_db_direct import _verify_generation
+from api.services.storage import direct_promotion
+from api.services.storage.direct_promotion import verify_direct_generation
 
 
 class _Download:
@@ -66,7 +67,7 @@ def test_verify_generation_requires_marker_and_exact_blob_size() -> None:
         }
     )
 
-    files, size = _verify_generation(
+    files, size = verify_direct_generation(
         container,
         data_prefix=prefix,
         archive_count=1,
@@ -87,7 +88,7 @@ def test_verify_generation_rejects_transfer_hash_mismatch() -> None:
     )
 
     with pytest.raises(RuntimeError, match="transfer hash mismatch"):
-        _verify_generation(
+        verify_direct_generation(
             container,
             data_prefix=prefix,
             archive_count=1,
@@ -105,9 +106,163 @@ def test_verify_generation_rejects_missing_staged_file() -> None:
     )
 
     with pytest.raises(RuntimeError, match="files incomplete"):
-        _verify_generation(
+        verify_direct_generation(
             container,
             data_prefix=prefix,
             archive_count=1,
             transfer_sha=transfer_sha,
         )
+
+
+def test_promote_direct_generation_atomically_switches_active_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transfer_sha = "a" * 64
+    generation = "ncbi-direct-20260819-aaaaaaaaaaaa"
+    prefix = f"core_nt/generations/{generation}"
+    data = b"database"
+    container = _Container(
+        {
+            f"{prefix}/core_nt.00.nsq": data,
+            f"{prefix}/.manifests/00.json": _marker(transfer_sha, "core_nt.00.nsq", len(data)),
+        }
+    )
+    container.metadata = {
+        "db_name": "core_nt",
+        "source_version": "2026-07-21-01-05-02",
+        "active_generation": {"id": "old-generation"},
+        "update_in_progress": True,
+        "prepare_operation_id": "owner",
+        "pending_generation": {
+            "id": generation,
+            "data_prefix": prefix,
+            "source_provider": "ncbi-direct",
+            "transfer_manifest_sha256": transfer_sha,
+            "archive_count": 1,
+            "phase": "downloading",
+            "source_release_at": "2026-08-19T00:00:00",
+            "release_fingerprint": "b" * 64,
+            "number_of_letters": 100,
+            "number_of_sequences": 10,
+            "bytes_total": 200,
+            "taxonomy_release_at": "2026-08-26T00:00:00",
+            "taxonomy_release_fingerprint": "c" * 64,
+        },
+        "aks_job_ref": {"job_name": "prepare-core"},
+        "db_order_oracle": {"status": "ready"},
+    }
+
+    monkeypatch.setattr(
+        direct_promotion,
+        "download_blob_with_etag",
+        lambda _container, _db: (dict(container.metadata), "etag"),
+    )
+
+    def update(_container: object, _db: str, _account: str, mutator: object) -> dict[str, object]:
+        container.metadata = mutator(dict(container.metadata))  # type: ignore[operator]
+        return dict(container.metadata)
+
+    monkeypatch.setattr(direct_promotion, "update_metadata", update)
+    monkeypatch.setattr(
+        "api.services.ncbi_direct_lock.claim_or_refresh_direct_lock",
+        lambda _owner: True,
+    )
+    monkeypatch.setattr(
+        "api.services.ncbi_direct_lock.release_direct_lock",
+        lambda _owner: True,
+    )
+    monkeypatch.setattr(
+        direct_promotion,
+        "ensure_shard_sets",
+        lambda *_args, **_kwargs: {
+            "layout_schema": 1,
+            "total_volumes": 1,
+            "shard_sets": [1],
+            "errors": [],
+        },
+    )
+
+    result = direct_promotion.recover_direct_generation(
+        credential=None,
+        storage_account="acct",
+        db_name="core_nt",
+        metadata=dict(container.metadata),
+        container=container,
+    )
+
+    assert result["outcome"] == "promoted"
+    assert container.metadata["active_generation"]["id"] == generation
+    assert container.metadata["previous_generation"] == {"id": "old-generation"}
+    assert container.metadata["source_provider"] == "ncbi-direct"
+    assert container.metadata["source_release_at"] == "2026-08-19T00:00:00"
+    assert container.metadata["shard_sets"] == [1]
+    assert container.metadata["update_in_progress"] is False
+    assert "pending_generation" not in container.metadata
+    assert "prepare_operation_id" not in container.metadata
+    assert container.metadata["db_order_oracle"]["status"] == "stale"
+
+    repeated = direct_promotion.promote_direct_generation(
+        credential=None,
+        storage_account="acct",
+        db_name="core_nt",
+        operation_id="owner",
+        generation_id=generation,
+        data_prefix=prefix,
+        release={},
+        transfer_sha=transfer_sha,
+        archive_count=1,
+        container=container,
+    )
+    assert repeated["outcome"] == "already_promoted"
+
+
+def test_recovery_success_survives_lock_release_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "prepare_operation_id": "owner",
+        "pending_generation": {
+            "id": "ncbi-direct-20260819-aaaaaaaaaaaa",
+            "data_prefix": "core_nt/generations/ncbi-direct-20260819-aaaaaaaaaaaa",
+            "source_provider": "ncbi-direct",
+            "source_release_at": "2026-08-19T00:00:00",
+            "release_fingerprint": "b" * 64,
+            "transfer_manifest_sha256": "a" * 64,
+            "archive_count": 1,
+            "number_of_letters": 100,
+            "number_of_sequences": 10,
+        },
+        "aks_job_ref": {"job_name": "prepare-core"},
+    }
+    monkeypatch.setattr(
+        "api.services.ncbi_direct_lock.claim_or_refresh_direct_lock",
+        lambda _owner: True,
+    )
+
+    def release_failure(_owner: str) -> bool:
+        raise ConnectionError("redis unavailable")
+
+    monkeypatch.setattr(
+        "api.services.ncbi_direct_lock.release_direct_lock",
+        release_failure,
+    )
+    monkeypatch.setattr(
+        direct_promotion,
+        "promote_direct_generation",
+        lambda **_kwargs: {
+            "outcome": "promoted",
+            "generation_id": "ncbi-direct-20260819-aaaaaaaaaaaa",
+            "files_total": 12,
+            "bytes_total": 200,
+        },
+    )
+
+    result = direct_promotion.recover_direct_generation(
+        credential=None,
+        storage_account="acct",
+        db_name="core_nt",
+        metadata=metadata,
+        container=object(),
+    )
+
+    assert result["outcome"] == "promoted"
