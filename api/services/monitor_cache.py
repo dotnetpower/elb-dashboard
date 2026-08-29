@@ -99,6 +99,15 @@ def _is_transient_refresh_failure(exc: BaseException) -> bool:
     if isinstance(exc, (_RequestsConnectionError, _RequestsConnectTimeout, _RequestsReadTimeout)):
         return True
 
+    # The per-cluster breaker raises this local builtin-ConnectionError
+    # substitute before making another request. It represents the same
+    # transient reachability failure as the requests exceptions above and must
+    # share their stale-cache telemetry dedup behavior.
+    from api.services.k8s.cluster_breaker import ClusterApiUnreachable
+
+    if isinstance(exc, ClusterApiUnreachable):
+        return True
+
     # A ``requests`` HTTPError from ``raise_for_status()`` — e.g. the
     # metrics.k8s.io ``top-nodes`` endpoint returning a transient 5xx while
     # metrics-server is restarting (issue #48). Classify only the transient /

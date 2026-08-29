@@ -24,7 +24,10 @@ from types import SimpleNamespace
 
 import pytest
 from api.services import job_artifacts
-from api.services.blast.result_artifacts import build_result_aggregate_payload
+from api.services.blast.result_artifacts import (
+    build_result_aggregate_payload,
+    build_result_manifest_payload,
+)
 from api.services.job_artifacts import ArtifactState, build_execution_steps_snapshot
 from api.tasks import blast as blast_tasks
 from api.tasks.blast_artifacts import finalize_job_artifacts
@@ -64,6 +67,40 @@ def test_build_execution_steps_snapshot_preserves_steps() -> None:
         "elastic-blast submitted"
     )
     assert snapshot["output"]["steps"]["submitting"]["status"] == "completed"
+
+
+def test_result_manifest_payload_uses_parseable_result_files(monkeypatch) -> None:
+    selected = [
+        {
+            "name": "2026/08/29/job-1/shard_00/batch_000.out.gz",
+            "size": 396,
+            "file_id": "result-001",
+        }
+    ]
+    captured: dict[str, object] = {}
+
+    def fake_list(account: str, job_id: str, *, prefix: str | None = None):
+        captured.update(account=account, job_id=job_id, prefix=prefix)
+        return selected
+
+    monkeypatch.setattr(
+        "api.services.blast.result_artifacts.list_parseable_result_blobs",
+        fake_list,
+    )
+
+    payload = build_result_manifest_payload(
+        "job-1",
+        "storage1",
+        prefix="2026/08/29/job-1/",
+    )
+
+    assert captured == {
+        "account": "storage1",
+        "job_id": "job-1",
+        "prefix": "2026/08/29/job-1/",
+    }
+    assert payload["files"] == selected
+    assert payload["manifest"]["file_count"] == 1
 
 
 def test_build_execution_steps_snapshot_synthesizes_external_row_steps() -> None:

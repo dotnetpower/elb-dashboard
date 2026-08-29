@@ -17,6 +17,7 @@ import json
 from typing import Any
 
 from api.tasks import openapi
+from api.tasks.openapi import deploy as deploy_mod
 
 
 def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
@@ -86,6 +87,45 @@ def test_build_manifests_rejects_empty_token() -> None:
     # Default empty argument must also be rejected.
     with pytest.raises(ValueError, match="api_token must be a non-empty string"):
         openapi._build_manifests(**base_kwargs)
+
+
+def test_build_manifests_rejects_empty_storage_account() -> None:
+    import pytest
+
+    base_kwargs = {
+        "image": "elbacr.azurecr.io/elb-openapi:4.9",
+        "mi_client_id": "mi-client-id",
+        "cluster_name": "elb-cluster",
+        "resource_group": "rg-elb",
+        "region": "koreacentral",
+        "tenant_id": "tenant-id",
+        "acr_name": "elbacr",
+        "acr_resource_group": "rg-acr",
+        "num_nodes": 10,
+        "api_token": "dummy-token-for-storage-test",
+    }
+    for bad_account in ("", "   ", "\t\n"):
+        with pytest.raises(ValueError, match="storage_account must be a non-empty string"):
+            openapi._build_manifests(**base_kwargs, storage_account=bad_account)
+
+
+def test_deploy_rejects_empty_storage_before_azure_access(monkeypatch) -> None:
+    import pytest
+
+    def unexpected_credential() -> object:
+        raise AssertionError("Azure access must not start for an empty Storage target")
+
+    monkeypatch.setattr(deploy_mod, "get_credential", unexpected_credential)
+
+    with pytest.raises(RuntimeError, match="storage_account is required"):
+        deploy_mod.deploy_openapi_service.run(
+            subscription_id="sub-1",
+            resource_group="rg-elb-cluster",
+            cluster_name="elb-cluster-01",
+            acr_name="elbacr",
+            acr_resource_group="rg-elb-dashboard",
+            storage_account="   ",
+        )
 
 
 def test_build_manifests_grants_janitor_rbac_permissions() -> None:

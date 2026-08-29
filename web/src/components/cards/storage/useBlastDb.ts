@@ -53,7 +53,12 @@ export interface DownloadedDbMeta {
   pending_generation?: {
     id?: string;
     phase?: string;
+    source_provider?: string;
     source_release_at?: string;
+    archive_count?: number;
+    succeeded_archives?: number;
+    active_pods?: number;
+    failed_pods?: number;
   };
   signature_etag?: string;
   downloaded_at?: string;

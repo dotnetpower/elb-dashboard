@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from api.tasks import azure
 from api.tasks.azure import lifecycle as lifecycle_tasks
+from api.tasks.openapi.auto_deploy import build_auto_openapi_payload
 from api.tests._fakes import AsyncResultStub
 
 
@@ -618,6 +619,21 @@ def test_start_aks_auto_deploys_when_no_explicit_payload(monkeypatch) -> None:
     assert kwargs["storage_account"] == "platformstg"
     assert kwargs["storage_resource_group"] == "rg-platform"
     assert kwargs["tenant_id"] == "tenant-bbb"
+
+
+def test_auto_openapi_payload_rejects_missing_storage_account(monkeypatch) -> None:
+    monkeypatch.setenv("PLATFORM_ACR_NAME", "platformacr")
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.delenv("STORAGE_ACCOUNT_NAME", raising=False)
+
+    assert (
+        build_auto_openapi_payload(
+            subscription_id="sub-2",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster-02",
+        )
+        is None
+    )
 
 
 def test_start_aks_skips_openapi_when_opt_out_env_set(monkeypatch) -> None:

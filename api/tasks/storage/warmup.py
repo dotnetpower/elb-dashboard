@@ -56,6 +56,9 @@ _WARMUP_JOB_DEADLINE_SECONDS = env_int(
 _WARMUP_WAIT_GRACE_SECONDS = env_int(
     "BLAST_WARMUP_WAIT_GRACE_SECONDS", 120, minimum=30, maximum=15 * 60
 )
+_WARMUP_RELEASE_WAIT_SECONDS = env_int(
+    "BLAST_WARMUP_RELEASE_WAIT_SECONDS", 120, minimum=30, maximum=10 * 60
+)
 _WARMUP_POLL_MAX_SECONDS = _WARMUP_JOB_DEADLINE_SECONDS + _WARMUP_WAIT_GRACE_SECONDS
 _TASK_SOFT_TIME_LIMIT = int(
     os.environ.get("WARMUP_TASK_SOFT_TIME_LIMIT", str(_WARMUP_POLL_MAX_SECONDS + 180))
@@ -347,9 +350,10 @@ def warmup_database(
     `az aks stop`/`start`, so the pre-stop ``warm-<db>-<shard>`` Jobs are not
     flagged Stale and ``k8s_ensure_job_manifests`` would skip recreating them,
     leaving the node RAM page cache cold. When ``force_rewarm`` is true the
-    task drops the database's existing warmup Jobs before ensure so fresh Jobs
-    actually run (the on-disk DB survives on node_disk, so only the vmtouch
-    re-runs and the download is skipped).
+    task drops the database's existing warmup Jobs and verifies their pods are
+    absent before ensure so fresh Jobs actually run without overlapping stale
+    writers (the on-disk DB survives on node_disk, so only the vmtouch re-runs
+    and the download is skipped).
 
     ``release_inflight_on_done`` is set by the auto-warmup reconcile path: the
     reconcile claimed a Redis in-flight slot before enqueue, and the task drops
@@ -639,6 +643,7 @@ def warmup_database(
                         resource_group,
                         cluster_name,
                         database_name,
+                        wait_for_absence_seconds=_WARMUP_RELEASE_WAIT_SECONDS,
                     )
                 stale_summary = k8s_release_stale_warmup_jobs(
                     cred,
@@ -682,8 +687,12 @@ def warmup_database(
                     force_release_summary is not None
                     and force_release_summary.get("status") != "released"
                 ):
+                    failure_reason = str(
+                        force_release_summary.get("failure_reason") or "unknown"
+                    )
                     raise RuntimeError(
-                        "forced warmup Job release did not fully succeed: "
+                        "forced warmup Job release did not fully succeed "
+                        f"reason={failure_reason}: "
                         f"{force_release_summary.get('errors')}"
                     )
                 apply_summary = k8s_ensure_job_manifests(

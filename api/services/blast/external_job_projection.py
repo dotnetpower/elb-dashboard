@@ -724,12 +724,10 @@ def _external_result_files(job: dict[str, Any]) -> list[dict[str, Any]]:
             "format": item.get("format"),
             "source": "external",
         }
-        # The sibling exposes the result blob's path relative to
-        # ``results/{job_id}/`` (``_list_result_files`` → ``blob_path``). Carry it
-        # through so the dashboard can persist a file_id → blob_path manifest and
-        # stream the result straight from Storage when the elb-openapi proxy is
-        # unreachable (cluster auto-stopped) — see the Service Bus completion
-        # manifest persistence + the download Storage fallback.
+        # The sibling exposes the result blob's path relative to the submitted
+        # results prefix (``_list_result_files`` → ``blob_path``). Carry it through
+        # so the dashboard can persist a file_id → blob_path manifest and combine
+        # it with JobState.results_prefix when the elb-openapi proxy is unreachable.
         blob_path = str(item.get("blob_path") or "").strip()
         if blob_path:
             entry["blob_path"] = blob_path

@@ -401,6 +401,12 @@ def _make_requests_connect_timeout() -> Exception:
     return ConnectTimeout("connect timeout=10")
 
 
+def _make_cluster_api_unreachable() -> Exception:
+    from api.services.k8s.cluster_breaker import ClusterApiUnreachable
+
+    return ClusterApiUnreachable("AKS cluster API circuit breaker is open")
+
+
 def _make_arm_404() -> Exception:
     from azure.core.exceptions import ResourceNotFoundError
 
@@ -420,6 +426,7 @@ def _make_requests_http_error(status: int) -> Exception:
 def test_is_transient_refresh_failure_classifies_known_families() -> None:
     assert monitor_cache._is_transient_refresh_failure(_make_requests_connection_error()) is True
     assert monitor_cache._is_transient_refresh_failure(_make_requests_connect_timeout()) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_cluster_api_unreachable()) is True
     assert monitor_cache._is_transient_refresh_failure(_make_arm_404()) is True
     # metrics-server / top-nodes transient HTTPError family degrades quietly.
     assert monitor_cache._is_transient_refresh_failure(_make_requests_http_error(503)) is True

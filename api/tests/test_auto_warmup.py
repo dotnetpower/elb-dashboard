@@ -30,6 +30,7 @@ from api.services.auto_warmup import (
     save_auto_warmup_preference,
 )
 from api.tasks.storage import reconcile_auto_warmup, warmup_database
+from api.tasks.storage import warmup as warmup_module
 from api.tests._fakes import make_send_task_recorder
 
 
@@ -1401,11 +1402,11 @@ def test_warmup_database_force_rewarm_drops_existing_jobs(monkeypatch, tmp_path)
     )
 
     order: list[str] = []
-    release_calls: list[tuple[Any, Any]] = []
+    release_calls: list[tuple[Any, Any, Any]] = []
 
     def _record_release(cred, sub, rg, cluster, db_name, *a, **k):
         order.append("release")
-        release_calls.append((cluster, db_name))
+        release_calls.append((cluster, db_name, k.get("wait_for_absence_seconds")))
         return {"status": "released", "database": db_name}
 
     monkeypatch.setattr("api.services.k8s.monitoring.k8s_release_warmup_cache", _record_release)
@@ -1440,7 +1441,9 @@ def test_warmup_database_force_rewarm_drops_existing_jobs(monkeypatch, tmp_path)
 
     # The forced re-warm released the DB's existing Jobs and that release ran
     # BEFORE ensure recreated them.
-    assert release_calls == [("elb-cluster", "core_nt")]
+    assert release_calls == [
+        ("elb-cluster", "core_nt", warmup_module._WARMUP_RELEASE_WAIT_SECONDS)
+    ]
     assert order == ["release", "ensure"]
     # ensure was stubbed to fail, so the task surfaces that as a failure.
     assert result["status"] == "failed"

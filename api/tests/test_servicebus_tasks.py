@@ -3188,6 +3188,42 @@ def test_drain_lock_key_is_queue_scoped() -> None:
     assert sb_tasks._drain_lock_key("q1").endswith(":q1")
 
 
+def test_drain_lock_redis_errors_warn_without_exception_telemetry() -> None:
+    coordination = sb_tasks.drain_coordination
+    warnings: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+    logger = SimpleNamespace(
+        warning=lambda message, *args, **kwargs: warnings.append(
+            (message, args, kwargs)
+        )
+    )
+
+    def unavailable(**_kwargs: object) -> object:
+        raise ConnectionError("redis restarting")
+
+    assert coordination.acquire_drain_lock(
+        "requests",
+        enabled=True,
+        lock_ttl=coordination.MIN_DRAIN_LOCK_TTL_SECONDS,
+        lock_base_key="drain",
+        stop_intent_base_key="stop",
+        logger=logger,
+        redis_factory=unavailable,
+    ) == (False, None)
+    coordination.release_drain_lock(
+        "token",
+        "requests",
+        lock_base_key="drain",
+        logger=logger,
+        redis_factory=unavailable,
+    )
+
+    assert [args for _message, args, _kwargs in warnings] == [
+        ("ConnectionError",),
+        ("ConnectionError",),
+    ]
+    assert all("exc_info" not in kwargs for _message, _args, kwargs in warnings)
+
+
 def test_internal_send_lease_is_queue_scoped_and_released() -> None:
     coordination = sb_tasks.drain_coordination
     fake = _FakeLockRedis(set_result=True)

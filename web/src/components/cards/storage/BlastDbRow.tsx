@@ -233,35 +233,58 @@ export function BlastDbRow({
     oracle?.last_attempt?.status === "superseded";
 
   const cs = meta?.copy_status;
+  const pendingGeneration = meta?.pending_generation;
+  const directArchiveProgress =
+    isUpdating &&
+    (pendingGeneration?.source_provider === "ncbi-direct" ||
+      meta?.updating_to_source_version?.startsWith("ncbi-direct-")) &&
+    (typeof pendingGeneration?.archive_count === "number" ||
+      typeof inProgressInfo?.expectedFiles === "number");
+  const directArchivesDone = pendingGeneration?.succeeded_archives ?? 0;
+  const directArchivesTotal =
+    pendingGeneration?.archive_count ?? inProgressInfo?.expectedFiles ?? 0;
   // The server-side copy path reports a per-file `success`; the AKS-fanout
   // path reports pod-level counts (`succeeded_pods`/`shard_count`) instead.
   // Prefer per-file progress and fall back to shard progress so an AKS update
   // still surfaces a moving bar instead of a bare "Updating" badge.
-  const hasPerFile = typeof cs?.success === "number";
+  const hasPerFile = !directArchiveProgress && typeof cs?.success === "number";
   const hasShard =
     typeof cs?.succeeded_pods === "number" && typeof cs?.shard_count === "number";
   const maxCopiedRef = useRef(0);
   if (!copyActive) {
     maxCopiedRef.current = 0;
   }
-  const rawCopied = copyActive ? (cs?.success ?? 0) : 0;
+  const rawCopied = copyActive
+    ? directArchiveProgress
+      ? directArchivesDone
+      : (cs?.success ?? 0)
+    : 0;
   if (rawCopied > maxCopiedRef.current) {
     maxCopiedRef.current = rawCopied;
   }
   const copiedFiles = maxCopiedRef.current;
   const perFileTotal = cs?.total_files ?? inProgressInfo?.expectedFiles ?? 0;
   // Unit-agnostic progress: per-file (server-side) or shard (AKS).
-  const progressDone = hasPerFile
-    ? copiedFiles
-    : hasShard
-      ? (cs?.succeeded_pods ?? 0)
-      : 0;
-  const progressTotal = hasPerFile
-    ? perFileTotal
-    : hasShard
-      ? (cs?.shard_count ?? 0)
-      : perFileTotal;
-  const progressUnit = hasPerFile || !hasShard ? "files" : "shards";
+  const progressDone = directArchiveProgress
+    ? directArchivesDone
+    : hasPerFile
+      ? copiedFiles
+      : hasShard
+        ? (cs?.succeeded_pods ?? 0)
+        : 0;
+  const progressTotal = directArchiveProgress
+    ? directArchivesTotal
+    : hasPerFile
+      ? perFileTotal
+      : hasShard
+        ? (cs?.shard_count ?? 0)
+        : perFileTotal;
+  const progressUnit = directArchiveProgress
+    ? "archives"
+    : hasPerFile || !hasShard
+      ? "files"
+      : "shards";
+  const progressVerb = directArchiveProgress ? "Downloading" : "Copying";
   const rawCopyPct =
     progressTotal > 0
       ? Math.min(100, Math.round((progressDone / progressTotal) * 100))
@@ -587,7 +610,7 @@ export function BlastDbRow({
           )}
           {copyActive && progressTotal > 0 && (
             <span style={{ color: "var(--accent)" }}>
-              Copying {progressDone} / {progressTotal} {progressUnit}{" "}
+              {progressVerb} {progressDone} / {progressTotal} {progressUnit}{" "}
               {copyElapsedSeconds > 0 && (
                 <span
                   style={{

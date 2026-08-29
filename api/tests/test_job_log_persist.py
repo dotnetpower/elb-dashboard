@@ -1,7 +1,8 @@
 """Tests for `api.services.job_logs.persist`.
 
 Responsibility: Verify pod-log persistence at finalize is idempotent, groups
-by phase, writes chunks, and updates ``payload._progress.steps``.
+by phase, writes chunks, updates ``payload._progress.steps``, and preserves
+canonical columns on external rows.
 Edit boundaries: Use fakes — no live Azure / Kubernetes credentials.
 Key entry points: `test_persist_writes_chunks_and_last_output`,
 `test_persist_skips_when_inputs_missing`,
@@ -45,9 +46,14 @@ def _make_state(**payload_overrides: Any) -> SimpleNamespace:
     payload.update(payload_overrides)
     return SimpleNamespace(
         job_id="dash-job",
+        job_title="blastn - core_nt",
+        program="blastn",
+        db="core_nt",
+        query_label="query.fa",
         subscription_id="sub-1",
         resource_group="rg-elb",
         cluster_name="elb-cluster",
+        storage_account="storage1",
         payload=payload,
     )
 
@@ -136,6 +142,18 @@ def test_persist_writes_chunks_and_last_output(monkeypatch) -> None:
     assert progress_steps["running"]["pod_log_persisted"] is True
     staging_text = progress_steps["staging_db"]["last_output"]
     assert "fetched core_nt shard 1" in staging_text
+    assert repo.updates[-1] == {
+        "job_id": "dash-job",
+        "payload": state.payload,
+        "job_title": "blastn - core_nt",
+        "program": "blastn",
+        "db": "core_nt",
+        "query_label": "query.fa",
+        "subscription_id": "sub-1",
+        "resource_group": "rg-elb",
+        "cluster_name": "elb-cluster",
+        "storage_account": "storage1",
+    }
 
 
 def test_persist_skips_when_inputs_missing(monkeypatch) -> None:

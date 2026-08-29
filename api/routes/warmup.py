@@ -255,6 +255,13 @@ def warmup_release(
     body: dict[str, Any] = _WARMUP_RELEASE_BODY,
     caller: CallerIdentity = _WARMUP_RELEASE_CALLER,
 ) -> dict[str, Any]:
+    """Request non-blocking removal of one database's warmup resources.
+
+    This user-facing release preserves the historical Background deletion
+    behavior; pods may remain terminating briefly after the response. Automatic
+    failed-run recovery uses ``warmup_database(force_rewarm=True)`` instead,
+    which verifies full Job and pod absence before recreating resources.
+    """
     database_name = _resolve_warmup_db_name(body)
     subscription_id = str(body.get("subscription_id") or "")
     resource_group = str(body.get("resource_group") or "")

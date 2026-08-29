@@ -11,7 +11,8 @@ Key entry points: `aks_openapi_deploy`, `aks_openapi_deploy_status`,
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
-api/tests/test_openapi_proxy_route.py api/tests/test_route_contracts.py`.
+api/tests/test_openapi_deploy_contract.py api/tests/test_openapi_proxy_route.py
+api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -257,6 +258,23 @@ def aks_openapi_deploy(
         or os.environ.get("PLATFORM_ACR_RESOURCE_GROUP", "").strip()
         or os.environ.get("AZURE_RESOURCE_GROUP", "").strip()
     )
+    storage_account = (
+        (body.get("storage_account", "") or "").strip()
+        or os.environ.get("AZURE_STORAGE_ACCOUNT", "").strip()
+        or os.environ.get("STORAGE_ACCOUNT_NAME", "").strip()
+    )
+    if not storage_account:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "missing_storage_account",
+                "message": "storage_account is required to deploy the OpenAPI service.",
+            },
+        )
+    storage_resource_group = (
+        (body.get("storage_resource_group", "") or "").strip()
+        or os.environ.get("AZURE_RESOURCE_GROUP", "").strip()
+    )
 
     result = _safe_delay(
         deploy_openapi_service,
@@ -265,8 +283,8 @@ def aks_openapi_deploy(
         cluster_name=cluster_name,
         acr_name=acr_name,
         acr_resource_group=acr_resource_group,
-        storage_account=body.get("storage_account", "") or "",
-        storage_resource_group=body.get("storage_resource_group", "") or "",
+        storage_account=storage_account,
+        storage_resource_group=storage_resource_group,
         tenant_id=caller.tenant_id or "",
         caller_oid=caller.object_id or "",
         confirm_recreate=bool(body.get("confirm_recreate", False)),

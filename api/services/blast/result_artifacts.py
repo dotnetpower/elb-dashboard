@@ -28,7 +28,6 @@ from api.services.blast.result_analytics import (
     annotate_result_hit,
     enrich_taxonomy_with_lineage,
     list_parseable_result_blobs,
-    list_result_blobs_for_job,
     read_result_blob_texts_parallel,
     result_hit_matches_filters,
     result_hit_rank_aggregates,
@@ -245,7 +244,7 @@ class _StreamingAggregate:
 def build_result_manifest_payload(
     job_id: str, storage_account: str, *, prefix: str | None = None
 ) -> dict[str, Any]:
-    files = list_result_blobs_for_job(
+    files = list_parseable_result_blobs(
         storage_account,
         job_id,
         prefix=prefix,

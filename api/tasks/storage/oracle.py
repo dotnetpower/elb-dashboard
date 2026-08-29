@@ -36,6 +36,7 @@ _K8S_ERROR_LIMIT = env_int("ORACLE_BUILD_K8S_ERROR_LIMIT", 5, minimum=1, maximum
 _K8S_ERROR_GRACE_SECONDS = env_int(
     "ORACLE_BUILD_K8S_ERROR_GRACE_SECONDS", 60, minimum=5, maximum=300
 )
+_FAILED_JOB_LOG_TAIL_LINES = 20
 _SOFT_TIME_LIMIT = _BUILD_TIMEOUT_SECONDS + 60
 _HARD_TIME_LIMIT = _BUILD_TIMEOUT_SECONDS + 120
 
@@ -150,6 +151,47 @@ def _terminal_failure(
         automatic=automatic,
     )
     raise OracleTaskFailed(f"{error_code}: {safe_message}")
+
+
+def _failed_job_message(
+    credential: Any,
+    *,
+    subscription_id: str,
+    cluster_resource_group: str,
+    cluster_name: str,
+    namespace: str,
+    run_id: str,
+    failed_jobs: tuple[str, ...],
+) -> str:
+    """Return a bounded diagnostic for the first failed Job before cleanup."""
+    summary = f"failed Jobs: {', '.join(failed_jobs)}"
+    if not failed_jobs:
+        return summary
+    failed_job = failed_jobs[0]
+    try:
+        from api.services.k8s.workload_ops import k8s_job_logs
+
+        logs = k8s_job_logs(
+            credential,
+            subscription_id,
+            cluster_resource_group,
+            cluster_name,
+            namespace,
+            failed_job,
+            tail_lines=_FAILED_JOB_LOG_TAIL_LINES,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "oracle failed Job logs unavailable run_id=%s job=%s reason=%s",
+            run_id,
+            failed_job,
+            type(exc).__name__,
+        )
+        return summary
+    lines = [line.strip() for line in sanitise(logs).splitlines() if line.strip()]
+    if not lines:
+        return summary
+    return f"{summary}; log tail: {' | '.join(lines[-4:])}"
 
 
 @shared_task(
@@ -475,6 +517,15 @@ def build_db_order_oracle(
             )
             last_signature = progress.signature
         if progress is not None and progress.status == "failed":
+            failure_message = _failed_job_message(
+                credential,
+                subscription_id=subscription_id,
+                cluster_resource_group=cluster_resource_group,
+                cluster_name=cluster_name,
+                namespace=plan.namespace,
+                run_id=run_id,
+                failed_jobs=progress.failed,
+            )
             _cleanup_jobs()
             _terminal_failure(
                 job_id=job_id,
@@ -483,7 +534,7 @@ def build_db_order_oracle(
                 run_id=run_id,
                 owner_operation_id=owner_operation_id,
                 error_code="oracle_job_failed",
-                message=f"failed Jobs: {', '.join(progress.failed)}",
+                message=failure_message,
                 automatic=automatic,
             )
         if progress is not None and progress.status == "complete":

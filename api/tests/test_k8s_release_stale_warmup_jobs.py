@@ -9,7 +9,8 @@ Key entry points: `_make_job`, `_patch_session`,
 `test_release_stale_warmup_jobs_skips_jobs_without_node_pin`,
 `test_release_stale_warmup_jobs_reports_partial_on_delete_error`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
-explicitly integration-scoped.
+explicitly integration-scoped. Forced cache release must not report success until
+both matching Jobs and pods are absent.
 Validation: `uv run pytest -q api/tests/test_k8s_release_stale_warmup_jobs.py`.
 """
 
@@ -19,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from api.services.k8s import monitoring as km
+from api.services.k8s import warmup_status as warmup_status_module
 
 
 def _make_job(name: str, node: str, source_version: str = "") -> dict[str, Any]:
@@ -167,3 +169,91 @@ def test_release_stale_warmup_jobs_deletes_jobs_from_old_source_version() -> Non
     assert out["deleted"][0]["stale_source_version"] == "old"
     assert out["deleted"][1]["stale_source_version"] == ""
     assert out["kept"] == ["warm-core-nt-01"]
+
+
+def test_release_warmup_cache_waits_for_jobs_and_pods_to_disappear() -> None:
+    delete_response = MagicMock(status_code=200, text="")
+    empty_response = MagicMock(status_code=200, text="")
+    empty_response.json.return_value = {"items": []}
+    session = MagicMock()
+    session.delete.return_value = delete_response
+    session.get.return_value = empty_response
+
+    with patch.object(km, "_get_k8s_session", return_value=(session, "https://aks")), patch.object(
+        km, "_namespace_or_default", return_value="default"
+    ), patch.object(warmup_status_module.time, "sleep", return_value=None):
+        out = km.k8s_release_warmup_cache(
+            MagicMock(),
+            "sub",
+            "rg",
+            "aks",
+            "core_nt",
+            wait_for_absence_seconds=30,
+        )
+
+    assert out["status"] == "released"
+    assert out["absence_verified"] is True
+    assert out["remaining_jobs"] == []
+    assert out["remaining_pods"] == []
+    assert out["remaining_legacy_daemonsets"] == []
+    assert out["remaining_legacy_pods"] == []
+    assert out["failure_reason"] == ""
+    assert all(
+        call.kwargs["params"]["propagationPolicy"] == "Foreground"
+        for call in session.delete.call_args_list
+    )
+    selectors = {call.kwargs["params"]["labelSelector"] for call in session.get.call_args_list}
+    assert selectors == {"app=elb-db-warmup,db=core_nt", "app=db-warmup,db=core_nt"}
+
+
+def test_release_warmup_cache_timeout_reports_remaining_resources() -> None:
+    delete_response = MagicMock(status_code=200, text="")
+    remaining_job = {"metadata": {"name": "warm-core-nt-00"}}
+    remaining_pod = {"metadata": {"name": "warm-core-nt-00-old"}}
+    session = MagicMock()
+    session.delete.return_value = delete_response
+    clock = {"now": 0.0}
+
+    def list_resources(url: str, *, params: dict[str, str], timeout: float):
+        del timeout
+        response = MagicMock(status_code=200, text="")
+        selector = params["labelSelector"]
+        if url.endswith("/jobs") and selector.startswith("app=elb-db-warmup"):
+            items = [remaining_job]
+        elif url.endswith("/pods") and selector.startswith("app=db-warmup"):
+            items = [remaining_pod]
+        else:
+            items = []
+        response.json.return_value = {"items": items}
+        return response
+
+    session.get.side_effect = list_resources
+
+    with patch.object(km, "_get_k8s_session", return_value=(session, "https://aks")), patch.object(
+        km, "_namespace_or_default", return_value="default"
+    ), patch.object(
+        warmup_status_module.time,
+        "monotonic",
+        side_effect=lambda: clock["now"],
+    ), patch.object(
+        warmup_status_module.time,
+        "sleep",
+        side_effect=lambda _seconds: clock.update(now=31.0),
+    ):
+        out = km.k8s_release_warmup_cache(
+            MagicMock(),
+            "sub",
+            "rg",
+            "aks",
+            "core_nt",
+            wait_for_absence_seconds=30,
+        )
+
+    assert out["status"] == "partial"
+    assert out["absence_verified"] is False
+    assert out["remaining_jobs"] == ["warm-core-nt-00"]
+    assert out["remaining_pods"] == []
+    assert out["remaining_legacy_daemonsets"] == []
+    assert out["remaining_legacy_pods"] == ["warm-core-nt-00-old"]
+    assert out["failure_reason"] == "deletion_timeout"
+    assert out["errors"][-1]["reason"] == "deletion_timeout"

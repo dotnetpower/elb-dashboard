@@ -74,6 +74,7 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         assert "/scripts/init-db-shard-aks.sh" in container["args"][0]
         assert "STAGE_LOCK_ACQUIRED" in container["args"][0]
         assert 'blastdbcmd -db "$ELB_DB" -info' in container["args"][0]
+        assert 'blastdbcmd -db "$ELB_DB" -entry all' in container["args"][0]
         assert "staging helper did not commit completion marker" in container["args"][0]
         # The warmup pod intentionally does NOT call blast-vmtouch-aks.sh any
         # more — `azcopy` already populates the OS page cache as a side effect
@@ -1005,8 +1006,16 @@ def test_warmup_staging_commits_marker_after_post_download_integrity() -> None:
     helper = INIT_DB_SHARD_AKS_SCRIPT
     assert "downloaded taxonomy filter index is incomplete" in helper
     assert "downloaded DB failed blastdbcmd integrity probe" in helper
+    assert "downloaded DB failed blastdbcmd record probe" in helper
     assert helper.index("downloaded DB failed blastdbcmd integrity probe") < helper.index(
         'mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"'
+    )
+    assert helper.index("downloaded DB failed blastdbcmd record probe") < helper.index(
+        'mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"'
+    )
+    assert "CACHE_CORRUPT blastdbcmd record probe failed" in helper
+    assert helper.index("CACHE_CORRUPT blastdbcmd record probe failed") < helper.index(
+        "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
     )
     assert helper.index('mv "${CACHE_SOURCE_VERSION}.tmp" "$CACHE_SOURCE_VERSION"') < (
         helper.index('mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"')
@@ -1014,6 +1023,8 @@ def test_warmup_staging_commits_marker_after_post_download_integrity() -> None:
     entrypoint = warmup_shell_command()
     assert "staging helper did not commit completion marker" in entrypoint
     assert "final blastdbcmd integrity probe failed" in entrypoint
+    assert "final blastdbcmd record probe failed" in entrypoint
+    assert '-entry all -outfmt \'%a\'' in entrypoint
     assert helper.index("CACHE_UNVERIFIED expected source version is unavailable") < (
         helper.index("DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}")
     )

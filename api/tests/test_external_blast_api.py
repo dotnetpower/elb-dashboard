@@ -22,6 +22,7 @@ from typing import Any, ClassVar
 
 import httpx
 import pytest
+from azure.core.exceptions import ResourceNotFoundError
 from billiard.exceptions import SoftTimeLimitExceeded
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -439,6 +440,99 @@ def test_stream_result_file_from_storage_streams_from_manifest(monkeypatch):
     assert captured["path"] == "abc123/job-x/batch_000.out.gz"
     assert out.filename == "batch_000.out.gz"
     assert out.media_type == "application/gzip"
+
+
+def test_stream_result_file_from_storage_uses_dated_results_prefix(monkeypatch):
+    from types import SimpleNamespace
+
+    from api.services import external_blast
+
+    state = SimpleNamespace(
+        job_id="abc123",
+        results_prefix="2026/08/29/abc123/",
+        result_manifest='[{"file_id": "result-001", "blob_path": "job-x/batch.out.gz"}]',
+        storage_account="acct1",
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(get=lambda jid: state),
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    captured: dict[str, str] = {}
+
+    def fake_stream(_cred, _account, _container, path):
+        captured["path"] = path
+        return iter([b"DATED-RESULT"])
+
+    monkeypatch.setattr("api.services.storage.blob_io.stream_blob_bytes", fake_stream)
+
+    out = external_blast.stream_result_file_from_storage("abc123", "result-001")
+
+    assert b"".join(out.chunks) == b"DATED-RESULT"
+    assert captured["path"] == "2026/08/29/abc123/job-x/batch.out.gz"
+
+
+def test_stream_result_file_from_storage_does_not_duplicate_full_path(monkeypatch):
+    from types import SimpleNamespace
+
+    from api.services import external_blast
+
+    full_path = "2026/08/29/abc123/job-x/batch.out.gz"
+    state = SimpleNamespace(
+        job_id="abc123",
+        results_prefix="2026/08/29/abc123/",
+        result_manifest=(
+            '[{"file_id": "result-001", "blob_path": '
+            f'"{full_path}"}}]'
+        ),
+        storage_account="acct1",
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(get=lambda jid: state),
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    captured: dict[str, str] = {}
+
+    def fake_stream(_cred, _account, _container, path):
+        captured["path"] = path
+        return iter([b"FULL-PATH-RESULT"])
+
+    monkeypatch.setattr("api.services.storage.blob_io.stream_blob_bytes", fake_stream)
+
+    out = external_blast.stream_result_file_from_storage("abc123", "result-001")
+
+    assert b"".join(out.chunks) == b"FULL-PATH-RESULT"
+    assert captured["path"] == full_path
+
+
+def test_stream_result_file_from_storage_maps_missing_blob_to_offline_404(monkeypatch):
+    from types import SimpleNamespace
+
+    from api.services import external_blast
+
+    state = SimpleNamespace(
+        job_id="abc123",
+        results_prefix="2026/08/29/abc123/",
+        result_manifest='[{"file_id": "result-001", "blob_path": "job-x/missing.gz"}]',
+        storage_account="acct1",
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(get=lambda jid: state),
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    def missing(*_args, **_kwargs):
+        raise ResourceNotFoundError("missing")
+
+    monkeypatch.setattr("api.services.storage.blob_io.stream_blob_bytes", missing)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.stream_result_file_from_storage("abc123", "result-001")
+
+    assert raised.value.status_code == 404
+    assert raised.value.detail["code"] == "result_unavailable_offline"
 
 
 def test_stream_result_file_from_storage_404_without_manifest(monkeypatch):

@@ -10,9 +10,10 @@ its unit tests. Network I/O (Kubernetes API) and Storage I/O (chunked log
 artifacts + job state row) are both side-effects of the public entry point.
 Key entry points: `persist_completed_job_pod_logs`
 Risky contracts: Must be idempotent (the finalizer can retry). Pod logs are
-sanitised and truncated identically to the SSE follow path. Storage and
-Table writes are best-effort; failures are logged and never raised to the
-caller — losing tail logs must not break artifact finalization.
+sanitised and truncated identically to the SSE follow path. A payload-only
+merge must preserve the row's canonical columns because external metadata is
+nested. Storage and Table writes are best-effort; failures are logged and never
+raised to the caller — losing tail logs must not break artifact finalization.
 Validation: `uv run pytest -q api/tests/test_job_log_persist.py`.
 """
 
@@ -223,7 +224,18 @@ def persist_completed_job_pod_logs(
             steps[phase] = step
         progress["steps"] = steps
         fresh_payload["_progress"] = progress
-        repo.update(job_id, payload=fresh_payload)
+        repo.update(
+            job_id,
+            payload=fresh_payload,
+            job_title=str(getattr(fresh, "job_title", "") or ""),
+            program=str(getattr(fresh, "program", "") or ""),
+            db=str(getattr(fresh, "db", "") or ""),
+            query_label=str(getattr(fresh, "query_label", "") or ""),
+            subscription_id=str(getattr(fresh, "subscription_id", "") or ""),
+            resource_group=str(getattr(fresh, "resource_group", "") or ""),
+            cluster_name=str(getattr(fresh, "cluster_name", "") or ""),
+            storage_account=str(getattr(fresh, "storage_account", "") or ""),
+        )
     except Exception as exc:
         LOGGER.info(
             "persist_completed_job_pod_logs: payload merge skipped job_id=%s: %s",

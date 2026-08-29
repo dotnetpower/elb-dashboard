@@ -1,9 +1,9 @@
 """Tests for the orphaned prepare-db reconciler.
 
 Responsibility: Cover the pure ``classify_prepare_db_entry`` decision branches and the
-    ``reconcile_orphaned_prepare_db`` orchestrator (reset write, skip paths, and the
-    concurrency-race guard) using an in-memory fake Storage container and an injectable
-    Job lookup.
+    ``reconcile_orphaned_prepare_db`` orchestrator (live progress refresh, reset write, skip
+    paths, and concurrency-race guards) using an in-memory fake Storage container and an
+    injectable Job lookup.
 Edit boundaries: Test module only. No production code.
 Key entry points: pytest test functions.
 Risky contracts: The race test asserts a fresh dispatch (changed owner token)
@@ -477,6 +477,78 @@ def test_reconcile_running_job_leaves_row_untouched() -> None:
     assert out["reset"] == []
     assert out["skipped_running"] == ["nt"]
     assert container.metadata("nt") == before
+
+
+def test_reconcile_running_direct_job_refreshes_durable_progress() -> None:
+    container = _FakeContainer()
+    container.set_metadata("nt", _direct_candidate_meta())
+
+    out = reconcile_orphaned_prepare_db(
+        credential=None,
+        storage_account="acct",
+        container=container,
+        job_lookup=lambda *a, **k: {
+            "missing": False,
+            "active": 4,
+            "succeeded": 3,
+            "failed": 1,
+            "completions": 10,
+            "conditions": [],
+        },
+        now=NOW,
+        stale_seconds=STALE,
+    )
+
+    assert out["refreshed_direct"] == ["nt"]
+    assert out["skipped_running"] == ["nt"]
+    pending = container.metadata("nt")["pending_generation"]
+    assert pending["active_pods"] == 4
+    assert pending["succeeded_archives"] == 3
+    assert pending["failed_pods"] == 1
+
+
+def test_reconcile_running_direct_progress_does_not_clobber_new_owner() -> None:
+    class _RaceContainer(_FakeContainer):
+        def __init__(self) -> None:
+            super().__init__()
+            self._raced = False
+
+        def on_upload(self, name: str, etag: str | None) -> None:
+            if name == "nt-metadata.json" and not self._raced:
+                self._raced = True
+                fresh = _direct_candidate_meta(prepare_operation_id="new-owner")
+                fresh["pending_generation"]["id"] = "ncbi-direct-new-generation"
+                fresh["aks_job_ref"]["job_name"] = "prepare-db-direct-nt-new"
+                self.store[name] = (
+                    json.dumps(fresh).encode("utf-8"),
+                    self.next_etag(),
+                )
+
+    container = _RaceContainer()
+    container.set_metadata("nt", _direct_candidate_meta())
+
+    out = reconcile_orphaned_prepare_db(
+        credential=None,
+        storage_account="acct",
+        container=container,
+        job_lookup=lambda *a, **k: {
+            "missing": False,
+            "active": 4,
+            "succeeded": 3,
+            "failed": 0,
+            "completions": 10,
+            "conditions": [],
+        },
+        now=NOW,
+        stale_seconds=STALE,
+    )
+
+    assert out["refreshed_direct"] == []
+    assert out["skipped_raced"] == ["nt"]
+    meta = container.metadata("nt")
+    assert meta["prepare_operation_id"] == "new-owner"
+    assert meta["pending_generation"]["id"] == "ncbi-direct-new-generation"
+    assert meta["pending_generation"].get("succeeded_archives") is None
 
 
 def test_reconcile_job_lookup_exception_skips() -> None:

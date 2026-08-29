@@ -148,6 +148,11 @@ if ! blastdbcmd -db "$ELB_DB" -info | tee warmup-db-info.txt; then
     log "ERROR final blastdbcmd integrity probe failed"
     exit 1
 fi
+if ! blastdbcmd -db "$ELB_DB" -entry all -outfmt '%a' >/dev/null; then
+    rm -f "$CACHE_COMPLETE"
+    log "ERROR final blastdbcmd record probe failed"
+    exit 1
+fi
 log "STAGING_COMPLETE shard=${ELB_SHARD_IDX}"
 log "DONE shard=${ELB_SHARD_IDX} size=$(du -sh . | cut -f1)"
 """.strip()
@@ -516,6 +521,12 @@ if [ -f "$CACHE_COMPLETE" ]; then
     fi
 fi
 if [ -f "$CACHE_COMPLETE" ]; then
+    if ! blastdbcmd -db "$ELB_DB" -entry all -outfmt '%a' >/dev/null 2>&1; then
+        echo "CACHE_CORRUPT blastdbcmd record probe failed - invalidating"
+        rm -f "$CACHE_COMPLETE"
+    fi
+fi
+if [ -f "$CACHE_COMPLETE" ]; then
     echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
     commit_layout_markers
     write_volpaths
@@ -633,6 +644,10 @@ cp /tmp/shard.nal "./${ELB_DB}.nal.tmp"
 mv "./${ELB_DB}.nal.tmp" "./${ELB_DB}.nal"
 if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
     echo "ERROR: downloaded DB failed blastdbcmd integrity probe"
+    exit 1
+fi
+if ! blastdbcmd -db "$ELB_DB" -entry all -outfmt '%a' >/dev/null; then
+    echo "ERROR: downloaded DB failed blastdbcmd record probe"
     exit 1
 fi
 

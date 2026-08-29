@@ -9,8 +9,10 @@ Key entry points: `deploy_openapi_service` (Celery task
     `api.tasks.openapi.deploy_openapi_service`).
 Risky contracts: Task name must remain `api.tasks.openapi.deploy_openapi_service` —
     routes and SPA references depend on it. Returned payload must keep the
-    `{status, cluster_name, workload_identity, openapi_deploy:{...}}` shape.
-Validation: `uv run pytest -q api/tests/test_smoke.py`.
+    `{status, cluster_name, workload_identity, openapi_deploy:{...}}` shape. A
+    missing Storage account must fail before Azure or Kubernetes mutation.
+Validation: `uv run pytest -q api/tests/test_openapi_task.py
+    api/tests/test_openapi_deploy_contract.py`.
 """
 
 from __future__ import annotations
@@ -280,6 +282,13 @@ def deploy_openapi_service(
     works (operators that pre-date the SPA button can keep using it);
     kwargs and env are OR-ed so either one unblocks the recreate path.
     """
+
+    storage_account = storage_account.strip()
+    if not storage_account:
+        raise RuntimeError(
+            "storage_account is required to deploy OpenAPI; refusing to emit "
+            "an invalid empty Blob Storage host"
+        )
 
     started = time.time()
     cred = get_credential()

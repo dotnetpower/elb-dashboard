@@ -451,6 +451,7 @@ def test_deploy_grants_lb_subnet_rbac_before_apply(monkeypatch: pytest.MonkeyPat
         resource_group="rg-elb-cluster",
         cluster_name="elb-cluster-01",
         acr_name="",  # avoid the acr_resource_group requirement
+        storage_account="stelbdashboardtest01",
     )
 
     # The grant ran, was passed the pre-fetched cluster, and the task then
@@ -479,6 +480,7 @@ def test_deploy_tolerates_lb_subnet_rbac_failure(monkeypatch: pytest.MonkeyPatch
         resource_group="rg-elb-cluster",
         cluster_name="elb-cluster-01",
         acr_name="",
+        storage_account="stelbdashboardtest01",
     )
 
     # Grant raised, but the task continued (reached the PLS step) instead of

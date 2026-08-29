@@ -36,10 +36,11 @@ export function BlastDbDirectUpdateConfirm({
         <div className="muted" style={{ fontSize: 11, lineHeight: 1.45 }}>
           NCBI published this release on {formatStorageDate(pending.publishedAt)}. It is
           not available from the faster cloud mirror yet. This downloads and verifies{" "}
-          {pending.numberOfVolumes ?? "all"} archives
+          {pending.numberOfVolumes ?? "all"} database archives plus a pinned taxonomy bundle
           {pending.bytesTotal ? ` (${formatBytes(pending.bytesTotal)})` : ""} through the
           running AKS cluster. It may take hours. The current generation remains stored
-          and is replaced only after every archive and shard layout passes validation.
+          and is replaced only after every archive, the taxonomy bundle, and every shard
+          layout pass validation.
         </div>
       </div>
       <div style={{ display: "flex", gap: 6 }}>

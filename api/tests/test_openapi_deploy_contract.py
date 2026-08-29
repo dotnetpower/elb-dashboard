@@ -18,11 +18,18 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from api.auth import CallerIdentity
 from api.routes.aks import openapi as openapi_route
 from api.tasks.openapi import deploy as openapi_deploy
 from api.tasks.openapi import rbac as openapi_rbac
 from api.tests._fakes import AsyncResultStub
+from fastapi import HTTPException
+
+
+@pytest.fixture(autouse=True)
+def _platform_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbdashboardtest01")
 
 
 def test_openapi_deploy_route_forwards_storage_resource_group(
@@ -128,6 +135,71 @@ def test_openapi_deploy_route_falls_back_to_platform_acr_rg_env(monkeypatch) -> 
     )
 
     assert captured["acr_resource_group"] == "rg-platform-acr"
+
+
+def test_openapi_deploy_route_falls_back_to_platform_storage_env(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_safe_delay(_task: object, **kwargs: Any) -> AsyncResultStub:
+        captured.update(kwargs)
+        return AsyncResultStub("task-openapi-env-storage")
+
+    monkeypatch.setattr(openapi_route, "_safe_delay", fake_safe_delay)
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbplatform")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-platform")
+
+    openapi_route.aks_openapi_deploy(
+        {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+            "acr_name": "elbacr",
+            "acr_resource_group": "rg-shared-acr",
+        },
+        CallerIdentity(
+            object_id="caller-oid",
+            tenant_id="tenant-id",
+            upn="researcher@example.test",
+            raw_token="token",
+            claims={},
+        ),
+    )
+
+    assert captured["storage_account"] == "stelbplatform"
+    assert captured["storage_resource_group"] == "rg-platform"
+
+
+@pytest.mark.parametrize("bad_account", [None, "", "   ", "\t\n"])
+def test_openapi_deploy_route_rejects_missing_storage_account(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_account: str | None,
+) -> None:
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.delenv("STORAGE_ACCOUNT_NAME", raising=False)
+    body = {
+        "subscription_id": "sub-1",
+        "resource_group": "rg-elb-cluster",
+        "cluster_name": "elb-cluster-01",
+        "acr_name": "elbacr",
+        "acr_resource_group": "rg-shared-acr",
+    }
+    if bad_account is not None:
+        body["storage_account"] = bad_account
+
+    with pytest.raises(HTTPException) as exc_info:
+        openapi_route.aks_openapi_deploy(
+            body,
+            CallerIdentity(
+                object_id="caller-oid",
+                tenant_id="tenant-id",
+                upn="researcher@example.test",
+                raw_token="token",
+                claims={},
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == "missing_storage_account"
 
 
 def test_openapi_deploy_route_falls_back_to_azure_resource_group_env(monkeypatch) -> None:

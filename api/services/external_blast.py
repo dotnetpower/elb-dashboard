@@ -23,6 +23,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
+from azure.core.exceptions import ResourceNotFoundError
 from billiard.exceptions import SoftTimeLimitExceeded
 from fastapi import HTTPException
 
@@ -1319,14 +1320,33 @@ def stream_result_file_from_storage(job_id: str, file_id: str) -> StreamedFile:
     if not account:
         raise _offline_404("result storage account is not recorded for this job")
 
-    # ``blob_path`` is relative to ``results/{job_id}/`` (the sibling's
-    # ``_list_result_files`` contract). ``stream_blob_bytes`` validates the full
-    # path against traversal and gates concurrency (§9).
-    full_path = f"{job_id}/{blob_path.lstrip('/')}"
+    from api.services.blast.result_analytics import (
+        InvalidResultBlobName,
+        validate_result_blob_name,
+    )
+    from api.services.storage.job_prefix import resolve_results_prefix
+
+    # Current sibling payloads report a path relative to this job's persisted
+    # results prefix. Older rows default to ``{job_id}/``; date-layout rows use
+    # ``YYYY/MM/DD/{job_id}/``. Accept an already-prefixed path as well so a
+    # future sibling can emit container-relative paths without double-prefixing.
+    try:
+        validate_result_blob_name(blob_path, job_id)
+        full_path = blob_path
+    except InvalidResultBlobName:
+        full_path = f"{resolve_results_prefix(job_id, state=state)}{blob_path.lstrip('/')}"
+        try:
+            validate_result_blob_name(full_path, job_id)
+        except InvalidResultBlobName as exc:
+            raise _offline_404("result manifest path is invalid") from exc
     filename = _safe_filename(blob_path.rsplit("/", 1)[-1])
     media_type = "application/gzip" if filename.endswith(".gz") else "application/xml"
+    try:
+        chunks = stream_blob_bytes(get_credential(), account, "results", full_path)
+    except ResourceNotFoundError as exc:
+        raise _offline_404("result blob is missing from storage") from exc
     return StreamedFile(
-        chunks=stream_blob_bytes(get_credential(), account, "results", full_path),
+        chunks=chunks,
         media_type=media_type,
         filename=filename,
     )

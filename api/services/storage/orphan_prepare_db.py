@@ -1,8 +1,8 @@
 """Reconcile orphaned AKS-fanout prepare-db state back to a terminal phase.
 
-Responsibility: Reconcile orphaned prepare-db metadata after worker/revision loss: recover a
-    fully staged NCBI Direct generation through immutable validation and atomic promotion, or
-    drive missing/failed partial work to a terminal phase so the SPA and operation gate converge.
+Responsibility: Reconcile prepare-db metadata after worker/revision loss: refresh live NCBI
+    Direct progress, recover a fully staged generation through immutable validation and atomic
+    promotion, or drive missing/failed partial work to a terminal phase.
 Edit boundaries: Pure-Python decision + Storage/Kubernetes read-modify-write only. Do NOT
     re-dispatch downloads from here (no auto-relaunch — that belongs to an explicit user
     Update click). Metadata writes go through the shared ETag-guarded ``update_metadata``
@@ -15,9 +15,10 @@ Risky contracts: The authoritative orphan signal is the K8s Job lookup, NOT age 
     (server-side mode). The reset mutator re-validates both ``update_started_at`` and the
     owner token under the ETag so an interleaved new dispatch is never reset. NCBI Direct
     recovery terminalizes only ``pending_generation`` and preserves active copy/shard state.
-    A completed Direct Job gets a grace window for its original worker, then recovery uses the
-    persisted owner/release/hash/count contract; an absent Redis lock may be reclaimed only by
-    that same durable owner.
+    Running Direct progress is written only after owner, generation, and Job identity are
+    revalidated under ETag CAS. A completed Direct Job gets a grace window for its original
+    worker, then recovery uses the persisted owner/release/hash/count contract; an absent Redis
+    lock may be reclaimed only by that same durable owner.
 Validation: ``uv run pytest -q api/tests/test_orphan_prepare_db_reconcile.py``.
 """
 
@@ -47,6 +48,10 @@ _METADATA_SUFFIX = "-metadata.json"
 class _SkipReset(Exception):
     """Raised inside the reset mutator when the row changed under us
     (a fresh dispatch replaced the orphan) so the write is abandoned."""
+
+
+class _SkipProgressRefresh(Exception):
+    """Raised when a Direct progress write no longer owns the observed operation."""
 
 
 def _marker_age_seconds(metadata: dict[str, Any], *, now: datetime) -> float | None:
@@ -240,10 +245,11 @@ def reconcile_orphaned_prepare_db(
 ) -> dict[str, Any]:
     """Scan ``blast-db`` metadata and drive orphaned prepare-db rows to terminal.
 
-    Side effects: reads Storage metadata + AKS Job status; rewrites
-    ``{db}-metadata.json`` (``update_in_progress=False`` + ``copy_status.phase=
-    "partial"`` + drops ``aks_job_ref``) for rows whose driving Job is gone or
-    failed. Never re-dispatches a download and never opens Storage network.
+    Side effects: reads Storage metadata + AKS Job status; refreshes active
+    Direct archive counters or rewrites ``{db}-metadata.json``
+    (``update_in_progress=False`` + ``copy_status.phase="partial"`` + drops
+    ``aks_job_ref``) for rows whose driving Job is gone or failed. Never
+    re-dispatches a download and never opens Storage network.
 
     Idempotent: a reset row leaves a terminal phase, so the next tick classifies
     it ``skip-terminal``. Concurrency-safe: the reset is an ETag-guarded write
@@ -308,6 +314,7 @@ def reconcile_orphaned_prepare_db(
         "skipped_terminal": [],
         "skipped_error": [],
         "skipped_raced": [],
+        "refreshed_direct": [],
         "recovered_direct": [],
         "errors": [],
     }
@@ -359,6 +366,89 @@ def reconcile_orphaned_prepare_db(
         )
 
         if action == "skip-running":
+            isolated_direct = bool(
+                isinstance(ref, dict) and ref.get("source_provider") == "ncbi-direct"
+            )
+            pending = metadata.get("pending_generation")
+            if isolated_direct and isinstance(pending, dict) and isinstance(job_status, dict):
+                observed_operation_id = str(metadata.get("prepare_operation_id") or "")
+                observed_generation_id = str(pending.get("id") or "")
+                observed_job_name = str(ref.get("job_name") or "")
+                active_pods = int(job_status.get("active") or 0)
+                succeeded_archives = max(
+                    int(pending.get("succeeded_archives") or 0),
+                    int(job_status.get("succeeded") or 0),
+                )
+                failed_pods = max(
+                    int(pending.get("failed_pods") or 0),
+                    int(job_status.get("failed") or 0),
+                )
+                progress_changed = any(
+                    (
+                        int(pending.get("active_pods") or 0) != active_pods,
+                        int(pending.get("succeeded_archives") or 0) != succeeded_archives,
+                        int(pending.get("failed_pods") or 0) != failed_pods,
+                    )
+                )
+                if progress_changed:
+
+                    def _refresh_progress(
+                        meta: dict[str, Any],
+                        *,
+                        _operation_id: str = observed_operation_id,
+                        _generation_id: str = observed_generation_id,
+                        _job_name: str = observed_job_name,
+                        _active: int = active_pods,
+                        _succeeded: int = succeeded_archives,
+                        _failed: int = failed_pods,
+                    ) -> dict[str, Any]:
+                        current_pending = meta.get("pending_generation")
+                        current_ref = meta.get("aks_job_ref")
+                        if (
+                            not meta.get("update_in_progress")
+                            or not isinstance(current_pending, dict)
+                            or not isinstance(current_ref, dict)
+                            or str(current_pending.get("id") or "") != _generation_id
+                            or str(current_ref.get("job_name") or "") != _job_name
+                            or (
+                                _operation_id
+                                and str(meta.get("prepare_operation_id") or "")
+                                != _operation_id
+                            )
+                        ):
+                            raise _SkipProgressRefresh
+                        current_pending = dict(current_pending)
+                        current_pending.update(
+                            {
+                                "active_pods": _active,
+                                "succeeded_archives": max(
+                                    int(current_pending.get("succeeded_archives") or 0),
+                                    _succeeded,
+                                ),
+                                "failed_pods": max(
+                                    int(current_pending.get("failed_pods") or 0),
+                                    _failed,
+                                ),
+                            }
+                        )
+                        meta["pending_generation"] = current_pending
+                        return meta
+
+                    try:
+                        _update_metadata(container, db_name, account, _refresh_progress)
+                    except _SkipProgressRefresh:
+                        LOGGER.info("orphan progress refresh raced db=%s", db_name)
+                        result["skipped_raced"].append(db_name)
+                        continue
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "orphan progress refresh failed db=%s: %s",
+                            db_name,
+                            type(exc).__name__,
+                        )
+                        result["errors"].append(db_name)
+                        continue
+                    result["refreshed_direct"].append(db_name)
             result["skipped_running"].append(db_name)
             continue
         if action == "skip-recent":

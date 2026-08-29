@@ -593,8 +593,8 @@ def _persist_result_manifest(openapi_job_id: str, job: dict[str, Any]) -> None:
     later unreachable (the cluster auto-stopped). Best-effort: a failure here
     never blocks the completion event — the download just falls back to the
     openapi proxy as before. Blob paths are stored relative to
-    ``results/{job_id}/`` (the sibling's contract), so the fallback maps each to
-    ``stream_blob_bytes(account, "results", f"{job_id}/{blob_path}")``.
+    the submitted results prefix, so the fallback combines each with the durable
+    ``JobState.results_prefix`` (flat or date-tiered) before streaming.
     """
     from api.services.blast.external_job_projection import _external_result_files
 

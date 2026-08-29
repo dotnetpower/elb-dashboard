@@ -8,6 +8,7 @@ monkeypatch them on that module.
 Key entry points: `k8s_warmup_status`, `k8s_release_warmup_cache`,
 `k8s_release_stale_warmup_jobs`, `k8s_check_namespace_exists`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
+Forced retry cleanup must verify both Job and pod absence before same-name recreation.
 The six top-level reads in `k8s_warmup_status` fan out via `_k8s_fanout_pool`; keep them
 independent so the wall time stays bounded by the slowest call. Never submit a helper that
 waits on this pool back into the same pool, and never swallow Celery soft deadlines.
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -46,12 +48,16 @@ def k8s_release_warmup_cache(
     cluster_name: str,
     db_name: str,
     namespace: str = "default",
+    wait_for_absence_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Release node-local warmup resources for one database.
 
     The operation removes the Kubernetes resources that keep the dashboard's
     warm-cache state alive. Node-local kernel/page cache may drain gradually,
-    but subsequent status checks no longer report the DB as warmed.
+    but subsequent status checks no longer report the DB as warmed. A positive
+    ``wait_for_absence_seconds`` switches Job deletion to Foreground and verifies
+    both matching Jobs and pods are absent before reporting ``released``; this is
+    required before a failed Auto warm retry recreates the same resource names.
     """
 
     from api.services.k8s.monitoring import _get_k8s_session, _namespace_or_default
@@ -81,17 +87,105 @@ def k8s_release_warmup_cache(
             ),
         ]
 
+        wait_seconds = min(max(float(wait_for_absence_seconds), 0.0), 600.0)
         for kind, url, selector in targets:
             response = session.delete(
                 url,
-                params={"labelSelector": selector, "propagationPolicy": "Background"},
+                params={
+                    "labelSelector": selector,
+                    "propagationPolicy": "Foreground" if wait_seconds > 0 else "Background",
+                },
                 timeout=10,
             )
             item = {"kind": kind, "selector": selector, "status_code": response.status_code}
             if response.status_code in (200, 201, 202, 404):
                 deleted.append(item)
             else:
-                errors.append({**item, "detail": response.text[:200]})
+                errors.append({**item, "stage": "delete", "detail": response.text[:200]})
+
+        remaining_jobs: list[str] = []
+        remaining_pods: list[str] = []
+        remaining_legacy_daemonsets: list[str] = []
+        remaining_legacy_pods: list[str] = []
+        absence_verified = False
+        if not errors and wait_seconds > 0:
+            selector = f"app={DEFAULT_WARMUP_APP_LABEL},db={db_label}"
+            legacy_selector = f"app=db-warmup,db={db_label}"
+            jobs_url = f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs"
+            pods_url = f"{server}/api/v1/namespaces/{target_ns}/pods"
+            daemonsets_url = f"{server}/apis/apps/v1/namespaces/{target_ns}/daemonsets"
+            poll_targets = (
+                ("jobs", jobs_url, selector),
+                ("pods", pods_url, selector),
+                ("legacy_daemonsets", daemonsets_url, legacy_selector),
+                ("legacy_pods", pods_url, legacy_selector),
+            )
+            deadline = time.monotonic() + wait_seconds
+            while True:
+                remaining: dict[str, list[str]] = {}
+                for kind, url, target_selector in poll_targets:
+                    response = session.get(
+                        url,
+                        params={"labelSelector": target_selector},
+                        timeout=min(10.0, max(1.0, deadline - time.monotonic())),
+                    )
+                    if response.status_code != 200:
+                        errors.append(
+                            {
+                                "kind": kind,
+                                "stage": "verify",
+                                "selector": target_selector,
+                                "status_code": response.status_code,
+                                "detail": response.text[:200],
+                            }
+                        )
+                        break
+                    remaining[kind] = [
+                        str(item.get("metadata", {}).get("name") or "")
+                        for item in response.json().get("items", [])
+                        if item.get("metadata", {}).get("name")
+                    ]
+                if errors:
+                    break
+                remaining_jobs = remaining.get("jobs", [])
+                remaining_pods = remaining.get("pods", [])
+                remaining_legacy_daemonsets = remaining.get("legacy_daemonsets", [])
+                remaining_legacy_pods = remaining.get("legacy_pods", [])
+                if not any(
+                    (
+                        remaining_jobs,
+                        remaining_pods,
+                        remaining_legacy_daemonsets,
+                        remaining_legacy_pods,
+                    )
+                ):
+                    absence_verified = True
+                    break
+                if time.monotonic() >= deadline:
+                    errors.append(
+                        {
+                            "kind": "warmup-resources",
+                            "selector": selector,
+                            "reason": "deletion_timeout",
+                            "remaining_jobs": remaining_jobs,
+                            "remaining_pods": remaining_pods,
+                            "remaining_legacy_daemonsets": remaining_legacy_daemonsets,
+                            "remaining_legacy_pods": remaining_legacy_pods,
+                        }
+                    )
+                    break
+                remaining_wait = deadline - time.monotonic()
+                if remaining_wait > 0:
+                    time.sleep(min(1.0, max(0.05, remaining_wait)))
+
+        failure_reason = ""
+        if errors:
+            if any(error.get("reason") == "deletion_timeout" for error in errors):
+                failure_reason = "deletion_timeout"
+            elif any(error.get("stage") == "verify" for error in errors):
+                failure_reason = "verify_failed"
+            else:
+                failure_reason = "delete_failed"
 
         return {
             "status": "released" if not errors else "partial",
@@ -100,7 +194,15 @@ def k8s_release_warmup_cache(
             "namespace": target_ns,
             "deleted": deleted,
             "errors": errors,
+            "absence_verified": absence_verified,
+            "remaining_jobs": remaining_jobs,
+            "remaining_pods": remaining_pods,
+            "remaining_legacy_daemonsets": remaining_legacy_daemonsets,
+            "remaining_legacy_pods": remaining_legacy_pods,
+            "failure_reason": failure_reason,
         }
+    except SoftTimeLimitExceeded:
+        raise
     finally:
         session.close()
 

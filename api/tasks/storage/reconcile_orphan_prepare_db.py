@@ -1,7 +1,7 @@
-"""`reconcile_orphaned_prepare_db` Celery task — recover stuck prepare-db markers.
+"""`reconcile_orphaned_prepare_db` Celery task — reconcile durable prepare-db state.
 
-Responsibility: Beat-scheduled wrapper that recovers fully staged Direct generations after
-    revision loss and terminalizes genuinely partial orphaned prepare-db metadata.
+Responsibility: Beat-scheduled wrapper that refreshes live Direct progress, recovers fully
+    staged generations after revision loss, and terminalizes genuinely partial metadata.
 Edit boundaries: Thin Celery wrapper. The detection + reset logic lives in
     `api.services.storage.orphan_prepare_db.reconcile_orphaned_prepare_db`. Do not add
     business logic here.
@@ -35,8 +35,9 @@ def reconcile_orphaned_prepare_db(
 ) -> dict[str, Any]:
     """Recover orphaned AKS-fanout prepare-db markers.
 
-    Side effects: reads Storage metadata + AKS Job status, promotes a fully
-    validated Direct generation, or rewrites partial rows whose Job is gone/failed.
+    Side effects: reads Storage metadata + AKS Job status, refreshes live
+    Direct counters, promotes a fully validated generation, or rewrites partial
+    rows whose Job is gone/failed.
     """
 
     from api.services.storage.orphan_prepare_db import (

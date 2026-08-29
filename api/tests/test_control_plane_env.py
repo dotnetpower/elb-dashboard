@@ -9,8 +9,8 @@ Actions `deploy.yml` path). Without this file both fast deploy paths patch
 images only and silently skip a Bicep guard-default change, which is how a
 no-RBAC user could still load the dashboard after an apparent redeploy.
 The same fast path also backfills non-secret platform coordinates required by
-runtime maintenance, including `PLATFORM_ACR_NAME` on the four Bicep-owned
-runtime sidecars.
+runtime maintenance, including `PLATFORM_ACR_NAME` and `STORAGE_ACCOUNT_NAME`
+on the four Bicep-owned runtime sidecars.
 
 This test fails loudly when the file is malformed, when a guard key Bicep
 references disappears, or when the security-critical default
@@ -220,6 +220,7 @@ def _control_plane_pairs(sidecar: str) -> list[str]:
         f"CONTROL_PLANE_ENV_FILE='{_JSON_PATH}'; "
         "ACR_NAME=acrelbdashboardtest; "
         "ACR_LOGIN_SERVER=acrelbdashboardtest.azurecr.io; "
+        "STORAGE_ACCOUNT_NAME=stelbdashboardtest; "
         "TAG=v0.3.0-test; "
         "LOG_ANALYTICS_WORKSPACE_ID=648cd0d4-a8b7-41da-a22c-050b5217b153; "
         f"{function}; control_plane_env_pairs '{sidecar}'"
@@ -245,6 +246,37 @@ def test_quick_deploy_backfills_platform_acr_on_runtime_sidecars() -> None:
     for sidecar in ("api", "worker", "beat", "terminal"):
         assert expected in _control_plane_pairs(sidecar)
     assert expected not in _control_plane_pairs("frontend")
+
+
+def test_quick_deploy_backfills_storage_account_on_runtime_sidecars() -> None:
+    expected = "STORAGE_ACCOUNT_NAME=stelbdashboardtest"
+    for sidecar in ("api", "worker", "beat", "terminal"):
+        assert expected in _control_plane_pairs(sidecar)
+    assert expected not in _control_plane_pairs("frontend")
+
+
+def test_quick_deploy_does_not_overwrite_storage_account_with_empty_value() -> None:
+    script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
+    start = script.index("control_plane_env_pairs() {")
+    end = script.index("\n}\n\n# Upsert the shared M2M token", start) + len("\n}")
+    function = script[start:end]
+    command = (
+        f"CONTROL_PLANE_ENV_FILE='{_JSON_PATH}'; "
+        "ACR_NAME=acrelbdashboardtest; "
+        f"{function}; control_plane_env_pairs api"
+    )
+    env = os.environ.copy()
+    env.pop("STORAGE_ACCOUNT_NAME", None)
+    result = subprocess.run(  # noqa: S603 -- repository-controlled function.
+        ["/bin/bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert not any(
+        line.startswith("STORAGE_ACCOUNT_NAME=") for line in result.stdout.splitlines()
+    )
 
 
 def test_quick_deploy_backfills_prepare_db_image_on_api_only() -> None:

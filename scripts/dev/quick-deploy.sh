@@ -113,11 +113,16 @@ for k, v in section.items():
     value = os.environ[k] if k in os.environ else v
     print(f"{k}={value}")
 PY
-  # Core platform coordinate declared on the same four sidecars in Bicep.
-  # Backfill it on every fast patch so an older live template converges instead
-  # of leaving self-upgrade/revision-GC unable to resolve the platform ACR.
-  if [[ "$sidecar" =~ ^(api|worker|beat|terminal)$ && -n "${ACR_NAME:-}" ]]; then
-    printf 'PLATFORM_ACR_NAME=%s\n' "$ACR_NAME"
+  # Core platform coordinates declared on the same four sidecars in Bicep.
+  # Backfill them on every fast patch so an older live template converges
+  # instead of leaving runtime maintenance without its ACR or Storage target.
+  if [[ "$sidecar" =~ ^(api|worker|beat|terminal)$ ]]; then
+    if [[ -n "${ACR_NAME:-}" ]]; then
+      printf 'PLATFORM_ACR_NAME=%s\n' "$ACR_NAME"
+    fi
+    if [[ -n "${STORAGE_ACCOUNT_NAME:-}" ]]; then
+      printf 'STORAGE_ACCOUNT_NAME=%s\n' "$STORAGE_ACCOUNT_NAME"
+    fi
   fi
   # The Direct/AKS prepare task is emitted by the api but runs in AKS from a
   # dedicated Azure CLI + pinned-azcopy image. Full postprovision wires this

@@ -175,8 +175,11 @@ def acquire_drain_lock(
         return (True, token) if acquired else (False, None)
     except SoftTimeLimitExceeded:
         raise
-    except Exception:
-        logger.warning("drain lock acquire failed; deferring queue receive", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "drain lock acquire failed; deferring queue receive reason=%s",
+            type(exc).__name__,
+        )
         return (False, None)
 
 
@@ -201,8 +204,11 @@ def release_drain_lock(
         )
     except SoftTimeLimitExceeded:
         raise
-    except Exception:
-        logger.warning("drain lock release failed (will expire via TTL)", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "drain lock release failed (will expire via TTL) reason=%s",
+            type(exc).__name__,
+        )
 
 
 def acquire_drain_stop_intent(

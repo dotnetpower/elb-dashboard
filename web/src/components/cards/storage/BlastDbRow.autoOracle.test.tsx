@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import { BlastDbDirectUpdateConfirm } from "@/components/cards/storage/BlastDbDirectUpdateConfirm";
 import { BlastDbRow } from "@/components/cards/storage/BlastDbRow";
 import type { BlastDbCatalogItem } from "@/components/cards/storageDbCatalog";
 
@@ -143,6 +144,19 @@ describe("BlastDbRow NCBI Direct update", () => {
     expect(html).toContain("disabled");
   });
 
+  it("explains the taxonomy archive added to the database volume count", () => {
+    const html = renderToStaticMarkup(
+      <BlastDbDirectUpdateConfirm
+        dbValue="core_nt"
+        pending={pending}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain("84 database archives plus a pinned taxonomy bundle");
+  });
+
   it("enables the explicit NCBI Direct action when the gate is on", () => {
     const html = renderRow({
       updatePending: pending,
@@ -168,5 +182,56 @@ describe("BlastDbRow NCBI Direct update", () => {
     )?.[0];
     expect(button).toContain('disabled=""');
     expect(html).toContain("Start the AKS cluster first");
+  });
+
+  it("shows pending archive progress instead of stale completed copy status", () => {
+    const html = renderRow({
+      meta: {
+        source_version: "2026-07-21-01-05-02",
+        update_in_progress: true,
+        update_started_at: "2026-08-29T15:41:46Z",
+        copy_status: {
+          phase: "completed",
+          success: 731,
+          total_files: 731,
+        },
+        pending_generation: {
+          id: "ncbi-direct-20260819-cab30d18c360",
+          phase: "downloading",
+          source_provider: "ncbi-direct",
+          archive_count: 85,
+          succeeded_archives: 0,
+          active_pods: 4,
+          failed_pods: 0,
+        },
+      },
+    });
+
+    expect(html).toContain("Downloading 0 / 85 archives");
+    expect(html).not.toContain("Copying 731 / 731 files");
+  });
+
+  it("uses the Direct response count before pending generation metadata arrives", () => {
+    const html = renderRow({
+      meta: {
+        source_version: "2026-07-21-01-05-02",
+        update_in_progress: true,
+        updating_to_source_version: "ncbi-direct-20260819-cab30d18c360",
+        update_started_at: "2026-08-29T15:41:46Z",
+        copy_status: {
+          phase: "completed",
+          success: 731,
+          total_files: 731,
+        },
+      },
+      isCopying: true,
+      inProgressInfo: {
+        startTime: Date.parse("2026-08-29T15:41:38Z"),
+        expectedFiles: 85,
+      },
+    });
+
+    expect(html).toContain("Downloading 0 / 85 archives");
+    expect(html).not.toContain("Copying 731 / 731 files");
   });
 });

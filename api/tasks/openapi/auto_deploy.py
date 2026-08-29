@@ -15,7 +15,7 @@ Risky contracts: Must remain non-fatal — a failed enqueue logs a warning and
     Task name `api.tasks.openapi.deploy_openapi_service` must not change without
     updating `start_aks` / `provision_aks` as well.
 Validation: `uv run pytest -q api/tests/test_azure_tasks.py
-    api/tests/test_warmup_route.py api/tests/test_openapi_auto_deploy.py`.
+    api/tests/test_warmup_route.py`.
 """
 
 from __future__ import annotations
@@ -55,10 +55,9 @@ def build_auto_openapi_payload(
     """Build the `deploy_openapi_service` kwargs from env + AKS coordinates.
 
     Returns ``None`` when required platform values are missing — typically
-    when the api sidecar is running locally without `PLATFORM_ACR_NAME`
-    set, in which case we cannot construct an image reference and should
-    not enqueue. Caller-supplied ``overrides`` win over env (used when
-    the SPA's Start panel explicitly forwarded an `auto_openapi`
+    when the api sidecar is running locally without `PLATFORM_ACR_NAME` or
+    `STORAGE_ACCOUNT_NAME` set. Caller-supplied ``overrides`` win over env
+    (used when the SPA's Start panel explicitly forwarded an `auto_openapi`
     payload).
     """
     overrides = overrides or {}
@@ -77,6 +76,12 @@ def build_auto_openapi_payload(
         or os.environ.get("AZURE_STORAGE_ACCOUNT", "").strip()
         or os.environ.get("STORAGE_ACCOUNT_NAME", "").strip()
     )
+    if not storage_account:
+        LOGGER.warning(
+            "auto OpenAPI deploy skipped: AZURE_STORAGE_ACCOUNT and "
+            "STORAGE_ACCOUNT_NAME are unset and no storage_account override was supplied"
+        )
+        return None
     storage_rg = (
         overrides.get("storage_resource_group")
         or os.environ.get("AZURE_RESOURCE_GROUP", "").strip()

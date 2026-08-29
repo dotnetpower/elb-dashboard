@@ -9,7 +9,8 @@ Edit boundaries: Pure manifest construction — no Azure or Kubernetes I/O. If y
 Key entry points: `build_manifests`.
 Risky contracts: The blast-pool toleration and `nodeSelector workload=blast` are load-
     bearing — without them the deployment lands on tainted system nodes and serves no
-    traffic. `AZURE_CLIENT_ID` is deliberately NOT set in the pod env (workload-identity
+    traffic. Storage account and API token values must be non-empty or manifest construction
+    fails before apply. `AZURE_CLIENT_ID` is deliberately NOT set in the pod env (workload-identity
     webhook injects it from the annotated ServiceAccount). The Deployment runs
     `replicas: 1` ON PURPOSE: the sibling OpenAPI service holds its job queue in a
     process-local in-memory dict and enforces `ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS`
@@ -91,6 +92,11 @@ def build_manifests(
             "emit a manifest without it. Resolve / mint a token in the "
             "calling task (api.tasks.openapi.deploy.deploy_openapi_service) "
             "before invoking build_manifests."
+        )
+    if not storage_account or not storage_account.strip():
+        raise ValueError(
+            "build_manifests: storage_account must be a non-empty string. "
+            "An empty value produces invalid https://.blob.core.windows.net URLs."
         )
 
     sa_manifest = {

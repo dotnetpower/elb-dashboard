@@ -77,6 +77,8 @@ def _patch_common(
         "failures": [],
         "promotions": [],
         "cleanup": [],
+        "job_logs": [],
+        "order": [],
         "state": [],
     }
     monkeypatch.setattr("api.services.get_credential", lambda: object())
@@ -146,9 +148,18 @@ def _patch_common(
     monkeypatch.setattr(
         "api.services.db.oracle_runtime.cleanup_oracle_jobs",
         lambda *_args, **kwargs: (
-            observations["cleanup"].append(kwargs) or {"deleted": [], "errors": []}
+            observations["cleanup"].append(kwargs)
+            or observations["order"].append("cleanup")
+            or {"deleted": [], "errors": []}
         ),
     )
+
+    def job_logs(*_args: Any, **kwargs: Any) -> str:
+        observations["job_logs"].append(kwargs.get("job_name") or _args[5])
+        observations["order"].append("logs")
+        return "Error: [blastdbcmd] byte 178: Frame type=eFrameClassMember"
+
+    monkeypatch.setattr("api.services.k8s.workload_ops.k8s_job_logs", job_logs)
     monkeypatch.setattr(
         "api.tasks.storage._update_state",
         lambda job_id, phase, **kwargs: observations["state"].append(
@@ -210,7 +221,31 @@ def test_oracle_task_raises_after_job_failure(
     assert observations["failures"][0]["error_code"] == "oracle_job_failed"
     assert observations["state"][-1]["status"] == "failed"
     assert len(observations["cleanup"]) == 1
+    assert observations["job_logs"] == ["oracle-core-nt-01-run-1"]
+    assert observations["order"] == ["logs", "cleanup"]
+    assert "Frame type=eFrameClassMember" in observations["failures"][0]["error"]
     assert observations["promotions"] == []
+
+
+def test_oracle_job_log_failure_does_not_block_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations = _patch_common(
+        monkeypatch,
+        jobs=[[{"name": "oracle-core-nt-01-run-1", "status": "Failed"}]],
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.workload_ops.k8s_job_logs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("logs unavailable")),
+    )
+
+    with pytest.raises(oracle_task.OracleTaskFailed, match="oracle_job_failed"):
+        oracle_task.build_db_order_oracle.run(**_kwargs())
+
+    assert len(observations["cleanup"]) == 1
+    assert observations["failures"][0]["error"] == (
+        "failed Jobs: oracle-core-nt-01-run-1"
+    )
 
 
 def test_oracle_task_times_out_and_cleans_jobs(
