@@ -1201,7 +1201,23 @@ def prepare_db_delete(
     from api.services.storage.dfs_client_pool import dfs_enabled
 
     dfs_done = False
-    if dfs_enabled() and names:
+    use_dfs = dfs_enabled()
+    if not use_dfs and names:
+        try:
+            from api.services.storage.account_properties import storage_hns_enabled
+
+            use_dfs = storage_hns_enabled(cred, sub, storage_rg, account_name)
+        except Exception as exc:
+            # ARM capability discovery is best-effort. The existing Blob batch
+            # path remains the fallback for non-HNS accounts and transient ARM
+            # failures; metadata retention keeps any surviving HNS directory
+            # markers visible and safely re-deletable.
+            LOGGER.warning(
+                "prepare_db_delete HNS probe failed db=%s: %s; falling back to batch",
+                db_name,
+                type(exc).__name__,
+            )
+    if use_dfs and names:
         try:
             from api.services.storage.dfs_io import delete_directory_dfs
 

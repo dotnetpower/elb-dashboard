@@ -86,9 +86,7 @@ class _FakeContainer:
         prefix = name_starts_with or ""
         # Snapshot the names so deletes during iteration don't skip entries
         # (the real Azure paged iterator is server-snapshotted too).
-        return iter(
-            [SimpleNamespace(name=n) for n in self._blobs if n.startswith(prefix)]
-        )
+        return iter([SimpleNamespace(name=n) for n in self._blobs if n.startswith(prefix)])
 
     def delete_blob(self, name: str, **_kw: Any) -> None:
         if name.endswith("-metadata.json"):
@@ -123,7 +121,6 @@ class _FakeContainer:
         return responses
 
 
-
 class _FakeBlobSvc:
     def __init__(self, container: _FakeContainer) -> None:
         self._container = container
@@ -146,6 +143,11 @@ def _patch_common(
     monkeypatch.setattr(
         "api.services.storage.public_access.ensure_local_storage_access",
         lambda *_a, **_kw: {"action": "noop"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.account_properties.storage_hns_enabled",
+        lambda *_a, **_kw: False,
         raising=True,
     )
     monkeypatch.setattr(
@@ -231,18 +233,21 @@ def test_delete_partial_failure_keeps_metadata(
     assert container._blobs == ["core_nt/core_nt.001.nhr"]
 
 
-def test_delete_dfs_recursive_path(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # With STORAGE_DFS_ENABLED on, the shard delete collapses to a single
-    # recursive delete_directory; the route reports deleted=len(names) and
-    # then removes the metadata blob.
-    monkeypatch.setenv("STORAGE_DFS_ENABLED", "true")
+def test_delete_dfs_recursive_path(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An HNS account uses one recursive delete_directory even when the general
+    # STORAGE_DFS_ENABLED feature gate is off. Direct generations create real
+    # directory markers that the Blob batch API cannot delete reliably.
+    monkeypatch.delenv("STORAGE_DFS_ENABLED", raising=False)
     container = _FakeContainer(
         meta={"db_name": "core_nt", "copy_status": {"phase": "completed"}},
         blobs=["core_nt/core_nt.000.nhr", "core_nt/core_nt.000.nin"],
     )
     _patch_common(monkeypatch, container)
+    monkeypatch.setattr(
+        "api.services.storage.account_properties.storage_hns_enabled",
+        lambda *_a, **_kw: True,
+        raising=True,
+    )
 
     captured: dict[str, Any] = {}
 
@@ -276,12 +281,17 @@ def test_delete_dfs_failure_falls_back_to_batch(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A dfs error must fall back to the proven per-batch delete loop.
-    monkeypatch.setenv("STORAGE_DFS_ENABLED", "true")
+    monkeypatch.delenv("STORAGE_DFS_ENABLED", raising=False)
     container = _FakeContainer(
         meta={"db_name": "core_nt", "copy_status": {"phase": "completed"}},
         blobs=["core_nt/core_nt.000.nhr", "core_nt/core_nt.000.nin"],
     )
     _patch_common(monkeypatch, container)
+    monkeypatch.setattr(
+        "api.services.storage.account_properties.storage_hns_enabled",
+        lambda *_a, **_kw: True,
+        raising=True,
+    )
 
     def _boom_delete_dir(*_a, **_kw):
         raise RuntimeError("dfs unreachable")
@@ -409,9 +419,7 @@ def test_delete_partial_db_with_aks_ref_deletes_job(
     assert calls[0]["cluster"] == "aks-elb"
 
 
-def test_delete_idempotent_when_absent(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_delete_idempotent_when_absent(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     # No metadata blob, no staged blobs → a no-op success.
     container = _FakeContainer(meta=None, blobs=[])
     _patch_common(monkeypatch, container)
