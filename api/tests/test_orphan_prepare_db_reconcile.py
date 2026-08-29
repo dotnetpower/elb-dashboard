@@ -388,7 +388,9 @@ def test_reconcile_missing_direct_job_preserves_active_generation() -> None:
     assert meta["shard_source_version"] == "2026-07-21-01-05-02"
 
 
-def test_reconcile_completed_direct_job_invokes_durable_recovery() -> None:
+def test_reconcile_completed_direct_job_invokes_durable_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     container = _FakeContainer()
     container.set_metadata("nt", _direct_candidate_meta())
     calls: list[dict[str, Any]] = []
@@ -401,6 +403,17 @@ def test_reconcile_completed_direct_job_invokes_durable_recovery() -> None:
             "files_total": 20,
             "bytes_total": 200,
         }
+
+    cleanup_calls: list[dict[str, Any]] = []
+
+    def cleanup(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        cleanup_calls.append(kwargs)
+        return {"status": "deleted"}
+
+    monkeypatch.setattr(
+        "api.services.k8s.prepare_db_jobs.delete_prepare_db_job",
+        cleanup,
+    )
 
     out = reconcile_orphaned_prepare_db(
         credential="credential",
@@ -421,6 +434,13 @@ def test_reconcile_completed_direct_job_invokes_durable_recovery() -> None:
 
     assert calls[0]["credential"] == "credential"
     assert calls[0]["db_name"] == "nt"
+    assert cleanup_calls == [
+        {
+            "namespace": "default",
+            "job_name": "prepare-db-nt-260602010502",
+            "configmap_name": "prepare-db-nt-260602010502",
+        }
+    ]
     assert out["recovered_direct"] == [
         {
             "db_name": "nt",
@@ -429,6 +449,7 @@ def test_reconcile_completed_direct_job_invokes_durable_recovery() -> None:
             "generation_id": "ncbi-direct-20260819-aaaaaaaaaaaa",
             "files_total": 20,
             "bytes_total": 200,
+            "aks_cleanup": {"status": "deleted"},
         }
     ]
 

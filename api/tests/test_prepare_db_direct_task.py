@@ -1,9 +1,9 @@
 """Tests for NCBI Direct task generation verification.
 
-Responsibility: Lock the marker hash, archive completeness, unique extracted
-    file identity, and exact staged-blob size gates that precede promotion.
-Edit boundaries: Pure fake-Storage tests for `_verify_generation`; Kubernetes
-    orchestration is covered by manifest and dispatch tests.
+Responsibility: Lock Direct marker/promotion validation and worker-interruption
+    cleanup behavior with fake Storage, Kubernetes, and Redis boundaries.
+Edit boundaries: Network-free Direct task tests; manifest construction and HTTP
+    dispatch remain in their focused test modules.
 Key entry points: Tests for `api.tasks.storage.prepare_db_direct`.
 Risky contracts: A partial or mixed manifest must never reach active promotion.
 Validation: `uv run pytest -q api/tests/test_prepare_db_direct_task.py`.
@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from api.services.storage import direct_promotion
 from api.services.storage.direct_promotion import verify_direct_generation
+from api.tasks.storage import prepare_db_direct as direct_task
 from api.tasks.storage.prepare_db_direct import _ownership_loss_outcome
 
 
@@ -302,3 +303,100 @@ def test_recovery_success_survives_lock_release_failure(
     )
 
     assert result["outcome"] == "promoted"
+
+
+def test_worker_shutdown_preserves_aks_job_for_durable_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WorkerShutdown(BaseException):
+        pass
+
+    metadata: dict[str, object] = {
+        "update_in_progress": True,
+        "prepare_operation_id": "owner",
+        "pending_generation": {
+            "id": "ncbi-direct-20260819-aaaaaaaaaaaa",
+            "data_prefix": "core_nt/generations/ncbi-direct-20260819-aaaaaaaaaaaa",
+            "source_provider": "ncbi-direct",
+            "transfer_manifest_sha256": "a" * 64,
+            "archive_count": 1,
+            "phase": "queued",
+        },
+    }
+    container = _Container({})
+    container.metadata = metadata
+    service = SimpleNamespace(get_container_client=lambda _name: container)
+    monkeypatch.setattr(direct_task._facade, "get_credential", lambda: object())
+    monkeypatch.setattr(direct_task._facade, "_update_state", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _credential, _account: service,
+    )
+
+    def update(_container: object, _db: str, _account: str, mutator: object) -> dict:
+        container.metadata = mutator(dict(container.metadata))  # type: ignore[operator]
+        return dict(container.metadata)
+
+    monkeypatch.setattr(
+        "api.services.storage.prepare_db_metadata.update_metadata",
+        update,
+    )
+    monkeypatch.setattr(
+        "api.services.ncbi_direct_lock.claim_or_refresh_direct_lock",
+        lambda _owner: True,
+    )
+    released: list[str] = []
+    monkeypatch.setattr(
+        "api.services.ncbi_direct_lock.release_direct_lock",
+        lambda owner: released.append(owner) or True,
+    )
+    monkeypatch.setattr(
+        direct_task,
+        "submit_prepare_db_job",
+        lambda *_args, **_kwargs: {"status": "created"},
+    )
+    monkeypatch.setattr(
+        direct_task,
+        "_poll_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(WorkerShutdown()),
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        direct_task,
+        "delete_prepare_db_job",
+        lambda *_args, **kwargs: deleted.append(kwargs["job_name"]),
+    )
+
+    with pytest.raises(WorkerShutdown):
+        direct_task.prepare_db_via_ncbi_direct.run(
+            job_id="prepare-db-direct-core_nt-1",
+            prepare_operation_id="owner",
+            subscription_id="sub",
+            storage_account="stelb",
+            db_name="core_nt",
+            generation_id="ncbi-direct-20260819-aaaaaaaaaaaa",
+            data_prefix="core_nt/generations/ncbi-direct-20260819-aaaaaaaaaaaa",
+            release={
+                "released_at": "2026-08-19T00:00:00",
+                "release_fingerprint": "b" * 64,
+                "number_of_letters": 100,
+                "number_of_sequences": 10,
+            },
+            archives=[
+                {
+                    "url": "https://ftp.ncbi.nlm.nih.gov/blast/db/core_nt.00.tar.gz",
+                    "md5_url": ("https://ftp.ncbi.nlm.nih.gov/blast/db/core_nt.00.tar.gz.md5"),
+                    "md5": "c" * 32,
+                    "size": 100,
+                    "member_prefix": "core_nt",
+                }
+            ],
+            transfer_manifest_sha256="a" * 64,
+            aks_resource_group="rg-aks",
+            cluster_name="aks",
+            image="acr/prepare:tag",
+        )
+
+    assert deleted == []
+    assert released == ["owner"]
+    assert container.metadata["update_in_progress"] is True

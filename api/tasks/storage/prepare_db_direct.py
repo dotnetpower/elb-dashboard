@@ -293,6 +293,7 @@ def prepare_db_via_ncbi_direct(
 
         update_metadata(container, db_name, storage_account, _mut)
 
+    cleanup_job = False
     try:
         job_status = _poll_job(
             credential,
@@ -319,6 +320,7 @@ def prepare_db_via_ncbi_direct(
             container=container,
         )
         _update_state(job_id, "completed", status="completed", outcome="promoted")
+        cleanup_job = True
         return {
             "ok": True,
             "mode": "ncbi-direct",
@@ -343,6 +345,7 @@ def prepare_db_via_ncbi_direct(
                 type(read_exc).__name__,
             )
             current = {}
+        cleanup_job = True
         return _finish_owner_loss(current)
     except Exception as exc:
         # Redis lock loss and other failures can race a cancellation after the
@@ -356,6 +359,7 @@ def prepare_db_via_ncbi_direct(
             current = {}
             owner_outcome = None
         if owner_outcome is not None:
+            cleanup_job = True
             return _finish_owner_loss(current)
         reason = f"NCBI Direct prepare failed: {type(exc).__name__}: {exc}"
 
@@ -373,6 +377,7 @@ def prepare_db_via_ncbi_direct(
             return meta
 
         update_metadata(container, db_name, storage_account, _fail)
+        cleanup_job = True
         _update_state(
             job_id,
             "failed",
@@ -382,20 +387,31 @@ def prepare_db_via_ncbi_direct(
         )
         return {"ok": False, "mode": "ncbi-direct", "error": reason}
     finally:
-        try:
-            delete_prepare_db_job(
-                credential,
-                subscription_id,
-                aks_resource_group,
-                cluster_name,
-                namespace=namespace,
-                job_name=job_name,
-                configmap_name=configmap_name,
-            )
-        except Exception as cleanup_exc:
-            LOGGER.warning(
-                "NCBI Direct Job cleanup failed job=%s: %s",
+        if cleanup_job:
+            try:
+                delete_prepare_db_job(
+                    credential,
+                    subscription_id,
+                    aks_resource_group,
+                    cluster_name,
+                    namespace=namespace,
+                    job_name=job_name,
+                    configmap_name=configmap_name,
+                )
+            except Exception as cleanup_exc:
+                LOGGER.warning(
+                    "NCBI Direct Job cleanup failed job=%s: %s",
+                    job_name,
+                    type(cleanup_exc).__name__,
+                )
+        else:
+            # Celery worker/revision shutdown raises outside the normal
+            # Exception terminalization paths. Keep the independently running
+            # AKS Job and its ConfigMap so the new revision's durable orphan
+            # reconciler can verify and promote it instead of destroying live
+            # work during infrastructure replacement.
+            LOGGER.info(
+                "NCBI Direct task interrupted; preserving AKS Job for recovery job=%s",
                 job_name,
-                type(cleanup_exc).__name__,
             )
         _release_lock_quietly()

@@ -415,8 +415,37 @@ def reconcile_orphaned_prepare_db(
             else:
                 pending = metadata.get("pending_generation")
                 job_id = str(pending.get("job_id") or "") if isinstance(pending, dict) else ""
+                cleanup: dict[str, Any] | None = None
+                if isinstance(ref, dict):
+                    try:
+                        from api.services.k8s.prepare_db_jobs import delete_prepare_db_job
+
+                        cleanup = delete_prepare_db_job(
+                            credential,
+                            str(ref.get("subscription_id") or ""),
+                            str(ref.get("resource_group") or ""),
+                            str(ref.get("cluster_name") or ""),
+                            namespace=str(ref.get("namespace") or "default"),
+                            job_name=str(ref.get("job_name") or ""),
+                            configmap_name=str(
+                                ref.get("configmap_name") or ref.get("job_name") or ""
+                            )
+                            or None,
+                        )
+                    except Exception as cleanup_exc:
+                        LOGGER.warning(
+                            "orphan reconcile recovered Direct cleanup failed db=%s job=%s: %s",
+                            db_name,
+                            ref.get("job_name"),
+                            type(cleanup_exc).__name__,
+                        )
                 result["recovered_direct"].append(
-                    {"db_name": db_name, "job_id": job_id, **recovered}
+                    {
+                        "db_name": db_name,
+                        "job_id": job_id,
+                        **recovered,
+                        "aks_cleanup": cleanup,
+                    }
                 )
                 LOGGER.info(
                     "orphan reconcile promoted Direct generation db=%s generation=%s",
