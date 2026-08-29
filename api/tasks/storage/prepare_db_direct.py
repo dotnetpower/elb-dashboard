@@ -66,8 +66,10 @@ def _update_state(job_id: str, phase: str, status: str = "running", **extra: Any
         )
 
 
-def _ownership_loss_outcome(metadata: dict[str, Any]) -> str:
-    """Classify an owner-fenced task as cancelled or superseded."""
+def _ownership_loss_outcome(metadata: dict[str, Any], expected_owner: str) -> str | None:
+    """Classify a replaced owner as cancelled/superseded, or return None."""
+    if str(metadata.get("prepare_operation_id") or "") == expected_owner:
+        return None
     pending = metadata.get("pending_generation")
     phase = str(pending.get("phase") or "") if isinstance(pending, dict) else ""
     if not metadata.get("update_in_progress") and phase == "cancelled":
@@ -161,27 +163,52 @@ def prepare_db_via_ncbi_direct(
     started = time.monotonic()
     credential = _facade.get_credential()
     container = _blob_service(credential, storage_account).get_container_client("blast-db")
-    from api.services.ncbi_direct_lock import refresh_direct_lock
-
-    try:
-        if not refresh_direct_lock(prepare_operation_id):
-            raise RuntimeError("NCBI Direct transfer lock ownership was lost")
-    except Exception as exc:
-        _update_state(
-            job_id,
-            "failed",
-            status="failed",
-            outcome="failed",
-            error_code="prepare_db_direct_lock_unavailable",
-        )
-        return {"ok": False, "mode": "ncbi-direct", "error": str(exc)}
+    from api.services.ncbi_direct_lock import (
+        claim_or_refresh_direct_lock,
+        release_direct_lock,
+    )
+    from api.services.storage.prepare_db_metadata import download_blob_with_etag
 
     def _verify_owner(meta: dict[str, Any]) -> dict[str, Any]:
         require_prepare_operation_owner(meta, prepare_operation_id)
         return meta
 
+    def _finish_owner_loss(current: dict[str, Any]) -> dict[str, Any]:
+        outcome = _ownership_loss_outcome(current, prepare_operation_id) or "superseded"
+        _update_state(job_id, outcome, status="cancelled", outcome=outcome)
+        return {
+            "ok": False,
+            "mode": "ncbi-direct",
+            "db_name": db_name,
+            "generation_id": generation_id,
+            "cancelled": True,
+            "outcome": outcome,
+        }
+
+    def _release_lock_quietly() -> None:
+        try:
+            release_direct_lock(prepare_operation_id)
+        except Exception as exc:
+            LOGGER.warning(
+                "NCBI Direct lock release failed owner=%s: %s",
+                prepare_operation_id,
+                type(exc).__name__,
+            )
+
     try:
         update_metadata(container, db_name, storage_account, _verify_owner)
+        if not claim_or_refresh_direct_lock(prepare_operation_id):
+            raise RuntimeError("NCBI Direct transfer lock ownership was lost")
+        # Close the cross-store race: cancellation may commit to Blob between
+        # the first owner check and reclaiming an absent Redis lock.
+        update_metadata(container, db_name, storage_account, _verify_owner)
+    except DatabaseOperationOwnershipError:
+        try:
+            current, _etag = download_blob_with_etag(container, db_name)
+        except Exception:
+            current = {}
+        _release_lock_quietly()
+        return _finish_owner_loss(current)
     except Exception as exc:
         _update_state(
             job_id,
@@ -190,6 +217,7 @@ def prepare_db_via_ncbi_direct(
             outcome="failed",
             error_code="prepare_db_direct_owner_lost",
         )
+        _release_lock_quietly()
         return {"ok": False, "mode": "ncbi-direct", "error": str(exc)}
     pinned = tuple(NcbiDirectArchive(**entry) for entry in archives)
     job_name = direct_prepare_job_name(db_name, generation_id)
@@ -239,7 +267,12 @@ def prepare_db_via_ncbi_direct(
     _update_state(job_id, "downloading", mode="ncbi-direct", archive_count=len(pinned))
 
     def _progress(status: dict[str, Any]) -> None:
-        if not refresh_direct_lock(prepare_operation_id):
+        # Durable metadata is the authority; Redis can disappear on a revision
+        # replacement. Verify the owner before and after reclaiming/refreshing
+        # the ephemeral lock so a concurrent cancel cannot be mistaken for an
+        # infrastructure failure or have its terminal metadata overwritten.
+        update_metadata(container, db_name, storage_account, _verify_owner)
+        if not claim_or_refresh_direct_lock(prepare_operation_id):
             raise RuntimeError("NCBI Direct transfer lock ownership was lost")
         update_metadata(container, db_name, storage_account, _verify_owner)
 
@@ -302,27 +335,28 @@ def prepare_db_via_ncbi_direct(
         # cancel/resubmit may already show a fresh owner; classify that as
         # superseded for the old JobState while preserving the new operation.
         try:
-            from api.services.storage.prepare_db_metadata import download_blob_with_etag
-
             current, _etag = download_blob_with_etag(container, db_name)
-            outcome = _ownership_loss_outcome(current)
         except Exception as read_exc:
             LOGGER.warning(
                 "NCBI Direct ownership-loss state read failed db=%s: %s",
                 db_name,
                 type(read_exc).__name__,
             )
-            outcome = "superseded"
-        _update_state(job_id, outcome, status="cancelled", outcome=outcome)
-        return {
-            "ok": False,
-            "mode": "ncbi-direct",
-            "db_name": db_name,
-            "generation_id": generation_id,
-            "cancelled": True,
-            "outcome": outcome,
-        }
+            current = {}
+        return _finish_owner_loss(current)
     except Exception as exc:
+        # Redis lock loss and other failures can race a cancellation after the
+        # last metadata checkpoint. Re-read before writing failure state: when
+        # the durable owner changed, the new owner has already committed the
+        # authoritative terminal/new-operation decision.
+        try:
+            current, _etag = download_blob_with_etag(container, db_name)
+            owner_outcome = _ownership_loss_outcome(current, prepare_operation_id)
+        except Exception:
+            current = {}
+            owner_outcome = None
+        if owner_outcome is not None:
+            return _finish_owner_loss(current)
         reason = f"NCBI Direct prepare failed: {type(exc).__name__}: {exc}"
 
         def _fail(meta: dict[str, Any]) -> dict[str, Any]:
@@ -348,8 +382,6 @@ def prepare_db_via_ncbi_direct(
         )
         return {"ok": False, "mode": "ncbi-direct", "error": reason}
     finally:
-        from api.services.ncbi_direct_lock import release_direct_lock
-
         try:
             delete_prepare_db_job(
                 credential,
@@ -366,11 +398,4 @@ def prepare_db_via_ncbi_direct(
                 job_name,
                 type(cleanup_exc).__name__,
             )
-        try:
-            release_direct_lock(prepare_operation_id)
-        except Exception as lock_exc:
-            LOGGER.warning(
-                "NCBI Direct lock release failed owner=%s: %s",
-                prepare_operation_id,
-                type(lock_exc).__name__,
-            )
+        _release_lock_quietly()
