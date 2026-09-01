@@ -7,6 +7,7 @@ import { ResultFilterBar } from "./ResultFilterBar";
 import { ResultsPendingPanel } from "./ResultsPendingPanel";
 import { TaxonRollupPanel } from "./TaxonRollupPanel";
 import { isPartialResult, isResultFilesUnavailable, ncbiNuccoreUrl } from "./helpers";
+import { tieCutoffNotice } from "./tieCutoffNotice";
 import type { BlastAnalyticsState } from "./useBlastAnalyticsState";
 import type { BlastHit } from "@/api/endpoints";
 import type { BlastTieCutoff } from "@/api/blast";
@@ -144,13 +145,13 @@ export function DescriptionsTabBody({ analytics, resultsPending = false }: Descr
  * in one tied score class and more hits share that exact score, some are not
  * shown. This badge surfaces that sampling so a researcher does not mistake
  * the displayed set for the complete top score class — and points at the
- * remedy (raise max_target_seqs / re-run). When the opt-in diversity-aware
- * cutoff reserved slots for lower-scoring near-miss hits, it explains that
- * the displayed set is intentionally not the strict top-N by score.
+ * remedy (raise max_target_seqs / re-run). When the diversity-aware cutoff
+ * reserves slots for lower-scoring near-miss hits, that preservation notice
+ * takes precedence over the generic truncation notice.
  */
 function TieCutoffBadge({ tieCutoff }: { tieCutoff: BlastTieCutoff }) {
-  const { overflow_count, diversity_reserved_count, max_target_seqs } = tieCutoff;
-  const limitText = max_target_seqs ? ` (max_target_seqs=${max_target_seqs})` : "";
+  const notice = tieCutoffNotice(tieCutoff);
+  const diversityApplied = notice.kind === "diversity";
   return (
     <div
       className="glass-card"
@@ -164,32 +165,25 @@ function TieCutoffBadge({ tieCutoff }: { tieCutoff: BlastTieCutoff }) {
         fontSize: 13,
       }}
     >
-      <span style={{ color: "var(--text-primary)" }}>
-        {overflow_count > 0
-          ? `Displayed hits are a sample of a larger tied score class — ${overflow_count} hit${
-              overflow_count === 1 ? "" : "s"
-            } with the same top score were not shown${limitText}.`
-          : `Diversity-aware cutoff reserved ${diversity_reserved_count} slot${
-              diversity_reserved_count === 1 ? "" : "s"
-            } for lower-scoring near-miss hits; the displayed set is not the strict top hits by score.`}
-      </span>
+      <span style={{ color: "var(--text-primary)" }}>{notice.message}</span>
       <Tooltip
         width={360}
         content={
-          overflow_count > 0 ? (
+          diversityApplied ? (
+            <span>
+              When the result limit is entirely filled by one tied top-score
+              class, the merge keeps the best lower-scoring near-miss hit in the
+              final slot. The result stays within <code>max_target_seqs</code>,
+              but is intentionally not the strict top-N-by-score set. Raise the
+              limit to inspect more tied and near-miss candidates.
+            </span>
+          ) : (
             <span>
               ElasticBLAST splits the database into shards and applies the
               <code> max_target_seqs</code> cap on each shard before merging. When
               many subjects tie on the exact same top score, the merged top-N is
               just one sample of that tied class. To see more of the tied hits,
               re-run with a higher <code>-max_target_seqs</code>.
-            </span>
-          ) : (
-            <span>
-              The opt-in diversity-aware cutoff intentionally swaps the lowest
-              displayed tied hits for the best lower-scoring near-miss hits so a
-              near-perfect match in a crowded score class is not dropped. Turn it
-              off to restore the strict top-N-by-score view.
             </span>
           )
         }

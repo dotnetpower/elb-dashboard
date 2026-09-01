@@ -117,9 +117,15 @@ This section controls **how** the search runs on the cluster.
 | --- | --- | --- | --- | --- |
 | Off | `off` | Single full-database BLAST. Results are bit-exact with NCBI Web BLAST given the same database snapshot and options. | Always. | — |
 | Approximate shard | `approximate` | Partitioned search; results are merged but **not** byte-equivalent to the full-DB run. Sets `allow_approximate_sharding: true`. | `outfmt` must be 5 or 6; database must be sharded; user must opt in. | [shardingAvailability.ts](../../web/src/pages/blastSubmit/shardingAvailability.ts) |
-| Precise shard (web-equivalent) | `precise` | Partitioned search gated by the precision report so the merged result matches the full-database run. Sets `use_db_order_oracle: true`. | `outfmt` must be 5 or 6; the database must carry a verified `web_blast_searchsp` value; the precision report must report `eligible=true`. | [api/services/sharding_precision.py](../../api/services/sharding_precision.py), [docs/research/blast-searchsp-discovery.md](../research/blast-searchsp-discovery.md) |
+| Precise shard (web-equivalent) | `precise` | Partitioned search gated by the precision report so statistics and tie ordering can match the full-database run. Sets `use_db_order_oracle: true`. | `outfmt` must be 5 or 6; the database must carry a verified `web_blast_searchsp` value; the precision report must report `eligible=true`. | [api/services/sharding_precision.py](../../api/services/sharding_precision.py), [docs/research/blast-searchsp-discovery.md](../research/blast-searchsp-discovery.md) |
 
 The `disable_sharding` boolean is a legacy opt-out kept for older callers. New code paths should set `sharding_mode: "off"` instead.
+
+!!! note "Tied top scores and near-miss variants"
+
+    A sharded merge normally returns at most `max_target_seqs` hits per query. If that entire window is filled by one `(evalue, bitscore)` tie while lower-scoring candidates exist, the merge uses the final slot for the best lower-scoring near-miss. This keeps a likely variant from being hidden behind a large class of perfect matches while preserving the requested result count. The results notice identifies jobs where this happened.
+
+    The merge can only select candidates emitted by the individual shards. Because BLAST+ also applies `max_target_seqs` inside each shard, a candidate already discarded there cannot be recovered; increase `max_target_seqs` when the notice reports a large tied class and broader tail coverage is required. Operators can set `ELB_DIVERSITY_AWARE_CUTOFF=0` in a custom finalizer environment to restore strict score-only top-N selection, or a positive integer to reserve that many final slots. A strict tie-order oracle always takes precedence and disables diversity reservation.
 
 !!! warning "outfmt and sharding"
 

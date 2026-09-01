@@ -8,6 +8,12 @@ tags:
 
 # BLAST score-class truncation badge, near-miss preservation, and bit-score explanation
 
+> **Current behavior:** Since 2026-09-01, one-slot near-miss preservation is the
+> default for both XML and tabular sharded merges. Set
+> `ELB_DIVERSITY_AWARE_CUTOFF=0` in a custom finalizer environment for the
+> strict score-only selection described here. See
+> [Preserve near-miss variants at sharded BLAST cutoffs](../2026-09/2026-09-01-sharded-near-miss-preservation.md).
+
 ## Motivation
 
 Comparing an elb-dashboard run against NCBI Web BLAST for a SARS-CoV-2 ORF1ab

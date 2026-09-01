@@ -872,15 +872,15 @@ export interface BlastSubjectAggregate {
  * Score-class truncation signal surfaced from the merge step's
  * merge-report.json. Present on the alignments payload only when the
  * max_target_seqs cutoff split a tied score class (`overflow_count > 0`) or
- * the opt-in diversity-aware cutoff reserved near-miss slots
+ * the diversity-aware cutoff reserved near-miss slots
  * (`diversity_reserved_count > 0`). Absent otherwise.
  */
 export interface BlastTieCutoff {
-  /** Number of hits in the top tied score class that were dropped because the
-   *  displayed set hit the max_target_seqs limit. */
+  /** Number of hits in the top tied score class outside the pristine
+   *  max_target_seqs window, before any diversity reservation. */
   overflow_count: number;
-  /** Slots reserved for lower-scoring near-miss hits by the opt-in
-   *  diversity-aware cutoff (0 when that mode is off). */
+  /** Slots reserved for lower-scoring near-miss hits by the diversity-aware
+   *  cutoff (0 when strict score-only selection is enabled). */
   diversity_reserved_count: number;
   /** The max_target_seqs value in effect for the job, when recorded. */
   max_target_seqs?: number;

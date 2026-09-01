@@ -1126,7 +1126,7 @@ def _aggregate_split_merge_reports(
     # child; the parent concatenates a bounded sample so the UI can render a
     # "displayed N are a sample of a larger tied class" badge for split jobs.
     tie_cutoff_queries: list[dict[str, Any]] = []
-    # Per-query diversity-aware cutoff samples (opt-in ELB_DIVERSITY_AWARE_CUTOFF):
+    # Per-query diversity-aware cutoff samples (default 1; 0 restores strict top-N):
     # which queries had lower-scoring near-miss hits reserved into the window.
     diversity_queries: list[dict[str, Any]] = []
     child_items: list[dict[str, Any]] = []

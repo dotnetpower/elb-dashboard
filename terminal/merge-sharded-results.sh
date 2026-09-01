@@ -124,21 +124,22 @@ def deterministic_tie_order_enabled():
 
 
 def diversity_aware_cutoff_limit():
-    # Opt-in (default OFF / 0). When set to a positive integer k, and the
+    # Default 1; set to 0 to restore strict top-N selection. When set to a
+    # positive integer k, and the
     # selected max_target_seqs window is entirely filled by a SINGLE tied
     # (evalue, bitscore) score class while lower-scoring hits exist below the
     # cutoff, the last min(k, available) slots are replaced by the best
     # lower-scoring (more informative, e.g. 1-mismatch) hits. This preserves
     # near-miss subjects that a strict max_target_seqs cutoff would otherwise
     # drop -- the case where 100 perfect matches push out a single SNP-bearing
-    # variant. Default 0 preserves standard BLAST max_target_seqs semantics.
+    # variant. The output still contains at most max_target_seqs hits.
     raw = os.environ.get("ELB_DIVERSITY_AWARE_CUTOFF", "").strip()
     if not raw:
-        return 0
+        return 1
     try:
         value = int(raw)
     except ValueError:
-        return 0
+        return 1
     return value if value > 0 else 0
 
 
@@ -162,21 +163,40 @@ def ranking_basis_label(tie_order):
     return "evalue_bitscore_ordinal"
 
 
-def apply_diversity_reservation(selected, sorted_hits, limit):
+def apply_diversity_reservation(selected, sorted_hits, limit, subject_key):
     # Replace the tail of a saturated selection window with the best
     # lower-scoring near-miss hits. Only acts when the ENTIRE selected window
     # is a single tied (evalue, bitscore) score class -- i.e. informative
     # lower-scoring subjects were pushed out purely by the max_target_seqs
-    # cutoff. Hit tuple layout: (evalue, -bitscore, ordinal, line).
+    # cutoff. Both tabular and XML hit tuples begin with
+    # (evalue, -bitscore).
     top_class = (selected[0][0], selected[0][1])
     if any((hit[0], hit[1]) != top_class for hit in selected):
         return selected, 0
-    near_misses = [
-        hit for hit in sorted_hits[len(selected):] if (hit[0], hit[1]) != top_class
-    ]
+    unselected = sorted_hits[len(selected):]
+    if not any((hit[0], hit[1]) == top_class for hit in unselected):
+        return selected, 0
+    # A lower-ranked HSP for an already selected subject does not preserve a
+    # new variant. Reserve at most one row per previously unseen subject.
+    selected_subjects = set()
+    for hit in selected:
+        subject = subject_key(hit)
+        if subject:
+            selected_subjects.add(subject)
+    reserved_subjects = set()
+    near_misses = []
+    for hit in unselected:
+        if (hit[0], hit[1]) == top_class:
+            continue
+        subject = subject_key(hit)
+        if subject and (subject in selected_subjects or subject in reserved_subjects):
+            continue
+        near_misses.append(hit)
+        if subject:
+            reserved_subjects.add(subject)
     if not near_misses:
         return selected, 0
-    reserve = min(limit, len(near_misses), len(selected))
+    reserve = min(limit, len(near_misses), max(0, len(selected) - 1))
     if reserve <= 0:
         return selected, 0
     kept = selected[: len(selected) - reserve]
@@ -446,7 +466,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     tie_cutoff_overflow_count = 0
     tie_cutoff_queries = []
     oracle_missing_queries = []
-    diversity_limit = diversity_aware_cutoff_limit()
+    diversity_limit = 0 if strict_oracle else diversity_aware_cutoff_limit()
     diversity_reserved_count = 0
     diversity_queries = []
     total_output_hits = 0
@@ -512,7 +532,14 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
             # the truncation report still reflects the real top-class overflow.
             if diversity_limit and selected and len(sorted_hits) > len(selected):
                 selected, reserved = apply_diversity_reservation(
-                    selected, sorted_hits, diversity_limit
+                    selected,
+                    sorted_hits,
+                    diversity_limit,
+                    lambda hit: (
+                        tabular_subject_accession(hit[3], subject_idx)
+                        if subject_idx is not None
+                        else ""
+                    ),
                 )
                 if reserved:
                     diversity_reserved_count += reserved
@@ -727,6 +754,9 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
     tie_cutoff_overflow_count = 0
     tie_cutoff_queries = []
     oracle_missing_queries = []
+    diversity_limit = 0 if strict_oracle else diversity_aware_cutoff_limit()
+    diversity_reserved_count = 0
+    diversity_queries = []
     total_output_hits = 0
     total_output_hsps = 0
     for query_id in query_order:
@@ -762,12 +792,12 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         )
         selected = sorted_hits[:max_hits]
         if selected and len(sorted_hits) > len(selected):
-            cutoff_signature = (selected[-1][0], selected[-1][1], selected[-1][2])
+            cutoff_signature = (selected[-1][0], selected[-1][1])
             cutoff_input_count = sum(
-                1 for hit in sorted_hits if (hit[0], hit[1], hit[2]) == cutoff_signature
+                1 for hit in sorted_hits if (hit[0], hit[1]) == cutoff_signature
             )
             cutoff_selected_count = sum(
-                1 for hit in selected if (hit[0], hit[1], hit[2]) == cutoff_signature
+                1 for hit in selected if (hit[0], hit[1]) == cutoff_signature
             )
             cutoff_overflow = max(0, cutoff_input_count - cutoff_selected_count)
             if cutoff_overflow:
@@ -778,11 +808,24 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
                             "query_id": query_id,
                             "evalue": cutoff_signature[0],
                             "bitscore": -cutoff_signature[1],
-                            "hsp_count": -cutoff_signature[2],
+                            "hsp_count": -selected[-1][2],
                             "tie_input_count": cutoff_input_count,
                             "tie_selected_count": cutoff_selected_count,
                             "tie_overflow_count": cutoff_overflow,
                         }
+                    )
+        if diversity_limit and selected and len(sorted_hits) > len(selected):
+            selected, reserved = apply_diversity_reservation(
+                selected,
+                sorted_hits,
+                diversity_limit,
+                lambda hit: xml_subject_accession(hit[4]),
+            )
+            if reserved:
+                diversity_reserved_count += reserved
+                if len(diversity_queries) < 10:
+                    diversity_queries.append(
+                        {"query_id": query_id, "reserved_count": reserved}
                     )
         template = item["template"]
         hits_node = template.find("Iteration_hits")
@@ -840,6 +883,11 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
             "The max_target_seqs cutoff splits a tied score class; strict Web BLAST "
             "ordering may require original BLAST DB subject order"
         )
+    if diversity_reserved_count:
+        warnings.append(
+            "Diversity-aware cutoff reserved slots for lower-scoring near-miss hits; "
+            "the displayed set is not the strict top max_target_seqs by score"
+        )
 
     with gzip.open(output_gz, "wb") as handle:
         ET.ElementTree(base_root).write(handle, encoding="utf-8", xml_declaration=True)
@@ -858,6 +906,8 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         "tie_break_count": tie_break_count,
         "tie_cutoff_overflow_count": tie_cutoff_overflow_count,
         "tie_cutoff_queries": tie_cutoff_queries,
+        "diversity_reserved_count": diversity_reserved_count,
+        "diversity_queries": diversity_queries,
         "num_shards": int(num_shards),
         "ranking_basis": (
             "best_hsp_evalue_bitscore_oracle_ordinal"

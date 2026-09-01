@@ -2727,6 +2727,10 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
             "total_output_hits": 1,
             "unsupported_rows": 0,
             "tie_break_count": 0,
+            "tie_cutoff_overflow_count": 2,
+            "tie_cutoff_queries": [{"query_id": "q1", "tie_overflow_count": 2}],
+            "diversity_reserved_count": 1,
+            "diversity_queries": [{"query_id": "q1", "reserved_count": 1}],
             "num_shards": 5,
             "warnings": [],
         },
@@ -2737,6 +2741,10 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
             "total_output_hits": 1,
             "unsupported_rows": 1,
             "tie_break_count": 2,
+            "tie_cutoff_overflow_count": 3,
+            "tie_cutoff_queries": [{"query_id": "q2", "tie_overflow_count": 3}],
+            "diversity_reserved_count": 1,
+            "diversity_queries": [{"query_id": "q2", "reserved_count": 1}],
             "num_shards": 5,
             "warnings": ["ties were resolved deterministically"],
         },
@@ -2809,6 +2817,16 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
     assert report["total_output_hits"] == 2
     assert report["unsupported_rows"] == 1
     assert report["tie_break_count"] == 2
+    assert report["tie_cutoff_overflow_count"] == 5
+    assert report["tie_cutoff_queries"] == [
+        {"query_id": "q1", "tie_overflow_count": 2},
+        {"query_id": "q2", "tie_overflow_count": 3},
+    ]
+    assert report["diversity_reserved_count"] == 2
+    assert report["diversity_queries"] == [
+        {"query_id": "q1", "reserved_count": 1},
+        {"query_id": "q2", "reserved_count": 1},
+    ]
     assert report["num_shards"] == 10
     assert result["paths"]["manifest_path"] == "job-123/split-results-manifest.json"
     assert b"q1\thit1" not in uploads["job-123/merge-report.json"]

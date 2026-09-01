@@ -9,7 +9,8 @@ Key entry points: `_blast_xml`, `test_merge_sharded_results_respects_top_n_and_r
 `test_merge_sharded_results_uses_tie_order_oracle`,
 `test_merge_sharded_results_strict_oracle_excludes_non_oracle_hits`,
 `test_deterministic_tie_order_on_sorts_by_accession`,
-`test_diversity_aware_cutoff_on_reserves_near_miss`
+`test_diversity_aware_cutoff_defaults_to_one_reserved_near_miss`,
+`test_xml_diversity_aware_cutoff_defaults_to_one_reserved_near_miss`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_sharded_merge.py`.
@@ -612,6 +613,42 @@ def _run_tabular_merge(
     return out_rows, json.loads(report_json.read_text())
 
 
+def _run_xml_merge(
+    tmp_path: Path,
+    shard_hits: list[list[tuple[str, str, float]]],
+    *,
+    max_target_seqs: int,
+    env: dict[str, str] | None = None,
+) -> tuple[list[str], dict]:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    input_tsv.write_text("")
+    for shard_index, hits in enumerate(shard_hits):
+        shard_dir = tmp_path / f"shard_{shard_index:02d}"
+        shard_dir.mkdir()
+        with gzip.open(shard_dir / "batch.out.gz", "wt") as handle:
+            handle.write(_blast_xml("q1", hits))
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            str(len(shard_hits)),
+            "blastn",
+            f"-outfmt 5 -max_target_seqs {max_target_seqs}",
+        ],
+        check=True,
+        env={**os.environ, **(env or {})},
+    )
+    with gzip.open(output_gz, "rt") as handle:
+        root = ET.parse(handle).getroot()  # noqa: S314 -- test fixture XML
+    subjects = [node.text or "" for node in root.findall(".//Hit_id")]
+    return subjects, json.loads(report_json.read_text())
+
+
 def _tabular_row(query: str, subject: str, evalue: str, bitscore: str) -> str:
     return f"{query}\t{subject}\t100\t20\t0\t0\t1\t20\t1\t20\t{evalue}\t{bitscore}"
 
@@ -644,22 +681,7 @@ def test_deterministic_tie_order_on_sorts_by_accession(tmp_path: Path) -> None:
     assert report["ranking_basis"] == "evalue_bitscore_accession_ordinal"
 
 
-def test_diversity_aware_cutoff_off_drops_near_miss(tmp_path: Path) -> None:
-    rows = [
-        _tabular_row("q1", "pa", "1e-30", "90"),
-        _tabular_row("q1", "pb", "1e-30", "90"),
-        _tabular_row("q1", "pc", "1e-30", "90"),
-        _tabular_row("q1", "pd", "1e-30", "90"),
-        _tabular_row("q1", "na", "1e-20", "80"),
-        _tabular_row("q1", "nb", "1e-20", "80"),
-    ]
-    out_rows, report = _run_tabular_merge(tmp_path, rows, num_shards="6", max_target_seqs=3)
-    assert [row.split("\t")[1] for row in out_rows] == ["pa", "pb", "pc"]
-    assert report["diversity_reserved_count"] == 0
-    assert report["tie_cutoff_overflow_count"] == 1
-
-
-def test_diversity_aware_cutoff_on_reserves_near_miss(tmp_path: Path) -> None:
+def test_diversity_aware_cutoff_zero_preserves_strict_top_n(tmp_path: Path) -> None:
     rows = [
         _tabular_row("q1", "pa", "1e-30", "90"),
         _tabular_row("q1", "pb", "1e-30", "90"),
@@ -673,11 +695,137 @@ def test_diversity_aware_cutoff_on_reserves_near_miss(tmp_path: Path) -> None:
         rows,
         num_shards="6",
         max_target_seqs=3,
-        env={"ELB_DIVERSITY_AWARE_CUTOFF": "1"},
+        env={"ELB_DIVERSITY_AWARE_CUTOFF": "0"},
+    )
+    assert [row.split("\t")[1] for row in out_rows] == ["pa", "pb", "pc"]
+    assert report["diversity_reserved_count"] == 0
+    assert report["tie_cutoff_overflow_count"] == 1
+
+
+def test_diversity_aware_cutoff_defaults_to_one_reserved_near_miss(tmp_path: Path) -> None:
+    rows = [
+        _tabular_row("q1", "pa", "1e-30", "90"),
+        _tabular_row("q1", "pb", "1e-30", "90"),
+        _tabular_row("q1", "pc", "1e-30", "90"),
+        _tabular_row("q1", "pd", "1e-30", "90"),
+        _tabular_row("q1", "pa", "1e-25", "85"),
+        _tabular_row("q1", "na", "1e-20", "80"),
+        _tabular_row("q1", "nb", "1e-20", "80"),
+    ]
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="6",
+        max_target_seqs=3,
     )
     assert [row.split("\t")[1] for row in out_rows] == ["pa", "pb", "na"]
     assert report["diversity_reserved_count"] == 1
     assert report["diversity_queries"] == [{"query_id": "q1", "reserved_count": 1}]
     # The truncation signal is still reported against the real top score class.
+    assert report["tie_cutoff_overflow_count"] == 1
+    assert any("Diversity-aware cutoff" in warning for warning in report["warnings"])
+
+
+def test_diversity_aware_cutoff_requires_top_class_overflow(tmp_path: Path) -> None:
+    rows = [
+        _tabular_row("q1", "pa", "1e-30", "90"),
+        _tabular_row("q1", "pb", "1e-30", "90"),
+        _tabular_row("q1", "pc", "1e-30", "90"),
+        _tabular_row("q1", "na", "1e-20", "80"),
+    ]
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="4",
+        max_target_seqs=3,
+    )
+    assert [row.split("\t")[1] for row in out_rows] == ["pa", "pb", "pc"]
+    assert report["tie_cutoff_overflow_count"] == 0
+    assert report["diversity_reserved_count"] == 0
+
+
+def test_diversity_aware_cutoff_keeps_the_only_top_slot(tmp_path: Path) -> None:
+    rows = [
+        _tabular_row("q1", "pa", "1e-30", "90"),
+        _tabular_row("q1", "pb", "1e-30", "90"),
+        _tabular_row("q1", "na", "1e-20", "80"),
+    ]
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="3",
+        max_target_seqs=1,
+    )
+    assert [row.split("\t")[1] for row in out_rows] == ["pa"]
+    assert report["tie_cutoff_overflow_count"] == 1
+    assert report["diversity_reserved_count"] == 0
+
+
+def test_strict_tie_order_oracle_disables_default_diversity_reservation(
+    tmp_path: Path,
+) -> None:
+    oracle = tmp_path / "oracle.txt"
+    oracle.write_text("pa\npb\npc\npd\nna\n")
+    rows = [
+        _tabular_row("q1", "pa", "1e-30", "90"),
+        _tabular_row("q1", "pb", "1e-30", "90"),
+        _tabular_row("q1", "pc", "1e-30", "90"),
+        _tabular_row("q1", "pd", "1e-30", "90"),
+        _tabular_row("q1", "na", "1e-20", "80"),
+    ]
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="5",
+        max_target_seqs=3,
+        env={
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_STRICT": "1",
+        },
+    )
+    assert [row.split("\t")[1] for row in out_rows] == ["pa", "pb", "pc"]
+    assert report["tie_order_oracle_strict"] is True
+    assert report["diversity_reserved_count"] == 0
+
+
+def test_diversity_aware_cutoff_positive_value_sets_reservation(tmp_path: Path) -> None:
+    rows = [
+        _tabular_row("q1", "pa", "1e-30", "90"),
+        _tabular_row("q1", "pb", "1e-30", "90"),
+        _tabular_row("q1", "pc", "1e-30", "90"),
+        _tabular_row("q1", "pd", "1e-30", "90"),
+        _tabular_row("q1", "na", "1e-20", "80"),
+        _tabular_row("q1", "nb", "1e-20", "80"),
+    ]
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="6",
+        max_target_seqs=3,
+        env={"ELB_DIVERSITY_AWARE_CUTOFF": "2"},
+    )
+    assert [row.split("\t")[1] for row in out_rows] == ["pa", "na", "nb"]
+    assert report["diversity_reserved_count"] == 2
+
+
+def test_xml_diversity_aware_cutoff_defaults_to_one_reserved_near_miss(
+    tmp_path: Path,
+) -> None:
+    subjects, report = _run_xml_merge(
+        tmp_path,
+        [
+            [("pa", "1e-30", 90.0), ("pb", "1e-30", 90.0)],
+            [
+                ("pc", "1e-30", 90.0),
+                ("pd", "1e-30", 90.0),
+                ("na", "1e-20", 80.0),
+                ("nb", "1e-20", 80.0),
+            ],
+        ],
+        max_target_seqs=3,
+    )
+    assert subjects == ["pa", "pb", "na"]
+    assert report["diversity_reserved_count"] == 1
+    assert report["diversity_queries"] == [{"query_id": "q1", "reserved_count": 1}]
     assert report["tie_cutoff_overflow_count"] == 1
     assert any("Diversity-aware cutoff" in warning for warning in report["warnings"])

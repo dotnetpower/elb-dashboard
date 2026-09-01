@@ -53,8 +53,8 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
     merge-report.json.
 
     Returns a compact summary when the max_target_seqs cutoff split a tied
-    score class (or the opt-in diversity-aware cutoff reserved near-miss
-    slots), otherwise ``None`` so the field is simply omitted and the UI shows
+    score class (or the diversity-aware cutoff reserved near-miss slots),
+    otherwise ``None`` so the field is simply omitted and the UI shows
     no badge. The read is intentionally tolerant of a missing or malformed
     report -- result serving must never fail because the report is absent.
     """
