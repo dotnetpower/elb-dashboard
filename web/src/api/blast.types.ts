@@ -882,10 +882,31 @@ export interface BlastTieCutoff {
   /** Slots reserved for lower-scoring near-miss hits by the diversity-aware
    *  cutoff (0 when strict score-only selection is enabled). */
   diversity_reserved_count: number;
+  /** Distinct lower-scoring subjects available when reservation was applied. */
+  diversity_candidate_count?: number;
+  /** Selection policy recorded by the merge report. */
+  diversity_reservation_mode?:
+    | "proportional"
+    | "fixed"
+    | "off"
+    | "strict_oracle"
+    | "mixed";
   /** The max_target_seqs value in effect for the job, when recorded. */
   max_target_seqs?: number;
   /** Up to 5 sample queries whose top score class was truncated. */
-  queries?: Array<{ query_id?: string; overflow_count?: number }>;
+  queries?: Array<{
+    query_id?: string;
+    overflow_count?: number;
+    tie_input_count?: number;
+    tie_selected_count?: number;
+    tie_overflow_count?: number;
+    evalue?: number;
+    bitscore?: number;
+    hsp_count?: number;
+    candidate_count?: number;
+    reserved_count?: number;
+    reservation_mode?: string;
+  }>;
 }
 
 export interface BlastTaxonomyRow {

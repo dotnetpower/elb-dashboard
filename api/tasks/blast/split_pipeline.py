@@ -1107,10 +1107,15 @@ def _aggregate_split_merge_reports(
     max_target_values: set[int] = set()
     formats: set[str] = set()
     precision_levels: set[str] = set()
+    diversity_modes: set[str] = set()
     totals = {
         "queries": 0,
         "total_input_hits": 0,
+        "total_input_rows": 0,
+        "total_input_subjects": 0,
         "total_output_hits": 0,
+        "total_output_rows": 0,
+        "total_output_subjects": 0,
         "unsupported_rows": 0,
         "unsupported_records": 0,
         "malformed_xml_count": 0,
@@ -1119,6 +1124,7 @@ def _aggregate_split_merge_reports(
         "tie_break_count": 0,
         "tie_cutoff_overflow_count": 0,
         "diversity_reserved_count": 0,
+        "diversity_candidate_count": 0,
         "num_shards": 0,
     }
     # Per-query score-class cutoff samples (which queries had a tied top-score
@@ -1126,8 +1132,9 @@ def _aggregate_split_merge_reports(
     # child; the parent concatenates a bounded sample so the UI can render a
     # "displayed N are a sample of a larger tied class" badge for split jobs.
     tie_cutoff_queries: list[dict[str, Any]] = []
-    # Per-query diversity-aware cutoff samples (default 1; 0 restores strict top-N):
-    # which queries had lower-scoring near-miss hits reserved into the window.
+    # Per-query diversity-aware cutoff samples (proportional by default; 0
+    # restores strict top-N): which queries had lower-scoring near-miss hits
+    # reserved into the result window.
     diversity_queries: list[dict[str, Any]] = []
     child_items: list[dict[str, Any]] = []
     for item in child_reports:
@@ -1142,6 +1149,9 @@ def _aggregate_split_merge_reports(
         precision_level = report.get("precision_level")
         if isinstance(precision_level, str) and precision_level:
             precision_levels.add(precision_level)
+        diversity_mode = report.get("diversity_reservation_mode")
+        if isinstance(diversity_mode, str) and diversity_mode:
+            diversity_modes.add(diversity_mode)
         for key in totals:
             raw_value = report.get(key, 0)
             if isinstance(raw_value, (int, float)):
@@ -1168,7 +1178,11 @@ def _aggregate_split_merge_reports(
                 "group_id": item.get("group_id"),
                 "queries": report.get("queries", 0),
                 "total_input_hits": report.get("total_input_hits", 0),
+                "total_input_rows": report.get("total_input_rows", 0),
+                "total_input_subjects": report.get("total_input_subjects", 0),
                 "total_output_hits": report.get("total_output_hits", 0),
+                "total_output_rows": report.get("total_output_rows", 0),
+                "total_output_subjects": report.get("total_output_subjects", 0),
                 "unsupported_rows": report.get("unsupported_rows", 0),
                 "unsupported_records": report.get("unsupported_records", 0),
                 "malformed_xml_count": report.get("malformed_xml_count", 0),
@@ -1176,6 +1190,9 @@ def _aggregate_split_merge_reports(
                 "total_output_hsps": report.get("total_output_hsps", 0),
                 "tie_break_count": report.get("tie_break_count", 0),
                 "tie_cutoff_overflow_count": report.get("tie_cutoff_overflow_count", 0),
+                "diversity_reserved_count": report.get("diversity_reserved_count", 0),
+                "diversity_candidate_count": report.get("diversity_candidate_count", 0),
+                "diversity_reservation_mode": diversity_mode,
                 "num_shards": report.get("num_shards", 0),
                 "format": report_format,
                 "warnings": report.get("warnings", []),
@@ -1187,6 +1204,8 @@ def _aggregate_split_merge_reports(
         raise ValueError("split child merge reports used different output formats")
     if len(precision_levels) > 1:
         raise ValueError("split child merge reports used different precision levels")
+    if len(diversity_modes) > 1:
+        warnings.append("child merge reports used different diversity reservation modes")
     report_format = next(iter(formats), "blast_tabular")
     outfmt = 5 if report_format == "blast_xml" else 6
 
@@ -1204,6 +1223,13 @@ def _aggregate_split_merge_reports(
         "max_target_seqs": next(iter(max_target_values)) if len(max_target_values) == 1 else None,
         **totals,
         "tie_cutoff_queries": tie_cutoff_queries,
+        "diversity_reservation_mode": (
+            next(iter(diversity_modes))
+            if len(diversity_modes) == 1
+            else "mixed"
+            if diversity_modes
+            else None
+        ),
         "diversity_queries": diversity_queries,
         "warnings": warnings,
         "children": child_items,

@@ -8,6 +8,11 @@ tags:
 
 # Preserve near-miss variants at sharded BLAST cutoffs
 
+> **Current behavior:** Since 2026-09-02, the default reservation is calculated
+> from the lower-scoring unique-subject share of the merged shard candidate
+> pool instead of being fixed at one slot. See
+> [Scale near-miss preservation for 5,000-hit shard merges](2026-09-02-sharded-near-miss-proportional-reservation.md).
+
 ## Motivation
 
 A partitioned [BLAST+](https://blast.ncbi.nlm.nih.gov/doc/blast-help/) search can
@@ -23,9 +28,10 @@ XML output.
 - XML (`outfmt 5`) and tabular (`outfmt 6` or `7`) merges now use the same
   diversity-aware cutoff.
 - When all selected hits belong to one `(evalue, bitscore)` class and a lower
-  score exists, the final slot is used for the best lower-scoring near-miss by
-  default. This intentionally changes the previous strict score-only default;
-  the output remains capped at `max_target_seqs`.
+  score exists, this version used the final slot for the best lower-scoring
+  near-miss by default. The 2026-09-02 follow-up supersedes that fixed count
+  with proportional reservation; the output remains capped at
+  `max_target_seqs`.
 - `ELB_DIVERSITY_AWARE_CUTOFF=0` restores strict score-only top-N behavior. A
   positive value reserves up to that many slots.
 - A strict tie-order oracle takes precedence over diversity reservation so a

@@ -124,23 +124,27 @@ def deterministic_tie_order_enabled():
 
 
 def diversity_aware_cutoff_limit():
-    # Default 1; set to 0 to restore strict top-N selection. When set to a
-    # positive integer k, and the
-    # selected max_target_seqs window is entirely filled by a SINGLE tied
-    # (evalue, bitscore) score class while lower-scoring hits exist below the
-    # cutoff, the last min(k, available) slots are replaced by the best
-    # lower-scoring (more informative, e.g. 1-mismatch) hits. This preserves
-    # near-miss subjects that a strict max_target_seqs cutoff would otherwise
-    # drop -- the case where 100 perfect matches push out a single SNP-bearing
-    # variant. The output still contains at most max_target_seqs hits.
+    # Default auto (None); set to 0 to restore strict top-N selection or to a
+    # positive integer k for a fixed reservation. Auto mode preserves the
+    # lower-scoring unique-subject proportion observed in the merged shard
+    # candidate pool instead of allowing a cross-shard top-score tie class to
+    # consume the entire result window.
     raw = os.environ.get("ELB_DIVERSITY_AWARE_CUTOFF", "").strip()
-    if not raw:
-        return 1
+    if not raw or raw.lower() == "auto":
+        return None
     try:
         value = int(raw)
     except ValueError:
-        return 1
+        return None
     return value if value > 0 else 0
+
+
+def diversity_reservation_mode(limit, strict_oracle):
+    if strict_oracle:
+        return "strict_oracle"
+    if limit is None:
+        return "proportional"
+    return "fixed" if limit > 0 else "off"
 
 
 def tie_break_sort_component(tie_order, accession, ordinal):
@@ -172,35 +176,60 @@ def apply_diversity_reservation(selected, sorted_hits, limit, subject_key):
     # (evalue, -bitscore).
     top_class = (selected[0][0], selected[0][1])
     if any((hit[0], hit[1]) != top_class for hit in selected):
-        return selected, 0
-    unselected = sorted_hits[len(selected):]
-    if not any((hit[0], hit[1]) == top_class for hit in unselected):
-        return selected, 0
-    # A lower-ranked HSP for an already selected subject does not preserve a
-    # new variant. Reserve at most one row per previously unseen subject.
+        return selected, 0, 0
+
+    # Count each subject once using its best-ranked row/Hit. A lower-ranked HSP
+    # for an already seen subject is not a new variant candidate. Formats with
+    # no subject column intentionally fall back to row identity.
+    candidate_hits = []
+    candidate_subjects = set()
+    for hit in sorted_hits:
+        subject = subject_key(hit)
+        if subject and subject in candidate_subjects:
+            continue
+        if subject:
+            candidate_subjects.add(subject)
+        candidate_hits.append(hit)
+
     selected_subjects = set()
+    selected_candidate_count = 0
     for hit in selected:
         subject = subject_key(hit)
+        if subject and subject in selected_subjects:
+            continue
         if subject:
             selected_subjects.add(subject)
-    reserved_subjects = set()
-    near_misses = []
-    for hit in unselected:
-        if (hit[0], hit[1]) == top_class:
-            continue
-        subject = subject_key(hit)
-        if subject and (subject in selected_subjects or subject in reserved_subjects):
-            continue
-        near_misses.append(hit)
-        if subject:
-            reserved_subjects.add(subject)
+        selected_candidate_count += 1
+
+    top_candidates = [
+        hit for hit in candidate_hits if (hit[0], hit[1]) == top_class
+    ]
+    if len(top_candidates) <= selected_candidate_count:
+        return selected, 0, 0
+
+    near_misses = [
+        hit for hit in candidate_hits if (hit[0], hit[1]) != top_class
+    ]
     if not near_misses:
-        return selected, 0
-    reserve = min(limit, len(near_misses), max(0, len(selected) - 1))
+        return selected, 0, 0
+
+    if limit is None:
+        # Preserve the lower-score share represented in the shard candidate
+        # pool. Integer ceiling guarantees at least one near-miss whenever a
+        # real tied-class overflow and a lower-scoring candidate coexist.
+        candidate_count = len(top_candidates) + len(near_misses)
+        reserve_limit = (
+            len(selected) * len(near_misses) + candidate_count - 1
+        ) // candidate_count
+    else:
+        reserve_limit = limit
+    # Never replace every top-class hit. At N=1 this intentionally reserves
+    # zero slots so the result count stays within max_target_seqs.
+    reserve = min(reserve_limit, len(near_misses), max(0, len(selected) - 1))
     if reserve <= 0:
-        return selected, 0
+        return selected, 0, len(near_misses)
     kept = selected[: len(selected) - reserve]
-    return kept + near_misses[:reserve], reserve
+    return kept + near_misses[:reserve], reserve, len(near_misses)
 
 
 def oracle_sort_key(order, accession, fallback):
@@ -215,6 +244,47 @@ def oracle_sort_key(order, accession, fallback):
 def tabular_subject_accession(line, subject_idx=1):
     cols = line.split("\t")
     return cols[subject_idx] if len(cols) > subject_idx else ""
+
+
+def group_tabular_subject_hits(rows, subject_idx):
+    # BLAST max_target_seqs limits subjects, not tabular HSP rows. Rank each
+    # subject by its best HSP, retain the first input ordinal as the stable
+    # fallback, and carry every row so selected subjects keep all HSPs.
+    grouped = {}
+    for row in rows:
+        accession = (
+            tabular_subject_accession(row[3], subject_idx)
+            if subject_idx is not None
+            else ""
+        )
+        key = ("subject", accession) if accession else ("row", row[2])
+        item = grouped.get(key)
+        if item is None:
+            item = {
+                "accession": accession,
+                "best_evalue": row[0],
+                "best_negative_bitscore": row[1],
+                "first_ordinal": row[2],
+                "rows": [],
+            }
+            grouped[key] = item
+        elif (row[0], row[1]) < (
+            item["best_evalue"],
+            item["best_negative_bitscore"],
+        ):
+            item["best_evalue"] = row[0]
+            item["best_negative_bitscore"] = row[1]
+        item["rows"].append(row)
+    return [
+        (
+            item["best_evalue"],
+            item["best_negative_bitscore"],
+            item["first_ordinal"],
+            item["accession"],
+            item["rows"],
+        )
+        for item in grouped.values()
+    ]
 
 
 # Field-aware tabular column resolution. The shard merge historically assumed
@@ -292,7 +362,8 @@ def resolve_tabular_columns(spec, warnings):
     if subject_idx is None:
         warnings.append(
             "outfmt has no subject accession column; the tie-order oracle and "
-            "deterministic accession tie-break are disabled"
+            "deterministic accession tie-break are disabled, and max_target_seqs "
+            "plus diversity reservation operate on rows instead of subjects"
         )
     return qseqid_idx, evalue_idx, bitscore_idx, subject_idx
 
@@ -406,7 +477,6 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     if subject_idx is None:
         strict_oracle = False
         tie_order = {}
-    oracle_subject_idx = subject_idx if subject_idx is not None else 1
     # Lowest column count a data row must have for every resolved index to be
     # addressable (mirrors the historical `< 12` guard for the std layout).
     min_required_cols = max(
@@ -467,16 +537,21 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     tie_cutoff_queries = []
     oracle_missing_queries = []
     diversity_limit = 0 if strict_oracle else diversity_aware_cutoff_limit()
+    diversity_mode = diversity_reservation_mode(diversity_limit, strict_oracle)
     diversity_reserved_count = 0
+    diversity_candidate_count = 0
     diversity_queries = []
-    total_output_hits = 0
+    total_input_subjects = 0
+    total_output_subjects = 0
+    total_output_rows = 0
 
     with gzip.open(output_gz, "wt") as out:
         for query_id in sorted(query_hits):
-            hits = query_hits[query_id]
+            hits = group_tabular_subject_hits(query_hits[query_id], subject_idx)
+            total_input_subjects += len(hits)
             if strict_oracle:
                 observed_keys = observed_accession_keys(
-                    tabular_subject_accession(hit[3], oracle_subject_idx) for hit in hits
+                    hit[3] for hit in hits
                 )
                 missing_accessions = oracle_missing_accessions(oracle_accessions, observed_keys)
                 if missing_accessions:
@@ -490,7 +565,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                 hits = [
                     hit
                     for hit in hits
-                    if oracle_sort_key(tie_order, tabular_subject_accession(hit[3], oracle_subject_idx), hit[2])[0] == 0
+                    if oracle_sort_key(tie_order, hit[3], hit[2])[0] == 0
                 ]
             pair_counts = Counter((hit[0], hit[1]) for hit in hits)
             tie_break_count += sum(count - 1 for count in pair_counts.values() if count > 1)
@@ -500,7 +575,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                     hit[0],
                     hit[1],
                     tie_break_sort_component(
-                        tie_order, tabular_subject_accession(hit[3], oracle_subject_idx), hit[2]
+                        tie_order, hit[3], hit[2]
                     ),
                     hit[2],
                 ),
@@ -528,24 +603,26 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                                 "tie_overflow_count": cutoff_overflow,
                             }
                         )
-            # Diversity-aware reservation (opt-in) runs AFTER cutoff detection so
-            # the truncation report still reflects the real top-class overflow.
-            if diversity_limit and selected and len(sorted_hits) > len(selected):
-                selected, reserved = apply_diversity_reservation(
+            # Diversity-aware reservation runs AFTER cutoff detection so the
+            # truncation report still reflects the pristine strict top-N window.
+            if diversity_limit != 0 and selected and len(sorted_hits) > len(selected):
+                selected, reserved, candidates = apply_diversity_reservation(
                     selected,
                     sorted_hits,
                     diversity_limit,
-                    lambda hit: (
-                        tabular_subject_accession(hit[3], subject_idx)
-                        if subject_idx is not None
-                        else ""
-                    ),
+                    lambda hit: hit[3],
                 )
                 if reserved:
                     diversity_reserved_count += reserved
+                    diversity_candidate_count += candidates
                     if len(diversity_queries) < 10:
                         diversity_queries.append(
-                            {"query_id": query_id, "reserved_count": reserved}
+                            {
+                                "query_id": query_id,
+                                "candidate_count": candidates,
+                                "reservation_mode": diversity_mode,
+                                "reserved_count": reserved,
+                            }
                         )
             out.write(f"# {blast_label}\n")
             out.write(f"# Query: {query_id}\n")
@@ -553,8 +630,10 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
             out.write(f"# Fields: {fields}\n")
             out.write(f"# {len(selected)} hits found\n")
             for hit in selected:
-                out.write(hit[3] + "\n")
-            total_output_hits += len(selected)
+                for row in hit[4]:
+                    out.write(row[3] + "\n")
+                    total_output_rows += 1
+            total_output_subjects += len(selected)
 
     if tie_break_count:
         warnings.append(
@@ -567,8 +646,9 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         )
     if diversity_reserved_count:
         warnings.append(
-            "Diversity-aware cutoff reserved slots for lower-scoring near-miss hits; "
-            "the displayed set is not the strict top max_target_seqs by score"
+            "Diversity-aware cutoff reserved lower-scoring near-miss subjects; "
+            "the displayed set preserves shard candidate-pool composition and is "
+            "not the strict top max_target_seqs by score"
         )
 
     report = {
@@ -583,13 +663,21 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         },
         "max_target_seqs": max_hits,
         "queries": len(query_hits),
+        # Keep the historical tabular `*_hits` row semantics for report
+        # consumers; the new `*_subjects` fields carry max_target_seqs units.
         "total_input_hits": total_input_rows,
-        "total_output_hits": total_output_hits,
+        "total_input_rows": total_input_rows,
+        "total_input_subjects": total_input_subjects,
+        "total_output_hits": total_output_rows,
+        "total_output_rows": total_output_rows,
+        "total_output_subjects": total_output_subjects,
         "unsupported_rows": unsupported_rows,
         "tie_break_count": tie_break_count,
         "tie_cutoff_overflow_count": tie_cutoff_overflow_count,
         "tie_cutoff_queries": tie_cutoff_queries,
         "diversity_reserved_count": diversity_reserved_count,
+        "diversity_candidate_count": diversity_candidate_count,
+        "diversity_reservation_mode": diversity_mode,
         "diversity_queries": diversity_queries,
         "num_shards": int(num_shards),
         "ranking_basis": ranking_basis_label(tie_order),
@@ -603,7 +691,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         "warnings": warnings,
     }
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
-    return total_output_hits, len(query_hits)
+    return total_output_subjects, len(query_hits)
 
 
 def text_at(element, path, default=""):
@@ -755,7 +843,9 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
     tie_cutoff_queries = []
     oracle_missing_queries = []
     diversity_limit = 0 if strict_oracle else diversity_aware_cutoff_limit()
+    diversity_mode = diversity_reservation_mode(diversity_limit, strict_oracle)
     diversity_reserved_count = 0
+    diversity_candidate_count = 0
     diversity_queries = []
     total_output_hits = 0
     total_output_hsps = 0
@@ -814,8 +904,8 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
                             "tie_overflow_count": cutoff_overflow,
                         }
                     )
-        if diversity_limit and selected and len(sorted_hits) > len(selected):
-            selected, reserved = apply_diversity_reservation(
+        if diversity_limit != 0 and selected and len(sorted_hits) > len(selected):
+            selected, reserved, candidates = apply_diversity_reservation(
                 selected,
                 sorted_hits,
                 diversity_limit,
@@ -823,9 +913,15 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
             )
             if reserved:
                 diversity_reserved_count += reserved
+                diversity_candidate_count += candidates
                 if len(diversity_queries) < 10:
                     diversity_queries.append(
-                        {"query_id": query_id, "reserved_count": reserved}
+                        {
+                            "query_id": query_id,
+                            "candidate_count": candidates,
+                            "reservation_mode": diversity_mode,
+                            "reserved_count": reserved,
+                        }
                     )
         template = item["template"]
         hits_node = template.find("Iteration_hits")
@@ -885,8 +981,9 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         )
     if diversity_reserved_count:
         warnings.append(
-            "Diversity-aware cutoff reserved slots for lower-scoring near-miss hits; "
-            "the displayed set is not the strict top max_target_seqs by score"
+            "Diversity-aware cutoff reserved lower-scoring near-miss subjects; "
+            "the displayed set preserves shard candidate-pool composition and is "
+            "not the strict top max_target_seqs by score"
         )
 
     with gzip.open(output_gz, "wb") as handle:
@@ -898,7 +995,9 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         "max_target_seqs": max_hits,
         "queries": len(query_order),
         "total_input_hits": total_input_hits,
+        "total_input_subjects": total_input_hits,
         "total_output_hits": total_output_hits,
+        "total_output_subjects": total_output_hits,
         "total_input_hsps": total_input_hsps,
         "total_output_hsps": total_output_hsps,
         "unsupported_records": unsupported_records,
@@ -907,6 +1006,8 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         "tie_cutoff_overflow_count": tie_cutoff_overflow_count,
         "tie_cutoff_queries": tie_cutoff_queries,
         "diversity_reserved_count": diversity_reserved_count,
+        "diversity_candidate_count": diversity_candidate_count,
+        "diversity_reservation_mode": diversity_mode,
         "diversity_queries": diversity_queries,
         "num_shards": int(num_shards),
         "ranking_basis": (

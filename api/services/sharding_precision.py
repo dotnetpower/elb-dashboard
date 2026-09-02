@@ -4,7 +4,8 @@ Responsibility: Precision policy for sharded BLAST submissions
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `PrecisionReport`, `normalize_sharding_mode`, `option_value`,
-`outfmt_is_merge_compatible`, `merge_format_for_outfmt`, `positive_int`
+`outfmt_is_merge_compatible`, `merge_format_for_outfmt`,
+`tabular_outfmt_has_query_field`, `positive_int`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests`.
@@ -138,6 +139,7 @@ _STD_TABULAR_FIELDS: tuple[str, ...] = (
     "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
     "qstart", "qend", "sstart", "send", "evalue", "bitscore",
 )
+_QUERY_TABULAR_FIELDS = frozenset({"qseqid", "qacc", "qaccver", "qgi"})
 
 
 def _expand_outfmt_field_codes(field_tokens: list[str]) -> list[str]:
@@ -189,6 +191,17 @@ def merge_format_for_outfmt(value: object | None) -> Literal["tabular", "xml"] |
             return "tabular"
         return None
     return None
+
+
+def tabular_outfmt_has_query_field(value: object | None) -> bool:
+    """Return whether a tabular outfmt can keep multiple queries separated."""
+    if value in (None, ""):
+        return True
+    parts = str(value).strip().strip("'\"").split()
+    if not parts or parts[0] not in ("6", "7"):
+        return True
+    fields = _expand_outfmt_field_codes(parts[1:] or ["std"])
+    return any(field in _QUERY_TABULAR_FIELDS for field in fields)
 
 
 # Web BLAST parity columns the dashboard result analytics need to populate
@@ -338,7 +351,7 @@ def build_precision_report(
         )
 
     additional = str(opts.get("additional_options") or "")
-    additional_outfmt = option_value(additional, "-outfmt") if additional else None
+    additional_outfmt = outfmt_spec_value(additional) if additional else None
     additional_searchsp = (
         positive_int(option_value(additional, "-searchsp")) if additional else None
     )
@@ -348,6 +361,16 @@ def build_precision_report(
         blockers.append(
             "sharded result merge currently supports only outfmt 5, outfmt 6, "
             "outfmt 7, or outfmt '6 std...'/'7 std...'"
+        )
+    elif (
+        merge_format == "tabular"
+        and query_count is not None
+        and query_count > 1
+        and not tabular_outfmt_has_query_field(outfmt)
+    ):
+        blockers.append(
+            "sharded multi-query tabular merge requires qseqid, qacc, qaccver, "
+            "or qgi in the outfmt field list"
         )
 
     if not db_stats_available and not positive_int(opts.get("db_total_letters")):

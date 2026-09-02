@@ -172,10 +172,12 @@ function TieCutoffBadge({ tieCutoff }: { tieCutoff: BlastTieCutoff }) {
           diversityApplied ? (
             <span>
               When the result limit is entirely filled by one tied top-score
-              class, the merge keeps the best lower-scoring near-miss hit in the
-              final slot. The result stays within <code>max_target_seqs</code>,
-              but is intentionally not the strict top-N-by-score set. Raise the
-              limit to inspect more tied and near-miss candidates.
+              class, the merge preserves a proportional share of the distinct
+              lower-scoring subjects found across the shard candidate pool. The
+              result stays within <code>max_target_seqs</code>, but is
+              intentionally not the strict top-N-by-score set. Set the runtime
+              cutoff to 0 for strict selection or a positive number for a fixed
+              reservation.
             </span>
           ) : (
             <span>

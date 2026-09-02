@@ -10,7 +10,8 @@ Key entry points: `_state`, `test_build_execution_steps_snapshot_preserves_steps
 `test_reconcile_terminal_artifacts_resets_empty_identity_budget`,
 `test_finalizer_records_exhausted_pod_log_capture`,
 `test_finalizer_records_pod_log_retry_enqueue_failure`,
-`test_read_json_artifact_supports_gzip`, `test_artifact_build_should_enqueue_stale_pending`
+`test_read_json_artifact_supports_gzip`, `test_artifact_build_should_enqueue_stale_pending`,
+`test_load_merge_report_tie_cutoff_summarizes_overflow`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_job_artifacts.py`.
@@ -838,6 +839,8 @@ def test_load_merge_report_tie_cutoff_summarizes_overflow(monkeypatch) -> None:
     report = {
         "tie_cutoff_overflow_count": 4,
         "diversity_reserved_count": 0,
+        "diversity_candidate_count": 0,
+        "diversity_reservation_mode": "off",
         "max_target_seqs": 500,
         "tie_cutoff_queries": [
             {"query_id": "q1", "overflow_count": 4},
@@ -855,6 +858,8 @@ def test_load_merge_report_tie_cutoff_summarizes_overflow(monkeypatch) -> None:
     assert summary == {
         "overflow_count": 4,
         "diversity_reserved_count": 0,
+        "diversity_candidate_count": 0,
+        "diversity_reservation_mode": "off",
         "max_target_seqs": 500,
         "queries": report["tie_cutoff_queries"][:5],
     }
@@ -892,7 +897,14 @@ def test_load_merge_report_tie_cutoff_reports_diversity_only(monkeypatch) -> Non
 
     _patch_merge_report(
         monkeypatch,
-        json.dumps({"tie_cutoff_overflow_count": 0, "diversity_reserved_count": 2}),
+        json.dumps(
+            {
+                "tie_cutoff_overflow_count": 0,
+                "diversity_reserved_count": 2,
+                "diversity_candidate_count": 8,
+                "diversity_reservation_mode": "proportional",
+            }
+        ),
     )
 
     summary = result_artifacts._load_merge_report_tie_cutoff("job-1", "acct")
@@ -900,6 +912,8 @@ def test_load_merge_report_tie_cutoff_reports_diversity_only(monkeypatch) -> Non
     assert summary == {
         "overflow_count": 0,
         "diversity_reserved_count": 2,
+        "diversity_candidate_count": 8,
+        "diversity_reservation_mode": "proportional",
         "queries": [],
     }
 

@@ -7,7 +7,8 @@ Key entry points: `test_default_sharding_mode_is_off`,
 `test_legacy_approximate_flag_maps_to_approximate`,
 `test_legacy_explicit_partitions_map_to_approximate`,
 `test_explicit_off_conflicts_with_explicit_partitions`, `test_invalid_sharding_mode_rejected`,
-`test_off_mode_reports_full_precision`
+`test_off_mode_reports_full_precision`,
+`test_multi_query_sharding_blocks_tabular_outfmt_without_query_field`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_sharding_precision.py`.
@@ -23,6 +24,7 @@ from api.services.sharding_precision import (
     normalize_sharding_mode,
     outfmt_spec_value,
     set_outfmt_spec,
+    tabular_outfmt_has_query_field,
 )
 
 _PARITY = "staxids sscinames stitle qcovs"
@@ -177,6 +179,36 @@ def test_merge_format_blocks_layout_missing_rank_columns() -> None:
     shards, so it is blocked at submit (mirrors the merge fail-closed)."""
     assert merge_format_for_outfmt("7 qseqid sseqid staxids") is None
     assert merge_format_for_outfmt("7 staxids evalue") is None  # no bitscore
+
+
+def test_tabular_query_field_detection_handles_std_and_custom_layouts() -> None:
+    assert tabular_outfmt_has_query_field("6") is True
+    assert tabular_outfmt_has_query_field("7 std staxids") is True
+    assert tabular_outfmt_has_query_field("7 qacc sseqid evalue bitscore") is True
+    assert tabular_outfmt_has_query_field("7 sseqid evalue bitscore") is False
+
+
+def test_multi_query_sharding_blocks_tabular_outfmt_without_query_field() -> None:
+    report = build_precision_report(
+        {
+            "sharding_mode": "approximate",
+            "additional_options": "-outfmt 7 sseqid evalue bitscore",
+        },
+        query_count=2,
+    )
+    assert report.eligible is False
+    assert any("multi-query" in error for error in report.blocking_errors)
+
+
+def test_single_query_sharding_allows_tabular_outfmt_without_query_field() -> None:
+    report = build_precision_report(
+        {
+            "sharding_mode": "approximate",
+            "additional_options": "-outfmt 7 sseqid evalue bitscore",
+        },
+        query_count=1,
+    )
+    assert report.eligible is True
 
 
 def test_outfmt_spec_value_rejoins_unquoted_multi_token() -> None:

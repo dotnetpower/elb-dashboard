@@ -82,6 +82,14 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
     overflow = overflow if isinstance(overflow, int) and not isinstance(overflow, bool) else 0
     reserved = report.get("diversity_reserved_count")
     reserved = reserved if isinstance(reserved, int) and not isinstance(reserved, bool) else 0
+    candidate_count = report.get("diversity_candidate_count")
+    candidate_count = (
+        candidate_count
+        if isinstance(candidate_count, int) and not isinstance(candidate_count, bool)
+        else None
+    )
+    reservation_mode = report.get("diversity_reservation_mode")
+    reservation_mode = reservation_mode if isinstance(reservation_mode, str) else None
     if overflow <= 0 and reserved <= 0:
         return None
     queries = report.get("tie_cutoff_queries")
@@ -92,6 +100,10 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
         "diversity_reserved_count": reserved,
         "queries": sample,
     }
+    if candidate_count is not None:
+        summary["diversity_candidate_count"] = candidate_count
+    if reservation_mode:
+        summary["diversity_reservation_mode"] = reservation_mode
     if isinstance(max_target, int) and not isinstance(max_target, bool):
         summary["max_target_seqs"] = max_target
     return summary

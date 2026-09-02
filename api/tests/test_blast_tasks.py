@@ -6,7 +6,8 @@ Azure calls.
 Key entry points: `FakeK8sResponse`, `FakeK8sSession`, `_parse_ini`,
 `test_build_config_content_targets_existing_cluster_and_storage_urls`,
 `test_build_config_content_preserves_full_blob_urls`,
-`test_build_config_content_rejects_relative_path_traversal`
+`test_build_config_content_rejects_relative_path_traversal`,
+`test_aggregate_split_merge_reports_marks_mixed_diversity_modes`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_blast_tasks.py`.
@@ -2723,28 +2724,54 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
         "job-123-qg1/merge-report.json": {
             "max_target_seqs": 10,
             "queries": 1,
-            "total_input_hits": 3,
-            "total_output_hits": 1,
+            "total_input_hits": 4,
+            "total_input_rows": 4,
+            "total_input_subjects": 3,
+            "total_output_hits": 2,
+            "total_output_rows": 2,
+            "total_output_subjects": 1,
             "unsupported_rows": 0,
             "tie_break_count": 0,
             "tie_cutoff_overflow_count": 2,
             "tie_cutoff_queries": [{"query_id": "q1", "tie_overflow_count": 2}],
             "diversity_reserved_count": 1,
-            "diversity_queries": [{"query_id": "q1", "reserved_count": 1}],
+            "diversity_candidate_count": 2,
+            "diversity_reservation_mode": "proportional",
+            "diversity_queries": [
+                {
+                    "query_id": "q1",
+                    "candidate_count": 2,
+                    "reservation_mode": "proportional",
+                    "reserved_count": 1,
+                }
+            ],
             "num_shards": 5,
             "warnings": [],
         },
         "job-123-qg2/merge-report.json": {
             "max_target_seqs": 10,
             "queries": 1,
-            "total_input_hits": 4,
-            "total_output_hits": 1,
+            "total_input_hits": 5,
+            "total_input_rows": 5,
+            "total_input_subjects": 4,
+            "total_output_hits": 3,
+            "total_output_rows": 3,
+            "total_output_subjects": 1,
             "unsupported_rows": 1,
             "tie_break_count": 2,
             "tie_cutoff_overflow_count": 3,
             "tie_cutoff_queries": [{"query_id": "q2", "tie_overflow_count": 3}],
             "diversity_reserved_count": 1,
-            "diversity_queries": [{"query_id": "q2", "reserved_count": 1}],
+            "diversity_candidate_count": 4,
+            "diversity_reservation_mode": "proportional",
+            "diversity_queries": [
+                {
+                    "query_id": "q2",
+                    "candidate_count": 4,
+                    "reservation_mode": "proportional",
+                    "reserved_count": 1,
+                }
+            ],
             "num_shards": 5,
             "warnings": ["ties were resolved deterministically"],
         },
@@ -2813,8 +2840,12 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
     report = json.loads(uploads["job-123/merge-report.json"].decode("utf-8"))
     assert report["precision_level"] == "split_query_child_finalizer_concat"
     assert report["queries"] == 2
-    assert report["total_input_hits"] == 7
-    assert report["total_output_hits"] == 2
+    assert report["total_input_hits"] == 9
+    assert report["total_input_rows"] == 9
+    assert report["total_input_subjects"] == 7
+    assert report["total_output_hits"] == 5
+    assert report["total_output_rows"] == 5
+    assert report["total_output_subjects"] == 2
     assert report["unsupported_rows"] == 1
     assert report["tie_break_count"] == 2
     assert report["tie_cutoff_overflow_count"] == 5
@@ -2823,13 +2854,54 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
         {"query_id": "q2", "tie_overflow_count": 3},
     ]
     assert report["diversity_reserved_count"] == 2
+    assert report["diversity_candidate_count"] == 6
+    assert report["diversity_reservation_mode"] == "proportional"
     assert report["diversity_queries"] == [
-        {"query_id": "q1", "reserved_count": 1},
-        {"query_id": "q2", "reserved_count": 1},
+        {
+            "query_id": "q1",
+            "candidate_count": 2,
+            "reservation_mode": "proportional",
+            "reserved_count": 1,
+        },
+        {
+            "query_id": "q2",
+            "candidate_count": 4,
+            "reservation_mode": "proportional",
+            "reserved_count": 1,
+        },
     ]
     assert report["num_shards"] == 10
     assert result["paths"]["manifest_path"] == "job-123/split-results-manifest.json"
     assert b"q1\thit1" not in uploads["job-123/merge-report.json"]
+
+
+def test_aggregate_split_merge_reports_marks_mixed_diversity_modes() -> None:
+    report = blast._aggregate_split_merge_reports(
+        parent_job_id="job-123",
+        child_reports=[
+            {
+                "child_job_id": "job-123-qg1",
+                "group_id": "qg1",
+                "report": {
+                    "outfmt": 6,
+                    "format": "blast_tabular",
+                    "diversity_reservation_mode": "proportional",
+                },
+            },
+            {
+                "child_job_id": "job-123-qg2",
+                "group_id": "qg2",
+                "report": {
+                    "outfmt": 6,
+                    "format": "blast_tabular",
+                    "diversity_reservation_mode": "fixed",
+                },
+            },
+        ],
+    )
+
+    assert report["diversity_reservation_mode"] == "mixed"
+    assert "child merge reports used different diversity reservation modes" in report["warnings"]
 
 
 def _blast_xml(query_id: str, subject: str) -> bytes:
