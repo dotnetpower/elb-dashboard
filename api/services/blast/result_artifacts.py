@@ -90,6 +90,12 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
     )
     reservation_mode = report.get("diversity_reservation_mode")
     reservation_mode = reservation_mode if isinstance(reservation_mode, str) else None
+    selection_equivalence = report.get("selection_equivalence")
+    selection_equivalence = (
+        selection_equivalence if isinstance(selection_equivalence, str) else None
+    )
+    ranking_basis = report.get("ranking_basis")
+    ranking_basis = ranking_basis if isinstance(ranking_basis, str) else None
     if overflow <= 0 and reserved <= 0:
         return None
     queries = report.get("tie_cutoff_queries")
@@ -104,6 +110,10 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
         summary["diversity_candidate_count"] = candidate_count
     if reservation_mode:
         summary["diversity_reservation_mode"] = reservation_mode
+    if selection_equivalence:
+        summary["selection_equivalence"] = selection_equivalence
+    if ranking_basis:
+        summary["ranking_basis"] = ranking_basis
     if isinstance(max_target, int) and not isinstance(max_target, bool):
         summary["max_target_seqs"] = max_target
     return summary

@@ -8,6 +8,11 @@ tags:
 
 # Scale near-miss preservation for 5,000-hit shard merges
 
+> **Current behavior:** Precise sharding now uses the exact BLAST full-DB
+> comparator and disables proportional reservation. Proportional reservation
+> remains the explicit approximate-mode fallback. See
+> [Exact full-DB hitlist selection for sharded BLAST](2026-09-02-sharded-full-db-exact-hitlist.md).
+
 ## Motivation
 
 The first tied-cutoff mitigation reserved one lower-scoring subject. That closed

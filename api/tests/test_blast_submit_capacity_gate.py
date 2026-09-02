@@ -202,6 +202,37 @@ def test_submit_gate_disabled_uses_submit_lock(monkeypatch: pytest.MonkeyPatch) 
     assert capacity_touched == []  # gate path must not be entered when disabled
 
 
+def test_precise_submit_stops_before_cli_when_db_order_oracle_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = _install_pipeline_stubs(monkeypatch)
+    monkeypatch.setattr(
+        "api.tasks.blast.submit_task.upload_db_order_oracle_pointer_if_available",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        _blast,
+        "_retry_or_fail",
+        lambda *_args, **kwargs: {
+            "job_id": kwargs["job_id"],
+            "status": "failed",
+            "phase": kwargs["phase"],
+        },
+    )
+
+    kwargs = dict(_SUBMIT_KWARGS)
+    kwargs["options"] = {
+        "sharding_mode": "precise",
+        "use_db_order_oracle": True,
+    }
+    result = _blast.submit.run(**kwargs)
+
+    assert result["status"] == "failed"
+    assert result["phase"] == "db_order_oracle_unavailable"
+    assert tracker.stream_calls == 0
+    assert tracker.config_options == []
+
+
 def test_submit_drops_untrusted_warmed_cache_skip_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

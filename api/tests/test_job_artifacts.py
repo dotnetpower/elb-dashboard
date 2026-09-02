@@ -841,6 +841,8 @@ def test_load_merge_report_tie_cutoff_summarizes_overflow(monkeypatch) -> None:
         "diversity_reserved_count": 0,
         "diversity_candidate_count": 0,
         "diversity_reservation_mode": "off",
+        "selection_equivalence": "full_db_hitlist_exact",
+        "ranking_basis": "blast_evalue_raw_score_db_oid_desc",
         "max_target_seqs": 500,
         "tie_cutoff_queries": [
             {"query_id": "q1", "overflow_count": 4},
@@ -860,6 +862,8 @@ def test_load_merge_report_tie_cutoff_summarizes_overflow(monkeypatch) -> None:
         "diversity_reserved_count": 0,
         "diversity_candidate_count": 0,
         "diversity_reservation_mode": "off",
+        "selection_equivalence": "full_db_hitlist_exact",
+        "ranking_basis": "blast_evalue_raw_score_db_oid_desc",
         "max_target_seqs": 500,
         "queries": report["tie_cutoff_queries"][:5],
     }

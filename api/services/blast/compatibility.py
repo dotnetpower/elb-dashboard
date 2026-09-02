@@ -37,6 +37,7 @@ class BlastCompatibilityContract:
     eligible: bool
     database: str
     search_space_source: str
+    selection_basis: str = "unverified"
     searchsp: int | None = None
     evidence: dict[str, Any] | None = None
     precision: dict[str, Any] | None = None
@@ -50,6 +51,7 @@ class BlastCompatibilityContract:
             "eligible": self.eligible,
             "database": self.database,
             "search_space_source": self.search_space_source,
+            "selection_basis": self.selection_basis,
             "searchsp": self.searchsp,
             "evidence": self.evidence,
             "precision": self.precision,
@@ -147,6 +149,11 @@ def build_compatibility_contract(
             blockers.append(
                 "effective search space does not match verified Web BLAST-compatible evidence"
             )
+        if opts.get("use_db_order_oracle") is not True:
+            blockers.append(
+                "precise sharding requires a ready same-generation DB-order oracle "
+                "for exact full-DB hitlist membership"
+            )
 
         if blockers:
             return BlastCompatibilityContract(
@@ -192,7 +199,7 @@ def build_compatibility_contract(
 
         return BlastCompatibilityContract(
             mode="precise",
-            level="web_blast_compatible_sharded",
+            level="full_db_hitlist_exact_sharded",
             eligible=True,
             database=db_name,
             search_space_source=_search_space_source(
@@ -201,6 +208,7 @@ def build_compatibility_contract(
                 verified_value=effective_verified_value,
             ),
             searchsp=configured_searchsp,
+            selection_basis="blast_evalue_raw_score_db_oid_desc",
             evidence=evidence,
             precision=precision_dict,
             blocking_errors=[],
@@ -235,6 +243,7 @@ def build_compatibility_contract(
             verified_value=effective_verified_value,
         ),
         searchsp=configured_searchsp or effective_verified_value,
+        selection_basis="native_full_database",
         evidence=evidence,
         precision=precision_dict,
         warnings=warnings,

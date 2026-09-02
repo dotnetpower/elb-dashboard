@@ -36,9 +36,16 @@ const database: BlastDatabase = {
   name: "core_nt",
   container: "blast-db",
   total_bytes: 250 * 1024 ** 3,
+  source_version: "2026-09-01",
   web_blast_searchsp: 32_156_241_807_668,
   sharded: true,
   shard_sets: [1, 2, 3, 4, 5, 6, 8, 10],
+  db_order_oracle: {
+    status: "ready",
+    source_version: "2026-09-01",
+    expected_parts: 10,
+    ready_parts: 10,
+  },
 };
 
 describe("deriveShardingAvailability", () => {
@@ -53,7 +60,7 @@ describe("deriveShardingAvailability", () => {
     expect(availability.options.off.enabled).toBe(true);
     expect(availability.preferredMode).toBe("precise");
     expect(availability.options.precise.enabled).toBe(true);
-    expect(availability.options.precise.label).toBe("Web-equivalent shard");
+    expect(availability.options.precise.label).toBe("Full-DB-exact shard");
     expect(availability.options.approximate.enabled).toBe(true);
     expect(availability.capacityPlan?.pickedN).toBe(10);
   });
@@ -73,6 +80,39 @@ describe("deriveShardingAvailability", () => {
     expect(availability.options.precise.reason).toContain(
       "Verified Web BLAST search-space evidence",
     );
+  });
+
+  it("falls back to approximate while the exact DB-order oracle is unavailable", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database: { ...database, db_order_oracle: undefined },
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+
+    expect(availability.preferredMode).toBe("approximate");
+    expect(availability.options.precise.enabled).toBe(false);
+    expect(availability.options.precise.reason).toContain("DB-order oracle");
+  });
+
+  it("rejects an oracle from a different database generation", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database: {
+        ...database,
+        db_order_oracle: {
+          status: "ready",
+          source_version: "2026-08-01",
+          expected_parts: 10,
+          ready_parts: 10,
+        },
+      },
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+
+    expect(availability.options.precise.enabled).toBe(false);
+    expect(availability.options.precise.reason).toContain("refresh");
   });
 
   it("disables sharded modes when the DB is not warm on the selected cluster", () => {

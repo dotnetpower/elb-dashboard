@@ -173,6 +173,23 @@ def test_upload_db_order_oracle_pointer_requires_explicit_opt_in() -> None:
     )
 
 
+def test_upload_db_order_oracle_pointer_requires_ready_matching_oracle(monkeypatch) -> None:
+    monkeypatch.setattr(
+        blast_oracles,
+        "resolve_db_metadata",
+        lambda *_args: {"source_version": "v1"},
+    )
+    monkeypatch.setattr(blast_oracles, "resolve_db_order_oracle", lambda **_kwargs: None)
+
+    with pytest.raises(blast_oracles.DbOrderOracleUnavailableError, match="No ready"):
+        blast_oracles.upload_db_order_oracle_pointer_if_available(
+            storage_account="stelb",
+            job_id="job-123",
+            database="core_nt",
+            options={"sharding_mode": "precise", "use_db_order_oracle": True},
+        )
+
+
 def test_db_order_oracle_part_urls_rejects_source_version_mismatch(monkeypatch) -> None:
     class FakeStatusDownload:
         def readall(self) -> bytes:

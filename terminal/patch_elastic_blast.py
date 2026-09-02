@@ -555,6 +555,7 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             "--log-level=ERROR 2>/dev/null; then\n"
             '                    export ELB_TIE_ORDER_FILE="$ORACLE_FILE"\n'
             '                    export ELB_TIE_ORDER_BASE="$ORACLE_BASE"\n'
+            '                    export ELB_TIE_ORDER_SOURCE="query"\n'
             '                    echo "Using tie-order oracle from ${ORACLE_BLOB}"\n'
             "                else\n"
             '                    echo "WARNING: tie-order oracle exists but could not be '
@@ -586,12 +587,21 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             "                            fi\n"
             "                            idx=$((idx + 1))\n"
             '                        done < "$ORACLE_URLS_FILE"\n'
-            '                        if find "$ORACLE_PART_DIR" -type f '
-            '-name "part-*.txt" | grep -q .; then\n'
+            "                        ORACLE_EXPECTED_PARTS=$(grep -cve '^$' \"$ORACLE_URLS_FILE\" || true)\n"
+            '                        ORACLE_DOWNLOADED_PARTS=$(find "$ORACLE_PART_DIR" -type f '
+            '-name "part-*.txt" | wc -l | tr -d " ")\n'
+            '                        if [ "$ORACLE_EXPECTED_PARTS" -le 0 ] || '
+            '[ "$ORACLE_DOWNLOADED_PARTS" -ne "$ORACLE_EXPECTED_PARTS" ]; then\n'
+            '                            echo "ERROR: DB-order oracle parts incomplete: '
+            'expected=${ORACLE_EXPECTED_PARTS} downloaded=${ORACLE_DOWNLOADED_PARTS}"\n'
+            "                            exit 1\n"
+            "                        fi\n"
+            '                        if [ "$ORACLE_DOWNLOADED_PARTS" -gt 0 ]; then\n'
             '                            find "$ORACLE_PART_DIR" -type f '
             '-name "part-*.txt" | sort | xargs cat > "$ORACLE_FILE"\n'
             '                            export ELB_TIE_ORDER_FILE="$ORACLE_FILE"\n'
             '                            export ELB_TIE_ORDER_BASE="$ORACLE_BASE"\n'
+            '                            export ELB_TIE_ORDER_SOURCE="db_order"\n'
             '                            echo "Using DB-order tie oracle parts from '
             '${ORACLE_URLS_BLOB}"\n'
             "                        fi\n"

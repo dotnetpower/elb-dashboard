@@ -612,6 +612,7 @@ def blast_job_submit(
     from api.routes.elastic_blast import ExternalBlastSubmitRequest, _normalise_external_job_payload
     from api.services import external_blast
     from api.services.blast.submit_payload import (
+        align_options_with_resource_profile,
         resolve_sharded_db_resource_profile,
         resolve_sharding_plan,
     )
@@ -634,10 +635,13 @@ def blast_job_submit(
     payload["resource_profile"] = resolve_sharded_db_resource_profile(
         payload.get("db") or "", payload.get("resource_profile")
     )
+    payload["options"] = align_options_with_resource_profile(
+        payload.get("options"), str(payload["resource_profile"])
+    )
     plan = resolve_sharding_plan(
         program=submit_request.program,
         database=str(payload.get("db") or ""),
-        options=payload.get("options"),
+        options=payload["options"],
         caller_supplied_searchsp=submit_request.options.db_effective_search_space,
     )
     payload["options"] = plan.options

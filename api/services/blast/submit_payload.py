@@ -143,6 +143,17 @@ def resolve_sharded_db_resource_profile(
     return requested or "standard"
 
 
+def align_options_with_resource_profile(
+    options: dict[str, Any] | None,
+    resource_profile: str,
+) -> dict[str, Any]:
+    """Make canonical sharding mode match a profile that shards at runtime."""
+    aligned = dict(options or {})
+    if resource_profile in _SHARDING_RESOURCE_PROFILES:
+        aligned["sharding_mode"] = "precise"
+    return aligned
+
+
 def canonical_submit_metadata(
     body: dict[str, Any],
     *,
@@ -279,6 +290,22 @@ def resolve_sharding_plan(
     downgrade_reason: str | None = None
     downgraded = False
     requested_mode = normalize_sharding_mode(resolved)
+    if requested_mode == "precise":
+        resolved["use_db_order_oracle"] = True
+        from api.services.sharding_precision import (
+            enrich_exact_tabular_outfmt,
+            outfmt_spec_value,
+            set_outfmt_spec,
+        )
+
+        additional = str(resolved.get("additional_options") or "")
+        current_outfmt = outfmt_spec_value(additional) if additional else None
+        if current_outfmt is None:
+            current_outfmt = resolved.get("outfmt")
+        exact_outfmt = enrich_exact_tabular_outfmt(current_outfmt)
+        if isinstance(exact_outfmt, str) and exact_outfmt != str(current_outfmt or ""):
+            resolved["additional_options"] = set_outfmt_spec(additional, exact_outfmt)
+            resolved.pop("outfmt", None)
     verified_default = default_for_database(database)
     additional_searchsp = positive_int(
         option_value(str(resolved.get("additional_options") or ""), "-searchsp")
@@ -373,6 +400,7 @@ def resolve_sharding_plan(
             )
             if merge_family is not None:
                 resolved["sharding_mode"] = "approximate"
+                resolved.pop("use_db_order_oracle", None)
             else:
                 # The output format cannot be merged across shards, so
                 # approximate sharding is unavailable — keep the original
@@ -670,6 +698,13 @@ def _normalise_blast_submit_body(body: dict[str, Any], *, job_id: str) -> dict[s
         normalised["query_metadata"] = merged
 
     if options:
-        normalised["options"] = options
+        plan = resolve_sharding_plan(
+            program=str(normalised.get("program") or "blastn"),
+            database=str(normalised.get("database") or normalised.get("db") or ""),
+            options=options,
+            caller_supplied_searchsp=_caller_supplied_searchsp(body),
+            allow_servicebus_downgrade=False,
+        )
+        normalised["options"] = plan.options
     normalised["canonical_request"] = canonical_submit_snapshot(normalised)
     return normalised

@@ -183,11 +183,34 @@ describe("searchSpacePin", () => {
 });
 
 describe("parityVerdict", () => {
-  it("reports NCBI-equivalent for precise eligible runs", () => {
+  it("reports full-DB exact only for the exact sharded contract", () => {
     const job = {
-      provenance: { compatibility: { mode: "precise", eligible: true, warnings: [] } },
+      provenance: {
+        compatibility: {
+          mode: "precise",
+          level: "full_db_hitlist_exact_sharded",
+          eligible: true,
+          warnings: [],
+        },
+      },
     } as unknown as BlastJobSummary;
     expect(parityVerdict(job).state).toBe("equivalent");
+    expect(parityVerdict(job).label).toBe("Full-DB exact");
+  });
+
+  it("does not overclaim exact parity for a legacy precise contract", () => {
+    const job = {
+      provenance: {
+        compatibility: {
+          mode: "precise",
+          level: "web_blast_compatible_sharded",
+          eligible: true,
+          warnings: [],
+        },
+      },
+    } as unknown as BlastJobSummary;
+    expect(parityVerdict(job).state).toBe("unknown");
+    expect(parityVerdict(job).label).toBe("Legacy precision");
   });
 
   it("reports drift for calibration_required", () => {
@@ -216,7 +239,13 @@ describe("buildMethodsText", () => {
           number_of_letters: 1.04e12,
         },
         options: { evalue: 0.05 },
-        compatibility: { mode: "precise", eligible: true, warnings: [], searchsp: 3.2e13 },
+        compatibility: {
+          mode: "precise",
+          level: "full_db_hitlist_exact_sharded",
+          eligible: true,
+          warnings: [],
+          searchsp: 3.2e13,
+        },
       },
       payload: {},
     } as unknown as BlastJobSummary;
@@ -225,7 +254,8 @@ describe("buildMethodsText", () => {
     expect(text).toContain("core_nt");
     expect(text).toContain("snapshot 2026-05-09");
     expect(text).toContain("E-value threshold of 0.05");
-    expect(text).toContain("equivalent to a single full-database NCBI BLAST run");
+    expect(text).toContain("reproduces full-database BLAST hitlist membership and order");
+    expect(text).toContain("NCBI parity additionally requires the same NCBI database snapshot");
   });
 
   it("degrades gracefully with an empty bundle", () => {

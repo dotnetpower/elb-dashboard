@@ -62,7 +62,7 @@ def test_drifted_snapshot_recomputed_searchsp_stays_precise() -> None:
     assert plan.options["db_effective_search_space"] == _DRIFT_SEARCHSP
     contract = plan.compatibility_contract
     assert contract["mode"] == "precise"
-    assert contract["level"] == "web_blast_compatible_sharded"
+    assert contract["level"] == "full_db_hitlist_exact_sharded"
 
 
 def test_stale_pinned_value_against_drifted_stats_degrades() -> None:

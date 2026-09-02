@@ -109,19 +109,19 @@ def _copy_support_files(root: Path) -> None:
 
 
 def _copy_app_overlay(root: Path) -> None:
-    """Copy the self-learning ETA overlay into the build-context ``app/``.
+    """Copy dashboard runtime overlays into the build-context ``app/``.
 
-    The Dockerfile already ``COPY ./app /app`` so dropping ``eta.py`` next to
-    ``main.py`` is enough to make ``import eta`` resolve at runtime. The overlay
-    is import-safe and strictly opt-in (``ELB_OPENAPI_ETA_ENABLED``).
+    The Dockerfile already ``COPY ./app /app`` so dropping modules next to
+    ``main.py`` makes their imports resolve at runtime.
     """
     project_root = Path(__file__).resolve().parents[2]
-    src = project_root / "scripts" / "dev" / "openapi-overlays" / "eta.py"
-    if not src.is_file():
-        raise RuntimeError(f"missing OpenAPI ETA overlay: {src}")
-    dest = root / "app" / "eta.py"
-    if not dest.exists() or dest.read_bytes() != src.read_bytes():
-        dest.write_bytes(src.read_bytes())
+    for name in ("eta.py", "exact_oracle.py"):
+        src = project_root / "scripts" / "dev" / "openapi-overlays" / name
+        if not src.is_file():
+            raise RuntimeError(f"missing OpenAPI overlay: {src}")
+        dest = root / "app" / name
+        if not dest.exists() or dest.read_bytes() != src.read_bytes():
+            dest.write_bytes(src.read_bytes())
 
 
 def _patch_terminal_webhook_runtime_id(path: Path) -> None:
@@ -423,6 +423,7 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "from importlib.resources import files",
         "from pathlib import Path",
         "from util import run_cancellable, safe_exec",
+        "import exact_oracle as _exact_oracle",
         'logger = logging.getLogger("elb-openapi")',
         'config["cluster"].pop("exp-skip-warmed-ssd-init", None)',
         '"init-db-shard-aks.sh",',
@@ -438,6 +439,9 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         're.fullmatch(r"job-[0-9a-f]{32}", elb_job_id, re.IGNORECASE)',
         'safe_exec(["kubectl", "get", "jobs", "-l", f"elb-job-id={elb_job_id}"',
         'safe_exec(["kubectl", "get", "pods", "-l", f"elb-job-id={elb_job_id}"',
+        "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
+        "exact_oracle_info = _exact_oracle.attach_db_order_oracle(",
+        'job_data["exact_oracle"] = exact_oracle_info',
     )
     missing = [fragment for fragment in required if fragment not in text]
     forbidden = (
@@ -761,6 +765,17 @@ def patch_app(root: Path) -> None:
     _harden_elb_scripts_configmap_reconciliation(path)
     _insert_once(
         path,
+        "from util import run_cancellable, safe_exec\n",
+        (
+            "\ntry:\n"
+            "    import exact_oracle as _exact_oracle\n"
+            "except Exception:  # pragma: no cover - validated before precise submit\n"
+            "    _exact_oracle = None\n"
+        ),
+        "import exact_oracle as _exact_oracle",
+    )
+    _insert_once(
+        path,
         (
             '    config["cluster"]["num-nodes"] = str(NUM_NODES)\n'
             '    config["blast"]["program"] = req.program\n'
@@ -780,6 +795,10 @@ def patch_app(root: Path) -> None:
             "\n    db_name = _db_name_from_value(req.db)\n"
             '    profile = str(req.resource_profile or "").strip().lower()\n'
             '    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:\n'
+            "        if _exact_oracle is None:\n"
+            "            raise HTTPException(503, \"Exact DB-order oracle support is unavailable\")\n"
+            "        opts = _exact_oracle.ensure_tabular_raw_score(opts)\n"
+            '        config["blast"]["options"] = opts\n'
             "        partitions = max(1, min(NUM_NODES, 10))\n"
             '        config["blast"]["db-partitions"] = str(partitions)\n'
             '        config["blast"]["db-partition-prefix"] = (\n'
@@ -789,6 +808,17 @@ def patch_app(root: Path) -> None:
             '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
         ),
         'profile in {"core_nt_precise", "precise", "core_nt_safe"}',
+    )
+    _insert_once(
+        path,
+        '    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:\n',
+        (
+            "        if _exact_oracle is None:\n"
+            "            raise HTTPException(503, \"Exact DB-order oracle support is unavailable\")\n"
+            "        opts = _exact_oracle.ensure_tabular_raw_score(opts)\n"
+            '        config["blast"]["options"] = opts\n'
+        ),
+        "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
     )
     _insert_once(
         path,
@@ -835,6 +865,43 @@ def patch_app(root: Path) -> None:
         '                or _discover_elb_job_id_from_submit_output(job_id, result.stdout or "")\n'
         "                or job_id\n"
         "            ),\n",
+    )
+    _insert_once(
+        path,
+        "    db_version = _db_version_detail(db_name)\n",
+        (
+            "    exact_oracle_info = None\n"
+            '    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:\n'
+            "        try:\n"
+            "            exact_oracle_info = _exact_oracle.attach_db_order_oracle(\n"
+            "                blob_base=_blob_base(),\n"
+            "                results_url=results_url,\n"
+            "                db_name=db_name,\n"
+            '                expected_source_version=str(db_version.get("version") or ""),\n'
+            "                token=_storage_oauth_token(),\n"
+            "            ).as_dict()\n"
+            "        except Exception as exc:\n"
+            "            logger.warning(\n"
+            '                "exact DB-order oracle attach failed job=%s db=%s reason=%s",\n'
+            "                job_id,\n"
+            "                db_name,\n"
+            "                type(exc).__name__,\n"
+            "            )\n"
+            "            raise HTTPException(\n"
+            "                503,\n"
+            '                "A ready same-generation DB-order oracle is required for exact sharded results",\n'
+            "            ) from exc\n"
+        ),
+        "exact_oracle_info = None",
+    )
+    _insert_once(
+        path,
+        "    if passthrough:\n        job_data[\"passthrough\"] = passthrough\n",
+        (
+            "    if exact_oracle_info is not None:\n"
+            '        job_data["exact_oracle"] = exact_oracle_info\n'
+        ),
+        'job_data["exact_oracle"] = exact_oracle_info',
     )
     _replace_once_unless_marker(
         path,

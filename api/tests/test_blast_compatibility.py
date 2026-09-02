@@ -27,6 +27,7 @@ def test_core_nt_precise_contract_uses_verified_default() -> None:
         "query_count": 1,
         "db_effective_search_space": 32_156_241_807_668,
         "db_total_letters": 1_041_443_571_674,
+        "use_db_order_oracle": True,
     }
     precision = build_precision_report(options, query_count=1, db_stats_available=True)
 
@@ -38,7 +39,8 @@ def test_core_nt_precise_contract_uses_verified_default() -> None:
 
     assert contract.mode == "precise"
     assert contract.eligible is True
-    assert contract.level == "web_blast_compatible_sharded"
+    assert contract.level == "full_db_hitlist_exact_sharded"
+    assert contract.selection_basis == "blast_evalue_raw_score_db_oid_desc"
     assert contract.search_space_source == "verified_default"
     assert contract.evidence is not None
     assert contract.evidence["db_name"] == "core_nt"
@@ -76,6 +78,7 @@ def test_explicit_searchsp_mismatch_invalidates_verified_evidence() -> None:
         "additional_options": "-searchsp 42",
         "db_effective_search_space": 42,
         "db_total_letters": 1_041_443_571_674,
+        "use_db_order_oracle": True,
     }
     precision = build_precision_report(options, query_count=1, db_stats_available=True)
 
@@ -98,6 +101,7 @@ def test_verified_db_nondefault_search_space_runs_without_precise_claim() -> Non
         "query_count": 1,
         "db_effective_search_space": 123456,
         "db_total_letters": 123456,
+        "use_db_order_oracle": True,
     }
     precision = build_precision_report(options, query_count=1, db_stats_available=True)
 
@@ -122,6 +126,7 @@ def test_explicit_matching_searchsp_is_precise_eligible() -> None:
         "query_count": 1,
         "additional_options": "-searchsp 32156241807668",
         "db_total_letters": 1_041_443_571_674,
+        "use_db_order_oracle": True,
     }
     precision = build_precision_report(options, query_count=1, db_stats_available=True)
 
@@ -191,6 +196,7 @@ def test_drifted_snapshot_recomputed_searchsp_is_web_blast_compatible() -> None:
         "db_effective_search_space": drift_searchsp,
         "db_total_letters": drift_len,
         "db_total_sequences": drift_num,
+        "use_db_order_oracle": True,
     }
     precision = build_precision_report(options, query_count=1, db_stats_available=True)
 
@@ -202,6 +208,6 @@ def test_drifted_snapshot_recomputed_searchsp_is_web_blast_compatible() -> None:
 
     assert contract.mode == "precise"
     assert contract.eligible is True
-    assert contract.level == "web_blast_compatible_sharded"
+    assert contract.level == "full_db_hitlist_exact_sharded"
     assert contract.search_space_source == "verified_default"
 

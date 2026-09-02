@@ -1108,6 +1108,8 @@ def _aggregate_split_merge_reports(
     formats: set[str] = set()
     precision_levels: set[str] = set()
     diversity_modes: set[str] = set()
+    selection_equivalences: set[str] = set()
+    ranking_bases: set[str] = set()
     totals = {
         "queries": 0,
         "total_input_hits": 0,
@@ -1152,6 +1154,12 @@ def _aggregate_split_merge_reports(
         diversity_mode = report.get("diversity_reservation_mode")
         if isinstance(diversity_mode, str) and diversity_mode:
             diversity_modes.add(diversity_mode)
+        selection_equivalence = report.get("selection_equivalence")
+        if isinstance(selection_equivalence, str) and selection_equivalence:
+            selection_equivalences.add(selection_equivalence)
+        ranking_basis = report.get("ranking_basis")
+        if isinstance(ranking_basis, str) and ranking_basis:
+            ranking_bases.add(ranking_basis)
         for key in totals:
             raw_value = report.get(key, 0)
             if isinstance(raw_value, (int, float)):
@@ -1193,6 +1201,8 @@ def _aggregate_split_merge_reports(
                 "diversity_reserved_count": report.get("diversity_reserved_count", 0),
                 "diversity_candidate_count": report.get("diversity_candidate_count", 0),
                 "diversity_reservation_mode": diversity_mode,
+                "selection_equivalence": selection_equivalence,
+                "ranking_basis": ranking_basis,
                 "num_shards": report.get("num_shards", 0),
                 "format": report_format,
                 "warnings": report.get("warnings", []),
@@ -1206,6 +1216,10 @@ def _aggregate_split_merge_reports(
         raise ValueError("split child merge reports used different precision levels")
     if len(diversity_modes) > 1:
         warnings.append("child merge reports used different diversity reservation modes")
+    if len(selection_equivalences) > 1:
+        warnings.append("child merge reports used different selection equivalence modes")
+    if len(ranking_bases) > 1:
+        warnings.append("child merge reports used different ranking bases")
     report_format = next(iter(formats), "blast_tabular")
     outfmt = 5 if report_format == "blast_xml" else 6
 
@@ -1228,6 +1242,20 @@ def _aggregate_split_merge_reports(
             if len(diversity_modes) == 1
             else "mixed"
             if diversity_modes
+            else None
+        ),
+        "selection_equivalence": (
+            next(iter(selection_equivalences))
+            if len(selection_equivalences) == 1
+            else "mixed"
+            if selection_equivalences
+            else None
+        ),
+        "ranking_basis": (
+            next(iter(ranking_bases))
+            if len(ranking_bases) == 1
+            else "mixed"
+            if ranking_bases
             else None
         ),
         "diversity_queries": diversity_queries,

@@ -156,11 +156,24 @@ export function deriveShardingAvailability({
     !isDbAlreadyWarm && isWarmupStatusResolved && reasonIfWarm == null;
   const hasVerifiedWebSearchSpace =
     typeof database?.web_blast_searchsp === "number" && database.web_blast_searchsp > 0;
+  const oracle = database?.db_order_oracle;
+  const oraclePartsReady =
+    typeof oracle?.expected_parts === "number" &&
+    oracle.expected_parts > 0 &&
+    oracle.ready_parts === oracle.expected_parts;
+  const oracleGenerationMatches =
+    !database?.source_version ||
+    !oracle?.source_version ||
+    oracle.source_version === database.source_version;
+  const hasExactDbOrderOracle =
+    oracle?.status === "ready" && oraclePartsReady && oracleGenerationMatches;
   const preciseReason =
     reason ??
-    (hasVerifiedWebSearchSpace
-      ? null
-      : "Verified Web BLAST search-space evidence is not available for this database/options scope.");
+    (!hasVerifiedWebSearchSpace
+      ? "Verified Web BLAST search-space evidence is not available for this database/options scope."
+      : !hasExactDbOrderOracle
+        ? "Build or refresh the DB-order oracle for this database generation before using exact sharding."
+        : null);
   return {
     capacityPlan,
     preferredMode: preciseReason == null ? "precise" : enabled ? "approximate" : "off",
@@ -184,11 +197,11 @@ export function deriveShardingAvailability({
       },
       precise: {
         mode: "precise",
-        label: hasVerifiedWebSearchSpace ? "Web-equivalent shard" : "Precise shard",
+        label: hasVerifiedWebSearchSpace ? "Full-DB-exact shard" : "Precise shard",
         enabled: preciseReason == null,
         reason: preciseReason,
         description: hasVerifiedWebSearchSpace
-          ? "Use warmed shards with verified full-DB search-space correction and query-aware merge checks. This is the default path for evidence-backed NCBI Web BLAST-compatible runs."
+          ? "Use warmed shards with verified full-DB search-space correction, raw-score ranking, and a same-generation DB-order oracle. This reproduces full-DB hitlist membership and order for the same snapshot and options."
           : "Use warmed shards only after a verified full-DB search-space default or explicit calibration evidence is available for this database/options scope.",
       },
     },

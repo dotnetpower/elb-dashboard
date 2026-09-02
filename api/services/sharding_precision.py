@@ -237,6 +237,20 @@ def enrich_tabular_outfmt(value: object | None) -> object | None:
     return " ".join([code, *cols, *additions])
 
 
+def enrich_exact_tabular_outfmt(value: object | None) -> object | None:
+    """Add the raw score required by the BLAST full-DB hitlist comparator."""
+    enriched = enrich_tabular_outfmt(value)
+    if enriched in (None, ""):
+        return enriched
+    parts = str(enriched).strip().strip("'\"").split()
+    if not parts or parts[0] not in ("6", "7"):
+        return enriched
+    code = parts[0]
+    cols = parts[1:] or ["std"]
+    present = set(_expand_outfmt_field_codes(cols))
+    return " ".join([code, *cols, *([] if "score" in present else ["score"])])
+
+
 def set_outfmt_spec(options: str, spec: str) -> str:
     """Return ``options`` with its ``-outfmt`` specifier replaced by ``spec``.
 

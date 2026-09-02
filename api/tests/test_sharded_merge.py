@@ -8,6 +8,8 @@ Key entry points: `_blast_xml`, `test_merge_sharded_results_respects_top_n_and_r
 `test_merge_sharded_results_reports_tie_cutoff_overflow`,
 `test_merge_sharded_results_uses_tie_order_oracle`,
 `test_merge_sharded_results_strict_oracle_excludes_non_oracle_hits`,
+`test_db_order_oracle_reproduces_blast_reverse_oid_ties`,
+`test_db_order_oracle_uses_raw_score_and_evalue_epsilon`,
 `test_deterministic_tie_order_on_sorts_by_accession`,
 `test_tabular_max_target_seqs_counts_subjects_and_preserves_hsps`,
 `test_diversity_aware_cutoff_defaults_to_proportional_near_misses`,
@@ -36,7 +38,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / "terminal" / "merge-sharded-resul
 
 def _blast_xml(
     query_id: str,
-    hits: list[tuple[str, str, float]],
+    hits: list[tuple[str, str, float] | tuple[str, str, float, int]],
     *,
     db_len: int = 1000,
     db_num: int = 1,
@@ -44,7 +46,9 @@ def _blast_xml(
     hsp_len: int = 1,
 ) -> str:
     hit_xml = []
-    for index, (subject, evalue, bitscore) in enumerate(hits, start=1):
+    for index, hit in enumerate(hits, start=1):
+        subject, evalue, bitscore = hit[:3]
+        raw_score = hit[3] if len(hit) == 4 else int(bitscore)
         hit_xml.append(
             f"""        <Hit>
           <Hit_num>{index}</Hit_num>
@@ -54,7 +58,7 @@ def _blast_xml(
             <Hsp>
               <Hsp_num>1</Hsp_num>
               <Hsp_bit-score>{bitscore}</Hsp_bit-score>
-              <Hsp_score>{int(bitscore)}</Hsp_score>
+              <Hsp_score>{raw_score}</Hsp_score>
               <Hsp_evalue>{evalue}</Hsp_evalue>
             </Hsp>
           </Hit_hsps>
@@ -283,6 +287,113 @@ def test_merge_sharded_results_strict_oracle_excludes_non_oracle_hits(tmp_path: 
     report = json.loads(report_json.read_text())
     assert report["tie_order_oracle_strict"] is True
     assert any("Strict tie-order oracle" in warning for warning in report["warnings"])
+
+
+def test_db_order_oracle_reproduces_blast_reverse_oid_ties(tmp_path: Path) -> None:
+    rows = [
+        "q1\ts1\t1e-30\t90\t100",
+        "q1\ts2\t1e-30\t90\t100",
+        "q1\ts3\t1e-30\t90\t100",
+    ]
+    oracle = tmp_path / "db-order.txt"
+    oracle.write_text("s1\ns2\ns3\n")
+
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="2",
+        max_target_seqs=2,
+        outfmt_spec="6 qseqid sseqid evalue bitscore score",
+        env={
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+        },
+    )
+
+    assert [row.split("\t")[1] for row in out_rows] == ["s3", "s2"]
+    assert report["tie_order_oracle_source"] == "db_order"
+    assert report["selection_equivalence"] == "full_db_hitlist_exact"
+    assert report["diversity_reservation_mode"] == "db_order_exact"
+
+
+def test_db_order_oracle_uses_raw_score_and_evalue_epsilon(tmp_path: Path) -> None:
+    rows = [
+        "q1\ts1\t0\t90\t100",
+        "q1\ts2\t1e-200\t90\t101",
+        "q1\ts3\t1e-50\t120\t130",
+    ]
+    oracle = tmp_path / "db-order.txt"
+    oracle.write_text("s1\ns2\ns3\n")
+
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="2",
+        max_target_seqs=2,
+        outfmt_spec="6 qseqid sseqid evalue bitscore score",
+        env={
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+        },
+    )
+
+    assert [row.split("\t")[1] for row in out_rows] == ["s2", "s1"]
+    assert report["resolved_columns"]["score"] == 4
+    assert report["ranking_basis"] == "blast_evalue_raw_score_db_oid_desc"
+
+
+def test_db_order_oracle_fails_when_candidate_is_unmapped(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    oracle = tmp_path / "db-order.txt"
+    input_tsv.write_text("q1\ts1\t1e-30\t90\t100\nq1\ts2\t1e-30\t90\t100\n")
+    oracle.write_text("s1\n")
+
+    proc = subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "2",
+            "blastn",
+            "-outfmt 6 qseqid sseqid evalue bitscore score -max_target_seqs 2",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+        },
+    )
+
+    assert proc.returncode != 0
+    assert "DB-order oracle does not cover" in proc.stderr
+
+
+def test_xml_db_order_oracle_uses_blast_comparator(tmp_path: Path) -> None:
+    oracle = tmp_path / "db-order.txt"
+    oracle.write_text("s1\ns2\ns3\n")
+
+    subjects, report = _run_xml_merge(
+        tmp_path,
+        [
+            [("s1", "0", 90.0, 100), ("s2", "1e-200", 90.0, 101)],
+            [("s3", "1e-50", 120.0, 130)],
+        ],
+        max_target_seqs=2,
+        env={
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+        },
+    )
+
+    assert subjects == ["s2", "s1"]
+    assert report["ranking_basis"] == "blast_evalue_raw_score_db_oid_desc"
+    assert report["selection_equivalence"] == "full_db_hitlist_exact"
 
 
 def test_merge_sharded_results_writes_valid_xml(tmp_path: Path) -> None:

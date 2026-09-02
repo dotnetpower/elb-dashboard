@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 from api.services.sharding_precision import (
     build_precision_report,
+    enrich_exact_tabular_outfmt,
     enrich_tabular_outfmt,
     merge_format_for_outfmt,
     normalize_sharding_mode,
@@ -63,6 +64,14 @@ def test_enrich_keeps_merge_compatible() -> None:
     # Every enriched tabular layout still passes the shard-merge gate.
     for spec in ("7", "6", "7 std", "7 qseqid sseqid pident evalue bitscore"):
         assert merge_format_for_outfmt(enrich_tabular_outfmt(spec)) == "tabular"
+
+
+def test_enrich_exact_tabular_adds_raw_score_idempotently() -> None:
+    assert enrich_exact_tabular_outfmt("6") == f"6 std {_PARITY} score"
+    expected = f"7 qseqid sseqid evalue bitscore {_PARITY} score"
+    assert enrich_exact_tabular_outfmt("7 qseqid sseqid evalue bitscore") == expected
+    assert enrich_exact_tabular_outfmt(expected) == expected
+    assert enrich_exact_tabular_outfmt("5") == "5"
 
 
 def test_set_outfmt_spec_appends_when_absent() -> None:

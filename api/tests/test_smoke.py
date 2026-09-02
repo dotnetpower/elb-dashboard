@@ -866,6 +866,7 @@ def test_blast_preflight_reports_web_blast_compatibility(
             "db": "core_nt",
             "query_data": ">q1\nAAAA\n",
             "sharding_mode": "precise",
+            "use_db_order_oracle": True,
             "outfmt": 5,
             "db_effective_search_space": 32_156_241_807_668,
             "db_total_letters": 1_041_443_571_674,

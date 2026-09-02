@@ -698,6 +698,7 @@ export interface BlastCompatibilityContract {
   eligible: boolean;
   database: string;
   search_space_source: string;
+  selection_basis?: string;
   searchsp?: number | null;
   evidence?: Record<string, unknown> | null;
   precision?: BlastPrecisionReport | null;
@@ -890,7 +891,16 @@ export interface BlastTieCutoff {
     | "fixed"
     | "off"
     | "strict_oracle"
+    | "db_order_exact"
     | "mixed";
+  /** Whether selection reproduces the native full-DB BLAST hitlist. */
+  selection_equivalence?:
+    | "full_db_hitlist_exact"
+    | "strict_query_oracle"
+    | "heuristic"
+    | "mixed";
+  /** Comparator recorded by the merge report. */
+  ranking_basis?: string;
   /** The max_target_seqs value in effect for the job, when recorded. */
   max_target_seqs?: number;
   /** Up to 5 sample queries whose top score class was truncated. */

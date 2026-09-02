@@ -219,6 +219,69 @@ def test_ui_openapi_and_servicebus_precise_contracts_converge() -> None:
     assert servicebus_contracts["compatibility_contract"]["searchsp"] == expected_searchsp
 
 
+def test_precise_tabular_plan_adds_exact_score_and_db_order_oracle() -> None:
+    options = canonical_execution_config(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">q1\nATGCATGCATGC\n",
+            "options": {
+                "outfmt": 6,
+                "sharding_mode": "precise",
+            },
+        }
+    )["options"]
+
+    assert options["use_db_order_oracle"] is True
+    assert "outfmt" not in options
+    assert options["additional_options"].count("-outfmt") == 1
+    assert "-outfmt 6 std staxids sscinames stitle qcovs score" in options[
+        "additional_options"
+    ]
+
+
+def test_precise_tabular_plan_does_not_duplicate_existing_score() -> None:
+    options = canonical_execution_config(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">q1\nATGCATGCATGC\n",
+            "options": {
+                "additional_options": "-outfmt 7 std score -dust yes",
+                "sharding_mode": "precise",
+            },
+        }
+    )["options"]
+
+    assert options["additional_options"].count("-outfmt") == 1
+    assert options["additional_options"].split().count("score") == 1
+
+
+def test_normalise_precise_tabular_body_persists_exact_runtime_options() -> None:
+    normalised = _normalise_blast_submit_body(
+        {
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "database": "core_nt",
+            "query_file": "queries/q.fa",
+            "options": {
+                "outfmt": 6,
+                "query_count": 1,
+                "sharding_mode": "precise",
+            },
+        },
+        job_id="job-1",
+    )
+
+    options = normalised["options"]
+    assert options["use_db_order_oracle"] is True
+    assert "-outfmt 6 std staxids sscinames stitle qcovs score" in options[
+        "additional_options"
+    ]
+
+
 def test_browser_submit_degrades_on_calibration_snapshot_mismatch() -> None:
     """A browser New Search submit whose live core_nt stats no longer match the
     pinned Web BLAST calibration must degrade gracefully instead of hard-blocking.
@@ -260,6 +323,7 @@ def test_browser_submit_degrades_on_calibration_snapshot_mismatch() -> None:
     opts = canonical_execution_config(body)["options"]
     assert "db_effective_search_space" not in opts
     assert opts["sharding_mode"] == "approximate"
+    assert "use_db_order_oracle" not in opts
 
 
 def test_web_blast_searchsp_default_applies_for_core_nt() -> None:

@@ -28,4 +28,18 @@ describe("tieCutoffNotice", () => {
     expect(notice.kind).toBe("overflow");
     expect(notice.message).toContain("1 hit with the same top score was not shown");
   });
+
+  it("reports verified full-DB selection without suggesting heuristic drift", () => {
+    const notice = tieCutoffNotice({
+      overflow_count: 12,
+      diversity_reserved_count: 0,
+      max_target_seqs: 5000,
+      selection_equivalence: "full_db_hitlist_exact",
+      ranking_basis: "blast_evalue_raw_score_db_oid_desc",
+    });
+
+    expect(notice.kind).toBe("exact");
+    expect(notice.message).toContain("Full-DB-exact merge");
+    expect(notice.message).toContain("12 additional tied subjects");
+  });
 });

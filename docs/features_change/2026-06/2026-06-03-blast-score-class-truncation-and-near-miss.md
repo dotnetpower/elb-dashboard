@@ -8,12 +8,11 @@ tags:
 
 # BLAST score-class truncation badge, near-miss preservation, and bit-score explanation
 
-> **Current behavior:** Since 2026-09-02, XML and tabular sharded merges reserve
-> a candidate-proportional share of lower-scoring subjects and preserve every
-> tabular HSP row for selected subjects. Set
-> `ELB_DIVERSITY_AWARE_CUTOFF=0` in a custom finalizer environment for the
-> strict score-only selection described here. See
-> [Scale near-miss preservation for 5,000-hit shard merges](../2026-09/2026-09-02-sharded-near-miss-proportional-reservation.md).
+> **Current behavior:** Since 2026-09-02, precise XML/tabular sharding reproduces
+> native full-DB hitlist selection with a same-generation DB-order oracle and
+> preserves every tabular HSP row for selected subjects. Approximate sharding
+> retains the proportional near-miss fallback described in the follow-up. See
+> [Exact full-DB hitlist selection for sharded BLAST](../2026-09/2026-09-02-sharded-full-db-exact-hitlist.md).
 
 ## Motivation
 

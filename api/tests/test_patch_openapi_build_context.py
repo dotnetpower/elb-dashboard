@@ -249,6 +249,27 @@ def test_patch_app_disables_warmed_cache_skip(tmp_path: Path) -> None:
     )
 
 
+def test_copy_app_overlay_includes_exact_oracle(tmp_path: Path) -> None:
+    module = _load_module()
+    (tmp_path / "app").mkdir()
+
+    module._copy_app_overlay(tmp_path)
+
+    assert (tmp_path / "app" / "eta.py").is_file()
+    exact = tmp_path / "app" / "exact_oracle.py"
+    assert exact.is_file()
+    assert "def attach_db_order_oracle(" in exact.read_text()
+
+
+def test_patch_source_wires_exact_oracle_before_dispatch() -> None:
+    module = _load_module()
+    source = Path(module.__file__).read_text()
+
+    assert "import exact_oracle as _exact_oracle" in source
+    assert "exact_oracle_info = _exact_oracle.attach_db_order_oracle(" in source
+    assert 'job_data["exact_oracle"] = exact_oracle_info' in source
+
+
 def test_patch_app_rejects_late_warmed_cache_skip_assignment(tmp_path: Path) -> None:
     module = _load_module()
     path = tmp_path / "main.py"

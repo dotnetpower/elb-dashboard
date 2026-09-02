@@ -66,6 +66,7 @@ def blast_pre_flight(
         "query_effective_search_spaces",
         "searchsp",
         "sharding_mode",
+        "use_db_order_oracle",
     ):
         if key in body:
             if key == "searchsp":

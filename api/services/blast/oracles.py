@@ -36,6 +36,10 @@ class DbOrderOracleResolution:
     part_urls: tuple[str, ...]
 
 
+class DbOrderOracleUnavailableError(RuntimeError):
+    """Raised when an exact precise submit has no same-generation DB oracle."""
+
+
 def upload_tie_order_oracle_if_present(
     *,
     storage_account: str,
@@ -101,7 +105,10 @@ def upload_db_order_oracle_pointer_if_available(
         expected_source_version=source_version or None,
     )
     if resolution is None:
-        return None
+        raise DbOrderOracleUnavailableError(
+            f"No ready DB-order oracle matches database {db_name!r} "
+            f"source version {source_version or '<unknown>'!r}"
+        )
     from api.services import get_credential
     from api.services.db.oracle_references import create_oracle_reference
     from api.services.storage.data import upload_blob_text

@@ -1833,6 +1833,16 @@ def test_patch_source_wires_finalizer_awk_fields_preservation() -> None:
     assert "awk '/^# Fields:/ || !/^#/'" in source
 
 
+def test_patch_source_tags_query_and_db_order_oracles() -> None:
+    patch_path = Path(__file__).resolve().parents[2] / "terminal" / "patch_elastic_blast.py"
+    source = patch_path.read_text()
+
+    assert 'export ELB_TIE_ORDER_SOURCE="query"' in source
+    assert 'export ELB_TIE_ORDER_SOURCE="db_order"' in source
+    assert "DB-order oracle parts incomplete" in source
+    assert "ORACLE_EXPECTED_PARTS" in source
+
+
 _BATCH_JOB_TEMPLATES = (
     ("blast-batch-job-aks.yaml.template", "  backoffLimit: 5\n"),
     ("blast-batch-job-local-ssd-aks.yaml.template", "  backoffLimit: 3\n"),

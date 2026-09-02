@@ -39,6 +39,7 @@ from api.services.blast.coordination import (
 )
 from api.services.blast.db_metadata import extract_db_name
 from api.services.blast.oracles import (
+    DbOrderOracleUnavailableError,
     upload_db_order_oracle_pointer_if_available,
     upload_tie_order_oracle_if_present,
 )
@@ -85,6 +86,17 @@ def _capacity_gate_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _requires_db_order_oracle(options: dict[str, Any]) -> bool:
+    if options.get("tie_order_oracle_accessions") or options.get("tie_order_oracle_text"):
+        return False
+    from api.services.sharding_precision import normalize_sharding_mode
+
+    return (
+        normalize_sharding_mode(options) == "precise"
+        and options.get("use_db_order_oracle") is True
+    )
 
 
 def _warmup_max_wait_seconds() -> int:
@@ -196,6 +208,7 @@ def submit(
     )
     effective_options = _blast._expand_strict_tie_order_candidate_pool(effective_options)
     effective_options = dict(effective_options or {})
+    db_order_oracle_required = _requires_db_order_oracle(effective_options)
     # Completed warmup Jobs cannot prove that node-local data still exists
     # after scale-out, node replacement, or disk loss. The hardened init path
     # must validate and repair the cache on every submit.
@@ -499,13 +512,42 @@ def submit(
         if db_oracle_future is not None:
             try:
                 db_order_oracle = db_oracle_future.result()
+            except DbOrderOracleUnavailableError as exc:
+                return _blast._retry_or_fail(
+                    self,
+                    job_id=job_id,
+                    phase="db_order_oracle_unavailable",
+                    exc=exc,
+                    error_code="db_order_oracle_unavailable",
+                    retry_after_seconds=60,
+                )
             except Exception as exc:
                 LOGGER.warning(
                     "db_order_oracle upload failed job_id=%s: %s",
                     job_id,
                     type(exc).__name__,
                 )
+                if db_order_oracle_required:
+                    return _blast._retry_or_fail(
+                        self,
+                        job_id=job_id,
+                        phase="db_order_oracle_unavailable",
+                        exc=exc,
+                        error_code="db_order_oracle_unavailable",
+                        retry_after_seconds=60,
+                    )
                 db_order_oracle = None
+            if db_order_oracle_required and db_order_oracle is None:
+                return _blast._retry_or_fail(
+                    self,
+                    job_id=job_id,
+                    phase="db_order_oracle_unavailable",
+                    exc=DbOrderOracleUnavailableError(
+                        "Precise sharding requires a ready same-generation DB-order oracle"
+                    ),
+                    error_code="db_order_oracle_unavailable",
+                    retry_after_seconds=60,
+                )
     finally:
         warmup_pool.shutdown(wait=False, cancel_futures=False)
 

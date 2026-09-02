@@ -83,10 +83,13 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
     assert captured["idempotency_key"] == "req-1"
     assert captured["canonical_request"]["metadata"]["submission_source"] == "external_api"
     assert captured["compatibility_contract"]["mode"] == "precise"
+    assert captured["compatibility_contract"]["level"] == "full_db_hitlist_exact_sharded"
     assert captured["provenance"]["compatibility"]["mode"] == "precise"
     assert captured["taxid"] == 3431483
     assert captured["is_inclusive"] is False
     assert captured["options"]["outfmt"] == 5
+    assert captured["options"]["sharding_mode"] == "precise"
+    assert captured["options"]["use_db_order_oracle"] is True
     assert captured["batch_len"] == 462
     assert "caller_oid" not in captured
 

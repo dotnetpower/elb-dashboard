@@ -2737,6 +2737,8 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
             "diversity_reserved_count": 1,
             "diversity_candidate_count": 2,
             "diversity_reservation_mode": "proportional",
+            "selection_equivalence": "heuristic",
+            "ranking_basis": "evalue_bitscore_ordinal",
             "diversity_queries": [
                 {
                     "query_id": "q1",
@@ -2764,6 +2766,8 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
             "diversity_reserved_count": 1,
             "diversity_candidate_count": 4,
             "diversity_reservation_mode": "proportional",
+            "selection_equivalence": "heuristic",
+            "ranking_basis": "evalue_bitscore_ordinal",
             "diversity_queries": [
                 {
                     "query_id": "q2",
@@ -2856,6 +2860,8 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
     assert report["diversity_reserved_count"] == 2
     assert report["diversity_candidate_count"] == 6
     assert report["diversity_reservation_mode"] == "proportional"
+    assert report["selection_equivalence"] == "heuristic"
+    assert report["ranking_basis"] == "evalue_bitscore_ordinal"
     assert report["diversity_queries"] == [
         {
             "query_id": "q1",
@@ -2902,6 +2908,33 @@ def test_aggregate_split_merge_reports_marks_mixed_diversity_modes() -> None:
 
     assert report["diversity_reservation_mode"] == "mixed"
     assert "child merge reports used different diversity reservation modes" in report["warnings"]
+
+
+def test_aggregate_split_merge_reports_preserves_exact_selection() -> None:
+    children = [
+        {
+            "child_job_id": f"job-123-qg{index}",
+            "group_id": f"qg{index}",
+            "report": {
+                "outfmt": 5,
+                "format": "blast_xml",
+                "diversity_reservation_mode": "db_order_exact",
+                "selection_equivalence": "full_db_hitlist_exact",
+                "ranking_basis": "blast_evalue_raw_score_db_oid_desc",
+            },
+        }
+        for index in (1, 2)
+    ]
+
+    report = blast._aggregate_split_merge_reports(
+        parent_job_id="job-123",
+        child_reports=children,
+    )
+
+    assert report["diversity_reserved_count"] == 0
+    assert report["diversity_reservation_mode"] == "db_order_exact"
+    assert report["selection_equivalence"] == "full_db_hitlist_exact"
+    assert report["ranking_basis"] == "blast_evalue_raw_score_db_oid_desc"
 
 
 def _blast_xml(query_id: str, subject: str) -> bytes:

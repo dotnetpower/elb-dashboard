@@ -39,6 +39,7 @@ def build_request_payload(
     from api.routes.elastic_blast import ExternalBlastSubmitRequest
     from api.services.blast.submit_payload import (
         _caller_supplied_searchsp,
+        align_options_with_resource_profile,
         canonical_submit_metadata,
         resolve_sharded_db_resource_profile,
         resolve_sharding_plan,
@@ -102,10 +103,13 @@ def build_request_payload(
         payload.get("db") or "",
         payload.get("resource_profile"),
     )
+    payload["options"] = align_options_with_resource_profile(
+        payload.get("options"), str(payload["resource_profile"])
+    )
     plan = resolve_sharding_plan(
         program=str(payload.get("program") or "blastn"),
         database=str(payload.get("db") or ""),
-        options=payload.get("options"),
+        options=payload["options"],
         caller_supplied_searchsp=_caller_supplied_searchsp(body),
         allow_servicebus_downgrade=True,
     )

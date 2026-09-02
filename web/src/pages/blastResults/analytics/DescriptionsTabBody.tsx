@@ -152,6 +152,7 @@ export function DescriptionsTabBody({ analytics, resultsPending = false }: Descr
 function TieCutoffBadge({ tieCutoff }: { tieCutoff: BlastTieCutoff }) {
   const notice = tieCutoffNotice(tieCutoff);
   const diversityApplied = notice.kind === "diversity";
+  const exactSelection = notice.kind === "exact";
   return (
     <div
       className="glass-card"
@@ -169,7 +170,14 @@ function TieCutoffBadge({ tieCutoff }: { tieCutoff: BlastTieCutoff }) {
       <Tooltip
         width={360}
         content={
-          diversityApplied ? (
+          exactSelection ? (
+            <span>
+              The merge reproduced BLAST&apos;s native full-database comparator:
+              E-values below 1e-180 compare equal, then raw score and descending
+              database OID determine the retained subjects. Exactness requires
+              the same database snapshot and BLAST options.
+            </span>
+          ) : diversityApplied ? (
             <span>
               When the result limit is entirely filled by one tied top-score
               class, the merge preserves a proportional share of the distinct

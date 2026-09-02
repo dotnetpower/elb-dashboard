@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from api.auth import CallerIdentity, require_caller, require_caller_or_download_token
 from api.services import external_blast
 from api.services.blast.submit_payload import (
+    align_options_with_resource_profile,
     canonical_submit_metadata,
     canonical_submit_snapshot,
     resolve_sharded_db_resource_profile,
@@ -225,7 +226,7 @@ class ExternalBlastV1Request(BaseModel):
         outfmt = self.blast_options.outfmt
         if outfmt is not None and str(outfmt).strip():
             from api.services.sharding_precision import (
-                enrich_tabular_outfmt,
+                enrich_exact_tabular_outfmt,
                 merge_format_for_outfmt,
             )
 
@@ -240,7 +241,7 @@ class ExternalBlastV1Request(BaseModel):
             # name / Query Cover columns populate for an outfmt 6/7 run the same
             # way they do for outfmt 5 (XML). Idempotent + preserves the caller's
             # columns; a no-op for XML or an already-enriched layout.
-            self.blast_options.outfmt = enrich_tabular_outfmt(outfmt)
+            self.blast_options.outfmt = enrich_exact_tabular_outfmt(outfmt)
         return self
 
 
@@ -415,10 +416,13 @@ def submit_external_blast_job(
     payload["resource_profile"] = resolve_sharded_db_resource_profile(
         payload.get("db") or "", payload.get("resource_profile")
     )
+    payload["options"] = align_options_with_resource_profile(
+        payload.get("options"), str(payload["resource_profile"])
+    )
     plan = resolve_sharding_plan(
         program=request.program,
         database=str(payload.get("db") or ""),
-        options=payload.get("options"),
+        options=payload["options"],
         caller_supplied_searchsp=request.options.db_effective_search_space,
     )
     payload["options"] = plan.options

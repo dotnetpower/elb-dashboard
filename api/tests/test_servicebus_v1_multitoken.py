@@ -46,7 +46,10 @@ def test_v1_request_accepts_multitoken_std_outfmt() -> None:
     # Caller columns survive; the dashboard appends the result-UI parity columns
     # (sscinames/stitle/qcovs; staxids already present) so Description / Scientific
     # name / Query Cover populate for the tabular run.
-    assert req.blast_options.outfmt == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
+    assert (
+        req.blast_options.outfmt
+        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs score"
+    )
     assert req.blast_options.extra and "-searchsp" in req.blast_options.extra
     assert req.db == "core_nt"
 
@@ -122,7 +125,7 @@ def test_build_v1_payload_preserves_multitoken_and_stamps_metadata() -> None:
     # result-UI parity columns to the tabular layout.
     assert (
         payload["blast_options"]["outfmt"]
-        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
+        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs score"
     )
     assert "-searchsp" in payload["blast_options"]["extra"]
     # The sibling /v1/jobs only accepts {dashboard, external_api, terminal,
@@ -234,7 +237,8 @@ def test_build_v1_payload_accepts_external_queue_body_without_internal_metadata(
     # staxid/ssciname/qcovhsp variants the analytics do not read).
     assert payload["blast_options"] == {
         **body["blast_options"],
-        "outfmt": body["blast_options"]["outfmt"] + " staxids sscinames stitle qcovs",
+        "outfmt": body["blast_options"]["outfmt"]
+        + " staxids sscinames stitle qcovs score",
     }
     assert "request_id" not in payload
     assert "type" not in payload
@@ -368,7 +372,7 @@ def test_build_v1_payload_searchsp_resolution_failure_is_safe(
     assert "-searchsp" not in payload["blast_options"]["extra"]
     assert (
         payload["blast_options"]["outfmt"]
-        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
+        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs score"
     )
 
 

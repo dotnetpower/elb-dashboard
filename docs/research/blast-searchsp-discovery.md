@@ -1240,6 +1240,43 @@ coverage and comparator strictness. The live finalizer currently took `46s` for
 latency must stay comfortably below one minute, parallelizing finalizer shard
 downloads is the next optimization.
 
+### 2026-09-02 Native full-DB hitlist comparator resolution
+
+The earlier DB-order experiments sorted equal displayed bit scores by ascending
+accession/OID rank. That was not BLAST's comparator, so their low overlap did not
+disprove a DB-order solution. Source inspection of NCBI BLAST 2.17.0 identified
+the actual bounded hitlist behavior in `s_EvalueCompareHSPLists` and
+`Blast_HitListUpdate`:
+
+1. E-values below `1e-180` compare equal.
+2. Higher raw score wins.
+3. Equal e-value/raw-score subjects sort by descending database OID; a newer
+   equal subject replaces the current worst subject in a full hitlist.
+
+Prepared shards use contiguous original volume blocks. Concatenating each
+shard's `blastdbcmd -entry all -outfmt '%a'` output in shard order was verified
+byte-for-byte equal to the full DB accession order on a generated three-shard
+database. Reversing that rank only inside equal e-value/raw-score classes then
+reproduced native BLAST selection.
+
+Local BLAST+ 2.17.0 evidence:
+
+- A mixed-score 45-subject full DB versus three contiguous shards produced
+  exact XML and `6 std score` tabular hit membership/order.
+- A 60-subject all-perfect tie with `max_target_seqs=40` produced the same
+  `s59..s20` membership/order in full and sharded XML/tabular output.
+- A multi-HSP fixture retained the same 10 subjects and all 20 HSP rows.
+- The existing canonical XML comparator reported `equivalent=true` and
+  `difference_count=0`, including query/subject coordinates, identity, gaps,
+  aligned sequences, and merged statistics. Exact XML statistics use a bounded
+  tiny alias-DB probe with full `NSEQ`/`LENGTH`; no full DB download is needed.
+
+The durable local command is
+`scripts/dev/verify-local-blast-exact-sharding.sh`. Precise production submits
+now require a complete same-generation DB-order oracle and fail closed when it
+is missing. NCBI Web parity still additionally requires the Web service and ELB
+to use the same database snapshot and BLAST options.
+
 ### Resource Shape
 
 Use a temporary resource group dedicated to the experiment. The safest default is

@@ -22,10 +22,15 @@ import json
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from pathlib import Path
+
+BLAST_EVALUE_EPSILON = 1.0e-180
 
 
 def _accession_base(accession):
@@ -108,6 +113,16 @@ def strict_oracle_enabled():
     }
 
 
+def tie_order_oracle_source():
+    source = os.environ.get("ELB_TIE_ORDER_SOURCE", "").strip().lower()
+    return source if source in {"query", "db_order"} else "query"
+
+
+def blast_evalue_sort_key(evalue):
+    # Mirrors NCBI BLAST core s_EvalueComp: values below 1e-180 compare equal.
+    return 0.0 if evalue < BLAST_EVALUE_EPSILON else evalue
+
+
 def deterministic_tie_order_enabled():
     # Opt-in (default OFF). When enabled, ties within an identical
     # (evalue, bitscore) score class are broken by subject accession instead
@@ -139,9 +154,11 @@ def diversity_aware_cutoff_limit():
     return value if value > 0 else 0
 
 
-def diversity_reservation_mode(limit, strict_oracle):
+def diversity_reservation_mode(limit, strict_oracle, db_order_exact=False):
     if strict_oracle:
         return "strict_oracle"
+    if db_order_exact:
+        return "db_order_exact"
     if limit is None:
         return "proportional"
     return "fixed" if limit > 0 else "off"
@@ -153,18 +170,37 @@ def tie_break_sort_component(tie_order, accession, ordinal):
     # accession provides a stable, rerun-independent order; the input ordinal
     # is kept as the final disambiguator.
     if tie_order:
-        return oracle_sort_key(tie_order, accession, ordinal)
+        return oracle_sort_key(
+            tie_order,
+            accession,
+            ordinal,
+            reverse=tie_order_oracle_source() == "db_order",
+        )
     if deterministic_tie_order_enabled():
         return (0, accession)
     return (0, ordinal)
 
 
-def ranking_basis_label(tie_order):
+def ranking_basis_label(tie_order, raw_score_available=False):
+    if tie_order and tie_order_oracle_source() == "db_order" and raw_score_available:
+        return "blast_evalue_raw_score_db_oid_desc"
     if tie_order:
         return "evalue_bitscore_oracle_ordinal"
     if deterministic_tie_order_enabled():
         return "evalue_bitscore_accession_ordinal"
     return "evalue_bitscore_ordinal"
+
+
+def selection_equivalence_label(tie_order, strict_oracle, raw_score_available):
+    if strict_oracle and tie_order:
+        return "strict_query_oracle"
+    if (
+        tie_order
+        and tie_order_oracle_source() == "db_order"
+        and raw_score_available
+    ):
+        return "full_db_hitlist_exact"
+    return "heuristic"
 
 
 def apply_diversity_reservation(selected, sorted_hits, limit, subject_key):
@@ -232,13 +268,21 @@ def apply_diversity_reservation(selected, sorted_hits, limit, subject_key):
     return kept + near_misses[:reserve], reserve, len(near_misses)
 
 
-def oracle_sort_key(order, accession, fallback):
+def oracle_rank(order, accession):
+    return order.get(accession, order.get(_accession_base(accession)))
+
+
+def oracle_sort_key(order, accession, fallback, reverse=False):
     if not order:
         return (0, fallback)
-    rank = order.get(accession, order.get(_accession_base(accession)))
+    rank = oracle_rank(order, accession)
     if rank is None:
         return (1, fallback)
-    return (0, rank)
+    return (0, -rank if reverse else rank)
+
+
+def unmapped_oracle_accessions(order, accessions):
+    return sorted({accession for accession in accessions if oracle_rank(order, accession) is None})
 
 
 def tabular_subject_accession(line, subject_idx=1):
@@ -262,26 +306,35 @@ def group_tabular_subject_hits(rows, subject_idx):
         if item is None:
             item = {
                 "accession": accession,
-                "best_evalue": row[0],
-                "best_negative_bitscore": row[1],
+                "best_evalue_key": row[0],
+                "best_negative_score": row[1],
                 "first_ordinal": row[2],
+                "display_evalue": row[4],
+                "display_bitscore": row[5],
+                "raw_score": row[6],
                 "rows": [],
             }
             grouped[key] = item
         elif (row[0], row[1]) < (
-            item["best_evalue"],
-            item["best_negative_bitscore"],
+            item["best_evalue_key"],
+            item["best_negative_score"],
         ):
-            item["best_evalue"] = row[0]
-            item["best_negative_bitscore"] = row[1]
+            item["best_evalue_key"] = row[0]
+            item["best_negative_score"] = row[1]
+            item["display_evalue"] = row[4]
+            item["display_bitscore"] = row[5]
+            item["raw_score"] = row[6]
         item["rows"].append(row)
     return [
         (
-            item["best_evalue"],
-            item["best_negative_bitscore"],
+            item["best_evalue_key"],
+            item["best_negative_score"],
             item["first_ordinal"],
             item["accession"],
             item["rows"],
+            item["display_evalue"],
+            item["display_bitscore"],
+            item["raw_score"],
         )
         for item in grouped.values()
     ]
@@ -330,9 +383,9 @@ def expand_outfmt_fields(spec):
 def resolve_tabular_columns(spec, warnings):
     """Resolve group/rank/oracle column indices BY NAME from a tabular outfmt.
 
-    Returns ``(qseqid_idx, evalue_idx, bitscore_idx, subject_idx)`` where the
-    query and subject indices may be ``None``. Raises ``ValueError`` when evalue
-    or bitscore is absent (the merge cannot re-rank shard hits without them). A
+    Returns ``(qseqid_idx, evalue_idx, bitscore_idx, score_idx, subject_idx)``
+    where the query, raw-score, and subject indices may be ``None``. Raises
+    ``ValueError`` when evalue or bitscore is absent. A
     missing query column means the caller merges every hit as a single query
     group (correct only for single-query searches); a missing subject column
     disables the tie-order oracle / deterministic accession tie-break.
@@ -348,6 +401,7 @@ def resolve_tabular_columns(spec, warnings):
     qseqid_idx = first_index(_QUERY_FIELD_CODES)
     evalue_idx = first_index({"evalue"})
     bitscore_idx = first_index({"bitscore"})
+    score_idx = first_index({"score"})
     subject_idx = first_index(_SUBJECT_FIELD_CODES)
     if evalue_idx is None or bitscore_idx is None:
         raise ValueError(
@@ -365,7 +419,7 @@ def resolve_tabular_columns(spec, warnings):
             "deterministic accession tie-break are disabled, and max_target_seqs "
             "plus diversity reservation operate on rows instead of subjects"
         )
-    return qseqid_idx, evalue_idx, bitscore_idx, subject_idx
+    return qseqid_idx, evalue_idx, bitscore_idx, score_idx, subject_idx
 
 
 def xml_subject_accession(hit):
@@ -462,6 +516,7 @@ def parse_outfmt_spec(options_text):
 def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings, outfmt="6", outfmt_spec=""):
     oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
     strict_oracle = bool(tie_order) and strict_oracle_enabled()
+    db_order_exact = bool(tie_order) and tie_order_oracle_source() == "db_order"
     if strict_oracle:
         warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
     # Resolve the group / rank / oracle columns BY NAME from the outfmt
@@ -469,18 +524,29 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     # `7 sseqid staxids ... evalue bitscore ...`). For a plain or `std`-prefixed
     # layout these resolve back to the historical positions (qseqid=0,
     # sseqid=1, evalue=10, bitscore=11), so existing runs are byte-identical.
-    qseqid_idx, evalue_idx, bitscore_idx, subject_idx = resolve_tabular_columns(
+    qseqid_idx, evalue_idx, bitscore_idx, score_idx, subject_idx = resolve_tabular_columns(
         outfmt_spec, warnings
     )
     # A subject accession column is required for the tie-order oracle and the
     # deterministic accession tie-break; without it, neither can run.
     if subject_idx is None:
+        if db_order_exact:
+            raise ValueError(
+                "DB-order exact merge requires a subject accession column in outfmt"
+            )
         strict_oracle = False
         tie_order = {}
+        db_order_exact = False
+    if db_order_exact and score_idx is None:
+        raise ValueError(
+            "DB-order exact tabular merge requires the raw score column in outfmt"
+        )
     # Lowest column count a data row must have for every resolved index to be
     # addressable (mirrors the historical `< 12` guard for the std layout).
     min_required_cols = max(
-        idx for idx in (qseqid_idx, evalue_idx, bitscore_idx, subject_idx) if idx is not None
+        idx
+        for idx in (qseqid_idx, evalue_idx, bitscore_idx, score_idx, subject_idx)
+        if idx is not None
     ) + 1
     query_hits = defaultdict(list)
     unsupported_rows = 0
@@ -517,27 +583,48 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                 try:
                     evalue = float(cols[evalue_idx])
                     bitscore = float(cols[bitscore_idx])
+                    raw_score = float(cols[score_idx]) if score_idx is not None else None
                 except ValueError:
                     unsupported_rows += 1
                     continue
+                ranking_score = raw_score if raw_score is not None else bitscore
                 group_key = cols[qseqid_idx] if qseqid_idx is not None else ""
-                query_hits[group_key].append((evalue, -bitscore, ordinal, line))
+                query_hits[group_key].append(
+                    (
+                        blast_evalue_sort_key(evalue),
+                        -ranking_score,
+                        ordinal,
+                        line,
+                        evalue,
+                        bitscore,
+                        raw_score,
+                    )
+                )
                 ordinal += 1
 
     if unsupported_rows:
         warnings.append("Some rows were skipped because they were not outfmt 6 compatible")
 
+    resolved_fields = expand_outfmt_fields(outfmt_spec)
     fields = captured_fields or (
-        "query acc.ver, subject acc.ver, % identity, alignment length, mismatches, "
-        "gap opens, q. start, q. end, s. start, s. end, evalue, bit score"
+        ", ".join(resolved_fields)
+        if resolved_fields != _STD_TABULAR_FIELDS
+        else (
+            "query acc.ver, subject acc.ver, % identity, alignment length, mismatches, "
+            "gap opens, q. start, q. end, s. start, s. end, evalue, bit score"
+        )
     )
     blast_label = blast_program.upper() if blast_program else "BLAST"
     tie_break_count = 0
     tie_cutoff_overflow_count = 0
     tie_cutoff_queries = []
     oracle_missing_queries = []
-    diversity_limit = 0 if strict_oracle else diversity_aware_cutoff_limit()
-    diversity_mode = diversity_reservation_mode(diversity_limit, strict_oracle)
+    diversity_limit = (
+        0 if strict_oracle or db_order_exact else diversity_aware_cutoff_limit()
+    )
+    diversity_mode = diversity_reservation_mode(
+        diversity_limit, strict_oracle, db_order_exact
+    )
     diversity_reserved_count = 0
     diversity_candidate_count = 0
     diversity_queries = []
@@ -549,6 +636,16 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         for query_id in sorted(query_hits):
             hits = group_tabular_subject_hits(query_hits[query_id], subject_idx)
             total_input_subjects += len(hits)
+            if db_order_exact:
+                unmapped = unmapped_oracle_accessions(
+                    tie_order, (hit[3] for hit in hits)
+                )
+                if unmapped:
+                    raise ValueError(
+                        "DB-order oracle does not cover all candidate subjects; "
+                        f"query={query_id!r} missing={len(unmapped)} "
+                        f"first={unmapped[:10]}"
+                    )
             if strict_oracle:
                 observed_keys = observed_accession_keys(
                     hit[3] for hit in hits
@@ -593,16 +690,17 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                 if cutoff_overflow:
                     tie_cutoff_overflow_count += cutoff_overflow
                     if len(tie_cutoff_queries) < 10:
-                        tie_cutoff_queries.append(
-                            {
-                                "query_id": query_id,
-                                "evalue": cutoff_signature[0],
-                                "bitscore": -cutoff_signature[1],
-                                "tie_input_count": cutoff_input_count,
-                                "tie_selected_count": cutoff_selected_count,
-                                "tie_overflow_count": cutoff_overflow,
-                            }
-                        )
+                        cutoff_item = {
+                            "query_id": query_id,
+                            "evalue": selected[-1][5],
+                            "bitscore": selected[-1][6],
+                            "tie_input_count": cutoff_input_count,
+                            "tie_selected_count": cutoff_selected_count,
+                            "tie_overflow_count": cutoff_overflow,
+                        }
+                        if selected[-1][7] is not None:
+                            cutoff_item["score"] = selected[-1][7]
+                        tie_cutoff_queries.append(cutoff_item)
             # Diversity-aware reservation runs AFTER cutoff detection so the
             # truncation report still reflects the pristine strict top-N window.
             if diversity_limit != 0 and selected and len(sorted_hits) > len(selected):
@@ -636,10 +734,15 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
             total_output_subjects += len(selected)
 
     if tie_break_count:
-        warnings.append(
-            "Ties were resolved deterministically but may not match full-DB BLAST internal order"
-        )
-    if tie_cutoff_overflow_count:
+        if db_order_exact:
+            warnings.append(
+                "Ties were resolved with the BLAST full-DB raw-score and OID comparator"
+            )
+        else:
+            warnings.append(
+                "Ties were resolved deterministically but may not match full-DB BLAST internal order"
+            )
+    if tie_cutoff_overflow_count and not db_order_exact:
         warnings.append(
             "The max_target_seqs cutoff splits a tied score class; strict Web BLAST "
             "ordering may require original BLAST DB subject order"
@@ -660,6 +763,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
             "evalue": evalue_idx,
             "bitscore": bitscore_idx,
             "subject": subject_idx,
+            **({"score": score_idx} if score_idx is not None else {}),
         },
         "max_target_seqs": max_hits,
         "queries": len(query_hits),
@@ -680,8 +784,12 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         "diversity_reservation_mode": diversity_mode,
         "diversity_queries": diversity_queries,
         "num_shards": int(num_shards),
-        "ranking_basis": ranking_basis_label(tie_order),
+        "ranking_basis": ranking_basis_label(tie_order, score_idx is not None),
+        "selection_equivalence": selection_equivalence_label(
+            tie_order, strict_oracle, score_idx is not None
+        ),
         "tie_order_oracle_path": oracle_path,
+        "tie_order_oracle_source": tie_order_oracle_source() if tie_order else None,
         "tie_order_oracle_accessions": oracle_unique_accessions,
         "tie_order_oracle_strict": strict_oracle,
         "tie_order_oracle_missing_count": sum(
@@ -728,23 +836,184 @@ def normalize_sharded_db_name(db_name):
     return re.sub(r"_shard_\d+$", "", stripped)
 
 
+def _length_adjustment_blast_options(options_text):
+    tokens = shlex.split(options_text or "")
+    valued = {"-task", "-reward", "-penalty", "-gapopen", "-gapextend"}
+    out = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in valued and index + 1 < len(tokens):
+            out.extend((token, tokens[index + 1]))
+            index += 2
+            continue
+        if any(token.startswith(f"{flag}=") for flag in valued):
+            out.append(token)
+        elif token == "-ungapped":
+            out.append(token)
+            if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
+                out.append(tokens[index + 1])
+                index += 1
+        index += 1
+    return out
+
+
+def recalibrate_full_db_hsp_lengths(queries, blast_program, options_text, warnings):
+    """Return native full-DB length adjustments for exact blastn XML merges."""
+    if blast_program != "blastn":
+        warnings.append(
+            "Full-DB Statistics_hsp-len recalibration is currently available for blastn only"
+        )
+        return {}
+    blastn = shutil.which("blastn")
+    makeblastdb = shutil.which("makeblastdb")
+    if not blastn or not makeblastdb:
+        warnings.append(
+            "BLAST tools were unavailable for full-DB Statistics_hsp-len recalibration"
+        )
+        return {}
+
+    grouped = defaultdict(list)
+    for query_id, item in queries.items():
+        try:
+            query_len = int(text_at(item["template"], "Iteration_query-len", "0"))
+        except ValueError:
+            query_len = 0
+        if query_len > 0 and item["db_len"] > 0 and item["db_num"] > 0:
+            grouped[(item["db_len"], item["db_num"])].append((query_id, query_len))
+    calibrated = {}
+    try:
+        relevant_options = _length_adjustment_blast_options(options_text)
+    except ValueError as exc:
+        warnings.append(f"Could not parse options for HSP-length recalibration: {exc}")
+        return {}
+
+    for group_index, ((db_len, db_num), query_items) in enumerate(grouped.items()):
+        try:
+            with tempfile.TemporaryDirectory(prefix="elb-hsp-len-") as temp_dir:
+                root = Path(temp_dir)
+                query_path = root / "queries.fa"
+                query_path.write_text(
+                    "".join(
+                        f">q{index}\n{('ACGT' * ((length + 3) // 4))[:length]}\n"
+                        for index, (_query_id, length) in enumerate(query_items)
+                    )
+                )
+                max_length = max(length for _query_id, length in query_items)
+                subject_path = root / "tiny.fa"
+                subject_path.write_text(
+                    f">dummy\n{('ACGT' * ((max_length + 3) // 4))[:max_length]}\n"
+                )
+                tiny_db = root / "tiny"
+                subprocess.run(
+                    [
+                        makeblastdb,
+                        "-in",
+                        str(subject_path),
+                        "-dbtype",
+                        "nucl",
+                        "-parse_seqids",
+                        "-out",
+                        str(tiny_db),
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+                alias = root / "virtual.nal"
+                alias.write_text(
+                    f"TITLE full-db-stats-{group_index}\n"
+                    "DBLIST tiny\n"
+                    f"NSEQ {db_num}\n"
+                    f"LENGTH {db_len}\n"
+                )
+                output = root / "stats.xml"
+                subprocess.run(
+                    [
+                        blastn,
+                        "-query",
+                        str(query_path),
+                        "-db",
+                        str(root / "virtual"),
+                        "-outfmt",
+                        "5",
+                        "-max_target_seqs",
+                        "1",
+                        "-dust",
+                        "no",
+                        *relevant_options,
+                        "-out",
+                        str(output),
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+                root_xml = ET.parse(output).getroot()
+                iterations = root_xml.findall("./BlastOutput_iterations/Iteration")
+                if len(iterations) != len(query_items):
+                    raise ValueError("BLAST statistics probe returned an unexpected query count")
+                for (query_id, _length), iteration in zip(
+                    query_items, iterations, strict=True
+                ):
+                    stats = iteration.find("./Iteration_stat/Statistics")
+                    hsp_len = int_at(stats, "Statistics_hsp-len") if stats is not None else None
+                    if hsp_len is None:
+                        raise ValueError("BLAST statistics probe omitted Statistics_hsp-len")
+                    calibrated[query_id] = hsp_len
+        except (OSError, subprocess.SubprocessError, ET.ParseError, ValueError) as exc:
+            warnings.append(
+                "Full-DB Statistics_hsp-len recalibration failed for "
+                f"db_len={db_len} db_num={db_num}: {type(exc).__name__}"
+            )
+    return calibrated
+
+
 def hit_rank(hit):
+    best_key = (float("inf"), float("inf"))
     best_evalue = float("inf")
     best_bitscore = float("-inf")
+    best_raw_score = float("-inf")
     hsp_count = 0
     for hsp in hit.findall("./Hit_hsps/Hsp"):
         hsp_count += 1
         try:
-            best_evalue = min(best_evalue, float(text_at(hsp, "Hsp_evalue", "inf")))
-            best_bitscore = max(best_bitscore, float(text_at(hsp, "Hsp_bit-score", "-inf")))
+            evalue = float(text_at(hsp, "Hsp_evalue", "inf"))
+            bitscore = float(text_at(hsp, "Hsp_bit-score", "-inf"))
+            raw_score = float(text_at(hsp, "Hsp_score", "-inf"))
         except ValueError:
             continue
-    return best_evalue, -best_bitscore, hsp_count
+        key = (blast_evalue_sort_key(evalue), -raw_score)
+        if key < best_key:
+            best_key = key
+            best_evalue = evalue
+            best_bitscore = bitscore
+            best_raw_score = raw_score
+    return (
+        best_key[0],
+        best_key[1],
+        hsp_count,
+        best_evalue,
+        best_bitscore,
+        best_raw_score,
+    )
 
 
-def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings):
+def merge_xml(
+    input_tsv,
+    output_gz,
+    report_json,
+    num_shards,
+    max_hits,
+    warnings,
+    blast_program,
+    blast_options,
+):
     oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
     strict_oracle = bool(tie_order) and strict_oracle_enabled()
+    db_order_exact = bool(tie_order) and tie_order_oracle_source() == "db_order"
     if strict_oracle:
         warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
     input_root = Path(input_tsv).parent
@@ -824,13 +1093,31 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
             if eff_space is not None:
                 queries[query_id]["eff_spaces"][eff_space] += 1
             for hit in iteration.findall("./Iteration_hits/Hit"):
-                evalue, negative_bitscore, hsp_count = hit_rank(hit)
+                (
+                    evalue_key,
+                    negative_score,
+                    hsp_count,
+                    display_evalue,
+                    display_bitscore,
+                    raw_score,
+                ) = hit_rank(hit)
                 if hsp_count == 0:
                     unsupported_records += 1
                     continue
                 total_input_hits += 1
                 total_input_hsps += hsp_count
-                queries[query_id]["hits"].append((evalue, negative_bitscore, -hsp_count, ordinal, copy.deepcopy(hit)))
+                queries[query_id]["hits"].append(
+                    (
+                        evalue_key,
+                        negative_score,
+                        ordinal,
+                        copy.deepcopy(hit),
+                        display_evalue,
+                        display_bitscore,
+                        hsp_count,
+                        raw_score,
+                    )
+                )
                 ordinal += 1
 
     if base_root is None or iterations_node is None:
@@ -838,12 +1125,24 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
     if unsupported_records:
         warnings.append("Some XML records were skipped because query or HSP metadata was incomplete")
 
+    calibrated_hsp_lengths = (
+        recalibrate_full_db_hsp_lengths(
+            queries, blast_program, blast_options, warnings
+        )
+        if db_order_exact
+        else {}
+    )
+
     tie_break_count = 0
     tie_cutoff_overflow_count = 0
     tie_cutoff_queries = []
     oracle_missing_queries = []
-    diversity_limit = 0 if strict_oracle else diversity_aware_cutoff_limit()
-    diversity_mode = diversity_reservation_mode(diversity_limit, strict_oracle)
+    diversity_limit = (
+        0 if strict_oracle or db_order_exact else diversity_aware_cutoff_limit()
+    )
+    diversity_mode = diversity_reservation_mode(
+        diversity_limit, strict_oracle, db_order_exact
+    )
     diversity_reserved_count = 0
     diversity_candidate_count = 0
     diversity_queries = []
@@ -852,8 +1151,18 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
     for query_id in query_order:
         item = queries[query_id]
         hits = item["hits"]
+        if db_order_exact:
+            unmapped = unmapped_oracle_accessions(
+                tie_order, (xml_subject_accession(hit[3]) for hit in hits)
+            )
+            if unmapped:
+                raise ValueError(
+                    "DB-order oracle does not cover all candidate subjects; "
+                    f"query={query_id!r} missing={len(unmapped)} "
+                    f"first={unmapped[:10]}"
+                )
         if strict_oracle:
-            observed_keys = observed_accession_keys(xml_subject_accession(hit[4]) for hit in hits)
+            observed_keys = observed_accession_keys(xml_subject_accession(hit[3]) for hit in hits)
             missing_accessions = oracle_missing_accessions(oracle_accessions, observed_keys)
             if missing_accessions:
                 oracle_missing_queries.append(
@@ -866,18 +1175,17 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
             hits = [
                 hit
                 for hit in hits
-                if oracle_sort_key(tie_order, xml_subject_accession(hit[4]), hit[3])[0] == 0
+                if oracle_sort_key(tie_order, xml_subject_accession(hit[3]), hit[2])[0] == 0
             ]
-        pair_counts = Counter((hit[0], hit[1], hit[2]) for hit in hits)
+        pair_counts = Counter((hit[0], hit[1]) for hit in hits)
         tie_break_count += sum(count - 1 for count in pair_counts.values() if count > 1)
         sorted_hits = sorted(
             hits,
             key=lambda hit: (
                 hit[0],
                 hit[1],
+                tie_break_sort_component(tie_order, xml_subject_accession(hit[3]), hit[2]),
                 hit[2],
-                tie_break_sort_component(tie_order, xml_subject_accession(hit[4]), hit[3]),
-                hit[3],
             ),
         )
         selected = sorted_hits[:max_hits]
@@ -896,9 +1204,10 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
                     tie_cutoff_queries.append(
                         {
                             "query_id": query_id,
-                            "evalue": cutoff_signature[0],
-                            "bitscore": -cutoff_signature[1],
-                            "hsp_count": -selected[-1][2],
+                            "evalue": selected[-1][4],
+                            "bitscore": selected[-1][5],
+                            "score": selected[-1][7],
+                            "hsp_count": selected[-1][6],
                             "tie_input_count": cutoff_input_count,
                             "tie_selected_count": cutoff_selected_count,
                             "tie_overflow_count": cutoff_overflow,
@@ -909,7 +1218,7 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
                 selected,
                 sorted_hits,
                 diversity_limit,
-                lambda hit: xml_subject_accession(hit[4]),
+                lambda hit: xml_subject_accession(hit[3]),
             )
             if reserved:
                 diversity_reserved_count += reserved
@@ -929,7 +1238,7 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
             hits_node = ET.SubElement(template, "Iteration_hits")
         hits_node.clear()
         for index, selected_hit in enumerate(selected, start=1):
-            hit = selected_hit[4]
+            hit = selected_hit[3]
             hit_num = hit.find("Hit_num")
             if hit_num is not None:
                 hit_num.text = str(index)
@@ -949,18 +1258,27 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
             if len(item["eff_spaces"]) == 1:
                 eff_space = next(iter(item["eff_spaces"]))
                 set_child_text(statistics, "Statistics_eff-space", eff_space)
-                try:
-                    query_len = int(text_at(template, "Iteration_query-len", "0"))
-                except ValueError:
-                    query_len = 0
-                hsp_len = derive_hsp_len(query_len, item["db_len"], item["db_num"], eff_space)
-                if hsp_len is not None:
-                    set_child_text(statistics, "Statistics_hsp-len", hsp_len)
-                else:
-                    warnings.append(
-                        f"Could not derive merged HSP length for query {query_id}; "
-                        "kept the first shard value"
+                if query_id in calibrated_hsp_lengths:
+                    set_child_text(
+                        statistics,
+                        "Statistics_hsp-len",
+                        calibrated_hsp_lengths[query_id],
                     )
+                else:
+                    try:
+                        query_len = int(text_at(template, "Iteration_query-len", "0"))
+                    except ValueError:
+                        query_len = 0
+                    hsp_len = derive_hsp_len(
+                        query_len, item["db_len"], item["db_num"], eff_space
+                    )
+                    if hsp_len is not None:
+                        set_child_text(statistics, "Statistics_hsp-len", hsp_len)
+                    else:
+                        warnings.append(
+                            f"Could not derive merged HSP length for query {query_id}; "
+                            "kept the first shard value"
+                        )
             elif item["eff_spaces"]:
                 warnings.append(
                     f"Shard effective search spaces differ for query {query_id}; "
@@ -971,10 +1289,15 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         iterations_node.append(template)
 
     if tie_break_count:
-        warnings.append(
-            "Ties were resolved deterministically but may not match full-DB BLAST internal order"
-        )
-    if tie_cutoff_overflow_count:
+        if db_order_exact:
+            warnings.append(
+                "Ties were resolved with the BLAST full-DB raw-score and OID comparator"
+            )
+        else:
+            warnings.append(
+                "Ties were resolved deterministically but may not match full-DB BLAST internal order"
+            )
+    if tie_cutoff_overflow_count and not db_order_exact:
         warnings.append(
             "The max_target_seqs cutoff splits a tied score class; strict Web BLAST "
             "ordering may require original BLAST DB subject order"
@@ -1011,15 +1334,24 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         "diversity_queries": diversity_queries,
         "num_shards": int(num_shards),
         "ranking_basis": (
-            "best_hsp_evalue_bitscore_oracle_ordinal"
+            "blast_evalue_raw_score_db_oid_desc"
+            if db_order_exact
+            else "best_hsp_evalue_raw_score_oracle_ordinal"
             if tie_order
-            else (
-                "best_hsp_evalue_bitscore_accession_ordinal"
-                if deterministic_tie_order_enabled()
-                else "best_hsp_evalue_bitscore_ordinal"
-            )
+            else "best_hsp_evalue_raw_score_accession_ordinal"
+            if deterministic_tie_order_enabled()
+            else "best_hsp_evalue_raw_score_ordinal"
+        ),
+        "selection_equivalence": selection_equivalence_label(
+            tie_order, strict_oracle, True
+        ),
+        "statistics_equivalence": (
+            "full_db_exact"
+            if db_order_exact and len(calibrated_hsp_lengths) == len(query_order)
+            else "partial"
         ),
         "tie_order_oracle_path": oracle_path,
+        "tie_order_oracle_source": tie_order_oracle_source() if tie_order else None,
         "tie_order_oracle_accessions": oracle_unique_accessions,
         "tie_order_oracle_strict": strict_oracle,
         "tie_order_oracle_missing_count": sum(
@@ -1037,7 +1369,16 @@ max_hits, warnings = parse_max_target_seqs(blast_options)
 outfmt = parse_outfmt(blast_options)
 outfmt_spec = parse_outfmt_spec(blast_options)
 if outfmt == "5":
-    total_hits, query_count = merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
+    total_hits, query_count = merge_xml(
+        input_tsv,
+        output_gz,
+        report_json,
+        num_shards,
+        max_hits,
+        warnings,
+        blast_program,
+        blast_options,
+    )
 elif outfmt in ("6", "7"):
     # outfmt 6/7 share the same tabular data rows (7 only adds comment lines,
     # which the merge skips and re-emits). The merge resolves its group/rank/

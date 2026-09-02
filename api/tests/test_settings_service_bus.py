@@ -1263,10 +1263,11 @@ def test_send_preserves_blast_options_for_v1_path(
     sent = captured["body"]
     assert isinstance(sent, dict)
     # Multi-token outfmt + extra survive (the XML model would have dropped them);
-    # the dashboard appends the result-UI parity columns (sscinames/stitle/qcovs)
-    # so a tabular run's Description / Scientific name / Query Cover populate.
+    # the dashboard appends result-UI parity columns (sscinames/stitle/qcovs)
+    # plus raw score, which exact shard merging needs for native hitlist ranking.
     assert (
-        sent["blast_options"]["outfmt"] == "7 std staxids sstrand qseq sseq sscinames stitle qcovs"
+        sent["blast_options"]["outfmt"]
+        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs score"
     )
     assert "-searchsp" in sent["blast_options"]["extra"]
     assert "options" not in sent  # the XML options object is not synthesised

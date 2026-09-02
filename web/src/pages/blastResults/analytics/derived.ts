@@ -471,14 +471,37 @@ export function parityVerdict(job: BlastJobSummary | null | undefined): ParityVe
     };
   }
   const warnings = contract.warnings?.length ?? 0;
-  if (contract.mode === "precise" && contract.eligible) {
+  if (
+    contract.mode === "precise" &&
+    contract.eligible &&
+    contract.level === "full_db_hitlist_exact_sharded"
+  ) {
     return {
       state: "equivalent",
-      label: "NCBI-equivalent",
+      label: "Full-DB exact",
       detail:
         warnings > 0
-          ? `Precise mode with ${warnings} advisory note(s).`
-          : "Precise mode: E-values computed against the pinned full-database search space.",
+          ? `Exact full-DB hitlist selection with ${warnings} advisory note(s).`
+          : "Exact full-DB hitlist membership and order for the same database snapshot and BLAST options.",
+    };
+  }
+  if (
+    contract.mode === "precise" &&
+    contract.eligible &&
+    contract.level === "verified_full_database_profile"
+  ) {
+    return {
+      state: "equivalent",
+      label: "Native full DB",
+      detail: "The search ran against the full database without a shard merge.",
+    };
+  }
+  if (contract.mode === "precise" && contract.eligible) {
+    return {
+      state: "unknown",
+      label: "Legacy precision",
+      detail:
+        "Search-space precision was recorded, but exact hitlist membership was not verified.",
     };
   }
   if (contract.mode === "calibration_required") {
@@ -541,8 +564,12 @@ export function buildMethodsText(job: BlastJobSummary | null | undefined): strin
     );
   }
   const verdict = parityVerdict(job);
-  if (verdict.state === "equivalent") {
-    parts.push("This configuration is equivalent to a single full-database NCBI BLAST run.");
+  if (prov?.compatibility?.level === "full_db_hitlist_exact_sharded") {
+    parts.push(
+      "This sharded result reproduces full-database BLAST hitlist membership and order for the recorded database snapshot and options; NCBI parity additionally requires the same NCBI database snapshot.",
+    );
+  } else if (prov?.compatibility?.level === "verified_full_database_profile") {
+    parts.push("This search ran directly against the full database without a shard merge.");
   } else if (verdict.state === "drift") {
     parts.push(
       "Note: the database snapshot differs from the calibrated search space, so E-values may differ from a contemporaneous NCBI search.",

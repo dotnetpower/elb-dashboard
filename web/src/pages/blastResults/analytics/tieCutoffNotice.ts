@@ -1,7 +1,7 @@
 import type { BlastTieCutoff } from "@/api/blast";
 
 export interface TieCutoffNotice {
-  kind: "diversity" | "overflow";
+  kind: "diversity" | "exact" | "overflow";
   message: string;
 }
 
@@ -13,6 +13,14 @@ export function tieCutoffNotice(tieCutoff: BlastTieCutoff): TieCutoffNotice {
     max_target_seqs,
   } = tieCutoff;
   const limitText = max_target_seqs ? ` (max_target_seqs=${max_target_seqs})` : "";
+  if (tieCutoff.selection_equivalence === "full_db_hitlist_exact") {
+    return {
+      kind: "exact",
+      message: `Full-DB-exact merge used BLAST raw-score and database OID ordering${limitText}; ${overflow_count} additional tied subject${
+        overflow_count === 1 ? " was" : "s were"
+      } outside the native hitlist window.`,
+    };
+  }
   if (diversity_reserved_count > 0) {
     const candidateText = diversity_candidate_count
       ? ` from ${diversity_candidate_count} lower-scoring candidate${

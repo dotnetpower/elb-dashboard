@@ -14,7 +14,10 @@ Validation: ``uv run pytest -q api/tests/test_sharded_db_profile.py``.
 from __future__ import annotations
 
 import pytest
-from api.services.blast.submit_payload import resolve_sharded_db_resource_profile
+from api.services.blast.submit_payload import (
+    align_options_with_resource_profile,
+    resolve_sharded_db_resource_profile,
+)
 
 
 @pytest.mark.parametrize(
@@ -49,6 +52,18 @@ def test_non_standard_custom_profile_preserved() -> None:
     # A caller that set a non-standard, non-sharding profile keeps it (we only
     # upgrade empty/standard).
     assert resolve_sharded_db_resource_profile("core_nt", "custom_x") == "custom_x"
+
+
+def test_sharding_profile_aligns_options_to_precise() -> None:
+    assert align_options_with_resource_profile(
+        {"outfmt": 5, "sharding_mode": "off"}, "core_nt_safe"
+    ) == {"outfmt": 5, "sharding_mode": "precise"}
+
+
+def test_custom_profile_keeps_requested_mode() -> None:
+    assert align_options_with_resource_profile(
+        {"outfmt": 5, "sharding_mode": "off"}, "custom_x"
+    ) == {"outfmt": 5, "sharding_mode": "off"}
 
 
 def test_sharding_defaults_are_recognised_sharding_profiles() -> None:
