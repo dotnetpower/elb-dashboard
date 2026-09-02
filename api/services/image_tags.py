@@ -4,9 +4,10 @@ Responsibility: Pinned ACR image tags consumed by ElasticBLAST on AKS
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: Module import side effects and constants.
-Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
-Validation: `uv run pytest -q api/tests`.
+Risky contracts: elb-openapi builds must use the dashboard source, verify the
+pinned sibling commit, and run the local build-context patcher before Docker.
+Validation: `uv run pytest -q api/tests/test_acr_build_task.py
+api/tests/test_patch_openapi_build_context.py`.
 """
 
 from __future__ import annotations
@@ -72,7 +73,10 @@ from __future__ import annotations
 # six attempts and closed the remaining monitoring GET retry paths. 4.34 uses
 # the same verified sibling commit and ElasticBLAST source pin, with
 # content-aware reconciliation for the image-installed elb-scripts ConfigMap.
-# 4.35 adds a 900 KiB size bound and post-apply content verification. Tags 4.32
+# 4.35 adds a 900 KiB size bound and post-apply content verification. 4.38 adds
+# exact DB-order oracle attachment, immutable generation-path + search-space
+# pinning, explicit soft masking, and full-DB XML statistics recalibration.
+# 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
 # digest sha256:7bac4202…581fbf4.
@@ -99,12 +103,14 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.35",
+    "elb-openapi": "4.38",
 }
 
 # GitHub source repo for ACR Build Tasks.
 SOURCE_REPO = "https://github.com/dotnetpower/elastic-blast-azure.git"
 SOURCE_BRANCH = "master"
+DASHBOARD_SOURCE_REPO = "https://github.com/dotnetpower/elb-dashboard.git"
+OPENAPI_SIBLING_SOURCE_REF = "352a1f4ccf32dc8d76add5bcdb901530f0ad4c14"
 
 # Build info per image: context subdirectory within the repo, Dockerfile path
 # relative to the context. Image-name → build args mirror exactly what the
@@ -155,8 +161,31 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
         "dockerfile": "Dockerfile.azure",
     },
     "elb-openapi": {
-        "context": "docker-openapi",
+        # A raw sibling build omits dashboard runtime overlays. Schedule this
+        # image from the dashboard source, clone the reviewed sibling commit,
+        # patch its context, then build from the generated directory.
+        "source_repo": DASHBOARD_SOURCE_REPO,
+        "context": ".acr-openapi/docker-openapi",
         "dockerfile": "Dockerfile",
+        "timeout_seconds": "1200",
+        "pre_build_cmd": " && ".join(
+            [
+                "rm -rf .acr-openapi",
+                "git init .acr-openapi",
+                (
+                    "git -C .acr-openapi remote add origin "
+                    "https://github.com/dotnetpower/elastic-blast-azure.git"
+                ),
+                (f"git -C .acr-openapi fetch --depth 1 origin {OPENAPI_SIBLING_SOURCE_REF}"),
+                "git -C .acr-openapi checkout --detach FETCH_HEAD",
+                (f'test "$(git -C .acr-openapi rev-parse HEAD)" = "{OPENAPI_SIBLING_SOURCE_REF}"'),
+                (
+                    "grep -q 'def _replace_stale_core_nt_search_space_fallback' "
+                    "scripts/dev/patch-openapi-build-context.py"
+                ),
+                ("grep -q 'def read_active_database' scripts/dev/openapi-overlays/exact_oracle.py"),
+                ("python3 scripts/dev/patch-openapi-build-context.py .acr-openapi/docker-openapi"),
+            ]
+        ),
     },
 }
-

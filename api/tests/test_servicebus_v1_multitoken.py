@@ -47,8 +47,7 @@ def test_v1_request_accepts_multitoken_std_outfmt() -> None:
     # (sscinames/stitle/qcovs; staxids already present) so Description / Scientific
     # name / Query Cover populate for the tabular run.
     assert (
-        req.blast_options.outfmt
-        == "7 std staxids sstrand qseq sseq sscinames stitle qcovs score"
+        req.blast_options.outfmt == "7 std staxids sstrand qseq sseq sscinames stitle qcovs score"
     )
     assert req.blast_options.extra and "-searchsp" in req.blast_options.extra
     assert req.db == "core_nt"
@@ -237,8 +236,7 @@ def test_build_v1_payload_accepts_external_queue_body_without_internal_metadata(
     # staxid/ssciname/qcovhsp variants the analytics do not read).
     assert payload["blast_options"] == {
         **body["blast_options"],
-        "outfmt": body["blast_options"]["outfmt"]
-        + " staxids sscinames stitle qcovs score",
+        "outfmt": body["blast_options"]["outfmt"] + " staxids sscinames stitle qcovs score",
     }
     assert "request_id" not in payload
     assert "type" not in payload
@@ -336,6 +334,55 @@ def test_build_v1_payload_does_not_override_caller_pinned_searchsp() -> None:
     # Exactly one -searchsp token (no double-injection of the oracle value).
     assert extra.count("-searchsp") == 1
     assert str(_CORE_NT_SEARCHSP) not in extra
+
+
+def test_build_v1_payload_replaces_stale_searchsp_from_active_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda account, db: {
+            "total_letters": 998_069_435_926,
+            "total_sequences": 130_155_243,
+        },
+    )
+
+    payload = sb._build_v1_jobs_payload(_msg(_USER_BODY), ServiceBusConfig())
+
+    assert payload is not None
+    extra = payload["blast_options"]["extra"]
+    assert "-searchsp 30807003700117" in extra
+    assert str(_CORE_NT_SEARCHSP) not in extra
+    assert extra.count("-searchsp") == 1
+
+
+def test_build_v1_payload_replaces_dbsize_from_active_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args, **_kwargs: {
+            "total_letters": 998_069_435_926,
+            "total_sequences": 130_155_243,
+        },
+    )
+    body = _v1_no_searchsp_body()
+    body["blast_options"]["extra"] = "-word_size 28 -dbsize 1"
+
+    payload = sb._build_v1_jobs_payload(_msg(body), ServiceBusConfig())
+
+    assert payload is not None
+    extra = payload["blast_options"]["extra"]
+    assert "-dbsize" not in extra
+    assert "-searchsp 30807003700117" in extra
 
 
 def test_build_v1_payload_no_searchsp_for_uncalibrated_db() -> None:

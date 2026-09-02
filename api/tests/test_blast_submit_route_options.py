@@ -15,6 +15,7 @@ Validation: `uv run pytest -q api/tests/test_blast_submit_route_options.py`.
 
 from __future__ import annotations
 
+import pytest
 from api.routes._blast_shared import (
     _apply_web_blast_searchsp_default,
     _normalise_blast_submit_body,
@@ -205,18 +206,71 @@ def test_ui_openapi_and_servicebus_precise_contracts_converge() -> None:
         canonical_execution_config(ui_payload)["options"]["db_effective_search_space"]
         == expected_searchsp
     )
-    assert openapi_contracts["precision"]["required_options"] == servicebus_contracts["precision"][
-        "required_options"
-    ]
-    assert ui_contracts["precision"]["precision_level"] == openapi_contracts["precision"][
-        "precision_level"
-    ] == servicebus_contracts["precision"]["precision_level"]
-    assert ui_contracts["precision"]["merge_strategy"] == openapi_contracts["precision"][
-        "merge_strategy"
-    ] == servicebus_contracts["precision"]["merge_strategy"]
+    assert (
+        openapi_contracts["precision"]["required_options"]
+        == servicebus_contracts["precision"]["required_options"]
+    )
+    assert (
+        ui_contracts["precision"]["precision_level"]
+        == openapi_contracts["precision"]["precision_level"]
+        == servicebus_contracts["precision"]["precision_level"]
+    )
+    assert (
+        ui_contracts["precision"]["merge_strategy"]
+        == openapi_contracts["precision"]["merge_strategy"]
+        == servicebus_contracts["precision"]["merge_strategy"]
+    )
     assert ui_contracts["compatibility_contract"]["searchsp"] == expected_searchsp
     assert openapi_contracts["compatibility_contract"]["searchsp"] == expected_searchsp
     assert servicebus_contracts["compatibility_contract"]["searchsp"] == expected_searchsp
+
+
+def test_servicebus_xml_replaces_stale_searchsp_from_active_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.service_bus import ParsedMessage
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb_tasks
+
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda account, db: {
+            "total_letters": 998_069_435_926,
+            "total_sequences": 130_155_243,
+        },
+    )
+    body = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": ">q1\nATGCATGCATGC\n",
+        "options": {
+            "outfmt": 5,
+            "sharding_mode": "precise",
+            "db_effective_search_space": 32_156_241_807_668,
+        },
+        "external_correlation_id": "corr-live-searchsp",
+    }
+
+    payload = sb_tasks._build_request_payload(
+        ParsedMessage(
+            body=body,
+            raw_body="",
+            message_id="m1",
+            correlation_id="corr-live-searchsp",
+            subject="blast.request",
+            content_type="application/json",
+            enqueued_time_utc=None,
+            sequence_number=1,
+            application_properties={},
+        ),
+        ServiceBusConfig(),
+    )
+
+    assert payload is not None
+    assert payload["options"]["db_effective_search_space"] == 30_807_003_700_117
+    assert payload["options"]["db_total_letters"] == 998_069_435_926
+    assert payload["options"]["db_total_sequences"] == 130_155_243
 
 
 def test_precise_tabular_plan_adds_exact_score_and_db_order_oracle() -> None:
@@ -235,9 +289,7 @@ def test_precise_tabular_plan_adds_exact_score_and_db_order_oracle() -> None:
     assert options["use_db_order_oracle"] is True
     assert "outfmt" not in options
     assert options["additional_options"].count("-outfmt") == 1
-    assert "-outfmt 6 std staxids sscinames stitle qcovs score" in options[
-        "additional_options"
-    ]
+    assert "-outfmt 6 std staxids sscinames stitle qcovs score" in options["additional_options"]
 
 
 def test_precise_tabular_plan_does_not_duplicate_existing_score() -> None:
@@ -277,9 +329,7 @@ def test_normalise_precise_tabular_body_persists_exact_runtime_options() -> None
 
     options = normalised["options"]
     assert options["use_db_order_oracle"] is True
-    assert "-outfmt 6 std staxids sscinames stitle qcovs score" in options[
-        "additional_options"
-    ]
+    assert "-outfmt 6 std staxids sscinames stitle qcovs score" in options["additional_options"]
 
 
 def test_browser_submit_degrades_on_calibration_snapshot_mismatch() -> None:

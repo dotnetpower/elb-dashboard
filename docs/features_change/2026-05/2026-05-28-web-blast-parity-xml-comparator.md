@@ -34,8 +34,11 @@ as NCBI Web BLAST for every reference gene.
   `parse_summary`, `compare_summaries`, and `verify_exclusion` as a reusable
   offline harness. The comparator auto-detects `core_nt` snapshot drift via
   `Statistics_db-num` / `db-len` and downgrades the strictness of the
-  comparison from per-HSP equality to accession rank-set equality when drift
-  is present, instead of silently passing or silently failing.
+  comparison as a separate accession-containment diagnostic when drift is
+  present. A 2026-09-02 hardening follow-up added `exact_equivalent` and made
+  the live acceptance gate require matching snapshots plus every canonical HSP
+  and search-statistics field; drift diagnostics can no longer be mistaken for
+  exact parity.
 - The user-guide page **Web BLAST Parity Validation** is updated to describe
   the result-side contract, the candidate-vs-reference parity workflow gated by
   `ELB_PARITY_CANDIDATE_DIR`, and the new database parity policy.
@@ -94,8 +97,8 @@ research ledger tick.
   is required to keep emitting is the assertion target.
 - **AC5** XML comparison passes with zero unexplained differences ->
   `compare_summaries` + self-equivalence + opt-in candidate parity. Snapshot
-  drift is *explained* (and reported in `ParityReport.snapshot_drift`), not
-  silenced.
+  drift is explained and reported, but `exact_equivalent` remains false until
+  the reference and candidate use matching database statistics.
 - **AC6** Taxonomic exclusion filters are verified ->
   `verify_exclusion` checks that the query's own NCBI source accession never
   re-hits itself, which is the universal-truth taxonomic exclusion check

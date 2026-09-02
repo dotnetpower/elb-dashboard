@@ -84,10 +84,10 @@ const SMALL_16S_FASTA =
     "GACGTTACCCGCAGAAGAAGCACCGGCTAACTCCGTGCCAGCAGCCGCGGTAATACGGAG",
   ].join("\n") + "\n";
 
-// Web BLAST-equivalent CLI flags for a core_nt run (search-space correction
-// makes the e-values match NCBI Web BLAST). No `-outfmt` here — the format is
-// carried by the `outfmt` field so the standard columns are never duplicated.
-const CORE_NT_EXTRA = "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668";
+// Web BLAST-compatible caller-controlled flags for a core_nt run. Search space
+// is intentionally absent: the backend derives it from the active DB generation.
+// No `-outfmt` here — the format field owns the standard columns.
+const CORE_NT_EXTRA = "-word_size 28 -dust yes -soft_masking false";
 
 // Detects a -searchsp / -dbsize flag already present in the raw `extra` string
 // (mirrors the backend guard): when present, the structured searchsp field is

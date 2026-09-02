@@ -1,7 +1,8 @@
 """Tests for the elb-openapi rebuild + redeploy orchestration task and routes.
 
 Responsibility: Pin the charter rollout-order gate — the orchestrator enqueues
-    ``deploy_openapi_service`` ONLY when the ACR build reaches ``Succeeded``; a
+    ``deploy_openapi_service`` ONLY when ACR private posture is restored and the
+    build reaches ``Succeeded``; a
     failed, timed-out, or unscheduled build returns a terminal ``failed`` payload
     and never deploys. Also pin the bounded poll, the ``dry_run`` no-side-effect
     path, and the route validation + envelope shaping.
@@ -9,8 +10,8 @@ Edit boundaries: Task + route behaviour only. The ACR build scheduling, the ACR
     run poll, the deploy enqueue, and the route's Celery enqueue are all
     monkeypatched so the suite never touches Azure or a live broker.
 Key entry points: the ``test_*`` functions.
-Risky contracts: deploy-only-on-success gate, bounded poll, dry_run side-effect
-    freedom, route 400 on missing params.
+Risky contracts: restore-before-deploy, deploy-only-on-success gate, bounded
+    poll, dry_run side-effect freedom, route 400 on missing params.
 Validation: ``uv run pytest -q api/tests/test_openapi_rebuild.py``.
 """
 
@@ -32,6 +33,8 @@ def _apply(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, Any]:
     """
     scheduled: list[dict[str, Any]] = []
     deployed: list[dict[str, Any]] = []
+    access_events: list[tuple[str, str]] = []
+    cancelled: list[str] = []
 
     def fake_schedule(sub: str, rg: str, registry: str) -> str:
         scheduled.append({"sub": sub, "rg": rg, "registry": registry})
@@ -44,12 +47,27 @@ def _apply(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, Any]:
         deployed.append(kwargs)
         return overrides.get("deploy_task_id", "deploy-789")
 
+    def fake_open(_sub: str, _rg: str, _registry: str) -> object:
+        access_events.append(("open", ""))
+        if overrides.get("open_raises"):
+            raise RuntimeError("open failed")
+        return object()
+
+    def fake_restore(_lease: object) -> bool:
+        access_events.append(("restore", ""))
+        return bool(overrides.get("restore_ok", True))
+
+    def fake_cancel(_sub: str, _rg: str, _registry: str, run_id: str) -> bool:
+        cancelled.append(run_id)
+        return bool(overrides.get("cancel_ok", True))
+
+    monkeypatch.setattr(rebuild_mod, "_open_acr_build_access", fake_open)
+    monkeypatch.setattr(rebuild_mod, "_restore_acr_build_access", fake_restore)
+    monkeypatch.setattr(rebuild_mod, "_cancel_acr_build_and_wait", fake_cancel)
     monkeypatch.setattr(rebuild_mod, "_schedule_openapi_build", fake_schedule)
     monkeypatch.setattr(rebuild_mod, "_poll_acr_build", fake_poll)
     monkeypatch.setattr(rebuild_mod, "_enqueue_openapi_deploy", fake_enqueue)
-    monkeypatch.setattr(
-        "api.services.acr_build_state.record_pending_build", lambda *a, **k: None
-    )
+    monkeypatch.setattr("api.services.acr_build_state.record_pending_build", lambda *a, **k: None)
 
     kwargs: dict[str, Any] = {
         "subscription_id": "sub-1",
@@ -68,6 +86,8 @@ def _apply(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, Any]:
     assert isinstance(result, dict), result
     result["_scheduled"] = scheduled
     result["_deployed"] = deployed
+    result["_access_events"] = access_events
+    result["_cancelled"] = cancelled
     return result
 
 
@@ -80,6 +100,8 @@ def test_build_success_enqueues_deploy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(out["_deployed"]) == 1
     # ACR RG forwarded to the deploy task.
     assert out["_deployed"][0]["acr_resource_group"] == "rg-acr"
+    assert out["_access_events"] == [("open", ""), ("restore", "")]
+    assert out["_cancelled"] == []
 
 
 def test_build_failure_does_not_deploy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,12 +111,33 @@ def test_build_failure_does_not_deploy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["error_code"] == "acr_build_failed"
     assert out["build_status"] == "Failed"
     assert out["_deployed"] == []  # the gate held — no deploy
+    assert out["_access_events"] == [("open", ""), ("restore", "")]
+    assert out["_cancelled"] == []
 
 
 def test_build_timeout_does_not_deploy(monkeypatch: pytest.MonkeyPatch) -> None:
     out = _apply(monkeypatch, build_status=rebuild_mod._BUILD_TIMEOUT)
     assert out["status"] == "failed"
     assert out["error_code"] == "build_timeout"
+    assert out["_deployed"] == []
+    assert out["_access_events"] == [("open", ""), ("restore", "")]
+    assert out["_cancelled"] == ["run-123"]
+
+
+def test_build_timeout_cancel_and_restore_failure_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _apply(
+        monkeypatch,
+        build_status=rebuild_mod._BUILD_TIMEOUT,
+        cancel_ok=False,
+        restore_ok=False,
+    )
+
+    assert out["status"] == "failed"
+    assert out["stage"] == "build_access"
+    assert out["error_code"] == "acr_build_access_restore_failed"
+    assert out["_cancelled"] == ["run-123"]
     assert out["_deployed"] == []
 
 
@@ -103,6 +146,8 @@ def test_build_schedule_failure_does_not_deploy(monkeypatch: pytest.MonkeyPatch)
     assert out["status"] == "failed"
     assert out["error_code"] == "build_schedule_failed"
     assert out["_deployed"] == []
+    assert out["_access_events"] == [("open", ""), ("restore", "")]
+    assert out["_cancelled"] == []
 
 
 def test_deploy_enqueue_failure_reported(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,6 +163,28 @@ def test_dry_run_has_no_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["image"].startswith("elb-openapi:")
     assert out["would_build"] is True
     assert out["_scheduled"] == []
+    assert out["_deployed"] == []
+    assert out["_access_events"] == []
+
+
+def test_build_access_open_failure_does_not_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+    out = _apply(monkeypatch, open_raises=True)
+
+    assert out["status"] == "failed"
+    assert out["stage"] == "build_access"
+    assert out["error_code"] == "acr_build_access_failed"
+    assert out["_scheduled"] == []
+    assert out["_deployed"] == []
+
+
+def test_build_access_restore_failure_does_not_deploy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _apply(monkeypatch, restore_ok=False, build_status="Succeeded")
+
+    assert out["status"] == "failed"
+    assert out["stage"] == "build_access"
+    assert out["error_code"] == "acr_build_access_restore_failed"
     assert out["_deployed"] == []
 
 
@@ -145,9 +212,7 @@ def _patch_acr_client(monkeypatch: pytest.MonkeyPatch, status_value: str) -> Non
     # ``get_credential()`` is left real (lazy DefaultAzureCredential, no token
     # fetched because the fake client ignores the credential), so this stays out
     # of the facade-contract monkeypatch surface.
-    monkeypatch.setattr(
-        "azure.mgmt.containerregistry.ContainerRegistryManagementClient", _Client
-    )
+    monkeypatch.setattr("azure.mgmt.containerregistry.ContainerRegistryManagementClient", _Client)
 
 
 def test_poll_returns_succeeded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,6 +228,78 @@ def test_poll_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         "s", "rg", "reg", "run-1", deadline_seconds=1, interval_seconds=1
     )
     assert status == rebuild_mod._BUILD_TIMEOUT
+
+
+def _patch_cancel_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: str = "Canceled",
+    cancel_raises: bool = False,
+) -> list[str]:
+    events: list[str] = []
+
+    class _Poller:
+        def result(self, timeout: int) -> None:
+            events.append(f"wait:{timeout}")
+
+    class _Runs:
+        def begin_cancel(self, *_args: Any, **_kwargs: Any) -> _Poller:
+            events.append("cancel")
+            if cancel_raises:
+                raise RuntimeError("cancel failed")
+            return _Poller()
+
+        def get(self, *_args: Any, **_kwargs: Any) -> Any:
+            events.append("get")
+            return type("Run", (), {"status": status})()
+
+    class _Client:
+        runs = _Runs()
+
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(
+        "azure.mgmt.containerregistry.ContainerRegistryManagementClient",
+        _Client,
+    )
+    return events
+
+
+def test_cancel_timed_out_build_waits_for_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _patch_cancel_client(monkeypatch)
+
+    assert rebuild_mod._cancel_acr_build_and_wait("s", "rg", "acr", "run-1") is True
+    assert events == ["cancel", "wait:60", "get", "close"]
+
+
+def test_cancel_timed_out_build_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _patch_cancel_client(monkeypatch, cancel_raises=True)
+
+    assert rebuild_mod._cancel_acr_build_and_wait("s", "rg", "acr", "run-1") is False
+    assert events == ["cancel", "close"]
+
+
+def test_cancel_timed_out_build_wait_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_cancel_client(monkeypatch, status="Running")
+    clock = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(rebuild_mod.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(rebuild_mod.time, "sleep", lambda _seconds: None)
+
+    assert (
+        rebuild_mod._cancel_acr_build_and_wait(
+            "s",
+            "rg",
+            "acr",
+            "run-1",
+            deadline_seconds=1,
+            interval_seconds=1,
+        )
+        is False
+    )
 
 
 # ── route ──────────────────────────────────────────────────────────────────

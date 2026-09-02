@@ -25,6 +25,16 @@ def _test_credential() -> str:
     return "".join(("unit", "-", "test", "-", "credential"))
 
 
+def test_calibration_constants_match_dashboard_policy() -> None:
+    from api.services.web_blast_searchsp import (
+        CALIBRATION_LENGTH_ADJUSTMENT,
+        CALIBRATION_QUERY_LEN,
+    )
+
+    assert exact_oracle._CALIBRATION_QUERY_LEN == CALIBRATION_QUERY_LEN
+    assert exact_oracle._CALIBRATION_LENGTH_ADJUSTMENT == CALIBRATION_LENGTH_ADJUSTMENT
+
+
 class _Response:
     def __init__(self, status_code: int = 200, *, payload=None, size: int = 10) -> None:
         self.status_code = status_code
@@ -146,6 +156,74 @@ def test_attach_rejects_missing_or_empty_part(monkeypatch) -> None:
     assert put.called is False
 
 
+def test_read_active_database_uses_generation_identity_and_counts(monkeypatch) -> None:
+    monkeypatch.setattr(
+        exact_oracle.requests,
+        "get",
+        lambda url, **_kwargs: _Response(
+            payload={
+                "source_version": "stale-fallback",
+                "active_generation": {
+                    "id": "ncbi-direct-20260819-cab30d18c360",
+                    "prefix": ("core_nt/generations/ncbi-direct-20260819-cab30d18c360/core_nt"),
+                },
+                "active_prefix": ("core_nt/generations/ncbi-direct-20260819-cab30d18c360/core_nt"),
+                "shard_layout_prefix": (
+                    "core_nt/generations/ncbi-direct-20260819-cab30d18c360/shards"
+                ),
+                "total_letters": 998_069_435_926,
+                "total_sequences": 130_155_243,
+            }
+        ),
+    )
+
+    active = exact_oracle.read_active_database(
+        blob_base="https://acct.blob.core.windows.net",
+        db_name="core_nt",
+        token=_test_credential(),
+    )
+
+    assert active.source_version == "ncbi-direct-20260819-cab30d18c360"
+    assert active.db_prefix.endswith("/ncbi-direct-20260819-cab30d18c360/core_nt")
+    assert active.shard_layout_prefix.endswith("/ncbi-direct-20260819-cab30d18c360/shards")
+    assert active.total_letters == 998_069_435_926
+    assert active.total_sequences == 130_155_243
+    assert active.search_space == 30_807_003_700_117
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"active_generation": {"id": "generation"}},
+        {"total_letters": 1000, "total_sequences": 10},
+        {
+            "source_version": "generation",
+            "active_prefix": "core_nt/core_nt",
+            "shard_layout_prefix": "10shards",
+            "total_letters": 1_000_000,
+            "total_sequences": 10,
+        },
+    ],
+)
+def test_read_active_database_fails_closed_on_incomplete_metadata(
+    monkeypatch,
+    payload,
+) -> None:
+    monkeypatch.setattr(
+        exact_oracle.requests,
+        "get",
+        lambda *_args, **_kwargs: _Response(payload=payload),
+    )
+
+    with pytest.raises(exact_oracle.ExactOracleUnavailable):
+        exact_oracle.read_active_database(
+            blob_base="https://acct.blob.core.windows.net",
+            db_name="core_nt",
+            token=_test_credential(),
+        )
+
+
 @pytest.mark.parametrize(
     ("options", "expected"),
     [
@@ -158,3 +236,54 @@ def test_attach_rejects_missing_or_empty_part(monkeypatch) -> None:
 )
 def test_ensure_tabular_raw_score(options: str, expected: str) -> None:
     assert exact_oracle.ensure_tabular_raw_score(options) == expected
+
+
+def test_search_space_from_db_version_uses_active_counts() -> None:
+    assert (
+        exact_oracle.search_space_from_db_version(
+            {
+                "detail": {
+                    "number_of_letters": "998069435926",
+                    "number_of_sequences": "130155243",
+                }
+            }
+        )
+        == 30_807_003_700_117
+    )
+
+
+@pytest.mark.parametrize("db_version", [{}, {"detail": {}}, {"detail": "invalid"}])
+def test_search_space_from_db_version_fails_closed(db_version) -> None:
+    with pytest.raises(exact_oracle.ExactOracleUnavailable):
+        exact_oracle.search_space_from_db_version(db_version)
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ("-word_size 28", "-word_size 28 -searchsp 30807003700117"),
+        (
+            "-searchsp 32156241807668 -dust yes",
+            "-dust yes -searchsp 30807003700117",
+        ),
+        (
+            "-searchsp=32156241807668 -outfmt '7 std score'",
+            "-outfmt '7 std score' -searchsp 30807003700117",
+        ),
+        (
+            "-dbsize 998069435926 -dust yes",
+            "-dust yes -searchsp 30807003700117",
+        ),
+    ],
+)
+def test_set_search_space_replaces_stale_forms(options: str, expected: str) -> None:
+    assert exact_oracle.set_search_space(options, 30_807_003_700_117) == expected
+
+
+@pytest.mark.parametrize(
+    "options",
+    ["-searchsp", "-searchsp -dust yes", "-dbsize", "-dbsize -dust yes"],
+)
+def test_set_search_space_rejects_missing_scalar(options: str) -> None:
+    with pytest.raises(exact_oracle.ExactOracleUnavailable, match="requires a scalar value"):
+        exact_oracle.set_search_space(options, 30_807_003_700_117)

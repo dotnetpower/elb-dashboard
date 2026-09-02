@@ -12,11 +12,10 @@ only reads files (plain `.xml` or `.xml.gz`) and returns plain dataclasses.
 The opt-in NCBI fetcher lives in `scripts/dev/fetch-ncbi-blast-rid.py`; do
 not put network calls in here.
 Key entry points: `parse_summary`, `compare_summaries`, `verify_exclusion`.
-Risky contracts: tolerate cross-snapshot drift when callers request it —
-exact rank-set / HSP equality is only meaningful when both XMLs were
-produced against the same `core_nt` database snapshot. The
-`ParityReport.snapshot_drift` flag records whether the comparator detected
-a `BlastOutput_db` / Statistics drift.
+Risky contracts: `exact_equivalent` is true only for the same database
+statistics, BLAST version/options, subject order, every HSP field, and search
+statistics. Cross-snapshot containment is diagnostic only and must never close
+an exact-parity acceptance criterion.
 Validation: `uv run pytest -q api/tests/test_web_blast_parity_xml.py`.
 """
 
@@ -26,22 +25,45 @@ import gzip
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Literal
 
 from defusedxml import ElementTree as ET
 
 from api.services.blast.snapshot_drift import assess_snapshot_drift
 
-_ACC_RE = re.compile(r"^([A-Z]+_?\d+(?:\.\d+)?)$", re.IGNORECASE)
+
+@dataclass(frozen=True)
+class WebBlastHsp:
+    """One complete canonical HSP from BLAST XML."""
+
+    bit_score: float
+    raw_score: int
+    evalue: float
+    query_from: int
+    query_to: int
+    hit_from: int
+    hit_to: int
+    query_frame: int
+    hit_frame: int
+    identity: int
+    positive: int
+    gaps: int
+    align_len: int
+    qseq: str
+    hseq: str
+    midline: str
 
 
 @dataclass(frozen=True)
 class WebBlastHit:
-    """One canonical hit summary, comparable across XML snapshots."""
+    """One canonical subject plus compatibility aliases for its first HSP."""
 
     rank: int
     accession: str
     hit_id: str
+    subject_id: str
     organism: str
     bit_score: float
     raw_score: int
@@ -53,6 +75,9 @@ class WebBlastHit:
     query_to: int
     hit_from: int
     hit_to: int
+    hit_def: str = ""
+    hit_len: int = 0
+    hsps: tuple[WebBlastHsp, ...] = ()
 
     @property
     def percent_identity(self) -> float:
@@ -80,7 +105,12 @@ class WebBlastSummary:
     filter_string: str
     db_num: int
     db_len: int
+    hsp_len: int
     eff_space: int
+    kappa: float
+    lambda_value: float
+    entropy: float
+    parameters: tuple[tuple[str, str], ...]
     hits: tuple[WebBlastHit, ...]
 
 
@@ -90,20 +120,24 @@ class ParityReport:
 
     equivalent: bool
     snapshot_drift: bool
+    exact_equivalent: bool = False
+    drift_compatible: bool = False
+    comparison_mode: Literal["strict_exact", "drift_tolerant_containment"] = "strict_exact"
     findings: list[str] = field(default_factory=list)
+    exact_findings: list[str] = field(default_factory=list)
     reference_db_num: int = 0
     candidate_db_num: int = 0
     reference_rank_count: int = 0
     candidate_rank_count: int = 0
     rank_set_only_in_reference: list[str] = field(default_factory=list)
     rank_set_only_in_candidate: list[str] = field(default_factory=list)
-    hsp_drift: list[dict] = field(default_factory=list)
+    hsp_drift: list[dict[str, object]] = field(default_factory=list)
     # Structured, quantified drift of the candidate run's observed database
     # statistics against the verified NCBI Web BLAST calibration (see
     # `api/services/blast/snapshot_drift.assess_snapshot_drift`). `None` when
     # the candidate did not report a database name to look up. The boolean
     # `snapshot_drift` above remains the reference-vs-candidate comparison.
-    snapshot_drift_detail: dict | None = None
+    snapshot_drift_detail: dict[str, object] | None = None
 
 
 def _open_xml(path: Path) -> str:
@@ -148,6 +182,20 @@ def _float(parent: ET.Element | None, child: str, default: float = 0.0) -> float
         return default
 
 
+def _canonical_parameter(child: ET.Element) -> tuple[str, str]:
+    name = _local(child.tag)
+    value = (child.text or "").strip()
+    if name == "Parameters_filter":
+        return name, value.split(";", 1)[0].strip().upper()
+    try:
+        number = Decimal(value)
+    except InvalidOperation:
+        return name, value
+    if number.is_zero():
+        return name, "0"
+    return name, format(number.normalize(), "E")
+
+
 def _organism_from_def(hit_def: str) -> str:
     """Best-effort organism extraction from a Hit_def line.
 
@@ -164,6 +212,38 @@ def _organism_from_def(hit_def: str) -> str:
         flags=re.IGNORECASE,
     ).strip()
     return cleaned
+
+
+def _parse_hsp(hsp: ET.Element) -> WebBlastHsp:
+    return WebBlastHsp(
+        bit_score=_float(hsp, "Hsp_bit-score"),
+        raw_score=_int(hsp, "Hsp_score"),
+        evalue=_float(hsp, "Hsp_evalue"),
+        query_from=_int(hsp, "Hsp_query-from"),
+        query_to=_int(hsp, "Hsp_query-to"),
+        hit_from=_int(hsp, "Hsp_hit-from"),
+        hit_to=_int(hsp, "Hsp_hit-to"),
+        query_frame=_int(hsp, "Hsp_query-frame"),
+        hit_frame=_int(hsp, "Hsp_hit-frame"),
+        identity=_int(hsp, "Hsp_identity"),
+        positive=_int(hsp, "Hsp_positive"),
+        gaps=_int(hsp, "Hsp_gaps"),
+        align_len=_int(hsp, "Hsp_align-len"),
+        qseq=_text(hsp, "Hsp_qseq") or "",
+        hseq=_text(hsp, "Hsp_hseq") or "",
+        midline=_text(hsp, "Hsp_midline") or "",
+    )
+
+
+def _versioned_accession(hit_id: str, accession: str) -> str:
+    for pattern in (
+        r"\|([A-Z]{1,4}_?\d+(?:\.\d+)?)\|?$",
+        r"\|([A-Z]{1,4}_?\d+\.\d+)\|",
+    ):
+        match = re.search(pattern, hit_id, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return accession or hit_id
 
 
 def parse_summary(path: str | Path) -> WebBlastSummary:
@@ -184,41 +264,52 @@ def parse_summary(path: str | Path) -> WebBlastSummary:
     params = root.find("BlastOutput_param/Parameters")
     evalue_threshold = _float(params, "Parameters_expect")
     filter_string = _text(params, "Parameters_filter") or ""
+    parameters = tuple(
+        sorted(_canonical_parameter(child) for child in list(params)) if params is not None else ()
+    )
 
-    iteration = root.find(".//Iteration")
-    stats = root.find(".//Iteration_stat/Statistics")
+    iterations = root.findall("./BlastOutput_iterations/Iteration")
+    if len(iterations) != 1:
+        raise ValueError(f"{p}: expected exactly one query iteration, found {len(iterations)}")
+    iteration = iterations[0]
+    stats = iteration.find("./Iteration_stat/Statistics")
     db_num = _int(stats, "Statistics_db-num")
     db_len = _int(stats, "Statistics_db-len")
+    hsp_len = _int(stats, "Statistics_hsp-len")
     eff_space = _int(stats, "Statistics_eff-space")
 
     hits: list[WebBlastHit] = []
-    if iteration is not None:
-        for hit_el in iteration.findall("Iteration_hits/Hit"):
-            rank = _int(hit_el, "Hit_num")
-            hit_id = _text(hit_el, "Hit_id") or ""
-            accession = _text(hit_el, "Hit_accession") or ""
-            hit_def = _text(hit_el, "Hit_def") or ""
-            best_hsp = hit_el.find("Hit_hsps/Hsp")
-            if best_hsp is None:
-                continue
-            hits.append(
-                WebBlastHit(
-                    rank=rank,
-                    accession=accession,
-                    hit_id=hit_id,
-                    organism=_organism_from_def(hit_def),
-                    bit_score=_float(best_hsp, "Hsp_bit-score"),
-                    raw_score=_int(best_hsp, "Hsp_score"),
-                    evalue=_float(best_hsp, "Hsp_evalue"),
-                    identity=_int(best_hsp, "Hsp_identity"),
-                    align_len=_int(best_hsp, "Hsp_align-len"),
-                    gaps=_int(best_hsp, "Hsp_gaps"),
-                    query_from=_int(best_hsp, "Hsp_query-from"),
-                    query_to=_int(best_hsp, "Hsp_query-to"),
-                    hit_from=_int(best_hsp, "Hsp_hit-from"),
-                    hit_to=_int(best_hsp, "Hsp_hit-to"),
-                )
+    for hit_el in iteration.findall("Iteration_hits/Hit"):
+        rank = _int(hit_el, "Hit_num")
+        hit_id = _text(hit_el, "Hit_id") or ""
+        accession = _text(hit_el, "Hit_accession") or ""
+        hit_def = _text(hit_el, "Hit_def") or ""
+        hsps = tuple(_parse_hsp(hsp) for hsp in hit_el.findall("Hit_hsps/Hsp"))
+        if not hsps:
+            continue
+        best_hsp = hsps[0]
+        hits.append(
+            WebBlastHit(
+                rank=rank,
+                accession=accession,
+                hit_id=hit_id,
+                subject_id=_versioned_accession(hit_id, accession),
+                organism=_organism_from_def(hit_def),
+                bit_score=best_hsp.bit_score,
+                raw_score=best_hsp.raw_score,
+                evalue=best_hsp.evalue,
+                identity=best_hsp.identity,
+                align_len=best_hsp.align_len,
+                gaps=best_hsp.gaps,
+                query_from=best_hsp.query_from,
+                query_to=best_hsp.query_to,
+                hit_from=best_hsp.hit_from,
+                hit_to=best_hsp.hit_to,
+                hit_def=hit_def,
+                hit_len=_int(hit_el, "Hit_len"),
+                hsps=hsps,
             )
+        )
     hits.sort(key=lambda h: h.rank)
     return WebBlastSummary(
         program=program,
@@ -231,14 +322,19 @@ def parse_summary(path: str | Path) -> WebBlastSummary:
         filter_string=filter_string,
         db_num=db_num,
         db_len=db_len,
+        hsp_len=hsp_len,
         eff_space=eff_space,
+        kappa=_float(stats, "Statistics_kappa"),
+        lambda_value=_float(stats, "Statistics_lambda"),
+        entropy=_float(stats, "Statistics_entropy"),
+        parameters=parameters,
         hits=tuple(hits),
     )
 
 
 def _accession_key(hit: WebBlastHit) -> str:
     """Canonical key for comparing hits across runs (accession w/o version)."""
-    acc = hit.accession or hit.hit_id
+    acc = hit.subject_id or hit.accession or hit.hit_id
     if acc:
         # Strip a trailing `.N` version suffix so that a newer DB snapshot's
         # bumped version (e.g. AB12345.2 vs AB12345.1) still compares equal.
@@ -246,111 +342,232 @@ def _accession_key(hit: WebBlastHit) -> str:
     return hit.organism.upper()
 
 
+def _normalized_database_name(value: str) -> str:
+    leaf = value.rstrip("/").rsplit("/", 1)[-1]
+    return re.sub(r"_shard_\d+$", "", leaf, flags=re.IGNORECASE)
+
+
+def _duplicate_accession_keys(hits: tuple[WebBlastHit, ...]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for hit in hits:
+        key = _accession_key(hit)
+        if key in seen:
+            duplicates.add(key)
+        seen.add(key)
+    return sorted(duplicates)
+
+
+def _relative_difference(left: float, right: float, tolerance: float) -> bool:
+    if left == right:
+        return False
+    denominator = max(abs(left), abs(right), 1e-300)
+    return abs(left - right) / denominator > tolerance
+
+
+def _hsp_differences(
+    reference: WebBlastHsp,
+    candidate: WebBlastHsp,
+    *,
+    evalue_rel_tol: float,
+    bit_score_rel_tol: float,
+) -> dict[str, object]:
+    differences: dict[str, object] = {}
+    if _relative_difference(reference.evalue, candidate.evalue, evalue_rel_tol):
+        differences["evalue"] = {
+            "reference": reference.evalue,
+            "candidate": candidate.evalue,
+        }
+    if _relative_difference(reference.bit_score, candidate.bit_score, bit_score_rel_tol):
+        differences["bit_score"] = {
+            "reference": reference.bit_score,
+            "candidate": candidate.bit_score,
+        }
+    exact_fields = (
+        "raw_score",
+        "query_from",
+        "query_to",
+        "hit_from",
+        "hit_to",
+        "query_frame",
+        "hit_frame",
+        "identity",
+        "positive",
+        "gaps",
+        "align_len",
+        "qseq",
+        "hseq",
+        "midline",
+    )
+    for field_name in exact_fields:
+        left = getattr(reference, field_name)
+        right = getattr(candidate, field_name)
+        if left != right:
+            differences[field_name] = {"reference": left, "candidate": right}
+    return differences
+
+
 def compare_summaries(
     reference: WebBlastSummary,
     candidate: WebBlastSummary,
     *,
     tolerate_db_drift: bool | None = None,
-    evalue_rel_tol: float = 0.01,
-    bit_score_rel_tol: float = 0.005,
+    evalue_rel_tol: float = 0.0,
+    bit_score_rel_tol: float = 0.0,
 ) -> ParityReport:
     """Compare two BLAST summaries and return a structured parity report.
 
-    When the DB snapshots differ (`Statistics_db-num` or `Statistics_db-len`
-    not equal), the comparator downgrades to set-based comparison: the
-    accession sets must match exactly when `tolerate_db_drift=False`; when
-    `True`, only a subset relationship is required (candidate is contained in
-    the reference set within `evalue_rel_tol`).
+    Strict equality requires matching database statistics, request metadata,
+    accession sets, and primary-HSP values. Drift-tolerant diagnostics require
+    only request metadata plus non-empty candidate accession containment in the
+    reference set; HSP drift remains visible in ``hsp_drift`` but does not fail
+    that deliberately weaker diagnostic mode.
 
     Default for `tolerate_db_drift`: auto -- true when DB stats differ, false
-    when they match.
+    when they match. ``equivalent`` reports the selected mode;
+    ``exact_equivalent`` is always the strict same-snapshot verdict and is the
+    only field suitable for a full parity claim.
     """
-    findings: list[str] = []
-    snapshot_drift = (
-        reference.db_num != candidate.db_num or reference.db_len != candidate.db_len
-    )
+    common_findings: list[str] = []
+    snapshot_drift = reference.db_num != candidate.db_num or reference.db_len != candidate.db_len
     if tolerate_db_drift is None:
         tolerate_db_drift = snapshot_drift
 
     if reference.program != candidate.program:
-        findings.append(
+        common_findings.append(
             f"program mismatch: ref={reference.program!r} cand={candidate.program!r}"
         )
-    if reference.database != candidate.database:
-        findings.append(
+    if _normalized_database_name(reference.database) != _normalized_database_name(
+        candidate.database
+    ):
+        common_findings.append(
             f"database name mismatch: ref={reference.database!r} cand={candidate.database!r}"
         )
+    if reference.query_def != candidate.query_def:
+        common_findings.append(
+            f"query definition mismatch: ref={reference.query_def!r} cand={candidate.query_def!r}"
+        )
     if reference.query_len != candidate.query_len:
-        findings.append(
+        common_findings.append(
             f"query-len mismatch: ref={reference.query_len} cand={candidate.query_len}"
         )
     if abs(reference.evalue_threshold - candidate.evalue_threshold) > 1e-9:
-        findings.append(
+        common_findings.append(
             f"evalue threshold mismatch: ref={reference.evalue_threshold} "
             f"cand={candidate.evalue_threshold}"
         )
-    if reference.filter_string.split(";", 1)[0].strip().upper() != candidate.filter_string.split(
-        ";", 1
-    )[0].strip().upper():
-        findings.append(
-            f"filter mismatch: ref={reference.filter_string!r} "
-            f"cand={candidate.filter_string!r}"
+    if (
+        reference.filter_string.split(";", 1)[0].strip().upper()
+        != candidate.filter_string.split(";", 1)[0].strip().upper()
+    ):
+        common_findings.append(
+            f"filter mismatch: ref={reference.filter_string!r} cand={candidate.filter_string!r}"
         )
+    if reference.version != candidate.version:
+        common_findings.append(
+            f"BLAST version mismatch: ref={reference.version!r} cand={candidate.version!r}"
+        )
+    if reference.parameters != candidate.parameters:
+        common_findings.append("BLAST parameter block mismatch")
 
     ref_keys = {_accession_key(h): h for h in reference.hits}
     cand_keys = {_accession_key(h): h for h in candidate.hits}
+    ref_duplicates = _duplicate_accession_keys(reference.hits)
+    cand_duplicates = _duplicate_accession_keys(candidate.hits)
+    if ref_duplicates:
+        common_findings.append(f"reference contains {len(ref_duplicates)} duplicate accession keys")
+    if cand_duplicates:
+        common_findings.append(
+            f"candidate contains {len(cand_duplicates)} duplicate accession keys"
+        )
     only_ref = sorted(set(ref_keys) - set(cand_keys))
     only_cand = sorted(set(cand_keys) - set(ref_keys))
 
-    if not tolerate_db_drift:
-        if only_ref:
-            findings.append(f"{len(only_ref)} accessions present only in reference")
-        if only_cand:
-            findings.append(f"{len(only_cand)} accessions present only in candidate")
-    else:
-        # In drift mode, require that the candidate has not invented hits that
-        # were not in the reference at all; the reference set is the truth.
-        if only_cand:
-            findings.append(
-                f"{len(only_cand)} accessions in candidate not present in reference"
-                " (likely DB snapshot drift)"
-            )
+    exact_findings = list(common_findings)
+    if snapshot_drift:
+        exact_findings.append(
+            "database snapshot mismatch: "
+            f"ref=({reference.db_num}, {reference.db_len}) "
+            f"cand=({candidate.db_num}, {candidate.db_len})"
+        )
+    if reference.eff_space != candidate.eff_space:
+        exact_findings.append(
+            f"effective search space mismatch: ref={reference.eff_space} cand={candidate.eff_space}"
+        )
+    for field_name in ("hsp_len", "kappa", "lambda_value", "entropy"):
+        left = getattr(reference, field_name)
+        right = getattr(candidate, field_name)
+        if left != right:
+            exact_findings.append(f"{field_name} statistic mismatch: ref={left} cand={right}")
+    if only_ref:
+        exact_findings.append(f"{len(only_ref)} accessions present only in reference")
+    if only_cand:
+        exact_findings.append(f"{len(only_cand)} accessions present only in candidate")
 
-    hsp_drift: list[dict] = []
+    drift_findings = list(common_findings)
+    if reference.hits and not candidate.hits:
+        drift_findings.append("candidate contains no hits while reference contains hits")
+    if only_cand:
+        drift_findings.append(
+            f"{len(only_cand)} accessions in candidate not present in reference"
+            " (likely DB snapshot drift)"
+        )
+
+    hsp_drift: list[dict[str, object]] = []
     shared = sorted(set(ref_keys) & set(cand_keys))
     for key in shared:
         rh = ref_keys[key]
         ch = cand_keys[key]
-        diffs: dict = {}
-        if rh.evalue == 0.0 and ch.evalue == 0.0:
-            pass
-        else:
-            denom = max(abs(rh.evalue), abs(ch.evalue), 1e-300)
-            if abs(rh.evalue - ch.evalue) / denom > evalue_rel_tol:
-                diffs["evalue"] = {"reference": rh.evalue, "candidate": ch.evalue}
-        if rh.bit_score and ch.bit_score:
-            denom = max(abs(rh.bit_score), abs(ch.bit_score), 1e-9)
-            if abs(rh.bit_score - ch.bit_score) / denom > bit_score_rel_tol:
-                diffs["bit_score"] = {
-                    "reference": rh.bit_score,
-                    "candidate": ch.bit_score,
-                }
-        if rh.identity != ch.identity or rh.align_len != ch.align_len:
-            diffs["alignment"] = {
-                "reference": (rh.identity, rh.align_len),
-                "candidate": (ch.identity, ch.align_len),
+        subject_differences: dict[str, object] = {}
+        for field_name in (
+            "rank",
+            "subject_id",
+            "accession",
+            "hit_id",
+            "hit_def",
+            "hit_len",
+            "organism",
+        ):
+            left = getattr(rh, field_name)
+            right = getattr(ch, field_name)
+            if left != right:
+                subject_differences[field_name] = {"reference": left, "candidate": right}
+        if len(rh.hsps) != len(ch.hsps):
+            subject_differences["hsp_count"] = {
+                "reference": len(rh.hsps),
+                "candidate": len(ch.hsps),
             }
-        if diffs:
-            hsp_drift.append({"accession": key, **diffs})
+        if subject_differences:
+            hsp_drift.append({"accession": key, "subject": subject_differences})
+        for hsp_index, (ref_hsp, candidate_hsp) in enumerate(
+            zip(rh.hsps, ch.hsps, strict=False),
+            start=1,
+        ):
+            differences = _hsp_differences(
+                ref_hsp,
+                candidate_hsp,
+                evalue_rel_tol=evalue_rel_tol,
+                bit_score_rel_tol=bit_score_rel_tol,
+            )
+            if differences:
+                hsp_drift.append(
+                    {
+                        "accession": key,
+                        "hsp_index": hsp_index,
+                        **differences,
+                    }
+                )
 
-    if hsp_drift and not tolerate_db_drift:
-        findings.append(f"{len(hsp_drift)} HSPs drifted beyond tolerance")
-    elif hsp_drift:
-        findings.append(
-            f"{len(hsp_drift)} HSPs drifted (db snapshot drift tolerated)"
-        )
+    if hsp_drift:
+        exact_findings.append(f"{len(hsp_drift)} subject/HSP records drifted beyond tolerance")
 
-    equivalent = not findings
+    comparison_mode: Literal["strict_exact", "drift_tolerant_containment"] = (
+        "drift_tolerant_containment" if tolerate_db_drift else "strict_exact"
+    )
+    findings = drift_findings if tolerate_db_drift else exact_findings
+    exact_equivalent = not exact_findings
+    drift_compatible = not drift_findings
+    equivalent = drift_compatible if tolerate_db_drift else exact_equivalent
     snapshot_drift_detail = (
         assess_snapshot_drift(
             candidate.database,
@@ -363,7 +580,11 @@ def compare_summaries(
     return ParityReport(
         equivalent=equivalent,
         snapshot_drift=snapshot_drift,
+        exact_equivalent=exact_equivalent,
+        drift_compatible=drift_compatible,
+        comparison_mode=comparison_mode,
         findings=findings,
+        exact_findings=exact_findings,
         reference_db_num=reference.db_num,
         candidate_db_num=candidate.db_num,
         reference_rank_count=len(reference.hits),
@@ -402,7 +623,7 @@ def verify_exclusion(
                 f"rank {hit.rank}: query source accession {hit.accession} re-hit itself"
             )
         for marker in markers:
-            target = f"{hit.organism}\n{hit.hit_id}"
+            target = f"{hit.organism}\n{hit.hit_id}\n{hit.hit_def}"
             if marker.lower() in target.lower():
                 violations.append(
                     f"rank {hit.rank}: excluded marker {marker!r} found in "

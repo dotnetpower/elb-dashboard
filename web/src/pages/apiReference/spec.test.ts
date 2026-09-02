@@ -81,7 +81,7 @@ describe("API Reference spec parser", () => {
       evalue: 0.05,
       max_target_seqs: 100,
       outfmt: "5",
-      extra: "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668",
+      extra: "-word_size 28 -dust yes -soft_masking false",
     });
     expect(coreNt.resource_profile).toBe("core_nt_safe");
 

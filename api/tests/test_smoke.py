@@ -866,21 +866,53 @@ def test_blast_preflight_reports_web_blast_compatibility(
             "db": "core_nt",
             "query_data": ">q1\nAAAA\n",
             "sharding_mode": "precise",
-            "use_db_order_oracle": True,
             "outfmt": 5,
             "db_effective_search_space": 32_156_241_807_668,
             "db_total_letters": 1_041_443_571_674,
+            "db_total_sequences": 125_619_662,
         },
     )
 
     assert r.status_code == 200
     body = r.json()
     assert body["compatibility"]["mode"] == "precise"
+    assert body["compatibility"]["level"] == "full_db_hitlist_exact_sharded"
+    assert body["compatibility"]["selection_basis"] == ("blast_evalue_raw_score_db_oid_desc")
     compatibility_check = next(
         item for item in body["checks"] if item["id"] == "web_blast_compatibility"
     )
     assert compatibility_check["status"] == "pass"
     assert compatibility_check["compatibility"]["evidence"]["db_name"] == "core_nt"
+
+
+def test_blast_preflight_recomputes_search_space_from_live_sequence_count(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    response = client.post(
+        "/api/blast/pre-flight",
+        json={
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "db": "core_nt",
+            "query_data": ">q1\nAAAA\n",
+            "sharding_mode": "precise",
+            "outfmt": 5,
+            "db_effective_search_space": 30_807_003_700_117,
+            "db_total_letters": 998_069_435_926,
+            "db_total_sequences": 130_155_243,
+        },
+    )
+
+    assert response.status_code == 200
+    compatibility = response.json()["compatibility"]
+    assert compatibility["mode"] == "precise"
+    assert compatibility["level"] == "full_db_hitlist_exact_sharded"
+    assert compatibility["search_space_source"] == "verified_default"
+    assert compatibility["selection_basis"] == "blast_evalue_raw_score_db_oid_desc"
 
 
 def test_blast_submit_blocks_false_precise_with_unverified_database(

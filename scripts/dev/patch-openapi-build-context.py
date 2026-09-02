@@ -124,6 +124,129 @@ def _copy_app_overlay(root: Path) -> None:
             dest.write_bytes(src.read_bytes())
 
 
+def _patch_external_soft_masking(root: Path) -> None:
+    """Keep external XML filtering/search-space equal to dashboard submit."""
+    schemas = root / "app" / "schemas.py"
+    main = root / "app" / "main.py"
+    _insert_once(
+        schemas,
+        "    dust: bool = Field(True)\n",
+        "    soft_masking: bool = Field(False)\n",
+        "soft_masking: bool = Field(False)",
+    )
+    _insert_once(
+        schemas,
+        "    soft_masking: bool = Field(False)\n",
+        "    db_effective_search_space: Optional[int] = Field(None, ge=1)\n",
+        "db_effective_search_space: Optional[int] = Field(None, ge=1)",
+    )
+    _insert_once(
+        main,
+        '        "-dust yes" if opts.dust else "-dust no",\n',
+        (
+            '        "-soft_masking true" if opts.soft_masking '
+            'else "-soft_masking false",\n'
+        ),
+        '"-soft_masking true" if opts.soft_masking',
+    )
+    _insert_once(
+        main,
+        (
+            '        "-soft_masking true" if opts.soft_masking '
+            'else "-soft_masking false",\n'
+            "    ]\n"
+        ),
+        (
+            "    if opts.db_effective_search_space is not None:\n"
+            '        parts.append(f"-searchsp {opts.db_effective_search_space}")\n'
+        ),
+        "parts.append(f\"-searchsp {opts.db_effective_search_space}\")",
+    )
+    fresh_bridge = (
+        '        extra=f"-word_size {req.options.word_size} '
+        "{'-dust yes' if req.options.dust else '-dust no'}\",\n"
+    )
+    legacy_bridge = (
+        "        extra=(\n"
+        '            f"-word_size {req.options.word_size} "\n'
+        '            f"{\'-dust yes\' if req.options.dust else \'-dust no\'} "\n'
+        '            f"{\'-soft_masking true\' if req.options.soft_masking else \'-soft_masking false\'}"\n'
+        "        ),\n"
+    )
+    desired_bridge = (
+        "        extra=(\n"
+        '            f"-word_size {req.options.word_size} "\n'
+        '            f"{\'-dust yes\' if req.options.dust else \'-dust no\'} "\n'
+        '            f"{\'-soft_masking true\' if req.options.soft_masking else \'-soft_masking false\'}"\n'
+        "            + (\n"
+        '                f" -searchsp {req.options.db_effective_search_space}"\n'
+        "                if req.options.db_effective_search_space is not None\n"
+        '                else ""\n'
+        "            )\n"
+        "        ),\n"
+    )
+    _replace_fresh_or_legacy(
+        main,
+        fresh=fresh_bridge,
+        legacy=legacy_bridge,
+        desired=desired_bridge,
+        marker="req.options.db_effective_search_space is not None",
+    )
+    schema_text = schemas.read_text()
+    main_text = main.read_text()
+    if schema_text.count("soft_masking: bool = Field(False)") != 1:
+        raise RuntimeError("external soft-masking schema patch is missing or duplicated")
+    if schema_text.count("db_effective_search_space: Optional[int]") != 1:
+        raise RuntimeError("external search-space schema patch is missing or duplicated")
+    if main_text.count("req.options.soft_masking") != 1:
+        raise RuntimeError("external soft-masking bridge patch is missing or duplicated")
+    if main_text.count("opts.soft_masking") != 1:
+        raise RuntimeError("external soft-masking option patch is missing or duplicated")
+    if main_text.count("opts.db_effective_search_space") != 2:
+        raise RuntimeError("external search-space option patch is missing or duplicated")
+    if main_text.count("req.options.db_effective_search_space") != 2:
+        raise RuntimeError("external search-space bridge patch is missing or duplicated")
+
+
+def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
+    """Derive precise search space from active DB metadata, never a snapshot constant."""
+    stale = (
+        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
+        '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
+    )
+    active = (
+        "        try:\n"
+        "            active_database = _exact_oracle.read_active_database(\n"
+        "                blob_base=_blob_base(),\n"
+        "                db_name=db_name,\n"
+        "                token=_storage_oauth_token(),\n"
+        "            )\n"
+        "            opts = _exact_oracle.set_search_space(opts, active_database.search_space)\n"
+        "            config[\"blast\"][\"db\"] = (\n"
+        '                f"{_blob_base()}/blast-db/{active_database.db_prefix}"\n'
+        "            )\n"
+        "            config[\"blast\"][\"db-partition-prefix\"] = (\n"
+        '                f"{_blob_base()}/blast-db/{active_database.shard_layout_prefix}/"\n'
+        '                f"{partitions}shards/{db_name}_shard_"\n'
+        "            )\n"
+        "            config[\"blast\"][\"options\"] = opts\n"
+        "        except Exception as exc:\n"
+        "            logger.warning(\n"
+        '                "active DB search-space resolution failed db=%s reason=%s",\n'
+        "                db_name,\n"
+        "                type(exc).__name__,\n"
+        "            )\n"
+        "            raise HTTPException(\n"
+        "                503,\n"
+        '                "Active database statistics are required for precise core_nt sharding",\n'
+        "            ) from exc\n"
+    )
+    _replace_once(path, stale, active)
+    text = path.read_text()
+    if stale in text or text.count(active) != 1:
+        raise RuntimeError("precise core_nt active search-space patch is invalid")
+
+
 def _patch_terminal_webhook_runtime_id(path: Path) -> None:
     """Attach a genuine ElasticBLAST runtime id to terminal webhooks."""
 
@@ -416,6 +539,8 @@ def _validate_dockerfile_runtime_policy(path: Path) -> None:
 def _validate_openapi_runtime_policy(path: Path) -> None:
     """Verify generated app semantics independently from patch markers."""
 
+    import ast
+
     text = path.read_text()
     required = (
         "import json\n",
@@ -440,8 +565,17 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         'safe_exec(["kubectl", "get", "jobs", "-l", f"elb-job-id={elb_job_id}"',
         'safe_exec(["kubectl", "get", "pods", "-l", f"elb-job-id={elb_job_id}"',
         "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
+        "active_database = _exact_oracle.read_active_database(",
+        "opts = _exact_oracle.set_search_space(opts, active_database.search_space)",
+        "active_database.db_prefix",
+        "active_database.shard_layout_prefix",
         "exact_oracle_info = _exact_oracle.attach_db_order_oracle(",
+        "expected_source_version=active_database.source_version",
+        '"source": "active_generation"',
+        '"db_prefix": active_database.db_prefix',
         'job_data["exact_oracle"] = exact_oracle_info',
+        '"-soft_masking true" if opts.soft_masking',
+        "req.options.db_effective_search_space is not None",
     )
     missing = [fragment for fragment in required if fragment not in text]
     forbidden = (
@@ -459,6 +593,29 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         raise RuntimeError(
             f"OpenAPI app runtime policy mismatch: missing={missing}, forbidden={present}"
         )
+
+    tree = ast.parse(text)
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    for call_name in ("read_active_database", "attach_db_order_oracle"):
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == call_name
+        ]
+        if len(calls) != 1:
+            raise RuntimeError(
+                f"OpenAPI runtime policy requires one {call_name} call, found {len(calls)}"
+            )
+        current: ast.AST | None = calls[0]
+        while current in parents:
+            current = parents[current]
+            if isinstance(current, (ast.For, ast.AsyncFor, ast.While)):
+                raise RuntimeError(f"OpenAPI {call_name} call must not run inside a loop")
 
 
 def patch_dockerfile(root: Path) -> None:
@@ -718,6 +875,7 @@ def patch_dockerfile(root: Path) -> None:
 
 def patch_app(root: Path) -> None:
     _copy_app_overlay(root)
+    _patch_external_soft_masking(root)
     path = root / "app" / "main.py"
     _patch_terminal_webhook_runtime_id(path)
     _disable_warmed_cache_skip(path)
@@ -805,7 +963,10 @@ def patch_app(root: Path) -> None:
             '            f"{_blob_base()}/blast-db/{partitions}shards/core_nt_shard_"\n'
             "        )\n"
             '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
-            '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
+            "            raise HTTPException(\n"
+            "                400,\n"
+            '                "Precise core_nt sharding requires db_effective_search_space",\n'
+            "            )\n"
         ),
         'profile in {"core_nt_precise", "precise", "core_nt_safe"}',
     )
@@ -820,6 +981,7 @@ def patch_app(root: Path) -> None:
         ),
         "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
     )
+    _replace_stale_core_nt_search_space_fallback(path)
     _insert_once(
         path,
         '    if req.batch_len is not None:\n        config["blast"]["batch-len"] = str(req.batch_len)\n',
@@ -868,16 +1030,29 @@ def patch_app(root: Path) -> None:
     )
     _insert_once(
         path,
-        "    db_version = _db_version_detail(db_name)\n",
+        (
+            "    blast_version = _blast_version_detail()\n"
+            "    db_version = _db_version_detail(db_name)\n"
+        ),
         (
             "    exact_oracle_info = None\n"
             '    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:\n'
+            "        db_version = {\n"
+            '            "version": active_database.source_version,\n'
+            '            "source": "active_generation",\n'
+            '            "detail": {\n'
+            '                "number_of_letters": str(active_database.total_letters),\n'
+            '                "number_of_sequences": str(active_database.total_sequences),\n'
+            '                "db_prefix": active_database.db_prefix,\n'
+            '                "shard_layout_prefix": active_database.shard_layout_prefix,\n'
+            "            },\n"
+            "        }\n"
             "        try:\n"
             "            exact_oracle_info = _exact_oracle.attach_db_order_oracle(\n"
             "                blob_base=_blob_base(),\n"
             "                results_url=results_url,\n"
             "                db_name=db_name,\n"
-            '                expected_source_version=str(db_version.get("version") or ""),\n'
+            "                expected_source_version=active_database.source_version,\n"
             "                token=_storage_oauth_token(),\n"
             "            ).as_dict()\n"
             "        except Exception as exc:\n"

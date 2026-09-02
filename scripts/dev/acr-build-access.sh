@@ -61,6 +61,7 @@ acr_ensure_build_access() {
 
   acr_capture_build_access_state "$acr_name"
   ACR_BUILD_ACCESS_RESTORE_NEEDED=0
+  ACR_BUILD_ACCESS_RESTORE_TO_STEADY_STATE=0
 
   if [[ "$ACR_BUILD_ACCESS_ORIGINAL_PUBLIC" != "Enabled" || \
         "$ACR_BUILD_ACCESS_ORIGINAL_DEFAULT_ACTION" != "Allow" || \
@@ -77,14 +78,55 @@ acr_ensure_build_access() {
     acr_build_access_log "    ACR policy accepted; settling ${settle_seconds}s for build-agent propagation"
     sleep "$settle_seconds"
   else
-    acr_build_access_log "==> ACR build access already open; leaving current policy unchanged"
+    case "${ACR_BUILD_ACCESS_PRESERVE_OPEN:-}" in
+      1|true|TRUE|yes|YES)
+        acr_build_access_log "==> ACR build access already open; explicit preserve requested"
+        ;;
+      *)
+        # The source-of-truth steady state is private-only. A previous killed
+        # deploy can strand the temporary build posture at Enabled/Allow; the
+        # old helper then treated that incident state as intentional forever.
+        # Mark it for an idle-checked close after this process's builds finish.
+        # The active-run check in `acr_restore_build_access` prevents one
+        # deploy from cutting off another caller's concurrent ACR Task.
+        acr_build_access_log "==> ACR build access already open; will restore private steady state when builds are idle"
+        ACR_BUILD_ACCESS_RESTORE_NEEDED=1
+        ACR_BUILD_ACCESS_RESTORE_TO_STEADY_STATE=1
+        ;;
+    esac
   fi
+}
+
+acr_active_build_count() {
+  local acr_name="${1:?acr name required}"
+  timeout 30s az acr task list-runs \
+    --registry "$acr_name" \
+    --top 100 \
+    --query "length([?status=='Queued' || status=='Started' || status=='Running'])" \
+    -o tsv 2>/dev/null
 }
 
 acr_restore_build_access() {
   local acr_name="${1:-}"
   [[ -n "$acr_name" ]] || return 0
   [[ "${ACR_BUILD_ACCESS_RESTORE_NEEDED:-0}" == "1" ]] || return 0
+
+  local active_builds
+  if ! active_builds="$(acr_active_build_count "$acr_name")" || \
+     [[ ! "$active_builds" =~ ^[0-9]+$ ]]; then
+    acr_build_access_log "WARN: could not verify active ACR builds; leaving build access open"
+    return 0
+  fi
+  if (( active_builds > 0 )); then
+    acr_build_access_log "WARN: ${active_builds} other ACR build(s) still active; leaving build access open"
+    return 0
+  fi
+
+  if [[ "${ACR_BUILD_ACCESS_RESTORE_TO_STEADY_STATE:-0}" == "1" ]]; then
+    ACR_BUILD_ACCESS_ORIGINAL_PUBLIC=Disabled
+    ACR_BUILD_ACCESS_ORIGINAL_DEFAULT_ACTION=Deny
+    ACR_BUILD_ACCESS_ORIGINAL_BYPASS=AzureServices
+  fi
 
   local public_enabled trusted_services
   if [[ "${ACR_BUILD_ACCESS_ORIGINAL_PUBLIC:-Disabled}" == "Enabled" ]]; then
@@ -106,4 +148,5 @@ acr_restore_build_access() {
     --allow-trusted-services "$trusted_services" \
     -o none >/dev/null 2>&1 || acr_build_access_log "WARN: failed to restore ACR network policy"
   ACR_BUILD_ACCESS_RESTORE_NEEDED=0
+  ACR_BUILD_ACCESS_RESTORE_TO_STEADY_STATE=0
 }

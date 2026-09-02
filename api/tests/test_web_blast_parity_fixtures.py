@@ -211,8 +211,7 @@ def test_generated_ini_does_not_leak_inclusive_taxid_filter(gene_id: str) -> Non
     options = _parse_ini(generate_config(params)).get("blast", "options")
     inclusive_flag = f"-taxids {payload['exclusion_taxid']}"
     assert inclusive_flag not in options, (
-        f"{gene_id}: exclusive filter must not emit `{inclusive_flag}`; "
-        f"observed options: {options}"
+        f"{gene_id}: exclusive filter must not emit `{inclusive_flag}`; observed options: {options}"
     )
 
 
@@ -251,3 +250,12 @@ def test_blockers_are_explicitly_tracked() -> None:
         assert (FIXTURES_DIR / xml_path).exists(), (
             f"{gene_id}: reference XML {xml_path} missing on disk"
         )
+        exclusion_blocker = payload.get("exclusion_validation_blocker")
+        if exclusion_blocker is not None:
+            assert exclusion_blocker.get("code")
+            assert exclusion_blocker.get("subject_accession")
+            assert int(exclusion_blocker.get("subject_taxid") or 0) > 0
+            assert int(exclusion_blocker.get("excluded_ancestor_taxid") or 0) == int(
+                payload["exclusion_taxid"]
+            )
+            assert exclusion_blocker.get("detail")

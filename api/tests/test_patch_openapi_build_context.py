@@ -13,6 +13,7 @@ Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -266,8 +267,75 @@ def test_patch_source_wires_exact_oracle_before_dispatch() -> None:
     source = Path(module.__file__).read_text()
 
     assert "import exact_oracle as _exact_oracle" in source
+    assert "active_database = _exact_oracle.read_active_database(" in source
+    assert "active_database.db_prefix" in source
+    assert "active_database.shard_layout_prefix" in source
     assert "exact_oracle_info = _exact_oracle.attach_db_order_oracle(" in source
+    assert "expected_source_version=active_database.source_version" in source
+    assert '"source": "active_generation"' in source
     assert 'job_data["exact_oracle"] = exact_oracle_info' in source
+
+
+def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
+    module = _load_module()
+    app = tmp_path / "app"
+    app.mkdir()
+    schemas = app / "schemas.py"
+    schemas.write_text(
+        "from pydantic import BaseModel, Field\n\n"
+        "class ExternalBlastOptions(BaseModel):\n"
+        "    dust: bool = Field(True)\n"
+    )
+    main = app / "main.py"
+    main.write_text(
+        "def _build_external_options(opts):\n"
+        "    parts = [\n"
+        '        "-dust yes" if opts.dust else "-dust no",\n'
+        "    ]\n"
+        "    return parts\n\n"
+        "def external_submit(req):\n"
+        "    return dict(\n"
+        '        extra=f"-word_size {req.options.word_size} '
+        "{'-dust yes' if req.options.dust else '-dust no'}\",\n"
+        "    )\n"
+    )
+
+    module._patch_external_soft_masking(tmp_path)
+    first_schema = schemas.read_text()
+    first_main = main.read_text()
+    module._patch_external_soft_masking(tmp_path)
+
+    assert schemas.read_text() == first_schema
+    assert main.read_text() == first_main
+    assert "soft_masking: bool = Field(False)" in first_schema
+    assert "db_effective_search_space: Optional[int] = Field(None, ge=1)" in first_schema
+    assert '"-soft_masking false"' in first_main
+    assert "req.options.soft_masking" in first_main
+    assert 'parts.append(f"-searchsp {opts.db_effective_search_space}")' in first_main
+    assert 'f" -searchsp {req.options.db_effective_search_space}"' in first_main
+    ast.parse(first_schema)
+    ast.parse(first_main)
+
+
+def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
+        '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
+    )
+
+    module._replace_stale_core_nt_search_space_fallback(path)
+    first = path.read_text()
+    module._replace_stale_core_nt_search_space_fallback(path)
+
+    assert path.read_text() == first
+    assert "32156241807668" not in first
+    assert "read_active_database(" in first
+    assert "set_search_space(opts, active_database.search_space)" in first
+    assert "active_database.db_prefix" in first
+    assert "active_database.shard_layout_prefix" in first
+    assert "Active database statistics are required for precise core_nt sharding" in first
 
 
 def test_patch_app_rejects_late_warmed_cache_skip_assignment(tmp_path: Path) -> None:

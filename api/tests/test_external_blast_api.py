@@ -88,6 +88,8 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
     assert captured["taxid"] == 3431483
     assert captured["is_inclusive"] is False
     assert captured["options"]["outfmt"] == 5
+    assert captured["options"]["soft_masking"] is False
+    assert captured["options"]["db_effective_search_space"] == 32_156_241_807_668
     assert captured["options"]["sharding_mode"] == "precise"
     assert captured["options"]["use_db_order_oracle"] is True
     assert captured["batch_len"] == 462
@@ -484,10 +486,7 @@ def test_stream_result_file_from_storage_does_not_duplicate_full_path(monkeypatc
     state = SimpleNamespace(
         job_id="abc123",
         results_prefix="2026/08/29/abc123/",
-        result_manifest=(
-            '[{"file_id": "result-001", "blob_path": '
-            f'"{full_path}"}}]'
-        ),
+        result_manifest=(f'[{{"file_id": "result-001", "blob_path": "{full_path}"}}]'),
         storage_account="acct1",
     )
     monkeypatch.setattr(
@@ -737,6 +736,127 @@ def test_external_blast_submit_derives_precise_searchsp(monkeypatch) -> None:
     assert response.status_code == 202
     assert captured["options"]["sharding_mode"] == "precise"
     assert captured["options"]["db_effective_search_space"] == 32_156_241_807_668
+
+
+def test_external_blast_submit_uses_active_database_searchsp(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    from api.main import app
+    from api.services import external_blast
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda account, db: {
+            "total_letters": 998_069_435_926,
+            "total_sequences": 130_155_243,
+            "source_version": "ncbi-direct-20260819-cab30d18c360",
+        },
+    )
+    monkeypatch.setattr(external_blast, "ready", lambda **_kwargs: {"ready": True})
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kwargs: (
+            captured.update(payload) or {"job_id": "active123456", "status": "queued"}
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {
+                "sharding_mode": "precise",
+                "db_effective_search_space": 32_156_241_807_668,
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["options"]["db_effective_search_space"] == 30_807_003_700_117
+    assert captured["options"]["db_total_letters"] == 998_069_435_926
+    assert captured["options"]["db_total_sequences"] == 130_155_243
+
+
+def test_external_blast_submit_fails_closed_without_active_database_metadata(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    from api.main import app
+    from api.services import external_blast
+
+    submitted: list[object] = []
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kwargs: submitted.append(payload),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {"sharding_mode": "precise"},
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "live_search_space_unavailable"
+    assert submitted == []
+
+
+def test_canonical_inline_submit_uses_active_database_searchsp(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    from api.main import app
+    from api.services import external_blast
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args, **_kwargs: {
+            "total_letters": 998_069_435_926,
+            "total_sequences": 130_155_243,
+        },
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kwargs: (
+            captured.update(payload) or {"job_id": "abcdef123456", "status": "queued"}
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/blast/jobs",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {
+                "sharding_mode": "precise",
+                "db_effective_search_space": 32_156_241_807_668,
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["options"]["db_effective_search_space"] == 30_807_003_700_117
+    assert captured["options"]["db_total_letters"] == 998_069_435_926
+    assert captured["options"]["db_total_sequences"] == 130_155_243
 
 
 def test_external_blast_submit_rejects_bad_searchsp_override(monkeypatch) -> None:

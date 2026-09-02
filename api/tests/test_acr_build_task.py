@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import base64
 
-from api.services.image_tags import IMAGE_BUILD_INFO
+from api.services.image_tags import (
+    DASHBOARD_SOURCE_REPO,
+    IMAGE_BUILD_INFO,
+    OPENAPI_SIBLING_SOURCE_REF,
+)
 from api.tasks.acr import _schedule_acr_build
 
 
@@ -71,6 +75,20 @@ def _scheduled_task_yaml() -> str:
     return base64.b64decode(encoded).decode("utf-8")
 
 
+def _scheduled_openapi_request() -> object:
+    mgmt = _FakeManagementClient()
+    _schedule_acr_build(
+        mgmt,
+        "rg-acr",
+        "acr1",
+        "elb-openapi",
+        "4.38",
+        IMAGE_BUILD_INFO["elb-openapi"],
+    )
+    assert mgmt.registries.request is not None
+    return mgmt.registries.request
+
+
 def test_job_submit_build_patches_azure_snapshot_flow() -> None:
     task_yaml = _scheduled_task_yaml()
 
@@ -84,6 +102,21 @@ def test_pre_build_command_is_shell_quoted() -> None:
 
     assert "bash -lc '" in task_yaml
     assert "'\"'\"'s|COPY templates" in task_yaml
+
+
+def test_openapi_build_uses_pinned_patched_context() -> None:
+    request = _scheduled_openapi_request()
+    task_yaml = base64.b64decode(request.encoded_task_content).decode("utf-8")
+
+    assert request.source_location == DASHBOARD_SOURCE_REPO
+    assert f"fetch --depth 1 origin {OPENAPI_SIBLING_SOURCE_REF}" in task_yaml
+    assert f'test "$(git -C .acr-openapi rev-parse HEAD)" = "{OPENAPI_SIBLING_SOURCE_REF}"' in (
+        task_yaml
+    )
+    assert "def _replace_stale_core_nt_search_space_fallback" in task_yaml
+    assert "def read_active_database" in task_yaml
+    assert "scripts/dev/patch-openapi-build-context.py" in task_yaml
+    assert "workingDirectory: .acr-openapi/docker-openapi" in task_yaml
 
 
 def test_schedule_returns_run_id_from_initial_response() -> None:

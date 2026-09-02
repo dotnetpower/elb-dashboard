@@ -22,9 +22,9 @@ Tracking issue: [#8 Validate BLAST result parity with NCBI Web BLAST references]
 
 | Gene | Pathogen | Query length | NCBI RID (captured) | Entrez exclusion | Reference XML |
 | --- | --- | --- | --- | --- | --- |
-| F3L | Monkeypox virus (`taxid=10244`) | 462 bp | `1FZVPFJ6014` | `NOT txid3431483[ORGN]` | `reference_xml/f3l_1FZVPFJ6014.xml.gz` |
+| F3L | Monkeypox virus (`taxid=10244`) | 462 bp | `1FZVPFJ6014` | `NOT txid3431483[ORGN]` (`Orthopoxvirus monkeypox`, species) | `reference_xml/f3l_1FZVPFJ6014.xml.gz` |
 | 18S ribosomal RNA | Plasmodium falciparum (`taxid=5833`) | 2,151 bp | `1FZW35EN014` | `NOT txid5833[ORGN]` (P. falciparum itself) | `reference_xml/rrna_18s_1FZW35EN014.xml.gz` |
-| RdRp / ORF1ab | SARS-CoV-2 (`taxid=2697049`) | 21,290 bp | `1G7Z8G7W016` | `NOT txid3418604[ORGN]` | `reference_xml/rdrp_orf1ab_1G7Z8G7W016.xml.gz` |
+| RdRp / ORF1ab | SARS-CoV-2 (`taxid=2697049`) | 21,290 bp | `1G7Z8G7W016` | `NOT txid3418604[ORGN]` (`Betacoronavirus pandemicum`, species) | `reference_xml/rdrp_orf1ab_1G7Z8G7W016.xml.gz` |
 
 All three FASTA inputs and their corresponding NCBI Web BLAST reference XML outputs are checked
 into the repository under `api/tests/fixtures/web_blast_parity/`. The reference XMLs are stored
@@ -65,22 +65,29 @@ captured NCBI Web BLAST XML for every reference gene:
    `query_len`, `EXPECT`, and `FILTER` -- otherwise the captured XML belongs to a different
    query and parity claims are meaningless.
 2. **Self-equivalence.** `compare_summaries(reference, reference)` must return
-   `equivalent=True` with empty `findings`, `rank_set_only_in_reference`,
-   `rank_set_only_in_candidate`, and `hsp_drift`. This is the smoke test for the comparator
-   itself.
-3. **Query source exclusion.** The query's own NCBI source accession (e.g. `NC_045512.2` for
-   RdRp) must not appear in the hit set. This is the universal taxonomic-exclusion check that
-   holds regardless of where NCBI places the excluded taxid in its tree.
+  `exact_equivalent=True` with empty `exact_findings`, `rank_set_only_in_reference`,
+  `rank_set_only_in_candidate`, and `hsp_drift`. This is the smoke test for the comparator
+  itself.
+3. **Taxonomic exclusion.** The query's own NCBI source accession (e.g. `NC_045512.2` for RdRp)
+  must not appear as a canonical subject. The fixture also records the authoritative NCBI species
+  name and rank. Organism/taxid absence is not yet fully proven for ORF1ab: captured rank 3
+  `MN996528.1` belongs to taxid `2697049`, whose lineage includes excluded species taxid
+  `3418604`, but the XML hit groups it with non-excluded identical-sequence deflines. BLAST XML v1
+  carries no per-defline taxids, so a fresh taxid-bearing result is required to resolve AC6.
 4. **Canonical-field guard.** The dashboard's reusable
    [`parse_blast_xml`](https://github.com/dotnetpower/elb-dashboard/blob/main/api/services/blast/results_parser.py)
-   (which feeds the UI, API, and CSV export) must agree with the comparator on the rank-1 hit's
-   subject accession, alignment length, bit score, and e-value. If `parse_blast_xml` ever drops
-   a canonical field, this test fails before the dashboard misrepresents NCBI's output.
+  (which feeds the UI, API, and CSV export) must emit the same number of rows and agree with the
+  comparator on all 23 projected fields for every HSP. This includes canonical versioned subject
+  IDs from `Hit_id`; NCBI XML can carry a different `Hit_accession` when one hit groups multiple
+  deflines. If `parse_blast_xml` drops, reorders, or substitutes a field, the test fails before
+  the dashboard misrepresents NCBI's output.
 5. **Candidate-vs-reference parity (opt-in).** Set `ELB_PARITY_CANDIDATE_DIR=<path>` and the
-   test layer compares every reference XML against `<path>/<gene_id>.xml(.gz)` and asserts
-   `compare_summaries(...).equivalent == True`. DB snapshot drift between candidate and
-   reference is auto-detected from `Statistics_db-num` / `db-len` and downgrades the comparison
-   from per-HSP equality to accession rank-set equality -- it never silences a real divergence.
+  test layer compares every reference XML against `<path>/<gene_id>.xml(.gz)` and asserts
+  `compare_summaries(...).exact_equivalent == True`. Strict comparison covers BLAST version and
+  parameters, subject rank/identity/length, every HSP's raw score, bit score, e-value, identity,
+  positives, gaps, coordinates, frames, aligned sequences/midline, and all search statistics.
+  DB snapshot drift is auto-detected from `Statistics_db-num` / `db-len`; it may produce a
+  separate candidate-within-reference diagnostic, but can never satisfy the exact gate.
 
 The legacy CLI comparison scripts in `scripts/dev/` are still available for ad-hoc operator
 use:
@@ -119,10 +126,11 @@ ELB_PARITY_CANDIDATE_DIR=/tmp/my-blast-run \
   uv run pytest -q api/tests/test_web_blast_parity_xml.py
 ```
 
-Any gene whose candidate XML is missing is skipped individually with a clear reason; any gene
-whose candidate XML diverges from the reference fails the test with a structured diff (DB
-snapshot drift flag, accession-only-in-reference, accession-only-in-candidate, top HSP drift
-samples).
+When `ELB_PARITY_CANDIDATE_DIR` is unset, all three live checks skip cleanly. Once it is set, all
+three candidate files are mandatory: a missing gene fails the run instead of silently reducing
+coverage. Any divergence fails with a structured diff (comparison mode, DB snapshot drift flag,
+accession-only-in-reference, accession-only-in-candidate, and full subject/HSP drift samples). A
+cross-snapshot containment pass is useful diagnostic evidence but is not reported as exact parity.
 
 ## Refresh NCBI reference XML (opt-in, never in CI)
 
@@ -163,13 +171,27 @@ Byte-level result equality is only meaningful when both runs see the same `core_
 verified default search-space metadata lives in
 [`api/services/web_blast_searchsp.py`](https://github.com/dotnetpower/elb-dashboard/blob/main/api/services/web_blast_searchsp.py).
 When the dashboard's local `core_nt` snapshot is older or newer than NCBI Web BLAST's, expect
-small differences in hit count tails and e-value precision; the comparison report's `equivalent`
-flag will reflect that. See the [Compatibility Plan §8 Equivalence Evidence Matrix](../research/web-blast-compatibility-plan.md#stage-8-equivalence-evidence-matrix)
+differences in hit membership and HSP/search statistics. The report records
+`comparison_mode=drift_tolerant_containment` and a `drift_compatible` diagnostic, while
+`exact_equivalent` remains false. Only `exact_equivalent=true` is acceptable evidence for complete
+parity. See the [Compatibility Plan §8 Equivalence Evidence Matrix](../research/web-blast-compatibility-plan.md#stage-8-equivalence-evidence-matrix)
 for the full database-version policy.
 
 ## Outstanding gaps tracked by issue #8
 
 - Live `core_nt` snapshot pinning between NCBI Web BLAST and this dashboard is operational work
-  that lives in the cluster lifecycle, not in this test suite. The XML comparator already
-  auto-detects snapshot drift and downgrades the comparison strictness; pinning the snapshot at
-  the cluster layer is what makes the drift-tolerant mode unnecessary.
+  that lives in the cluster lifecycle, not in this test suite. The XML comparator reports drift
+  diagnostics but deliberately fails the strict exact gate until the snapshots match.
+- The 2026-09-02 readiness check confirmed the checked-in references and the active workload DB
+  are not the same snapshot. Reference `Statistics_db-num` values are `125,926,199` (F3L),
+  `125,832,392` (18S), and `117,842,978` (ORF1ab), while the active
+  `ncbi-direct-20260819-cab30d18c360` generation reports `130,155,243` sequences and
+  `998,069,435,926` letters. The legacy Web XML v1 references also report only 1.2–1.5 billion
+  `db-len` and zero `eff-space`, which cannot identify the full trillion-base DB unambiguously
+  (the length is consistent with a wrapped/filtered representation). Starting the ten-node
+  cluster cannot make those frozen artifacts exact. Capture fresh Web XML plus authoritative
+  full snapshot counts/release identity, pin/download that matching DB generation, and only then
+  run the three candidates and require `exact_equivalent=true`.
+- ORF1ab exclusion AC6 is separately blocked by the grouped-defline case above. A new reference
+  must retain taxids (or be joined to an authoritative accession-taxid snapshot) and prove that no
+  returned defline belongs to taxid `3418604` or any descendant.

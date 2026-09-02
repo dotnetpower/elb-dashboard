@@ -43,6 +43,7 @@ class ExternalBlastOptions(BaseModel):
     outfmt: Literal[5] = Field(5, description="Fixed to BLAST XML format 5")
     word_size: int = Field(28, ge=1)
     dust: bool = Field(True)
+    soft_masking: bool = Field(False)
     sharding_mode: Literal["off", "approximate", "precise"] = Field("off")
     db_effective_search_space: int | None = Field(None, ge=1)
     evalue: float = Field(
@@ -263,6 +264,31 @@ _SUCCESS_STATUSES = frozenset({"complete", "completed", "success", "succeeded"})
 _FAILED_STATUSES = frozenset({"canceled", "cancelled", "error", "failed", "failure", "timeout"})
 
 
+def _canonicalize_external_live_options(
+    database: str,
+    options: dict[str, Any] | None,
+) -> dict[str, Any]:
+    from api.services.blast.live_search_space import (
+        LiveSearchSpaceUnavailable,
+        canonicalize_precise_options,
+    )
+
+    try:
+        return canonicalize_precise_options(database, options)
+    except LiveSearchSpaceUnavailable as exc:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "live_search_space_unavailable",
+                "message": (
+                    "Active database statistics are required for precise "
+                    "Web BLAST-compatible sharding."
+                ),
+                "retryable": True,
+            },
+        ) from exc
+
+
 def _validated_submit_contracts(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         contracts = submit_contracts(payload)
@@ -419,11 +445,15 @@ def submit_external_blast_job(
     payload["options"] = align_options_with_resource_profile(
         payload.get("options"), str(payload["resource_profile"])
     )
+    payload["options"] = _canonicalize_external_live_options(
+        str(payload.get("db") or ""),
+        payload["options"],
+    )
     plan = resolve_sharding_plan(
         program=request.program,
         database=str(payload.get("db") or ""),
         options=payload["options"],
-        caller_supplied_searchsp=request.options.db_effective_search_space,
+        caller_supplied_searchsp=None,
     )
     payload["options"] = plan.options
     payload.update(

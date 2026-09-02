@@ -1,9 +1,8 @@
 """Orchestrate a single-action ``elb-openapi`` rebuild + redeploy.
 
-Responsibility: Chain the charter rollout order (build the pinned
-    ``elb-openapi`` image in ACR FIRST, wait for it to succeed, THEN redeploy it
-    to AKS) into one Celery task so the SPA exposes a single "Rebuild & Deploy"
-    action. The image tag is the single source of truth
+Responsibility: Lease ACR build access, build the pinned ``elb-openapi`` image,
+    restore private registry posture, and only then redeploy it to AKS. The SPA
+    exposes this chain as one "Rebuild & Deploy" action. The image tag is the single source of truth
     ``IMAGE_TAGS["elb-openapi"]`` — this task never invents a tag. Deploy is
     chained as a SEPARATE ``deploy_openapi_service`` task (so its progress is
     tracked by the existing deploy status route); this task returns the
@@ -16,8 +15,9 @@ Key entry points: ``rebuild_and_redeploy_openapi`` (Celery task
     ``api.tasks.openapi.rebuild_and_redeploy``), plus the monkeypatch-friendly
     module helpers ``_schedule_openapi_build``, ``_poll_acr_build``,
     ``_enqueue_openapi_deploy``.
-Risky contracts: The build-success gate is load-bearing — deploy is enqueued
-    ONLY when the ACR run reaches ``Succeeded``. A failed / timed-out build
+Risky contracts: Build access restoration and the build-success gate are
+    load-bearing — deploy is enqueued ONLY after ACR is restored and the run
+    reaches ``Succeeded``. A failed / timed-out build
     returns a terminal ``status="failed"`` payload and never deploys, so a
     broken image can never replace the live revision. The poll loop is bounded
     by ``_BUILD_POLL_MAX_SECONDS`` (< the task soft limit) so it cannot spin
@@ -82,6 +82,89 @@ _BUILD_TERMINAL_FAIL = frozenset({"Failed", "Canceled", "Cancelled", "Error", "T
 # Sentinel returned by ``_poll_acr_build`` when the deadline elapses before the
 # run reaches any terminal status.
 _BUILD_TIMEOUT = "__timeout__"
+_BUILD_CANCEL_WAIT_SECONDS = int(os.environ.get("OPENAPI_REBUILD_CANCEL_WAIT_SECONDS", "180"))
+
+
+def _open_acr_build_access(
+    subscription_id: str,
+    registry_resource_group: str,
+    registry_name: str,
+) -> Any:
+    from api.services.acr_build_access import open_build_access
+
+    return open_build_access(
+        get_credential(),
+        subscription_id=subscription_id,
+        resource_group=registry_resource_group,
+        registry_name=registry_name,
+    )
+
+
+def _restore_acr_build_access(lease: Any) -> bool:
+    from api.services.acr_build_access import restore_build_access
+
+    try:
+        return restore_build_access(
+            get_credential(),
+            lease,
+        )
+    except Exception as exc:
+        LOGGER.error("ACR build access restore raised: %s", type(exc).__name__)
+        return False
+
+
+def _cancel_acr_build_and_wait(
+    subscription_id: str,
+    registry_resource_group: str,
+    registry_name: str,
+    run_id: str,
+    *,
+    deadline_seconds: int = _BUILD_CANCEL_WAIT_SECONDS,
+    interval_seconds: int = 5,
+) -> bool:
+    """Cancel one timed-out run and wait boundedly for a terminal state."""
+    from azure.mgmt.containerregistry import ContainerRegistryManagementClient
+
+    client = ContainerRegistryManagementClient(
+        get_credential(),
+        subscription_id,
+        api_version=_ACR_RUN_API_VERSION,
+    )
+    try:
+        poller = client.runs.begin_cancel(
+            registry_resource_group,
+            registry_name,
+            run_id,
+            connection_timeout=10,
+            read_timeout=30,
+        )
+        poller.result(timeout=60)
+        deadline = time.monotonic() + max(1, deadline_seconds)
+        while time.monotonic() < deadline:
+            status = str(
+                client.runs.get(
+                    registry_resource_group,
+                    registry_name,
+                    run_id,
+                    connection_timeout=10,
+                    read_timeout=30,
+                ).status
+                or ""
+            ).strip()
+            if status == "Succeeded" or status in _BUILD_TERMINAL_FAIL:
+                return True
+            time.sleep(max(1, interval_seconds))
+    except Exception as exc:
+        LOGGER.error(
+            "ACR timed-out build cancel failed run_id=%s error=%s",
+            run_id,
+            type(exc).__name__,
+        )
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    return False
 
 
 def _schedule_openapi_build(
@@ -257,6 +340,23 @@ def rebuild_and_redeploy_openapi(
             "image": image_ref,
         }
 
+    record_progress(self, "opening_acr_build_access", image=image_ref, registry=registry_name)
+    try:
+        build_access_lease = _open_acr_build_access(
+            subscription_id,
+            registry_resource_group,
+            registry_name,
+        )
+    except Exception as exc:
+        LOGGER.error("openapi ACR build access open failed: %s", type(exc).__name__)
+        record_progress(self, "acr_build_access_failed", image=image_ref)
+        return {
+            "status": "failed",
+            "stage": "build_access",
+            "error_code": "acr_build_access_failed",
+            "image": image_ref,
+        }
+
     # 1. schedule build ----------------------------------------------------
     record_progress(self, "scheduling_build", image=image_ref, registry=registry_name)
     try:
@@ -265,11 +365,14 @@ def rebuild_and_redeploy_openapi(
         LOGGER.warning("openapi build schedule raised: %s", exc)
         run_id = ""
     if not run_id:
+        restored = _restore_acr_build_access(build_access_lease)
         record_progress(self, "build_schedule_failed", image=image_ref)
         return {
             "status": "failed",
-            "stage": "build",
-            "error_code": "build_schedule_failed",
+            "stage": "build_access" if not restored else "build",
+            "error_code": (
+                "acr_build_access_restore_failed" if not restored else "build_schedule_failed"
+            ),
             "image": image_ref,
         }
 
@@ -283,9 +386,42 @@ def rebuild_and_redeploy_openapi(
 
     # 2. poll build until terminal (bounded) -------------------------------
     record_progress(self, "building", run_id=run_id, image=image_ref)
-    build_status = _poll_acr_build(
-        subscription_id, registry_resource_group, registry_name, run_id
-    )
+    try:
+        build_status = _poll_acr_build(
+            subscription_id, registry_resource_group, registry_name, run_id
+        )
+    except Exception as exc:
+        LOGGER.error(
+            "openapi ACR build poll failed run_id=%s error=%s",
+            run_id,
+            type(exc).__name__,
+        )
+        build_status = "Error"
+    if build_status == _BUILD_TIMEOUT:
+        cancelled = _cancel_acr_build_and_wait(
+            subscription_id,
+            registry_resource_group,
+            registry_name,
+            run_id,
+        )
+        if not cancelled:
+            LOGGER.error("timed-out ACR build did not reach terminal state run_id=%s", run_id)
+    restored = _restore_acr_build_access(build_access_lease)
+    if not restored:
+        record_progress(
+            self,
+            "acr_build_access_restore_failed",
+            run_id=run_id,
+            build_status=build_status,
+        )
+        return {
+            "status": "failed",
+            "stage": "build_access",
+            "error_code": "acr_build_access_restore_failed",
+            "build_run_id": run_id,
+            "build_status": build_status,
+            "image": image_ref,
+        }
     if build_status != "Succeeded":
         error_code = (
             "build_timeout"
@@ -318,9 +454,7 @@ def rebuild_and_redeploy_openapi(
         confirm_recreate=confirm_recreate,
     )
     if not deploy_task_id:
-        record_progress(
-            self, "deploy_enqueue_failed", run_id=run_id, image=image_ref
-        )
+        record_progress(self, "deploy_enqueue_failed", run_id=run_id, image=image_ref)
         return {
             "status": "failed",
             "stage": "deploy",

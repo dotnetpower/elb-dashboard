@@ -4,8 +4,10 @@ Responsibility: ACR image build Celery tasks - build ElasticBLAST container imag
 Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
 persist state.
 Key entry points: `build_images`, `_schedule_acr_build`
-Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
-Validation: `uv run pytest -q api/tests/test_azure_tasks.py api/tests/test_blast_tasks.py`.
+Risky contracts: Tasks should be idempotent and retry-aware; per-image source
+repositories and pre-build patch commands are part of the immutable build input.
+Validation: `uv run pytest -q api/tests/test_acr_build_task.py
+api/tests/test_azure_tasks.py api/tests/test_blast_tasks.py`.
 """
 
 from __future__ import annotations
@@ -190,9 +192,9 @@ def _schedule_acr_build(
     encoded = base64.b64encode(task_yaml.encode("utf-8")).decode("ascii")
     request = EncodedTaskRunRequest(
         encoded_task_content=encoded,
-        source_location=SOURCE_REPO,
+        source_location=build_info.get("source_repo") or SOURCE_REPO,
         platform=PlatformProperties(os="Linux", architecture="amd64"),
-        timeout=3600,
+        timeout=int(build_info.get("timeout_seconds") or 3600),
     )
 
     poller = mgmt.registries.begin_schedule_run(

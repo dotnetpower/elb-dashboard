@@ -17,7 +17,6 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, Request
 
 from api.auth import CallerIdentity, require_caller
-from api.routes._blast_shared import _apply_web_blast_searchsp_default
 from api.services.response_contracts import (
     AdmissionDecision,
     build_admission,
@@ -51,29 +50,6 @@ def blast_pre_flight(
     storage = body.get("storage_account", "")
     db = body.get("db") or body.get("database", "")
     compatibility_contract: dict[str, Any] | None = None
-    _raw_opts = body.get("options")
-    raw_options: dict[str, Any] = _raw_opts if isinstance(_raw_opts, dict) else {}
-    precision_options = {**raw_options}
-    for key in (
-        "additional_options",
-        "allow_approximate_sharding",
-        "db_auto_partition",
-        "db_partitions",
-        "db_partition_prefix",
-        "db_effective_search_space",
-        "db_total_letters",
-        "outfmt",
-        "query_effective_search_spaces",
-        "searchsp",
-        "sharding_mode",
-        "use_db_order_oracle",
-    ):
-        if key in body:
-            if key == "searchsp":
-                precision_options.setdefault("db_effective_search_space", body[key])
-            else:
-                precision_options[key] = body[key]
-    _apply_web_blast_searchsp_default(str(db), precision_options)
 
     # Local sidecar gates from `api.services.blast.submit_gates`: terminal
     # sidecar reachability and EXEC_TOKEN presence are blocking conditions for
@@ -286,8 +262,7 @@ def blast_pre_flight(
         critical += 1
 
     try:
-        from api.services.blast.compatibility import build_compatibility_contract
-        from api.services.sharding_precision import build_precision_report
+        from api.services.blast.submit_payload import submit_contracts
 
         query_metadata = None
         query_count = body.get("query_count")
@@ -299,49 +274,46 @@ def blast_pre_flight(
             query_count = query_metadata.query_count
         elif not isinstance(query_count, int):
             query_count = None
-        shard_sets = body.get("shard_sets")
-        if not isinstance(shard_sets, list):
-            shard_sets = None
-        precision_report = build_precision_report(
-            precision_options,
-            query_count=query_count,
-            db_stats_available=bool(precision_options.get("db_total_letters")),
-            shard_sets=shard_sets,
-        )
-        contract = build_compatibility_contract(
-            database=str(db),
-            options=precision_options,
-            precision_report=precision_report,
-        )
-        compatibility_contract = contract.as_dict()
-        status = "pass" if precision_report.eligible else "fail"
+        contract_body = {**body, "database": str(db)}
+        if query_count is not None:
+            contract_body["query_count"] = query_count
+        contracts = submit_contracts(contract_body)
+        precision_contract = contracts["precision"]
+        compatibility_contract = contracts["compatibility_contract"]
+        precision_eligible = bool(precision_contract.get("eligible"))
+        status = "pass" if precision_eligible else "fail"
         checks.append(
             {
                 "id": "sharding_precision",
                 "status": status,
                 "title": "Sharding Precision",
-                "detail": precision_report.precision_level,
-                "severity": "critical" if not precision_report.eligible else None,
-                "precision": precision_report.as_dict(),
+                "detail": precision_contract.get("precision_level"),
+                "severity": "critical" if not precision_eligible else None,
+                "precision": precision_contract,
                 "query_metadata": query_metadata.as_dict() if query_metadata else None,
             }
         )
-        if not precision_report.eligible:
+        if not precision_eligible:
             critical += 1
+        compatibility_eligible = bool(compatibility_contract.get("eligible"))
         contract_status = (
-            "fail" if not contract.eligible else "warn" if contract.mode != "precise" else "pass"
+            "fail"
+            if not compatibility_eligible
+            else "warn"
+            if compatibility_contract.get("mode") != "precise"
+            else "pass"
         )
         checks.append(
             {
                 "id": "web_blast_compatibility",
                 "status": contract_status,
                 "title": "Web BLAST Compatibility",
-                "detail": contract.level,
-                "severity": "critical" if not contract.eligible else None,
+                "detail": compatibility_contract.get("level"),
+                "severity": "critical" if not compatibility_eligible else None,
                 "compatibility": compatibility_contract,
             }
         )
-        if not contract.eligible:
+        if not compatibility_eligible:
             critical += 1
     except Exception as exc:
         checks.append(

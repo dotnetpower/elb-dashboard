@@ -12,8 +12,9 @@ Risky contracts: Correlation fallback order is body, Service Bus correlation,
     then message id; invalid requests return ``None`` for terminal rejection;
     producers cannot spoof submission source; core_nt retains its safe sharded
     profile; custom v1 profiles and target scope survive validation; caller
-    search-space flags are never overwritten; v1 calibration failure degrades
-    without rejecting an otherwise valid request.
+    search-space flags are preserved only without a configured workload account;
+    deployed precise core_nt requests replace caller searchsp/dbsize from active
+    metadata and fail closed when that metadata is unavailable.
 Validation: ``uv run pytest -q api/tests/test_servicebus_tasks.py
     api/tests/test_servicebus_v1_multitoken.py
     api/tests/test_blast_submit_route_options.py``.
@@ -37,8 +38,11 @@ def build_request_payload(
     """Map one XML-path queue message to a validated OpenAPI payload."""
     del cfg
     from api.routes.elastic_blast import ExternalBlastSubmitRequest
+    from api.services.blast.live_search_space import (
+        LiveSearchSpaceUnavailable,
+        canonicalize_precise_options,
+    )
     from api.services.blast.submit_payload import (
-        _caller_supplied_searchsp,
         align_options_with_resource_profile,
         canonical_submit_metadata,
         resolve_sharded_db_resource_profile,
@@ -62,10 +66,13 @@ def build_request_payload(
         "outfmt",
         "word_size",
         "dust",
+        "soft_masking",
         "evalue",
         "max_target_seqs",
         "sharding_mode",
         "db_effective_search_space",
+        "db_total_letters",
+        "db_total_sequences",
     ):
         if key in body and key not in options:
             options[key] = body[key]
@@ -106,11 +113,23 @@ def build_request_payload(
     payload["options"] = align_options_with_resource_profile(
         payload.get("options"), str(payload["resource_profile"])
     )
+    try:
+        payload["options"] = canonicalize_precise_options(
+            str(payload.get("db") or ""),
+            payload["options"],
+        )
+    except LiveSearchSpaceUnavailable:
+        logger.warning(
+            "service bus active search-space metadata unavailable corr=%s db=%s",
+            correlation_id,
+            payload.get("db"),
+        )
+        return None
     plan = resolve_sharding_plan(
         program=str(payload.get("program") or "blastn"),
         database=str(payload.get("db") or ""),
         options=payload["options"],
-        caller_supplied_searchsp=_caller_supplied_searchsp(body),
+        caller_supplied_searchsp=None,
         allow_servicebus_downgrade=True,
     )
     payload["options"] = plan.options
@@ -138,6 +157,11 @@ def build_v1_jobs_payload(
     """Map one free-form ``blast_options`` message to a v1 jobs payload."""
     del cfg
     from api.routes.elastic_blast import ExternalBlastV1Request
+    from api.services.blast.live_search_space import (
+        LiveSearchSpaceUnavailable,
+        canonicalize_precise_options,
+        set_search_space_option,
+    )
     from api.services.blast.submit_payload import (
         canonical_submit_metadata,
         resolve_sharded_db_resource_profile,
@@ -189,50 +213,59 @@ def build_v1_jobs_payload(
     blast_options = payload.get("blast_options")
     if isinstance(blast_options, dict):
         caller_searchsp = blast_options.pop("db_effective_search_space", None)
-        existing = f"{blast_options.get('extra') or ''} {blast_options.get('outfmt') or ''}"
-        if "-searchsp" not in existing and "-dbsize" not in existing:
-            resolved_searchsp = None
-            plan = None
-            try:
-                plan = resolve_sharding_plan(
-                    program=str(payload.get("program") or "blastn"),
-                    database=str(payload.get("db") or ""),
-                    options={
-                        "additional_options": str(blast_options.get("extra") or ""),
-                        "db_effective_search_space": caller_searchsp,
-                        "db_total_letters": body.get("db_total_letters"),
-                        "db_total_sequences": body.get("db_total_sequences"),
-                    },
-                    caller_supplied_searchsp=(
-                        caller_searchsp if isinstance(caller_searchsp, int) else None
-                    ),
-                    allow_servicebus_downgrade=True,
-                )
-                resolved_searchsp = plan.options.get("db_effective_search_space")
-            except Exception as exc:
-                logger.warning(
-                    "service bus v1 searchsp resolution skipped corr=%s: %s",
-                    correlation_id,
-                    type(exc).__name__,
-                )
-            if resolved_searchsp:
-                current_extra = str(blast_options.get("extra") or "").strip()
-                blast_options["extra"] = (
-                    f"{current_extra} -searchsp {int(resolved_searchsp)}".strip()
-                )
-                logger.info(
-                    "service bus v1 searchsp applied corr=%s db=%s searchsp=%s",
-                    correlation_id,
-                    payload.get("db"),
-                    int(resolved_searchsp),
-                )
-            elif plan is not None and getattr(plan, "downgraded", False):
-                logger.info(
-                    "service bus v1 searchsp parity downgraded corr=%s db=%s reason=%s",
-                    correlation_id,
-                    payload.get("db"),
-                    getattr(plan, "downgrade_reason", None),
-                )
+        resolved_searchsp = None
+        plan = None
+        try:
+            live_options = canonicalize_precise_options(
+                str(payload.get("db") or ""),
+                {
+                    "sharding_mode": "precise",
+                    "db_effective_search_space": caller_searchsp,
+                    "db_total_letters": body.get("db_total_letters"),
+                    "db_total_sequences": body.get("db_total_sequences"),
+                    "additional_options": str(blast_options.get("extra") or ""),
+                },
+            )
+            plan = resolve_sharding_plan(
+                program=str(payload.get("program") or "blastn"),
+                database=str(payload.get("db") or ""),
+                options=live_options,
+                caller_supplied_searchsp=None,
+                allow_servicebus_downgrade=True,
+            )
+            resolved_searchsp = plan.options.get("db_effective_search_space")
+        except LiveSearchSpaceUnavailable:
+            logger.warning(
+                "service bus v1 active search-space metadata unavailable corr=%s db=%s",
+                correlation_id,
+                payload.get("db"),
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "service bus v1 searchsp resolution skipped corr=%s: %s",
+                correlation_id,
+                type(exc).__name__,
+            )
+        if resolved_searchsp:
+            current_extra = str(blast_options.get("extra") or "").strip()
+            blast_options["extra"] = set_search_space_option(
+                current_extra,
+                int(resolved_searchsp),
+            )
+            logger.info(
+                "service bus v1 searchsp applied corr=%s db=%s searchsp=%s",
+                correlation_id,
+                payload.get("db"),
+                int(resolved_searchsp),
+            )
+        elif plan is not None and getattr(plan, "downgraded", False):
+            logger.info(
+                "service bus v1 searchsp parity downgraded corr=%s db=%s reason=%s",
+                correlation_id,
+                payload.get("db"),
+                getattr(plan, "downgrade_reason", None),
+            )
         payload["blast_options"] = blast_options
 
     payload.update(

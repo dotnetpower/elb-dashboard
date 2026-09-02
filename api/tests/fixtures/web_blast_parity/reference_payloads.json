@@ -2,7 +2,7 @@
   "$schema_note": "Web BLAST parity reference inputs. Each entry pairs the literal NCBI Web BLAST form payload with the structured dashboard submit request the parity test maps it into, plus the BLAST+ flags that must appear in the [blast].options line of the generated elastic-blast INI. See README.md.",
   "version": "2",
   "core_nt_snapshot": {
-    "policy": "When the dashboard's local core_nt snapshot drifts from the NCBI Web BLAST snapshot, byte-level result equality is not guaranteed. The parity comparator records both versions and downgrades to taxonomy-and-rank-set equivalence instead of HSP byte equality when the snapshots differ.",
+    "policy": "When the dashboard's local core_nt snapshot drifts from the NCBI Web BLAST snapshot, exact result equality cannot be claimed. The parity comparator records both versions and may report a weaker candidate-within-reference containment diagnostic, but exact_equivalent remains false until database statistics, BLAST version/options, subjects, every HSP, and search statistics match.",
     "ncbi_database_name": "core_nt",
     "reference_database_field": "Database/BlastOutput_db",
     "documented_in": "docs/user-guide/web-blast-parity.md#database-parity"
@@ -29,7 +29,8 @@
       },
       "ncbi_rid": "1FZVPFJ6014",
       "exclusion_taxid": 3431483,
-      "exclusion_label": "Orthopoxvirus",
+      "exclusion_label": "Orthopoxvirus monkeypox",
+      "exclusion_taxon_rank": "species",
       "dashboard_request": {
         "program": "blastn",
         "database_name": "core_nt",
@@ -73,6 +74,7 @@
       "ncbi_rid": "1FZW35EN014",
       "exclusion_taxid": 5833,
       "exclusion_label": "Plasmodium falciparum",
+      "exclusion_taxon_rank": "species",
       "dashboard_request": {
         "program": "blastn",
         "database_name": "core_nt",
@@ -116,7 +118,15 @@
       },
       "ncbi_rid": "1G7Z8G7W016",
       "exclusion_taxid": 3418604,
-      "exclusion_label": "Betacoronavirus",
+      "exclusion_label": "Betacoronavirus pandemicum",
+      "exclusion_taxon_rank": "species",
+      "exclusion_validation_blocker": {
+        "code": "grouped_defline_contains_excluded_descendant",
+        "subject_accession": "MN996528.1",
+        "subject_taxid": 2697049,
+        "excluded_ancestor_taxid": 3418604,
+        "detail": "Captured rank 3 groups an excluded SARS-CoV-2 descendant with non-excluded identical-sequence deflines; BLAST XML v1 does not carry per-defline taxids. Query-source accession exclusion passes, but AC6 organism/taxid absence is not proven by this artifact."
+      },
       "dashboard_request": {
         "program": "blastn",
         "database_name": "core_nt",
