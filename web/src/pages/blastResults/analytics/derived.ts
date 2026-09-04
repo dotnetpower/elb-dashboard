@@ -413,6 +413,15 @@ export interface SearchSpacePin {
   text: string;
 }
 
+function uniformQuerySearchSpace(value: unknown): number | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const values = value.map(numberValue);
+  if (values.some((item) => item === null)) return null;
+  const first = values[0];
+  if (first === null || values.some((item) => item !== first)) return null;
+  return first;
+}
+
 /**
  * Surface the effective BLAST search space (and where it came from) so the
  * E-value above is interpretable and reproducible. Reads the compatibility
@@ -425,11 +434,15 @@ export function searchSpacePin(job: BlastJobSummary | null | undefined): SearchS
     ? contract.search_space_source
     : null;
   const options = job?.provenance?.options as Record<string, unknown> | undefined;
+  const payload = job?.payload as Record<string, unknown> | undefined;
   const fromOptions = numberValue(
     options?.db_effective_search_space ??
-      (job?.payload as Record<string, unknown> | undefined)?.db_effective_search_space,
+      payload?.db_effective_search_space,
   );
-  const searchSpace = fromContract ?? fromOptions ?? null;
+  const fromQueryOptions = uniformQuerySearchSpace(
+    options?.query_effective_search_spaces ?? payload?.query_effective_search_spaces,
+  );
+  const searchSpace = fromContract ?? fromQueryOptions ?? fromOptions ?? null;
   if (searchSpace === null) {
     return {
       searchSpace: null,

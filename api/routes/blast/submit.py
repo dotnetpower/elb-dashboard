@@ -612,6 +612,7 @@ def blast_job_submit(
     from api.routes.elastic_blast import (
         ExternalBlastSubmitRequest,
         _canonicalize_external_live_options,
+        _external_transport_payload,
         _normalise_external_job_payload,
     )
     from api.services import external_blast
@@ -675,7 +676,7 @@ def blast_job_submit(
         submit_request.program,
     )
     upstream = _normalise_external_job_payload(
-        external_blast.submit_job(payload),
+        external_blast.submit_job(_external_transport_payload(payload)),
         request_payload=payload,
     )
     openapi_job_id = str(upstream.get("job_id") or "")

@@ -1603,6 +1603,48 @@ def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
     assert "searchsp" not in payload
 
 
+def test_message_payload_collapses_uniform_query_search_space() -> None:
+    payload = sb_tasks._build_request_payload(
+        _msg(
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">s\nACGT",
+                "external_correlation_id": "corr-query-space",
+                "options": {
+                    "sharding_mode": "precise",
+                    "query_effective_search_spaces": [421_817_959_873_974],
+                },
+            }
+        ),
+        _enabled_cfg(),
+    )
+
+    assert payload is not None
+    assert payload["options"]["db_effective_search_space"] == 421_817_959_873_974
+    assert "query_effective_search_spaces" not in payload["options"]
+
+
+def test_message_payload_rejects_mixed_query_search_space_transport() -> None:
+    payload = sb_tasks._build_request_payload(
+        _msg(
+            {
+                "program": "blastn",
+                "db": "core_nt",
+                "query_fasta": ">q1\nACGT\n>q2\nACGT",
+                "external_correlation_id": "corr-mixed-query-space",
+                "options": {
+                    "sharding_mode": "precise",
+                    "query_effective_search_spaces": [123, 456],
+                },
+            }
+        ),
+        _enabled_cfg(),
+    )
+
+    assert payload is None
+
+
 def test_drain_rejects_message_for_a_different_deployment_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

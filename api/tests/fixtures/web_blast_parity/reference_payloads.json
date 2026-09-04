@@ -5,13 +5,30 @@
     "policy": "When the dashboard's local core_nt snapshot drifts from the NCBI Web BLAST snapshot, exact result equality cannot be claimed. The parity comparator records both versions and may report a weaker candidate-within-reference containment diagnostic, but exact_equivalent remains false until database statistics, BLAST version/options, subjects, every HSP, and search statistics match.",
     "ncbi_database_name": "core_nt",
     "reference_database_field": "Database/BlastOutput_db",
-    "documented_in": "docs/user-guide/web-blast-parity.md#database-parity"
+    "documented_in": "docs/user-guide/web-blast-parity.md#database-parity",
+    "identity_status": "verified",
+    "verified_at_utc": "2026-09-04T04:21:37Z",
+    "release_date": "2026-08-19T00:00:00",
+    "number_of_sequences": 130155243,
+    "number_of_letters": 998069435926,
+    "number_of_volumes": 84,
+    "ncbi_v5_metadata_path": "snapshot/core_nt-nucl-metadata-20260819.json",
+    "ncbi_v5_metadata_sha256": "ba09cf5742ea180df5d5250dcde4df6ef992779e53ccdffb04f2180e417a76a4",
+    "web_getdbinfo_path": "snapshot/web-blast-core_nt-getDBInfo-20260904.html",
+    "web_getdbinfo_sha256": "707a747ec25aceaf6f45cf9c415c9f1dd5ebbd04c4179e834114cc6de3889096",
+    "web_update_date": "2026/08/19",
+    "web_number_of_sequences": 130155243,
+    "local_active_generation": "ncbi-direct-20260819-cab30d18c360",
+    "local_release_fingerprint": "cab30d18c36080c80d64c8a53e01a2220a1f4ecc7dbcb056f150746ad7f83d01",
+    "local_transfer_manifest_sha256": "361779172c43a9e776a41ff263f99f5cca2bd0a261a8fe5866720c37283a9c4a"
   },
   "genes": {
     "f3l": {
-      "description": "Monkeypox virus F3L gene, 462 bp. NCBI Web BLAST RID 1FZVPFJ6014 captured 2026-05-28.",
+      "description": "Monkeypox virus F3L gene, 462 bp. NCBI Web BLAST RID 9MHUJ94R014 captured 2026-09-04.",
       "fasta_path": "f3l_query.fasta",
-      "reference_xml_path": "reference_xml/f3l_1FZVPFJ6014.xml.gz",
+      "reference_xml_path": "reference_xml/f3l_9MHUJ94R014.xml.gz",
+      "reference_xml2_path": "reference_xml/f3l_9MHUJ94R014.xml2.gz",
+      "reference_taxonomy_path": "reference_xml/f3l_9MHUJ94R014-taxonomy.xml.gz",
       "query_length": 462,
       "ncbi_form": {
         "CMD": "Put",
@@ -27,10 +44,23 @@
         "EMAIL": "parity@example.com",
         "ENTREZ_QUERY": "NOT txid3431483[ORGN]"
       },
-      "ncbi_rid": "1FZVPFJ6014",
+      "ncbi_rid": "9MHUJ94R014",
       "exclusion_taxid": 3431483,
       "exclusion_label": "Orthopoxvirus monkeypox",
       "exclusion_taxon_rank": "species",
+      "exclusion_validation_evidence": {
+        "status": "verified",
+        "evidence_format": "XML2",
+        "evidence_rid": "9MHUJ94R014",
+        "evidence_sha256": "bd5817ad43a78fc03bfc4cf27698bf66436e8d856ec270095959640c0b9a5759",
+        "reference_content_sha256": "ebc4df54330739233a7e1085af92776a8dae1fd90b11235c0aa4c5a181ae0db0",
+        "taxonomy_response_sha256": "0ce27273a72c981eab5d367c976c701ca8d2015852029fe6cbd34710d7abf799",
+        "defline_count": 377,
+        "unique_taxid_count": 38,
+        "missing_taxid_count": 0,
+        "excluded_descendant_count": 0,
+        "detail": "All 377 XML2 deflines carry taxids. NCBI Taxonomy EFetch checked all 38 unique result taxids and found no taxid 3431483 or descendant."
+      },
       "dashboard_request": {
         "program": "blastn",
         "database_name": "core_nt",
@@ -39,6 +69,9 @@
         "word_size": 28,
         "max_target_seqs": 500,
         "low_complexity_filter": true,
+        "query_effective_search_spaces": [
+          421817959873974
+        ],
         "taxid": 3431483,
         "is_inclusive": false
       },
@@ -47,6 +80,7 @@
         "-max_target_seqs 500",
         "-negative_taxids 3431483",
         "-outfmt 5",
+        "-searchsp 421817959873974",
         "-word_size 28",
         "-dust yes",
         "-soft_masking false"
@@ -97,10 +131,12 @@
       ]
     },
     "rdrp_orf1ab": {
-      "description": "SARS-CoV-2 ORF1ab polyprotein (266..21555 of NC_045512.2; includes nsp12 / RdRp), 21290 bp. NCBI Web BLAST RID 1G7Z8G7W016 submitted 2026-05-28 with the parity tool/email tuple (the documented original requestor; either combination produces the same scientific result for these parameters).",
+      "description": "SARS-CoV-2 ORF1ab polyprotein (266..21555 of NC_045512.2; includes nsp12 / RdRp), 21290 bp. NCBI Web BLAST RID 9MK93UBF016 submitted 2026-09-04 with the corrected dual-NOT taxonomy filter.",
       "fasta_path": "orf1ab_query.fasta",
       "fasta_source": "NCBI Entrez efetch nuccore NC_045512.2:266-21555",
-      "reference_xml_path": "reference_xml/rdrp_orf1ab_1G7Z8G7W016.xml.gz",
+      "reference_xml_path": "reference_xml/rdrp_orf1ab_9MK93UBF016.xml.gz",
+      "reference_xml2_path": "reference_xml/rdrp_orf1ab_9MK93UBF016.xml2.gz",
+      "reference_taxonomy_path": "reference_xml/rdrp_orf1ab_9MK93UBF016-taxonomy.xml.gz",
       "query_length": 21290,
       "ncbi_form": {
         "CMD": "Put",
@@ -114,18 +150,28 @@
         "FILTER": "L",
         "TOOL": "elb-dashboard-parity",
         "EMAIL": "parity@example.com",
-        "ENTREZ_QUERY": "NOT txid3418604[ORGN]"
+        "ENTREZ_QUERY": "NOT txid3418604[ORGN] NOT txid32630[ORGN]"
       },
-      "ncbi_rid": "1G7Z8G7W016",
+      "ncbi_rid": "9MK93UBF016",
       "exclusion_taxid": 3418604,
+      "exclusion_taxids": [
+        3418604,
+        32630
+      ],
       "exclusion_label": "Betacoronavirus pandemicum",
       "exclusion_taxon_rank": "species",
-      "exclusion_validation_blocker": {
-        "code": "grouped_defline_contains_excluded_descendant",
-        "subject_accession": "MN996528.1",
-        "subject_taxid": 2697049,
-        "excluded_ancestor_taxid": 3418604,
-        "detail": "Captured rank 3 groups an excluded SARS-CoV-2 descendant with non-excluded identical-sequence deflines; BLAST XML v1 does not carry per-defline taxids. Query-source accession exclusion passes, but AC6 organism/taxid absence is not proven by this artifact."
+      "exclusion_validation_evidence": {
+        "status": "verified",
+        "evidence_format": "XML2",
+        "evidence_rid": "9MK93UBF016",
+        "evidence_sha256": "b87c5ba9a983375e3073f4785f0d6506a4ab280c255d12da5368e121407ebf2a",
+        "reference_content_sha256": "db047da6ab3458efda31699da30bf528d22e266e9349aa88430f6a79cf031f10",
+        "taxonomy_response_sha256": "d723a1dfbfa8a14d0658efd4d35463ae80fc216903ceb2972a7071ff7562cdaf",
+        "defline_count": 643,
+        "unique_taxid_count": 111,
+        "missing_taxid_count": 0,
+        "excluded_descendant_count": 0,
+        "detail": "All 643 XML2 deflines carry taxids. NCBI Taxonomy EFetch checked all 111 unique result taxids and found no taxid 3418604 or descendant. The additional NOT txid32630 term removes the mixed group that previously paired three excluded SARS-CoV-2 accessions with synthetic construct MT108784."
       },
       "dashboard_request": {
         "program": "blastn",
@@ -135,14 +181,17 @@
         "word_size": 28,
         "max_target_seqs": 500,
         "low_complexity_filter": true,
-        "taxid": 3418604,
-        "is_inclusive": false
+        "additional_options": "-negative_taxids 3418604,32630",
+        "query_effective_search_spaces": [
+          15967096556108750
+        ]
       },
       "expected_blast_options": [
         "-evalue 0.05",
         "-max_target_seqs 500",
-        "-negative_taxids 3418604",
+        "-negative_taxids 3418604,32630",
         "-outfmt 5",
+        "-searchsp 15967096556108750",
         "-word_size 28",
         "-dust yes",
         "-soft_masking false"

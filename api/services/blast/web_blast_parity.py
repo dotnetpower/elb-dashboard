@@ -11,11 +11,14 @@ Edit boundaries: keep this module side-effect-free and dependency-light. It
 only reads files (plain `.xml` or `.xml.gz`) and returns plain dataclasses.
 The opt-in NCBI fetcher lives in `scripts/dev/fetch-ncbi-blast-rid.py`; do
 not put network calls in here.
-Key entry points: `parse_summary`, `compare_summaries`, `verify_exclusion`.
+Key entry points: `parse_summary`, `parse_xml2_deflines`, `parse_xml2_statistics`,
+`compare_summaries`, `verify_exclusion`, `verify_xml2_taxid_exclusion`.
 Risky contracts: `exact_equivalent` is true only for the same database
 statistics, BLAST version/options, subject order, every HSP field, and search
 statistics. Cross-snapshot containment is diagnostic only and must never close
-an exact-parity acceptance criterion.
+an exact-parity acceptance criterion. XML2 taxonomy checks require an
+authoritative ancestor-plus-descendant taxid closure supplied by the caller;
+this offline module never guesses taxonomy lineage from titles.
 Validation: `uv run pytest -q api/tests/test_web_blast_parity_xml.py`.
 """
 
@@ -26,12 +29,17 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from io import BytesIO
 from pathlib import Path
 from typing import Literal
+from zipfile import BadZipFile, ZipFile
 
 from defusedxml import ElementTree as ET
 
 from api.services.blast.snapshot_drift import assess_snapshot_drift
+
+_XML2_MAX_MEMBERS = 16
+_XML2_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -84,6 +92,32 @@ class WebBlastHit:
         if self.align_len <= 0:
             return 0.0
         return round(self.identity * 100.0 / self.align_len, 3)
+
+
+@dataclass(frozen=True)
+class WebBlastDefline:
+    """One taxid-bearing descriptor from an NCBI BLAST XML2 hit group."""
+
+    hit_rank: int
+    descriptor_index: int
+    accession: str
+    identifier: str
+    taxid: int | None
+    scientific_name: str
+    title: str
+
+
+@dataclass(frozen=True)
+class WebBlastXml2Statistics:
+    """Authoritative per-query statistics exposed by NCBI BLAST XML2."""
+
+    db_num: int
+    db_len: int
+    hsp_len: int
+    eff_space: int
+    kappa: float
+    lambda_value: float
+    entropy: float
 
 
 @dataclass(frozen=True)
@@ -148,6 +182,52 @@ def _open_xml(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _open_xml2_documents(path: Path) -> tuple[bytes, ...]:
+    """Read bounded XML2 documents from a plain, gzip, or NCBI ZIP payload."""
+    if path.stat().st_size > _XML2_MAX_UNCOMPRESSED_BYTES:
+        raise ValueError(f"{path}: XML2 payload exceeds 128 MiB")
+    if path.suffix == ".gz":
+        with gzip.open(path, "rb") as fh:
+            payload = fh.read(_XML2_MAX_UNCOMPRESSED_BYTES + 1)
+    else:
+        payload = path.read_bytes()
+    if len(payload) > _XML2_MAX_UNCOMPRESSED_BYTES:
+        raise ValueError(f"{path}: XML2 payload exceeds 128 MiB")
+    if not payload.startswith(b"PK\x03\x04"):
+        return (payload,)
+
+    try:
+        with ZipFile(BytesIO(payload)) as archive:
+            members = [
+                info
+                for info in archive.infolist()
+                if not info.is_dir() and info.filename.lower().endswith(".xml")
+            ]
+            if not members:
+                raise ValueError(f"{path}: XML2 ZIP contains no XML members")
+            if len(members) > _XML2_MAX_MEMBERS:
+                raise ValueError(
+                    f"{path}: XML2 ZIP contains {len(members)} XML members; "
+                    f"maximum is {_XML2_MAX_MEMBERS}"
+                )
+            total_size = sum(member.file_size for member in members)
+            if total_size > _XML2_MAX_UNCOMPRESSED_BYTES:
+                raise ValueError(f"{path}: XML2 ZIP expands beyond 128 MiB")
+            documents = tuple(archive.read(member) for member in members)
+            # NCBI's ZIP includes a tiny XInclude wrapper and the actual
+            # BlastOutput2 member. Some live wrappers are malformed (missing
+            # whitespace between namespace attributes), so select the
+            # self-contained result document rather than parsing the wrapper.
+            result_documents = tuple(
+                document for document in documents if b"<BlastOutput2" in document
+            )
+            if not result_documents:
+                raise ValueError(f"{path}: XML2 ZIP contains no BlastOutput2 result")
+            return result_documents
+    except BadZipFile as exc:
+        raise ValueError(f"{path}: invalid XML2 ZIP payload") from exc
+
+
 def _local(tag: str) -> str:
     """Strip any XML namespace prefix."""
     return tag.split("}", 1)[-1] if "}" in tag else tag
@@ -160,6 +240,46 @@ def _text(parent: ET.Element | None, child: str) -> str | None:
     if el is None or el.text is None:
         return None
     return el.text.strip() or None
+
+
+def _local_text(parent: ET.Element, child_name: str) -> str | None:
+    """Return one direct child's text while ignoring an XML namespace."""
+    for child in list(parent):
+        if _local(child.tag) == child_name:
+            value = (child.text or "").strip()
+            return value or None
+    return None
+
+
+def _local_int(parent: ET.Element, child_name: str, default: int = 0) -> int:
+    value = _local_text(parent, child_name)
+    try:
+        return int(value) if value is not None else default
+    except ValueError:
+        return default
+
+
+def _local_float(parent: ET.Element, child_name: str, default: float = 0.0) -> float:
+    value = _local_text(parent, child_name)
+    try:
+        return float(value) if value is not None else default
+    except ValueError:
+        return default
+
+
+def _parse_xml2_roots(path: Path) -> tuple[ET.Element, ...]:
+    roots: list[ET.Element] = []
+    for document in _open_xml2_documents(path):
+        try:
+            root = ET.fromstring(document)
+        except ET.ParseError as exc:
+            raise ValueError(f"{path}: invalid XML2 document") from exc
+        if _local(root.tag) not in {"BlastXML2", "BlastOutput2"}:
+            raise ValueError(f"{path}: root element is {root.tag!r}, expected BLAST XML2")
+        roots.append(root)
+    if not roots:
+        raise ValueError(f"{path}: no BLAST XML2 document found")
+    return tuple(roots)
 
 
 def _int(parent: ET.Element | None, child: str, default: int = 0) -> int:
@@ -329,6 +449,79 @@ def parse_summary(path: str | Path) -> WebBlastSummary:
         entropy=_float(stats, "Statistics_entropy"),
         parameters=parameters,
         hits=tuple(hits),
+    )
+
+
+def parse_xml2_deflines(path: str | Path) -> tuple[WebBlastDefline, ...]:
+    """Parse every taxid-bearing descriptor from NCBI XML2 or its ZIP envelope.
+
+    NCBI returns XML2 as a ZIP containing an XInclude wrapper plus one result
+    document. A single result hit may contain several ``HitDescr`` records for
+    identical sequences. Every descriptor is retained because checking only the
+    first title can miss an excluded descendant hidden in the same hit group.
+    """
+    source = Path(path)
+    deflines: list[WebBlastDefline] = []
+    for root in _parse_xml2_roots(source):
+        for hit in (node for node in root.iter() if _local(node.tag) == "Hit"):
+            rank_raw = _local_text(hit, "num") or "0"
+            try:
+                hit_rank = int(rank_raw)
+            except ValueError:
+                hit_rank = 0
+            descriptors = [
+                node for node in hit.iter() if _local(node.tag) == "HitDescr"
+            ]
+            for descriptor_index, descriptor in enumerate(descriptors, start=1):
+                taxid_raw = _local_text(descriptor, "taxid")
+                try:
+                    taxid = int(taxid_raw) if taxid_raw is not None else None
+                except ValueError:
+                    taxid = None
+                if taxid is not None and taxid <= 0:
+                    taxid = None
+                deflines.append(
+                    WebBlastDefline(
+                        hit_rank=hit_rank,
+                        descriptor_index=descriptor_index,
+                        accession=_local_text(descriptor, "accession") or "",
+                        identifier=_local_text(descriptor, "id") or "",
+                        taxid=taxid,
+                        scientific_name=_local_text(descriptor, "sciname") or "",
+                        title=_local_text(descriptor, "title") or "",
+                    )
+                )
+    return tuple(deflines)
+
+
+def parse_xml2_statistics(path: str | Path) -> WebBlastXml2Statistics:
+    """Parse one query's complete statistics from an XML2 result.
+
+    XML1 returned by the public Web BLAST API can zero ``hsp-len`` and
+    ``eff-space`` even though XML2 for the same RID carries both. This parser
+    exposes that companion evidence without conflating XML2's database fields
+    with XML1's filtered/wrapped representation.
+    """
+    source = Path(path)
+    statistics = [
+        node
+        for root in _parse_xml2_roots(source)
+        for node in root.iter()
+        if _local(node.tag) == "Statistics"
+    ]
+    if len(statistics) != 1:
+        raise ValueError(
+            f"{source}: expected exactly one XML2 Statistics block, found {len(statistics)}"
+        )
+    node = statistics[0]
+    return WebBlastXml2Statistics(
+        db_num=_local_int(node, "db-num"),
+        db_len=_local_int(node, "db-len"),
+        hsp_len=_local_int(node, "hsp-len"),
+        eff_space=_local_int(node, "eff-space"),
+        kappa=_local_float(node, "kappa"),
+        lambda_value=_local_float(node, "lambda"),
+        entropy=_local_float(node, "entropy"),
     )
 
 
@@ -631,3 +824,39 @@ def verify_exclusion(
                 )
                 break
     return violations
+
+
+def verify_xml2_taxid_exclusion(
+    deflines: Iterable[WebBlastDefline],
+    *,
+    forbidden_taxids: Iterable[int],
+) -> list[dict[str, object]]:
+    """Return structured missing/forbidden-taxid findings for XML2 deflines.
+
+    ``forbidden_taxids`` must contain the requested excluded taxid and every
+    descendant resolved from an authoritative taxonomy snapshot. This function
+    deliberately performs no title inference and no network lookup.
+    """
+    forbidden = {int(taxid) for taxid in forbidden_taxids if int(taxid) > 0}
+    if not forbidden:
+        raise ValueError("forbidden_taxids must contain at least one positive taxid")
+    findings: list[dict[str, object]] = []
+    for defline in deflines:
+        common = {
+            "hit_rank": defline.hit_rank,
+            "descriptor_index": defline.descriptor_index,
+            "accession": defline.accession,
+            "identifier": defline.identifier,
+            "scientific_name": defline.scientific_name,
+        }
+        if defline.taxid is None:
+            findings.append({"code": "missing_taxid", **common})
+        elif defline.taxid in forbidden:
+            findings.append(
+                {
+                    "code": "excluded_taxid_present",
+                    **common,
+                    "taxid": defline.taxid,
+                }
+            )
+    return findings

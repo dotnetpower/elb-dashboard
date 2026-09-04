@@ -13,9 +13,9 @@ NCBI Web BLAST references").
 
 | Gene | Pathogen | Query length | NCBI RID (captured) | Entrez exclusion | Status |
 | --- | --- | --- | --- | --- | --- |
-| F3L | Monkeypox virus (`taxid=10244`) | 462 bp | `1FZVPFJ6014` | `NOT txid3431483[ORGN]` | FASTA + payload + reference XML captured |
+| F3L | Monkeypox virus (`taxid=10244`) | 462 bp | `9MHUJ94R014` | `NOT txid3431483[ORGN]` | Fresh XML1/XML2 + all-defline taxid proof captured |
 | 18S ribosomal RNA | Plasmodium falciparum (`taxid=5833`) | 2,151 bp | `1FZW35EN014` | `NOT txid5833[ORGN]` (P. falciparum itself) | FASTA + payload + reference XML captured |
-| RdRp / ORF1ab | SARS-CoV-2 (`taxid=2697049`) | 21,290 bp | `1G7Z8G7W016` | `NOT txid3418604[ORGN]` | FASTA + payload + reference XML captured |
+| RdRp / ORF1ab | SARS-CoV-2 (`taxid=2697049`) | 21,290 bp | `9MK93UBF016` | `NOT txid3418604[ORGN] NOT txid32630[ORGN]` | Fresh XML1/XML2 + all-defline taxid proof captured |
 
 All three genes are now fully captured. The RdRp / ORF1ab FASTA was pulled from NCBI Entrez
 `efetch` against `NC_045512.2:266-21555`, which matches the issue body exactly.
@@ -46,11 +46,14 @@ All three genes are now fully captured. The RdRp / ORF1ab FASTA was pulled from 
     accession rank-set equality when drift is present.
 - `reference_xml/` -- captured NCBI Web BLAST reference XML for every gene, gzip-compressed to
   keep the repo lean:
-  - `f3l_1FZVPFJ6014.xml.gz` (350 hits)
+  - `f3l_9MHUJ94R014.xml.gz` plus same-RID XML2 and NCBI Taxonomy snapshots
   - `rrna_18s_1FZW35EN014.xml.gz` (500 hits, HITLIST_SIZE cap)
-  - `rdrp_orf1ab_1G7Z8G7W016.xml.gz` (500 hits, HITLIST_SIZE cap)
+  - `rdrp_orf1ab_9MK93UBF016.xml.gz` plus same-RID XML2 and NCBI Taxonomy snapshots
   The comparator at `api/services/blast/web_blast_parity.py::parse_summary` reads `.xml` and
   `.xml.gz` transparently.
+- `snapshot/` -- authoritative release identity evidence captured independently of result XML:
+  NCBI v5 metadata (`2026-08-19`, 130,155,243 sequences, 998,069,435,926 letters, 84 volumes)
+  and the Web BLAST UI's own `getDBInfo.cgi` response (`2026/08/19`, 130,155,243 sequences).
 
 ## Mapping policy
 
@@ -69,9 +72,15 @@ All three genes are now fully captured. The RdRp / ORF1ab FASTA was pulled from 
 - `WORD_SIZE=28` → `word_size = 28`.
 - `FILTER=L` (low-complexity masking on) → `low_complexity_filter = true`, which `generate_config()`
   renders as `-dust yes -soft_masking false`.
-- `ENTREZ_QUERY=NOT txid<N>[ORGN]` → `taxid = N`, `is_inclusive = false`, which renders as
-  `-negative_taxids <N>`. This is a structural negative-taxid filter; the exclusion is enforced by
-  BLAST+ at the database level, not by post-filtering the NCBI Entrez query string.
+- One `ENTREZ_QUERY=NOT txid<N>[ORGN]` term maps to `taxid = N`, `is_inclusive = false`. Multiple
+  NOT terms map to one comma-separated `-negative_taxids` value. ORF1ab also excludes synthetic
+  construct taxid `32630`: without it, core_nt groups excluded SARS-CoV-2 accessions with an
+  identical synthetic alias and returns all descriptors in one hit. Same-RID XML2 preserves every
+  grouped descriptor's taxid; the pinned NCBI Taxonomy response proves that the corrected result
+  contains neither taxid `3418604` nor any descendant.
+- Query-specific `Statistics_eff-space` comes from the same-RID XML2 result. XML1 can report zero
+  for that field. The local request carries it as `query_effective_search_spaces`; active-generation
+  canonicalization must not replace it with the unrelated 64-nt database calibration value.
 
 ## Refreshing reference XML from NCBI (opt-in)
 

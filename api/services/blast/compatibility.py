@@ -20,6 +20,7 @@ from api.services.sharding_precision import (
     PrecisionReport,
     normalize_sharding_mode,
     option_value,
+    uniform_query_effective_search_space,
 )
 from api.services.web_blast_searchsp import (
     calibrated_searchsp_for_stats,
@@ -78,7 +79,15 @@ def build_compatibility_contract(
     blockers = list(precision_report.blocking_errors if precision_report else [])
 
     explicit_searchsp = _explicit_searchsp(opts)
-    configured_searchsp = _positive_int(opts.get("db_effective_search_space")) or explicit_searchsp
+    query_searchsp = uniform_query_effective_search_space(
+        opts,
+        _positive_int(opts.get("query_count")),
+    )
+    configured_searchsp = (
+        _positive_int(opts.get("db_effective_search_space"))
+        or query_searchsp
+        or explicit_searchsp
+    )
     evidence = verified_default.as_dict() if verified_default is not None else None
     # The canonical verified search space for THIS request's live DB snapshot:
     # recomputed from the forwarded db_total_letters/db_total_sequences when
@@ -109,6 +118,7 @@ def build_compatibility_contract(
                 configured_searchsp=configured_searchsp,
                 explicit_searchsp=explicit_searchsp,
                 verified_value=effective_verified_value,
+                query_specific=query_searchsp is not None,
             ),
             searchsp=configured_searchsp,
             evidence=evidence,
@@ -127,6 +137,7 @@ def build_compatibility_contract(
                 configured_searchsp=configured_searchsp,
                 explicit_searchsp=explicit_searchsp,
                 verified_value=effective_verified_value,
+                query_specific=query_searchsp is not None,
             ),
             searchsp=configured_searchsp,
             evidence=evidence,
@@ -165,6 +176,7 @@ def build_compatibility_contract(
                     configured_searchsp=configured_searchsp,
                     explicit_searchsp=explicit_searchsp,
                     verified_value=effective_verified_value,
+                    query_specific=query_searchsp is not None,
                 ),
                 searchsp=configured_searchsp,
                 evidence=evidence,
@@ -175,7 +187,11 @@ def build_compatibility_contract(
 
         if verified_default is None:  # guarded by blockers check above; survive ``-O``
             raise RuntimeError("verified_default unexpectedly None after blockers check")
-        if configured_searchsp is not None and configured_searchsp != effective_verified_value:
+        if (
+            query_searchsp is None
+            and configured_searchsp is not None
+            and configured_searchsp != effective_verified_value
+        ):
             return BlastCompatibilityContract(
                 mode="calibration_required",
                 level="verified_database_nondefault_search_space",
@@ -185,6 +201,7 @@ def build_compatibility_contract(
                     configured_searchsp=configured_searchsp,
                     explicit_searchsp=explicit_searchsp,
                     verified_value=effective_verified_value,
+                    query_specific=query_searchsp is not None,
                 ),
                 searchsp=configured_searchsp,
                 evidence=evidence,
@@ -206,6 +223,7 @@ def build_compatibility_contract(
                 configured_searchsp=configured_searchsp,
                 explicit_searchsp=explicit_searchsp,
                 verified_value=effective_verified_value,
+                query_specific=query_searchsp is not None,
             ),
             searchsp=configured_searchsp,
             selection_basis="blast_evalue_raw_score_db_oid_desc",
@@ -225,6 +243,7 @@ def build_compatibility_contract(
                 configured_searchsp=configured_searchsp,
                 explicit_searchsp=explicit_searchsp,
                 verified_value=None,
+                query_specific=query_searchsp is not None,
             ),
             searchsp=configured_searchsp,
             evidence=None,
@@ -241,6 +260,7 @@ def build_compatibility_contract(
             configured_searchsp=configured_searchsp,
             explicit_searchsp=explicit_searchsp,
             verified_value=effective_verified_value,
+            query_specific=query_searchsp is not None,
         ),
         searchsp=configured_searchsp or effective_verified_value,
         selection_basis="native_full_database",
@@ -274,7 +294,10 @@ def _search_space_source(
     configured_searchsp: int | None,
     explicit_searchsp: int | None,
     verified_value: int | None,
+    query_specific: bool = False,
 ) -> str:
+    if query_specific:
+        return "query_effective_search_spaces"
     if explicit_searchsp is not None:
         return "explicit_override"
     if (

@@ -48,6 +48,7 @@ _SNAPSHOT_OPTION_KEYS: tuple[str, ...] = (
     "negative_taxids",
     "is_inclusive",
     "db_effective_search_space",
+    "query_effective_search_spaces",
     "sharding_mode",
     "machine_type",
     "num_nodes",

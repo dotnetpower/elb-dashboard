@@ -22,9 +22,9 @@ Tracking issue: [#8 Validate BLAST result parity with NCBI Web BLAST references]
 
 | Gene | Pathogen | Query length | NCBI RID (captured) | Entrez exclusion | Reference XML |
 | --- | --- | --- | --- | --- | --- |
-| F3L | Monkeypox virus (`taxid=10244`) | 462 bp | `1FZVPFJ6014` | `NOT txid3431483[ORGN]` (`Orthopoxvirus monkeypox`, species) | `reference_xml/f3l_1FZVPFJ6014.xml.gz` |
+| F3L | Monkeypox virus (`taxid=10244`) | 462 bp | `9MHUJ94R014` | `NOT txid3431483[ORGN]` (`Orthopoxvirus monkeypox`, species) | `reference_xml/f3l_9MHUJ94R014.xml.gz` |
 | 18S ribosomal RNA | Plasmodium falciparum (`taxid=5833`) | 2,151 bp | `1FZW35EN014` | `NOT txid5833[ORGN]` (P. falciparum itself) | `reference_xml/rrna_18s_1FZW35EN014.xml.gz` |
-| RdRp / ORF1ab | SARS-CoV-2 (`taxid=2697049`) | 21,290 bp | `1G7Z8G7W016` | `NOT txid3418604[ORGN]` (`Betacoronavirus pandemicum`, species) | `reference_xml/rdrp_orf1ab_1G7Z8G7W016.xml.gz` |
+| RdRp / ORF1ab | SARS-CoV-2 (`taxid=2697049`) | 21,290 bp | `9MK93UBF016` | `NOT txid3418604[ORGN] NOT txid32630[ORGN]` | `reference_xml/rdrp_orf1ab_9MK93UBF016.xml.gz` |
 
 All three FASTA inputs and their corresponding NCBI Web BLAST reference XML outputs are checked
 into the repository under `api/tests/fixtures/web_blast_parity/`. The reference XMLs are stored
@@ -68,12 +68,13 @@ captured NCBI Web BLAST XML for every reference gene:
   `exact_equivalent=True` with empty `exact_findings`, `rank_set_only_in_reference`,
   `rank_set_only_in_candidate`, and `hsp_drift`. This is the smoke test for the comparator
   itself.
-3. **Taxonomic exclusion.** The query's own NCBI source accession (e.g. `NC_045512.2` for RdRp)
-  must not appear as a canonical subject. The fixture also records the authoritative NCBI species
-  name and rank. Organism/taxid absence is not yet fully proven for ORF1ab: captured rank 3
-  `MN996528.1` belongs to taxid `2697049`, whose lineage includes excluded species taxid
-  `3418604`, but the XML hit groups it with non-excluded identical-sequence deflines. BLAST XML v1
-  carries no per-defline taxids, so a fresh taxid-bearing result is required to resolve AC6.
+3. **Taxonomic exclusion.** The query source accession must not appear as a canonical subject.
+  Same-RID XML2 is also parsed descriptor by descriptor; every descriptor must carry a taxid. A
+  pinned NCBI Taxonomy response covers every unique result taxid and proves the excluded taxid and
+  descendants are absent. Fresh ORF1ab XML2 showed why title inference was unsafe: core_nt grouped
+  three taxid `2697049` accessions with synthetic construct `MT108784` (taxid `32630`). The
+  corrected dual-NOT request excludes both the requested taxon and that mixed-group alias, after
+  which all 643 descriptors are taxid-bearing and the forbidden descendant count is zero.
 4. **Canonical-field guard.** The dashboard's reusable
    [`parse_blast_xml`](https://github.com/dotnetpower/elb-dashboard/blob/main/api/services/blast/results_parser.py)
   (which feeds the UI, API, and CSV export) must emit the same number of rows and agree with the
@@ -86,6 +87,7 @@ captured NCBI Web BLAST XML for every reference gene:
   `compare_summaries(...).exact_equivalent == True`. Strict comparison covers BLAST version and
   parameters, subject rank/identity/length, every HSP's raw score, bit score, e-value, identity,
   positives, gaps, coordinates, frames, aligned sequences/midline, and all search statistics.
+  Query-specific `hsp-len` and `eff-space` are enriched from same-RID XML2 when XML1 reports zero.
   DB snapshot drift is auto-detected from `Statistics_db-num` / `db-len`; it may produce a
   separate candidate-within-reference diagnostic, but can never satisfy the exact gate.
 
@@ -177,21 +179,23 @@ differences in hit membership and HSP/search statistics. The report records
 parity. See the [Compatibility Plan §8 Equivalence Evidence Matrix](../research/web-blast-compatibility-plan.md#stage-8-equivalence-evidence-matrix)
 for the full database-version policy.
 
+The 2026-09-04 authoritative proof does not rely on XML1's filtered/wrapped database length. The
+Web BLAST UI's `getDBInfo.cgi` reports update date `2026/08/19` and 130,155,243 sequences. NCBI v5
+metadata independently reports release `2026-08-19`, the same sequence count, 998,069,435,926
+letters, and 84 volumes. The deployed active generation
+`ncbi-direct-20260819-cab30d18c360` carries that release and both full counts, with a complete
+same-generation 10/10 database-order oracle.
+
+Each live request must also carry the same-RID XML2 effective search space. This value is
+query-specific and, with taxonomy filters, can reflect a filtered database subset. The 64-nt
+calibration value shown in the database catalogue is not a substitute. The submit contract
+preserves `query_effective_search_spaces`; external OpenAPI 4.38 receives a lossless scalar only
+when that list is uniform.
+
 ## Outstanding gaps tracked by issue #8
 
-- Live `core_nt` snapshot pinning between NCBI Web BLAST and this dashboard is operational work
-  that lives in the cluster lifecycle, not in this test suite. The XML comparator reports drift
-  diagnostics but deliberately fails the strict exact gate until the snapshots match.
-- The 2026-09-02 readiness check confirmed the checked-in references and the active workload DB
-  are not the same snapshot. Reference `Statistics_db-num` values are `125,926,199` (F3L),
-  `125,832,392` (18S), and `117,842,978` (ORF1ab), while the active
-  `ncbi-direct-20260819-cab30d18c360` generation reports `130,155,243` sequences and
-  `998,069,435,926` letters. The legacy Web XML v1 references also report only 1.2–1.5 billion
-  `db-len` and zero `eff-space`, which cannot identify the full trillion-base DB unambiguously
-  (the length is consistent with a wrapped/filtered representation). Starting the ten-node
-  cluster cannot make those frozen artifacts exact. Capture fresh Web XML plus authoritative
-  full snapshot counts/release identity, pin/download that matching DB generation, and only then
-  run the three candidates and require `exact_equivalent=true`.
-- ORF1ab exclusion AC6 is separately blocked by the grouped-defline case above. A new reference
-  must retain taxids (or be joined to an authoritative accession-taxid snapshot) and prove that no
-  returned defline belongs to taxid `3418604` or any descendant.
+- The three fresh reference RIDs and all three live ElasticBLAST candidate XML files must exist in
+  one evidence run. The candidate gate remains blocked until all three report
+  `exact_equivalent=true` and `exact_findings=[]`.
+- A live run must verify the deployed API/frontend/terminal/OpenAPI versions, Result Passport,
+  dashboard/API/export field parity, and a clean App Insights window before issue closure.

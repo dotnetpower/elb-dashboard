@@ -1,11 +1,14 @@
 """Tests for active-generation Web BLAST search-space resolution.
 
-Responsibility: Verify calibrated metadata lookup, precise option overwrite,
-fail-closed behavior, and scalar CLI search-space replacement.
+Responsibility: Verify calibrated metadata lookup, scalar overwrite,
+query-specific preservation/transport, fail-closed behavior, and scalar CLI
+search-space replacement.
 Edit boundaries: Test-only; mock Storage metadata and never call Azure.
 Key entry points: pytest test functions.
 Risky contracts: Approximate/uncalibrated requests remain untouched while
-precise calibrated requests never retain stale caller values.
+precise calibrated requests never retain stale caller scalar values. Explicit
+query-level values survive until the sibling transport boundary, where only a
+uniform list can collapse losslessly.
 Validation: `uv run pytest -q api/tests/test_live_search_space.py`.
 """
 
@@ -60,6 +63,48 @@ def test_precise_options_replace_stale_caller_value(live_metadata) -> None:
     assert result["db_total_letters"] == live_metadata["total_letters"]
     assert result["db_total_sequences"] == live_metadata["total_sequences"]
     assert result["additional_options"] == "-dust yes -searchsp 30807003700117"
+
+
+def test_precise_options_preserve_query_specific_search_space(live_metadata) -> None:
+    query_search_space = 421_817_959_873_974
+
+    result = live_search_space.canonicalize_precise_options(
+        "core_nt",
+        {
+            "sharding_mode": "precise",
+            "db_effective_search_space": 32_156_241_807_668,
+            "query_effective_search_spaces": [query_search_space],
+            "additional_options": "-negative_taxids 3431483 -dust yes",
+        },
+        storage_account="workloadstg",
+    )
+
+    assert "db_effective_search_space" not in result
+    assert result["query_effective_search_spaces"] == [query_search_space]
+    assert result["db_total_letters"] == live_metadata["total_letters"]
+    assert result["db_total_sequences"] == live_metadata["total_sequences"]
+    assert result["additional_options"] == "-negative_taxids 3431483 -dust yes"
+
+
+def test_uniform_query_search_space_collapses_for_sibling_transport() -> None:
+    result = live_search_space.collapse_uniform_query_search_space(
+        {
+            "query_effective_search_spaces": [123, 123],
+            "db_total_letters": 456,
+        }
+    )
+
+    assert result == {
+        "db_effective_search_space": 123,
+        "db_total_letters": 456,
+    }
+
+
+def test_mixed_query_search_spaces_fail_sibling_transport() -> None:
+    with pytest.raises(ValueError, match="require query-group execution"):
+        live_search_space.collapse_uniform_query_search_space(
+            {"query_effective_search_spaces": [123, 456]}
+        )
 
 
 def test_precise_calibrated_database_fails_closed_without_metadata(

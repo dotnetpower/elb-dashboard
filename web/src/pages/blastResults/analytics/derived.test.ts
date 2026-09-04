@@ -177,6 +177,27 @@ describe("searchSpacePin", () => {
     expect(searchSpacePin(job).searchSpace).toBe(1.5e10);
   });
 
+  it("prefers a uniform query-specific search space over the database scalar", () => {
+    const job = {
+      provenance: {
+        options: {
+          db_effective_search_space: 3.08e13,
+          query_effective_search_spaces: [4.21817959873974e14],
+        },
+      },
+    } as unknown as BlastJobSummary;
+    expect(searchSpacePin(job).searchSpace).toBe(4.21817959873974e14);
+  });
+
+  it("does not collapse mixed query-specific search spaces", () => {
+    const job = {
+      provenance: {
+        options: { query_effective_search_spaces: [100, 200] },
+      },
+    } as unknown as BlastJobSummary;
+    expect(searchSpacePin(job).searchSpace).toBeNull();
+  });
+
   it("reports when unpinned", () => {
     expect(searchSpacePin(null).searchSpace).toBeNull();
   });

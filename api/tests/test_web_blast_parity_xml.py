@@ -16,12 +16,15 @@ Key entry points: `test_reference_xml_parses_with_expected_header`,
 `test_reference_xml_self_equivalence`,
 `test_query_source_accession_excluded`, `test_reference_exclusion_blockers_are_explicit`,
 `test_dashboard_xml_parser_agrees_with_reference_parser`,
-`test_candidate_xml_matches_reference_when_provided`.
+`test_candidate_xml_matches_reference_when_provided`,
+`test_fresh_xml2_taxid_evidence_when_provided`.
 
-Risky contracts: candidate XML comparison is optional; when
-`ELB_PARITY_CANDIDATE_DIR` is unset the layer skips cleanly. Once supplied,
-every candidate must be same-snapshot `exact_equivalent`; drift diagnostics do
-not satisfy the issue-closing gate.
+Risky contracts: fresh reference and candidate XML comparison are optional;
+when their environment variables are unset the layers skip cleanly. Once
+supplied, all three references/candidates are mandatory, every candidate must
+be same-snapshot `exact_equivalent`, and XML2 taxonomy evidence must contain no
+missing or forbidden descendant taxids. Drift diagnostics and title inference
+do not satisfy the issue-closing gate.
 
 Validation: `uv run pytest -q api/tests/test_web_blast_parity_xml.py`.
 """
@@ -29,19 +32,27 @@ Validation: `uv run pytest -q api/tests/test_web_blast_parity_xml.py`.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
 
 import pytest
 from api.services.blast.results_parser import parse_blast_xml
 from api.services.blast.web_blast_parity import (
+    WebBlastSummary,
     compare_summaries,
     parse_summary,
+    parse_xml2_deflines,
+    parse_xml2_statistics,
     verify_exclusion,
+    verify_xml2_taxid_exclusion,
 )
+from defusedxml import ElementTree as ET
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "web_blast_parity"
 PAYLOADS_PATH = FIXTURES_DIR / "reference_payloads.json"
@@ -91,12 +102,75 @@ def _captured_genes() -> list[str]:
     ]
 
 
+def _reference_dir() -> Path | None:
+    raw = os.environ.get("ELB_PARITY_REFERENCE_DIR", "").strip()
+    return Path(raw) if raw else None
+
+
+def _reference_path(gene_id: str, payload: dict[str, Any]) -> Path:
+    reference_dir = _reference_dir()
+    if reference_dir is None:
+        return FIXTURES_DIR / payload["reference_xml_path"]
+    if not reference_dir.is_dir():
+        pytest.fail(f"ELB_PARITY_REFERENCE_DIR={reference_dir!s} is not a directory")
+    candidates = (
+        reference_dir / f"{gene_id}.xml",
+        reference_dir / f"{gene_id}.xml.gz",
+        reference_dir / gene_id / "reference.xml",
+        reference_dir / gene_id / "reference.xml.gz",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    pytest.fail(f"{gene_id}: no fresh reference XML in {reference_dir!s}")
+
+
+def _reference_xml2_path(gene_id: str, payload: dict[str, Any]) -> Path | None:
+    reference_dir = _reference_dir()
+    if reference_dir is None:
+        relative = payload.get("reference_xml2_path")
+        return FIXTURES_DIR / relative if isinstance(relative, str) and relative else None
+    candidates = (
+        reference_dir / f"{gene_id}.xml2",
+        reference_dir / f"{gene_id}.xml2.gz",
+        reference_dir / gene_id / "reference.xml2.raw",
+        reference_dir / gene_id / "reference.xml2.gz",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _parse_reference_summary(
+    gene_id: str,
+    payload: dict[str, Any],
+) -> WebBlastSummary:
+    summary = parse_summary(_reference_path(gene_id, payload))
+    xml2_path = _reference_xml2_path(gene_id, payload)
+    if xml2_path is None:
+        return summary
+    statistics = parse_xml2_statistics(xml2_path)
+    return replace(
+        summary,
+        hsp_len=statistics.hsp_len if summary.hsp_len == 0 else summary.hsp_len,
+        eff_space=statistics.eff_space if summary.eff_space == 0 else summary.eff_space,
+    )
+
+
 def _read_xml_text(xml_path: Path) -> str:
     """Read a captured reference XML transparently from `.xml` or `.xml.gz`."""
     if xml_path.suffix == ".gz":
         with gzip.open(xml_path, "rt", encoding="utf-8") as fh:
             return fh.read()
     return xml_path.read_text(encoding="utf-8")
+
+
+def _read_evidence_bytes(path: Path) -> bytes:
+    if path.suffix == ".gz":
+        with gzip.open(path, "rb") as fh:
+            return fh.read()
+    return path.read_bytes()
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +182,7 @@ def _read_xml_text(xml_path: Path) -> str:
 def test_reference_xml_parses_with_expected_header(gene_id: str) -> None:
     """The captured XML must declare blastn + BLASTN 2.x + core_nt + matching qlen."""
     payload = _load_payloads()["genes"][gene_id]
-    xml_path = FIXTURES_DIR / payload["reference_xml_path"]
-    summary = parse_summary(xml_path)
+    summary = _parse_reference_summary(gene_id, payload)
 
     assert summary.program == "blastn"
     assert summary.version.startswith("BLASTN 2."), (
@@ -142,8 +215,7 @@ def test_reference_xml_self_equivalence(gene_id: str) -> None:
     in this file is suspect.
     """
     payload = _load_payloads()["genes"][gene_id]
-    xml_path = FIXTURES_DIR / payload["reference_xml_path"]
-    summary = parse_summary(xml_path)
+    summary = _parse_reference_summary(gene_id, payload)
     report = compare_summaries(summary, summary)
     assert report.equivalent, f"{gene_id}: self-equivalence failed: {report.findings}"
     assert report.exact_equivalent is True
@@ -164,8 +236,7 @@ def test_snapshot_drift_detail_is_populated(gene_id: str) -> None:
     This is the machine-readable counterpart to the `snapshot_drift` boolean.
     """
     payload = _load_payloads()["genes"][gene_id]
-    xml_path = FIXTURES_DIR / payload["reference_xml_path"]
-    summary = parse_summary(xml_path)
+    summary = _parse_reference_summary(gene_id, payload)
     report = compare_summaries(summary, summary)
     if not summary.database:
         assert report.snapshot_drift_detail is None
@@ -179,7 +250,7 @@ def test_snapshot_drift_detail_is_populated(gene_id: str) -> None:
 
 def test_cross_snapshot_diagnostic_does_not_claim_exact_equivalence() -> None:
     payload = _load_payloads()["genes"]["f3l"]
-    reference = parse_summary(FIXTURES_DIR / payload["reference_xml_path"])
+    reference = _parse_reference_summary("f3l", payload)
     first_hit = reference.hits[0]
     first_hsp = first_hit.hsps[0]
     changed_hsp = replace(first_hsp, raw_score=first_hsp.raw_score - 1)
@@ -203,7 +274,7 @@ def test_cross_snapshot_diagnostic_does_not_claim_exact_equivalence() -> None:
 
 def test_cross_snapshot_diagnostic_rejects_empty_candidate() -> None:
     payload = _load_payloads()["genes"]["f3l"]
-    reference = parse_summary(FIXTURES_DIR / payload["reference_xml_path"])
+    reference = _parse_reference_summary("f3l", payload)
     candidate = replace(reference, db_num=reference.db_num + 1, hits=())
 
     report = compare_summaries(reference, candidate)
@@ -216,7 +287,7 @@ def test_cross_snapshot_diagnostic_rejects_empty_candidate() -> None:
 
 def test_database_path_is_representation_only_but_query_def_is_strict() -> None:
     payload = _load_payloads()["genes"]["f3l"]
-    reference = parse_summary(FIXTURES_DIR / payload["reference_xml_path"])
+    reference = _parse_reference_summary("f3l", payload)
     path_variant = replace(
         reference,
         database="https://account.blob.core.windows.net/blast-db/core_nt/core_nt",
@@ -231,7 +302,7 @@ def test_database_path_is_representation_only_but_query_def_is_strict() -> None:
 
 def test_parse_summary_rejects_multiple_query_iterations(tmp_path: Path) -> None:
     payload = _load_payloads()["genes"]["f3l"]
-    source = _read_xml_text(FIXTURES_DIR / payload["reference_xml_path"])
+    source = _read_xml_text(_reference_path("f3l", payload))
     start = source.index("<Iteration>")
     end = source.index("</Iteration>", start) + len("</Iteration>")
     candidate = source.replace(
@@ -248,7 +319,7 @@ def test_parse_summary_rejects_multiple_query_iterations(tmp_path: Path) -> None
 
 def test_duplicate_accession_keys_fail_exact_comparison() -> None:
     payload = _load_payloads()["genes"]["f3l"]
-    reference = parse_summary(FIXTURES_DIR / payload["reference_xml_path"])
+    reference = _parse_reference_summary("f3l", payload)
     duplicate = replace(reference.hits[1], subject_id=reference.hits[0].subject_id)
     candidate = replace(reference, hits=(reference.hits[0], duplicate, *reference.hits[2:]))
 
@@ -281,7 +352,7 @@ def test_duplicate_accession_keys_fail_exact_comparison() -> None:
 )
 def test_same_snapshot_all_hsp_fields_are_strictly_compared(field_name: str) -> None:
     payload = _load_payloads()["genes"]["f3l"]
-    reference = parse_summary(FIXTURES_DIR / payload["reference_xml_path"])
+    reference = _parse_reference_summary("f3l", payload)
     first_hit = reference.hits[0]
     first_hsp = first_hit.hsps[0]
     original = getattr(first_hsp, field_name)
@@ -303,15 +374,15 @@ def test_same_snapshot_all_hsp_fields_are_strictly_compared(field_name: str) -> 
 @pytest.mark.parametrize("gene_id", _captured_genes())
 def test_parse_summary_retains_every_hsp(gene_id: str) -> None:
     payload = _load_payloads()["genes"][gene_id]
-    xml_path = FIXTURES_DIR / payload["reference_xml_path"]
-    summary = parse_summary(xml_path)
+    xml_path = _reference_path(gene_id, payload)
+    summary = _parse_reference_summary(gene_id, payload)
 
     assert sum(len(hit.hsps) for hit in summary.hits) == _read_xml_text(xml_path).count("<Hsp>")
 
 
 def test_same_snapshot_subject_and_hsp_count_drift_fail_exactly() -> None:
     payload = _load_payloads()["genes"]["f3l"]
-    reference = parse_summary(FIXTURES_DIR / payload["reference_xml_path"])
+    reference = _parse_reference_summary("f3l", payload)
     first_hit = reference.hits[0]
     changed_hit = replace(first_hit, rank=first_hit.rank + 1, hsps=())
     candidate = replace(reference, hits=(changed_hit, *reference.hits[1:]))
@@ -333,7 +404,7 @@ def test_same_snapshot_subject_and_hsp_count_drift_fail_exactly() -> None:
 )
 def test_same_snapshot_statistics_and_parameters_are_strict(field_name: str) -> None:
     payload = _load_payloads()["genes"]["f3l"]
-    reference = parse_summary(FIXTURES_DIR / payload["reference_xml_path"])
+    reference = _parse_reference_summary("f3l", payload)
     original = getattr(reference, field_name)
     if field_name == "parameters":
         changed = (*original, ("Parameters_test-only", "different"))
@@ -362,8 +433,7 @@ def test_query_source_accession_excluded(gene_id: str) -> None:
     regardless of where the excluded taxid sits in NCBI's tree).
     """
     payload = _load_payloads()["genes"][gene_id]
-    xml_path = FIXTURES_DIR / payload["reference_xml_path"]
-    summary = parse_summary(xml_path)
+    summary = _parse_reference_summary(gene_id, payload)
 
     # Map of gene → query source accession (the NCBI RefSeq the FASTA came
     # from). Hard-coded here because the fixture intentionally omits this
@@ -382,20 +452,190 @@ def test_query_source_accession_excluded(gene_id: str) -> None:
     assert violations == [], f"{gene_id}: query source accession leaked into hits: {violations}"
 
 
-def test_reference_exclusion_blockers_are_explicit() -> None:
+def test_reference_exclusion_evidence_is_explicit() -> None:
     payloads = _load_payloads()["genes"]
-    blockers = {
-        gene_id: payload["exclusion_validation_blocker"]
+    evidence = {
+        gene_id: payload["exclusion_validation_evidence"]
         for gene_id, payload in payloads.items()
-        if payload.get("exclusion_validation_blocker")
+        if payload.get("exclusion_validation_evidence")
     }
 
-    assert set(blockers) == {"rdrp_orf1ab"}
-    blocker = blockers["rdrp_orf1ab"]
-    assert blocker["code"] == "grouped_defline_contains_excluded_descendant"
-    assert blocker["subject_accession"] == "MN996528.1"
-    assert blocker["subject_taxid"] == 2_697_049
-    assert blocker["excluded_ancestor_taxid"] == 3_418_604
+    assert set(evidence) == {"f3l", "rdrp_orf1ab"}
+    for gene_id, item in evidence.items():
+        assert item["status"] == "verified"
+        assert item["evidence_format"] == "XML2"
+        assert item["evidence_rid"] == payloads[gene_id]["ncbi_rid"]
+        assert len(item["evidence_sha256"]) == 64
+        assert len(item["reference_content_sha256"]) == 64
+        assert len(item["taxonomy_response_sha256"]) == 64
+        assert item["defline_count"] > 0
+        assert item["missing_taxid_count"] == 0
+        assert item["excluded_descendant_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "gene_id",
+    [
+        gene_id
+        for gene_id, payload in _load_payloads()["genes"].items()
+        if payload.get("exclusion_validation_evidence")
+    ],
+)
+def test_xml2_has_no_excluded_taxid_or_descendant(gene_id: str) -> None:
+    """Verify every grouped defline against the pinned NCBI Taxonomy response."""
+    payload = _load_payloads()["genes"][gene_id]
+    evidence = payload["exclusion_validation_evidence"]
+    xml2_path = FIXTURES_DIR / payload["reference_xml2_path"]
+    taxonomy_path = FIXTURES_DIR / payload["reference_taxonomy_path"]
+    xml2_bytes = _read_evidence_bytes(xml2_path)
+    taxonomy_bytes = _read_evidence_bytes(taxonomy_path)
+
+    assert hashlib.sha256(xml2_bytes).hexdigest() == evidence["reference_content_sha256"]
+    assert hashlib.sha256(taxonomy_bytes).hexdigest() == evidence["taxonomy_response_sha256"]
+
+    deflines = parse_xml2_deflines(xml2_path)
+    result_taxids = {row.taxid for row in deflines if row.taxid is not None}
+    taxonomy_root = ET.fromstring(taxonomy_bytes)
+    checked_taxids: set[int] = set()
+    descendant_taxids: set[int] = set()
+    excluded_taxid = int(payload["exclusion_taxid"])
+    for taxon in taxonomy_root.findall("./Taxon"):
+        taxid = int(taxon.findtext("TaxId") or 0)
+        checked_taxids.add(taxid)
+        lineage = {
+            int(node.findtext("TaxId") or 0)
+            for node in taxon.findall("./LineageEx/Taxon")
+        }
+        if taxid == excluded_taxid or excluded_taxid in lineage:
+            descendant_taxids.add(taxid)
+
+    assert result_taxids <= checked_taxids
+    assert len(deflines) == evidence["defline_count"]
+    assert len(result_taxids) == evidence["unique_taxid_count"]
+    assert sum(row.taxid is None for row in deflines) == evidence["missing_taxid_count"]
+    assert len(descendant_taxids) == evidence["excluded_descendant_count"]
+    assert verify_xml2_taxid_exclusion(
+        deflines,
+        forbidden_taxids={excluded_taxid, *descendant_taxids},
+    ) == []
+
+
+_XML2_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
+<BlastOutput2 xmlns="http://www.ncbi.nlm.nih.gov">
+  <report><Report><results><Results><search><Search><hits>
+    <Hit><num>3</num><description>
+            <HitDescr>
+                <id>gb|MN996528.1|</id><accession>MN996528</accession><taxid>2697049</taxid>
+                <sciname>Severe acute respiratory syndrome coronavirus 2</sciname>
+                <title>isolate WIV04</title>
+            </HitDescr>
+            <HitDescr>
+                <id>gb|MT108784.1|</id><accession>MT108784</accession><taxid>32630</taxid>
+                <sciname>synthetic construct</sciname><title>ORF1ab construct</title>
+            </HitDescr>
+            <HitDescr>
+                <id>gb|NO_TAXID.1|</id><accession>NO_TAXID</accession>
+                <sciname>unknown</sciname><title>missing taxonomy</title>
+            </HitDescr>
+    </description></Hit>
+    </hits><stat><Statistics>
+        <db-num>130155243</db-num><db-len>998069435926</db-len>
+        <hsp-len>36</hsp-len><eff-space>421817959873974</eff-space>
+        <kappa>0.46</kappa><lambda>1.28</lambda><entropy>0.85</entropy>
+    </Statistics></stat></Search></search></Results></results></Report></report>
+</BlastOutput2>
+"""
+
+
+def test_parse_xml2_deflines_retains_every_grouped_descriptor(tmp_path: Path) -> None:
+    path = tmp_path / "reference.xml2"
+    path.write_text(_XML2_SAMPLE, encoding="utf-8")
+
+    deflines = parse_xml2_deflines(path)
+
+    assert [(row.hit_rank, row.descriptor_index) for row in deflines] == [
+        (3, 1),
+        (3, 2),
+        (3, 3),
+    ]
+    assert [row.accession for row in deflines] == ["MN996528", "MT108784", "NO_TAXID"]
+    assert [row.taxid for row in deflines] == [2_697_049, 32_630, None]
+
+
+def test_parse_xml2_deflines_reads_ncbi_zip_envelope(tmp_path: Path) -> None:
+    archive_path = tmp_path / "reference.xml2.raw"
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "RID.xml",
+            '<?xml version="1.0"?><BlastXML2 xmlns="http://www.ncbi.nlm.nih.gov"/>',
+        )
+        archive.writestr("RID_1.xml", _XML2_SAMPLE)
+    archive_path.write_bytes(buffer.getvalue())
+
+    deflines = parse_xml2_deflines(archive_path)
+
+    assert len(deflines) == 3
+    assert deflines[0].identifier == "gb|MN996528.1|"
+
+
+def test_parse_xml2_statistics_reads_authoritative_effective_space(tmp_path: Path) -> None:
+    path = tmp_path / "reference.xml2"
+    path.write_text(_XML2_SAMPLE, encoding="utf-8")
+
+    statistics = parse_xml2_statistics(path)
+
+    assert statistics.db_num == 130_155_243
+    assert statistics.db_len == 998_069_435_926
+    assert statistics.hsp_len == 36
+    assert statistics.eff_space == 421_817_959_873_974
+    assert statistics.kappa == 0.46
+    assert statistics.lambda_value == 1.28
+    assert statistics.entropy == 0.85
+
+
+def test_xml2_taxid_exclusion_flags_descendants_and_missing_taxids(tmp_path: Path) -> None:
+    path = tmp_path / "reference.xml2"
+    path.write_text(_XML2_SAMPLE, encoding="utf-8")
+
+    findings = verify_xml2_taxid_exclusion(
+        parse_xml2_deflines(path),
+        forbidden_taxids={3_418_604, 2_697_049},
+    )
+
+    assert [finding["code"] for finding in findings] == [
+        "excluded_taxid_present",
+        "missing_taxid",
+    ]
+    assert findings[0]["accession"] == "MN996528"
+    assert findings[0]["taxid"] == 2_697_049
+
+
+def test_fresh_xml2_taxid_evidence_when_provided() -> None:
+    """A live reference directory must prove all grouped deflines taxid-safe."""
+    reference_dir = _reference_dir()
+    if reference_dir is None:
+        pytest.skip("ELB_PARITY_REFERENCE_DIR not set; skipping fresh XML2 evidence")
+    gene_dir = reference_dir / "rdrp_orf1ab"
+    xml2_path = gene_dir / "reference.xml2.raw"
+    evidence_path = gene_dir / "taxonomy-exclusion-evidence.json"
+    if not xml2_path.exists():
+        pytest.fail(f"rdrp_orf1ab: missing taxid-bearing XML2 at {xml2_path!s}")
+    if not evidence_path.exists():
+        pytest.fail(f"rdrp_orf1ab: missing taxonomy lineage evidence at {evidence_path!s}")
+
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    excluded_taxid = int(evidence["excluded_taxid"])
+    descendant_taxids = {int(value) for value in evidence["descendant_taxids"]}
+    findings = verify_xml2_taxid_exclusion(
+        parse_xml2_deflines(xml2_path),
+        forbidden_taxids={excluded_taxid, *descendant_taxids},
+    )
+
+    assert findings == [], (
+        "rdrp_orf1ab: NCBI XML2 contains excluded taxid 3418604 or descendants; "
+        f"findings={findings[:10]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -415,8 +655,8 @@ def test_dashboard_xml_parser_agrees_with_reference_parser(gene_id: str) -> None
     NCBI output regardless of how clean the INI ↔ flag mapping looks.
     """
     payload = _load_payloads()["genes"][gene_id]
-    xml_path = FIXTURES_DIR / payload["reference_xml_path"]
-    summary = parse_summary(xml_path)
+    xml_path = _reference_path(gene_id, payload)
+    summary = _parse_reference_summary(gene_id, payload)
 
     dashboard_rows = parse_blast_xml(_read_xml_text(xml_path))
     assert dashboard_rows, f"{gene_id}: dashboard parser produced no rows"
@@ -506,7 +746,7 @@ def test_candidate_xml_matches_reference_when_provided(gene_id: str) -> None:
         pytest.fail(f"{gene_id}: no candidate XML in {candidate_dir!s}")
 
     payload = _load_payloads()["genes"][gene_id]
-    reference = parse_summary(FIXTURES_DIR / payload["reference_xml_path"])
+    reference = _parse_reference_summary(gene_id, payload)
     candidate_summary = parse_summary(candidate_path)
     report = compare_summaries(reference, candidate_summary)
     assert report.exact_equivalent, (

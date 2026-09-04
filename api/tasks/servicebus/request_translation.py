@@ -41,6 +41,7 @@ def build_request_payload(
     from api.services.blast.live_search_space import (
         LiveSearchSpaceUnavailable,
         canonicalize_precise_options,
+        collapse_uniform_query_search_space,
     )
     from api.services.blast.submit_payload import (
         align_options_with_resource_profile,
@@ -133,6 +134,14 @@ def build_request_payload(
         allow_servicebus_downgrade=True,
     )
     payload["options"] = plan.options
+    try:
+        payload["options"] = collapse_uniform_query_search_space(payload["options"])
+    except ValueError:
+        logger.warning(
+            "service bus query search-space transport unsupported corr=%s",
+            correlation_id,
+        )
+        return None
     payload.update(
         canonical_submit_metadata(
             payload,

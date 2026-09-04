@@ -5,10 +5,13 @@ Web BLAST calibration value used by non-browser submit surfaces.
 Edit boundaries: Keep Storage metadata lookup and scalar option rewriting here;
 submit routes/tasks own HTTP, queue, and state behavior.
 Key entry points: `resolve_live_search_space`, `canonicalize_precise_options`,
-`set_search_space_option`.
+`collapse_uniform_query_search_space`, `set_search_space_option`.
 Risky contracts: Precise calibrated databases fail closed when active metadata
-is unavailable; caller-provided stale values never override the active
-snapshot; no URL, token, or Storage response is returned to callers.
+is unavailable; caller-provided stale scalar values never override the active
+snapshot. An explicit query-level list is more specific than the database
+calibration and must survive canonicalization; mixed values cannot be sent to
+the sibling's single-job scalar wire contract. No URL, token, or Storage
+response is returned to callers.
 Validation: `uv run pytest -q api/tests/test_live_search_space.py`.
 """
 
@@ -135,10 +138,50 @@ def canonicalize_precise_options(
         raise LiveSearchSpaceUnavailable("calibrated database metadata is unavailable")
     resolved["db_total_letters"] = live.total_letters
     resolved["db_total_sequences"] = live.total_sequences
-    resolved["db_effective_search_space"] = live.value
+    query_spaces = resolved.get("query_effective_search_spaces")
+    if query_spaces not in (None, ""):
+        # Query-specific effective spaces incorporate query length and any
+        # taxonomy-filtered database subset. They are deliberately preserved;
+        # the fixed 64-nt database calibration cannot replace them. Drop a
+        # simultaneous scalar so the precision contract has one source.
+        resolved.pop("db_effective_search_space", None)
+    else:
+        resolved["db_effective_search_space"] = live.value
     additional = str(resolved.get("additional_options") or "").strip()
-    if additional:
+    if additional and query_spaces in (None, ""):
         resolved["additional_options"] = set_search_space_option(additional, live.value)
+    return resolved
+
+
+def collapse_uniform_query_search_space(
+    options: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Collapse a uniform query-space list to the sibling's scalar wire field.
+
+    Dashboard-native execution understands ``query_effective_search_spaces``.
+    The sibling OpenAPI 4.38 schema accepts only ``db_effective_search_space``.
+    A uniform list (including the one-value single-query case) is losslessly
+    transportable; mixed values require query-group fan-out and fail closed.
+    """
+    resolved = dict(options or {})
+    raw_spaces = resolved.get("query_effective_search_spaces")
+    if raw_spaces in (None, ""):
+        return resolved
+    if not isinstance(raw_spaces, (list, tuple)) or not raw_spaces:
+        raise ValueError("query_effective_search_spaces must be a non-empty list")
+    spaces: list[int] = []
+    for raw in raw_spaces:
+        value = _positive_int(raw)
+        if value is None:
+            raise ValueError("query_effective_search_spaces values must be positive integers")
+        spaces.append(value)
+    unique = set(spaces)
+    if len(unique) != 1:
+        raise ValueError(
+            "mixed query_effective_search_spaces require query-group execution"
+        )
+    resolved.pop("query_effective_search_spaces", None)
+    resolved["db_effective_search_space"] = spaces[0]
     return resolved
 
 

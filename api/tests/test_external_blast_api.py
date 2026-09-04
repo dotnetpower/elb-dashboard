@@ -859,6 +859,109 @@ def test_canonical_inline_submit_uses_active_database_searchsp(monkeypatch) -> N
     assert captured["options"]["db_total_sequences"] == 130_155_243
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/v1/elastic-blast/submit",
+        "/api/blast/jobs",
+    ],
+)
+def test_external_submit_transports_query_specific_searchsp(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    from api.main import app
+    from api.services import external_blast
+
+    query_search_space = 421_817_959_873_974
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args, **_kwargs: {
+            "total_letters": 998_069_435_926,
+            "total_sequences": 130_155_243,
+            "active_generation": {"id": "ncbi-direct-20260819-cab30d18c360"},
+        },
+    )
+    monkeypatch.setattr(external_blast, "ready", lambda **_kwargs: {"ready": True})
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kwargs: (
+            captured.update(payload) or {"job_id": "abcdef123456", "status": "queued"}
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        endpoint,
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {
+                "sharding_mode": "precise",
+                "query_effective_search_spaces": [query_search_space],
+            },
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["options"]["db_effective_search_space"] == query_search_space
+    assert "query_effective_search_spaces" not in captured["options"]
+    assert captured["canonical_request"]["options"][
+        "query_effective_search_spaces"
+    ] == [query_search_space]
+
+
+def test_external_submit_rejects_mixed_query_searchspace_transport(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    from api.main import app
+    from api.services import external_blast
+
+    submitted: list[object] = []
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args, **_kwargs: {
+            "total_letters": 998_069_435_926,
+            "total_sequences": 130_155_243,
+        },
+    )
+    monkeypatch.setattr(external_blast, "ready", lambda **_kwargs: {"ready": True})
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kwargs: submitted.append(payload),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGC\n>q2\nATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {
+                "sharding_mode": "precise",
+                "query_effective_search_spaces": [123, 456],
+            },
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "query_search_space_transport_unsupported"
+    assert submitted == []
+
+
 def test_external_blast_submit_rejects_bad_searchsp_override(monkeypatch) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app

@@ -24,8 +24,10 @@ Validation: `uv run pytest -q api/tests/test_web_blast_parity_fixtures.py`.
 from __future__ import annotations
 
 import configparser
+import hashlib
 import io
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +62,7 @@ def _build_submit_params(gene_payload: dict[str, Any]) -> dict[str, Any]:
     """
     dashboard = gene_payload["dashboard_request"]
     db_name = dashboard["database_name"]
-    return {
+    params = {
         # ---- Web BLAST-controlled fields (the contract under test) ----
         "program": dashboard["program"],
         "db": f"https://elbstg01.blob.core.windows.net/blast-db/{db_name}/{db_name}",
@@ -69,8 +71,6 @@ def _build_submit_params(gene_payload: dict[str, Any]) -> dict[str, Any]:
         "word_size": dashboard["word_size"],
         "max_target_seqs": dashboard["max_target_seqs"],
         "low_complexity_filter": dashboard["low_complexity_filter"],
-        "taxid": dashboard["taxid"],
-        "is_inclusive": dashboard["is_inclusive"],
         "outfmt": dashboard["outfmt"],
         # ---- Azure infrastructure plumbing (stubbed; not under test here) ----
         "region": "koreacentral",
@@ -82,7 +82,18 @@ def _build_submit_params(gene_payload: dict[str, Any]) -> dict[str, Any]:
         "query_blob_url": "https://elbstg01.blob.core.windows.net/queries/q.fa",
         "results_url": "https://elbstg01.blob.core.windows.net/results/job-1",
         "job_id": "parity-job",
+        "query_count": 1,
     }
+    for key in (
+        "taxid",
+        "is_inclusive",
+        "additional_options",
+        "query_effective_search_spaces",
+    ):
+        value = dashboard.get(key)
+        if value not in (None, ""):
+            params[key] = value
+    return params
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +110,34 @@ def test_reference_payloads_have_required_genes() -> None:
     assert "f3l" in payloads["genes"], "F3L fixture must remain present"
     assert "rrna_18s" in payloads["genes"], "18S rRNA fixture must remain present"
     assert "rdrp_orf1ab" in payloads["genes"], "RdRp/ORF1ab fixture must remain present"
+
+
+def test_authoritative_core_nt_snapshot_evidence_matches_active_generation() -> None:
+    """Pin Web UI release/counts and NCBI v5 full counts, not wrapped XML1 stats."""
+    snapshot = _load_payloads()["core_nt_snapshot"]
+    metadata_path = FIXTURES_DIR / snapshot["ncbi_v5_metadata_path"]
+    web_info_path = FIXTURES_DIR / snapshot["web_getdbinfo_path"]
+    metadata_bytes = metadata_path.read_bytes()
+    web_info_bytes = web_info_path.read_bytes()
+
+    assert hashlib.sha256(metadata_bytes).hexdigest() == snapshot["ncbi_v5_metadata_sha256"]
+    assert hashlib.sha256(web_info_bytes).hexdigest() == snapshot["web_getdbinfo_sha256"]
+
+    metadata = json.loads(metadata_bytes)
+    assert metadata["last-updated"] == snapshot["release_date"]
+    assert metadata["number-of-sequences"] == snapshot["number_of_sequences"]
+    assert metadata["number-of-letters"] == snapshot["number_of_letters"]
+    assert metadata["number-of-volumes"] == snapshot["number_of_volumes"]
+
+    web_info = web_info_bytes.decode("utf-8")
+    web_date = re.search(r"Update date:</span>([^<]+)", web_info)
+    web_count = re.search(r'Number of sequences:</span><span class="sn">(\d+)', web_info)
+    assert web_date is not None and web_date.group(1).strip() == snapshot["web_update_date"]
+    assert web_count is not None
+    assert int(web_count.group(1)) == snapshot["web_number_of_sequences"]
+    assert snapshot["web_number_of_sequences"] == snapshot["number_of_sequences"]
+    assert snapshot["local_active_generation"].startswith("ncbi-direct-20260819-")
+    assert snapshot["identity_status"] == "verified"
 
 
 @pytest.mark.parametrize("gene_id", _gene_ids())
@@ -159,13 +198,26 @@ def test_dashboard_request_matches_ncbi_form(gene_id: str) -> None:
     # which we reach by submitting program=blastn (no explicit -task flag).
     assert form["MEGABLAST"] == "on"
     assert dashboard["program"] == "blastn"
-    # ENTREZ_QUERY=NOT txid<N>[ORGN] → negative_taxids <N>.
-    expected_taxid = payload["exclusion_taxid"]
-    assert f"NOT txid{expected_taxid}[ORGN]" == form["ENTREZ_QUERY"]
-    assert dashboard["taxid"] == expected_taxid
-    assert dashboard["is_inclusive"] is False, (
-        "ENTREZ_QUERY=NOT ... must map to is_inclusive=false (negative taxid filter)"
-    )
+    # One or more Web BLAST NOT terms map to one BLAST+ comma-separated
+    # negative-taxid filter. ORF1ab includes taxid 32630 because core_nt groups
+    # three excluded SARS-CoV-2 accessions with one synthetic-construct alias;
+    # excluding both taxids removes that mixed group rather than trusting its
+    # first title.
+    exclusion_taxids = payload.get("exclusion_taxids", [payload["exclusion_taxid"]])
+    assert " ".join(f"NOT txid{taxid}[ORGN]" for taxid in exclusion_taxids) == form[
+        "ENTREZ_QUERY"
+    ]
+    if len(exclusion_taxids) == 1:
+        assert dashboard["taxid"] == exclusion_taxids[0]
+        assert dashboard["is_inclusive"] is False, (
+            "ENTREZ_QUERY=NOT ... must map to is_inclusive=false (negative taxid filter)"
+        )
+    else:
+        assert dashboard.get("taxid") is None
+        assert dashboard.get("is_inclusive") is None
+        assert dashboard["additional_options"] == (
+            "-negative_taxids " + ",".join(str(taxid) for taxid in exclusion_taxids)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +261,13 @@ def test_generated_ini_does_not_leak_inclusive_taxid_filter(gene_id: str) -> Non
     params = _build_submit_params(payload)
 
     options = _parse_ini(generate_config(params)).get("blast", "options")
-    inclusive_flag = f"-taxids {payload['exclusion_taxid']}"
-    assert inclusive_flag not in options, (
-        f"{gene_id}: exclusive filter must not emit `{inclusive_flag}`; observed options: {options}"
-    )
+    exclusion_taxids = payload.get("exclusion_taxids", [payload["exclusion_taxid"]])
+    for taxid in exclusion_taxids:
+        inclusive_flag = f"-taxids {taxid}"
+        assert inclusive_flag not in options, (
+            f"{gene_id}: exclusive filter must not emit `{inclusive_flag}`; "
+            f"observed options: {options}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -250,12 +305,15 @@ def test_blockers_are_explicitly_tracked() -> None:
         assert (FIXTURES_DIR / xml_path).exists(), (
             f"{gene_id}: reference XML {xml_path} missing on disk"
         )
-        exclusion_blocker = payload.get("exclusion_validation_blocker")
-        if exclusion_blocker is not None:
-            assert exclusion_blocker.get("code")
-            assert exclusion_blocker.get("subject_accession")
-            assert int(exclusion_blocker.get("subject_taxid") or 0) > 0
-            assert int(exclusion_blocker.get("excluded_ancestor_taxid") or 0) == int(
-                payload["exclusion_taxid"]
-            )
-            assert exclusion_blocker.get("detail")
+        exclusion_evidence = payload.get("exclusion_validation_evidence")
+        if exclusion_evidence is not None:
+            assert exclusion_evidence.get("status") == "verified"
+            assert exclusion_evidence.get("evidence_format") == "XML2"
+            assert exclusion_evidence.get("evidence_rid")
+            assert len(str(exclusion_evidence.get("evidence_sha256") or "")) == 64
+            assert len(str(exclusion_evidence.get("reference_content_sha256") or "")) == 64
+            assert len(str(exclusion_evidence.get("taxonomy_response_sha256") or "")) == 64
+            assert int(exclusion_evidence.get("defline_count") or 0) > 0
+            assert int(exclusion_evidence.get("missing_taxid_count", -1)) == 0
+            assert int(exclusion_evidence.get("excluded_descendant_count", -1)) == 0
+            assert exclusion_evidence.get("detail")

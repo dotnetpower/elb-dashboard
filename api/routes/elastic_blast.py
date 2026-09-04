@@ -46,6 +46,15 @@ class ExternalBlastOptions(BaseModel):
     soft_masking: bool = Field(False)
     sharding_mode: Literal["off", "approximate", "precise"] = Field("off")
     db_effective_search_space: int | None = Field(None, ge=1)
+    query_effective_search_spaces: list[int] | None = Field(
+        None,
+        min_length=1,
+        max_length=10_000,
+        description=(
+            "Ordered query-specific effective search spaces. A uniform list is "
+            "forwarded to the sibling as its scalar search-space field."
+        ),
+    )
     evalue: float = Field(
         0.05,
         gt=0,
@@ -287,6 +296,26 @@ def _canonicalize_external_live_options(
                 "retryable": True,
             },
         ) from exc
+
+
+def _external_transport_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Adapt validated query-level options to the sibling's scalar wire schema."""
+    from api.services.blast.live_search_space import collapse_uniform_query_search_space
+
+    transport = dict(payload)
+    try:
+        transport["options"] = collapse_uniform_query_search_space(
+            payload.get("options") if isinstance(payload.get("options"), dict) else None
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "query_search_space_transport_unsupported",
+                "message": sanitise(str(exc))[:500],
+            },
+        ) from exc
+    return transport
 
 
 def _validated_submit_contracts(payload: dict[str, Any]) -> dict[str, Any]:
@@ -549,7 +578,10 @@ def submit_external_blast_job(
         cluster_name=str(payload.get("cluster_name") or "").strip(),
     )
     external_blast.ready(**scope_kwargs)
-    upstream = external_blast.submit_job(payload, **scope_kwargs)
+    upstream = external_blast.submit_job(
+        _external_transport_payload(payload),
+        **scope_kwargs,
+    )
     normalised = _normalise_external_job_payload(upstream, request_payload=payload)
     # The sibling OpenAPI plane stores no query identity for inline FASTA, so
     # remember a defline-derived label keyed by the upstream job id. The jobs
