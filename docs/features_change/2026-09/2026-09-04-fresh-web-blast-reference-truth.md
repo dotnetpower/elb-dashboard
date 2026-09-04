@@ -58,7 +58,10 @@ calibration value even though NCBI reports query-specific values.
   `.../generations/<id>/shards/core_nt-metadata.json`, so all ten init Jobs exhausted retries with
   exit 75 before BLAST execution. The hardened script now derives the full DB root, container-root
   metadata path, and expected generation ID directly from the immutable shard prefix. Legacy
-  `<N>shards/` layouts retain their existing path behavior.
+  `<N>shards/` layouts retain their existing path behavior. The immutable generation directory is
+  itself the payload root (`core_nt` is a file basename there, not another directory).
+- OpenAPI `4.41` carries that final correction; ACR run `de83` produced digest
+  `sha256:01c400629c0976873026dc91aa5e7b05e5e626ffdef1d20efd1cc6a69072b3eb`.
 
 ## Validation
 

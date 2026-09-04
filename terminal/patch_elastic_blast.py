@@ -783,10 +783,11 @@ echo "Volumes: ${VOLUMES[*]}"
 # as the generation root.
 if [[ "${ELB_PARTITION_PREFIX}" =~ ^(.+)/shards/[0-9]+shards/[^/]+_shard_$ ]]; then
     DB_BASE_URL="${BASH_REMATCH[1]}/"
+    DB_URL="${DB_BASE_URL}"
 else
     DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
+    DB_URL="${DB_BASE_URL}${ORIG_DB}/"
 fi
-DB_URL="${DB_BASE_URL}${ORIG_DB}/"
 echo "DB base URL: ${DB_URL}"
 
 EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"

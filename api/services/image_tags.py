@@ -84,6 +84,9 @@ from __future__ import annotations
 # generation's full DB root, the container-root metadata blob, and an expected
 # source version derived from the immutable path. ACR run de80 produced digest
 # sha256:7e5f7401f40b05177a93ca94e900a8636f5cc4560da6e4dd9aa99e877ecccc53.
+# 4.41 corrects the immutable payload root itself: the generation directory
+# contains `core_nt.*` files directly. ACR run de83 produced digest
+# sha256:01c400629c0976873026dc91aa5e7b05e5e626ffdef1d20efd1cc6a69072b3eb.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -111,7 +114,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.40",
+    "elb-openapi": "4.41",
 }
 
 # GitHub source repo for ACR Build Tasks.

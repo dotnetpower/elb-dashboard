@@ -951,7 +951,7 @@ def test_init_shard_immutable_generation_resolves_root_metadata_and_db(
     )
     assert (
         "https://elbstg.blob.core.windows.net/blast-db/core_nt/generations/"
-        f"{generation}/core_nt/*"
+        f"{generation}/*"
     ) in requested
     assert f"DB source version derived from immutable shard path: {generation}" in result.stdout
 
