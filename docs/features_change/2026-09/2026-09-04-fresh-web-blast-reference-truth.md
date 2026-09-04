@@ -62,6 +62,16 @@ calibration value even though NCBI reports query-specific values.
   itself the payload root (`core_nt` is a file basename there, not another directory).
 - OpenAPI `4.41` carries that final correction; ACR run `de83` produced digest
   `sha256:01c400629c0976873026dc91aa5e7b05e5e626ffdef1d20efd1cc6a69072b3eb`.
+- The first complete 10/10 F3L shard run then exposed a finalizer shell bug: `azcopy` inherited
+  the oracle URL manifest as stdin, consumed its remaining lines after part 0, and failed closed
+  with `expected=10 downloaded=1`. Oracle part downloads now read stdin from `/dev/null`, so the
+  surrounding manifest loop processes all ten URLs.
+- OpenAPI `4.42` carries the oracle-loop fix; ACR run `de86` produced digest
+  `sha256:3c43d992468f6e093ecbc5fff5f93047c079e6e7afb7408f1b29a95182e0fb62`.
+- F3L then completed all ten BLAST shards, but strict merge correctly rejected the existing
+  active oracle because 35 tax-filter-selected grouped aliases were absent. Future oracle builds
+  use `blastdbcmd -get_dups` so duplicate/grouped accessions stay adjacent to their OID ordering.
+  The existing `20260829192214-0757dc7b` oracle must be rebuilt before another exact live run.
 
 ## Validation
 

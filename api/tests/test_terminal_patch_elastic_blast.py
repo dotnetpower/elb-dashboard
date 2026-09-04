@@ -1884,6 +1884,7 @@ def test_patch_source_tags_query_and_db_order_oracles() -> None:
     assert 'export ELB_TIE_ORDER_SOURCE="db_order"' in source
     assert "DB-order oracle parts incomplete" in source
     assert "ORACLE_EXPECTED_PARTS" in source
+    assert '--log-level=ERROR </dev/null 2>/dev/null; then' in source
 
 
 _BATCH_JOB_TEMPLATES = (

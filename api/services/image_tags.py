@@ -87,6 +87,10 @@ from __future__ import annotations
 # 4.41 corrects the immutable payload root itself: the generation directory
 # contains `core_nt.*` files directly. ACR run de83 produced digest
 # sha256:01c400629c0976873026dc91aa5e7b05e5e626ffdef1d20efd1cc6a69072b3eb.
+# 4.42 isolates each finalizer oracle-part azcopy process from the surrounding
+# URL-manifest stdin, so all ten parts download instead of part 0 consuming the
+# remaining lines. ACR run de86 produced digest
+# sha256:3c43d992468f6e093ecbc5fff5f93047c079e6e7afb7408f1b29a95182e0fb62.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -114,7 +118,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.41",
+    "elb-openapi": "4.42",
 }
 
 # GitHub source repo for ACR Build Tasks.

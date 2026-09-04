@@ -110,6 +110,7 @@ def test_build_db_order_oracle_job_plan_pins_shards_to_nodes() -> None:
     )
     assert pod_spec["volumes"][0]["hostPath"]["path"] == "/workspace/blast"
     assert "blastdbcmd -db" in container["args"][0]
+    assert "-entry all -get_dups -outfmt '%a'" in container["args"][0]
     assert "azcopy cp" in container["args"][0]
 
 

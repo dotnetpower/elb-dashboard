@@ -580,7 +580,7 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             '                            part_file=$(printf "%s/part-%06d.txt" '
             '"$ORACLE_PART_DIR" "$idx")\n'
             '                            if ! azcopy cp "$part_url" "$part_file" '
-            "--log-level=ERROR 2>/dev/null; then\n"
+            "--log-level=ERROR </dev/null 2>/dev/null; then\n"
             '                                echo "WARNING: tie-order oracle part could not '
             'be downloaded: ${part_url}"\n'
             '                                rm -f "$part_file"\n'

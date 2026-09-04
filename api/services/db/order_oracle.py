@@ -171,9 +171,12 @@ def build_db_order_oracle_job_plan(
     """Build one Job per warmed shard to dump DB accession order.
 
     Each job runs on the node that already holds the warmed shard, emits the
-    shard's BLAST DB accession order with ``blastdbcmd``, and uploads a text
-    part to Storage. The submit path later passes the ordered part URLs to the
-    finalizer; BLAST submissions do not regenerate this data.
+    shard's BLAST DB accession order with ``blastdbcmd -get_dups``, and uploads
+    a text part to Storage. Duplicate/grouped defline accessions stay adjacent
+    to their database OID so a tax-filtered result that selects a non-primary
+    alias can still resolve exact full-DB order. The submit path later passes
+    the ordered part URLs to the finalizer; BLAST submissions do not regenerate
+    this data.
     """
 
     _validate_db_name(db_name)
@@ -334,7 +337,7 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 out="/tmp/${ELB_DB_NAME}-${ELB_SHARD}-db-order-oracle.txt"
 log "START db=${ELB_DB} shard=${ELB_SHARD} node=$(hostname)"
 azcopy login --identity >/dev/null
-blastdbcmd -db "${ELB_DB}" -entry all -outfmt '%a' \
+blastdbcmd -db "${ELB_DB}" -entry all -get_dups -outfmt '%a' \
   | awk 'NF && !seen[$1]++ { print $1 }' > "${out}"
 count=$(wc -l < "${out}" | tr -d ' ')
 if [ "${count}" = "0" ]; then
