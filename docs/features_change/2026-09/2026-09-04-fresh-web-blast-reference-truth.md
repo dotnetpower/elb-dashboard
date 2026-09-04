@@ -44,6 +44,9 @@ calibration value even though NCBI reports query-specific values.
   directory; all files are mandatory once supplied.
 - `query_effective_search_spaces` is accepted on the external XML API and retained in job
   provenance. Uniform values collapse only at the sibling transport boundary.
+- Fast deploys now resolve newly built image tags to immutable digests before restoring private
+  ACR access. This prevents a successful build from stopping before the Container App patch when
+  private-network propagation blocks the later registry data-plane lookup.
 
 ## Validation
 

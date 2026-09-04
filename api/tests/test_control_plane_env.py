@@ -58,6 +58,20 @@ def test_json_exists_and_parses() -> None:
     assert isinstance(data, dict)
 
 
+def test_quick_deploy_resolves_built_digests_before_private_acr_restore() -> None:
+    """A successful private-ACR build must reach the Container App PATCH."""
+    script = _QUICK_DEPLOY_PATH.read_text(encoding="utf-8")
+    all_prune = script.index("acr_prune_targets elb-api elb-prepare-db")
+    all_resolve = script.index('NEW_API="$(resolve_image_digest', all_prune)
+    all_restore = script.index('acr_restore_build_access "$ACR_NAME"', all_prune)
+    assert all_prune < all_resolve < all_restore
+
+    single_prune = script.index('acr_prune_targets "$IMAGE_NAME"', all_restore)
+    single_resolve = script.index('NEW_IMAGE="$(resolve_image_digest', single_prune)
+    single_restore = script.index('acr_restore_build_access "$ACR_NAME"', single_prune)
+    assert single_prune < single_resolve < single_restore
+
+
 def test_expected_sidecars_present() -> None:
     data = _load()
     for sidecar in ("api", "worker", "beat"):

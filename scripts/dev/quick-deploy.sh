@@ -1104,6 +1104,16 @@ if ! $NO_BUILD; then
   # Best-effort: a delete failure never aborts the deploy.
   acr_prune_targets elb-api elb-prepare-db elb-frontend elb-terminal
 
+  if ! $BUILD_ONLY; then
+    # Digest lookup is an ACR data-plane call. Resolve while the temporary
+    # build-access lease is still open; doing this after restoration makes a
+    # successful private-registry build end before the Container App PATCH.
+    ts "==> Resolving image tags to digests before restoring private ACR access"
+    NEW_API="$(resolve_image_digest "$NEW_API")"
+    NEW_FRONTEND="$(resolve_image_digest "$NEW_FRONTEND")"
+    NEW_TERMINAL="$(resolve_image_digest "$NEW_TERMINAL")"
+  fi
+
   acr_restore_build_access "$ACR_NAME"
   trap - EXIT
 fi  # end: if ! $NO_BUILD (all branch)
@@ -1121,10 +1131,12 @@ fi
   # the Container App template and rolls a new revision. Without this,
   # `deploy all latest-main` is a silent no-op whenever the active revision
   # already references :latest-main (see resolve_image_digest).
-  ts "==> Resolving image tags to digests for a deterministic revision roll"
-  NEW_API="$(resolve_image_digest "$NEW_API")"
-  NEW_FRONTEND="$(resolve_image_digest "$NEW_FRONTEND")"
-  NEW_TERMINAL="$(resolve_image_digest "$NEW_TERMINAL")"
+  if $NO_BUILD; then
+    ts "==> Resolving pre-built image tags to digests for a deterministic revision roll"
+    NEW_API="$(resolve_image_digest "$NEW_API")"
+    NEW_FRONTEND="$(resolve_image_digest "$NEW_FRONTEND")"
+    NEW_TERMINAL="$(resolve_image_digest "$NEW_TERMINAL")"
+  fi
   ts "      api/worker/beat -> $NEW_API"
   ts "      frontend        -> $NEW_FRONTEND"
   ts "      terminal        -> $NEW_TERMINAL"
@@ -1343,6 +1355,13 @@ if ! $NO_BUILD; then
     acr_prune_targets "$IMAGE_NAME"
   fi
 
+  if ! $BUILD_ONLY; then
+    # Resolve before ACR returns to private-only posture. The ARM image PATCH
+    # below uses this immutable ref and no longer needs registry data-plane
+    # access after the lease is restored.
+    NEW_IMAGE="$(resolve_image_digest "$NEW_IMAGE")"
+  fi
+
   acr_restore_build_access "$ACR_NAME"
   trap - EXIT
 
@@ -1375,8 +1394,11 @@ esac
 
 # Pin the mutable tag to its digest so the PATCH rolls a new revision even
 # when the active revision already references the same tag (see
-# resolve_image_digest in the helpers block).
-NEW_IMAGE="$(resolve_image_digest "$NEW_IMAGE")"
+# resolve_image_digest in the helpers block). A newly built image was resolved
+# before private ACR restoration; --no-build still resolves here.
+if $NO_BUILD; then
+  NEW_IMAGE="$(resolve_image_digest "$NEW_IMAGE")"
+fi
 
 for tgt in "${TARGETS[@]}"; do
   ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $NEW_IMAGE"
