@@ -80,6 +80,10 @@ from __future__ import annotations
 # it with the 64-nt active-generation fallback; missing values still receive
 # the active fallback and malformed/duplicate values fail closed. ACR run de7w
 # produced digest sha256:6afca07b9132a843877f1a49b2baa36b4d7da303b325f41c4741c5c533062a7a.
+# 4.40 fixes immutable-generation init URLs: active shard prefixes resolve the
+# generation's full DB root, the container-root metadata blob, and an expected
+# source version derived from the immutable path. ACR run de80 produced digest
+# sha256:7e5f7401f40b05177a93ca94e900a8636f5cc4560da6e4dd9aa99e877ecccc53.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -107,7 +111,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.39",
+    "elb-openapi": "4.40",
 }
 
 # GitHub source repo for ACR Build Tasks.

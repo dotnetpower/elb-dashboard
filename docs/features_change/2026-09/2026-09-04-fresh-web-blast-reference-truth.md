@@ -54,6 +54,11 @@ calibration value even though NCBI reports query-specific values.
   path instead of replacing it with the 64-nt fallback. Missing values still use the active
   fallback; malformed or duplicate values fail closed. ACR run `de7w` produced digest
   `sha256:6afca07b9132a843877f1a49b2baa36b4d7da303b325f41c4741c5c533062a7a`.
+- Live F3L then exposed an immutable-path init defect: the shard script resolved
+  `.../generations/<id>/shards/core_nt-metadata.json`, so all ten init Jobs exhausted retries with
+  exit 75 before BLAST execution. The hardened script now derives the full DB root, container-root
+  metadata path, and expected generation ID directly from the immutable shard prefix. Legacy
+  `<N>shards/` layouts retain their existing path behavior.
 
 ## Validation
 

@@ -777,14 +777,35 @@ for volume in "${VOLUMES[@]}"; do
 done
 echo "Volumes: ${VOLUMES[*]}"
 
-DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
+# Legacy layouts use `<container>/<N>shards/<db>_shard_`; immutable layouts
+# insert `<db>/generations/<id>/shards/` before that suffix. Resolve the full
+# database root from either shape instead of accidentally treating `shards/`
+# as the generation root.
+if [[ "${ELB_PARTITION_PREFIX}" =~ ^(.+)/shards/[0-9]+shards/[^/]+_shard_$ ]]; then
+    DB_BASE_URL="${BASH_REMATCH[1]}/"
+else
+    DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
+fi
 DB_URL="${DB_BASE_URL}${ORIG_DB}/"
 echo "DB base URL: ${DB_URL}"
 
 EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
+# The immutable path itself is authoritative. Pin the expected generation even
+# when an older ElasticBLAST template did not inject ELB_DB_SOURCE_VERSION.
+if [ -z "$EXPECTED_SOURCE_VERSION" ] \
+        && [[ "${ELB_PARTITION_PREFIX}" =~ /generations/([^/]+)/shards/ ]]; then
+    EXPECTED_SOURCE_VERSION="${BASH_REMATCH[1]}"
+    echo "DB source version derived from immutable shard path: ${EXPECTED_SOURCE_VERSION}"
+fi
 METADATA_SOURCE_VERSION=""
 SHARD_LAYOUT_SCHEMA="0"
-METADATA_URL="${DB_BASE_URL}${ORIG_DB}-metadata.json"
+if [[ "${ELB_PARTITION_PREFIX}" =~ ^(https://[^/]+/[^/]+)/ ]]; then
+    CONTAINER_ROOT_URL="${BASH_REMATCH[1]}/"
+else
+    echo "ERROR: shard prefix does not identify an Azure container root"
+    exit 65
+fi
+METADATA_URL="${ELB_METADATA_URL:-${CONTAINER_ROOT_URL}${ORIG_DB}-metadata.json}"
 echo "Resolving DB metadata: ${METADATA_URL}"
 if retry_azcopy cp "${METADATA_URL}" /tmp/db-metadata.json --log-level=ERROR; then
     if command -v python3 >/dev/null 2>&1; then

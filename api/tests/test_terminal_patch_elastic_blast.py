@@ -261,7 +261,8 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     assert "CACHE_STALE shard alias mismatch" in text
     assert 'cp /tmp/shard.nal "./${ELB_DB}.nal.tmp"' in text
     assert "Resolving DB metadata: ${METADATA_URL}" in text
-    assert "${DB_BASE_URL}${ORIG_DB}-metadata.json" in text
+    assert "${CONTAINER_ROOT_URL}${ORIG_DB}-metadata.json" in text
+    assert "DB source version derived from immutable shard path" in text
     assert "DB metadata lookup failed after retries; refusing unversioned shard staging" in text
     assert "DB source version changed after Job creation" in text
     assert "CACHE_UNVERIFIED expected source version is unavailable" in text
@@ -911,6 +912,48 @@ def _init_shard_runtime_assets(
         "ELB_TEST_AZCOPY_CALLS": str(calls),
     }
     return script, env, calls
+
+
+@pytest.mark.subprocess
+def test_init_shard_immutable_generation_resolves_root_metadata_and_db(
+    tmp_path: Path,
+) -> None:
+    script, env, calls = _init_shard_runtime_assets(tmp_path)
+    generation = "ncbi-direct-20260819-cab30d18c360"
+    env["ELB_PARTITION_PREFIX"] = (
+        "https://elbstg.blob.core.windows.net/blast-db/core_nt/generations/"
+        f"{generation}/shards/10shards/core_nt_shard_"
+    )
+    metadata = Path(env["ELB_TEST_METADATA"])
+    metadata.write_text(
+        json.dumps(
+            {
+                "source_version": generation,
+                "shard_layout_schema": 1,
+            }
+        )
+    )
+
+    result = subprocess.run(  # noqa: S603 -- executes generated fixture script.
+        ["/bin/bash", str(script)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    requested = calls.read_text()
+    assert (
+        "https://elbstg.blob.core.windows.net/blast-db/core_nt-metadata.json"
+        in requested
+    )
+    assert (
+        "https://elbstg.blob.core.windows.net/blast-db/core_nt/generations/"
+        f"{generation}/core_nt/*"
+    ) in requested
+    assert f"DB source version derived from immutable shard path: {generation}" in result.stdout
 
 
 @pytest.mark.subprocess

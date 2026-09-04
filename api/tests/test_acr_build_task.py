@@ -82,7 +82,7 @@ def _scheduled_openapi_request() -> object:
         "rg-acr",
         "acr1",
         "elb-openapi",
-        "4.39",
+        "4.40",
         IMAGE_BUILD_INFO["elb-openapi"],
     )
     assert mgmt.registries.request is not None
