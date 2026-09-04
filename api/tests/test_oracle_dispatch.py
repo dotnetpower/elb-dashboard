@@ -32,7 +32,7 @@ def _context() -> OracleBuildContext:
         source_version="v1",
         layout_schema=1,
         layout_fingerprint="layout-1",
-        identity="oracle-v1:layout-1",
+        identity="oracle-v2:layout-1",
         shards=("00", "01"),
         shard_nodes=(("00", "node-a"), ("01", "node-b")),
     )

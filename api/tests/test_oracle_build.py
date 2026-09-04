@@ -69,7 +69,7 @@ def test_ready_snapshots_build_context() -> None:
         ("01", "node-b", "/workspace/blastdb/core_nt/01"),
     )
     assert context.expected_parts == 2
-    assert context.identity.startswith("oracle-v1:")
+    assert context.identity.startswith("oracle-v2:")
 
 
 @pytest.mark.parametrize(

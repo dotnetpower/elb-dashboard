@@ -31,6 +31,7 @@ from azure.core.exceptions import (
 from azure.storage.blob import ContentSettings
 
 from api.services.db.order_oracle import (
+    ORACLE_FORMAT_VERSION,
     ORACLE_PARTS_DIR,
     ORACLE_PREFIX_ROOT,
     oracle_active_blob_path,
@@ -386,6 +387,7 @@ def promote_oracle_run(
     expected_prefix = f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_PARTS_DIR}/{run_id}/"
     if (
         terminal.get("schema_version") != 1
+        or int(terminal.get("oracle_format_version") or 0) != ORACLE_FORMAT_VERSION
         or str(terminal.get("db_name") or "") != db_name
         or str(terminal.get("run_id") or "") != run_id
         or not str(terminal.get("identity") or "")

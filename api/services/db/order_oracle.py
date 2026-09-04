@@ -5,8 +5,10 @@ Edit boundaries: Keep reusable domain logic here; routes and tasks should call t
 instead of duplicating SDK code.
 Key entry points: `DbOrderOracleJobPlan`, `oracle_status_blob_path`, `oracle_part_blob_path`,
 `oracle_part_url`, `build_db_order_oracle_job_plan`
-Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
+Risky contracts: Oracle v2 rows are `shard<TAB>local_oid<TAB>accession`; aliases
+for one non-redundant DB sequence must share one rank, while shard identity keeps
+local OID resets distinct. Keep Azure credentials centralized and sanitise data
+before HTTP, WebSocket, or log boundaries.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -33,6 +35,8 @@ ORACLE_RUNS_DIR = "runs"
 ORACLE_PARTS_DIR = "parts"
 ORACLE_REFERENCES_DIR = "references"
 ORACLE_GC_DIR = "gc"
+ORACLE_FORMAT_VERSION = 2
+ORACLE_IDENTITY_PREFIX = f"oracle-v{ORACLE_FORMAT_VERSION}:"
 
 _SAFE_DB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_NODE_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
@@ -170,13 +174,13 @@ def build_db_order_oracle_job_plan(
 ) -> DbOrderOracleJobPlan:
     """Build one Job per warmed shard to dump DB accession order.
 
-    Each job runs on the node that already holds the warmed shard, emits the
-    shard's BLAST DB accession order with ``blastdbcmd -get_dups``, and uploads
-    a text part to Storage. Duplicate/grouped defline accessions stay adjacent
-    to their database OID so a tax-filtered result that selects a non-primary
-    alias can still resolve exact full-DB order. The submit path later passes
-    the ordered part URLs to the finalizer; BLAST submissions do not regenerate
-    this data.
+    Each job runs on the node that already holds the warmed shard and emits
+    ``shard<TAB>local_oid<TAB>accession`` rows with ``blastdbcmd -get_dups``.
+    Duplicate/grouped defline accessions share one shard-local OID, while the
+    shard field disambiguates OID resets across contiguous shards. A tax-filtered
+    result that selects a non-primary alias can therefore resolve the same exact
+    full-DB order. The submit path later passes the ordered part URLs to the
+    finalizer; BLAST submissions do not regenerate this data.
     """
 
     _validate_db_name(db_name)
@@ -337,8 +341,10 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 out="/tmp/${ELB_DB_NAME}-${ELB_SHARD}-db-order-oracle.txt"
 log "START db=${ELB_DB} shard=${ELB_SHARD} node=$(hostname)"
 azcopy login --identity >/dev/null
-blastdbcmd -db "${ELB_DB}" -entry all -get_dups -outfmt '%a' \
-  | awk 'NF && !seen[$1]++ { print $1 }' > "${out}"
+blastdbcmd -db "${ELB_DB}" -entry all -get_dups -outfmt $'%o\t%a' \
+    | awk -F '\t' -v shard="${ELB_SHARD}" \
+            'NF >= 2 && !seen[$1 SUBSEP $2]++ { print shard "\t" $1 "\t" $2 }' \
+            > "${out}"
 count=$(wc -l < "${out}" | tr -d ' ')
 if [ "${count}" = "0" ]; then
   log "ERROR no accessions emitted for ${ELB_DB}"

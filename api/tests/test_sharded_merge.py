@@ -316,6 +316,39 @@ def test_db_order_oracle_reproduces_blast_reverse_oid_ties(tmp_path: Path) -> No
     assert report["diversity_reservation_mode"] == "db_order_exact"
 
 
+def test_db_order_oracle_v2_maps_grouped_aliases_and_shard_oid_resets(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        "q1\talias-a\t1e-30\t90\t100",
+        "q1\ts2\t1e-30\t90\t100",
+        "q1\ts3\t1e-30\t90\t100",
+    ]
+    oracle = tmp_path / "db-order-v2.txt"
+    oracle.write_text(
+        "00\t0\tprimary-a\n"
+        "00\t0\talias-a\n"
+        "00\t1\ts2\n"
+        "01\t0\ts3\n"
+    )
+
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="2",
+        max_target_seqs=3,
+        outfmt_spec="6 qseqid sseqid evalue bitscore score",
+        env={
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+        },
+    )
+
+    assert [row.split("\t")[1] for row in out_rows] == ["s3", "s2", "alias-a"]
+    assert report["tie_order_oracle_accessions"] == 4
+    assert report["selection_equivalence"] == "full_db_hitlist_exact"
+
+
 def test_db_order_oracle_uses_raw_score_and_evalue_epsilon(tmp_path: Path) -> None:
     rows = [
         "q1\ts1\t0\t90\t100",

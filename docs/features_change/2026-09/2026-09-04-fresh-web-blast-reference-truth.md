@@ -70,8 +70,12 @@ calibration value even though NCBI reports query-specific values.
   `sha256:3c43d992468f6e093ecbc5fff5f93047c079e6e7afb7408f1b29a95182e0fb62`.
 - F3L then completed all ten BLAST shards, but strict merge correctly rejected the existing
   active oracle because 35 tax-filter-selected grouped aliases were absent. Future oracle builds
-  use `blastdbcmd -get_dups` so duplicate/grouped accessions stay adjacent to their OID ordering.
-  The existing `20260829192214-0757dc7b` oracle must be rebuilt before another exact live run.
+  publish oracle-v2 rows as `shard<TAB>local_oid<TAB>accession` with
+  `blastdbcmd -get_dups`, so duplicate/grouped accessions share one OID rank and shard-local OID
+  resets remain distinct. OpenAPI rejects v1 oracles. The existing
+  `20260829192214-0757dc7b` oracle must be rebuilt before another exact live run.
+- OpenAPI `4.43` carries the oracle-v2 reader/gate; ACR run `de89` produced digest
+  `sha256:e76e25509f60269116be7ad5cc99e3254c4594d952f4eed00ae0ac9bd458956c`.
 
 ## Validation
 

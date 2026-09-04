@@ -54,12 +54,22 @@ def load_tie_order_oracle(warnings):
     order = {}
     accessions = []
     unique_accessions = 0
+    logical_oid_rank = -1
+    previous_oid_key = None
     for raw_line in path.read_text().splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         tokens = re.split(r"[\t, ]+", line)
-        if len(tokens) >= 12:
+        explicit_oid_key = None
+        if (
+            len(tokens) >= 3
+            and re.fullmatch(r"[0-9]{2}", tokens[0])
+            and tokens[1].isdigit()
+        ):
+            explicit_oid_key = (tokens[0], int(tokens[1]))
+            accession = tokens[2]
+        elif len(tokens) >= 12:
             accession = tokens[1]
         elif len(tokens) >= 2 and tokens[0].isdigit():
             accession = tokens[1]
@@ -67,8 +77,15 @@ def load_tie_order_oracle(warnings):
             accession = tokens[0]
         if not accession:
             continue
+        if explicit_oid_key is not None:
+            if explicit_oid_key != previous_oid_key:
+                logical_oid_rank += 1
+                previous_oid_key = explicit_oid_key
+            accession_rank = logical_oid_rank
+        else:
+            accession_rank = unique_accessions
         if accession not in order:
-            order[accession] = unique_accessions
+            order[accession] = accession_rank
             accessions.append(accession)
             unique_accessions += 1
         base = _accession_base(accession)

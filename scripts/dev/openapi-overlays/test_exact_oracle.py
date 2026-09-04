@@ -48,6 +48,8 @@ class _Response:
 def _ready_status() -> dict[str, object]:
     return {
         "status": "ready",
+        "oracle_format_version": 2,
+        "identity": "oracle-v2:layout-1",
         "run_id": "run-1",
         "source_version": "2026-09-01",
         "expected_parts": 2,
@@ -102,6 +104,8 @@ def test_attach_validates_every_part_and_uploads_private_manifest(monkeypatch) -
         {"source_version": "old"},
         {"ready_parts": 1},
         {"expected_shards": ["00", "00"]},
+        {"oracle_format_version": 1},
+        {"identity": "oracle-v1:layout-1"},
     ],
 )
 def test_attach_rejects_incomplete_or_wrong_generation(monkeypatch, mutation) -> None:

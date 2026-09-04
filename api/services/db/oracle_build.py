@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
-from api.services.db.order_oracle import oracle_layout_fingerprint
+from api.services.db.order_oracle import ORACLE_IDENTITY_PREFIX, oracle_layout_fingerprint
 
 
 class OracleBuildBlocked(RuntimeError):
@@ -184,7 +184,7 @@ def plan_oracle_build_from_snapshots(
         source_version=effective_source_version,
         layout_schema=layout_schema,
         layout_fingerprint=fingerprint,
-        identity=f"oracle-v1:{fingerprint}",
+        identity=f"{ORACLE_IDENTITY_PREFIX}{fingerprint}",
         shards=tuple(shards),
         shard_nodes=tuple(mapped),
     )

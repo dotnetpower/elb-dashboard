@@ -102,6 +102,7 @@ class _Container:
 def _claim(*, identity: str = "identity-1", run_id: str = "run-1") -> dict[str, Any]:
     return {
         "schema_version": 1,
+        "oracle_format_version": 2,
         "db_name": "core_nt",
         "identity": identity,
         "layout_fingerprint": "layout-1",

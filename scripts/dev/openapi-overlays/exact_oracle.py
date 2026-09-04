@@ -32,6 +32,8 @@ _SHARD_RE = re.compile(r"^[0-9]{2}$")
 _MAX_PARTS = 1024
 _CALIBRATION_QUERY_LEN = 64
 _CALIBRATION_LENGTH_ADJUSTMENT = 33
+_ORACLE_FORMAT_VERSION = 2
+_ORACLE_IDENTITY_PREFIX = f"oracle-v{_ORACLE_FORMAT_VERSION}:"
 
 
 class ExactOracleUnavailable(RuntimeError):
@@ -131,12 +133,16 @@ def attach_db_order_oracle(
         raise ExactOracleUnavailable("DB-order oracle is not ready")
     run_id = str(status.get("run_id") or "")
     oracle_source = str(status.get("source_version") or "")
+    oracle_identity = str(status.get("identity") or "")
+    oracle_format_version = int(status.get("oracle_format_version") or 0)
     shards = status.get("expected_shards")
     expected_parts = int(status.get("expected_parts") or 0)
     ready_parts = int(status.get("ready_parts") or 0)
     if (
         not _RUN_RE.fullmatch(run_id)
         or oracle_source != source_version
+        or not oracle_identity.startswith(_ORACLE_IDENTITY_PREFIX)
+        or oracle_format_version != _ORACLE_FORMAT_VERSION
         or not isinstance(shards, list)
         or not 0 < expected_parts <= _MAX_PARTS
         or ready_parts != expected_parts

@@ -91,6 +91,10 @@ from __future__ import annotations
 # URL-manifest stdin, so all ten parts download instead of part 0 consuming the
 # remaining lines. ACR run de86 produced digest
 # sha256:3c43d992468f6e093ecbc5fff5f93047c079e6e7afb7408f1b29a95182e0fb62.
+# 4.43 requires oracle-v2 and consumes shard/local-OID/accession rows so every
+# grouped alias shares the sequence's exact rank while OID resets across shards
+# remain distinct. ACR run de89 produced digest
+# sha256:e76e25509f60269116be7ad5cc99e3254c4594d952f4eed00ae0ac9bd458956c.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -118,7 +122,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.42",
+    "elb-openapi": "4.43",
 }
 
 # GitHub source repo for ACR Build Tasks.

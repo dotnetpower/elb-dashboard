@@ -419,6 +419,7 @@ def start_oracle_build(
     part_prefix = f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_PARTS_DIR}/{run_id}/"
     document: dict[str, Any] = {
         "schema_version": 1,
+        "oracle_format_version": 2,
         "status": "queued",
         "phase": "queued",
         "db_name": db_name,
