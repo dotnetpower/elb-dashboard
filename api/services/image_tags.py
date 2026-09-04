@@ -95,6 +95,10 @@ from __future__ import annotations
 # grouped alias shares the sequence's exact rank while OID resets across shards
 # remain distinct. ACR run de89 produced digest
 # sha256:e76e25509f60269116be7ad5cc99e3254c4594d952f4eed00ae0ac9bd458956c.
+# 4.44 exposes the canonical merged result after partition finalization and
+# re-lists a pre-finalizer shard-only cache until that artifact appears. ACR run
+# de8e produced digest
+# sha256:d6e21281d4bddd5969cbedc59daad48d332238bb439c8239509f0af4fcf9c9ee.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -122,7 +126,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.43",
+    "elb-openapi": "4.44",
 }
 
 # GitHub source repo for ACR Build Tasks.

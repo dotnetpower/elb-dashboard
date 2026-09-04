@@ -249,6 +249,50 @@ def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
         raise RuntimeError("precise core_nt active search-space patch is invalid")
 
 
+def _patch_canonical_merged_result_discovery(path: Path) -> None:
+    """Expose a partitioned run's merged XML instead of shard intermediates."""
+    legacy_existing = (
+        '    existing = job_info.get("result_files")\n'
+        "    if isinstance(existing, list) and existing:\n"
+        "        return existing\n"
+    )
+    desired_existing = (
+        '    existing = job_info.get("result_files")\n'
+        "    if isinstance(existing, list) and existing:\n"
+        '        if any(item.get("filename") == "merged_results.out.gz" for item in existing):\n'
+        "            return existing\n"
+        '        # A pre-finalizer poll may cache shard `batch_*` intermediates.\n'
+        "        # Re-list until the canonical merged output appears.\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=legacy_existing,
+        legacy=desired_existing,
+        desired=desired_existing,
+        marker='item.get("filename") == "merged_results.out.gz"',
+    )
+    legacy_filter = (
+        '        if not name.startswith("batch_"):\n'
+        "            continue\n"
+    )
+    desired_filter = (
+        '        if name == "merged_results.out.gz":\n'
+        "            files = []\n"
+        "            seen = set()\n"
+        '        elif not name.startswith("batch_") or any(\n'
+        '            item.get("filename") == "merged_results.out.gz" for item in files\n'
+        "        ):\n"
+        "            continue\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=legacy_filter,
+        legacy=desired_filter,
+        desired=desired_filter,
+        marker='if name == "merged_results.out.gz":',
+    )
+
+
 def _patch_terminal_webhook_runtime_id(path: Path) -> None:
     """Attach a genuine ElasticBLAST runtime id to terminal webhooks."""
 
@@ -989,6 +1033,7 @@ def patch_app(root: Path) -> None:
         "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
     )
     _replace_stale_core_nt_search_space_fallback(path)
+    _patch_canonical_merged_result_discovery(path)
     _insert_once(
         path,
         '    if req.batch_len is not None:\n        config["blast"]["batch-len"] = str(req.batch_len)\n',

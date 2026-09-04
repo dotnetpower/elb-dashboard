@@ -81,6 +81,12 @@ calibration value even though NCBI reports query-specific values.
   Celery worker replied and the task is absent, the heartbeat is stale, all expected Kubernetes
   Jobs are complete, and every exact run-scoped Storage part is non-empty; any uncertain
   observation preserves the claim and fails closed.
+- Partitioned OpenAPI results now expose `merged_results.out.gz` as the canonical result file.
+  A poll that occurs before finalization no longer caches shard `batch_*` intermediates forever;
+  discovery re-lists until the merged artifact appears and then discards shard files from the
+  public manifest.
+- OpenAPI `4.44` carries the canonical merged-result manifest fix; ACR run `de8e` produced digest
+  `sha256:d6e21281d4bddd5969cbedc59daad48d332238bb439c8239509f0af4fcf9c9ee`.
 
 ## Validation
 

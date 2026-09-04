@@ -339,6 +339,34 @@ def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> N
     assert "Active database statistics are required for precise core_nt sharding" in first
 
 
+def test_patch_prefers_canonical_merged_result_and_rechecks_shard_cache(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        'def _list_result_files(job_info):\n'
+        '    existing = job_info.get("result_files")\n'
+        "    if isinstance(existing, list) and existing:\n"
+        "        return existing\n"
+        "    files = []\n"
+        "    seen = set()\n"
+        '    for name in ["batch_1.out.gz"]:\n'
+        '        if not name.startswith("batch_"):\n'
+        "            continue\n"
+    )
+
+    module._patch_canonical_merged_result_discovery(path)
+    first = path.read_text()
+    module._patch_canonical_merged_result_discovery(path)
+
+    assert path.read_text() == first
+    assert 'item.get("filename") == "merged_results.out.gz"' in first
+    assert 'if name == "merged_results.out.gz":' in first
+    assert "files = []" in first
+    assert "seen = set()" in first
+
+
 def test_patch_app_rejects_late_warmed_cache_skip_assignment(tmp_path: Path) -> None:
     module = _load_module()
     path = tmp_path / "main.py"
