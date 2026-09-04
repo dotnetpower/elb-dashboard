@@ -287,3 +287,36 @@ def test_set_search_space_replaces_stale_forms(options: str, expected: str) -> N
 def test_set_search_space_rejects_missing_scalar(options: str) -> None:
     with pytest.raises(exact_oracle.ExactOracleUnavailable, match="requires a scalar value"):
         exact_oracle.set_search_space(options, 30_807_003_700_117)
+
+
+def test_preserve_or_set_search_space_keeps_query_specific_value() -> None:
+    query_value = 421_817_959_873_974
+
+    result = exact_oracle.preserve_or_set_search_space(
+        f"-outfmt 5 -searchsp {query_value} -dust yes",
+        30_807_003_700_117,
+    )
+
+    assert result == f"-outfmt 5 -searchsp {query_value} -dust yes"
+
+
+def test_preserve_or_set_search_space_uses_active_fallback_when_absent() -> None:
+    assert exact_oracle.preserve_or_set_search_space(
+        "-outfmt 5 -dbsize 1 -dust yes",
+        30_807_003_700_117,
+    ) == "-outfmt 5 -dust yes -searchsp 30807003700117"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        "-searchsp",
+        "-searchsp nope",
+        "-searchsp 0",
+        "-searchsp 1 -searchsp 2",
+        "-searchsp=1 -searchsp 2",
+    ],
+)
+def test_preserve_or_set_search_space_rejects_ambiguous_values(options: str) -> None:
+    with pytest.raises(exact_oracle.ExactOracleUnavailable):
+        exact_oracle.preserve_or_set_search_space(options, 30_807_003_700_117)

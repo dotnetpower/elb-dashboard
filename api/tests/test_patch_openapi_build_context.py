@@ -332,7 +332,8 @@ def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> N
     assert path.read_text() == first
     assert "32156241807668" not in first
     assert "read_active_database(" in first
-    assert "set_search_space(opts, active_database.search_space)" in first
+    assert "preserve_or_set_search_space(" in first
+    assert "opts, active_database.search_space" in first
     assert "active_database.db_prefix" in first
     assert "active_database.shard_layout_prefix" in first
     assert "Active database statistics are required for precise core_nt sharding" in first

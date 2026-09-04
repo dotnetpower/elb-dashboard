@@ -5,10 +5,11 @@ DB-order oracle, then write the bounded oracle manifest into private job results
 Edit boundaries: This file is copied verbatim into the sibling docker-openapi
 ``app/`` directory; keep it independent of dashboard packages and browser APIs.
 Key entry points: ``attach_db_order_oracle``, ``ensure_tabular_raw_score``,
-``read_active_database``, ``set_search_space``.
+``read_active_database``, ``set_search_space``, ``preserve_or_set_search_space``.
 Risky contracts: OAuth tokens never leave request headers, every Storage request
 has a timeout, immutable DB/shard paths must match the generation ID, all oracle
-parts must exist and be non-empty, and no SAS URL is created or returned.
+parts must exist and be non-empty, one explicit query-specific search space is
+preserved, and no SAS URL is created or returned.
 Validation: ``uv run pytest -q scripts/dev/openapi-overlays/test_exact_oracle.py``.
 """
 
@@ -342,3 +343,44 @@ def set_search_space(options: str, value: int) -> str:
         kept.append(argument)
         index += 1
     return shlex.join([*kept, "-searchsp", str(value)])
+
+
+def preserve_or_set_search_space(options: str, active_fallback: int) -> str:
+    """Preserve one positive query search space or set the active fallback.
+
+    The dashboard can forward a same-RID XML2 effective search space for the
+    exact query and taxonomy-filtered database subset. Replacing it with the
+    64-nt active-database calibration changes e-values. Direct sibling callers
+    that omit it still receive the active-generation fallback. Ambiguous,
+    malformed, or non-positive values fail closed.
+    """
+    if active_fallback <= 0:
+        raise ExactOracleUnavailable("Active search-space fallback must be positive")
+    try:
+        tokens = shlex.split(options or "")
+    except ValueError as exc:
+        raise ExactOracleUnavailable("BLAST options cannot be parsed") from exc
+    values: list[str] = []
+    index = 0
+    while index < len(tokens):
+        argument = tokens[index]
+        if argument == "-searchsp":
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                raise ExactOracleUnavailable("-searchsp requires a scalar value")
+            values.append(tokens[index + 1])
+            index += 2
+            continue
+        if argument.startswith("-searchsp="):
+            values.append(argument.split("=", 1)[1])
+        index += 1
+    if not values:
+        return set_search_space(options, active_fallback)
+    if len(values) != 1:
+        raise ExactOracleUnavailable("Exactly one -searchsp value is required")
+    try:
+        value = int(values[0])
+    except ValueError as exc:
+        raise ExactOracleUnavailable("-searchsp must be a positive integer") from exc
+    if value <= 0:
+        raise ExactOracleUnavailable("-searchsp must be a positive integer")
+    return options

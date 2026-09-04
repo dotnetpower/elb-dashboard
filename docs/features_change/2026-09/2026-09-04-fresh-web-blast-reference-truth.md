@@ -50,6 +50,10 @@ calibration value even though NCBI reports query-specific values.
 - Fast deploys now resolve newly built image tags to immutable digests before restoring private
   ACR access. This prevents a successful build from stopping before the Container App patch when
   private-network propagation blocks the later registry data-plane lookup.
+- OpenAPI `4.39` preserves a validated query-specific `-searchsp` in its precise active-generation
+  path instead of replacing it with the 64-nt fallback. Missing values still use the active
+  fallback; malformed or duplicate values fail closed. ACR run `de7w` produced digest
+  `sha256:6afca07b9132a843877f1a49b2baa36b4d7da303b325f41c4741c5c533062a7a`.
 
 ## Validation
 

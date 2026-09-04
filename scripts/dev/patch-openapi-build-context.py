@@ -209,7 +209,7 @@ def _patch_external_soft_masking(root: Path) -> None:
 
 
 def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
-    """Derive precise search space from active DB metadata, never a snapshot constant."""
+    """Pin active DB paths while preserving an explicit query search space."""
     stale = (
         '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
         '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
@@ -221,7 +221,9 @@ def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
         "                db_name=db_name,\n"
         "                token=_storage_oauth_token(),\n"
         "            )\n"
-        "            opts = _exact_oracle.set_search_space(opts, active_database.search_space)\n"
+        "            opts = _exact_oracle.preserve_or_set_search_space(\n"
+        "                opts, active_database.search_space\n"
+        "            )\n"
         "            config[\"blast\"][\"db\"] = (\n"
         '                f"{_blob_base()}/blast-db/{active_database.db_prefix}"\n'
         "            )\n"
@@ -566,7 +568,8 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         'safe_exec(["kubectl", "get", "pods", "-l", f"elb-job-id={elb_job_id}"',
         "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
         "active_database = _exact_oracle.read_active_database(",
-        "opts = _exact_oracle.set_search_space(opts, active_database.search_space)",
+        "opts = _exact_oracle.preserve_or_set_search_space(",
+        "opts, active_database.search_space",
         "active_database.db_prefix",
         "active_database.shard_layout_prefix",
         "exact_oracle_info = _exact_oracle.attach_db_order_oracle(",
@@ -599,7 +602,11 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parents[child] = parent
-    for call_name in ("read_active_database", "attach_db_order_oracle"):
+    for call_name in (
+        "read_active_database",
+        "preserve_or_set_search_space",
+        "attach_db_order_oracle",
+    ):
         calls = [
             node
             for node in ast.walk(tree)
