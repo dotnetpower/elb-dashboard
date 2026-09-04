@@ -285,6 +285,28 @@ def test_cross_snapshot_diagnostic_rejects_empty_candidate() -> None:
     assert "candidate contains no hits while reference contains hits" in report.findings
 
 
+def test_wrapped_xml1_db_len_requires_authoritative_snapshot_proof() -> None:
+    payload = _load_payloads()["genes"]["rdrp_orf1ab"]
+    reference = _parse_reference_summary("rdrp_orf1ab", payload)
+    full_filtered_db_len = reference.db_len + (176 * 2**32)
+    assert full_filtered_db_len == 756_264_949_991
+    candidate = replace(reference, db_len=full_filtered_db_len)
+
+    unproven = compare_summaries(reference, candidate)
+    proven = compare_summaries(
+        reference,
+        candidate,
+        authoritative_snapshot_match=True,
+    )
+
+    assert unproven.exact_equivalent is False
+    assert unproven.snapshot_drift is True
+    assert unproven.db_len_representation_normalized is False
+    assert proven.exact_equivalent is True
+    assert proven.snapshot_drift is False
+    assert proven.db_len_representation_normalized is True
+
+
 def test_database_path_is_representation_only_but_query_def_is_strict() -> None:
     payload = _load_payloads()["genes"]["f3l"]
     reference = _parse_reference_summary("f3l", payload)
@@ -748,12 +770,19 @@ def test_candidate_xml_matches_reference_when_provided(gene_id: str) -> None:
     payload = _load_payloads()["genes"][gene_id]
     reference = _parse_reference_summary(gene_id, payload)
     candidate_summary = parse_summary(candidate_path)
-    report = compare_summaries(reference, candidate_summary)
+    snapshot = _load_payloads()["core_nt_snapshot"]
+    report = compare_summaries(
+        reference,
+        candidate_summary,
+        authoritative_snapshot_match=snapshot.get("identity_status") == "verified",
+    )
     assert report.exact_equivalent, (
         f"{gene_id}: candidate XML disagrees with reference XML.\n"
         f"  mode={report.comparison_mode}\n"
         f"  diagnostic_compatible={report.drift_compatible}\n"
         f"  drift={report.snapshot_drift}\n"
+        f"  db_len_representation_normalized="
+        f"{report.db_len_representation_normalized}\n"
         f"  exact_findings={report.exact_findings}\n"
         f"  only_in_reference={report.rank_set_only_in_reference[:5]}\n"
         f"  only_in_candidate={report.rank_set_only_in_candidate[:5]}\n"

@@ -18,7 +18,9 @@ statistics, BLAST version/options, subject order, every HSP field, and search
 statistics. Cross-snapshot containment is diagnostic only and must never close
 an exact-parity acceptance criterion. XML2 taxonomy checks require an
 authoritative ancestor-plus-descendant taxid closure supplied by the caller;
-this offline module never guesses taxonomy lineage from titles.
+this offline module never guesses taxonomy lineage from titles. XML1 database
+length wrapping is normalized only when the caller explicitly supplies an
+independent authoritative snapshot match.
 Validation: `uv run pytest -q api/tests/test_web_blast_parity_xml.py`.
 """
 
@@ -154,6 +156,7 @@ class ParityReport:
 
     equivalent: bool
     snapshot_drift: bool
+    db_len_representation_normalized: bool = False
     exact_equivalent: bool = False
     drift_compatible: bool = False
     comparison_mode: Literal["strict_exact", "drift_tolerant_containment"] = "strict_exact"
@@ -558,6 +561,33 @@ def _relative_difference(left: float, right: float, tolerance: float) -> bool:
     return abs(left - right) / denominator > tolerance
 
 
+def _database_statistics_match(
+    reference: WebBlastSummary,
+    candidate: WebBlastSummary,
+    *,
+    authoritative_snapshot_match: bool,
+) -> tuple[bool, bool]:
+    """Return ``(match, wrapped_length_normalized)`` for result DB stats.
+
+    NCBI's public XML1 renderer can emit a filtered database length modulo
+    ``2**32`` while same-RID XML2 and local BLAST+ retain the full integer.
+    Matching the modulo value is representation-only only after an independent
+    release/count proof establishes that both searches use one snapshot.
+    Sequence counts must still match exactly.
+    """
+    if reference.db_num != candidate.db_num:
+        return False, False
+    if reference.db_len == candidate.db_len:
+        return True, False
+    if not authoritative_snapshot_match:
+        return False, False
+    larger = max(reference.db_len, candidate.db_len)
+    smaller = min(reference.db_len, candidate.db_len)
+    if larger > 0xFFFFFFFF and larger % (2**32) == smaller:
+        return True, True
+    return False, False
+
+
 def _hsp_differences(
     reference: WebBlastHsp,
     candidate: WebBlastHsp,
@@ -607,6 +637,7 @@ def compare_summaries(
     tolerate_db_drift: bool | None = None,
     evalue_rel_tol: float = 0.0,
     bit_score_rel_tol: float = 0.0,
+    authoritative_snapshot_match: bool = False,
 ) -> ParityReport:
     """Compare two BLAST summaries and return a structured parity report.
 
@@ -622,7 +653,14 @@ def compare_summaries(
     only field suitable for a full parity claim.
     """
     common_findings: list[str] = []
-    snapshot_drift = reference.db_num != candidate.db_num or reference.db_len != candidate.db_len
+    database_statistics_match, db_len_representation_normalized = (
+        _database_statistics_match(
+            reference,
+            candidate,
+            authoritative_snapshot_match=authoritative_snapshot_match,
+        )
+    )
+    snapshot_drift = not database_statistics_match
     if tolerate_db_drift is None:
         tolerate_db_drift = snapshot_drift
 
@@ -773,6 +811,7 @@ def compare_summaries(
     return ParityReport(
         equivalent=equivalent,
         snapshot_drift=snapshot_drift,
+        db_len_representation_normalized=db_len_representation_normalized,
         exact_equivalent=exact_equivalent,
         drift_compatible=drift_compatible,
         comparison_mode=comparison_mode,

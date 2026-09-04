@@ -34,6 +34,9 @@ calibration value even though NCBI reports query-specific values.
   use query-group execution. Result Passport displays the query-specific value.
 - Strict comparison enriches only zero XML1 `hsp-len`/`eff-space` values from same-RID XML2. It
   does not substitute XML2 database counts for XML1's result-specific filtered statistics.
+- NCBI XML1's exact modulo-$2^{32}$ filtered database length is normalized against a local 64-bit
+  value only when the independent Web UI/FTP/active-generation snapshot proof is explicitly true;
+  the machine report records `db_len_representation_normalized=true`.
 
 ## API and implementation summary
 

@@ -88,6 +88,10 @@ captured NCBI Web BLAST XML for every reference gene:
   parameters, subject rank/identity/length, every HSP's raw score, bit score, e-value, identity,
   positives, gaps, coordinates, frames, aligned sequences/midline, and all search statistics.
   Query-specific `hsp-len` and `eff-space` are enriched from same-RID XML2 when XML1 reports zero.
+  When the independent release/count proof matches, a local 64-bit filtered database length may
+  compare to NCBI XML1's exact modulo-$2^{32}$ representation; the report sets
+  `db_len_representation_normalized=true`. Without that external proof the same difference remains
+  snapshot drift and fails exact parity.
   DB snapshot drift is auto-detected from `Statistics_db-num` / `db-len`; it may produce a
   separate candidate-within-reference diagnostic, but can never satisfy the exact gate.
 
