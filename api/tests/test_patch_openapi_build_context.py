@@ -4,10 +4,11 @@ Responsibility: Verify OpenAPI image patching enforces runtime policy and refres
 ElasticBLAST scripts.
 Edit boundaries: Use temporary build contexts only; never invoke Docker or Azure.
 Key entry points: `test_patch_dockerfile_asserts_ttl_in_all_runtime_copies`,
-`test_patch_app_reconciles_elb_scripts_by_content`.
+`test_patch_app_reconciles_elb_scripts_by_content`,
+`test_patch_allows_only_canonical_merged_result_through_blob_path_guard`.
 Risky contracts: The assertions must cover source, system Python, and venv templates; OpenAPI
 submits must never trust historical warmup Jobs or name-only ConfigMap checks as node-local
-cache-presence proof.
+cache-presence proof. Result path guards must continue rejecting traversal and arbitrary files.
 Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
 
@@ -365,6 +366,51 @@ def test_patch_prefers_canonical_merged_result_and_rechecks_shard_cache(
     assert 'if name == "merged_results.out.gz":' in first
     assert "files = []" in first
     assert "seen = set()" in first
+
+
+def test_patch_allows_only_canonical_merged_result_through_blob_path_guard(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    path = tmp_path / "helpers.py"
+    path.write_text(
+        "def _safe_result_blob_path(value: str, fallback_filename: str) -> str:\n"
+        "    blob_path = str(value or fallback_filename).strip().lstrip(\"/\")\n"
+        '    if ".." in blob_path or "?" in blob_path or "#" in blob_path:\n'
+        '        raise HTTPException(400, "Invalid result blob path")\n'
+        "    if not re.match("
+        'r"^[A-Za-z0-9._/-]{1,512}\\.(?:xml|out)(?:\\.gz)?$", '
+        "blob_path, re.IGNORECASE):\n"
+        '        raise HTTPException(400, "Invalid result blob path")\n'
+        '    if not blob_path.split("/")[-1].startswith("batch_"):\n'
+        '        raise HTTPException(400, "Invalid result blob path")\n'
+        "    return blob_path\n"
+    )
+
+    module._patch_canonical_merged_result_validation(path)
+    first = path.read_text()
+    module._patch_canonical_merged_result_validation(path)
+
+    assert path.read_text() == first
+    ast.parse(first)
+
+    class FakeHTTPException(Exception):
+        pass
+
+    namespace: dict[str, Any] = {"HTTPException": FakeHTTPException, "re": re}
+    exec(first, namespace)  # noqa: S102 - generated temporary fixture code.
+    validate = namespace["_safe_result_blob_path"]
+
+    assert validate("job-runtime/merged_results.out.gz", "ignored.out.gz") == (
+        "job-runtime/merged_results.out.gz"
+    )
+    assert validate("job-runtime/batch_001.out.gz", "ignored.out.gz") == (
+        "job-runtime/batch_001.out.gz"
+    )
+    with pytest.raises(FakeHTTPException):
+        validate("job-runtime/other.out.gz", "ignored.out.gz")
+    with pytest.raises(FakeHTTPException):
+        validate("../merged_results.out.gz", "ignored.out.gz")
 
 
 def test_patch_app_rejects_late_warmed_cache_skip_assignment(tmp_path: Path) -> None:

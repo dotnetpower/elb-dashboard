@@ -87,6 +87,14 @@ calibration value even though NCBI reports query-specific values.
   public manifest.
 - OpenAPI `4.44` carries the canonical merged-result manifest fix; ACR run `de8e` produced digest
   `sha256:d6e21281d4bddd5969cbedc59daad48d332238bb439c8239509f0af4fcf9c9ee`.
+- The first `4.44` live download probe exposed a second contract mismatch: result discovery
+  accepted `merged_results.out.gz`, while the download path guard still accepted only `batch_*`
+  basenames. The guard now admits the exact canonical merged basename while preserving its
+  traversal, query-string, extension, and arbitrary-file rejection checks.
+- OpenAPI `4.45` carries the download-guard fix; ACR run `de8f` succeeded with digest
+  `sha256:9aafa0767fcc3372325895dfd3dc5c9416a6a61aa5257271e85793e4a9bd4e79`, and the
+  registry was restored to `publicNetworkAccess=Disabled`, `defaultAction=Deny` immediately
+  after the build.
 
 ## Validation
 

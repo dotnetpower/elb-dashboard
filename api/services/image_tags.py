@@ -99,6 +99,10 @@ from __future__ import annotations
 # re-lists a pre-finalizer shard-only cache until that artifact appears. ACR run
 # de8e produced digest
 # sha256:d6e21281d4bddd5969cbedc59daad48d332238bb439c8239509f0af4fcf9c9ee.
+# 4.45 permits that exact canonical basename through the result-download path
+# guard while preserving traversal and arbitrary-file rejection. ACR run de8f
+# produced digest
+# sha256:9aafa0767fcc3372325895dfd3dc5c9416a6a61aa5257271e85793e4a9bd4e79.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -126,7 +130,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.44",
+    "elb-openapi": "4.45",
 }
 
 # GitHub source repo for ACR Build Tasks.

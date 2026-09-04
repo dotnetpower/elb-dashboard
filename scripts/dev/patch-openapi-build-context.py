@@ -5,9 +5,11 @@
 Responsibility: Patch the sibling docker-openapi build context for dashboard runtime policy
 Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
 Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
-`_disable_warmed_cache_skip`, `_harden_openapi_runtime_ids`,
+`_disable_warmed_cache_skip`, `_patch_canonical_merged_result_validation`,
+`_harden_openapi_runtime_ids`,
 `_harden_elb_scripts_configmap_reconciliation`, `patch_app`, `main`
-Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Risky contracts: Preserve strict result-path validation; only shard outputs and the exact canonical
+merged filename may pass. Assume local developer context only; avoid broad production-side effects.
 Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
 
@@ -290,6 +292,26 @@ def _patch_canonical_merged_result_discovery(path: Path) -> None:
         legacy=desired_filter,
         desired=desired_filter,
         marker='if name == "merged_results.out.gz":',
+    )
+
+
+def _patch_canonical_merged_result_validation(path: Path) -> None:
+    """Permit the exact canonical merged XML path without weakening traversal guards."""
+    shard_only = (
+        '    if not blob_path.split("/")[-1].startswith("batch_"):\n'
+        '        raise HTTPException(400, "Invalid result blob path")\n'
+    )
+    canonical_or_shard = (
+        '    basename = blob_path.split("/")[-1]\n'
+        '    if not (basename.startswith("batch_") or basename == "merged_results.out.gz"):\n'
+        '        raise HTTPException(400, "Invalid result blob path")\n'
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=shard_only,
+        legacy=canonical_or_shard,
+        desired=canonical_or_shard,
+        marker='basename == "merged_results.out.gz"',
     )
 
 
@@ -928,6 +950,7 @@ def patch_app(root: Path) -> None:
     _copy_app_overlay(root)
     _patch_external_soft_masking(root)
     path = root / "app" / "main.py"
+    _patch_canonical_merged_result_validation(root / "app" / "helpers.py")
     _patch_terminal_webhook_runtime_id(path)
     _disable_warmed_cache_skip(path)
     if "def _effective_elb_job_id(" not in path.read_text():
