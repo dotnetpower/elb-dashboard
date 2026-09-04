@@ -6,7 +6,8 @@ Edit boundaries: JSON control-blob I/O and state transitions only; readiness,
     Kubernetes dispatch/polling, Celery orchestration, and HTTP shaping belong
     to their owning modules.
 Key entry points: `claim_oracle_build`, `update_oracle_run`,
-    `claim_oracle_execution`, `promote_oracle_run`, `fail_oracle_run`,
+    `claim_oracle_execution`, `reset_oracle_execution_for_redelivery`,
+    `promote_oracle_run`, `fail_oracle_run`,
     `read_oracle_current`, `read_oracle_active`.
 Risky contracts: Missing documents are created with `overwrite=False`; every
     replacement/deletion uses `IfNotModified`; run updates require the exact
@@ -337,6 +338,48 @@ def claim_oracle_execution(
         except ResourceModifiedError:
             continue
     raise OracleStateConflict("oracle execution claim CAS retries exhausted")
+
+
+def reset_oracle_execution_for_redelivery(
+    container: Any,
+    *,
+    db_name: str,
+    run_id: str,
+    owner_operation_id: str,
+    expected_execution_instance_id: str,
+    recovered_at: str,
+) -> bool:
+    """CAS-clear one proven-orphan execution so its durable run can redeliver.
+
+    The caller must independently prove that the Celery task is absent and all
+    expected Kubernetes Jobs/Storage parts are complete. Matching the exact
+    execution instance prevents a stale reconciler from clearing a replacement
+    worker's claim.
+    """
+    path = oracle_active_blob_path(db_name)
+    for _attempt in range(_MAX_CAS_ATTEMPTS):
+        current, etag = _read_document(container, path)
+        if current is None:
+            return False
+        _require_owner(current, owner_operation_id)
+        if str(current.get("run_id") or "") != run_id:
+            return False
+        if str(current.get("execution_instance_id") or "") != expected_execution_instance_id:
+            return False
+        next_document = {
+            **current,
+            "execution_instance_id": "",
+            "execution_started_at": "",
+            "deadline_at": "",
+            "phase": "redelivery_pending",
+            "updated_at": recovered_at,
+        }
+        try:
+            _write_document(container, path, next_document, etag=etag)
+            return True
+        except ResourceModifiedError:
+            continue
+    raise OracleStateConflict("oracle execution reset CAS retries exhausted")
 
 
 def release_oracle_active(

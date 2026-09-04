@@ -76,6 +76,11 @@ calibration value even though NCBI reports query-specific values.
   `20260829192214-0757dc7b` oracle must be rebuilt before another exact live run.
 - OpenAPI `4.43` carries the oracle-v2 reader/gate; ACR run `de89` produced digest
   `sha256:e76e25509f60269116be7ad5cc99e3254c4594d952f4eed00ae0ac9bd458956c`.
+- Oracle dispatch recovery now handles a worker revision replacement without waiting for the
+  30-minute execution deadline. It CAS-resets the exact stale execution instance only when every
+  Celery worker replied and the task is absent, the heartbeat is stale, all expected Kubernetes
+  Jobs are complete, and every exact run-scoped Storage part is non-empty; any uncertain
+  observation preserves the claim and fails closed.
 
 ## Validation
 

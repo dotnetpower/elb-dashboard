@@ -32,6 +32,7 @@ from api.services.db.oracle_state import (
     read_oracle_current,
     read_oracle_run,
     release_oracle_active,
+    reset_oracle_execution_for_redelivery,
     update_oracle_run,
 )
 from azure.core import MatchConditions
@@ -116,6 +117,47 @@ def _claim(*, identity: str = "identity-1", run_id: str = "run-1") -> dict[str, 
         "part_prefix": f"metadata/oracles/core_nt/parts/{run_id}/",
         "dispatch_token": "dispatch-1",
     }
+
+
+def test_execution_reset_requires_exact_instance_and_preserves_run() -> None:
+    container = _Container()
+    claim = _claim(identity="oracle-v2:layout-1")
+    claim_oracle_build(container, db_name="core_nt", document=claim)
+    assert claim_oracle_execution(
+        container,
+        db_name="core_nt",
+        run_id="run-1",
+        owner_operation_id="owner-run-1",
+        dispatch_token="dispatch-1",
+        execution_instance_id="execution-1",
+        started_at="2026-09-04T10:15:00+00:00",
+        deadline_at="2026-09-04T10:47:00+00:00",
+    )
+
+    assert not reset_oracle_execution_for_redelivery(
+        container,
+        db_name="core_nt",
+        run_id="run-1",
+        owner_operation_id="owner-run-1",
+        expected_execution_instance_id="stale-instance",
+        recovered_at="2026-09-04T10:22:00+00:00",
+    )
+    assert read_oracle_active(container, "core_nt")["execution_instance_id"] == "execution-1"  # type: ignore[index]
+
+    assert reset_oracle_execution_for_redelivery(
+        container,
+        db_name="core_nt",
+        run_id="run-1",
+        owner_operation_id="owner-run-1",
+        expected_execution_instance_id="execution-1",
+        recovered_at="2026-09-04T10:22:00+00:00",
+    )
+    active = read_oracle_active(container, "core_nt")
+    assert active is not None
+    assert active["execution_instance_id"] == ""
+    assert active["execution_started_at"] == ""
+    assert active["phase"] == "redelivery_pending"
+    assert read_oracle_run(container, "core_nt", "run-1")["status"] == "queued"  # type: ignore[index]
 
 
 def test_claim_adopts_same_identity_and_rejects_other() -> None:

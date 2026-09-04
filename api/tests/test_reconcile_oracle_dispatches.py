@@ -13,11 +13,18 @@ Validation: `uv run pytest -q api/tests/test_reconcile_oracle_dispatches.py`.
 
 from __future__ import annotations
 
+import importlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from api.tasks.storage.reconcile_oracle_dispatches import (
+    _reset_completed_orphan,
     reconcile_oracle_dispatches,
+)
+
+_RECONCILE_MODULE = importlib.import_module(
+    "api.tasks.storage.reconcile_oracle_dispatches"
 )
 
 
@@ -76,6 +83,123 @@ def test_reconciler_replays_valid_active_oracle(
     assert calls[0]["cluster_resource_group"] == "rg-aks"
     assert calls[0]["storage_resource_group"] == "rg-storage"
     assert calls[0]["automatic"] is True
+
+
+def test_completed_worker_loss_orphan_resets_only_after_full_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _payload()
+    active = {
+        **payload,
+        "task_id": "lost-task",
+        "owner_operation_id": "owner-run-1",
+        "execution_instance_id": "execution-1",
+        "updated_at": "2026-09-04T10:15:00+00:00",
+        "job_names": ["oracle-00"],
+        "expected_shards": ["00"],
+        "part_prefix": "metadata/oracles/core_nt/parts/run-1/",
+        "namespace": "default",
+    }
+    monkeypatch.setattr(
+        "api.services.db.oracle_state.read_oracle_active",
+        lambda *_args: active,
+    )
+    monkeypatch.setattr(_RECONCILE_MODULE, "_celery_task_ids", lambda _app: set())
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_get_jobs",
+        lambda *_args: [{"name": "oracle-00", "status": "Complete"}],
+    )
+    monkeypatch.setattr(
+        "api.services.db.oracle_runtime.validate_oracle_parts",
+        lambda *_args, **_kwargs: {"ready": True},
+    )
+    resets: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "api.services.db.oracle_state.reset_oracle_execution_for_redelivery",
+        lambda *_args, **kwargs: resets.append(kwargs) or True,
+    )
+
+    recovered = _reset_completed_orphan(
+        celery_app=object(),
+        credential=object(),
+        container=object(),
+        payload=payload,
+        now=datetime(2026, 9, 4, 10, 22, tzinfo=UTC),
+    )
+
+    assert recovered is True
+    assert resets[0]["expected_execution_instance_id"] == "execution-1"
+
+
+def test_completed_orphan_does_not_reset_while_task_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _payload()
+    monkeypatch.setattr(
+        "api.services.db.oracle_state.read_oracle_active",
+        lambda *_args: {
+            **payload,
+            "task_id": "live-task",
+            "owner_operation_id": "owner-run-1",
+            "execution_instance_id": "execution-1",
+            "updated_at": "2026-09-04T10:15:00+00:00",
+            "job_names": ["oracle-00"],
+            "expected_shards": ["00"],
+        },
+    )
+    monkeypatch.setattr(
+        _RECONCILE_MODULE,
+        "_celery_task_ids",
+        lambda _app: {"live-task"},
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.monitoring.k8s_get_jobs",
+        lambda *_args: pytest.fail("active tasks must not inspect Kubernetes"),
+    )
+
+    assert not _reset_completed_orphan(
+        celery_app=object(),
+        credential=object(),
+        container=object(),
+        payload=payload,
+        now=datetime(2026, 9, 4, 10, 22, tzinfo=UTC),
+    )
+
+
+def test_reconciler_redelivers_completed_worker_loss_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = SimpleNamespace(
+        list_active=lambda **_kwargs: [
+            SimpleNamespace(job_id="oracle-job-1", tenant_id="tenant-1", payload=_payload())
+        ]
+    )
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: repo)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setenv("AUTO_ORACLE_RECONCILE_ENABLED", "true")
+    monkeypatch.setenv("ENFORCE_AUTO_ORACLE_RBAC", "true")
+    monkeypatch.setattr("api.services.db.oracle_state.oracle_container", lambda *_args: object())
+    monkeypatch.setattr(
+        "api.services.db.oracle_dispatch._recover_terminal_active_claim",
+        lambda *_args, **_kwargs: "active",
+    )
+    monkeypatch.setattr(_RECONCILE_MODULE, "_reset_completed_orphan", lambda **_kwargs: True)
+    calls: list[bool] = []
+
+    def dispatch(*_args, **_kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            return SimpleNamespace(accepted=False, run_id="run-1", status="running")
+        return SimpleNamespace(accepted=True, run_id="run-1", status="queued")
+
+    monkeypatch.setattr("api.services.db.oracle_dispatch.start_oracle_build", dispatch)
+
+    result = reconcile_oracle_dispatches.run()
+
+    assert len(calls) == 2
+    assert result["accepted"] == [
+        {"job_id": "oracle-job-1", "run_id": "run-1", "status": "queued"}
+    ]
 
 
 def test_reconciler_processes_oldest_rows_first(
