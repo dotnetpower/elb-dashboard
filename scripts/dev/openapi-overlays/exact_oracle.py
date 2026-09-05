@@ -5,7 +5,8 @@ DB-order oracle, then write the bounded oracle manifest into private job results
 Edit boundaries: This file is copied verbatim into the sibling docker-openapi
 ``app/`` directory; keep it independent of dashboard packages and browser APIs.
 Key entry points: ``attach_db_order_oracle``, ``ensure_tabular_raw_score``,
-``read_active_database``, ``set_search_space``, ``preserve_or_set_search_space``.
+``read_active_database``, ``prepare_web_blast_statistics``,
+``attach_web_blast_statistics``, ``set_search_space``, ``preserve_or_set_search_space``.
 Risky contracts: OAuth tokens never leave request headers, every Storage request
 has a timeout, immutable DB/shard paths must match the generation ID, all oracle
 parts must exist and be non-empty, one explicit query-specific search space is
@@ -15,6 +16,7 @@ Validation: ``uv run pytest -q scripts/dev/openapi-overlays/test_exact_oracle.py
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from dataclasses import dataclass
@@ -63,6 +65,37 @@ class ActiveDatabase:
     total_letters: int
     total_sequences: int
     search_space: int
+
+
+@dataclass(frozen=True, slots=True)
+class WebBlastStatistics:
+    query_id: str
+    query_length: int
+    filtered_database_letters: int
+    filtered_database_sequences: int
+    length_adjustment: int
+    effective_search_space: int
+    scoring_search_space: int
+    result_database_letters: int
+    active_database_letters: int
+    active_database_sequences: int
+    active_source_version: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "query_id": self.query_id,
+            "query_length": self.query_length,
+            "filtered_database_letters": self.filtered_database_letters,
+            "filtered_database_sequences": self.filtered_database_sequences,
+            "length_adjustment": self.length_adjustment,
+            "effective_search_space": self.effective_search_space,
+            "scoring_search_space": self.scoring_search_space,
+            "result_database_letters": self.result_database_letters,
+            "active_database_letters": self.active_database_letters,
+            "active_database_sequences": self.active_database_sequences,
+            "active_source_version": self.active_source_version,
+        }
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -255,6 +288,171 @@ def read_active_database(
         total_sequences=total_sequences,
         search_space=search_space,
     )
+
+
+def _single_fasta_record(query_fasta: str) -> tuple[str, int]:
+    query_id = ""
+    query_length = 0
+    record_count = 0
+    for raw_line in query_fasta.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            record_count += 1
+            if record_count == 1:
+                query_id = line[1:].strip().split(None, 1)[0]
+            continue
+        if record_count != 1:
+            raise ExactOracleUnavailable(
+                "Web BLAST statistical context requires exactly one FASTA query"
+            )
+        query_length += len("".join(line.split()))
+    if record_count != 1 or not query_id or query_length <= 0:
+        raise ExactOracleUnavailable(
+            "Web BLAST statistical context requires exactly one FASTA query"
+        )
+    return query_id, query_length
+
+
+def _context_positive_int(context: dict[str, Any], field: str) -> int:
+    try:
+        value = int(context.get(field) or 0)
+    except (TypeError, ValueError) as exc:
+        raise ExactOracleUnavailable(f"Web BLAST statistical context {field} is invalid") from exc
+    if value <= 0:
+        raise ExactOracleUnavailable(f"Web BLAST statistical context {field} is invalid")
+    return value
+
+
+def _set_web_blast_statistical_options(
+    options: str,
+    *,
+    database_size: int,
+    scoring_search_space: int,
+) -> str:
+    try:
+        tokens = shlex.split(options or "")
+    except ValueError as exc:
+        raise ExactOracleUnavailable("BLAST options cannot be parsed") from exc
+    kept: list[str] = []
+    index = 0
+    while index < len(tokens):
+        argument = tokens[index]
+        if argument in {"-searchsp", "-dbsize"}:
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                raise ExactOracleUnavailable(f"{argument} requires a scalar value")
+            index += 2
+            continue
+        if argument.startswith(("-searchsp=", "-dbsize=")):
+            index += 1
+            continue
+        kept.append(argument)
+        index += 1
+    return shlex.join(
+        [
+            *kept,
+            "-dbsize",
+            str(database_size),
+            "-searchsp",
+            str(scoring_search_space),
+        ]
+    )
+
+
+def prepare_web_blast_statistics(
+    *,
+    context: Any,
+    query_fasta: str,
+    active_database: ActiveDatabase,
+    options: str,
+) -> tuple[str, WebBlastStatistics | None]:
+    """Validate an optional Web BLAST context and canonicalize runtime flags."""
+    if context in (None, ""):
+        return options, None
+    if not isinstance(context, dict):
+        raise ExactOracleUnavailable("Web BLAST statistical context is invalid")
+    query_id, query_length = _single_fasta_record(query_fasta)
+    filtered_letters = _context_positive_int(context, "filtered_database_letters")
+    filtered_sequences = _context_positive_int(context, "filtered_database_sequences")
+    length_adjustment = _context_positive_int(context, "length_adjustment")
+    effective_search_space = _context_positive_int(context, "effective_search_space")
+    scoring_search_space = _context_positive_int(context, "scoring_search_space")
+    result_database_letters = _context_positive_int(context, "result_database_letters")
+    if length_adjustment >= query_length:
+        raise ExactOracleUnavailable("Web BLAST length adjustment exceeds the query")
+    if (
+        filtered_letters > active_database.total_letters
+        or filtered_sequences > active_database.total_sequences
+    ):
+        raise ExactOracleUnavailable("Web BLAST filtered statistics exceed the active database")
+    effective_query_length = query_length - length_adjustment
+    effective_database_length = filtered_letters - filtered_sequences * length_adjustment
+    if effective_database_length <= 0:
+        raise ExactOracleUnavailable("Web BLAST filtered statistics are inconsistent")
+    if effective_search_space != effective_query_length * effective_database_length:
+        raise ExactOracleUnavailable("Web BLAST effective search space is inconsistent")
+    if scoring_search_space != effective_query_length * filtered_letters:
+        raise ExactOracleUnavailable("Web BLAST scoring search space is inconsistent")
+    if result_database_letters not in {filtered_letters, active_database.total_letters}:
+        raise ExactOracleUnavailable("Web BLAST result database length is inconsistent")
+    statistics = WebBlastStatistics(
+        query_id=query_id,
+        query_length=query_length,
+        filtered_database_letters=filtered_letters,
+        filtered_database_sequences=filtered_sequences,
+        length_adjustment=length_adjustment,
+        effective_search_space=effective_search_space,
+        scoring_search_space=scoring_search_space,
+        result_database_letters=result_database_letters,
+        active_database_letters=active_database.total_letters,
+        active_database_sequences=active_database.total_sequences,
+        active_source_version=active_database.source_version,
+    )
+    return (
+        _set_web_blast_statistical_options(
+            options,
+            database_size=filtered_letters,
+            scoring_search_space=scoring_search_space,
+        ),
+        statistics,
+    )
+
+
+def attach_web_blast_statistics(
+    *,
+    blob_base: str,
+    results_url: str,
+    statistics: WebBlastStatistics,
+    token: str,
+) -> str:
+    """Write validated Web BLAST statistics beside the private job metadata."""
+    _base, results = _validate_urls(blob_base, results_url)
+    manifest_url = f"{results}/metadata/web-blast-statistics.json"
+    payload = (json.dumps(statistics.as_dict(), sort_keys=True) + "\n").encode("utf-8")
+    uploaded = requests.put(
+        manifest_url,
+        headers={
+            **_headers(token),
+            "Content-Type": "application/json",
+            "x-ms-blob-type": "BlockBlob",
+            "If-None-Match": "*",
+        },
+        data=payload,
+        timeout=_REQUEST_TIMEOUT,
+    )
+    if int(getattr(uploaded, "status_code", 0) or 0) == 412:
+        existing = requests.get(
+            manifest_url,
+            headers=_headers(token),
+            timeout=_REQUEST_TIMEOUT,
+        )
+        _request_ok(existing, "Web BLAST statistics replay read")
+        if bytes(getattr(existing, "content", b"")) != payload:
+            raise ExactOracleUnavailable("Web BLAST statistics changed across an idempotent replay")
+    else:
+        _request_ok(uploaded, "Web BLAST statistics write")
+    return manifest_url
 
 
 def ensure_tabular_raw_score(options: str) -> str:

@@ -547,6 +547,27 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             '        if [ "$ORACLE_PARENT_RESULTS" != "$ELB_RESULTS" ]; then\n'
             '            ORACLE_SEARCH_BASES="$ORACLE_SEARCH_BASES $ORACLE_PARENT_RESULTS"\n'
             "        fi\n"
+            '        WEB_STATS_FILE="$MERGE_DIR/web-blast-statistics.json"\n'
+            "        WEB_STATS_REQUIRED=0\n"
+            '        case " ${ELB_BLAST_OPTIONS:-} " in\n'
+            '            *" -dbsize "*|*" -dbsize="*) WEB_STATS_REQUIRED=1 ;;\n'
+            "        esac\n"
+            "        for WEB_STATS_BASE in $ORACLE_SEARCH_BASES; do\n"
+            '            [ -n "${ELB_WEB_BLAST_STATISTICS_FILE:-}" ] && break\n'
+            '            WEB_STATS_BLOB="${WEB_STATS_BASE}/${ELB_METADATA_DIR}/web-blast-statistics.json"\n'
+            '            if blob_exists "$WEB_STATS_BLOB"; then\n'
+            '                if azcopy cp "$WEB_STATS_BLOB" "$WEB_STATS_FILE" '
+            "--log-level=ERROR </dev/null 2>/dev/null; then\n"
+            '                    export ELB_WEB_BLAST_STATISTICS_FILE="$WEB_STATS_FILE"\n'
+            '                    echo "Using Web BLAST statistics from ${WEB_STATS_BLOB}"\n'
+            "                fi\n"
+            "            fi\n"
+            "        done\n"
+            '        if [ "$WEB_STATS_REQUIRED" -eq 1 ] && '
+            '[ -z "${ELB_WEB_BLAST_STATISTICS_FILE:-}" ]; then\n'
+            '            echo "ERROR: -dbsize requires a Web BLAST statistics manifest"\n'
+            "            exit 1\n"
+            "        fi\n\n"
             "        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
             '            [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break\n'
             '            ORACLE_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/tie-order-oracle.txt"\n'

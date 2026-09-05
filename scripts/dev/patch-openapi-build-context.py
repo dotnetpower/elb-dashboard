@@ -127,9 +127,23 @@ def _copy_app_overlay(root: Path) -> None:
 
 
 def _patch_external_soft_masking(root: Path) -> None:
-    """Keep external XML filtering/search-space equal to dashboard submit."""
+    """Keep external XML filtering/statistics equal to dashboard submit."""
     schemas = root / "app" / "schemas.py"
     main = root / "app" / "main.py"
+    _replace_once(
+        schemas,
+        "class ExternalBlastOptions(BaseModel):\n",
+        (
+            "class WebBlastStatisticalContext(BaseModel):\n"
+            "    filtered_database_letters: int = Field(..., ge=1)\n"
+            "    filtered_database_sequences: int = Field(..., ge=1)\n"
+            "    length_adjustment: int = Field(..., ge=1)\n"
+            "    effective_search_space: int = Field(..., ge=1)\n"
+            "    scoring_search_space: int = Field(..., ge=1)\n"
+            "    result_database_letters: int = Field(..., ge=1)\n\n\n"
+            "class ExternalBlastOptions(BaseModel):\n"
+        ),
+    )
     _insert_once(
         schemas,
         "    dust: bool = Field(True)\n",
@@ -143,26 +157,36 @@ def _patch_external_soft_masking(root: Path) -> None:
         "db_effective_search_space: Optional[int] = Field(None, ge=1)",
     )
     _insert_once(
+        schemas,
+        "    db_effective_search_space: Optional[int] = Field(None, ge=1)\n",
+        ("    web_blast_statistical_context: Optional[WebBlastStatisticalContext] = None\n"),
+        "web_blast_statistical_context: Optional[WebBlastStatisticalContext]",
+    )
+    _insert_once(
         main,
         '        "-dust yes" if opts.dust else "-dust no",\n',
-        (
-            '        "-soft_masking true" if opts.soft_masking '
-            'else "-soft_masking false",\n'
-        ),
+        ('        "-soft_masking true" if opts.soft_masking else "-soft_masking false",\n'),
         '"-soft_masking true" if opts.soft_masking',
     )
     _insert_once(
         main,
-        (
-            '        "-soft_masking true" if opts.soft_masking '
-            'else "-soft_masking false",\n'
-            "    ]\n"
-        ),
+        ('        "-soft_masking true" if opts.soft_masking else "-soft_masking false",\n    ]\n'),
         (
             "    if opts.db_effective_search_space is not None:\n"
             '        parts.append(f"-searchsp {opts.db_effective_search_space}")\n'
         ),
-        "parts.append(f\"-searchsp {opts.db_effective_search_space}\")",
+        'parts.append(f"-searchsp {opts.db_effective_search_space}")',
+    )
+    _insert_once(
+        main,
+        '        parts.append(f"-searchsp {opts.db_effective_search_space}")\n',
+        (
+            "    if opts.web_blast_statistical_context is not None:\n"
+            "        parts.append(\n"
+            '            f"-dbsize {opts.web_blast_statistical_context.filtered_database_letters}"\n'
+            "        )\n"
+        ),
+        "opts.web_blast_statistical_context.filtered_database_letters",
     )
     fresh_bridge = (
         '        extra=f"-word_size {req.options.word_size} '
@@ -171,18 +195,23 @@ def _patch_external_soft_masking(root: Path) -> None:
     legacy_bridge = (
         "        extra=(\n"
         '            f"-word_size {req.options.word_size} "\n'
-        '            f"{\'-dust yes\' if req.options.dust else \'-dust no\'} "\n'
-        '            f"{\'-soft_masking true\' if req.options.soft_masking else \'-soft_masking false\'}"\n'
+        "            f\"{'-dust yes' if req.options.dust else '-dust no'} \"\n"
+        "            f\"{'-soft_masking true' if req.options.soft_masking else '-soft_masking false'}\"\n"
         "        ),\n"
     )
     desired_bridge = (
         "        extra=(\n"
         '            f"-word_size {req.options.word_size} "\n'
-        '            f"{\'-dust yes\' if req.options.dust else \'-dust no\'} "\n'
-        '            f"{\'-soft_masking true\' if req.options.soft_masking else \'-soft_masking false\'}"\n'
+        "            f\"{'-dust yes' if req.options.dust else '-dust no'} \"\n"
+        "            f\"{'-soft_masking true' if req.options.soft_masking else '-soft_masking false'}\"\n"
         "            + (\n"
         '                f" -searchsp {req.options.db_effective_search_space}"\n'
         "                if req.options.db_effective_search_space is not None\n"
+        '                else ""\n'
+        "            )\n"
+        "            + (\n"
+        '                f" -dbsize {req.options.web_blast_statistical_context.filtered_database_letters}"\n'
+        "                if req.options.web_blast_statistical_context is not None\n"
         '                else ""\n'
         "            )\n"
         "        ),\n"
@@ -192,7 +221,19 @@ def _patch_external_soft_masking(root: Path) -> None:
         fresh=fresh_bridge,
         legacy=legacy_bridge,
         desired=desired_bridge,
-        marker="req.options.db_effective_search_space is not None",
+        marker="req.options.web_blast_statistical_context is not None",
+    )
+    _insert_once(
+        main,
+        "    internal = JobSubmitRequest(\n",
+        (
+            "        web_blast_statistical_context=(\n"
+            "            req.options.web_blast_statistical_context.model_dump()\n"
+            "            if req.options.web_blast_statistical_context is not None\n"
+            "            else None\n"
+            "        ),\n"
+        ),
+        "web_blast_statistical_context=(",
     )
     schema_text = schemas.read_text()
     main_text = main.read_text()
@@ -200,6 +241,8 @@ def _patch_external_soft_masking(root: Path) -> None:
         raise RuntimeError("external soft-masking schema patch is missing or duplicated")
     if schema_text.count("db_effective_search_space: Optional[int]") != 1:
         raise RuntimeError("external search-space schema patch is missing or duplicated")
+    if schema_text.count("class WebBlastStatisticalContext(BaseModel):") != 1:
+        raise RuntimeError("external Web BLAST statistics schema patch is missing or duplicated")
     if main_text.count("req.options.soft_masking") != 1:
         raise RuntimeError("external soft-masking bridge patch is missing or duplicated")
     if main_text.count("opts.soft_masking") != 1:
@@ -208,6 +251,8 @@ def _patch_external_soft_masking(root: Path) -> None:
         raise RuntimeError("external search-space option patch is missing or duplicated")
     if main_text.count("req.options.db_effective_search_space") != 2:
         raise RuntimeError("external search-space bridge patch is missing or duplicated")
+    if main_text.count("req.options.web_blast_statistical_context") != 4:
+        raise RuntimeError("external Web BLAST statistics bridge patch is missing or duplicated")
 
 
 def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
@@ -223,17 +268,24 @@ def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
         "                db_name=db_name,\n"
         "                token=_storage_oauth_token(),\n"
         "            )\n"
-        "            opts = _exact_oracle.preserve_or_set_search_space(\n"
-        "                opts, active_database.search_space\n"
+        "            opts, web_blast_statistics = _exact_oracle.prepare_web_blast_statistics(\n"
+        '                context=(req.model_extra or {}).get("web_blast_statistical_context"),\n'
+        '                query_fasta=str(req.query_fasta or ""),\n'
+        "                active_database=active_database,\n"
+        "                options=opts,\n"
         "            )\n"
-        "            config[\"blast\"][\"db\"] = (\n"
+        "            if web_blast_statistics is None:\n"
+        "                opts = _exact_oracle.preserve_or_set_search_space(\n"
+        "                    opts, active_database.search_space\n"
+        "                )\n"
+        '            config["blast"]["db"] = (\n'
         '                f"{_blob_base()}/blast-db/{active_database.db_prefix}"\n'
         "            )\n"
-        "            config[\"blast\"][\"db-partition-prefix\"] = (\n"
+        '            config["blast"]["db-partition-prefix"] = (\n'
         '                f"{_blob_base()}/blast-db/{active_database.shard_layout_prefix}/"\n'
         '                f"{partitions}shards/{db_name}_shard_"\n'
         "            )\n"
-        "            config[\"blast\"][\"options\"] = opts\n"
+        '            config["blast"]["options"] = opts\n'
         "        except Exception as exc:\n"
         "            logger.warning(\n"
         '                "active DB search-space resolution failed db=%s reason=%s",\n'
@@ -263,7 +315,7 @@ def _patch_canonical_merged_result_discovery(path: Path) -> None:
         "    if isinstance(existing, list) and existing:\n"
         '        if any(item.get("filename") == "merged_results.out.gz" for item in existing):\n'
         "            return existing\n"
-        '        # A pre-finalizer poll may cache shard `batch_*` intermediates.\n'
+        "        # A pre-finalizer poll may cache shard `batch_*` intermediates.\n"
         "        # Re-list until the canonical merged output appears.\n"
     )
     _replace_fresh_or_legacy(
@@ -273,10 +325,7 @@ def _patch_canonical_merged_result_discovery(path: Path) -> None:
         desired=desired_existing,
         marker='item.get("filename") == "merged_results.out.gz"',
     )
-    legacy_filter = (
-        '        if not name.startswith("batch_"):\n'
-        "            continue\n"
-    )
+    legacy_filter = '        if not name.startswith("batch_"):\n            continue\n'
     desired_filter = (
         '        if name == "merged_results.out.gz":\n'
         "            files = []\n"
@@ -466,7 +515,7 @@ def _harden_elb_scripts_configmap_reconciliation(path: Path) -> None:
     end = text.find("\n\ndef ", start + len(function_name))
     if end < 0:
         raise RuntimeError("could not isolate ELB scripts ConfigMap helper")
-    replacement = '''def _ensure_elb_scripts_configmap() -> None:
+    replacement = """def _ensure_elb_scripts_configmap() -> None:
     required_scripts = {
         "blast-run-aks.sh",
         "elb-finalizer-aks.sh",
@@ -568,7 +617,7 @@ def _harden_elb_scripts_configmap_reconciliation(path: Path) -> None:
         raise RuntimeError(
             "ELB scripts ConfigMap verification found drift scripts="
             + ",".join(remaining_drift)
-        )'''
+        )"""
     path.write_text(text[:start] + replacement + text[end:])
 
 
@@ -636,6 +685,8 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "active_database = _exact_oracle.read_active_database(",
         "opts = _exact_oracle.preserve_or_set_search_space(",
         "opts, active_database.search_space",
+        "opts, web_blast_statistics = _exact_oracle.prepare_web_blast_statistics(",
+        "_exact_oracle.attach_web_blast_statistics(",
         "active_database.db_prefix",
         "active_database.shard_layout_prefix",
         "exact_oracle_info = _exact_oracle.attach_db_order_oracle(",
@@ -643,8 +694,11 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         '"source": "active_generation"',
         '"db_prefix": active_database.db_prefix',
         'job_data["exact_oracle"] = exact_oracle_info',
+        'job_data["web_blast_statistics"] = web_blast_statistics.as_dict()',
+        'for _runtime_key in ("exact_oracle", "web_blast_statistics")',
         '"-soft_masking true" if opts.soft_masking',
         "req.options.db_effective_search_space is not None",
+        "req.options.web_blast_statistical_context is not None",
     )
     missing = [fragment for fragment in required if fragment not in text]
     forbidden = (
@@ -671,6 +725,8 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
     for call_name in (
         "read_active_database",
         "preserve_or_set_search_space",
+        "prepare_web_blast_statistics",
+        "attach_web_blast_statistics",
         "attach_db_order_oracle",
     ):
         calls = [
@@ -1026,9 +1082,10 @@ def patch_app(root: Path) -> None:
         (
             "\n    db_name = _db_name_from_value(req.db)\n"
             '    profile = str(req.resource_profile or "").strip().lower()\n'
+            "    web_blast_statistics = None\n"
             '    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:\n'
             "        if _exact_oracle is None:\n"
-            "            raise HTTPException(503, \"Exact DB-order oracle support is unavailable\")\n"
+            '            raise HTTPException(503, "Exact DB-order oracle support is unavailable")\n'
             "        opts = _exact_oracle.ensure_tabular_raw_score(opts)\n"
             '        config["blast"]["options"] = opts\n'
             "        partitions = max(1, min(NUM_NODES, 10))\n"
@@ -1049,11 +1106,17 @@ def patch_app(root: Path) -> None:
         '    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:\n',
         (
             "        if _exact_oracle is None:\n"
-            "            raise HTTPException(503, \"Exact DB-order oracle support is unavailable\")\n"
+            '            raise HTTPException(503, "Exact DB-order oracle support is unavailable")\n'
             "        opts = _exact_oracle.ensure_tabular_raw_score(opts)\n"
             '        config["blast"]["options"] = opts\n'
         ),
         "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
+    )
+    _insert_once(
+        path,
+        '    profile = str(req.resource_profile or "").strip().lower()\n',
+        "    web_blast_statistics = None\n",
+        "    web_blast_statistics = None\n",
     )
     _replace_stale_core_nt_search_space_fallback(path)
     _patch_canonical_merged_result_discovery(path)
@@ -1130,6 +1193,13 @@ def patch_app(root: Path) -> None:
             "                expected_source_version=active_database.source_version,\n"
             "                token=_storage_oauth_token(),\n"
             "            ).as_dict()\n"
+            "            if web_blast_statistics is not None:\n"
+            "                _exact_oracle.attach_web_blast_statistics(\n"
+            "                    blob_base=_blob_base(),\n"
+            "                    results_url=results_url,\n"
+            "                    statistics=web_blast_statistics,\n"
+            "                    token=_storage_oauth_token(),\n"
+            "                )\n"
             "        except Exception as exc:\n"
             "            logger.warning(\n"
             '                "exact DB-order oracle attach failed job=%s db=%s reason=%s",\n'
@@ -1146,12 +1216,25 @@ def patch_app(root: Path) -> None:
     )
     _insert_once(
         path,
-        "    if passthrough:\n        job_data[\"passthrough\"] = passthrough\n",
+        '    if passthrough:\n        job_data["passthrough"] = passthrough\n',
         (
             "    if exact_oracle_info is not None:\n"
             '        job_data["exact_oracle"] = exact_oracle_info\n'
+            "    if web_blast_statistics is not None:\n"
+            '        job_data["web_blast_statistics"] = web_blast_statistics.as_dict()\n'
         ),
         'job_data["exact_oracle"] = exact_oracle_info',
+    )
+    _insert_once(
+        path,
+        '    if isinstance(_pt, dict) and _pt:\n        payload["passthrough"] = _pt\n',
+        (
+            '    for _runtime_key in ("exact_oracle", "web_blast_statistics"):\n'
+            "        _runtime_value = job_info.get(_runtime_key)\n"
+            "        if isinstance(_runtime_value, dict) and _runtime_value:\n"
+            "            payload[_runtime_key] = _runtime_value\n"
+        ),
+        'for _runtime_key in ("exact_oracle", "web_blast_statistics")',
     )
     _replace_once_unless_marker(
         path,

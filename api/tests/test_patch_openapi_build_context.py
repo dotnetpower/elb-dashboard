@@ -271,10 +271,14 @@ def test_patch_source_wires_exact_oracle_before_dispatch() -> None:
     assert "active_database = _exact_oracle.read_active_database(" in source
     assert "active_database.db_prefix" in source
     assert "active_database.shard_layout_prefix" in source
+    assert "prepare_web_blast_statistics(" in source
+    assert "attach_web_blast_statistics(" in source
     assert "exact_oracle_info = _exact_oracle.attach_db_order_oracle(" in source
     assert "expected_source_version=active_database.source_version" in source
     assert '"source": "active_generation"' in source
     assert 'job_data["exact_oracle"] = exact_oracle_info' in source
+    assert 'job_data["web_blast_statistics"] = web_blast_statistics.as_dict()' in source
+    assert 'for _runtime_key in ("exact_oracle", "web_blast_statistics")' in source
 
 
 def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
@@ -295,10 +299,14 @@ def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
         "    ]\n"
         "    return parts\n\n"
         "def external_submit(req):\n"
-        "    return dict(\n"
+        "    result = dict(\n"
         '        extra=f"-word_size {req.options.word_size} '
         "{'-dust yes' if req.options.dust else '-dust no'}\",\n"
         "    )\n"
+        "    internal = JobSubmitRequest(\n"
+        "        program=req.program,\n"
+        "    )\n"
+        "    return result\n"
     )
 
     module._patch_external_soft_masking(tmp_path)
@@ -310,10 +318,13 @@ def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
     assert main.read_text() == first_main
     assert "soft_masking: bool = Field(False)" in first_schema
     assert "db_effective_search_space: Optional[int] = Field(None, ge=1)" in first_schema
+    assert "class WebBlastStatisticalContext(BaseModel):" in first_schema
     assert '"-soft_masking false"' in first_main
     assert "req.options.soft_masking" in first_main
     assert 'parts.append(f"-searchsp {opts.db_effective_search_space}")' in first_main
     assert 'f" -searchsp {req.options.db_effective_search_space}"' in first_main
+    assert "opts.web_blast_statistical_context.filtered_database_letters" in first_main
+    assert "web_blast_statistical_context=(" in first_main
     ast.parse(first_schema)
     ast.parse(first_main)
 
@@ -334,6 +345,7 @@ def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> N
     assert "32156241807668" not in first
     assert "read_active_database(" in first
     assert "preserve_or_set_search_space(" in first
+    assert "prepare_web_blast_statistics(" in first
     assert "opts, active_database.search_space" in first
     assert "active_database.db_prefix" in first
     assert "active_database.shard_layout_prefix" in first
@@ -346,7 +358,7 @@ def test_patch_prefers_canonical_merged_result_and_rechecks_shard_cache(
     module = _load_module()
     path = tmp_path / "main.py"
     path.write_text(
-        'def _list_result_files(job_info):\n'
+        "def _list_result_files(job_info):\n"
         '    existing = job_info.get("result_files")\n'
         "    if isinstance(existing, list) and existing:\n"
         "        return existing\n"
@@ -375,7 +387,7 @@ def test_patch_allows_only_canonical_merged_result_through_blob_path_guard(
     path = tmp_path / "helpers.py"
     path.write_text(
         "def _safe_result_blob_path(value: str, fallback_filename: str) -> str:\n"
-        "    blob_path = str(value or fallback_filename).strip().lstrip(\"/\")\n"
+        '    blob_path = str(value or fallback_filename).strip().lstrip("/")\n'
         '    if ".." in blob_path or "?" in blob_path or "#" in blob_path:\n'
         '        raise HTTPException(400, "Invalid result blob path")\n'
         "    if not re.match("

@@ -65,6 +65,7 @@ _BLAST_SUBMIT_OPTION_KEYS = frozenset(
         "qcov_hsp_perc",
         "query_count",
         "query_effective_search_spaces",
+        "web_blast_statistical_context",
         "reuse",
         "seqidlist",
         "shard_sets",
@@ -120,9 +121,7 @@ class PrecisionPlan:
     downgrade_reason: str | None = None
 
 
-def resolve_sharded_db_resource_profile(
-    database: str, requested_profile: Any
-) -> str:
+def resolve_sharded_db_resource_profile(database: str, requested_profile: Any) -> str:
     """Promote a missing/standard profile to a DB's sharding default.
 
     Returns the resource profile the submit should carry. An explicit
@@ -310,9 +309,11 @@ def resolve_sharding_plan(
     additional_searchsp = positive_int(
         option_value(str(resolved.get("additional_options") or ""), "-searchsp")
     )
-    explicit_searchsp = caller_supplied_searchsp or positive_int(
-        resolved.get("db_effective_search_space")
-    ) or additional_searchsp
+    explicit_searchsp = (
+        caller_supplied_searchsp
+        or positive_int(resolved.get("db_effective_search_space"))
+        or additional_searchsp
+    )
     # A snapshot drift (a non-frontend caller replays the pinned Web BLAST
     # calibration value while the live DB stats have moved on) is not a caller
     # error — it degrades gracefully on EVERY submit surface, unlike an explicit
@@ -351,10 +352,10 @@ def resolve_sharding_plan(
             and live_db_num != verified_default.calibrated_db_num
         )
         if explicit_searchsp is None:
-            if (
-                resolved.get("query_effective_search_spaces") in (None, "")
-                and not _SEARCHSP_OPTION_RE.search(str(resolved.get("additional_options") or ""))
-            ):
+            if resolved.get("query_effective_search_spaces") in (
+                None,
+                "",
+            ) and not _SEARCHSP_OPTION_RE.search(str(resolved.get("additional_options") or "")):
                 resolved["db_effective_search_space"] = calibrated_value
         elif explicit_searchsp == calibrated_value and (
             recomputed is not None or not stats_indicate_drift

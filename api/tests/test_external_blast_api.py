@@ -29,6 +29,54 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 
+def test_external_projection_exposes_complete_web_blast_provenance() -> None:
+    from api.services.blast.external_job_projection import _external_to_blast_job
+
+    context = {
+        "schema_version": 1,
+        "query_id": "q1",
+        "query_length": 462,
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+        "active_database_letters": 998_069_435_926,
+        "active_database_sequences": 130_155_243,
+        "active_source_version": "ncbi-direct-20260819-cab30d18c360",
+    }
+    job = {
+        "job_id": "abcdef123456",
+        "status": "success",
+        "program": "blastn",
+        "db_name": "core_nt",
+        "blast_version": "2.17.0+",
+        "db_version": "ncbi-direct-20260819-cab30d18c360",
+        "db_version_detail": {
+            "detail": {
+                "number_of_letters": "998069435926",
+                "number_of_sequences": "130155243",
+            }
+        },
+        "config_snapshot": {"evalue": 0.05},
+        "exact_oracle": {"run_id": "run-1", "part_count": 10},
+        "web_blast_statistics": context,
+    }
+
+    projected = _external_to_blast_job(job)
+
+    provenance = projected["provenance"]
+    assert provenance["compatibility"]["searchsp"] == 421_817_959_873_974
+    assert provenance["compatibility"]["level"] == "full_db_hitlist_exact_sharded"
+    assert provenance["options"]["web_blast_statistical_context"] == context
+    assert provenance["database"]["number_of_letters"] == 998_069_435_926
+    assert provenance["database"]["number_of_sequences"] == 130_155_243
+
+    del job["exact_oracle"]
+    assert "provenance" not in _external_to_blast_job(job)
+
+
 def test_external_blast_submit_forwards_contract(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
@@ -914,9 +962,95 @@ def test_external_submit_transports_query_specific_searchsp(
     assert response.status_code == 202
     assert captured["options"]["db_effective_search_space"] == query_search_space
     assert "query_effective_search_spaces" not in captured["options"]
-    assert captured["canonical_request"]["options"][
-        "query_effective_search_spaces"
-    ] == [query_search_space]
+    assert captured["canonical_request"]["options"]["query_effective_search_spaces"] == [
+        query_search_space
+    ]
+
+
+def test_external_submit_transports_web_blast_scoring_context(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "workloadstg")
+    from api.main import app
+    from api.services import external_blast
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args, **_kwargs: {
+            "total_letters": 998_069_435_926,
+            "total_sequences": 130_155_243,
+            "active_generation": {"id": "ncbi-direct-20260819-cab30d18c360"},
+        },
+    )
+    monkeypatch.setattr(external_blast, "ready", lambda **_kwargs: {"ready": True})
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda payload, **_kwargs: (
+            captured.update(payload) or {"job_id": "abcdef123456", "status": "queued"}
+        ),
+    )
+    client = TestClient(app)
+    context = {
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+    }
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\n" + "A" * 462,
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {
+                "sharding_mode": "precise",
+                "web_blast_statistical_context": context,
+            },
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["options"]["db_effective_search_space"] == 423_813_461_852_118
+    assert captured["options"]["web_blast_statistical_context"] == context
+    assert captured["canonical_request"]["options"]["query_effective_search_spaces"] == [
+        421_817_959_873_974
+    ]
+
+
+def test_external_submit_rejects_inconsistent_web_blast_context(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\n" + "A" * 462,
+            "db": "core_nt",
+            "program": "blastn",
+            "options": {
+                "sharding_mode": "precise",
+                "web_blast_statistical_context": {
+                    "filtered_database_letters": 994_867_281_343,
+                    "filtered_database_sequences": 130_118_804,
+                    "length_adjustment": 36,
+                    "effective_search_space": 421_817_959_873_974,
+                    "scoring_search_space": 1,
+                    "result_database_letters": 998_069_435_926,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "scoring_search_space" in response.text
 
 
 def test_external_submit_rejects_mixed_query_searchspace_transport(monkeypatch) -> None:

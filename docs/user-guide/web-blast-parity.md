@@ -23,7 +23,7 @@ Tracking issue: [#8 Validate BLAST result parity with NCBI Web BLAST references]
 | Gene | Pathogen | Query length | NCBI RID (captured) | Entrez exclusion | Reference XML |
 | --- | --- | --- | --- | --- | --- |
 | F3L | Monkeypox virus (`taxid=10244`) | 462 bp | `9MHUJ94R014` | `NOT txid3431483[ORGN]` (`Orthopoxvirus monkeypox`, species) | `reference_xml/f3l_9MHUJ94R014.xml.gz` |
-| 18S ribosomal RNA | Plasmodium falciparum (`taxid=5833`) | 2,151 bp | `1FZW35EN014` | `NOT txid5833[ORGN]` (P. falciparum itself) | `reference_xml/rrna_18s_1FZW35EN014.xml.gz` |
+| 18S ribosomal RNA | Plasmodium falciparum (`taxid=5833`) | 2,151 bp | `9N5JA17Y014` | `NOT txid5833[ORGN]` (P. falciparum itself) | `reference_xml/rrna_18s_9N5JA17Y014.xml.gz` |
 | RdRp / ORF1ab | SARS-CoV-2 (`taxid=2697049`) | 21,290 bp | `9MK93UBF016` | `NOT txid3418604[ORGN] NOT txid32630[ORGN]` | `reference_xml/rdrp_orf1ab_9MK93UBF016.xml.gz` |
 
 All three FASTA inputs and their corresponding NCBI Web BLAST reference XML outputs are checked
@@ -190,16 +190,19 @@ letters, and 84 volumes. The deployed active generation
 `ncbi-direct-20260819-cab30d18c360` carries that release and both full counts, with a complete
 same-generation 10/10 database-order oracle.
 
-Each live request must also carry the same-RID XML2 effective search space. This value is
-query-specific and, with taxonomy filters, can reflect a filtered database subset. The 64-nt
-calibration value shown in the database catalogue is not a substitute. The submit contract
-preserves `query_effective_search_spaces`; external OpenAPI 4.38 receives a lossless scalar only
-when that list is uniform.
+Each live request must also carry the same-RID XML2 effective search space and its validated
+taxonomy-filtered statistical context. Web BLAST reports the length-adjusted effective space in
+XML statistics, but HSP E-values use the effective query length times the raw filtered database
+length. OpenAPI 4.46 therefore passes the filtered length as `-dbsize`, the HSP scoring space as
+`-searchsp`, and a private immutable manifest to the merger. The merger validates that manifest
+against the active generation and runtime flags before reconstructing query-level statistics; it
+never rewrites HSP scores or E-values. The 64-nt calibration shown in the database catalogue is
+only a fallback for requests without query-specific evidence.
 
 ## Outstanding gaps tracked by issue #8
 
-- The three fresh reference RIDs and all three live ElasticBLAST candidate XML files must exist in
-  one evidence run. The candidate gate remains blocked until all three report
+- Fresh same-snapshot references now exist for all three genes. The candidate gate remains blocked
+  until all three live ElasticBLAST XML files report
   `exact_equivalent=true` and `exact_findings=[]`.
 - A live run must verify the deployed API/frontend/terminal/OpenAPI versions, Result Passport,
   dashboard/API/export field parity, and a clean App Insights window before issue closure.

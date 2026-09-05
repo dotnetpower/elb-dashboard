@@ -72,6 +72,14 @@
         "query_effective_search_spaces": [
           421817959873974
         ],
+        "web_blast_statistical_context": {
+          "filtered_database_letters": 994867281343,
+          "filtered_database_sequences": 130118804,
+          "length_adjustment": 36,
+          "effective_search_space": 421817959873974,
+          "scoring_search_space": 423813461852118,
+          "result_database_letters": 998069435926
+        },
         "taxid": 3431483,
         "is_inclusive": false
       },
@@ -87,9 +95,11 @@
       ]
     },
     "rrna_18s": {
-      "description": "Plasmodium falciparum 18S ribosomal RNA, 2151 bp. NCBI Web BLAST RID 1FZW35EN014 captured 2026-05-28.",
+      "description": "Plasmodium falciparum 18S ribosomal RNA, 2151 bp. NCBI Web BLAST RID 9N5JA17Y014 captured 2026-09-04.",
       "fasta_path": "18s_query.fasta",
-      "reference_xml_path": "reference_xml/rrna_18s_1FZW35EN014.xml.gz",
+      "reference_xml_path": "reference_xml/rrna_18s_9N5JA17Y014.xml.gz",
+      "reference_xml2_path": "reference_xml/rrna_18s_9N5JA17Y014.xml2.gz",
+      "reference_taxonomy_path": "reference_xml/rrna_18s_9N5JA17Y014-taxonomy.xml.gz",
       "query_length": 2151,
       "ncbi_form": {
         "CMD": "Put",
@@ -105,10 +115,23 @@
         "EMAIL": "parity@example.com",
         "ENTREZ_QUERY": "NOT txid5833[ORGN]"
       },
-      "ncbi_rid": "1FZW35EN014",
+      "ncbi_rid": "9N5JA17Y014",
       "exclusion_taxid": 5833,
       "exclusion_label": "Plasmodium falciparum",
       "exclusion_taxon_rank": "species",
+      "exclusion_validation_evidence": {
+        "status": "verified",
+        "evidence_format": "XML2",
+        "evidence_rid": "9N5JA17Y014",
+        "evidence_sha256": "465b0f58db9ac4197433032178578efbb7aad97e81195e20b966b742861726a8",
+        "reference_content_sha256": "465b0f58db9ac4197433032178578efbb7aad97e81195e20b966b742861726a8",
+        "taxonomy_response_sha256": "e042cd3c07ede13be1222b19412efb7d14f5863cbf62df13773eef6ad295fb0b",
+        "defline_count": 531,
+        "unique_taxid_count": 46,
+        "missing_taxid_count": 0,
+        "excluded_descendant_count": 0,
+        "detail": "All 531 XML2 deflines carry taxids. NCBI Taxonomy EFetch checked all 46 unique result taxids and found no taxid 5833 or descendant."
+      },
       "dashboard_request": {
         "program": "blastn",
         "database_name": "core_nt",
@@ -117,6 +140,17 @@
         "word_size": 28,
         "max_target_seqs": 500,
         "low_complexity_filter": true,
+        "query_effective_search_spaces": [
+          2096661258389947
+        ],
+        "web_blast_statistical_context": {
+          "filtered_database_letters": 997208753343,
+          "filtered_database_sequences": 130032598,
+          "length_adjustment": 38,
+          "effective_search_space": 2096661258389947,
+          "scoring_search_space": 2107102095813759,
+          "result_database_letters": 997208753343
+        },
         "taxid": 5833,
         "is_inclusive": false
       },
@@ -125,6 +159,7 @@
         "-max_target_seqs 500",
         "-negative_taxids 5833",
         "-outfmt 5",
+        "-searchsp 2096661258389947",
         "-word_size 28",
         "-dust yes",
         "-soft_masking false"
@@ -184,7 +219,15 @@
         "additional_options": "-negative_taxids 3418604,32630",
         "query_effective_search_spaces": [
           15967096556108750
-        ]
+        ],
+        "web_blast_statistical_context": {
+          "filtered_database_letters": 756264949991,
+          "filtered_database_sequences": 121804272,
+          "length_adjustment": 40,
+          "effective_search_space": 15967096556108750,
+          "scoring_search_space": 16070630187308750,
+          "result_database_letters": 756264949991
+        }
       },
       "expected_blast_options": [
         "-evalue 0.05",

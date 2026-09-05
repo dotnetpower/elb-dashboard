@@ -11,6 +11,7 @@ Validation: ``uv run pytest -q scripts/dev/openapi-overlays/test_exact_oracle.py
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,9 +37,17 @@ def test_calibration_constants_match_dashboard_policy() -> None:
 
 
 class _Response:
-    def __init__(self, status_code: int = 200, *, payload=None, size: int = 10) -> None:
+    def __init__(
+        self,
+        status_code: int = 200,
+        *,
+        payload=None,
+        size: int = 10,
+        content: bytes = b"",
+    ) -> None:
         self.status_code = status_code
         self._payload = payload
+        self.content = content
         self.headers = {"Content-Length": str(size)}
 
     def json(self):
@@ -305,10 +314,13 @@ def test_preserve_or_set_search_space_keeps_query_specific_value() -> None:
 
 
 def test_preserve_or_set_search_space_uses_active_fallback_when_absent() -> None:
-    assert exact_oracle.preserve_or_set_search_space(
-        "-outfmt 5 -dbsize 1 -dust yes",
-        30_807_003_700_117,
-    ) == "-outfmt 5 -dust yes -searchsp 30807003700117"
+    assert (
+        exact_oracle.preserve_or_set_search_space(
+            "-outfmt 5 -dbsize 1 -dust yes",
+            30_807_003_700_117,
+        )
+        == "-outfmt 5 -dust yes -searchsp 30807003700117"
+    )
 
 
 @pytest.mark.parametrize(
@@ -324,3 +336,177 @@ def test_preserve_or_set_search_space_uses_active_fallback_when_absent() -> None
 def test_preserve_or_set_search_space_rejects_ambiguous_values(options: str) -> None:
     with pytest.raises(exact_oracle.ExactOracleUnavailable):
         exact_oracle.preserve_or_set_search_space(options, 30_807_003_700_117)
+
+
+def test_prepare_web_blast_statistics_canonicalizes_runtime_options() -> None:
+    active = exact_oracle.ActiveDatabase(
+        source_version="ncbi-direct-20260819-cab30d18c360",
+        db_prefix="core_nt/generations/ncbi-direct-20260819-cab30d18c360/core_nt",
+        shard_layout_prefix="core_nt/generations/ncbi-direct-20260819-cab30d18c360/shards",
+        total_letters=998_069_435_926,
+        total_sequences=130_155_243,
+        search_space=30_807_003_700_117,
+    )
+    context = {
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+    }
+
+    options, statistics = exact_oracle.prepare_web_blast_statistics(
+        context=context,
+        query_fasta=">query-1 description\n" + "A" * 462,
+        active_database=active,
+        options="-outfmt 5 -dbsize 1 -searchsp 2 -dust yes",
+    )
+
+    assert options == ("-outfmt 5 -dust yes -dbsize 994867281343 -searchsp 423813461852118")
+    assert statistics is not None
+    assert statistics.as_dict() == {
+        "schema_version": 1,
+        "query_id": "query-1",
+        "query_length": 462,
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+        "active_database_letters": 998_069_435_926,
+        "active_database_sequences": 130_155_243,
+        "active_source_version": "ncbi-direct-20260819-cab30d18c360",
+    }
+
+
+def test_attach_web_blast_statistics_uploads_private_manifest(monkeypatch) -> None:
+    uploaded: list[dict[str, object]] = []
+    credential = _test_credential()
+    statistics = exact_oracle.WebBlastStatistics(
+        query_id="q1",
+        query_length=462,
+        filtered_database_letters=994_867_281_343,
+        filtered_database_sequences=130_118_804,
+        length_adjustment=36,
+        effective_search_space=421_817_959_873_974,
+        scoring_search_space=423_813_461_852_118,
+        result_database_letters=998_069_435_926,
+        active_database_letters=998_069_435_926,
+        active_database_sequences=130_155_243,
+        active_source_version="ncbi-direct-20260819-cab30d18c360",
+    )
+    monkeypatch.setattr(
+        exact_oracle.requests,
+        "put",
+        lambda url, **kwargs: uploaded.append({"url": url, **kwargs}) or _Response(201),
+    )
+
+    result = exact_oracle.attach_web_blast_statistics(
+        blob_base="https://acct.blob.core.windows.net",
+        results_url="https://acct.blob.core.windows.net/results/job-1",
+        statistics=statistics,
+        token=credential,
+    )
+
+    assert result == (
+        "https://acct.blob.core.windows.net/results/job-1/metadata/web-blast-statistics.json"
+    )
+    payload = uploaded[0]["data"].decode("utf-8")
+    assert '"scoring_search_space": 423813461852118' in payload
+    assert uploaded[0]["headers"]["x-ms-blob-type"] == "BlockBlob"
+    assert uploaded[0]["headers"]["If-None-Match"] == "*"
+    assert credential not in payload
+
+
+def test_attach_web_blast_statistics_accepts_only_identical_replay(monkeypatch) -> None:
+    statistics = exact_oracle.WebBlastStatistics(
+        query_id="q1",
+        query_length=10,
+        filtered_database_letters=2900,
+        filtered_database_sequences=2,
+        length_adjustment=1,
+        effective_search_space=26082,
+        scoring_search_space=26100,
+        result_database_letters=3000,
+        active_database_letters=3000,
+        active_database_sequences=3,
+        active_source_version="generation-1",
+    )
+    expected = (json.dumps(statistics.as_dict(), sort_keys=True) + "\n").encode()
+    monkeypatch.setattr(
+        exact_oracle.requests,
+        "put",
+        lambda *_args, **_kwargs: _Response(412),
+    )
+    monkeypatch.setattr(
+        exact_oracle.requests,
+        "get",
+        lambda *_args, **_kwargs: _Response(200, content=expected),
+    )
+
+    exact_oracle.attach_web_blast_statistics(
+        blob_base="https://acct.blob.core.windows.net",
+        results_url="https://acct.blob.core.windows.net/results/job-1",
+        statistics=statistics,
+        token=_test_credential(),
+    )
+
+    monkeypatch.setattr(
+        exact_oracle.requests,
+        "get",
+        lambda *_args, **_kwargs: _Response(200, content=b"{}\n"),
+    )
+    with pytest.raises(
+        exact_oracle.ExactOracleUnavailable,
+        match="changed across an idempotent replay",
+    ):
+        exact_oracle.attach_web_blast_statistics(
+            blob_base="https://acct.blob.core.windows.net",
+            results_url="https://acct.blob.core.windows.net/results/job-1",
+            statistics=statistics,
+            token=_test_credential(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("effective_search_space", 1, "effective search space"),
+        ("scoring_search_space", 1, "scoring search space"),
+        ("filtered_database_letters", 998_069_435_927, "exceed"),
+        ("filtered_database_sequences", 130_155_244, "exceed"),
+        ("result_database_letters", 1, "result database length"),
+    ],
+)
+def test_prepare_web_blast_statistics_rejects_invalid_context(
+    field: str,
+    value: int,
+    match: str,
+) -> None:
+    active = exact_oracle.ActiveDatabase(
+        source_version="generation",
+        db_prefix="core_nt/generations/generation/core_nt",
+        shard_layout_prefix="core_nt/generations/generation/shards",
+        total_letters=998_069_435_926,
+        total_sequences=130_155_243,
+        search_space=30_807_003_700_117,
+    )
+    context = {
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+    }
+    context[field] = value
+
+    with pytest.raises(exact_oracle.ExactOracleUnavailable, match=match):
+        exact_oracle.prepare_web_blast_statistics(
+            context=context,
+            query_fasta=">q\n" + "A" * 462,
+            active_database=active,
+            options="-outfmt 5",
+        )

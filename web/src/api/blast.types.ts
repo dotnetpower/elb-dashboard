@@ -66,6 +66,14 @@ export interface BlastSubmitRequest {
   db_total_letters?: number;
   db_total_sequences?: number;
   query_effective_search_spaces?: number[];
+  web_blast_statistical_context?: {
+    filtered_database_letters: number;
+    filtered_database_sequences: number;
+    length_adjustment: number;
+    effective_search_space: number;
+    scoring_search_space: number;
+    result_database_letters: number;
+  };
   query_count?: number;
   shard_sets?: number[];
   /** Legacy opt-out retained for older callers; automatic sharding is off by default. */

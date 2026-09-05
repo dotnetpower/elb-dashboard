@@ -38,6 +38,7 @@ def _safe_openapi_job_id(value: Any) -> str:
     text = str(value or "").strip()
     return text if _SAFE_OPENAPI_JOB_ID_RE.fullmatch(text) else ""
 
+
 from api.services.blast.external_jobs import (  # noqa: E402
     _EXTERNAL_DETAIL_ENRICH_LIMIT as _EXTERNAL_DETAIL_ENRICH_LIMIT,
 )
@@ -517,8 +518,7 @@ def _arm_cluster_refresh_cooldown(
     """
     if cluster_key not in _K8S_REFRESH_CLUSTER_COOLDOWN:
         LOGGER.info(
-            "blast k8s refresh: cluster '%s' unreachable (%s); cooling down live "
-            "refresh for %.0fs",
+            "blast k8s refresh: cluster '%s' unreachable (%s); cooling down live refresh for %.0fs",
             cluster_name,
             reason,
             _K8S_REFRESH_FAILURE_COOLDOWN_SECONDS,
@@ -819,11 +819,7 @@ def _local_to_blast_job(
     db = str(getattr(state, "db", None) or _payload_value(payload, "db", "database") or "")
     if not db and is_external_origin:
         external_snapshot = payload["external"]
-        db = str(
-            external_snapshot.get("db_name")
-            or external_snapshot.get("db")
-            or ""
-        )
+        db = str(external_snapshot.get("db_name") or external_snapshot.get("db") or "")
     infrastructure = {
         "subscription_id": getattr(state, "subscription_id", None)
         or _payload_value(payload, "subscription_id"),
@@ -850,10 +846,7 @@ def _local_to_blast_job(
     # rewritten still renders cleanly.
     response_error_code = state.error_code
     response_error = _job_error_for_response(state)
-    if (
-        is_external_origin
-        and str(state.status or "").lower() in {"completed", "succeeded"}
-    ):
+    if is_external_origin and str(state.status or "").lower() in {"completed", "succeeded"}:
         if response_error_code:
             response_error_code = ""
         response_error = None
@@ -863,10 +856,9 @@ def _local_to_blast_job(
     _row_queue_origin = _resolve_local_queue_origin(
         payload, column=getattr(state, "queue_origin", None)
     )
-    _row_correlation_id = (
-        str(getattr(state, "external_correlation_id", "") or "")
-        or _resolve_external_correlation_id(payload)
-    )
+    _row_correlation_id = str(
+        getattr(state, "external_correlation_id", "") or ""
+    ) or _resolve_external_correlation_id(payload)
     _external_snapshot = payload.get("external") if isinstance(payload, dict) else None
     _elastic_blast_job_id = ""
     for _runtime_identity in (
@@ -963,6 +955,17 @@ def _local_to_blast_job(
         "external_correlation_id": _row_correlation_id or None,
         "owner_upn": getattr(state, "owner_upn", None) or None,
     }
+    if isinstance(_external_snapshot, dict):
+        from api.services.blast.external_job_projection import (
+            _external_web_blast_provenance,
+        )
+
+        _external_provenance = _external_web_blast_provenance(
+            _external_snapshot,
+            _row_config_snapshot if isinstance(_row_config_snapshot, dict) else None,
+        )
+        if _external_provenance is not None:
+            out["provenance"] = _external_provenance
     # Surface sibling-reported stats (started_at / run_seconds /
     # queue_wait_seconds / elapsed_seconds) on EVERY external row, list +
     # detail. The detail endpoint also re-fetches on a cache miss
@@ -984,15 +987,13 @@ def _local_to_blast_job(
                     "queue_wait_seconds",
                     "elapsed_seconds",
                 ):
-                    if (
-                        out.get(_stat_key) in (None, "")
-                        and _cached_stats.get(_stat_key) not in (None, "")
+                    if out.get(_stat_key) in (None, "") and _cached_stats.get(_stat_key) not in (
+                        None,
+                        "",
                     ):
                         out[_stat_key] = _cached_stats[_stat_key]
         except Exception:
-            LOGGER.debug(
-                "sibling stats cache merge skipped job_id=%s", state.job_id, exc_info=True
-            )
+            LOGGER.debug("sibling stats cache merge skipped job_id=%s", state.job_id, exc_info=True)
     out["target"] = build_target(
         resource_type="blast_job",
         job_id=str(state.job_id),
@@ -1043,9 +1044,7 @@ def _local_to_blast_job(
         # (and reset to None for terminal-success rows). Passing it as the
         # step projection's ``error_message`` flows the real cause into the
         # failed step's inline ``error`` / ``output`` too, not just the banner.
-        failed_error_override = (
-            response_error if live_status.lower() == "failed" else None
-        )
+        failed_error_override = response_error if live_status.lower() == "failed" else None
         ext_projection = _external_step_projection(
             external_snapshot,
             dashboard_status=live_status,
@@ -1229,14 +1228,10 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     # returned by `list_for_owner(include_payload=False)` (the list endpoint
     # avoids the payload column to keep responses small).
     subscription_id = str(
-        getattr(state, "subscription_id", None)
-        or _payload_value(payload, "subscription_id")
-        or ""
+        getattr(state, "subscription_id", None) or _payload_value(payload, "subscription_id") or ""
     )
     resource_group = str(
-        getattr(state, "resource_group", None)
-        or _payload_value(payload, "resource_group")
-        or ""
+        getattr(state, "resource_group", None) or _payload_value(payload, "resource_group") or ""
     )
     cluster_name = str(
         getattr(state, "cluster_name", None)
@@ -1461,9 +1456,7 @@ def _blocked_refresh_reasons(rows: list[Any]) -> dict[str, dict[str, Any]]:
     blocked: dict[str, dict[str, Any]] = {}
     for (subscription_id, resource_group, cluster_name), job_ids in scopes.items():
         try:
-            health = get_cluster_health(
-                credential, subscription_id, resource_group, cluster_name
-            )
+            health = get_cluster_health(credential, subscription_id, resource_group, cluster_name)
         except Exception as exc:
             LOGGER.debug(
                 "blocked-refresh health probe skipped cluster=%s: %s",
@@ -1702,8 +1695,7 @@ def _resolve_job_storage_account(job_id: str, supplied: str) -> str:
         # App Insights without operator value (see issue #19). An operator
         # debugging a bogus job_id can re-enable with the api logger level.
         LOGGER.debug(
-            "storage account cross-check: no JobState row for job_id=%s; "
-            "accepting supplied value",
+            "storage account cross-check: no JobState row for job_id=%s; accepting supplied value",
             job_id,
         )
         return supplied

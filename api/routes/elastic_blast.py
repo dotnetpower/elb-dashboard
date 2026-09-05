@@ -3,7 +3,8 @@
 Responsibility: External ElasticBLAST API facade
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `ExternalBlastOptions`, `ExternalBlastSubmitRequest`,
+Key entry points: `WebBlastStatisticalContext`, `ExternalBlastOptions`,
+`ExternalBlastSubmitRequest`,
 `submit_external_blast_job`, `list_external_blast_jobs`, `get_external_blast_job`,
 `list_external_blast_job_events`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
@@ -39,6 +40,17 @@ _REQUIRE_CALLER = Depends(require_caller)
 _REQUIRE_CALLER_OR_DOWNLOAD_TOKEN = Depends(require_caller_or_download_token)
 
 
+class WebBlastStatisticalContext(BaseModel):
+    """NCBI Web BLAST's query-specific taxonomy-filtered statistics."""
+
+    filtered_database_letters: int = Field(..., ge=1)
+    filtered_database_sequences: int = Field(..., ge=1)
+    length_adjustment: int = Field(..., ge=1)
+    effective_search_space: int = Field(..., ge=1)
+    scoring_search_space: int = Field(..., ge=1)
+    result_database_letters: int = Field(..., ge=1)
+
+
 class ExternalBlastOptions(BaseModel):
     outfmt: Literal[5] = Field(5, description="Fixed to BLAST XML format 5")
     word_size: int = Field(28, ge=1)
@@ -53,6 +65,13 @@ class ExternalBlastOptions(BaseModel):
         description=(
             "Ordered query-specific effective search spaces. A uniform list is "
             "forwarded to the sibling as its scalar search-space field."
+        ),
+    )
+    web_blast_statistical_context: WebBlastStatisticalContext | None = Field(
+        None,
+        description=(
+            "Single-query NCBI Web BLAST taxonomy-filtered database statistics. "
+            "The server validates both reported and scoring search-space formulas."
         ),
     )
     evalue: float = Field(
@@ -137,7 +156,7 @@ class ExternalBlastSubmitRequest(BaseModel):
             raise ValueError("db must not contain '..' path segments")
 
         try:
-            parse_fasta_metadata(self.query_fasta)
+            metadata = parse_fasta_metadata(self.query_fasta)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -145,6 +164,27 @@ class ExternalBlastSubmitRequest(BaseModel):
             raise ValueError("is_inclusive requires taxid")
         if self.taxid is not None and self.is_inclusive is None:
             self.is_inclusive = True
+        context = self.options.web_blast_statistical_context
+        if context is not None:
+            if self.db.rstrip("/").rsplit("/", 1)[-1] != "core_nt":
+                raise ValueError("web_blast_statistical_context requires core_nt")
+            if self.options.sharding_mode != "precise":
+                raise ValueError("web_blast_statistical_context requires precise sharding")
+            from api.services.blast.live_search_space import (
+                validate_web_blast_statistical_context,
+            )
+
+            validated = validate_web_blast_statistical_context(
+                context.model_dump(),
+                query_lengths=[record.length for record in metadata.records],
+            )
+            expected_spaces = [validated["effective_search_space"]]
+            if self.options.query_effective_search_spaces is None:
+                self.options.query_effective_search_spaces = expected_spaces
+            elif self.options.query_effective_search_spaces != expected_spaces:
+                raise ValueError(
+                    "query_effective_search_spaces conflicts with web_blast_statistical_context"
+                )
         return self
 
 
@@ -284,6 +324,14 @@ def _canonicalize_external_live_options(
 
     try:
         return canonicalize_precise_options(database, options)
+    except ValueError as exc:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "web_blast_statistical_context_invalid",
+                "message": sanitise(str(exc))[:500],
+            },
+        ) from exc
     except LiveSearchSpaceUnavailable as exc:
         raise HTTPException(
             503,

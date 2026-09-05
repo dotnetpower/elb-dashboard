@@ -103,6 +103,11 @@ from __future__ import annotations
 # guard while preserving traversal and arbitrary-file rejection. ACR run de8f
 # produced digest
 # sha256:9aafa0767fcc3372325895dfd3dc5c9416a6a61aa5257271e85793e4a9bd4e79.
+# 4.46 reproduces Web BLAST taxonomy-filtered statistics: a validated request
+# context supplies filtered DB counts, the native BLAST -dbsize value, the
+# distinct HSP scoring -searchsp, and canonical result statistics. The private
+# context manifest is immutable across idempotent replays and the finalizer
+# fails closed when the runtime flags or active generation disagree.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -130,7 +135,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.45",
+    "elb-openapi": "4.46",
 }
 
 # GitHub source repo for ACR Build Tasks.

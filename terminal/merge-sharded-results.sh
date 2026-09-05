@@ -31,6 +31,122 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 BLAST_EVALUE_EPSILON = 1.0e-180
+WEB_BLAST_STATISTICS_MAX_BYTES = 16 * 1024
+
+
+def load_web_blast_statistics():
+    path_value = os.environ.get("ELB_WEB_BLAST_STATISTICS_FILE", "").strip()
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if not path.is_file() or path.stat().st_size > WEB_BLAST_STATISTICS_MAX_BYTES:
+        raise ValueError("Web BLAST statistics manifest is missing or oversized")
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError("Web BLAST statistics manifest is invalid") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("Web BLAST statistics manifest schema is unsupported")
+    integer_fields = (
+        "query_length",
+        "filtered_database_letters",
+        "filtered_database_sequences",
+        "length_adjustment",
+        "effective_search_space",
+        "scoring_search_space",
+        "result_database_letters",
+        "active_database_letters",
+        "active_database_sequences",
+    )
+    for field in integer_fields:
+        try:
+            value = int(payload.get(field) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Web BLAST statistics field {field} is invalid") from exc
+        if value <= 0:
+            raise ValueError(f"Web BLAST statistics field {field} is invalid")
+        payload[field] = value
+    if not str(payload.get("query_id") or "").strip():
+        raise ValueError("Web BLAST statistics query_id is invalid")
+    if not str(payload.get("active_source_version") or "").strip():
+        raise ValueError("Web BLAST statistics active_source_version is invalid")
+    return payload
+
+
+def option_scalar(options_text, flag):
+    tokens = shlex.split(options_text or "")
+    values = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == flag:
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                raise ValueError(f"{flag} requires a scalar value")
+            values.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith(f"{flag}="):
+            values.append(token.split("=", 1)[1])
+        index += 1
+    if len(values) != 1:
+        raise ValueError(f"Web BLAST exact merge requires exactly one {flag} value")
+    try:
+        value = int(values[0])
+    except ValueError as exc:
+        raise ValueError(f"{flag} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{flag} must be a positive integer")
+    return value
+
+
+def validate_web_blast_statistics(payload, query_order, queries, blast_options):
+    if len(query_order) != 1:
+        raise ValueError("Web BLAST statistics require exactly one merged query")
+    query_id = query_order[0]
+    item = queries[query_id]
+    template = item["template"]
+    try:
+        query_length = int(text_at(template, "Iteration_query-len", "0"))
+    except ValueError as exc:
+        raise ValueError("Merged query length is invalid") from exc
+    query_def_id = text_at(template, "Iteration_query-def").strip().split(None, 1)[0]
+    manifest_query_id = str(payload["query_id"]).strip()
+    if manifest_query_id not in {query_id, query_def_id}:
+        raise ValueError("Web BLAST statistics query identity does not match the result")
+    if query_length != payload["query_length"]:
+        raise ValueError("Web BLAST statistics query length does not match the result")
+    if (
+        item["db_len"] != payload["active_database_letters"]
+        or item["db_num"] != payload["active_database_sequences"]
+    ):
+        raise ValueError("Web BLAST statistics active database does not match shard totals")
+    length_adjustment = payload["length_adjustment"]
+    effective_query_length = query_length - length_adjustment
+    effective_database_length = (
+        payload["filtered_database_letters"]
+        - payload["filtered_database_sequences"] * length_adjustment
+    )
+    if effective_query_length <= 0 or effective_database_length <= 0:
+        raise ValueError("Web BLAST statistics contain invalid effective lengths")
+    if (
+        effective_query_length * effective_database_length
+        != payload["effective_search_space"]
+    ):
+        raise ValueError("Web BLAST reported effective search space is inconsistent")
+    if (
+        effective_query_length * payload["filtered_database_letters"]
+        != payload["scoring_search_space"]
+    ):
+        raise ValueError("Web BLAST scoring search space is inconsistent")
+    if payload["result_database_letters"] not in {
+        payload["filtered_database_letters"],
+        payload["active_database_letters"],
+    }:
+        raise ValueError("Web BLAST result database length is inconsistent")
+    if option_scalar(blast_options, "-dbsize") != payload["filtered_database_letters"]:
+        raise ValueError("BLAST -dbsize does not match Web BLAST statistics")
+    if option_scalar(blast_options, "-searchsp") != payload["scoring_search_space"]:
+        raise ValueError("BLAST -searchsp does not match Web BLAST scoring space")
 
 
 def _accession_base(accession):
@@ -1142,11 +1258,25 @@ def merge_xml(
     if unsupported_records:
         warnings.append("Some XML records were skipped because query or HSP metadata was incomplete")
 
+    web_blast_statistics = load_web_blast_statistics()
+    if web_blast_statistics is not None:
+        if not db_order_exact:
+            raise ValueError("Web BLAST statistics require a same-generation DB-order oracle")
+        validate_web_blast_statistics(
+            web_blast_statistics,
+            query_order,
+            queries,
+            blast_options,
+        )
+        warnings.append(
+            "Web BLAST taxonomy-filtered statistics were validated against runtime options"
+        )
+
     calibrated_hsp_lengths = (
         recalibrate_full_db_hsp_lengths(
             queries, blast_program, blast_options, warnings
         )
-        if db_order_exact
+        if db_order_exact and web_blast_statistics is None
         else {}
     )
 
@@ -1269,7 +1399,28 @@ def merge_xml(
             if iteration_stat is None:
                 iteration_stat = ET.SubElement(template, "Iteration_stat")
             statistics = ET.SubElement(iteration_stat, "Statistics")
-        if item["db_len"] and item["db_num"]:
+        if web_blast_statistics is not None:
+            set_child_text(
+                statistics,
+                "Statistics_db-len",
+                web_blast_statistics["result_database_letters"],
+            )
+            set_child_text(
+                statistics,
+                "Statistics_db-num",
+                web_blast_statistics["filtered_database_sequences"],
+            )
+            set_child_text(
+                statistics,
+                "Statistics_hsp-len",
+                web_blast_statistics["length_adjustment"],
+            )
+            set_child_text(
+                statistics,
+                "Statistics_eff-space",
+                web_blast_statistics["effective_search_space"],
+            )
+        elif item["db_len"] and item["db_num"]:
             set_child_text(statistics, "Statistics_db-len", item["db_len"])
             set_child_text(statistics, "Statistics_db-num", item["db_num"])
             if len(item["eff_spaces"]) == 1:
@@ -1363,10 +1514,13 @@ def merge_xml(
             tie_order, strict_oracle, True
         ),
         "statistics_equivalence": (
-            "full_db_exact"
+            "web_blast_exact"
+            if web_blast_statistics is not None
+            else "full_db_exact"
             if db_order_exact and len(calibrated_hsp_lengths) == len(query_order)
             else "partial"
         ),
+        "web_blast_statistical_context": web_blast_statistics,
         "tie_order_oracle_path": oracle_path,
         "tie_order_oracle_source": tie_order_oracle_source() if tie_order else None,
         "tie_order_oracle_accessions": oracle_unique_accessions,

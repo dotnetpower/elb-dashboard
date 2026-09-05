@@ -13,7 +13,8 @@ Edit boundaries: Pure-ish projection only — NO cache reads/writes, NO upstream
     `db_metadata` (best-effort, never raises). The cache + sync lifecycle stays
     in `external_jobs.py`, which imports these helpers one-directionally.
 Key entry points: `_external_to_blast_job`, `_external_status_to_dashboard`,
-    `_external_error_message`, `_external_result_files`, `_short_external_db_name`.
+    `_external_error_message`, `_external_result_files`, `_external_web_blast_provenance`,
+    `_short_external_db_name`.
 Risky contracts: `error_code` MUST stay a short single token (reject whitespace
     / >80 chars) and the message MUST be whitespace-collapsed + 2000-char capped
     so an elastic-blast dump cannot bloat the Table row. `_external_to_blast_job`
@@ -52,9 +53,66 @@ __all__ = [
     "_external_status_to_dashboard",
     "_external_step_projection",
     "_external_to_blast_job",
+    "_external_web_blast_provenance",
     "_normalise_error_code",
     "_short_external_db_name",
 ]
+
+
+def _external_web_blast_provenance(
+    job: dict[str, Any],
+    config_snapshot: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Build provenance only when runtime exactness evidence is complete."""
+    statistics = job.get("web_blast_statistics")
+    exact_oracle = job.get("exact_oracle")
+    if not isinstance(statistics, dict) or not isinstance(exact_oracle, dict):
+        return None
+    effective_search_space = statistics.get("effective_search_space")
+    if not isinstance(effective_search_space, int) or effective_search_space <= 0:
+        return None
+    options = dict(config_snapshot or {})
+    options["web_blast_statistical_context"] = dict(statistics)
+    options.setdefault("query_effective_search_spaces", [effective_search_space])
+    db_version = str(job.get("db_version") or "") or None
+    compatibility = {
+        "mode": "precise",
+        "level": "full_db_hitlist_exact_sharded",
+        "eligible": True,
+        "searchsp": effective_search_space,
+        "search_space_source": "web_blast_statistical_context",
+        "warnings": [],
+        "evidence": {
+            "blast_version": job.get("blast_version") or "unknown",
+            "database_snapshot": db_version,
+            "exact_oracle": dict(exact_oracle),
+        },
+    }
+    payload = {
+        "db": job.get("db_name") or job.get("db") or "",
+        "program": job.get("program") or "blastn",
+        "options": options,
+        "compatibility_contract": compatibility,
+    }
+    from api.services.blast.provenance import build_blast_provenance
+
+    provenance = build_blast_provenance(
+        job_id=str(job.get("job_id") or ""),
+        payload=payload,
+    )
+    database = provenance.get("database")
+    detail = job.get("db_version_detail")
+    detail = detail.get("detail") if isinstance(detail, dict) else None
+    if isinstance(database, dict) and isinstance(detail, dict):
+        for field in ("number_of_letters", "number_of_sequences"):
+            try:
+                value = int(detail.get(field) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                database[field] = value
+    return provenance
+
 
 # The dashboard's 8-step timeline (Prepare Run / Warmup Check / Configure /
 # Stage DB / Submit Job / BLAST Run / Export / Complete) is a *dashboard-native*
@@ -231,8 +289,7 @@ def _external_execution_detail_text(
     failed = execution_summary.get("splits_failed")
     if total:
         lines.append(
-            f"Shards         : {done or 0}/{total} done"
-            + (f", {failed} failed" if failed else "")
+            f"Shards         : {done or 0}/{total} done" + (f", {failed} failed" if failed else "")
         )
     hit_count = result.get("hit_count")
     if isinstance(hit_count, int):
@@ -378,7 +435,6 @@ def _is_coarse_k8s_failure(message: str | None) -> bool:
         return False
     lowered = message.casefold()
     return any(token in lowered for token in _EXTERNAL_COARSE_K8S_FAILURE_SUBSTRINGS)
-
 
 
 def _enrich_external_failure_detail(
@@ -599,9 +655,7 @@ def _external_to_blast_job(
         dashboard_job_id=dashboard_job_id or None,
         openapi_job_id=openapi_job_id or None,
         links={
-            "dashboard_status": f"/api/blast/jobs/{dashboard_job_id}"
-            if dashboard_job_id
-            else "",
+            "dashboard_status": f"/api/blast/jobs/{dashboard_job_id}" if dashboard_job_id else "",
             "openapi_status": f"/v1/jobs/{openapi_job_id}/status" if openapi_job_id else "",
         },
     )
@@ -648,6 +702,12 @@ def _external_to_blast_job(
             LOGGER.debug("external job region resolve skipped", exc_info=True)
     if any(infrastructure.values()):
         out["infrastructure"] = {k: v for k, v in infrastructure.items() if v}
+    provenance = _external_web_blast_provenance(
+        job,
+        out.get("config_snapshot") if isinstance(out.get("config_snapshot"), dict) else None,
+    )
+    if provenance is not None:
+        out["provenance"] = provenance
     if include_database_metadata:
         # External-API jobs never populate infrastructure.storage_account, but
         # they carry the BLAST database as a full blob URL. Recover the account
@@ -655,9 +715,9 @@ def _external_to_blast_job(
         # resolver fills the sequence / letter counts and snapshot date
         # dashboard-submitted jobs show. The gate stops an attacker-influenced
         # db URL from leaking the MI Storage token to a foreign account.
-        storage_account = str(
-            infrastructure.get("storage_account") or ""
-        ) or derived_storage_account
+        storage_account = (
+            str(infrastructure.get("storage_account") or "") or derived_storage_account
+        )
         database_metadata = _database_metadata_for_response(
             db,
             storage_account,

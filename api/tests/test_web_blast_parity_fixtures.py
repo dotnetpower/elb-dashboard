@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 from api.services.blast.config import generate_config
+from api.services.blast.live_search_space import validate_web_blast_statistical_context
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "web_blast_parity"
 PAYLOADS_PATH = FIXTURES_DIR / "reference_payloads.json"
@@ -156,6 +157,26 @@ def test_fasta_length_matches_payload(gene_id: str) -> None:
     )
 
 
+@pytest.mark.parametrize("gene_id", _gene_ids())
+def test_web_blast_statistical_context_matches_query_and_snapshot(gene_id: str) -> None:
+    payloads = _load_payloads()
+    payload = payloads["genes"][gene_id]
+    snapshot = payloads["core_nt_snapshot"]
+    context = payload["dashboard_request"]["web_blast_statistical_context"]
+
+    validated = validate_web_blast_statistical_context(
+        context,
+        query_lengths=[payload["query_length"]],
+        active_total_letters=snapshot["number_of_letters"],
+        active_total_sequences=snapshot["number_of_sequences"],
+    )
+
+    assert validated == context
+    assert payload["dashboard_request"]["query_effective_search_spaces"] == [
+        context["effective_search_space"]
+    ]
+
+
 # ---------------------------------------------------------------------------
 # NCBI Web BLAST form → dashboard request mapping
 # ---------------------------------------------------------------------------
@@ -204,9 +225,7 @@ def test_dashboard_request_matches_ncbi_form(gene_id: str) -> None:
     # excluding both taxids removes that mixed group rather than trusting its
     # first title.
     exclusion_taxids = payload.get("exclusion_taxids", [payload["exclusion_taxid"]])
-    assert " ".join(f"NOT txid{taxid}[ORGN]" for taxid in exclusion_taxids) == form[
-        "ENTREZ_QUERY"
-    ]
+    assert " ".join(f"NOT txid{taxid}[ORGN]" for taxid in exclusion_taxids) == form["ENTREZ_QUERY"]
     if len(exclusion_taxids) == 1:
         assert dashboard["taxid"] == exclusion_taxids[0]
         assert dashboard["is_inclusive"] is False, (

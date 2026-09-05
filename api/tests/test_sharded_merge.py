@@ -325,12 +325,7 @@ def test_db_order_oracle_v2_maps_grouped_aliases_and_shard_oid_resets(
         "q1\ts3\t1e-30\t90\t100",
     ]
     oracle = tmp_path / "db-order-v2.txt"
-    oracle.write_text(
-        "00\t0\tprimary-a\n"
-        "00\t0\talias-a\n"
-        "00\t1\ts2\n"
-        "01\t0\ts3\n"
-    )
+    oracle.write_text("00\t0\tprimary-a\n00\t0\talias-a\n00\t1\ts2\n01\t0\ts3\n")
 
     out_rows, report = _run_tabular_merge(
         tmp_path,
@@ -475,6 +470,86 @@ def test_merge_sharded_results_writes_valid_xml(tmp_path: Path) -> None:
     report = json.loads(report_json.read_text())
     assert report["outfmt"] == 5
     assert report["format"] == "blast_xml"
+
+
+def test_xml_merge_applies_validated_web_blast_statistics_without_changing_hsps(
+    tmp_path: Path,
+) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    oracle = tmp_path / "db-order.txt"
+    statistics_path = tmp_path / "web-blast-statistics.json"
+    input_tsv.write_text("")
+    oracle.write_text("s1\ns2\n")
+    statistics = {
+        "schema_version": 1,
+        "query_id": "q1",
+        "query_length": 10,
+        "filtered_database_letters": 2900,
+        "filtered_database_sequences": 2,
+        "length_adjustment": 1,
+        "effective_search_space": 26082,
+        "scoring_search_space": 26100,
+        "result_database_letters": 3000,
+        "active_database_letters": 3000,
+        "active_database_sequences": 3,
+        "active_source_version": "generation-1",
+    }
+    statistics_path.write_text(json.dumps(statistics))
+    for shard, hits, db_len, db_num in (
+        ("shard_00", [("s1", "1.25e-20", 90.0)], 1000, 1),
+        ("shard_01", [("s2", "2.5e-10", 80.0)], 2000, 2),
+    ):
+        shard_dir = tmp_path / shard
+        shard_dir.mkdir()
+        with gzip.open(shard_dir / "batch.out.gz", "wt") as handle:
+            handle.write(
+                _blast_xml(
+                    "q1",
+                    hits,
+                    db_len=db_len,
+                    db_num=db_num,
+                    eff_space=26100,
+                    hsp_len=1,
+                )
+            )
+
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "2",
+            "blastn",
+            "-outfmt 5 -max_target_seqs 2 -dbsize 2900 -searchsp 26100",
+        ],
+        check=True,
+        env={
+            **os.environ,
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+            "ELB_WEB_BLAST_STATISTICS_FILE": str(statistics_path),
+        },
+    )
+
+    with gzip.open(output_gz, "rt") as handle:
+        root = ET.parse(handle).getroot()  # noqa: S314 -- test fixture XML
+    stats = root.find(".//Iteration_stat/Statistics")
+    assert stats is not None
+    assert stats.findtext("Statistics_db-num") == "2"
+    assert stats.findtext("Statistics_db-len") == "3000"
+    assert stats.findtext("Statistics_hsp-len") == "1"
+    assert stats.findtext("Statistics_eff-space") == "26082"
+    assert [node.text for node in root.findall(".//Hsp_evalue")] == [
+        "1.25e-20",
+        "2.5e-10",
+    ]
+    report = json.loads(report_json.read_text())
+    assert report["statistics_equivalence"] == "web_blast_exact"
+    assert report["web_blast_statistical_context"] == statistics
 
 
 def test_merge_sharded_results_supports_outfmt7_tabular(tmp_path: Path) -> None:

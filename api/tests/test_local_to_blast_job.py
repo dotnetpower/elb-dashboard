@@ -8,6 +8,7 @@ Key entry points: `_state`, `test_local_to_blast_job_minimum_shape`,
 `test_local_to_blast_job_can_include_database_metadata`,
 `test_local_to_blast_job_derives_storage_account_from_external_db_url`,
 `test_local_to_blast_job_refuses_foreign_external_db_storage_account`,
+`test_local_to_blast_job_projects_web_blast_runtime_provenance`,
 `test_local_to_blast_job_exposes_error_for_frontend`,
 `test_local_to_blast_job_exposes_progress_steps`,
 `test_refresh_running_blast_state_skips_pre_runtime_phases`,
@@ -122,6 +123,47 @@ def test_local_to_blast_job_surfaces_external_runtime_identities():
     assert out["target"]["openapi_job_id"] == openapi_job_id
 
 
+def test_local_to_blast_job_projects_web_blast_runtime_provenance():
+    statistics = {
+        "schema_version": 1,
+        "query_id": "q1",
+        "query_length": 462,
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+        "active_database_letters": 998_069_435_926,
+        "active_database_sequences": 130_155_243,
+        "active_source_version": "ncbi-direct-20260819-cab30d18c360",
+    }
+    external = {
+        "job_id": "7f7d3a3fc2aa",
+        "status": "success",
+        "program": "blastn",
+        "db_name": "core_nt",
+        "blast_version": "2.17.0+",
+        "db_version": "ncbi-direct-20260819-cab30d18c360",
+        "exact_oracle": {"run_id": "run-1", "part_count": 10},
+        "web_blast_statistics": statistics,
+        "config_snapshot": {"evalue": 0.05},
+    }
+
+    out = _local_to_blast_job(
+        _state(
+            job_id="7f7d3a3fc2aa",
+            status="completed",
+            phase="completed",
+            submission_source="external_api",
+            payload={"external": external},
+        )
+    )
+
+    assert out["provenance"]["compatibility"]["searchsp"] == 421_817_959_873_974
+    assert out["provenance"]["options"]["web_blast_statistical_context"] == statistics
+
+
 def test_local_to_blast_job_list_row_uses_durable_runtime_identity():
     openapi_job_id = "7f7d3a3fc2aa"
     out = _local_to_blast_job(
@@ -210,9 +252,7 @@ def test_local_to_blast_job_surfaces_servicebus_source_from_nested_external():
     # A queue-drained shared row stamps the true origin under
     # payload.external.submission_source — Recent searches / Jobs must label it
     # "servicebus", not the generic dashboard/external_api source.
-    out = _local_to_blast_job(
-        _state(payload={"external": {"submission_source": "servicebus"}})
-    )
+    out = _local_to_blast_job(_state(payload={"external": {"submission_source": "servicebus"}}))
     assert out["submission_source"] == "servicebus"
     # The coarse origin flag still reads external for an external-origin row.
     assert out["source"] == "external_api"
@@ -243,9 +283,7 @@ def test_local_to_blast_job_queue_origin_external_from_drained_row():
     # A queue-drained shared row stamps queue_origin on payload.external.
     out = _local_to_blast_job(
         _state(
-            payload={
-                "external": {"submission_source": "servicebus", "queue_origin": "external"}
-            }
+            payload={"external": {"submission_source": "servicebus", "queue_origin": "external"}}
         )
     )
     assert out["queue_origin"] == "external"
@@ -254,7 +292,6 @@ def test_local_to_blast_job_queue_origin_external_from_drained_row():
 def test_local_to_blast_job_queue_origin_empty_for_non_queue():
     out = _local_to_blast_job(_state(payload={}))
     assert out["queue_origin"] == ""
-
 
 
 def test_local_to_blast_job_can_include_database_metadata(monkeypatch):
@@ -442,7 +479,6 @@ def test_local_to_blast_job_external_failed_row_uses_persisted_error_code():
     assert out["output"]["error"] == detail
 
 
-
 def test_local_to_blast_job_external_failed_row_enriched_with_cluster_detail(monkeypatch):
     # On the detail view, a synced external failed row with only a generic/empty
     # sibling error recovers the authoritative cluster-side blastn detail from
@@ -450,9 +486,7 @@ def test_local_to_blast_job_external_failed_row_enriched_with_cluster_detail(mon
     monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
     monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
     monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbdashboard3abp67bppe")
-    monkeypatch.setattr(
-        blast_job_state, "_database_metadata_for_response", lambda *_a, **_k: None
-    )
+    monkeypatch.setattr(blast_job_state, "_database_metadata_for_response", lambda *_a, **_k: None)
     import api.services.blast.runtime_failure as runtime_failure
 
     seen: dict[str, str] = {}
@@ -500,9 +534,7 @@ def test_local_to_blast_job_external_crashloop_recovers_runtime_detail(monkeypat
     monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
     monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
     monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbdashboard3abp67bppe")
-    monkeypatch.setattr(
-        blast_job_state, "_database_metadata_for_response", lambda *_a, **_k: None
-    )
+    monkeypatch.setattr(blast_job_state, "_database_metadata_for_response", lambda *_a, **_k: None)
     import api.services.blast.runtime_failure as runtime_failure
 
     monkeypatch.setattr(
@@ -520,8 +552,7 @@ def test_local_to_blast_job_external_crashloop_recovers_runtime_detail(monkeypat
                     "job_id": "ext-crash",
                     "status": "failed",
                     "error": (
-                        "pod blastn-batch-16s-job-000-abc container blast "
-                        "is CrashLoopBackOff"
+                        "pod blastn-batch-16s-job-000-abc container blast is CrashLoopBackOff"
                     ),
                     "db": (
                         "https://stelbdashboard3abp67bppe.blob.core.windows.net/"
@@ -1476,7 +1507,6 @@ def test_blocked_refresh_reasons_skips_when_no_active_rows(monkeypatch):
     monkeypatch.setattr("api.services.get_credential", boom)
     rows = [_state(job_id="job-done", status="completed", phase="completed")]
     assert blast_job_state._blocked_refresh_reasons(rows) == {}
-
 
 
 def test_started_at_from_external_sibling_snapshot():

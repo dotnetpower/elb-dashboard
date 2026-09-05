@@ -945,13 +945,9 @@ def test_init_shard_immutable_generation_resolves_root_metadata_and_db(
 
     assert result.returncode == 0, result.stdout + result.stderr
     requested = calls.read_text()
+    assert "https://elbstg.blob.core.windows.net/blast-db/core_nt-metadata.json" in requested
     assert (
-        "https://elbstg.blob.core.windows.net/blast-db/core_nt-metadata.json"
-        in requested
-    )
-    assert (
-        "https://elbstg.blob.core.windows.net/blast-db/core_nt/generations/"
-        f"{generation}/*"
+        f"https://elbstg.blob.core.windows.net/blast-db/core_nt/generations/{generation}/*"
     ) in requested
     assert f"DB source version derived from immutable shard path: {generation}" in result.stdout
 
@@ -1884,7 +1880,9 @@ def test_patch_source_tags_query_and_db_order_oracles() -> None:
     assert 'export ELB_TIE_ORDER_SOURCE="db_order"' in source
     assert "DB-order oracle parts incomplete" in source
     assert "ORACLE_EXPECTED_PARTS" in source
-    assert '--log-level=ERROR </dev/null 2>/dev/null; then' in source
+    assert "--log-level=ERROR </dev/null 2>/dev/null; then" in source
+    assert 'export ELB_WEB_BLAST_STATISTICS_FILE="$WEB_STATS_FILE"' in source
+    assert "-dbsize requires a Web BLAST statistics manifest" in source
 
 
 _BATCH_JOB_TEMPLATES = (

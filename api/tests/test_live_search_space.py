@@ -100,6 +100,68 @@ def test_uniform_query_search_space_collapses_for_sibling_transport() -> None:
     }
 
 
+def test_web_blast_statistical_context_uses_distinct_scoring_space() -> None:
+    context = {
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+    }
+
+    validated = live_search_space.validate_web_blast_statistical_context(
+        context,
+        query_lengths=[462],
+        active_total_letters=998_069_435_926,
+        active_total_sequences=130_155_243,
+    )
+    transported = live_search_space.collapse_uniform_query_search_space(
+        {
+            "query_effective_search_spaces": [421_817_959_873_974],
+            "web_blast_statistical_context": validated,
+        }
+    )
+
+    assert transported == {
+        "db_effective_search_space": 423_813_461_852_118,
+        "web_blast_statistical_context": context,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("effective_search_space", 421_817_959_873_975),
+        ("scoring_search_space", 423_813_461_852_119),
+        ("filtered_database_letters", 998_069_435_927),
+        ("filtered_database_sequences", 130_155_244),
+        ("result_database_letters", 1),
+    ],
+)
+def test_web_blast_statistical_context_rejects_inconsistent_values(
+    field: str,
+    value: int,
+) -> None:
+    context = {
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+    }
+    context[field] = value
+
+    with pytest.raises(ValueError, match="web_blast_statistical_context"):
+        live_search_space.validate_web_blast_statistical_context(
+            context,
+            query_lengths=[462],
+            active_total_letters=998_069_435_926,
+            active_total_sequences=130_155_243,
+        )
+
+
 def test_mixed_query_search_spaces_fail_sibling_transport() -> None:
     with pytest.raises(ValueError, match="require query-group execution"):
         live_search_space.collapse_uniform_query_search_space(

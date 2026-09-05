@@ -49,6 +49,7 @@ _SNAPSHOT_OPTION_KEYS: tuple[str, ...] = (
     "is_inclusive",
     "db_effective_search_space",
     "query_effective_search_spaces",
+    "web_blast_statistical_context",
     "sharding_mode",
     "machine_type",
     "num_nodes",
@@ -109,9 +110,7 @@ _REGION_NEGATIVE_TTL_SECONDS = 60.0
 _REGION_CACHE_MAX = 256
 
 
-def resolve_cluster_region(
-    subscription_id: str, resource_group: str, cluster_name: str
-) -> str:
+def resolve_cluster_region(subscription_id: str, resource_group: str, cluster_name: str) -> str:
     """Resolve an AKS cluster's Azure region (cached, best-effort ``""``).
 
     Region never changes for a cluster, so a resolved value is cached for 1 hour
@@ -180,13 +179,9 @@ def remember_config_snapshot(job_id: str, snapshot: dict[str, Any] | None) -> No
             return
         from api.services.redis_clients import get_ops_redis_client
 
-        get_ops_redis_client().set(
-            _REMEMBER_KEY_PREFIX + job_id, blob, ex=_REMEMBER_TTL_SECONDS
-        )
+        get_ops_redis_client().set(_REMEMBER_KEY_PREFIX + job_id, blob, ex=_REMEMBER_TTL_SECONDS)
     except Exception as exc:  # pragma: no cover - best-effort, Redis optional
-        LOGGER.debug(
-            "remember_config_snapshot skipped job_id=%s: %s", job_id, type(exc).__name__
-        )
+        LOGGER.debug("remember_config_snapshot skipped job_id=%s: %s", job_id, type(exc).__name__)
 
 
 def recall_config_snapshot(job_id: str) -> dict[str, Any]:
@@ -198,9 +193,7 @@ def recall_config_snapshot(job_id: str) -> dict[str, Any]:
 
         value = get_ops_redis_client().get(_REMEMBER_KEY_PREFIX + job_id)
     except Exception as exc:  # pragma: no cover - best-effort, Redis optional
-        LOGGER.debug(
-            "recall_config_snapshot skipped job_id=%s: %s", job_id, type(exc).__name__
-        )
+        LOGGER.debug("recall_config_snapshot skipped job_id=%s: %s", job_id, type(exc).__name__)
         return {}
     if value is None:
         return {}
@@ -252,13 +245,9 @@ def remember_sibling_stats(job_id: str, stats: dict[str, Any] | None) -> None:
             return
         from api.services.redis_clients import get_ops_redis_client
 
-        get_ops_redis_client().set(
-            _STATS_KEY_PREFIX + job_id, blob, ex=_STATS_TTL_SECONDS
-        )
+        get_ops_redis_client().set(_STATS_KEY_PREFIX + job_id, blob, ex=_STATS_TTL_SECONDS)
     except Exception as exc:  # pragma: no cover - best-effort, Redis optional
-        LOGGER.debug(
-            "remember_sibling_stats skipped job_id=%s: %s", job_id, type(exc).__name__
-        )
+        LOGGER.debug("remember_sibling_stats skipped job_id=%s: %s", job_id, type(exc).__name__)
 
 
 def remember_sibling_stats_miss(job_id: str) -> None:
@@ -296,9 +285,7 @@ def recall_sibling_stats(job_id: str) -> dict[str, Any]:
 
         value = get_ops_redis_client().get(_STATS_KEY_PREFIX + job_id)
     except Exception as exc:  # pragma: no cover - best-effort, Redis optional
-        LOGGER.debug(
-            "recall_sibling_stats skipped job_id=%s: %s", job_id, type(exc).__name__
-        )
+        LOGGER.debug("recall_sibling_stats skipped job_id=%s: %s", job_id, type(exc).__name__)
         return {}
     if value is None:
         return {}

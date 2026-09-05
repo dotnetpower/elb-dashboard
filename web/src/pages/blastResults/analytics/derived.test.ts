@@ -39,7 +39,9 @@ describe("hitQueryCoverage", () => {
   });
 
   it("derives coverage from query span when qcovs is absent", () => {
-    expect(hitQueryCoverage(hit({ qstart: 1, qend: 250, qlen: 500, qcovs: undefined }))).toBe(50);
+    expect(
+      hitQueryCoverage(hit({ qstart: 1, qend: 250, qlen: 500, qcovs: undefined })),
+    ).toBe(50);
   });
 
   it("returns null when qlen is missing", () => {
@@ -86,7 +88,12 @@ describe("derepByRank", () => {
   const hits = [
     hit({ sseqid: "A", sscinames: "Escherichia coli", bitscore: 800, evalue: 1e-90 }),
     hit({ sseqid: "B", sscinames: "Escherichia coli", bitscore: 950, evalue: 1e-120 }),
-    hit({ sseqid: "C", sscinames: "Escherichia fergusonii", bitscore: 600, evalue: 1e-60 }),
+    hit({
+      sseqid: "C",
+      sscinames: "Escherichia fergusonii",
+      bitscore: 600,
+      evalue: 1e-60,
+    }),
     hit({ sseqid: "D", sscinames: "Salmonella enterica", bitscore: 700, evalue: 1e-70 }),
   ];
 
@@ -110,7 +117,10 @@ describe("derepByRank", () => {
   });
 
   it("buckets organism-less hits under Unassigned", () => {
-    const rows = derepByRank([hit({ sscinames: undefined, stitle: undefined })], "species");
+    const rows = derepByRank(
+      [hit({ sscinames: undefined, stitle: undefined })],
+      "species",
+    );
     expect(rows[0].label).toBe("Unassigned");
   });
 });
@@ -167,6 +177,7 @@ describe("searchSpacePin", () => {
     } as unknown as BlastJobSummary;
     const pin = searchSpacePin(job);
     expect(pin.searchSpace).toBe(3.2e13);
+    expect(pin.scoringSearchSpace).toBeNull();
     expect(pin.text).toContain("3.20e+13");
   });
 
@@ -187,6 +198,31 @@ describe("searchSpacePin", () => {
       },
     } as unknown as BlastJobSummary;
     expect(searchSpacePin(job).searchSpace).toBe(4.21817959873974e14);
+  });
+
+  it("separates reported and HSP scoring spaces for Web BLAST context", () => {
+    const job = {
+      provenance: {
+        compatibility: {
+          searchsp: 4.21817959873974e14,
+          search_space_source: "web_blast_statistical_context",
+        },
+        options: {
+          web_blast_statistical_context: {
+            effective_search_space: 4.21817959873974e14,
+            scoring_search_space: 4.23813461852118e14,
+          },
+        },
+      },
+    } as unknown as BlastJobSummary;
+
+    const pin = searchSpacePin(job);
+
+    expect(pin.searchSpace).toBe(4.21817959873974e14);
+    expect(pin.scoringSearchSpace).toBe(4.23813461852118e14);
+    expect(pin.text).toContain("Reported effective search space");
+    expect(pin.text).toContain("HSP E-values used 4.24e+14 letters");
+    expect(buildMethodsText(job)).toContain("taxonomy-filtered scoring space");
   });
 
   it("does not collapse mixed query-specific search spaces", () => {
@@ -276,7 +312,9 @@ describe("buildMethodsText", () => {
     expect(text).toContain("snapshot 2026-05-09");
     expect(text).toContain("E-value threshold of 0.05");
     expect(text).toContain("reproduces full-database BLAST hitlist membership and order");
-    expect(text).toContain("NCBI parity additionally requires the same NCBI database snapshot");
+    expect(text).toContain(
+      "NCBI parity additionally requires the same NCBI database snapshot",
+    );
   });
 
   it("degrades gracefully with an empty bundle", () => {

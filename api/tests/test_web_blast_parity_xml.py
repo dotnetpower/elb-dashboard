@@ -482,7 +482,7 @@ def test_reference_exclusion_evidence_is_explicit() -> None:
         if payload.get("exclusion_validation_evidence")
     }
 
-    assert set(evidence) == {"f3l", "rdrp_orf1ab"}
+    assert set(evidence) == {"f3l", "rrna_18s", "rdrp_orf1ab"}
     for gene_id, item in evidence.items():
         assert item["status"] == "verified"
         assert item["evidence_format"] == "XML2"
@@ -524,10 +524,7 @@ def test_xml2_has_no_excluded_taxid_or_descendant(gene_id: str) -> None:
     for taxon in taxonomy_root.findall("./Taxon"):
         taxid = int(taxon.findtext("TaxId") or 0)
         checked_taxids.add(taxid)
-        lineage = {
-            int(node.findtext("TaxId") or 0)
-            for node in taxon.findall("./LineageEx/Taxon")
-        }
+        lineage = {int(node.findtext("TaxId") or 0) for node in taxon.findall("./LineageEx/Taxon")}
         if taxid == excluded_taxid or excluded_taxid in lineage:
             descendant_taxids.add(taxid)
 
@@ -536,10 +533,13 @@ def test_xml2_has_no_excluded_taxid_or_descendant(gene_id: str) -> None:
     assert len(result_taxids) == evidence["unique_taxid_count"]
     assert sum(row.taxid is None for row in deflines) == evidence["missing_taxid_count"]
     assert len(descendant_taxids) == evidence["excluded_descendant_count"]
-    assert verify_xml2_taxid_exclusion(
-        deflines,
-        forbidden_taxids={excluded_taxid, *descendant_taxids},
-    ) == []
+    assert (
+        verify_xml2_taxid_exclusion(
+            deflines,
+            forbidden_taxids={excluded_taxid, *descendant_taxids},
+        )
+        == []
+    )
 
 
 _XML2_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>

@@ -14,7 +14,7 @@ NCBI Web BLAST references").
 | Gene | Pathogen | Query length | NCBI RID (captured) | Entrez exclusion | Status |
 | --- | --- | --- | --- | --- | --- |
 | F3L | Monkeypox virus (`taxid=10244`) | 462 bp | `9MHUJ94R014` | `NOT txid3431483[ORGN]` | Fresh XML1/XML2 + all-defline taxid proof captured |
-| 18S ribosomal RNA | Plasmodium falciparum (`taxid=5833`) | 2,151 bp | `1FZW35EN014` | `NOT txid5833[ORGN]` (P. falciparum itself) | FASTA + payload + reference XML captured |
+| 18S ribosomal RNA | Plasmodium falciparum (`taxid=5833`) | 2,151 bp | `9N5JA17Y014` | `NOT txid5833[ORGN]` (P. falciparum itself) | Fresh XML1/XML2 + all-defline taxid proof captured |
 | RdRp / ORF1ab | SARS-CoV-2 (`taxid=2697049`) | 21,290 bp | `9MK93UBF016` | `NOT txid3418604[ORGN] NOT txid32630[ORGN]` | Fresh XML1/XML2 + all-defline taxid proof captured |
 
 All three genes are now fully captured. The RdRp / ORF1ab FASTA was pulled from NCBI Entrez
@@ -47,7 +47,7 @@ All three genes are now fully captured. The RdRp / ORF1ab FASTA was pulled from 
 - `reference_xml/` -- captured NCBI Web BLAST reference XML for every gene, gzip-compressed to
   keep the repo lean:
   - `f3l_9MHUJ94R014.xml.gz` plus same-RID XML2 and NCBI Taxonomy snapshots
-  - `rrna_18s_1FZW35EN014.xml.gz` (500 hits, HITLIST_SIZE cap)
+  - `rrna_18s_9N5JA17Y014.xml.gz` plus same-RID XML2 and NCBI Taxonomy snapshots
   - `rdrp_orf1ab_9MK93UBF016.xml.gz` plus same-RID XML2 and NCBI Taxonomy snapshots
   The comparator at `api/services/blast/web_blast_parity.py::parse_summary` reads `.xml` and
   `.xml.gz` transparently.
@@ -81,6 +81,12 @@ All three genes are now fully captured. The RdRp / ORF1ab FASTA was pulled from 
 - Query-specific `Statistics_eff-space` comes from the same-RID XML2 result. XML1 can report zero
   for that field. The local request carries it as `query_effective_search_spaces`; active-generation
   canonicalization must not replace it with the unrelated 64-nt database calibration value.
+- Web BLAST applies two related spaces for taxonomy-filtered searches: result statistics report
+  `(query_length - length_adjustment) * (filtered_letters - filtered_sequences * length_adjustment)`,
+  while HSP E-values use `(query_length - length_adjustment) * filtered_letters`. The fixture's
+  validated `web_blast_statistical_context` carries both values plus the exact result DB-length
+  representation; precise shard execution passes the raw filtered length as `-dbsize` and the
+  scoring value as `-searchsp` before BLAST runs.
 
 ## Refreshing reference XML from NCBI (opt-in)
 

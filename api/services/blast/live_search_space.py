@@ -4,8 +4,9 @@ Responsibility: Read trusted workload database counts and derive the canonical
 Web BLAST calibration value used by non-browser submit surfaces.
 Edit boundaries: Keep Storage metadata lookup and scalar option rewriting here;
 submit routes/tasks own HTTP, queue, and state behavior.
-Key entry points: `resolve_live_search_space`, `canonicalize_precise_options`,
-`collapse_uniform_query_search_space`, `set_search_space_option`.
+Key entry points: `resolve_live_search_space`, `validate_web_blast_statistical_context`,
+`canonicalize_precise_options`, `collapse_uniform_query_search_space`,
+`set_search_space_option`.
 Risky contracts: Precise calibrated databases fail closed when active metadata
 is unavailable; caller-provided stale scalar values never override the active
 snapshot. An explicit query-level list is more specific than the database
@@ -28,6 +29,16 @@ class LiveSearchSpaceUnavailable(RuntimeError):
     """Raised when a precise calibrated submit lacks active DB statistics."""
 
 
+_WEB_BLAST_CONTEXT_FIELDS = (
+    "filtered_database_letters",
+    "filtered_database_sequences",
+    "length_adjustment",
+    "effective_search_space",
+    "scoring_search_space",
+    "result_database_letters",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class LiveSearchSpace:
     database: str
@@ -35,6 +46,75 @@ class LiveSearchSpace:
     total_letters: int
     total_sequences: int
     value: int
+
+
+def validate_web_blast_statistical_context(
+    context: Mapping[str, Any],
+    *,
+    query_lengths: list[int],
+    active_total_letters: int | None = None,
+    active_total_sequences: int | None = None,
+) -> dict[str, int]:
+    """Validate one query's NCBI Web BLAST database/statistics context.
+
+    Web BLAST reports a length-adjusted effective search space in result
+    statistics, while its HSP E-values use the effective query length times the
+    raw taxonomy-filtered database length. Both values are retained and checked
+    so callers cannot use the context as an arbitrary statistics override.
+    """
+    if len(query_lengths) != 1:
+        raise ValueError("web_blast_statistical_context requires exactly one query")
+    values: dict[str, int] = {}
+    for field in _WEB_BLAST_CONTEXT_FIELDS:
+        value = _positive_int(context.get(field))
+        if value is None:
+            raise ValueError(f"web_blast_statistical_context.{field} must be positive")
+        values[field] = value
+
+    query_length = query_lengths[0]
+    length_adjustment = values["length_adjustment"]
+    if length_adjustment >= query_length:
+        raise ValueError(
+            "web_blast_statistical_context.length_adjustment must be smaller than the query length"
+        )
+    filtered_letters = values["filtered_database_letters"]
+    filtered_sequences = values["filtered_database_sequences"]
+    effective_query_length = query_length - length_adjustment
+    effective_database_length = filtered_letters - filtered_sequences * length_adjustment
+    if effective_database_length <= 0:
+        raise ValueError(
+            "web_blast_statistical_context filtered database statistics are inconsistent"
+        )
+    expected_effective = effective_query_length * effective_database_length
+    expected_scoring = effective_query_length * filtered_letters
+    if values["effective_search_space"] != expected_effective:
+        raise ValueError(
+            "web_blast_statistical_context.effective_search_space does not match "
+            "the filtered database statistics"
+        )
+    if values["scoring_search_space"] != expected_scoring:
+        raise ValueError(
+            "web_blast_statistical_context.scoring_search_space does not match "
+            "the filtered database statistics"
+        )
+    if active_total_letters is not None and filtered_letters > active_total_letters:
+        raise ValueError(
+            "web_blast_statistical_context.filtered_database_letters exceeds the active database"
+        )
+    if active_total_sequences is not None and filtered_sequences > active_total_sequences:
+        raise ValueError(
+            "web_blast_statistical_context.filtered_database_sequences exceeds the active database"
+        )
+    result_database_letters = values["result_database_letters"]
+    if active_total_letters is not None and result_database_letters not in {
+        filtered_letters,
+        active_total_letters,
+    }:
+        raise ValueError(
+            "web_blast_statistical_context.result_database_letters must match "
+            "the filtered or active database length"
+        )
+    return values
 
 
 def _positive_int(value: object) -> int | None:
@@ -139,6 +219,29 @@ def canonicalize_precise_options(
     resolved["db_total_letters"] = live.total_letters
     resolved["db_total_sequences"] = live.total_sequences
     query_spaces = resolved.get("query_effective_search_spaces")
+    context = resolved.get("web_blast_statistical_context")
+    if isinstance(context, Mapping):
+        filtered_letters = _positive_int(context.get("filtered_database_letters"))
+        filtered_sequences = _positive_int(context.get("filtered_database_sequences"))
+        effective_search_space = _positive_int(context.get("effective_search_space"))
+        result_database_letters = _positive_int(context.get("result_database_letters"))
+        if (
+            filtered_letters is None
+            or filtered_sequences is None
+            or result_database_letters is None
+            or filtered_letters > live.total_letters
+            or filtered_sequences > live.total_sequences
+        ):
+            raise ValueError("web_blast_statistical_context exceeds the active database snapshot")
+        if result_database_letters not in {filtered_letters, live.total_letters}:
+            raise ValueError(
+                "web_blast_statistical_context.result_database_letters must match "
+                "the filtered or active database length"
+            )
+        if query_spaces != [effective_search_space]:
+            raise ValueError(
+                "web_blast_statistical_context conflicts with query_effective_search_spaces"
+            )
     if query_spaces not in (None, ""):
         # Query-specific effective spaces incorporate query length and any
         # taxonomy-filtered database subset. They are deliberately preserved;
@@ -177,11 +280,19 @@ def collapse_uniform_query_search_space(
         spaces.append(value)
     unique = set(spaces)
     if len(unique) != 1:
-        raise ValueError(
-            "mixed query_effective_search_spaces require query-group execution"
-        )
+        raise ValueError("mixed query_effective_search_spaces require query-group execution")
     resolved.pop("query_effective_search_spaces", None)
-    resolved["db_effective_search_space"] = spaces[0]
+    context = resolved.get("web_blast_statistical_context")
+    if isinstance(context, Mapping):
+        effective_search_space = _positive_int(context.get("effective_search_space"))
+        scoring_search_space = _positive_int(context.get("scoring_search_space"))
+        if effective_search_space != spaces[0] or scoring_search_space is None:
+            raise ValueError(
+                "web_blast_statistical_context conflicts with query_effective_search_spaces"
+            )
+        resolved["db_effective_search_space"] = scoring_search_space
+    else:
+        resolved["db_effective_search_space"] = spaces[0]
     return resolved
 
 

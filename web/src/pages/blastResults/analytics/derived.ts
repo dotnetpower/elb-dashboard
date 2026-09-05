@@ -379,7 +379,8 @@ export function evalueConfidence(evalue: unknown): ConfidenceVerdict {
     return {
       level: "moderate",
       headline: "Significant",
-      detail: "Below the usual 0.001 reporting threshold; a credible match worth keeping.",
+      detail:
+        "Below the usual 0.001 reporting threshold; a credible match worth keeping.",
     };
   }
   if (ev < 1) {
@@ -401,7 +402,8 @@ export function evalueConfidence(evalue: unknown): ConfidenceVerdict {
 export function bitscoreNote(bitscore: unknown): string {
   const bits = numberValue(bitscore);
   if (bits === null) return "Bit score unavailable.";
-  if (bits >= 200) return `${bits.toFixed(0)} bits — strong, database-independent signal.`;
+  if (bits >= 200)
+    return `${bits.toFixed(0)} bits — strong, database-independent signal.`;
   if (bits >= 80) return `${bits.toFixed(0)} bits — moderate signal; check coverage.`;
   if (bits >= 50) return `${bits.toFixed(0)} bits — weak signal; corroborate.`;
   return `${bits.toFixed(0)} bits — very weak; likely background.`;
@@ -409,6 +411,7 @@ export function bitscoreNote(bitscore: unknown): string {
 
 export interface SearchSpacePin {
   searchSpace: number | null;
+  scoringSearchSpace: number | null;
   source: string | null;
   text: string;
 }
@@ -430,31 +433,42 @@ function uniformQuerySearchSpace(value: unknown): number | null {
 export function searchSpacePin(job: BlastJobSummary | null | undefined): SearchSpacePin {
   const contract = job?.provenance?.compatibility;
   const fromContract = numberValue(contract?.searchsp);
-  const source = typeof contract?.search_space_source === "string"
-    ? contract.search_space_source
-    : null;
+  const source =
+    typeof contract?.search_space_source === "string"
+      ? contract.search_space_source
+      : null;
   const options = job?.provenance?.options as Record<string, unknown> | undefined;
   const payload = job?.payload as Record<string, unknown> | undefined;
   const fromOptions = numberValue(
-    options?.db_effective_search_space ??
-      payload?.db_effective_search_space,
+    options?.db_effective_search_space ?? payload?.db_effective_search_space,
   );
   const fromQueryOptions = uniformQuerySearchSpace(
     options?.query_effective_search_spaces ?? payload?.query_effective_search_spaces,
   );
+  const statisticalContext = (options?.web_blast_statistical_context ??
+    payload?.web_blast_statistical_context) as Record<string, unknown> | undefined;
+  const scoringSearchSpace = numberValue(statisticalContext?.scoring_search_space);
   const searchSpace = fromContract ?? fromQueryOptions ?? fromOptions ?? null;
   if (searchSpace === null) {
     return {
       searchSpace: null,
+      scoringSearchSpace,
       source,
       text: "Effective search space not pinned for this run.",
     };
   }
   const sourceLabel = source ? ` (source: ${source})` : "";
+  const scoringText =
+    scoringSearchSpace !== null && scoringSearchSpace !== searchSpace
+      ? ` HSP E-values used ${formatScientific(scoringSearchSpace)} letters.`
+      : "";
   return {
     searchSpace,
+    scoringSearchSpace,
     source,
-    text: `Effective search space ${formatScientific(searchSpace)} letters${sourceLabel}.`,
+    text:
+      `Reported effective search space ${formatScientific(searchSpace)} ` +
+      `letters${sourceLabel}.${scoringText}`,
   };
 }
 
@@ -548,12 +562,19 @@ export function buildMethodsText(job: BlastJobSummary | null | undefined): strin
   const prov = job?.provenance;
   const program = (prov?.blast?.program ?? job?.program ?? "BLAST").toString();
   const version = prov?.blast?.version ? `BLAST+ ${prov.blast.version}` : "BLAST+";
-  const db = (job?.db ?? readString(prov?.database, "name") ?? "the target database").toString();
-  const snapshot = readString(prov?.database, "snapshot") ?? readString(prov?.database, "update_date");
+  const db = (
+    job?.db ??
+    readString(prov?.database, "name") ??
+    "the target database"
+  ).toString();
+  const snapshot =
+    readString(prov?.database, "snapshot") ?? readString(prov?.database, "update_date");
   const seqs = numberValue(readUnknown(prov?.database, "number_of_sequences"));
   const letters = numberValue(readUnknown(prov?.database, "number_of_letters"));
   const options = (prov?.options ?? {}) as Record<string, unknown>;
-  const evalue = numberValue(options.evalue ?? (job?.payload as Record<string, unknown>)?.evalue);
+  const evalue = numberValue(
+    options.evalue ?? (job?.payload as Record<string, unknown>)?.evalue,
+  );
   const pin = searchSpacePin(job);
 
   const dbDetail: string[] = [];
@@ -570,11 +591,21 @@ export function buildMethodsText(job: BlastJobSummary | null | undefined): strin
     parts.push(`Hits were reported at an E-value threshold of ${formatPlain(evalue)}.`);
   }
   if (pin.searchSpace !== null) {
-    parts.push(
-      `E-values were computed against an effective search space of ${formatScientific(
-        pin.searchSpace,
-      )} letters${pin.source ? ` (${pin.source})` : ""}.`,
-    );
+    if (pin.scoringSearchSpace !== null && pin.scoringSearchSpace !== pin.searchSpace) {
+      parts.push(
+        `Result statistics report an effective search space of ${formatScientific(
+          pin.searchSpace,
+        )} letters; HSP E-values used the taxonomy-filtered scoring space of ${formatScientific(
+          pin.scoringSearchSpace,
+        )} letters${pin.source ? ` (${pin.source})` : ""}.`,
+      );
+    } else {
+      parts.push(
+        `E-values were computed against an effective search space of ${formatScientific(
+          pin.searchSpace,
+        )} letters${pin.source ? ` (${pin.source})` : ""}.`,
+      );
+    }
   }
   const verdict = parityVerdict(job);
   if (prov?.compatibility?.level === "full_db_hitlist_exact_sharded") {
@@ -582,13 +613,17 @@ export function buildMethodsText(job: BlastJobSummary | null | undefined): strin
       "This sharded result reproduces full-database BLAST hitlist membership and order for the recorded database snapshot and options; NCBI parity additionally requires the same NCBI database snapshot.",
     );
   } else if (prov?.compatibility?.level === "verified_full_database_profile") {
-    parts.push("This search ran directly against the full database without a shard merge.");
+    parts.push(
+      "This search ran directly against the full database without a shard merge.",
+    );
   } else if (verdict.state === "drift") {
     parts.push(
       "Note: the database snapshot differs from the calibrated search space, so E-values may differ from a contemporaneous NCBI search.",
     );
   } else if (verdict.state === "approximate") {
-    parts.push("Note: a sharded search was used; results approximate a full-database run.");
+    parts.push(
+      "Note: a sharded search was used; results approximate a full-database run.",
+    );
   }
   return parts.join(" ");
 }
@@ -605,10 +640,7 @@ function readString(
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function readUnknown(
-  record: Record<string, unknown> | undefined,
-  key: string,
-): unknown {
+function readUnknown(record: Record<string, unknown> | undefined, key: string): unknown {
   return record?.[key];
 }
 
