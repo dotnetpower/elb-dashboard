@@ -93,3 +93,12 @@ sidecar topology is being reprovisioned.
   direct health checks, but healthy responses occasionally exceeded the manifest's 3-second budget.
   Manifest revision 6 raises readiness `timeoutSeconds` to 10 while retaining `failureThreshold=3`
   (a bounded ~30-second removal budget); liveness remains the existing 10 seconds x 6 attempts.
+- Readiness follow-up commit `4e8b6dfb` passed the same clean-checkout CI gates and deployed through
+  task `81f030e5-ec77-431e-b8b9-0fad688070a9`. Deployment generation 50 converged on manifest
+  revision 6 with `timeoutSeconds=10`, `failureThreshold=3`, image digest unchanged, 1/1
+  Ready/Available, and restart count 0. The replacement pod recovered all persisted jobs, had no
+  active backlog, returned 30/30 direct health checks in 1-3 ms, and emitted no Unhealthy event or
+  runtime error.
+- Post-revision-6 App Insights window: HTTP 5xx 0, exceptions 0, severity >= 3 traces 0, and
+  actionable dependency failures 0. The API Reference displayed `v3.7.6 · image 4.51` with no
+  remaining Update/Rebuild panel.
