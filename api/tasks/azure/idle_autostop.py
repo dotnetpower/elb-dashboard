@@ -167,8 +167,7 @@ def _provisioning_state(pref: AutoStopPreference) -> str:
 def _batch_power_states(
     prefs: list[AutoStopPreference],
 ) -> tuple[dict[tuple[str, str, str], str], dict[str, Any]]:
-    """Resolve power_state for every pref using one ARM `list_by_resource_group`
-    per ``(subscription_id, resource_group)`` group.
+    """Resolve ARM power/provisioning state with one list call per resource group.
 
     The per-cluster ``_power_state`` helper makes one ARM ``managed_clusters.get``
     call per cluster; that's fine for ad-hoc calls but the beat fan-out
@@ -187,6 +186,7 @@ def _batch_power_states(
         "rg_groups": 0,
         "rg_failed": 0,
         "failed_rgs": [],
+        "provisioning_states": {},
     }
     if not prefs:
         return out, batch_summary
@@ -216,7 +216,11 @@ def _batch_power_states(
                 state = getattr(cluster, "power_state", None)
                 if state is not None:
                     ps = getattr(state, "code", "") or ""
-                out[(sub, rg, name)] = ps
+                key = (sub, rg, name)
+                out[key] = ps
+                batch_summary["provisioning_states"][key] = (
+                    getattr(cluster, "provisioning_state", "") or ""
+                )
         except Exception as exc:
             # Critique #15: an RG-wide ARM failure means auto-stop is
             # silently broken for that group until ARM recovers. Log at
@@ -503,6 +507,7 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     # batching, a 100-cluster fleet would issue 100 ARM `get` calls per
     # 5-min tick and trip ARM throttling on busy subscriptions.
     power_state_map, batch_summary = _batch_power_states(enabled_prefs)
+    provisioning_state_map = batch_summary.get("provisioning_states", {})
     summary["power_state_rg_groups"] = batch_summary["rg_groups"]
     summary["power_state_rg_failed"] = batch_summary["rg_failed"]
     summary["power_state_failed_rgs"] = batch_summary["failed_rgs"]
@@ -531,17 +536,31 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
                 (pref.subscription_id, pref.resource_group, pref.cluster_name),
                 "",
             )
+            cluster_provisioning_state = provisioning_state_map.get(
+                (pref.subscription_id, pref.resource_group, pref.cluster_name),
+                "",
+            )
             # Probe live Kubernetes work only for Running candidates. This
             # catches OpenAPI BLAST, warmup, and prepare-db operations even
             # when their durable row is absent/stale; probe failure remains
-            # additive-only and falls back to the Table signal.
-            live_active_jobs, live_latest_activity = _live_blast_signal(
-                pref, cluster_power_state
-            )
+            # additive-only and falls back to the Table signal. A cluster can
+            # report power_state=Running while its start/stop LRO is still
+            # transitional; skip K8s until provisioning settles so the probe
+            # does not emit expected DNS/connect exceptions during that gap.
+            if (
+                cluster_provisioning_state
+                and cluster_provisioning_state.lower() != "succeeded"
+            ):
+                live_active_jobs, live_latest_activity = None, None
+            else:
+                live_active_jobs, live_latest_activity = _live_blast_signal(
+                    pref, cluster_power_state
+                )
             decision = evaluate_cluster(
                 pref,
                 repo=repo,
                 power_state=cluster_power_state,
+                provisioning_state=cluster_provisioning_state,
                 live_active_jobs=live_active_jobs,
                 live_latest_activity=live_latest_activity,
                 pending_queue_depth=_sb_pending_signal(cluster_power_state),

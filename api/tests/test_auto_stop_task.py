@@ -704,10 +704,12 @@ def test_batch_power_states_groups_by_rg(monkeypatch: pytest.MonkeyPatch) -> Non
                 SimpleNamespace(
                     name="cluster-a",
                     power_state=SimpleNamespace(code="Running"),
+                    provisioning_state="Succeeded",
                 ),
                 SimpleNamespace(
                     name="cluster-b",
                     power_state=SimpleNamespace(code="Stopped"),
+                    provisioning_state="Succeeded",
                 ),
             ]
 
@@ -746,10 +748,54 @@ def test_batch_power_states_groups_by_rg(monkeypatch: pytest.MonkeyPatch) -> Non
     # Matched clusters carry the right power_state; unknown ones absent.
     assert states[("sub-1", "rg-elb", "cluster-a")] == "Running"
     assert states[("sub-1", "rg-elb", "cluster-b")] == "Stopped"
+    assert summary["provisioning_states"] == {
+        ("sub-1", "rg-elb", "cluster-a"): "Succeeded",
+        ("sub-1", "rg-elb", "cluster-b"): "Succeeded",
+    }
     # Summary attributes RG-level success/failure for log aggregation.
     assert summary["rg_groups"] == 2
     assert summary["rg_failed"] == 0
     assert summary["failed_rgs"] == []
+
+
+def test_evaluate_idle_clusters_skips_live_probe_while_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.azure import idle_autostop
+
+    pref = _pref(cluster_name="cluster-starting", enabled=True)
+    save_auto_stop_preference(pref)
+    key = (pref.subscription_id, pref.resource_group, pref.cluster_name)
+    monkeypatch.setattr(
+        idle_autostop,
+        "_batch_power_states",
+        lambda _prefs: (
+            {key: "Running"},
+            {
+                "rg_groups": 1,
+                "rg_failed": 0,
+                "failed_rgs": [],
+                "provisioning_states": {key: "Starting"},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        idle_autostop,
+        "_live_blast_signal",
+        lambda *_args: pytest.fail("K8s must not be probed while AKS is starting"),
+    )
+    observed: list[str] = []
+
+    def _evaluate(*_args: object, **kwargs: object) -> IdleDecision:
+        observed.append(str(kwargs.get("provisioning_state") or ""))
+        return IdleDecision(verdict="keep", reason="provisioning:Starting")
+
+    monkeypatch.setattr(idle_autostop, "evaluate_cluster", _evaluate)
+
+    summary = idle_autostop.evaluate_idle_clusters.run()
+
+    assert observed == ["Starting"]
+    assert summary["kept_running"] == 1
 
 
 def test_live_blast_signal_skips_probe_when_not_running(

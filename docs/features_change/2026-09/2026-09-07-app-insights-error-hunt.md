@@ -28,6 +28,7 @@ The review covered `2026-08-08` through `2026-09-07` in the 90-day workspace ret
 - The pinned OpenAPI runtime advances from `4.51` to immutable tag `4.52`; no endpoint, payload, or scientific-search behavior changes.
 - Completed runtime-metric backfill scans only recently updated completed jobs by default (two hours, bounded to seven days), avoiding the arbitrary 5,000-row cap and stale K8s calls. Other `list_completed` consumers retain the all-history default.
 - Oracle readiness bypasses the 90-second AKS health cache and blocks both non-running and non-`Succeeded` provisioning states before Storage/Kubernetes probes. ARM lookup failure still degrades open under the existing contract.
+- Idle auto-stop batching now carries the same ARM `provisioning_state` alongside `power_state` and skips live Kubernetes probes while AKS is `Starting` or `Stopping`, avoiding transition-only DNS/connect exceptions without adding ARM calls.
 - The App Insights hunt reference now uses `ExceptionType`, severity-based trace filtering, and excludes only the known derived `InProc`/result-code-zero dependency artifact.
 
 ## Current state
@@ -47,7 +48,7 @@ The review covered `2026-08-08` through `2026-09-07` in the 90-day workspace ret
 - `uv run pytest -q api/tests/test_blast_tasks.py -k 'backfill_completed_runtime_metrics'` - 4 passed.
 - `uv run pytest -q api/tests/test_state_repo.py -k 'list_completed'` - 3 passed.
 - `uv run pytest -q api/tests/test_oracle_build.py` - 11 passed.
-- `uv run pytest -q api/tests` - 5,713 passed, 5 skipped.
+- `uv run pytest -q api/tests` - 5,714 passed, 5 skipped.
 - `uv run ruff check api scripts/dev/patch-openapi-build-context.py` - passed.
 - `uv run python scripts/docs/check_frontmatter.py` - passed.
 - `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` - passed.
