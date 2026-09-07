@@ -26,9 +26,11 @@ import { usePreferences } from "@/hooks/usePreferences";
 
 import {
   appInsightsPortalUrl,
-  describeEffectiveSource,
+  describeBrowserConnectionSource,
+  describeServerTelemetry,
   extractInstrumentationKeyTail,
   isWellFormedConnectionString,
+  shouldShowProvisionResource,
 } from "./telemetryHelpers";
 
 /**
@@ -77,7 +79,7 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
   const userConnectionString = prefs.appInsightsConnectionString.trim();
   const userKeyTail = extractInstrumentationKeyTail(userConnectionString);
   const isWellFormedUserString = isWellFormedConnectionString(userConnectionString);
-  const hasConnectionStringSomewhere = ai.active || isWellFormedUserString || ai.source === "deployment";
+  const hasConnectionStringSomewhere = ai.active || isWellFormedUserString || ai.deploymentConfigured;
 
   usePollTask(task, setTask, (status) => {
     if (status.status !== "SUCCESS") return;
@@ -100,8 +102,11 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
       setPref("appInsightsWorkspaceResourceId", workspaceId);
     }
     const serverApplied = result?.deployment_apply?.status === "applied";
-    if (serverApplied && result?.deployment_apply?.revision) {
-      setPref("appInsightsLastAppliedRevision", result.deployment_apply.revision);
+    if (serverApplied) {
+      if (result?.deployment_apply?.revision) {
+        setPref("appInsightsLastAppliedRevision", result.deployment_apply.revision);
+      }
+      ai.refreshDeploymentStatus();
     }
     if (result?.connection_string || workspaceId) {
       const createdParts: string[] = [];
@@ -124,10 +129,11 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
     const result = status.result as { deployment_apply?: { status?: string; reason?: string; revision?: string | null } } | null;
     const applyStatus = result?.deployment_apply?.status;
     const revision = result?.deployment_apply?.revision;
-    if (applyStatus === "applied" && revision) {
-      setPref("appInsightsLastAppliedRevision", revision);
+    if (applyStatus === "applied") {
+      if (revision) setPref("appInsightsLastAppliedRevision", revision);
       const tail = extractInstrumentationKeyTail(prefs.appInsightsConnectionString);
       if (tail) setPref("appInsightsLastAppliedKeyTail", tail);
+      ai.refreshDeploymentStatus();
     }
     setApplyTask((prev) => prev && {
       ...prev,
@@ -145,6 +151,7 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
     if (clearStatus === "cleared" || clearStatus === "no_change") {
       setPref("appInsightsLastAppliedRevision", revision ?? "");
       setPref("appInsightsLastAppliedKeyTail", "");
+      ai.refreshDeploymentStatus();
     }
     setClearTask((prev) => prev && {
       ...prev,
@@ -270,7 +277,19 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
     copyTimer.current = window.setTimeout(() => setCopyMessage(null), 2200);
   }, [userConnectionString]);
 
-  const sourceDescriptor = describeEffectiveSource(ai.source, ai.active);
+  const sourceDescriptor = describeBrowserConnectionSource(
+    ai.source,
+    isWellFormedUserString,
+  );
+  const serverDescriptor = describeServerTelemetry(
+    ai.deploymentConfigured,
+    ai.deploymentStatusResolved,
+  );
+  const showProvisionResource = shouldShowProvisionResource({
+    deploymentConfigured: ai.deploymentConfigured,
+    deploymentStatusResolved: ai.deploymentStatusResolved,
+    userConnectionStringValid: isWellFormedUserString,
+  });
   const portalUrl = appInsightsPortalUrl(config?.subscriptionId, form.component_name, form.resource_group);
   const userValueDiffersFromApplied =
     isWellFormedUserString && userKeyTail !== "" && userKeyTail !== prefs.appInsightsLastAppliedKeyTail;
@@ -280,11 +299,11 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
     <Section heading="Telemetry">
       <Group>
         <Row
-          label="Send application telemetry to App Insights"
+          label="Browser telemetry on this device"
           hint={
             hasConnectionStringSomewhere
-              ? "Browser telemetry starts when the toggle is on. Server sidecar updates are explicit (see below)."
-              : "Add a connection string or provision an App Insights resource before enabling."
+              ? "Controls page views, browser requests, and browser errors from this browser only."
+              : "Add a browser connection string or configure the deployment before enabling."
           }
           control={
             <Toggle
@@ -296,7 +315,7 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
           }
         />
         <Row
-          label="Effective source"
+          label="Browser connection source"
           hint={sourceDescriptor.hint}
           control={
             <Badge tone={sourceDescriptor.tone} icon={sourceDescriptor.icon}>
@@ -304,25 +323,22 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
             </Badge>
           }
         />
-        {(prefs.appInsightsLastAppliedRevision || prefs.appInsightsLastAppliedKeyTail) && (
-          <Row
-            label="Server sidecars"
-            hint={
-              prefs.appInsightsLastAppliedKeyTail
-                ? `api / worker / beat last received a connection string ending …${prefs.appInsightsLastAppliedKeyTail}.`
-                : "api / worker / beat last had the connection string removed."
-            }
-            control={
-              prefs.appInsightsLastAppliedRevision ? (
+        <Row
+          label="Server sidecars"
+          hint={serverDescriptor.hint}
+          control={
+            <div style={{ display: "grid", justifyItems: "end", gap: 4 }}>
+              <Badge tone={serverDescriptor.tone} icon={serverDescriptor.icon}>
+                {serverDescriptor.label}
+              </Badge>
+              {prefs.appInsightsLastAppliedRevision && (
                 <code style={{ fontSize: 11, color: "var(--text-muted)" }}>
                   {prefs.appInsightsLastAppliedRevision}
                 </code>
-              ) : (
-                <Badge tone="muted">No revision</Badge>
-              )
-            }
-          />
-        )}
+              )}
+            </div>
+          }
+        />
       </Group>
 
       <Group title="Connection string override">
@@ -467,7 +483,7 @@ export function TelemetrySection({ config }: { config: ResourceConfig | null }) 
         )}
       </Group>
 
-      {!ai.active && (
+      {showProvisionResource && (
       <Group title="Provision a resource">
         <Row
           label="Create Application Insights"

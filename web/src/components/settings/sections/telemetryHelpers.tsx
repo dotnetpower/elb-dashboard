@@ -3,9 +3,9 @@
  * section component (issue #24).
  *
  * Owns the Application Insights connection-string shape check, the masked
- * instrumentation-key tail, the effective-source badge descriptor (label / hint
- * / tone / icon), and the Azure portal deep-link builder. No state, no effects —
- * the only JSX is the small status icon returned by `describeEffectiveSource`,
+ * instrumentation-key tail, browser/server status descriptors, provisioning
+ * visibility, and the Azure portal deep-link builder. No state, no effects —
+ * the only JSX is the small status icon returned by the descriptor helpers,
  * which is why this is a `.tsx` module.
  */
 
@@ -23,48 +23,90 @@ export function extractInstrumentationKeyTail(value: string): string {
   return key.length > 8 ? key.slice(-8) : key;
 }
 
-export function describeEffectiveSource(
+export function describeBrowserConnectionSource(
   source: "user" | "deployment" | "none",
-  active: boolean,
-): { label: string; hint: string; tone: "success" | "muted" | "warning"; icon: ReactNode } {
-  if (active && source === "user") {
-    return {
-      label: "Browser override · active",
-      hint: "The SPA is using the connection string entered below.",
-      tone: "success",
-      icon: <CheckCircle2 size={11} strokeWidth={2} />,
-    };
-  }
-  if (active && source === "deployment") {
-    return {
-      label: "Deployment · active",
-      hint: "Using APPLICATIONINSIGHTS_CONNECTION_STRING injected by the Container App template.",
-      tone: "success",
-      icon: <CheckCircle2 size={11} strokeWidth={2} />,
-    };
-  }
+  userConnectionStringValid: boolean,
+): {
+  label: string;
+  hint: string;
+  tone: "success" | "muted" | "warning";
+  icon: ReactNode;
+} {
   if (source === "user") {
+    if (!userConnectionStringValid) {
+      return {
+        label: "Invalid override",
+        hint: "Complete or clear the browser connection string entered below.",
+        tone: "warning",
+        icon: <AlertCircle size={11} strokeWidth={2} />,
+      };
+    }
     return {
-      label: "Browser override · idle",
-      hint: "A connection string is entered but telemetry is disabled.",
-      tone: "warning",
-      icon: <AlertCircle size={11} strokeWidth={2} />,
+      label: "Browser override",
+      hint: "This browser will use the connection string entered below when browser telemetry is on.",
+      tone: "success",
+      icon: <CheckCircle2 size={11} strokeWidth={2} />,
     };
   }
   if (source === "deployment") {
     return {
-      label: "Deployment · idle",
-      hint: "Connection string is available but telemetry is disabled.",
-      tone: "warning",
-      icon: <AlertCircle size={11} strokeWidth={2} />,
+      label: "Deployment connection",
+      hint: "This browser can use the connection string supplied by the deployment.",
+      tone: "success",
+      icon: <CheckCircle2 size={11} strokeWidth={2} />,
+    };
+  }
+  return {
+    label: "Unavailable",
+    hint: "No connection string is available to this browser.",
+    tone: "muted",
+    icon: null,
+  };
+}
+
+export function describeServerTelemetry(
+  deploymentConfigured: boolean,
+  deploymentStatusResolved: boolean,
+): {
+  label: string;
+  hint: string;
+  tone: "success" | "muted" | "warning";
+  icon: ReactNode;
+} {
+  if (!deploymentStatusResolved) {
+    return {
+      label: "Checking",
+      hint: "Checking telemetry configuration for api, worker, and beat.",
+      tone: "muted",
+      icon: null,
+    };
+  }
+  if (deploymentConfigured) {
+    return {
+      label: "Configured",
+      hint: "api, worker, and beat have an effective App Insights connection string.",
+      tone: "success",
+      icon: <CheckCircle2 size={11} strokeWidth={2} />,
     };
   }
   return {
     label: "Not configured",
-    hint: "Enter a connection string below or provision an Application Insights resource.",
-    tone: "muted",
-    icon: null,
+    hint: "api, worker, and beat do not have an App Insights connection string.",
+    tone: "warning",
+    icon: <AlertCircle size={11} strokeWidth={2} />,
   };
+}
+
+export function shouldShowProvisionResource({
+  deploymentConfigured,
+  deploymentStatusResolved,
+  userConnectionStringValid,
+}: {
+  deploymentConfigured: boolean;
+  deploymentStatusResolved: boolean;
+  userConnectionStringValid: boolean;
+}): boolean {
+  return deploymentStatusResolved && !deploymentConfigured && !userConnectionStringValid;
 }
 
 export function appInsightsPortalUrl(

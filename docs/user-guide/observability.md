@@ -74,11 +74,12 @@ The built-in surfaces stop helping when you need history. **Settings → Telemet
 
 ![Settings → Telemetry panel with the App Insights toggle, connection string override, and Provision a resource form](../images/screenshots/observability/settings-telemetry.png)
 
-The panel is split into three rows:
+The panel separates browser collection from server-side collection:
 
-1. **Send application telemetry to App Insights** — a master toggle. When on, the SPA initialises the [Application Insights JavaScript SDK](https://learn.microsoft.com/azure/azure-monitor/app/javascript) and starts sending page views, dependencies, and unhandled errors from the browser. The toggle is per-browser (stored in `localStorage["elb-prefs"]`) so individual operators can turn telemetry on for themselves without affecting other users.
-2. **Effective source** + **Server sidecars** — read-only status lines. **Effective source** tells you whether the SPA is using the deployment-provided connection string or a manual override entered in this panel. **Server sidecars** shows the last connection string suffix that was applied to `api` / `worker` / `beat` and the revision name that landed it (e.g. `ca-elb-dashboard--telemetry-…`).
-3. **Connection string override** — the manual entry field. Pasting a full Application Insights [connection string](https://learn.microsoft.com/azure/azure-monitor/app/sdk-connection-string) (it must contain both `InstrumentationKey=` and `IngestionEndpoint=`) takes precedence over the deployment value. The `frontend` and `terminal` sidecars are intentionally read-only and are never patched from this panel.
+1. **Browser telemetry on this device** — controls only the SPA's [Application Insights JavaScript SDK](https://learn.microsoft.com/azure/azure-monitor/app/javascript). When on, this browser sends page views, dependencies, and unhandled errors. The toggle is stored in `localStorage["elb-prefs"]`; changing it does not enable or disable telemetry from `api`, `worker`, or `beat`, and it does not affect other browsers.
+2. **Browser connection source** — reports whether this browser can use the deployment-provided connection string or a manual override entered in this panel. Connection availability is independent of whether the browser toggle is on.
+3. **Server sidecars** — reports the effective server status returned by the API. `Configured` means `api`, `worker`, and `beat` can resolve an App Insights connection string; their export remains active even when the browser toggle is off. When this browser previously applied an override, its last returned revision appears below the badge.
+4. **Connection string override** — the manual entry field. Pasting a full Application Insights [connection string](https://learn.microsoft.com/azure/azure-monitor/app/sdk-connection-string) (it must contain both `InstrumentationKey=` and `IngestionEndpoint=`) takes precedence over the deployment value for this browser. The `frontend` and `terminal` sidecars are intentionally read-only and are never patched from this panel.
 
 Three buttons drive server-side actions on the override row:
 
@@ -88,13 +89,13 @@ Three buttons drive server-side actions on the override row:
 
 ### Provision A New Resource
 
-If there is no Application Insights component yet — or you want a dedicated one separate from the `azd`-created default — use the **Provision a resource** card at the bottom of the panel. **Open form** asks for the subscription, resource group, name, region, and Log Analytics workspace, and **Create Application Insights** enqueues `api.tasks.azure.provision_app_insights` which creates both `appi-elb-dashboard` and its backing `log-elb-dashboard` workspace under `rg-elb-dashboard` / `koreacentral` by default. Existing resources with the same name are reused, so this is safe to re-run.
+If the status check confirms that the deployment has no Application Insights connection string and no valid browser override is present, the **Provision a resource** card appears at the bottom of the panel. **Open form** asks for the subscription, resource group, name, region, and Log Analytics workspace, and **Create Application Insights** enqueues `api.tasks.azure.provision_app_insights` which creates both `appi-elb-dashboard` and its backing `log-elb-dashboard` workspace under `rg-elb-dashboard` / `koreacentral` by default. Existing resources with the same name are reused, so this is safe to re-run.
 
 Once the task completes, the new connection string appears in the override field and you can immediately **Apply to server sidecars**. The **Open in Azure Portal** link opens the component's Overview blade, where the connection string also lives.
 
 ## What Lands In Application Insights
 
-Once both the SPA toggle and the server-side override are on, you will see telemetry from every sidecar that runs Python (`api`, `worker`, `beat`) plus browser telemetry from the SPA. The most useful tables to query in App Insights → **Logs** are:
+Server sidecars emit whenever their deployment connection string is configured. Separately, the SPA emits browser telemetry when its per-browser toggle is on and a browser connection source is available. The most useful tables to query in App Insights → **Logs** are:
 
 | Table | Source | Useful for |
 | --- | --- | --- |
@@ -418,7 +419,8 @@ The same warnings from the section above apply — this dashboard is a *consumer
 | Sidecar runtime band is missing | Narrow viewport — the band is hidden below a width threshold | Use a wider window or rotate the device. |
 | All sidecar tiles say `unknown` and the chip shows "Stale" | The browser cannot reach `/api/monitor/sidecars` (auth, network, or the api sidecar is down) | Check the browser network tab; verify the api sidecar is healthy in Azure Portal → Container Apps → Revisions. |
 | HTTP request inspector is empty | The api sidecar recently restarted and the in-memory ring buffer is empty | Generate a request (refresh the dashboard) and watch it appear. For historical data, switch to App Insights. |
-| Telemetry toggle is on but nothing appears in App Insights | Connection string is invalid, or the SPA is on an older bundle that has not picked up the override | Confirm the **Effective source** line says `BROWSER OVERRIDE · ACTIVE`, click **Send test event**, then search `customEvents` in App Insights. |
+| Browser telemetry is on but no browser events appear in App Insights | The browser connection string is invalid, or the SPA is on an older bundle that has not picked up the override | Confirm **Browser connection source** says `BROWSER OVERRIDE` or `DEPLOYMENT CONNECTION`, click **Send test event**, then search `customEvents` in App Insights. |
+| Browser telemetry is off but server records still appear | This is expected: the browser toggle controls only this device, while `api` / `worker` / `beat` use the deployment connection independently | Check the separate **Server sidecars** row; `CONFIGURED` means backend telemetry remains enabled. |
 | **Apply to server sidecars** succeeded but server logs still missing | Connection string was applied to a revision that has not finished rolling out | Wait for the new `ca-elb-dashboard--telemetry-…` revision to become active in the Container Apps revisions blade. |
 | **Provision a resource** fails with a permission error | The dashboard's user-assigned managed identity lacks `Contributor` on the target resource group | Grant the missing role at the resource-group scope and retry. |
 

@@ -37,6 +37,12 @@ import { settingsApi } from "@/api/settings";
 interface AppInsightsContextValue {
   /** True when an instance is live and accepting events. */
   active: boolean;
+  /** True when api / worker / beat have a deployment-provided connection string. */
+  deploymentConfigured: boolean;
+  /** True after the deployment telemetry status endpoint has answered. */
+  deploymentStatusResolved: boolean;
+  /** Re-read deployment telemetry state after an apply or clear task. */
+  refreshDeploymentStatus: () => void;
   /** Active connection string (masked at UI render time). */
   connectionString: string;
   /** "user" / "deployment" / "none". */
@@ -50,6 +56,9 @@ const noop = () => {};
 
 const Context = createContext<AppInsightsContextValue>({
   active: false,
+  deploymentConfigured: false,
+  deploymentStatusResolved: false,
+  refreshDeploymentStatus: noop,
   connectionString: "",
   source: "none",
   trackPageView: noop,
@@ -100,6 +109,8 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
   const { prefs } = usePreferences();
   const { accounts } = useMsal();
   const [deploymentConnectionString, setDeploymentConnectionString] = useState("");
+  const [deploymentConfigured, setDeploymentConfigured] = useState(false);
+  const [deploymentStatusResolved, setDeploymentStatusResolved] = useState(false);
   // True once a NON-EMPTY deployment string has resolved. We keep retrying
   // until then so a transient empty/error response does not leave the SPA
   // permanently blank (see the focus/visibility effect below).
@@ -117,22 +128,35 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
   // sidecar; a request landing in that window returns empty/errors, which
   // previously stuck the panel blank until a manual page refresh. Leaving
   // resolvedRef false on empty/error lets the focus/visibility effect retry.
-  const refreshDeploymentString = useCallback(() => {
-    if (!signedIn || resolvedRef.current) return;
-    settingsApi
-      .getAppInsightsStatus()
-      .then((status) => {
-        const cs = (status.deployment_connection_string ?? "").trim();
-        if (cs) {
-          resolvedRef.current = true;
+  const fetchDeploymentStatus = useCallback(
+    (force: boolean) => {
+      if (!signedIn || (!force && resolvedRef.current)) return;
+      if (force) setDeploymentStatusResolved(false);
+      settingsApi
+        .getAppInsightsStatus()
+        .then((status) => {
+          const cs = (status.deployment_connection_string ?? "").trim();
+          const configured = Boolean(status.deployment_configured && cs);
+          setDeploymentConfigured(configured);
+          setDeploymentStatusResolved(true);
           setDeploymentConnectionString(cs);
-        }
-      })
-      .catch(() => {
-        // Non-fatal — keep going with whatever the user supplied. resolvedRef
-        // stays false so the next focus/visibility regain retries.
-      });
-  }, [signedIn]);
+          resolvedRef.current = configured;
+        })
+        .catch(() => {
+          // Non-fatal — keep going with whatever the user supplied. A forced
+          // refresh remains unresolved so the UI does not report stale state.
+        });
+    },
+    [signedIn],
+  );
+
+  const refreshDeploymentString = useCallback(() => {
+    fetchDeploymentStatus(false);
+  }, [fetchDeploymentStatus]);
+
+  const refreshDeploymentStatus = useCallback(() => {
+    fetchDeploymentStatus(true);
+  }, [fetchDeploymentStatus]);
 
   useEffect(() => {
     refreshDeploymentString();
@@ -190,6 +214,9 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
     if (!ai) {
       return {
         active: false,
+        deploymentConfigured,
+        deploymentStatusResolved,
+        refreshDeploymentStatus,
         connectionString: "",
         source,
         trackPageView: noop,
@@ -198,12 +225,22 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
     }
     return {
       active: true,
+      deploymentConfigured,
+      deploymentStatusResolved,
+      refreshDeploymentStatus,
       connectionString: effective,
       source,
       trackPageView: (telemetry) => ai.trackPageView(telemetry),
       trackException: (telemetry) => ai.trackException(telemetry),
     };
-  }, [ai, effective, source]);
+  }, [
+    ai,
+    deploymentConfigured,
+    deploymentStatusResolved,
+    effective,
+    refreshDeploymentStatus,
+    source,
+  ]);
 
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }

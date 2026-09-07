@@ -892,6 +892,13 @@ function matchApi(path: string, method: string): Response | null {
   }
   if (path === "/api/terminal/health")
     return jsonResponse({ status: "ok", upstream_status: 200 });
+  if (path === "/api/settings/app-insights") {
+    return jsonResponse({
+      deployment_connection_string:
+        "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://example.invalid/",
+      deployment_configured: true,
+    });
+  }
   if (path === "/api/monitor/aks/service-ip")
     return jsonResponse({ service_name: "elb-openapi", external_ip: "10.42.0.52" });
   if (path === "/api/aks/openapi/spec") return jsonResponse(openApiSpecPayload());
