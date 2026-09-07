@@ -458,6 +458,13 @@ def test_validate_web_blast_execution_options_rejects_non_blastn_program() -> No
 def test_preserve_or_set_search_space_uses_active_fallback_when_absent() -> None:
     assert (
         exact_oracle.preserve_or_set_search_space(
+            "-outfmt 5 -dust yes",
+            30_807_003_700_117,
+        )
+        == "-outfmt 5 -dust yes -searchsp 30807003700117"
+    )
+    assert (
+        exact_oracle.preserve_or_set_search_space(
             "-outfmt 5 -dbsize 1 -dust yes",
             30_807_003_700_117,
         )

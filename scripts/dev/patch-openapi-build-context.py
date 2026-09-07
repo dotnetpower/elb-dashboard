@@ -9,7 +9,9 @@ Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch
 `_patch_web_blast_candidate_selection_evidence`, `_harden_openapi_runtime_ids`,
 `_harden_elb_scripts_configmap_reconciliation`, `patch_app`, `main`
 Risky contracts: Preserve strict result-path validation; only shard outputs and the exact canonical
-merged filename may pass. Assume local developer context only; avoid broad production-side effects.
+merged filename may pass. Precise core_nt submits without an explicit search space must derive it
+from validated active-generation metadata and fail closed when that metadata is unavailable. Assume
+local developer context only; avoid broad production-side effects.
 Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
 
@@ -256,7 +258,18 @@ def _patch_external_soft_masking(root: Path) -> None:
 
 
 def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
-    """Pin active DB paths while preserving an explicit query search space."""
+    """Pin active DB paths and derive a missing search space from active metadata."""
+    required_search_space_guard = (
+        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
+        "            raise HTTPException(\n"
+        "                400,\n"
+        '                "Precise core_nt sharding requires db_effective_search_space",\n'
+        "            )\n"
+    )
+    # OpenAPI 4.38 briefly required callers to provide the scalar even though
+    # the active-generation block below already derives a safe fallback.
+    # Remove that legacy guard before matching either patched source shape.
+    _replace_once(path, required_search_space_guard, "")
     fallback_only = (
         '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
         '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
@@ -274,11 +287,6 @@ def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
         '        config["blast"]["db-partition-prefix"] = (\n'
         '            f"{_blob_base()}/blast-db/{partitions}shards/core_nt_shard_"\n'
         "        )\n"
-        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
-        "            raise HTTPException(\n"
-        "                400,\n"
-        '                "Precise core_nt sharding requires db_effective_search_space",\n'
-        "            )\n"
         "        try:\n"
         "            active_database = _exact_oracle.read_active_database(\n"
         "                blob_base=_blob_base(),\n"
@@ -317,11 +325,6 @@ def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
     desired = (
         "        default_partitions = max(1, min(NUM_NODES, 10))\n"
         "        one_shard_layout = None\n"
-        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
-        "            raise HTTPException(\n"
-        "                400,\n"
-        '                "Precise core_nt sharding requires db_effective_search_space",\n'
-        "            )\n"
         "        try:\n"
         "            active_database = _exact_oracle.read_active_database(\n"
         "                blob_base=_blob_base(),\n"
@@ -1246,20 +1249,13 @@ def patch_app(root: Path) -> None:
             '            raise HTTPException(503, "Exact DB-order oracle support is unavailable")\n'
             "        opts = _exact_oracle.ensure_tabular_raw_score(opts)\n"
             '        config["blast"]["options"] = opts\n'
-            "        default_partitions = max(1, min(NUM_NODES, 10))\n"
-            "        one_shard_layout = None\n"
+            "        partitions = max(1, min(NUM_NODES, 10))\n"
+            '        config["blast"]["db-partitions"] = str(partitions)\n'
+            '        config["blast"]["db-partition-prefix"] = (\n'
+            '            f"{_blob_base()}/blast-db/{partitions}shards/core_nt_shard_"\n'
+            "        )\n"
             '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
-            "            raise HTTPException(\n"
-            "                400,\n"
-            '                "Precise core_nt sharding requires db_effective_search_space",\n'
-            "            )\n"
-            "            if web_blast_statistics is not None and partitions == 1:\n"
-            "                one_shard_layout = _exact_oracle.read_one_shard_layout(\n"
-            "                    blob_base=_blob_base(),\n"
-            "                    db_name=db_name,\n"
-            "                    active_database=active_database,\n"
-            "                    token=_storage_oauth_token(),\n"
-            "                )\n"
+            '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
         ),
         'profile in {"core_nt_precise", "precise", "core_nt_safe"}',
     )

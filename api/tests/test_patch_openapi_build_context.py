@@ -4,11 +4,13 @@ Responsibility: Verify OpenAPI image patching enforces runtime policy and refres
 ElasticBLAST scripts.
 Edit boundaries: Use temporary build contexts only; never invoke Docker or Azure.
 Key entry points: `test_patch_dockerfile_asserts_ttl_in_all_runtime_copies`,
+`test_patch_removes_obsolete_precise_search_space_guard`,
 `test_patch_app_reconciles_elb_scripts_by_content`,
 `test_patch_allows_only_canonical_merged_result_through_blob_path_guard`.
 Risky contracts: The assertions must cover source, system Python, and venv templates; OpenAPI
 submits must never trust historical warmup Jobs or name-only ConfigMap checks as node-local
-cache-presence proof. Result path guards must continue rejecting traversal and arbitrary files.
+cache-presence proof. Missing precise search space must reach the active-generation fallback. Result
+path guards must continue rejecting traversal and arbitrary files.
 Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
 
@@ -360,8 +362,10 @@ def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> N
 
     assert path.read_text() == first
     assert "32156241807668" not in first
+    assert "Precise core_nt sharding requires db_effective_search_space" not in first
     assert "read_active_database(" in first
     assert "preserve_or_set_search_space(" in first
+    assert first.index("read_active_database(") < first.index("preserve_or_set_search_space(")
     assert "prepare_web_blast_statistics(" in first
     assert "select_web_blast_partitions(" in first
     assert "read_one_shard_layout(" in first
@@ -373,6 +377,29 @@ def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> N
     assert "active_database.db_prefix" in first
     assert "active_database.shard_layout_prefix" in first
     assert "Active database statistics are required for precise core_nt sharding" in first
+
+
+def test_patch_removes_obsolete_precise_search_space_guard(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
+        '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
+    )
+    module._replace_stale_core_nt_search_space_fallback(path)
+    active_fallback = path.read_text()
+    obsolete_guard = (
+        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
+        "            raise HTTPException(\n"
+        "                400,\n"
+        '                "Precise core_nt sharding requires db_effective_search_space",\n'
+        "            )\n"
+    )
+    path.write_text(active_fallback.replace("        try:\n", obsolete_guard + "        try:\n", 1))
+
+    module._replace_stale_core_nt_search_space_fallback(path)
+
+    assert path.read_text() == active_fallback
 
 
 def test_patch_adds_candidate_selection_evidence_idempotently(tmp_path: Path) -> None:

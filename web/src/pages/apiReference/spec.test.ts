@@ -44,6 +44,17 @@ describe("API Reference spec parser", () => {
       "mode_b_core_nt_outfmt7_taxids",
       "mode_a",
     ]);
+    for (const key of [
+      "mode_b_core_nt",
+      "mode_b_core_nt_outfmt7",
+      "mode_b_core_nt_outfmt7_taxids",
+    ]) {
+      const example = examples[key] as { description?: string };
+      expect(example.description).toContain(
+        "Search space is resolved server-side from the active core_nt generation.",
+      );
+      expect(example.description).toContain("Leave -searchsp and -dbsize out");
+    }
 
     const small16s = examples.small_16s_rrna.value as {
       program: string;
@@ -83,6 +94,8 @@ describe("API Reference spec parser", () => {
       outfmt: "5",
       extra: "-word_size 28 -dust yes -soft_masking false",
     });
+    expect(coreNt.blast_options.extra).not.toContain("-searchsp");
+    expect(coreNt.blast_options.extra).not.toContain("-dbsize");
     expect(coreNt.resource_profile).toBe("core_nt_safe");
 
     const coreNtOutfmt7 = examples.mode_b_core_nt_outfmt7.value as {

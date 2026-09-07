@@ -127,6 +127,10 @@ from __future__ import annotations
 # SHA-256 c362535f0f85b0982cba43c0d48a0e82b63fce78422fb21a816e18685e513c52.
 # ACR run de8r produced digest
 # sha256:4d837a0fab027242df118ddce776df07fa0e0657e70adfbc15dee2c537927f5e.
+# 4.51 restores server-owned search-space derivation for direct precise
+# core_nt `/v1/jobs` requests. It removes the obsolete pre-resolution HTTP 400
+# guard while preserving explicit query-specific values and fail-closed active
+# generation validation.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -154,7 +158,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.50",
+    "elb-openapi": "4.51",
 }
 
 # GitHub source repo for ACR Build Tasks.

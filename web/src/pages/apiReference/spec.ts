@@ -13,11 +13,13 @@ const CORE_NT_NC_003310_FASTA =
   ].join("\n") + "\n";
 
 const CORE_NT_BLAST_OPTIONS = "-word_size 28 -dust yes -soft_masking false";
+const CORE_NT_SEARCH_SPACE_NOTE =
+  "Search space is resolved server-side from the active core_nt generation. Leave -searchsp and -dbsize out of the request so a database update cannot leave a stale snapshot value.";
 
 const CORE_NT_JOB_EXAMPLE = {
   summary: "Mode B - Web BLAST-equivalent core_nt",
   description:
-    "Search core_nt with the same BLAST options used by New Search. The server derives -searchsp from the active database generation and fails precise execution if those statistics are unavailable; no snapshot-specific value is copied into this request.",
+    `Search core_nt with the same BLAST options used by New Search. ${CORE_NT_SEARCH_SPACE_NOTE} Precise execution fails if the active statistics are unavailable.`,
   value: {
     program: "blastn",
     db: "core_nt",
@@ -69,7 +71,7 @@ const SMALL_16S_RRNA_JOB_EXAMPLE = {
 const CORE_NT_OUTFMT7_JOB_EXAMPLE = {
   summary: "Mode B - core_nt tabular (outfmt 7)",
   description:
-    "Same Web BLAST-equivalent core_nt search as Mode B, but requests tabular output with comment lines (outfmt 7) instead of XML. outfmt 7 shares outfmt 6's 12-column data rows, so it runs sharded: the shard merge skips the per-shard comment headers and re-emits a single merged comment header. Use outfmt 7 when a downstream consumer wants tabular rows with the BLASTN / Query / Fields / hit-count comments.",
+    `Same Web BLAST-equivalent core_nt search as Mode B, but requests tabular output with comment lines (outfmt 7) instead of XML. outfmt 7 shares outfmt 6's 12-column data rows, so it runs sharded: the shard merge skips the per-shard comment headers and re-emits a single merged comment header. Use outfmt 7 when a downstream consumer wants tabular rows with the BLASTN / Query / Fields / hit-count comments. ${CORE_NT_SEARCH_SPACE_NOTE}`,
   value: {
     program: "blastn",
     db: "core_nt",
@@ -86,8 +88,13 @@ const CORE_NT_OUTFMT7_JOB_EXAMPLE = {
 
 const CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE = {
   summary: "Mode B - core_nt tabular + taxids (outfmt 7 std staxids)",
-  description:
-    "Adds taxonomy + strand + sequence columns to the tabular output via an extended outfmt specifier. The standard 12 columns MUST stay first (the `std` token), because the shard merge re-ranks by the fixed std positions (evalue=col11, bitscore=col12) and only then preserves the trailing columns; a non-std-leading order is rejected. The full specifier is passed as the `outfmt` value (the sibling keeps it verbatim) so the standard columns are not duplicated — do NOT also place -outfmt in `extra`. For Web BLAST-equivalent e-values and ranking, submit this from New Search with sharding_mode=precise (search-space correction + tie-order oracle). The multi-token outfmt is now verified end-to-end on a live sharded core_nt run (elb-openapi 4.22): each shard pod renders `-outfmt 7 std staxids sscinames` as a single blastn argument and the merged result carries the `subject tax ids` / `subject sci names` columns. If a shard fails to start, fall back to plain outfmt 7 (no extra columns) or outfmt 5 (XML).",
+  description: [
+    "Adds taxonomy + strand + sequence columns to the tabular output via an extended outfmt specifier. The standard 12 columns MUST stay first (the `std` token), because the shard merge re-ranks by the fixed std positions (evalue=col11, bitscore=col12) and only then preserves the trailing columns; a non-std-leading order is rejected.",
+    "The full specifier is passed as the `outfmt` value (the sibling keeps it verbatim) so the standard columns are not duplicated; do NOT also place -outfmt in `extra`.",
+    "For Web BLAST-equivalent e-values and ranking, this preset uses the precise core_nt profile (search-space correction + tie-order oracle).",
+    CORE_NT_SEARCH_SPACE_NOTE,
+    "The multi-token outfmt is verified end-to-end: each shard pod renders `-outfmt 7 std staxids sstrand qseq sseq` as a single blastn argument and the merged result preserves the trailing taxonomy, strand, and sequence columns. If a shard fails to start, fall back to plain outfmt 7 (no extra columns) or outfmt 5 (XML).",
+  ].join(" "),
   value: {
     program: "blastn",
     db: "core_nt",
