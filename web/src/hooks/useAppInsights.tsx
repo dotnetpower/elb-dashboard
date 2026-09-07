@@ -31,6 +31,7 @@ import {
 } from "@microsoft/applicationinsights-web";
 import { useMsal } from "@azure/msal-react";
 
+import { isDevBypassEnabled } from "@/config/runtime";
 import { usePreferences } from "@/hooks/usePreferences";
 import { settingsApi } from "@/api/settings";
 
@@ -116,11 +117,12 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
   // permanently blank (see the focus/visibility effect below).
   const resolvedRef = useRef(false);
 
-  const signedIn = accounts.length > 0;
+  const canQuerySettings = accounts.length > 0 || isDevBypassEnabled();
 
-  // Look up the deployment-injected connection string lazily after sign-in.
-  // The endpoint requires a bearer token, so calling it before MSAL has an
-  // active account would return 401 and spam the SPA error console.
+  // Look up the deployment-injected connection string lazily after sign-in,
+  // or immediately when the explicit local/docs dev-bypass is enabled. The
+  // production endpoint requires a bearer token, so calling it before MSAL
+  // has an active account would return 401 and spam the SPA error console.
   //
   // Idempotent + self-healing: once a non-empty value resolves we stop
   // (resolvedRef), so this is at most one extra request per wake event until
@@ -130,7 +132,7 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
   // resolvedRef false on empty/error lets the focus/visibility effect retry.
   const fetchDeploymentStatus = useCallback(
     (force: boolean) => {
-      if (!signedIn || (!force && resolvedRef.current)) return;
+      if (!canQuerySettings || (!force && resolvedRef.current)) return;
       if (force) setDeploymentStatusResolved(false);
       settingsApi
         .getAppInsightsStatus()
@@ -147,7 +149,7 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
           // refresh remains unresolved so the UI does not report stale state.
         });
     },
-    [signedIn],
+    [canQuerySettings],
   );
 
   const refreshDeploymentString = useCallback(() => {
@@ -168,7 +170,7 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
   // manual refresh. No-op once resolvedRef is true (guarded inside the
   // callback), so it does not add steady-state traffic.
   useEffect(() => {
-    if (!signedIn) return;
+    if (!canQuerySettings) return;
     const onVisible = () => {
       if (document.visibilityState === "visible") refreshDeploymentString();
     };
@@ -178,7 +180,7 @@ export function AppInsightsProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("focus", refreshDeploymentString);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [signedIn, refreshDeploymentString]);
+  }, [canQuerySettings, refreshDeploymentString]);
 
   const userConnectionString = prefs.appInsightsConnectionString.trim();
   const effective = userConnectionString || deploymentConnectionString.trim();

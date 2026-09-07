@@ -27,6 +27,8 @@ configured deployment.
   `Not configured` from the authenticated deployment status endpoint.
 - **Provision a resource** appears only after the status request confirms that no
   deployment connection exists and no valid browser override is present.
+- Local dev-bypass and docs-preview sessions now perform the same status lookup
+  without requiring an MSAL account, matching their existing API-client auth path.
 
 ## API and implementation summary
 
@@ -45,3 +47,6 @@ configured deployment.
 - `bash scripts/docs/build-mock-preview.sh` - passed.
 - `uv run python scripts/docs/check_frontmatter.py` - passed.
 - `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` - passed.
+- Host-mode Playwright with a dummy configured status - browser toggle `false`,
+  browser source `Deployment connection`, server status `Configured`, and
+  **Provision a resource** absent; screenshot captured from the Settings dialog.
