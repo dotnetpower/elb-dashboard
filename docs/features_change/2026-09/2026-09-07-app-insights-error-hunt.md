@@ -33,8 +33,8 @@ The review covered `2026-08-08` through `2026-09-07` in the 90-day workspace ret
 
 ## Current state
 
-- Container App revision `ca-elb-dashboard--env-beat-1788781349-11597` is Healthy with one replica and 100% traffic.
-- Before the idle stop, all 11 AKS nodes were Ready and the OpenAPI deployment had one Ready pod with zero restarts. The cluster is now intentionally Stopped with the blast pool at zero after the 60-minute idle policy.
+- Container App revision `ca-elb-dashboard--env-beat-1788797485-29489` is Healthy with one replica and 100% traffic. All six sidecars are Ready with zero restarts; API, worker, and beat run digest `sha256:c0735941c77b0a533c801da6b783f3fad4c3413a30abe846ec08c64e7e94c705`.
+- AKS is `Running/Succeeded`; all 11 nodes are Ready. The OpenAPI `4.52` deployment is 1/1 Ready/Available with zero pod restarts, and authenticated `/v1/ready` reports `ready=true` for the K8s API, OpenAPI pod, and 10-node workload pool.
 - A representative completed job retained all 10 result files and a healthy aggregate. Its canonical runtime ID was eventually backfilled, confirming that the remaining impact was missing durable pod tails rather than missing scientific results.
 - The malformed Service Bus request reached the request DLQ with `servicebus_malformed_request`; neighboring valid requests continued through bounded readiness deferral and acceptance.
 - From the completed idle stop at `2026-09-07T14:16:00Z` through `14:38:06Z`, App Insights reported zero 5xx requests, exceptions, severity-3 traces, or actionable dependency failures.
@@ -53,4 +53,8 @@ The review covered `2026-08-08` through `2026-09-07` in the 90-day workspace ret
 - `uv run python scripts/docs/check_frontmatter.py` - passed.
 - `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` - passed.
 - ACR run `de9a` built and pushed `elb-openapi:4.52` with digest `sha256:73bda8e52b754deac8558398a247eb8fe3fb5b48243413e6e8d543e73318f83f`; ACR was restored to `publicNetworkAccess=Disabled`, `defaultAction=Deny` immediately afterward.
+- Commits `3e607037`, `f7384585`, and `511ca859` were pushed to `origin/main`; each push passed the isolated pre-push CI mirror.
+- ACR runs `de9d` / `de9e` built the final API and prepare-db images. `quick-deploy.sh api deploy-511ca85 --yes` converged API, worker, and beat on the final API digest without changing frontend, terminal, Redis, or sidecar topology.
+- After revision activation at `2026-09-07T16:12:42Z`, App Insights reported zero 5xx requests, exceptions, severity-3 traces, or actionable dependency failures. Public `/api/health` and the SPA root returned HTTP 200.
+- Final network posture: ACR and workload Storage both report `publicNetworkAccess=Disabled`, `defaultAction=Deny`; Storage has zero IP rules.
 - Live read-only checks: App Insights KQL across requests/exceptions/traces/dependencies, Container App revision health, AKS ARM state, Kubernetes `/readyz`, node readiness, OpenAPI deployment/pod readiness, Service Bus transition logs, and authenticated production result-page response capture.
