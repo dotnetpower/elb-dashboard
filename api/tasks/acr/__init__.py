@@ -5,7 +5,8 @@ Edit boundaries: Keep long-running side effects here; route handlers should enqu
 persist state.
 Key entry points: `build_images`, `_schedule_acr_build`
 Risky contracts: Tasks should be idempotent and retry-aware; per-image source
-repositories and pre-build patch commands are part of the immutable build input.
+repositories, pre-build patch commands, and their tool images are part of the immutable build
+input. A pre-build command must not depend on tools from ACR's implicit default image.
 Validation: `uv run pytest -q api/tests/test_acr_build_task.py
 api/tests/test_azure_tasks.py api/tests/test_blast_tasks.py`.
 """
@@ -153,7 +154,7 @@ def _schedule_acr_build(
     ``EncodedTaskRunRequest`` with ``workingDirectory`` set to the
     image's context directory. Images that need a pre-build step
     (currently ``ncbi/elasticblast-job-submit`` rsyncing templates)
-    prepend a ``cmd`` step.
+    prepend a ``cmd`` step with an explicit tool image when configured.
 
     The build models live alongside ``begin_schedule_run`` on the legacy
     api-version; importing from ``azure.mgmt.containerregistry.models``
@@ -177,7 +178,11 @@ def _schedule_acr_build(
 
     steps: list[str] = []
     if pre_cmd:
-        steps.append(f"  - cmd: >\n      bash -lc {shlex.quote(pre_cmd)}")
+        pre_build_step = f"  - cmd: >\n      bash -lc {shlex.quote(pre_cmd)}"
+        pre_build_image = build_info.get("pre_build_image")
+        if pre_build_image:
+            pre_build_step += f"\n    image: {pre_build_image}"
+        steps.append(pre_build_step)
     steps.append(
         "  - build: >\n"
         f"      -t {{{{.Run.Registry}}}}/{image_ref}\n"

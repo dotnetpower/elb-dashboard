@@ -218,11 +218,17 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
     "elb-openapi": {
         # A raw sibling build omits dashboard runtime overlays. Schedule this
         # image from the dashboard source, clone the reviewed sibling commit,
-        # patch its context, then build from the generated directory.
+        # patch its context, then build from the generated directory. ACR's
+        # implicit cmd-step image does not contain git, so pin an explicit
+        # tool image that carries git + Python + grep + bash.
         "source_repo": DASHBOARD_SOURCE_REPO,
         "context": ".acr-openapi/docker-openapi",
         "dockerfile": "Dockerfile",
         "timeout_seconds": "1200",
+        "pre_build_image": (
+            "python:3.12-bookworm@"
+            "sha256:581429e3df12d76e6af4be5ab7d0e7fc2013eb57dc23d2de691411c8efdbb970"
+        ),
         "pre_build_cmd": " && ".join(
             [
                 "rm -rf .acr-openapi",

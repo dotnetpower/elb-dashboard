@@ -34,6 +34,10 @@ though the runtime already had the metadata and fallback logic needed to calcula
   newly generated and previously patched source.
 - The pinned runtime advances from `elb-openapi:4.50` to `elb-openapi:4.51`, preserving `4.50` as
   the rollback boundary.
+- The ACR pre-build command now runs in a pinned tool image containing git and Python. The first
+  live `4.51` build correctly failed before deployment because ACR's implicit command image had no
+  `git`; the build-first gate preserved the running `4.50` deployment and restored ACR to
+  `publicNetworkAccess=Disabled`, `defaultAction=Deny`.
 - Existing active-generation validation, immutable database paths, DB-order oracle checks, and
   Web BLAST statistical-context handling are unchanged.
 - API Reference examples remain generation-neutral and do not embed a database snapshot constant.

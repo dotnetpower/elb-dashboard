@@ -109,6 +109,7 @@ def test_openapi_build_uses_pinned_patched_context() -> None:
     task_yaml = base64.b64decode(request.encoded_task_content).decode("utf-8")
 
     assert request.source_location == DASHBOARD_SOURCE_REPO
+    assert f"image: {IMAGE_BUILD_INFO['elb-openapi']['pre_build_image']}" in task_yaml
     assert f"fetch --depth 1 origin {OPENAPI_SIBLING_SOURCE_REF}" in task_yaml
     assert f'test "$(git -C .acr-openapi rev-parse HEAD)" = "{OPENAPI_SIBLING_SOURCE_REF}"' in (
         task_yaml
