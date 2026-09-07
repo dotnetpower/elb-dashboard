@@ -53,7 +53,7 @@ jobs:
 
       - name: Install web dependencies
         working-directory: web
-        run: npm install --no-package-lock
+        run: npm ci
 
       - name: Refresh Unreleased release notes
         run: |
