@@ -25,6 +25,7 @@ The review covered `2026-08-08` through `2026-09-07` in the 90-day workspace ret
 - Aggregate builders now classify `ResultReadBudgetExceeded` as an honest partial result (`truncated=true`) instead of a parse/read failure.
 - Local API/worker processes no longer auto-recover the deployed Application Insights connection string from durable state. Explicit local connection-string opt-in still works; durable self-healing remains enabled inside Container Apps.
 - The OpenAPI build-context patch accepts `correlation_id` as a runtime identity only when it is canonical. Workflow correlation values such as `wf3:...` now fall through to the submit-output parser, so the terminal webhook can carry the runtime ID before Kubernetes TTL cleanup.
+- The pinned OpenAPI runtime advances from `4.51` to immutable tag `4.52`; no endpoint, payload, or scientific-search behavior changes.
 - Completed runtime-metric backfill scans only recently updated completed jobs by default (two hours, bounded to seven days), avoiding the arbitrary 5,000-row cap and stale K8s calls. Other `list_completed` consumers retain the all-history default.
 - Oracle readiness bypasses the 90-second AKS health cache and blocks both non-running and non-`Succeeded` provisioning states before Storage/Kubernetes probes. ARM lookup failure still degrades open under the existing contract.
 - The App Insights hunt reference now uses `ExceptionType`, severity-based trace filtering, and excludes only the known derived `InProc`/result-code-zero dependency artifact.
@@ -50,4 +51,5 @@ The review covered `2026-08-08` through `2026-09-07` in the 90-day workspace ret
 - `uv run ruff check api scripts/dev/patch-openapi-build-context.py` - passed.
 - `uv run python scripts/docs/check_frontmatter.py` - passed.
 - `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` - passed.
+- ACR run `de9a` built and pushed `elb-openapi:4.52` with digest `sha256:73bda8e52b754deac8558398a247eb8fe3fb5b48243413e6e8d543e73318f83f`; ACR was restored to `publicNetworkAccess=Disabled`, `defaultAction=Deny` immediately afterward.
 - Live read-only checks: App Insights KQL across requests/exceptions/traces/dependencies, Container App revision health, AKS ARM state, Kubernetes `/readyz`, node readiness, OpenAPI deployment/pod readiness, Service Bus transition logs, and authenticated production result-page response capture.

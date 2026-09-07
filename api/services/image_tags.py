@@ -131,6 +131,10 @@ from __future__ import annotations
 # core_nt `/v1/jobs` requests. It removes the obsolete pre-resolution HTTP 400
 # guard while preserving explicit query-specific values and fail-closed active
 # generation validation.
+# 4.52 preserves 4.51 behavior and rejects noncanonical workflow correlation
+# values as ElasticBLAST runtime IDs so terminal webhooks carry the real
+# `job-<32hex>` identity before pod-log TTL cleanup. ACR run de9a produced
+# digest sha256:73bda8e52b754deac8558398a247eb8fe3fb5b48243413e6e8d543e73318f83f.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -158,7 +162,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.51",
+    "elb-openapi": "4.52",
 }
 
 # GitHub source repo for ACR Build Tasks.
