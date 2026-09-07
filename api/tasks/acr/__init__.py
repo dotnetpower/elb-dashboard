@@ -178,11 +178,11 @@ def _schedule_acr_build(
 
     steps: list[str] = []
     if pre_cmd:
-        pre_build_step = f"  - cmd: >\n      bash -lc {shlex.quote(pre_cmd)}"
         pre_build_image = build_info.get("pre_build_image")
-        if pre_build_image:
-            pre_build_step += f"\n    image: {pre_build_image}"
-        steps.append(pre_build_step)
+        command_prefix = f"{pre_build_image} " if pre_build_image else ""
+        steps.append(
+            f"  - cmd: >\n      {command_prefix}bash -lc {shlex.quote(pre_cmd)}"
+        )
     steps.append(
         "  - build: >\n"
         f"      -t {{{{.Run.Registry}}}}/{image_ref}\n"
