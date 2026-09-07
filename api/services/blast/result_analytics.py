@@ -162,9 +162,10 @@ class ResultReadBudgetExceeded(RuntimeError):
     """A result blob was skipped because the per-job read budget was spent.
 
     Carried in the ``error`` slot of :func:`read_result_blob_texts_parallel` so
-    the existing caller loops count it as a read failure. That is the honest
-    accounting — the file really was not read — and it keeps the "all reads
-    failed" guards working instead of silently returning fewer hits.
+    callers cannot silently return fewer hits. Export paths count the skipped
+    file as unread; the aggregate builder reports it as ``truncated`` rather
+    than an I/O or parse failure because the omission is an intentional memory
+    bound, not a broken result blob.
     """
 
     def __init__(self, blob_path: str, budget_bytes: int) -> None:
@@ -351,10 +352,10 @@ def read_result_blob_texts_parallel(
     ``max_bytes`` (10-20 MB) is 200-400 MB of decoded text held simultaneously
     in a 2 GiB sidecar. Reads are therefore issued in batches and stop once
     ``total_max_bytes`` is spent; the remaining blobs come back carrying
-    :class:`ResultReadBudgetExceeded`, which the existing caller loops already
-    surface as a read failure (the file genuinely was not read) rather than
-    silently under-reporting. The first blob is always read in full so a
-    single-file job is never affected.
+    :class:`ResultReadBudgetExceeded`, which each caller must surface either as
+    an unread file or an explicit truncation rather than silently
+    under-reporting. The first blob is always read in full so a single-file job
+    is never affected.
     """
     cred = get_credential()
     paths = [str(info.get("name") or "") for info in blob_infos]

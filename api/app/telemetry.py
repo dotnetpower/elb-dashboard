@@ -10,7 +10,7 @@ Key entry points: `init_telemetry(role, app=None)`, `annotate_error_span`,
 `suppress_dependency_telemetry`.
 Risky contracts: Must never raise. Must be safe to call multiple times in the
 same process. Must remain a no-op when the connection string env var is unset
-or empty so unit tests and `AUTH_DEV_BYPASS=true` local runs are unaffected.
+or empty outside Container Apps so unit tests and local runs are unaffected.
 Validation: `uv run pytest -q api/tests/test_telemetry_init.py`.
 """
 
@@ -101,16 +101,17 @@ def _resolve_connection_string() -> str:
     """Resolve the connection string, healing from the durable store if wiped.
 
     Prefers the ``APPLICATIONINSIGHTS_CONNECTION_STRING`` env var; when empty
-    (e.g. a full ``azd provision`` re-applied the Bicep template and reset the
-    env to the empty azd value), falls back to the applied override persisted in
-    the ``appinsightspref`` Table. This lets backend OpenTelemetry export
-    self-heal on the next sidecar restart without a revision swap. The import is
-    lazy and the lookup never raises — any failure degrades to the env value so
-    telemetry init stays non-fatal at startup.
+    in a deployed Container App (e.g. a full ``azd provision`` reset it), falls
+    back to the applied override persisted in the ``appinsightspref`` Table.
+    Local processes never use that fallback; they must opt in by setting the env
+    var explicitly so development and test traffic cannot pollute production
+    telemetry. The import is lazy and the lookup never raises.
     """
     env_value = (os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING") or "").strip()
     if env_value:
         return env_value
+    if not (os.environ.get("CONTAINER_APP_NAME") or "").strip():
+        return ""
     try:
         from api.services.app_insights_provisioning import deployment_connection_string
 

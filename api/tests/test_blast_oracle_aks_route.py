@@ -74,6 +74,7 @@ def test_oracle_returns_409_when_cluster_stopped(
         _subscription_id: str,
         resource_group: str,
         _cluster_name: str,
+        **_kwargs: object,
     ) -> dict[str, Any]:
         assert resource_group == "rg-aks"
         return {
@@ -108,6 +109,7 @@ def test_oracle_defaults_aks_resource_group_for_legacy_callers(
         _subscription_id: str,
         resource_group: str,
         _cluster_name: str,
+        **_kwargs: object,
     ) -> dict[str, Any]:
         assert resource_group == "rg-elb"
         return {

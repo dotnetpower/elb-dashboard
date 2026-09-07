@@ -49,7 +49,7 @@ AppRequests
 az monitor log-analytics query --workspace "$WORKSPACE_ID" --analytics-query '
 AppExceptions
 | where TimeGenerated > ago(4h)
-| project TimeGenerated, AppRoleName, OperationName, ProblemId, Type, OuterMessage, OperationId
+| project TimeGenerated, AppRoleName, OperationName, ProblemId, ExceptionType, OuterMessage, OperationId
 | order by TimeGenerated desc
 | take 100
 ' -o table
@@ -59,7 +59,7 @@ AppExceptions
 az monitor log-analytics query --workspace "$WORKSPACE_ID" --analytics-query '
 AppTraces
 | where TimeGenerated > ago(4h)
-| where SeverityLevel >= 3 or Message has_any ("ERROR", "Exception", "Traceback", "failed")
+| where SeverityLevel >= 3
 | project TimeGenerated, AppRoleName, SeverityLevel, Message, OperationId
 | order by TimeGenerated desc
 | take 100
@@ -71,6 +71,7 @@ az monitor log-analytics query --workspace "$WORKSPACE_ID" --analytics-query '
 AppDependencies
 | where TimeGenerated > ago(4h)
 | where Success == false
+| where not(DependencyType == "InProc" and ResultCode == "0")
 | project TimeGenerated, AppRoleName, Target, DependencyType, Name, ResultCode, DurationMs, OperationId
 | order by TimeGenerated desc
 | take 100
@@ -106,7 +107,7 @@ exceptions
 az monitor app-insights query --app "$APP_ID" --analytics-query '
 traces
 | where timestamp > ago(4h)
-| where severityLevel >= 3 or message has_any ("ERROR", "Exception", "Traceback", "failed")
+| where severityLevel >= 3
 | project timestamp, cloud_RoleName, severityLevel, message, operation_Id
 | order by timestamp desc
 | take 100
@@ -116,6 +117,9 @@ traces
 ## Interpretation Rules
 
 - Treat `api`, `worker`, and `beat` roles separately. A clean API with worker exceptions is still a failed execution run.
+- Use `ExceptionType` for workspace-based `AppExceptions`; `Type` is the table discriminator and collapses every exception into `AppExceptions`.
+- Query severity-2 warning signatures separately. Do not OR generic words such as `failed` into the error query: structured success messages can contain fields such as `failed=0` or `error_code=` and create large false-positive sets.
+- Exclude only `InProc` dependency spans with `ResultCode == "0"` from the failure list. Azure SDK instrumentation can mark the wrapper span failed when a handled Table/Blob miss occurs while retaining the actual nested Azure HTTP span (for example, a successful-policy 404); the nested HTTP span remains queryable and carries the actionable status.
 - Correlate by request id, `operation_Id`, job id, task id, and `external_correlation_id`.
 - Redact subscription ids, UPNs, bearer tokens, SAS signatures, and long URLs from the final report.
 - Browser-side exceptions are useful, but live BLAST success requires server-side request/task telemetry to be clean.

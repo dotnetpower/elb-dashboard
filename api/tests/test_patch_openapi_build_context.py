@@ -6,7 +6,8 @@ Edit boundaries: Use temporary build contexts only; never invoke Docker or Azure
 Key entry points: `test_patch_dockerfile_asserts_ttl_in_all_runtime_copies`,
 `test_patch_removes_obsolete_precise_search_space_guard`,
 `test_patch_app_reconciles_elb_scripts_by_content`,
-`test_patch_allows_only_canonical_merged_result_through_blob_path_guard`.
+`test_patch_allows_only_canonical_merged_result_through_blob_path_guard`,
+`test_patch_submit_runtime_id_rejects_noncanonical_correlation`.
 Risky contracts: The assertions must cover source, system Python, and venv templates; OpenAPI
 submits must never trust historical warmup Jobs or name-only ConfigMap checks as node-local
 cache-presence proof. Missing precise search space must reach the active-generation fallback. Result
@@ -796,6 +797,60 @@ def test_patch_app_hardens_all_runtime_id_consumers(tmp_path: Path) -> None:
 
     assert '.startswith("job-")' not in text
     assert text.count('re.fullmatch(r"job-[0-9a-f]{32}"') == 4
+
+
+def test_patch_submit_runtime_id_rejects_noncanonical_correlation(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def submit(job_id, payload, result, status):\n"
+        "        _update_job(\n"
+        "            job_id,\n"
+        "            status=status,\n"
+        '            phase="submitted" if status == "running" else status,\n'
+        "            elb_job_id=(\n"
+        '                payload.get("correlation_id")\n'
+        '                or _discover_elb_job_id_from_submit_output(job_id, result.stdout or "")\n'
+        "                or job_id\n"
+        "            ),\n"
+        "        )\n"
+    )
+
+    module._patch_submit_runtime_id_priority(path)
+    first = path.read_text()
+    module._patch_submit_runtime_id_priority(path)
+
+    assert path.read_text() == first
+    updates: list[str] = []
+
+    def _update_job(_job_id: str, **kwargs: Any) -> None:
+        updates.append(kwargs["elb_job_id"])
+
+    canonical = "job-" + "a" * 32
+    namespace: dict[str, Any] = {
+        "re": re,
+        "_update_job": _update_job,
+        "_discover_elb_job_id_from_submit_output": (
+            lambda _job_id, stdout: canonical if stdout == "discover" else ""
+        ),
+    }
+    exec(first, namespace)  # noqa: S102 - execute only generated temporary fixture code.
+    submit = namespace["submit"]
+    submit(
+        "request-1",
+        {"correlation_id": "wf3:request-1"},
+        SimpleNamespace(stdout="discover"),
+        "running",
+    )
+    submit(
+        "request-2",
+        {"correlation_id": canonical.upper()},
+        SimpleNamespace(stdout="other"),
+        "running",
+    )
+    submit("request-3", {}, SimpleNamespace(stdout="other"), "running")
+
+    assert updates == [canonical, canonical, "request-3"]
 
 
 def test_replace_once_removes_block_idempotently(tmp_path: Path) -> None:

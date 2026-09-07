@@ -7,7 +7,8 @@ Edit boundaries: Keep this as an operator/dev utility; do not make production co
 Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
 `_disable_warmed_cache_skip`, `_patch_canonical_merged_result_validation`,
 `_patch_web_blast_candidate_selection_evidence`, `_harden_openapi_runtime_ids`,
-`_harden_elb_scripts_configmap_reconciliation`, `patch_app`, `main`
+`_patch_submit_runtime_id_priority`, `_harden_elb_scripts_configmap_reconciliation`,
+`patch_app`, `main`
 Risky contracts: Preserve strict result-path validation; only shard outputs and the exact canonical
 merged filename may pass. Precise core_nt submits without an explicit search space must derive it
 from validated active-generation metadata and fail closed when that metadata is unavailable. Assume
@@ -662,6 +663,53 @@ def _harden_openapi_runtime_id_consumers(path: Path) -> None:
     path.write_text(text)
 
 
+def _patch_submit_runtime_id_priority(path: Path) -> None:
+    """Ignore non-runtime correlation values before parsing submit output."""
+
+    fresh = (
+        "        _update_job(\n"
+        "            job_id,\n"
+        "            status=status,\n"
+        '            phase="submitted" if status == "running" else status,\n'
+        '            elb_job_id=payload.get("correlation_id") or job_id,\n'
+    )
+    legacy = (
+        "        _update_job(\n"
+        "            job_id,\n"
+        "            status=status,\n"
+        '            phase="submitted" if status == "running" else status,\n'
+        "            elb_job_id=(\n"
+        '                payload.get("correlation_id")\n'
+        '                or _discover_elb_job_id_from_submit_output(job_id, result.stdout or "")\n'
+        "                or job_id\n"
+        "            ),\n"
+    )
+    desired = (
+        '        correlation_id = str(payload.get("correlation_id") or "")\n'
+        "        canonical_correlation_id = (\n"
+        "            correlation_id.lower()\n"
+        '            if re.fullmatch(r"job-[0-9a-f]{32}", correlation_id, re.IGNORECASE)\n'
+        '            else ""\n'
+        "        )\n"
+        "        _update_job(\n"
+        "            job_id,\n"
+        "            status=status,\n"
+        '            phase="submitted" if status == "running" else status,\n'
+        "            elb_job_id=(\n"
+        "                canonical_correlation_id\n"
+        '                or _discover_elb_job_id_from_submit_output(job_id, result.stdout or "")\n'
+        "                or job_id\n"
+        "            ),\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=fresh,
+        legacy=legacy,
+        desired=desired,
+        marker="canonical_correlation_id = (",
+    )
+
+
 def _harden_elb_scripts_configmap_reconciliation(path: Path) -> None:
     """Reconcile installed ElasticBLAST scripts instead of trusting stale keys."""
 
@@ -837,6 +885,7 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "def _discover_elb_job_id_from_submit_output(",
         "def _effective_elb_job_id(",
         'canonical_current = re.fullmatch(r"job-[0-9a-f]{32}"',
+        "canonical_correlation_id = (",
         'payload["elb_job_id"] = runtime_job_id',
         'def _job_marker_phase(results_url: str, elb_job_id: str = "")',
         're.fullmatch(r"job-[0-9a-f]{32}", elb_job_id, re.IGNORECASE)',
@@ -1307,23 +1356,7 @@ def patch_app(root: Path) -> None:
     )
     if duplicate in text:
         path.write_text(text.replace(duplicate, "    blast_version = _blast_version_detail()", 1))
-    _replace_once(
-        path,
-        "        _update_job(\n"
-        "            job_id,\n"
-        "            status=status,\n"
-        '            phase="submitted" if status == "running" else status,\n'
-        '            elb_job_id=payload.get("correlation_id") or job_id,\n',
-        "        _update_job(\n"
-        "            job_id,\n"
-        "            status=status,\n"
-        '            phase="submitted" if status == "running" else status,\n'
-        "            elb_job_id=(\n"
-        '                payload.get("correlation_id")\n'
-        '                or _discover_elb_job_id_from_submit_output(job_id, result.stdout or "")\n'
-        "                or job_id\n"
-        "            ),\n",
-    )
+    _patch_submit_runtime_id_priority(path)
     _insert_once(
         path,
         (

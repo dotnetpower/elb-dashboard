@@ -7,9 +7,9 @@ Edit boundaries: Exercise the local file backend only (no Azure Table); drive
 the public API of `api.services.app_insights_pref`.
 Key entry points: `test_roundtrip_and_clear`, `test_get_empty_when_missing`,
     `test_save_rejects_malformed`, `test_deployment_connection_string_fallback`,
-    `test_telemetry_resolver_prefers_env`.
+    `test_telemetry_resolver_limits_durable_fallback_to_container_apps`.
 Risky contracts: `get_persisted_connection_string` must never raise; the
-    fallback must not fire while the env var is set.
+    fallback must not fire while the env var is set or from a local process.
 Validation: `uv run pytest -q api/tests/test_app_insights_pref.py`.
 """
 
@@ -90,7 +90,9 @@ def test_deployment_connection_string_fallback(monkeypatch: pytest.MonkeyPatch) 
     assert deployment_connection_string() == _VALID
 
 
-def test_telemetry_resolver_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_telemetry_resolver_limits_durable_fallback_to_container_apps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from api.app import telemetry
     from api.services.app_insights_pref import save_persisted_connection_string
 
@@ -100,4 +102,7 @@ def test_telemetry_resolver_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert telemetry._resolve_connection_string() == "InstrumentationKey=env;"
 
     monkeypatch.delenv("APPLICATIONINSIGHTS_CONNECTION_STRING", raising=False)
+    assert telemetry._resolve_connection_string() == ""
+
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
     assert telemetry._resolve_connection_string() == _VALID

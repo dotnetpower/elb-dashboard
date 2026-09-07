@@ -1468,6 +1468,7 @@ class JobStateRepository:
         *,
         job_type: str = "blast",
         limit: int = 100,
+        since_seconds: int = 0,
     ) -> list[JobState]:
         """Return the genuinely most-recently-completed jobs for backfill tasks.
 
@@ -1488,11 +1489,19 @@ class JobStateRepository:
         long-running BLAST job can be created hours before it completes, and
         only recently-completed jobs still have a live K8s Job to read container
         timestamps from (old ones are garbage-collected, so backfilling them is
-        a no-op). The caller needs ``payload`` (scope + existing metrics), so
-        the summaries are not returned directly.
+        a no-op). Callers may set ``since_seconds`` to bound that stale scan by
+        ``updated_at``; zero preserves the all-history behavior used by retention
+        and result backfills. The caller needs ``payload`` (scope + existing
+        metrics), so the summaries are not returned directly.
         """
         safe_type = _sanitise_odata_value(job_type)
-        filter_expr = f"type eq '{safe_type}' and status eq 'completed'"
+        clauses = [f"type eq '{safe_type}'", "status eq 'completed'"]
+        if since_seconds > 0:
+            cutoff = (datetime.now(UTC) - timedelta(seconds=since_seconds)).isoformat(
+                timespec="seconds"
+            )
+            clauses.append(f"updated_at gt '{_sanitise_odata_value(cutoff)}'")
+        filter_expr = " and ".join(clauses)
         scan_cap = _list_scan_hard_cap()
         summaries: list[JobState] = []
         with self._state_client() as t:

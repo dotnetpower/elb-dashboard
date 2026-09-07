@@ -4100,11 +4100,25 @@ class _FakeReconcileRepo:
         self._active = active
         self.updates: list[tuple[str, dict[str, object]]] = []
         self.history: list[tuple[str, str, dict[str, object] | None]] = []
+        self.completed_calls: list[dict[str, object]] = []
 
     def list_active(self, *, job_type: str = "blast", limit: int = 500) -> list[_StaleRow]:
         return list(self._active)
 
-    def list_completed(self, *, job_type: str = "blast", limit: int = 100) -> list[_StaleRow]:
+    def list_completed(
+        self,
+        *,
+        job_type: str = "blast",
+        limit: int = 100,
+        since_seconds: int = 0,
+    ) -> list[_StaleRow]:
+        self.completed_calls.append(
+            {
+                "job_type": job_type,
+                "limit": limit,
+                "since_seconds": since_seconds,
+            }
+        )
         return [row for row in self._active if row.status == "completed"][:limit]
 
     def get(self, job_id: str) -> _StaleRow | None:
@@ -4388,6 +4402,9 @@ def test_backfill_completed_runtime_metrics_updates_missing_container_metrics(
     summary = blast.backfill_completed_runtime_metrics.run(limit=1)
 
     assert summary == {"scanned": 1, "backfilled": 1, "skipped": 0, "errors": 0}
+    assert repo.completed_calls == [
+        {"job_type": "blast", "limit": 1, "since_seconds": 7_200}
+    ]
     assert repo.updates[0][1]["status"] == "completed"
     assert repo.updates[0][1]["phase"] == "completed"
     assert repo.updates[0][1]["updated_at"] == "2026-05-20T00:00:00+00:00"

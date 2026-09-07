@@ -10,6 +10,7 @@ Key entry points: `_state`, `test_build_execution_steps_snapshot_preserves_steps
 `test_reconcile_terminal_artifacts_resets_empty_identity_budget`,
 `test_finalizer_records_exhausted_pod_log_capture`,
 `test_finalizer_records_pod_log_retry_enqueue_failure`,
+`test_streaming_aggregate_marks_read_budget_skip_as_truncated`,
 `test_read_json_artifact_supports_gzip`, `test_artifact_build_should_enqueue_stale_pending`,
 `test_load_merge_report_tie_cutoff_summarizes_overflow`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
@@ -814,6 +815,43 @@ def test_streaming_aggregate_does_not_hit_cap(monkeypatch) -> None:
     assert payload["stats"]["total_hits"] == 3
     assert payload["stats"]["unique_queries"] == 3
     assert payload["truncated"] is False
+
+
+def test_streaming_aggregate_marks_read_budget_skip_as_truncated(
+    monkeypatch, caplog
+) -> None:
+    from api.services.blast import result_artifacts
+    from api.services.blast.result_analytics import ResultReadBudgetExceeded
+
+    row = "query1\tNC_1\t99.0\t100\t0\t0\t1\t100\t1\t100\t1e-20\t50"
+    blobs = [{"name": f"job-1/shard-{index}.out"} for index in range(3)]
+    monkeypatch.setattr(result_artifacts, "list_parseable_result_blobs", lambda *_args: blobs)
+    monkeypatch.setattr(
+        result_artifacts,
+        "read_result_blob_texts_parallel",
+        lambda *_args, **_kwargs: [
+            (blobs[0]["name"], row, None),
+            (
+                blobs[1]["name"],
+                None,
+                ResultReadBudgetExceeded(blobs[1]["name"], 64 * 1024 * 1024),
+            ),
+            (
+                blobs[2]["name"],
+                None,
+                ResultReadBudgetExceeded(blobs[2]["name"], 64 * 1024 * 1024),
+            ),
+        ],
+    )
+
+    payload = build_result_aggregate_payload("job-1", "acct")
+
+    assert payload["stats"]["total_hits"] == 1
+    assert payload["files_parsed"] == 1
+    assert payload["total_files"] == 3
+    assert payload["read_failures"] == 0
+    assert payload["truncated"] is True
+    assert "aggregate artifact builder failed to parse" not in caplog.text
 
 
 def _patch_merge_report(monkeypatch, text):

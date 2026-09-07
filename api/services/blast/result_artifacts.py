@@ -25,6 +25,7 @@ from api.services.blast.result_analytics import (
     RESULTS_ALIGNMENTS_MAX_HITS,
     RESULTS_DEFAULT_PAGE_SIZE,
     RESULTS_MAX_FILES,
+    ResultReadBudgetExceeded,
     annotate_result_hit,
     enrich_taxonomy_with_lineage,
     list_parseable_result_blobs,
@@ -357,6 +358,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
     parsed_files = 0
     read_failures = 0
     content_truncated = False
+    read_budget_truncated = False
     reads = read_result_blob_texts_parallel(
         storage_account,
         result_blobs[:RESULTS_MAX_FILES],
@@ -366,6 +368,9 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
         if not blob_path:
             continue
         try:
+            if isinstance(read_exc, ResultReadBudgetExceeded):
+                read_budget_truncated = True
+                continue
             if read_exc is not None:
                 raise read_exc
             if content is not None and len(content) >= RESULTS_AGGREGATE_MAX_BYTES - 4:
@@ -401,7 +406,11 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
         "files_parsed": parsed_files,
         "total_files": len(result_blobs),
         "read_failures": read_failures,
-        "truncated": len(result_blobs) > RESULTS_MAX_FILES or content_truncated,
+        "truncated": (
+            len(result_blobs) > RESULTS_MAX_FILES
+            or content_truncated
+            or read_budget_truncated
+        ),
     }
 
 

@@ -10,8 +10,8 @@ Key entry points: `resolve_oracle_build_context`,
     `OracleBuildBlocked`.
 Risky contracts: A plan is valid only when Storage, shard layout, and every
     warmup shard share one source generation and every shard maps to a Ready
-    node. ARM probe failure degrades open, but a proven stopped/missing cluster
-    blocks before Kubernetes access.
+    node. ARM probe failure degrades open, but a stopped/missing/transitioning
+    cluster blocks before Kubernetes access using a fresh readiness lookup.
 Validation: `uv run pytest -q api/tests/test_oracle_build.py`.
 """
 
@@ -210,17 +210,24 @@ def resolve_oracle_build_context(
             subscription_id,
             cluster_resource_group,
             cluster_name,
+            ttl_seconds=0,
         )
     except Exception:
         health = None
-    if health is not None and not health.get("healthy", True):
+    provisioning_state = str((health or {}).get("provisioning_state") or "")
+    if health is not None and (
+        not health.get("healthy", True)
+        or (provisioning_state and provisioning_state != "Succeeded")
+    ):
         raise OracleBuildBlocked(
             "aks_unavailable",
-            "AKS cluster is not Running "
-            f"(reason={health.get('reason')}, power_state={health.get('power_state')})",
+            "AKS cluster is not ready "
+            f"(reason={health.get('reason')}, power_state={health.get('power_state')}, "
+            f"provisioning_state={provisioning_state or None})",
             details={
                 "cluster_reason": health.get("reason"),
                 "cluster_power_state": health.get("power_state"),
+                "cluster_provisioning_state": provisioning_state or None,
             },
         )
 

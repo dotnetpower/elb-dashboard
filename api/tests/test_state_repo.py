@@ -1394,6 +1394,39 @@ def test_list_completed_returns_newest_first_no_starvation(monkeypatch) -> None:
     assert all(r.payload for r in rows)
 
 
+def test_list_completed_can_bound_scan_by_recent_update(monkeypatch) -> None:
+    captured_filters: list[str] = []
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, **_kwargs):
+            captured_filters.append(query_filter)
+            return []
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    JobStateRepository().list_completed(
+        job_type="blast",
+        limit=5,
+        since_seconds=7_200,
+    )
+
+    assert len(captured_filters) == 1
+    assert "type eq 'blast'" in captured_filters[0]
+    assert "status eq 'completed'" in captured_filters[0]
+    assert "updated_at gt '" in captured_filters[0]
+
+
 def test_list_recent_terminal_returns_newest_first_no_starvation(monkeypatch) -> None:
     summaries = [
         {

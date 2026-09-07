@@ -6,7 +6,8 @@ Edit boundaries: Pure snapshot inputs only; Blob claims and Kubernetes task
     execution belong to their focused suites.
 Key entry points: `test_ready_snapshots_build_context`,
     `test_generation_mismatch_is_blocked`,
-    `test_incomplete_shard_node_mapping_is_blocked`.
+    `test_incomplete_shard_node_mapping_is_blocked`,
+    `test_resolve_blocks_transitioning_cluster_before_k8s`.
 Risky contracts: Every accepted context must represent one homogeneous source
     generation and map every expected shard to one Ready node.
 Validation: `uv run pytest -q api/tests/test_oracle_build.py`.
@@ -18,6 +19,7 @@ import pytest
 from api.services.db.oracle_build import (
     OracleBuildBlocked,
     plan_oracle_build_from_snapshots,
+    resolve_oracle_build_context,
 )
 
 
@@ -123,3 +125,40 @@ def test_incomplete_shard_node_mapping_is_blocked() -> None:
         )
 
     assert caught.value.code == "shard_node_mapping_incomplete"
+
+
+def test_resolve_blocks_transitioning_cluster_before_k8s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    health_calls: list[dict[str, object]] = []
+
+    def _health(*_args: object, **kwargs: object) -> dict[str, object]:
+        health_calls.append(kwargs)
+        return {
+            "healthy": True,
+            "exists": True,
+            "power_state": "Running",
+            "provisioning_state": "Stopping",
+            "reason": None,
+        }
+
+    monkeypatch.setattr("api.services.cluster_health.get_cluster_health", _health)
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda *_args, **_kwargs: pytest.fail("Storage must not run while AKS is stopping"),
+    )
+
+    with pytest.raises(OracleBuildBlocked) as caught:
+        resolve_oracle_build_context(
+            object(),
+            subscription_id="sub-1",
+            storage_resource_group="rg-storage",
+            storage_account="stelb",
+            cluster_resource_group="rg-aks",
+            cluster_name="aks-1",
+            db_name="core_nt",
+        )
+
+    assert caught.value.code == "aks_unavailable"
+    assert caught.value.details["cluster_provisioning_state"] == "Stopping"
+    assert health_calls == [{"ttl_seconds": 0}]

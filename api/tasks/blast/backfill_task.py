@@ -11,7 +11,7 @@ called through the module attribute so tests can monkeypatch them.
 Key entry points:
   - ``backfill_completed_runtime_metrics`` (``@shared_task``
      ``name="api.tasks.blast.backfill_completed_runtime_metrics"``,
-      scheduled hourly in bounded five-row passes by Celery beat).
+      scheduled hourly in bounded five-row, recent-job passes by Celery beat).
 Risky contracts: Idempotent — rows that already carry container runtime
 metrics are skipped before any K8s call. The periodic task uses early ACK and
 no worker-loss rejection because the next hourly pass is its recovery; a
@@ -191,6 +191,7 @@ def backfill_completed_runtime_metrics(
     *,
     job_id: str | None = None,
     limit: int = 5,
+    since_seconds: int = 7_200,
 ) -> dict[str, Any]:
     """Backfill K8s container runtime metrics for completed BLAST jobs.
 
@@ -213,7 +214,12 @@ def backfill_completed_runtime_metrics(
             row = repo.get(job_id)
             rows = [row] if row is not None and row.status == "completed" else []
         else:
-            rows = repo.list_completed(job_type="blast", limit=limit)
+            bounded_since = max(60, min(int(since_seconds), 7 * 86_400))
+            rows = repo.list_completed(
+                job_type="blast",
+                limit=limit,
+                since_seconds=bounded_since,
+            )
     except Exception as exc:
         LOGGER.warning("backfill_completed_runtime_metrics: list failed: %s", exc)
         summary["errors"] = 1
