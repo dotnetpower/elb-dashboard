@@ -6,7 +6,9 @@ Edit boundaries: This file is copied verbatim into the sibling docker-openapi
 ``app/`` directory; keep it independent of dashboard packages and browser APIs.
 Key entry points: ``attach_db_order_oracle``, ``ensure_tabular_raw_score``,
 ``read_active_database``, ``prepare_web_blast_statistics``,
-``attach_web_blast_statistics``, ``set_search_space``, ``preserve_or_set_search_space``.
+``read_one_shard_layout``, ``validate_web_blast_execution_options``,
+``select_web_blast_partitions``, ``attach_web_blast_statistics``,
+``set_search_space``, ``preserve_or_set_search_space``.
 Risky contracts: OAuth tokens never leave request headers, every Storage request
 has a timeout, immutable DB/shard paths must match the generation ID, all oracle
 parts must exist and be non-empty, one explicit query-specific search space is
@@ -16,6 +18,7 @@ Validation: ``uv run pytest -q scripts/dev/openapi-overlays/test_exact_oracle.py
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -65,6 +68,24 @@ class ActiveDatabase:
     total_letters: int
     total_sequences: int
     search_space: int
+    total_bytes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OneShardLayout:
+    manifest_sha256: str
+    layout_sha256: str
+    volume_count: int
+    required_bytes: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "shard_layout_source": "active_generation",
+            "shard_layout_manifest_sha256": self.manifest_sha256,
+            "shard_layout_sha256": self.layout_sha256,
+            "shard_layout_volume_count": self.volume_count,
+            "shard_layout_required_bytes": self.required_bytes,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +119,7 @@ class WebBlastStatistics:
         }
 
 
-def _headers(token: str) -> dict[str, str]:
+def _headers(token: str) -> dict[str, str | bytes]:
     if not token:
         raise ExactOracleUnavailable("Storage OAuth token is unavailable")
     return {
@@ -265,6 +286,7 @@ def read_active_database(
             or metadata.get("number-of-sequences")
             or 0
         )
+        total_bytes = int(metadata.get("total_bytes") or metadata.get("bytes_total") or 0)
     except (TypeError, ValueError) as exc:
         raise ExactOracleUnavailable("Active database statistics are invalid") from exc
     detail = {
@@ -274,7 +296,7 @@ def read_active_database(
         }
     }
     search_space = search_space_from_db_version(detail)
-    if not source_version:
+    if not source_version or total_bytes <= 0:
         raise ExactOracleUnavailable("Active database generation is unavailable")
     expected_db_prefix = f"{db_name}/generations/{source_version}/{db_name}"
     expected_shard_prefix = f"{db_name}/generations/{source_version}/shards"
@@ -287,6 +309,105 @@ def read_active_database(
         total_letters=total_letters,
         total_sequences=total_sequences,
         search_space=search_space,
+        total_bytes=total_bytes,
+    )
+
+
+def read_one_shard_layout(
+    *,
+    blob_base: str,
+    db_name: str,
+    active_database: ActiveDatabase,
+    token: str,
+) -> OneShardLayout:
+    """Validate the immutable one-shard layout against the active generation."""
+
+    if not _DB_RE.fullmatch(db_name):
+        raise ExactOracleUnavailable("Database name is invalid for shard layout lookup")
+    base = _validate_blob_base(blob_base)
+    shard_name = f"{db_name}_shard_00"
+    shard_root = f"{base}/blast-db/{active_database.shard_layout_prefix}/1shards/{shard_name}"
+
+    payloads: dict[str, bytes] = {}
+    for suffix in ("manifest", "nal", "layout"):
+        response = requests.get(
+            f"{shard_root}/{shard_name}.{suffix}",
+            headers=_headers(token),
+            timeout=_REQUEST_TIMEOUT,
+        )
+        _request_ok(response, f"one-shard {suffix} read")
+        content = bytes(getattr(response, "content", b""))
+        if not content:
+            raise ExactOracleUnavailable(f"One-shard {suffix} is empty")
+        payloads[suffix] = content
+
+    active_nal_response = requests.get(
+        f"{base}/blast-db/{active_database.db_prefix}.nal",
+        headers=_headers(token),
+        timeout=_REQUEST_TIMEOUT,
+    )
+    _request_ok(active_nal_response, "active database NAL read")
+    active_nal = bytes(getattr(active_nal_response, "content", b""))
+    if not active_nal:
+        raise ExactOracleUnavailable("Active database NAL is empty")
+
+    try:
+        manifest_text = payloads["manifest"].decode("utf-8")
+        shard_nal_text = payloads["nal"].decode("utf-8")
+        active_nal_text = active_nal.decode("utf-8")
+        layout_text = payloads["layout"].decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise ExactOracleUnavailable("One-shard metadata encoding is invalid") from exc
+    volumes = [line.strip() for line in manifest_text.splitlines() if line.strip()]
+    volume_pattern = re.compile(rf"^{re.escape(db_name)}\.([0-9]+)$")
+    ordinals: list[int] = []
+    for volume in volumes:
+        match = volume_pattern.fullmatch(volume)
+        if match is None:
+            raise ExactOracleUnavailable("One-shard manifest contains an invalid volume")
+        ordinals.append(int(match.group(1)))
+    if (
+        not ordinals
+        or len(set(ordinals)) != len(ordinals)
+        or sorted(ordinals) != list(range(len(ordinals)))
+    ):
+        raise ExactOracleUnavailable("One-shard manifest volumes are incomplete")
+
+    nal_volumes: list[list[str]] = []
+    for label, nal_text in (("one-shard", shard_nal_text), ("active database", active_nal_text)):
+        dblist_lines = [line for line in nal_text.splitlines() if line.startswith("DBLIST ")]
+        if len(dblist_lines) != 1:
+            raise ExactOracleUnavailable(f"{label.title()} NAL DBLIST is invalid")
+        entries = [item.rsplit("/", 1)[-1] for item in shlex.split(dblist_lines[0])[1:]]
+        if not entries or len(set(entries)) != len(entries):
+            raise ExactOracleUnavailable(f"{label.title()} NAL volumes are invalid")
+        nal_volumes.append(entries)
+    if any(entries != volumes for entries in nal_volumes):
+        raise ExactOracleUnavailable(
+            "One-shard volume declarations do not match the active database"
+        )
+
+    layout_parts = layout_text.split()
+    if len(layout_parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", layout_parts[0]):
+        raise ExactOracleUnavailable("One-shard layout metadata is invalid")
+    try:
+        required_bytes = int(layout_parts[1])
+    except ValueError as exc:
+        raise ExactOracleUnavailable("One-shard required bytes are invalid") from exc
+    if required_bytes <= 0 or required_bytes > active_database.total_bytes:
+        raise ExactOracleUnavailable("One-shard required bytes exceed the active database")
+    allowed_gap = max(1 << 30, active_database.total_bytes // 100)
+    if active_database.total_bytes - required_bytes > allowed_gap:
+        raise ExactOracleUnavailable("One-shard layout is incomplete for the active database")
+
+    layout_sha256 = hashlib.sha256(payloads["manifest"] + b"\0" + payloads["nal"]).hexdigest()
+    if layout_sha256 != layout_parts[0]:
+        raise ExactOracleUnavailable("One-shard layout digest does not match")
+    return OneShardLayout(
+        manifest_sha256=hashlib.sha256(payloads["manifest"]).hexdigest(),
+        layout_sha256=layout_sha256,
+        volume_count=len(volumes),
+        required_bytes=required_bytes,
     )
 
 
@@ -417,6 +538,93 @@ def prepare_web_blast_statistics(
         ),
         statistics,
     )
+
+
+def validate_web_blast_execution_options(options: str, *, program: str) -> dict[str, Any]:
+    """Validate and describe the runtime options behind an exactness claim."""
+
+    if program.strip().casefold() != "blastn":
+        raise ExactOracleUnavailable("Web BLAST execution requires blastn")
+    try:
+        tokens = shlex.split(options or "")
+    except ValueError as exc:
+        raise ExactOracleUnavailable("BLAST options cannot be parsed") from exc
+
+    def one_value(name: str) -> str:
+        indexes = [index for index, token in enumerate(tokens) if token == name]
+        if len(indexes) != 1:
+            raise ExactOracleUnavailable(f"Web BLAST execution requires exactly one {name}")
+        index = indexes[0]
+        if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+            raise ExactOracleUnavailable(f"{name} requires a scalar value")
+        return tokens[index + 1]
+
+    expected = {
+        "-outfmt": "5",
+        "-word_size": "28",
+        "-dust": "yes",
+        "-soft_masking": "false",
+        "-max_target_seqs": "500",
+    }
+    for name, value in expected.items():
+        if one_value(name).casefold() != value:
+            raise ExactOracleUnavailable(f"Web BLAST execution option {name} is incompatible")
+    try:
+        if float(one_value("-evalue")) != 0.05:
+            raise ValueError
+    except ValueError as exc:
+        raise ExactOracleUnavailable("Web BLAST execution option -evalue is incompatible") from exc
+
+    task_indexes = [index for index, argument in enumerate(tokens) if argument == "-task"]
+    if task_indexes and one_value("-task").casefold() != "megablast":
+        raise ExactOracleUnavailable("Web BLAST execution task is incompatible")
+
+    filter_indexes = [
+        index
+        for index, argument in enumerate(tokens)
+        if argument in {"-taxids", "-negative_taxids"}
+    ]
+    if len(filter_indexes) != 1:
+        raise ExactOracleUnavailable("Web BLAST execution requires exactly one taxonomy filter")
+    filter_index = filter_indexes[0]
+    filter_option = tokens[filter_index]
+    if filter_index + 1 >= len(tokens):
+        raise ExactOracleUnavailable(f"{filter_option} requires a scalar value")
+    taxid_text = tokens[filter_index + 1]
+    if not re.fullmatch(r"[1-9][0-9]*(?:,[1-9][0-9]*)*", taxid_text):
+        raise ExactOracleUnavailable("Web BLAST taxonomy filter is invalid")
+    taxids = [int(value) for value in taxid_text.split(",")]
+    if len(set(taxids)) != len(taxids):
+        raise ExactOracleUnavailable("Web BLAST taxonomy filter contains duplicates")
+
+    return {
+        "filter_semantics": "blast_taxonomy_filter",
+        "filter_mode": "include" if filter_option == "-taxids" else "exclude",
+        "filter_taxids": taxids,
+        "candidate_budget": 500,
+        "candidate_budget_verified": True,
+        "scoring_profile": "megablast_web_default",
+        "scoring_profile_verified": True,
+    }
+
+
+def select_web_blast_partitions(
+    statistics: WebBlastStatistics | None,
+    *,
+    default_partitions: int,
+) -> int:
+    """Use one full-DB partition when exact Web BLAST semantics are requested.
+
+    BLAST's report limit also bounds preliminary candidate retention. Applying
+    that limit independently to multiple shards changes the global candidate
+    pool before a merger can see it, so a post-search merge cannot reconstruct
+    the monolithic Web BLAST result. A validated Web statistical context is the
+    explicit opt-in to the slower one-partition path; other precise requests
+    retain their configured parallelism.
+    """
+    if type(default_partitions) is not int or not 1 <= default_partitions <= _MAX_PARTS:
+        raise ExactOracleUnavailable("Default partition count is invalid")
+    return 1 if statistics is not None else default_partitions
 
 
 def attach_web_blast_statistics(

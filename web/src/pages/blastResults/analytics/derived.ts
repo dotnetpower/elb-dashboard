@@ -501,7 +501,7 @@ export function parityVerdict(job: BlastJobSummary | null | undefined): ParityVe
   if (
     contract.mode === "precise" &&
     contract.eligible &&
-    contract.level === "full_db_hitlist_exact_sharded"
+    contract.level === "full_db_hitlist_exact_monolithic"
   ) {
     return {
       state: "equivalent",
@@ -510,6 +510,29 @@ export function parityVerdict(job: BlastJobSummary | null | undefined): ParityVe
         warnings > 0
           ? `Exact full-DB hitlist selection with ${warnings} advisory note(s).`
           : "Exact full-DB hitlist membership and order for the same database snapshot and BLAST options.",
+    };
+  }
+  if (
+    contract.mode === "precise" &&
+    contract.eligible &&
+    contract.level === "full_db_hitlist_exact_monolithic_planned"
+  ) {
+    return {
+      state: "unknown",
+      label: "Exactness pending",
+      detail: "The run plans native full-database candidate selection; completion evidence is required.",
+    };
+  }
+  if (
+    contract.mode === "precise" &&
+    contract.eligible &&
+    contract.level === "full_db_statistics_exact_sharded"
+  ) {
+    return {
+      state: "approximate",
+      label: "Partitioned candidates",
+      detail:
+        "Search statistics are calibrated, but shard-local candidate retention may differ from native full-database BLAST.",
     };
   }
   if (
@@ -608,9 +631,13 @@ export function buildMethodsText(job: BlastJobSummary | null | undefined): strin
     }
   }
   const verdict = parityVerdict(job);
-  if (prov?.compatibility?.level === "full_db_hitlist_exact_sharded") {
+  if (prov?.compatibility?.level === "full_db_hitlist_exact_monolithic") {
     parts.push(
-      "This sharded result reproduces full-database BLAST hitlist membership and order for the recorded database snapshot and options; NCBI parity additionally requires the same NCBI database snapshot.",
+      "This search used native full-database candidate selection and reproduces BLAST hitlist membership and order for the recorded database snapshot and options; NCBI parity additionally requires the same NCBI database snapshot.",
+    );
+  } else if (prov?.compatibility?.level === "full_db_statistics_exact_sharded") {
+    parts.push(
+      "Search statistics were calibrated to the full database, but shard-local candidate retention can change hitlist membership.",
     );
   } else if (prov?.compatibility?.level === "verified_full_database_profile") {
     parts.push(

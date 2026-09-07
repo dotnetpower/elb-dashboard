@@ -272,6 +272,13 @@ def test_patch_source_wires_exact_oracle_before_dispatch() -> None:
     assert "active_database.db_prefix" in source
     assert "active_database.shard_layout_prefix" in source
     assert "prepare_web_blast_statistics(" in source
+    assert "select_web_blast_partitions(" in source
+    assert "read_one_shard_layout(" in source
+    assert "validate_web_blast_execution_options(" in source
+    assert "opts, program=req.program" in source
+    assert 'config["blast"]["disk-backed-monolithic"] = "true"' in source
+    assert 'config["blast"]["mem-request"] = "104Gi"' in source
+    assert 'config["blast"]["mem-limit"] = "112Gi"' in source
     assert "attach_web_blast_statistics(" in source
     assert "exact_oracle_info = _exact_oracle.attach_db_order_oracle(" in source
     assert "expected_source_version=active_database.source_version" in source
@@ -279,6 +286,16 @@ def test_patch_source_wires_exact_oracle_before_dispatch() -> None:
     assert 'job_data["exact_oracle"] = exact_oracle_info' in source
     assert 'job_data["web_blast_statistics"] = web_blast_statistics.as_dict()' in source
     assert 'for _runtime_key in ("exact_oracle", "web_blast_statistics")' in source
+    assert '"candidate_selection": (' in source
+    assert '"monolithic_full_database"' in source
+    assert '"db_partitions": partitions' in source
+    assert '"disk_backed_bounded"' in source
+    assert '"memory_request": "104Gi"' in source
+    assert '"memory_limit": "112Gi"' in source
+    assert "exact_oracle_info.update(one_shard_layout.as_dict())" in source
+    assert source.index("prepare_web_blast_statistics(") < source.index(
+        "select_web_blast_partitions("
+    )
 
 
 def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
@@ -346,10 +363,75 @@ def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> N
     assert "read_active_database(" in first
     assert "preserve_or_set_search_space(" in first
     assert "prepare_web_blast_statistics(" in first
+    assert "select_web_blast_partitions(" in first
+    assert "read_one_shard_layout(" in first
+    assert 'config["blast"]["db-partitions"] = str(partitions)' in first
+    assert 'config["blast"]["disk-backed-monolithic"] = "true"' in first
+    assert 'config["blast"]["mem-request"] = "104Gi"' in first
+    assert 'config["blast"]["mem-limit"] = "112Gi"' in first
     assert "opts, active_database.search_space" in first
     assert "active_database.db_prefix" in first
     assert "active_database.shard_layout_prefix" in first
     assert "Active database statistics are required for precise core_nt sharding" in first
+
+
+def test_patch_adds_candidate_selection_evidence_idempotently(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "            exact_oracle_info = _exact_oracle.attach_db_order_oracle(\n"
+        "                token=token,\n"
+        "            ).as_dict()\n"
+        "            if web_blast_statistics is not None:\n"
+        "                upload_statistics()\n"
+    )
+
+    module._patch_web_blast_candidate_selection_evidence(path)
+    first = path.read_text()
+    module._patch_web_blast_candidate_selection_evidence(path)
+
+    assert path.read_text() == first
+    assert first.count('"candidate_selection": (') == 1
+    assert '"monolithic_full_database"' in first
+    assert '"db_partitions": partitions' in first
+    assert '"disk_backed_bounded"' in first
+    assert '"memory_request": "104Gi"' in first
+    assert '"memory_limit": "112Gi"' in first
+    assert "exact_oracle_info.update(one_shard_layout.as_dict())" in first
+    assert "validate_web_blast_execution_options(" in first
+    assert "opts, program=req.program" in first
+
+
+def test_patch_upgrades_legacy_candidate_selection_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "            exact_oracle_info = _exact_oracle.attach_db_order_oracle(\n"
+        "                token=token,\n"
+        "            ).as_dict()\n"
+        "            exact_oracle_info.update(\n"
+        "                {\n"
+        '                    "candidate_selection": (\n'
+        '                        "monolithic_full_database"\n'
+        "                        if partitions == 1\n"
+        '                        else "partitioned_shards"\n'
+        "                    ),\n"
+        '                    "db_partitions": partitions,\n'
+        "                }\n"
+        "            )\n"
+        "            if web_blast_statistics is not None:\n"
+        "                upload_statistics()\n"
+    )
+
+    module._patch_web_blast_candidate_selection_evidence(path)
+
+    text = path.read_text()
+    assert text.count('"candidate_selection": (') == 1
+    assert '"memory_mode": (' in text
+    assert '"memory_request": "104Gi"' in text
+    assert '"memory_limit": "112Gi"' in text
+    assert "validate_web_blast_execution_options(" in text
+    assert "opts, program=req.program" in text
 
 
 def test_patch_prefers_canonical_merged_result_and_rechecks_shard_cache(

@@ -108,6 +108,25 @@ from __future__ import annotations
 # distinct HSP scoring -searchsp, and canonical result statistics. The private
 # context manifest is immutable across idempotent replays and the finalizer
 # fails closed when the runtime flags or active generation disagree.
+# 4.47 adds an isolated disk-backed one-shard topology for validated Web BLAST
+# statistical contexts. Other precise requests retain their parallel shard
+# count, and runtime evidence records topology, filter semantics, and candidate
+# budget before the dashboard may project an exactness claim.
+# 4.48 makes tabular shard merging disk-backed: long qseq/sseq rows and rank
+# metadata spool through SQLite instead of growing the finalizer Python heap.
+# It also carries a widened strict-oracle candidate pool separately from the
+# requested final result cap. ACR run de8p produced digest
+# sha256:134827a3c63ea6caa57a6a3a036cb87c6c5b4aff515be6dff6c9174374c9bdbc.
+# 4.49 streams the multi-gigabyte full-DB order oracle and retains only ranks
+# for subjects present in the shard candidate pool. This removes the remaining
+# 26-40 GiB finalizer heap growth that 4.48's SQLite hit spool did not address.
+# ACR run de8q produced digest
+# sha256:d480c951ab83238ad362fe916a2a72f583dc20f43795222b8f0704f152822eb5.
+# 4.50 preserves the legacy fail-safe behavior for query-oracle tabular output
+# that has no subject accession column and is the final image built from merger
+# SHA-256 c362535f0f85b0982cba43c0d48a0e82b63fce78422fb21a816e18685e513c52.
+# ACR run de8r produced digest
+# sha256:4d837a0fab027242df118ddce776df07fa0e0657e70adfbc15dee2c537927f5e.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -135,7 +154,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.46",
+    "elb-openapi": "4.50",
 }
 
 # GitHub source repo for ACR Build Tasks.

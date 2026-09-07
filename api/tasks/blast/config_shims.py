@@ -116,6 +116,10 @@ def _disable_sharding_options(options: Mapping[str, Any] | None) -> dict[str, An
 def _expand_strict_tie_order_candidate_pool(
     options: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
+    # This widening belongs only to an explicit strict query-membership oracle.
+    # DB-order precise execution and Web statistical-context execution do not
+    # carry either query-oracle field, so their native request budget (including
+    # the Web exact 500-subject contract) is never rewritten here.
     if not isinstance(options, Mapping):
         return None if options is None else dict(options)
     has_oracle = bool(
@@ -131,7 +135,9 @@ def _expand_strict_tie_order_candidate_pool(
     if current >= STRICT_TIE_ORDER_MIN_TARGET_SEQS:
         return dict(options)
     expanded = dict(options)
-    expanded["requested_max_target_seqs"] = current_raw
+    # Zero is not emitted to the runtime: when the caller omitted the option,
+    # preserve BLAST's dashboard default as the requested final result cap.
+    expanded["requested_max_target_seqs"] = current if current > 0 else 500
     expanded["max_target_seqs"] = STRICT_TIE_ORDER_MIN_TARGET_SEQS
     return expanded
 

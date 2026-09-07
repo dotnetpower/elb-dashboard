@@ -1451,7 +1451,8 @@ def test_build_split_child_submit_plan_generates_group_configs(monkeypatch) -> N
                 "db_effective_search_space": 225,
                 "query_effective_search_spaces": [225],
                 "outfmt": 6,
-                "max_target_seqs": 10,
+                "max_target_seqs": 5000,
+                "requested_max_target_seqs": 10,
                 "machine_type": "Standard_E16s_v5",
                 "num_nodes": 5,
                 "db_sharded": True,
@@ -1481,7 +1482,8 @@ def test_build_split_child_submit_plan_generates_group_configs(monkeypatch) -> N
     )
     assert cfg.get("blast", "db-partitions") == "5"
     assert "-searchsp 225" in cfg.get("blast", "options")
-    assert "-max_target_seqs 10" in cfg.get("blast", "options")
+    assert "-max_target_seqs 5000" in cfg.get("blast", "options")
+    assert cfg.get("blast", "requested-max-target-seqs") == "10"
 
 
 def test_build_split_child_submit_plan_rejects_unsafe_option_override() -> None:
@@ -2723,6 +2725,7 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
     child_reports = {
         "job-123-qg1/merge-report.json": {
             "max_target_seqs": 10,
+            "candidate_pool_size": 5000,
             "queries": 1,
             "total_input_hits": 4,
             "total_input_rows": 4,
@@ -2752,6 +2755,7 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
         },
         "job-123-qg2/merge-report.json": {
             "max_target_seqs": 10,
+            "candidate_pool_size": 5000,
             "queries": 1,
             "total_input_hits": 5,
             "total_input_rows": 5,
@@ -2843,6 +2847,8 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
     assert gzip.decompress(uploads["job-123/merged_results.out.gz"]) == b"q1\thit1\nq2\thit2\n"
     report = json.loads(uploads["job-123/merge-report.json"].decode("utf-8"))
     assert report["precision_level"] == "split_query_child_finalizer_concat"
+    assert report["candidate_pool_size"] == 5000
+    assert [child["candidate_pool_size"] for child in report["children"]] == [5000, 5000]
     assert report["queries"] == 2
     assert report["total_input_hits"] == 9
     assert report["total_input_rows"] == 9
@@ -2891,6 +2897,7 @@ def test_aggregate_split_merge_reports_marks_mixed_diversity_modes() -> None:
                 "report": {
                     "outfmt": 6,
                     "format": "blast_tabular",
+                    "candidate_pool_size": 5000,
                     "diversity_reservation_mode": "proportional",
                 },
             },
@@ -2900,6 +2907,7 @@ def test_aggregate_split_merge_reports_marks_mixed_diversity_modes() -> None:
                 "report": {
                     "outfmt": 6,
                     "format": "blast_tabular",
+                    "candidate_pool_size": 6000,
                     "diversity_reservation_mode": "fixed",
                 },
             },
@@ -2908,6 +2916,8 @@ def test_aggregate_split_merge_reports_marks_mixed_diversity_modes() -> None:
 
     assert report["diversity_reservation_mode"] == "mixed"
     assert "child merge reports used different diversity reservation modes" in report["warnings"]
+    assert report["candidate_pool_size"] is None
+    assert "child merge reports used different candidate_pool_size values" in report["warnings"]
 
 
 def test_aggregate_split_merge_reports_preserves_exact_selection() -> None:

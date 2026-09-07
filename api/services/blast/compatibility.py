@@ -214,9 +214,26 @@ def build_compatibility_contract(
                 ],
             )
 
+        web_context = opts.get("web_blast_statistical_context")
+        monolithic_planned = isinstance(web_context, dict) and bool(web_context)
+        if monolithic_planned:
+            level = "full_db_hitlist_exact_monolithic_planned"
+            selection_basis = "native_full_database_planned"
+            compatibility_warnings = [
+                "exact hitlist parity requires completed runtime evidence for "
+                "one-partition monolithic candidate selection",
+                *warnings,
+            ]
+        else:
+            level = "full_db_statistics_exact_sharded"
+            selection_basis = "blast_evalue_raw_score_db_oid_desc"
+            compatibility_warnings = [
+                "partitioned candidate selection can differ from native full-database BLAST",
+                *warnings,
+            ]
         return BlastCompatibilityContract(
             mode="precise",
-            level="full_db_hitlist_exact_sharded",
+            level=level,
             eligible=True,
             database=db_name,
             search_space_source=_search_space_source(
@@ -226,11 +243,11 @@ def build_compatibility_contract(
                 query_specific=query_searchsp is not None,
             ),
             searchsp=configured_searchsp,
-            selection_basis="blast_evalue_raw_score_db_oid_desc",
+            selection_basis=selection_basis,
             evidence=evidence,
             precision=precision_dict,
             blocking_errors=[],
-            warnings=warnings,
+            warnings=compatibility_warnings,
         )
 
     if verified_default is None:

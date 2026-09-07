@@ -125,9 +125,7 @@ _EXTERNAL_JOBS_INFLIGHT: dict[str, threading.Event] = {}
 # token, 5xx upstream, ``openapi_not_configured`` 503, …) we cache the
 # exception for a short TTL so SPA polling (every ~14 s) doesn't keep paying
 # the 700-1500 ms upstream round-trip just to learn the same failure again.
-_EXTERNAL_JOBS_NEG_CACHE_TTL_SECONDS = float(
-    os.environ.get("EXTERNAL_JOBS_NEG_CACHE_TTL", "30.0")
-)
+_EXTERNAL_JOBS_NEG_CACHE_TTL_SECONDS = float(os.environ.get("EXTERNAL_JOBS_NEG_CACHE_TTL", "30.0"))
 _EXTERNAL_JOBS_NEG_CACHE: dict[str, tuple[float, HTTPException]] = {}
 _EXTERNAL_JOB_DETAIL_CACHE_TTL_SECONDS = 70.0
 _EXTERNAL_JOB_DETAIL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -200,9 +198,7 @@ def _discover_subscription_clusters(subscription_id: str) -> list[tuple[str, str
             list(pairs),
         )
         if len(_SUBSCRIPTION_CLUSTERS_CACHE) > 32:
-            oldest = min(
-                _SUBSCRIPTION_CLUSTERS_CACHE.items(), key=lambda kv: kv[1][0]
-            )[0]
+            oldest = min(_SUBSCRIPTION_CLUSTERS_CACHE.items(), key=lambda kv: kv[1][0])[0]
             _SUBSCRIPTION_CLUSTERS_CACHE.pop(oldest, None)
     return pairs
 
@@ -280,9 +276,7 @@ def _external_list_jobs_cached(external_kwargs: dict[str, Any]) -> list[dict[str
             with _EXTERNAL_JOBS_CACHE_LOCK:
                 _EXTERNAL_JOBS_NEG_CACHE[key] = (expires_at, exc)
                 if len(_EXTERNAL_JOBS_NEG_CACHE) > 32:
-                    oldest = min(
-                        _EXTERNAL_JOBS_NEG_CACHE.items(), key=lambda kv: kv[1][0]
-                    )[0]
+                    oldest = min(_EXTERNAL_JOBS_NEG_CACHE.items(), key=lambda kv: kv[1][0])[0]
                     _EXTERNAL_JOBS_NEG_CACHE.pop(oldest, None)
             raise
         finally:
@@ -304,9 +298,7 @@ def _reset_external_jobs_cache() -> None:
         _SUBSCRIPTION_CLUSTERS_CACHE.clear()
 
 
-def _recover_external_failure_error(
-    job_id: str, infrastructure: dict[str, Any]
-) -> str | None:
+def _recover_external_failure_error(job_id: str, infrastructure: dict[str, Any]) -> str | None:
     """Best-effort recovery of a failed external job's real error message.
 
     The ``/v1/jobs`` LIST snapshot the sync runs on never carries an ``error``
@@ -498,9 +490,7 @@ def _sync_external_jobs_to_table(
             # detail can show outfmt / evalue / etc. The sibling never echoes
             # these back; they live only on the durable row (drain) or the
             # remember store (direct API submit).
-            if not isinstance(ext.get("config_snapshot"), dict) or not ext.get(
-                "config_snapshot"
-            ):
+            if not isinstance(ext.get("config_snapshot"), dict) or not ext.get("config_snapshot"):
                 _stored_cfg = _stored_config_snapshot(_existing_for_source)
                 if _stored_cfg:
                     ext["config_snapshot"] = _stored_cfg
@@ -524,9 +514,7 @@ def _sync_external_jobs_to_table(
                 if isinstance(_payload, dict):
                     _ext_payload = _payload.get("external")
                     _stored_qm = (
-                        _ext_payload.get("query_meta")
-                        if isinstance(_ext_payload, dict)
-                        else None
+                        _ext_payload.get("query_meta") if isinstance(_ext_payload, dict) else None
                     )
                     if isinstance(_stored_qm, dict) and _stored_qm:
                         ext["query_meta"] = _stored_qm
@@ -661,6 +649,14 @@ def _sync_external_jobs_to_table(
                 prefix_backfill: dict[str, str] = {}
                 if _row_results_prefix and not (getattr(existing, "results_prefix", None) or ""):
                     prefix_backfill["results_prefix"] = _row_results_prefix
+                runtime_evidence = _external_runtime_evidence(ext)
+                evidence_needs_backfill = bool(
+                    runtime_evidence
+                    and _external_runtime_evidence_needs_backfill(
+                        getattr(existing, "payload", None),
+                        runtime_evidence,
+                    )
+                )
                 should_backfill_identity = False
                 stored_elastic_blast_job_id = canonical_elastic_blast_job_id(
                     getattr(existing, "elastic_blast_job_id", "")
@@ -680,12 +676,7 @@ def _sync_external_jobs_to_table(
                 status_changed = bool(
                     ext_status and (ext_status != cur_status or ext_phase != cur_phase)
                 )
-                if (
-                    status_changed
-                    or scope_backfill
-                    or meta_backfill
-                    or prefix_backfill
-                ):
+                if status_changed or scope_backfill or meta_backfill or prefix_backfill:
                     update_kwargs: dict[str, Any] = dict(scope_backfill)
                     update_kwargs.update(meta_backfill)
                     update_kwargs.update(prefix_backfill)
@@ -720,6 +711,16 @@ def _sync_external_jobs_to_table(
                     try:
                         repo.update(job_id, **update_kwargs)
                         updated += 1
+                    except KeyError:
+                        existing = None
+                if existing is not None and runtime_evidence and evidence_needs_backfill:
+                    try:
+                        if repo.backfill_payload_section(
+                            job_id,
+                            "external",
+                            runtime_evidence,
+                        ):
+                            updated += 1
                     except KeyError:
                         existing = None
                 if should_backfill_identity:
@@ -760,8 +761,7 @@ def _sync_external_jobs_to_table(
                             )
                     except Exception as exc:
                         LOGGER.info(
-                            "external job runtime identity backfill skipped "
-                            "job_id=%s err=%s",
+                            "external job runtime identity backfill skipped job_id=%s err=%s",
                             job_id,
                             type(exc).__name__,
                         )
@@ -845,6 +845,48 @@ _EXTERNAL_LIST_DETAIL_STATUSES = frozenset(
     }
 )
 
+_EXTERNAL_RUNTIME_EVIDENCE_KEYS = (
+    "exact_oracle",
+    "web_blast_statistics",
+    "db_version",
+    "db_version_detail",
+    "blast_version",
+    "blast_version_detail",
+    "config_snapshot",
+)
+
+
+def _external_runtime_evidence(external_row: dict[str, Any]) -> dict[str, Any] | None:
+    """Return complete immutable run evidence suitable for additive storage."""
+    exact_oracle = external_row.get("exact_oracle")
+    statistics = external_row.get("web_blast_statistics")
+    if not isinstance(exact_oracle, dict) or not exact_oracle:
+        return None
+    if not isinstance(statistics, dict) or not statistics:
+        return None
+
+    evidence: dict[str, Any] = {}
+    for key in _EXTERNAL_RUNTIME_EVIDENCE_KEYS:
+        value = external_row.get(key)
+        if value in (None, "", {}, []):
+            continue
+        evidence[key] = value
+    return evidence or None
+
+
+def _external_runtime_evidence_needs_backfill(
+    existing_payload: object,
+    evidence: dict[str, Any],
+) -> bool:
+    """Return True only when at least one immutable evidence field is absent."""
+
+    if not isinstance(existing_payload, dict):
+        return True
+    stored = existing_payload.get("external")
+    if not isinstance(stored, dict):
+        return True
+    return any(stored.get(key) in (None, "", {}, []) for key in evidence)
+
 
 def _external_list_row_needs_detail(row: dict[str, Any]) -> bool:
     status = str(row.get("status") or row.get("phase") or "").strip().casefold()
@@ -923,9 +965,7 @@ def _resolve_external_list_targets(
         )
 
     if cluster_name:
-        kwargs = _openapi_client_kwargs_from_cluster(
-            subscription_id, resource_group, cluster_name
-        )
+        kwargs = _openapi_client_kwargs_from_cluster(subscription_id, resource_group, cluster_name)
         _add(kwargs, subscription_id, resource_group, cluster_name)
         return targets
 
@@ -1002,13 +1042,9 @@ def collect_and_sync_external_jobs(
     seen = seen_job_ids if seen_job_ids is not None else set()
 
     try:
-        targets = _resolve_external_list_targets(
-            subscription_id, resource_group, cluster_name
-        )
+        targets = _resolve_external_list_targets(subscription_id, resource_group, cluster_name)
     except Exception as exc:
-        LOGGER.info(
-            "external jobs target resolution failed: %s", type(exc).__name__
-        )
+        LOGGER.info("external jobs target resolution failed: %s", type(exc).__name__)
         result.target_failures.append(exc)
         return result
 
@@ -1077,11 +1113,7 @@ def collect_and_sync_external_jobs(
                 cluster_name=t_cluster,
             )
             should_enrich_detail = bool(t_sub or t_rg or t_cluster)
-            if (
-                should_enrich_detail
-                and budget > 0
-                and _external_list_row_needs_detail(ext_row)
-            ):
+            if should_enrich_detail and budget > 0 and _external_list_row_needs_detail(ext_row):
                 ext_row = _external_job_detail_or_row(external_blast, ext_row, t_kwargs)
                 budget -= 1
             # Inline-FASTA API submits carry no query identity from the sibling;
@@ -1268,9 +1300,7 @@ def _openapi_client_kwargs_from_cluster(
                 dict(kwargs),
             )
             if len(_OPENAPI_CLIENT_KWARGS_CACHE) > 64:
-                oldest = min(
-                    _OPENAPI_CLIENT_KWARGS_CACHE.items(), key=lambda kv: kv[1][0]
-                )[0]
+                oldest = min(_OPENAPI_CLIENT_KWARGS_CACHE.items(), key=lambda kv: kv[1][0])[0]
                 _OPENAPI_CLIENT_KWARGS_CACHE.pop(oldest, None)
         return kwargs
     except Exception as exc:

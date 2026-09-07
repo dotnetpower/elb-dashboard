@@ -43,6 +43,29 @@ def test_non_strict_tie_order_oracle_keeps_candidate_pool() -> None:
     assert blast_tasks._expand_strict_tie_order_candidate_pool(options) is options
 
 
+def test_db_order_web_exact_path_does_not_expand_candidate_pool() -> None:
+    options = {
+        "max_target_seqs": 500,
+        "use_db_order_oracle": True,
+        "web_blast_statistical_context": {"schema_version": 1},
+    }
+
+    assert blast_tasks._expand_strict_tie_order_candidate_pool(options) is options
+    assert "requested_max_target_seqs" not in options
+
+
+def test_strict_tie_order_oracle_preserves_default_result_limit() -> None:
+    options = blast_tasks._expand_strict_tie_order_candidate_pool(
+        {
+            "tie_order_oracle_accessions": ["OZ254258.1"],
+            "tie_order_oracle_strict": True,
+        }
+    )
+
+    assert options["max_target_seqs"] == 5000
+    assert options["requested_max_target_seqs"] == 500
+
+
 def test_upload_tie_order_oracle_writes_finalizer_metadata(monkeypatch) -> None:
     uploads: list[dict[str, object]] = []
 

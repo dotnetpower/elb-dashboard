@@ -876,7 +876,7 @@ def test_blast_preflight_reports_web_blast_compatibility(
     assert r.status_code == 200
     body = r.json()
     assert body["compatibility"]["mode"] == "precise"
-    assert body["compatibility"]["level"] == "full_db_hitlist_exact_sharded"
+    assert body["compatibility"]["level"] == "full_db_statistics_exact_sharded"
     assert body["compatibility"]["selection_basis"] == ("blast_evalue_raw_score_db_oid_desc")
     compatibility_check = next(
         item for item in body["checks"] if item["id"] == "web_blast_compatibility"
@@ -910,7 +910,7 @@ def test_blast_preflight_recomputes_search_space_from_live_sequence_count(
     assert response.status_code == 200
     compatibility = response.json()["compatibility"]
     assert compatibility["mode"] == "precise"
-    assert compatibility["level"] == "full_db_hitlist_exact_sharded"
+    assert compatibility["level"] == "full_db_statistics_exact_sharded"
     assert compatibility["search_space_source"] == "verified_default"
     assert compatibility["selection_basis"] == "blast_evalue_raw_score_db_oid_desc"
 

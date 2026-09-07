@@ -12,6 +12,8 @@ Key entry points: `_blast_xml`, `test_merge_sharded_results_respects_top_n_and_r
 `test_db_order_oracle_uses_raw_score_and_evalue_epsilon`,
 `test_deterministic_tie_order_on_sorts_by_accession`,
 `test_tabular_max_target_seqs_counts_subjects_and_preserves_hsps`,
+`test_large_sseq_rows_merge_under_bounded_memory`,
+`test_large_db_order_oracle_streams_under_bounded_memory`,
 `test_diversity_aware_cutoff_defaults_to_proportional_near_misses`,
 `test_diversity_aware_cutoff_preserves_multiple_variants_at_5000`,
 `test_xml_diversity_aware_cutoff_defaults_to_proportional_near_misses`
@@ -25,6 +27,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import resource
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -803,6 +806,28 @@ def test_merge_sharded_results_rejects_outfmt_without_rank_columns(tmp_path: Pat
     assert "evalue and bitscore" in proc.stderr
 
 
+def test_query_oracle_is_disabled_without_subject_accession(tmp_path: Path) -> None:
+    oracle = tmp_path / "oracle.txt"
+    oracle.write_text("s1\n")
+
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        ["q1\t1e-30\t90"],
+        num_shards="1",
+        max_target_seqs=1,
+        outfmt_spec="6 qseqid evalue bitscore",
+        env={
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_STRICT": "1",
+        },
+    )
+
+    assert out_rows == ["q1\t1e-30\t90"]
+    assert report["tie_order_oracle_strict"] is False
+    assert report["tie_order_oracle_source"] is None
+    assert report["selection_equivalence"] == "heuristic"
+
+
 def _run_tabular_merge(
     tmp_path: Path,
     rows: list[str],
@@ -925,6 +950,172 @@ def test_tabular_max_target_seqs_counts_subjects_and_preserves_hsps(
     assert report["total_output_hits"] == 3
     assert report["total_output_rows"] == 3
     assert report["total_output_subjects"] == 2
+
+
+def test_requested_max_target_seqs_caps_widened_candidate_pool(tmp_path: Path) -> None:
+    rows = [
+        _tabular_row("q1", "s1", "1e-30", "90"),
+        _tabular_row("q1", "s2", "1e-20", "80"),
+        _tabular_row("q1", "s3", "1e-10", "70"),
+        _tabular_row("q1", "s4", "1e-5", "60"),
+    ]
+
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="2",
+        max_target_seqs=4,
+        env={"ELB_REQUESTED_MAX_TARGET_SEQS": "2"},
+    )
+
+    assert [row.split("\t")[1] for row in out_rows] == ["s1", "s2"]
+    assert report["max_target_seqs"] == 2
+    assert report["candidate_pool_size"] == 4
+    assert report["total_output_subjects"] == 2
+
+
+def test_requested_max_target_seqs_caps_xml_candidate_pool(tmp_path: Path) -> None:
+    subjects, report = _run_xml_merge(
+        tmp_path,
+        [
+            [("s1", "1e-30", 90.0), ("s3", "1e-10", 70.0)],
+            [("s2", "1e-20", 80.0), ("s4", "1e-5", 60.0)],
+        ],
+        max_target_seqs=4,
+        env={"ELB_REQUESTED_MAX_TARGET_SEQS": "2"},
+    )
+
+    assert subjects == ["s1", "s2"]
+    assert report["max_target_seqs"] == 2
+    assert report["candidate_pool_size"] == 4
+    assert report["total_output_subjects"] == 2
+
+
+@pytest.mark.slow
+def test_large_sseq_rows_merge_under_bounded_memory(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "long-sequences.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    sequence = "A" * 16_384
+    with input_tsv.open("w") as handle:
+        for index in range(5_000):
+            handle.write(
+                f"q1\ts{index:05d}\t1\tname\ttitle\t16384\t99\t16384\t16384\t0\t"
+                f"1e-20\t80\t1\t16384\t1\t16384\t100\t{sequence}\t1\tname\t100\n"
+            )
+
+    memory_limit = 96 * 1024 * 1024
+
+    def limit_address_space() -> None:
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+    proc = subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "10",
+            "blastn",
+            "-outfmt 7 qseqid saccver staxid ssciname stitle slen pident length "
+            "nident gaps evalue bitscore qstart qend sstart send qcovhsp sseq "
+            "staxids sscinames qcovs -max_target_seqs 100",
+        ],
+        capture_output=True,
+        text=True,
+        preexec_fn=limit_address_space,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    report = json.loads(report_json.read_text())
+    assert report["total_input_rows"] == 5_000
+    assert report["total_input_subjects"] == 5_000
+    assert report["total_output_rows"] == 100
+    assert report["total_output_subjects"] == 100
+
+
+@pytest.mark.slow
+def test_large_db_order_oracle_streams_under_bounded_memory(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    oracle = tmp_path / "db-order.txt"
+    input_tsv.write_text(
+        "q1\tselected-a\t1e-30\t90\t100\n"
+        "q1\tselected-b\t1e-30\t90\t100\n"
+    )
+    unrelated_count = 1_000_000
+    with oracle.open("w") as handle:
+        for index in range(unrelated_count):
+            handle.write(f"00\t{index}\tunused-{index}\n")
+        handle.write(f"00\t{unrelated_count}\tselected-a\n")
+        handle.write(f"00\t{unrelated_count + 1}\tselected-b\n")
+
+    memory_limit = 96 * 1024 * 1024
+
+    def limit_address_space() -> None:
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+    proc = subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "2",
+            "blastn",
+            "-outfmt 6 qseqid sseqid evalue bitscore score -max_target_seqs 1",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ELB_TIE_ORDER_FILE": str(oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+        },
+        preexec_fn=limit_address_space,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    with gzip.open(output_gz, "rt") as handle:
+        rows = [line.strip() for line in handle if line.strip() and not line.startswith("#")]
+    assert [row.split("\t")[1] for row in rows] == ["selected-b"]
+    report = json.loads(report_json.read_text())
+    assert report["tie_order_oracle_accessions"] == unrelated_count + 2
+    assert report["selection_equivalence"] == "full_db_hitlist_exact"
+    assert any("streamed" in warning for warning in report["warnings"])
+
+
+@pytest.mark.parametrize("requested", ["0", "5", "invalid"])
+def test_requested_max_target_seqs_rejects_invalid_cap(
+    tmp_path: Path,
+    requested: str,
+) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    input_tsv.write_text(_tabular_row("q1", "s1", "1e-30", "90") + "\n")
+
+    proc = subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "1",
+            "blastn",
+            "-outfmt 6 -max_target_seqs 4",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ELB_REQUESTED_MAX_TARGET_SEQS": requested},
+    )
+
+    assert proc.returncode != 0
+    assert "requested max_target_seqs" in proc.stderr
 
 
 def test_diversity_aware_cutoff_zero_preserves_strict_top_n(tmp_path: Path) -> None:

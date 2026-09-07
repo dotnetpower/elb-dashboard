@@ -26,6 +26,7 @@ Validation: `uv run pytest -q api/tests/test_external_blast_api.py
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -64,9 +65,59 @@ def _external_web_blast_provenance(
     config_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Build provenance only when runtime exactness evidence is complete."""
+    if str(job.get("status") or "").strip().casefold() not in {"success", "completed"}:
+        return None
     statistics = job.get("web_blast_statistics")
     exact_oracle = job.get("exact_oracle")
     if not isinstance(statistics, dict) or not isinstance(exact_oracle, dict):
+        return None
+    db_version = str(job.get("db_version") or "").strip()
+    oracle_source_version = str(exact_oracle.get("source_version") or "").strip()
+    statistics_source_version = str(statistics.get("active_source_version") or "").strip()
+    if not db_version or {db_version, oracle_source_version, statistics_source_version} != {
+        db_version
+    }:
+        return None
+    if exact_oracle.get("candidate_selection") != "monolithic_full_database":
+        return None
+    if type(exact_oracle.get("db_partitions")) is not int or exact_oracle["db_partitions"] != 1:
+        return None
+    if exact_oracle.get("memory_mode") != "disk_backed_bounded":
+        return None
+    if exact_oracle.get("shard_layout_source") != "active_generation":
+        return None
+    if type(exact_oracle.get("shard_layout_volume_count")) is not int:
+        return None
+    if exact_oracle["shard_layout_volume_count"] <= 0:
+        return None
+    if type(exact_oracle.get("shard_layout_required_bytes")) is not int:
+        return None
+    if exact_oracle["shard_layout_required_bytes"] <= 0:
+        return None
+    for digest_field in ("shard_layout_manifest_sha256", "shard_layout_sha256"):
+        digest = exact_oracle.get(digest_field)
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            return None
+    if exact_oracle.get("filter_semantics") != "blast_taxonomy_filter":
+        return None
+    if exact_oracle.get("filter_mode") not in {"include", "exclude"}:
+        return None
+    filter_taxids = exact_oracle.get("filter_taxids")
+    if not isinstance(filter_taxids, list) or not filter_taxids:
+        return None
+    if any(type(taxid) is not int or taxid <= 0 for taxid in filter_taxids):
+        return None
+    if exact_oracle.get("candidate_budget") != 500:
+        return None
+    if exact_oracle.get("candidate_budget_verified") is not True:
+        return None
+    if exact_oracle.get("candidate_engine") != "indexed_megablast":
+        return None
+    if exact_oracle.get("candidate_engine_verified") is not True:
+        return None
+    if exact_oracle.get("scoring_profile") != "megablast_web_default":
+        return None
+    if exact_oracle.get("scoring_profile_verified") is not True:
         return None
     effective_search_space = statistics.get("effective_search_space")
     if not isinstance(effective_search_space, int) or effective_search_space <= 0:
@@ -74,18 +125,24 @@ def _external_web_blast_provenance(
     options = dict(config_snapshot or {})
     options["web_blast_statistical_context"] = dict(statistics)
     options.setdefault("query_effective_search_spaces", [effective_search_space])
-    db_version = str(job.get("db_version") or "") or None
     compatibility = {
         "mode": "precise",
-        "level": "full_db_hitlist_exact_sharded",
+        "level": "full_db_hitlist_exact_monolithic",
         "eligible": True,
         "searchsp": effective_search_space,
         "search_space_source": "web_blast_statistical_context",
+        "selection_basis": "native_full_database",
         "warnings": [],
         "evidence": {
             "blast_version": job.get("blast_version") or "unknown",
             "database_snapshot": db_version,
             "exact_oracle": dict(exact_oracle),
+            "candidate_selection": "monolithic_full_database",
+            "db_partitions": 1,
+            "filter_semantics": "blast_taxonomy_filter",
+            "candidate_budget_verified": True,
+            "candidate_engine": "indexed_megablast",
+            "candidate_engine_verified": True,
         },
     }
     payload = {
@@ -100,6 +157,8 @@ def _external_web_blast_provenance(
         job_id=str(job.get("job_id") or ""),
         payload=payload,
     )
+    if not isinstance(provenance, dict):
+        return None
     database = provenance.get("database")
     detail = job.get("db_version_detail")
     detail = detail.get("detail") if isinstance(detail, dict) else None
@@ -266,7 +325,8 @@ def _external_execution_detail_text(
         if isinstance(result_exec, dict) and isinstance(result_exec.get("execution"), dict):
             execution = result_exec["execution"]
     execution = execution if isinstance(execution, dict) else {}
-    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    raw_result = job.get("result")
+    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
 
     def _first(*values: Any) -> str:
         for value in values:
@@ -329,7 +389,7 @@ def _external_execution_steps(
         steps["preparing"] = dict(_STEP_DONE)
         steps["configuring"] = dict(_STEP_DONE)
         steps["submitting"] = dict(_STEP_DONE)
-        running = {"status": "running", "source": "external_api"}
+        running: dict[str, Any] = {"status": "running", "source": "external_api"}
         if detail_text:
             running["last_output"] = detail_text
         steps["running"] = running
@@ -753,7 +813,8 @@ def _database_metadata_for_response(
     try:
         from api.services.blast.db_metadata import resolve_database_display_metadata
 
-        return resolve_database_display_metadata(storage_account, database)
+        metadata = resolve_database_display_metadata(storage_account, database)
+        return metadata if isinstance(metadata, dict) else None
     except Exception as exc:
         LOGGER.info(
             "database metadata projection skipped db=%s: %s",

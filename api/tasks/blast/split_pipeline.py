@@ -1105,6 +1105,7 @@ def _aggregate_split_merge_reports(
     """Combine child finalizer reports into one parent-level report."""
     warnings: list[str] = []
     max_target_values: set[int] = set()
+    candidate_pool_values: set[int] = set()
     formats: set[str] = set()
     precision_levels: set[str] = set()
     diversity_modes: set[str] = set()
@@ -1167,6 +1168,9 @@ def _aggregate_split_merge_reports(
         max_target = report.get("max_target_seqs")
         if isinstance(max_target, (int, float)) and max_target > 0:
             max_target_values.add(int(max_target))
+        candidate_pool_size = report.get("candidate_pool_size")
+        if isinstance(candidate_pool_size, (int, float)) and candidate_pool_size > 0:
+            candidate_pool_values.add(int(candidate_pool_size))
         for warning in report.get("warnings", []):
             if isinstance(warning, str) and warning not in warnings:
                 warnings.append(warning)
@@ -1185,6 +1189,7 @@ def _aggregate_split_merge_reports(
                 "child_job_id": item.get("child_job_id"),
                 "group_id": item.get("group_id"),
                 "queries": report.get("queries", 0),
+                "candidate_pool_size": candidate_pool_size,
                 "total_input_hits": report.get("total_input_hits", 0),
                 "total_input_rows": report.get("total_input_rows", 0),
                 "total_input_subjects": report.get("total_input_subjects", 0),
@@ -1210,6 +1215,8 @@ def _aggregate_split_merge_reports(
         )
     if len(max_target_values) > 1:
         warnings.append("child merge reports used different max_target_seqs values")
+    if len(candidate_pool_values) > 1:
+        warnings.append("child merge reports used different candidate_pool_size values")
     if len(formats) > 1:
         raise ValueError("split child merge reports used different output formats")
     if len(precision_levels) > 1:
@@ -1235,6 +1242,9 @@ def _aggregate_split_merge_reports(
         "parent_job_id": parent_job_id,
         "child_count": len(child_reports),
         "max_target_seqs": next(iter(max_target_values)) if len(max_target_values) == 1 else None,
+        "candidate_pool_size": (
+            next(iter(candidate_pool_values)) if len(candidate_pool_values) == 1 else None
+        ),
         **totals,
         "tie_cutoff_queries": tie_cutoff_queries,
         "diversity_reservation_mode": (

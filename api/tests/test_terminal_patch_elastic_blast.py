@@ -10,6 +10,7 @@ Key entry points: `_load_patch_module`,
 `test_patch_init_shard_script_is_idempotent`,
 `test_patch_init_shard_script_updates_installed_package_copy`,
 `test_patch_azure_traits_adds_dashboard_v7_skus`,
+`test_patch_requested_max_target_seqs_transport_is_complete_and_idempotent`,
 `test_patch_azure_cli_glue_clears_cleanup_stack_for_json_submit_success`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
@@ -683,6 +684,172 @@ def test_patch_partitioned_outfmt_gate_is_idempotent(tmp_path: Path) -> None:
     assert target.read_text() == once
     # The widened gate is present exactly once (no double application).
     assert once.count("outfmt_code not in {'5', '6', '7'}") == 1
+
+
+def test_patch_disk_backed_monolithic_mode_is_complete_and_idempotent(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    source = tmp_path / "src" / "elastic_blast"
+    templates = source / "templates"
+    templates.mkdir(parents=True)
+    (source / "elb_config.py").write_text(
+        "    db_auto_partition: bool = False\n"
+        "    db_partitions: int = 0\n"
+        "    db_partition_prefix: str = ''\n\n"
+        "    # database metadata, not part of config\n"
+        "               'db_partitions': ParamInfo(CFG_BLAST, CFG_BLAST_DB_PARTITIONS),\n"
+        "               'db_partition_prefix': ParamInfo(CFG_BLAST, CFG_BLAST_DB_PARTITION_PREFIX)}\n"
+        "        if self.db_partitions < 0:\n"
+        "            errors.append(f'db-partitions must be non-negative, got {self.db_partitions}')\n"
+        "        if task == ElbCommand.SUBMIT:\n"
+        "            # validate number of CPUs and memory limit for searching a batch\n"
+        "            # of queries\n"
+        "                if self.blast.db_metadata:\n"
+    )
+    (source / "azure.py").write_text(
+        "        program = cfg.blast.program\n"
+        "        # CPU allocation: fewer CPUs when 1 job per node, else quarter of total\n"
+        "            'ELB_MEM_LIMIT': str(cfg.cluster.mem_limit),\n"
+        "            'ELB_BLAST_OPTIONS': cfg.blast.options,\n"
+    )
+    (source / "kubernetes.py").write_text(
+        "    if _dashboard_warmup_jobs_ready(cfg, db, num_shards):\n"
+        "        return\n"
+        "        'ELB_PARTITION_PREFIX': partition_prefix,\n"
+        "        'ELB_RESULTS': results_bucket,\n"
+    )
+    (templates / "blast-batch-job-shard-ssd-aks.yaml.template").write_text(
+        "      - name: blast-dbs\n"
+        "        hostPath:\n"
+        '          path: "/workspace"\n'
+        "          type: DirectoryOrCreate\n"
+        "        - name: blast-dbs\n"
+        "          mountPath: /blast/blastdb\n"
+        "          subPath: blast\n"
+    )
+    (templates / "job-init-ssd-shard-aks.yaml.template").write_text(
+        "      - name: blastdb\n"
+        "        hostPath:\n"
+        '          path: "/workspace"\n'
+        "      - name: scripts\n"
+        "        - name: blastdb\n"
+        "          mountPath: /blast/blastdb\n"
+        "          subPath: blast\n"
+        "        - name: blastdb\n"
+        "          mountPath: /blast/queries\n"
+        "          subPath: queries\n"
+        "          readOnly: false\n"
+    )
+
+    patch_module.patch_disk_backed_monolithic_mode(tmp_path)
+    snapshots = {path: path.read_text() for path in source.rglob("*") if path.is_file()}
+    patch_module.patch_disk_backed_monolithic_mode(tmp_path)
+
+    assert snapshots == {path: path.read_text() for path in source.rglob("*") if path.is_file()}
+    config_text = (source / "elb_config.py").read_text()
+    assert "disk_backed_monolithic: bool = False" in config_text
+    assert "disk-backed-monolithic requires exactly one DB partition" in config_text
+    assert "disk-backed-monolithic requires Azure node-local SSD storage" in config_text
+    assert "if self.blast.db_metadata and not disk_backed_monolithic:" in config_text
+
+    azure_text = (source / "azure.py").read_text()
+    assert "'/workspace/blast-monolithic'" in azure_text
+    assert "'ELB_VMTOUCH_DISABLE': '1' if disk_backed_monolithic else '0'" in azure_text
+    kubernetes_text = (source / "kubernetes.py").read_text()
+    assert "not cfg.blast.disk_backed_monolithic" in kubernetes_text
+    assert "'ELB_DB_HOST_PATH': (" in kubernetes_text
+
+    search_template = (templates / "blast-batch-job-shard-ssd-aks.yaml.template").read_text()
+    assert 'path: "${ELB_DB_HOST_PATH}"' in search_template
+    assert "subPath: blast" not in search_template
+    init_template = (templates / "job-init-ssd-shard-aks.yaml.template").read_text()
+    assert 'path: "${ELB_DB_HOST_PATH}"' in init_template
+    assert 'path: "/workspace/queries"' in init_template
+    assert "name: query-cache" in init_template
+
+
+def test_patch_requested_max_target_seqs_transport_is_complete_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    patch_module = _load_patch_module()
+    source = tmp_path / "src" / "elastic_blast"
+    templates = source / "templates"
+    templates.mkdir(parents=True)
+    config_path = source / "elb_config.py"
+    config_path.write_text(
+        "    disk_backed_monolithic: bool = False\n\n"
+        "               'disk_backed_monolithic': "
+        "ParamInfo(CFG_BLAST, 'disk-backed-monolithic')}\n"
+        "        if self.disk_backed_monolithic and self.db_partitions != 1:\n"
+        "            errors.append(\n"
+        "                'disk-backed-monolithic requires exactly one DB partition'\n"
+        "            )\n"
+    )
+    azure_path = source / "azure.py"
+    azure_path.write_text(
+        "        # result-merger and terminal marker writer\n"
+        "            'ELB_DB_PARTITIONS': str(cfg.blast.db_partitions),\n"
+        "            'ELB_BLAST_PROGRAM': cfg.blast.program,\n"
+        "            'ELB_BLAST_OPTIONS': cfg.blast.options,\n"
+        "            'ELB_FINALIZER_DOCKER_IMAGE': cfg.azure.cjs_docker_image,\n"
+    )
+    template_path = templates / "elb-finalizer-aks.yaml.template"
+    template_path.write_text(
+        "        image: ${ELB_FINALIZER_DOCKER_IMAGE}\n"
+        "        - name: ELB_BLAST_OPTIONS\n"
+        '          value: "${ELB_BLAST_OPTIONS}"\n'
+        "        - name: BLAST_ELB_JOB_ID\n"
+        "      - key: CriticalAddonsOnly\n"
+    )
+
+    patch_module.patch_requested_max_target_seqs(tmp_path)
+    patch_module.patch_azure_py(tmp_path)
+    patch_module.patch_finalizer_template(tmp_path)
+    snapshots = {
+        path: path.read_text()
+        for path in (config_path, azure_path, template_path)
+    }
+    patch_module.patch_requested_max_target_seqs(tmp_path)
+    patch_module.patch_azure_py(tmp_path)
+    patch_module.patch_finalizer_template(tmp_path)
+
+    assert snapshots == {
+        path: path.read_text()
+        for path in (config_path, azure_path, template_path)
+    }
+    assert "requested_max_target_seqs: int = 0" in config_path.read_text()
+    assert "requested-max-target-seqs must be non-negative" in config_path.read_text()
+    assert "'ELB_REQUESTED_MAX_TARGET_SEQS': (" in azure_path.read_text()
+    assert "name: ELB_REQUESTED_MAX_TARGET_SEQS" in template_path.read_text()
+
+
+def test_patch_requested_max_target_seqs_supports_folded_options_yaml(
+    tmp_path: Path,
+) -> None:
+    patch_module = _load_patch_module()
+    template_path = (
+        tmp_path
+        / "src"
+        / "elastic_blast"
+        / "templates"
+        / "elb-finalizer-aks.yaml.template"
+    )
+    template_path.parent.mkdir(parents=True)
+    template_path.write_text(
+        "        image: ${ELB_FINALIZER_DOCKER_IMAGE}\n"
+        "        - name: ELB_BLAST_OPTIONS\n"
+        "          value: >-\n"
+        "            ${ELB_BLAST_OPTIONS}\n"
+        "        - name: BLAST_ELB_JOB_ID\n"
+        "      - key: CriticalAddonsOnly\n"
+    )
+
+    patch_module.patch_finalizer_template(tmp_path)
+    once = template_path.read_text()
+    patch_module.patch_finalizer_template(tmp_path)
+
+    assert template_path.read_text() == once
+    assert once.count("name: ELB_REQUESTED_MAX_TARGET_SEQS") == 1
+    assert "value: >-\n            ${ELB_BLAST_OPTIONS}" in once
 
 
 _BLAST_RUN_AKS_STUB = """#!/bin/bash

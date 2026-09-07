@@ -59,6 +59,7 @@ SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
         "pd_size",
         "query_count",
         "query_effective_search_spaces",
+        "requested_max_target_seqs",
         "shard_sets",
         "sharding_mode",
         "taxid",

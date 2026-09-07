@@ -80,6 +80,26 @@ def test_blast_k8s_job_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> 
     assert cfg.get("timeouts", "blast-k8s-job") == "4320"
 
 
+def test_requested_max_target_seqs_is_separate_from_candidate_pool() -> None:
+    params = _base_params()
+    params["max_target_seqs"] = 5000
+    params["requested_max_target_seqs"] = 100
+
+    cfg = _parse(generate_config(params))
+
+    assert "-max_target_seqs 5000" in cfg.get("blast", "options")
+    assert cfg.get("blast", "requested-max-target-seqs") == "100"
+
+
+def test_requested_max_target_seqs_rejects_value_above_candidate_pool() -> None:
+    params = _base_params()
+    params["max_target_seqs"] = 100
+    params["requested_max_target_seqs"] = 101
+
+    with pytest.raises(ValueError, match="cannot exceed max_target_seqs candidate pool"):
+        generate_config(params)
+
+
 def test_generate_config_rejects_storage_account_mismatch() -> None:
     params = _base_params()
     params["db"] = "https://stgelb.blob.core.windows.net/blast-db/core_nt/core_nt"

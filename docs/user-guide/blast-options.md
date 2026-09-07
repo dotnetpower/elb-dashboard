@@ -125,6 +125,8 @@ The `disable_sharding` boolean is a legacy opt-out kept for older callers. New c
 
     A sharded merge returns at most `max_target_seqs` subjects per query and retains every HSP row belonging to each selected tabular subject, so a tabular file can contain more than `max_target_seqs` rows. Precise mode reproduces native full-DB selection: BLAST treats e-values below `1e-180` as equal, then compares raw score and descending full-database OID. The contiguous shard DB-order oracle restores that OID; if the oracle does not cover every candidate, the merge fails instead of returning an approximate list.
 
+    A strict query-oracle run may widen the internal per-shard candidate pool to avoid pruning an oracle subject before the merge. That internal expansion does not change the requested final result limit: the merger still emits at most the original `max_target_seqs` subjects and records both limits in `merge-report.json`.
+
     Approximate mode has no exact OID contract. When one score class fills and overflows its complete result window, it preserves a proportional share `ceil(N * L / (T + L))` of distinct lower-scoring subjects from the shard candidate pool. Operators can set `ELB_DIVERSITY_AWARE_CUTOFF=0` for strict score-only selection, `auto` for proportional selection, or a positive fixed reservation. This heuristic does not claim full-DB equality. Exact NCBI parity additionally requires NCBI and ELB to use the same database snapshot and BLAST options.
 
 !!! warning "outfmt and sharding"

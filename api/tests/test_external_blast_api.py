@@ -60,7 +60,28 @@ def test_external_projection_exposes_complete_web_blast_provenance() -> None:
             }
         },
         "config_snapshot": {"evalue": 0.05},
-        "exact_oracle": {"run_id": "run-1", "part_count": 10},
+        "exact_oracle": {
+            "run_id": "run-1",
+            "source_version": "ncbi-direct-20260819-cab30d18c360",
+            "part_count": 10,
+            "candidate_selection": "monolithic_full_database",
+            "db_partitions": 1,
+            "memory_mode": "disk_backed_bounded",
+            "shard_layout_source": "active_generation",
+            "shard_layout_manifest_sha256": "a" * 64,
+            "shard_layout_sha256": "b" * 64,
+            "shard_layout_volume_count": 84,
+            "shard_layout_required_bytes": 295_616_972_515,
+            "filter_semantics": "blast_taxonomy_filter",
+            "filter_mode": "exclude",
+            "filter_taxids": [3431483],
+            "candidate_budget": 500,
+            "candidate_budget_verified": True,
+            "candidate_engine": "indexed_megablast",
+            "candidate_engine_verified": True,
+            "scoring_profile": "megablast_web_default",
+            "scoring_profile_verified": True,
+        },
         "web_blast_statistics": context,
     }
 
@@ -68,13 +89,168 @@ def test_external_projection_exposes_complete_web_blast_provenance() -> None:
 
     provenance = projected["provenance"]
     assert provenance["compatibility"]["searchsp"] == 421_817_959_873_974
-    assert provenance["compatibility"]["level"] == "full_db_hitlist_exact_sharded"
+    assert provenance["compatibility"]["level"] == "full_db_hitlist_exact_monolithic"
+    assert provenance["compatibility"]["selection_basis"] == "native_full_database"
+    assert provenance["compatibility"]["evidence"]["db_partitions"] == 1
     assert provenance["options"]["web_blast_statistical_context"] == context
     assert provenance["database"]["number_of_letters"] == 998_069_435_926
     assert provenance["database"]["number_of_sequences"] == 130_155_243
 
     del job["exact_oracle"]
     assert "provenance" not in _external_to_blast_job(job)
+
+
+def test_external_projection_rejects_cross_generation_exact_evidence() -> None:
+    from api.services.blast.external_job_projection import _external_to_blast_job
+
+    projected = _external_to_blast_job(
+        {
+            "job_id": "abcdef123456",
+            "status": "success",
+            "program": "blastn",
+            "db_name": "core_nt",
+            "db_version": "generation-2",
+            "exact_oracle": {"source_version": "generation-1"},
+            "web_blast_statistics": {
+                "active_source_version": "generation-2",
+                "effective_search_space": 123,
+            },
+        }
+    )
+
+    assert "provenance" not in projected
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "memory_mode",
+        "shard_layout_source",
+        "shard_layout_manifest_sha256",
+        "shard_layout_sha256",
+        "shard_layout_volume_count",
+        "shard_layout_required_bytes",
+        "filter_mode",
+        "filter_taxids",
+        "candidate_budget",
+        "candidate_engine",
+        "candidate_engine_verified",
+        "scoring_profile",
+        "scoring_profile_verified",
+    ],
+)
+def test_external_projection_requires_each_exact_runtime_evidence_field(
+    missing_field: str,
+) -> None:
+    from api.services.blast.external_job_projection import _external_to_blast_job
+
+    exact_oracle = {
+        "source_version": "generation-1",
+        "candidate_selection": "monolithic_full_database",
+        "db_partitions": 1,
+        "memory_mode": "disk_backed_bounded",
+        "shard_layout_source": "active_generation",
+        "shard_layout_manifest_sha256": "a" * 64,
+        "shard_layout_sha256": "b" * 64,
+        "shard_layout_volume_count": 84,
+        "shard_layout_required_bytes": 295_616_972_515,
+        "filter_semantics": "blast_taxonomy_filter",
+        "filter_mode": "exclude",
+        "filter_taxids": [5833],
+        "candidate_budget": 500,
+        "candidate_budget_verified": True,
+        "candidate_engine": "indexed_megablast",
+        "candidate_engine_verified": True,
+        "scoring_profile": "megablast_web_default",
+        "scoring_profile_verified": True,
+    }
+    del exact_oracle[missing_field]
+    projected = _external_to_blast_job(
+        {
+            "job_id": "abcdef123456",
+            "status": "success",
+            "program": "blastn",
+            "db_name": "core_nt",
+            "db_version": "generation-1",
+            "exact_oracle": exact_oracle,
+            "web_blast_statistics": {
+                "active_source_version": "generation-1",
+                "effective_search_space": 123,
+            },
+        }
+    )
+
+    assert "provenance" not in projected
+
+
+@pytest.mark.parametrize(
+    "exact_oracle",
+    [
+        {"run_id": "legacy-run", "part_count": 10},
+        {
+            "run_id": "partitioned-run",
+            "candidate_selection": "partitioned_shards",
+            "db_partitions": 10,
+        },
+        {
+            "run_id": "inconsistent-run",
+            "candidate_selection": "monolithic_full_database",
+            "db_partitions": 10,
+        },
+        {
+            "run_id": "missing-filter-evidence",
+            "candidate_selection": "monolithic_full_database",
+            "db_partitions": 1,
+        },
+        {
+            "run_id": "unverified-budget",
+            "candidate_selection": "monolithic_full_database",
+            "db_partitions": 1,
+            "filter_semantics": "blast_taxonomy_filter",
+            "candidate_budget_verified": False,
+        },
+    ],
+)
+def test_external_projection_requires_monolithic_runtime_evidence(
+    exact_oracle: dict[str, Any],
+) -> None:
+    from api.services.blast.external_job_projection import _external_to_blast_job
+
+    projected = _external_to_blast_job(
+        {
+            "job_id": "abcdef123456",
+            "status": "success",
+            "program": "blastn",
+            "db_name": "core_nt",
+            "exact_oracle": exact_oracle,
+            "web_blast_statistics": {"effective_search_space": 123},
+        }
+    )
+
+    assert "provenance" not in projected
+
+
+def test_external_projection_requires_terminal_success_for_exact_provenance() -> None:
+    from api.services.blast.external_job_projection import _external_to_blast_job
+
+    projected = _external_to_blast_job(
+        {
+            "job_id": "abcdef123456",
+            "status": "running",
+            "program": "blastn",
+            "db_name": "core_nt",
+            "exact_oracle": {
+                "run_id": "run-1",
+                "candidate_selection": "monolithic_full_database",
+                "db_partitions": 1,
+                "filter_semantics": "blast_taxonomy_filter",
+                "candidate_budget_verified": True,
+            },
+            "web_blast_statistics": {"effective_search_space": 123},
+        }
+    )
+
+    assert "provenance" not in projected
 
 
 def test_external_blast_submit_forwards_contract(monkeypatch):
@@ -131,7 +307,7 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
     assert captured["idempotency_key"] == "req-1"
     assert captured["canonical_request"]["metadata"]["submission_source"] == "external_api"
     assert captured["compatibility_contract"]["mode"] == "precise"
-    assert captured["compatibility_contract"]["level"] == "full_db_hitlist_exact_sharded"
+    assert captured["compatibility_contract"]["level"] == "full_db_statistics_exact_sharded"
     assert captured["provenance"]["compatibility"]["mode"] == "precise"
     assert captured["taxid"] == 3431483
     assert captured["is_inclusive"] is False
@@ -1051,6 +1227,28 @@ def test_external_submit_rejects_inconsistent_web_blast_context(monkeypatch) -> 
 
     assert response.status_code == 422
     assert "scoring_search_space" in response.text
+
+
+def test_external_submit_rejects_web_blast_context_for_non_blastn() -> None:
+    from api.routes.elastic_blast import ExternalBlastSubmitRequest
+
+    with pytest.raises(ValueError, match="requires blastn"):
+        ExternalBlastSubmitRequest(
+            query_fasta=">q1\nACGTACGT\n",
+            db="core_nt",
+            program="blastx",
+            options={
+                "sharding_mode": "precise",
+                "web_blast_statistical_context": {
+                    "filtered_database_letters": 1000,
+                    "filtered_database_sequences": 10,
+                    "length_adjustment": 1,
+                    "effective_search_space": 6930,
+                    "scoring_search_space": 7000,
+                    "result_database_letters": 1000,
+                },
+            },
+        )
 
 
 def test_external_submit_rejects_mixed_query_searchspace_transport(monkeypatch) -> None:
@@ -3759,6 +3957,192 @@ def test_sync_external_jobs_skips_unchanged_status(monkeypatch):
     )
 
     assert result == (0, 0, set())
+
+
+def test_sync_external_jobs_backfills_complete_runtime_evidence(monkeypatch):
+    from api.routes import _blast_shared as shared
+
+    updated_calls: list[dict[str, object]] = []
+    context = {
+        "schema_version": 1,
+        "query_id": "q1",
+        "query_length": 462,
+        "filtered_database_letters": 994_867_281_343,
+        "filtered_database_sequences": 130_118_804,
+        "length_adjustment": 36,
+        "effective_search_space": 421_817_959_873_974,
+        "scoring_search_space": 423_813_461_852_118,
+        "result_database_letters": 998_069_435_926,
+        "active_database_letters": 998_069_435_926,
+        "active_database_sequences": 130_155_243,
+        "active_source_version": "generation-1",
+    }
+
+    class ExistingRow:
+        job_id = "abc123"
+        status = "completed"
+        phase = "completed"
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "q1"
+        payload: ClassVar[dict] = {
+            "local_marker": "preserved",
+            "external": {"submission_source": "external_api"},
+        }
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"abc123": ExistingRow()}
+
+        def update(self, job_id, **kwargs):
+            updated_calls.append({"job_id": job_id, **kwargs})
+
+        def backfill_payload_section(self, job_id, section, values):
+            updated_calls.append(
+                {"job_id": job_id, "section": section, "values": values}
+            )
+            return True
+
+        def create(self, state):  # pragma: no cover - defensive
+            raise AssertionError("must not create an existing row")
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+
+    ext = {
+        "job_id": "abc123",
+        "status": "success",
+        "created_at": "2026-09-05T00:00:00Z",
+        "program": "blastn",
+        "db_name": "core_nt",
+        "exact_oracle": {"run_id": "run-1", "source_version": "generation-1"},
+        "web_blast_statistics": context,
+        "db_version": "generation-1",
+        "blast_version": "2.17.0+",
+    }
+
+    assert shared._sync_external_jobs_to_table([ext], caller_oid="oid-1") == (
+        0,
+        1,
+        set(),
+    )
+    assert len(updated_calls) == 1
+    assert updated_calls[0]["section"] == "external"
+    assert updated_calls[0]["values"]["exact_oracle"] == ext["exact_oracle"]
+    assert updated_calls[0]["values"]["web_blast_statistics"] == context
+
+
+def test_sync_external_jobs_runtime_evidence_backfill_is_idempotent(monkeypatch):
+    from api.routes import _blast_shared as shared
+
+    evidence = {
+        "exact_oracle": {"run_id": "run-1"},
+        "web_blast_statistics": {"effective_search_space": 123},
+    }
+
+    class ExistingRow:
+        job_id = "abc123"
+        status = "completed"
+        phase = "completed"
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "q1"
+        payload: ClassVar[dict] = {"external": {"submission_source": "external_api", **evidence}}
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"abc123": ExistingRow()}
+
+        def update(self, *_args, **_kwargs):
+            raise AssertionError("identical evidence must not rewrite the row")
+
+        def backfill_payload_section(self, _job_id, _section, _values):
+            raise AssertionError("complete evidence must not trigger a Table point read")
+
+        def create(self, state):  # pragma: no cover - defensive
+            raise AssertionError("must not create an existing row")
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+
+    ext = {
+        "job_id": "abc123",
+        "status": "success",
+        "created_at": "2026-09-05T00:00:00Z",
+        "program": "blastn",
+        "db_name": "core_nt",
+        **evidence,
+    }
+
+    assert shared._sync_external_jobs_to_table([ext], caller_oid="oid-1") == (
+        0,
+        0,
+        set(),
+    )
+
+
+def test_sync_external_jobs_passes_runtime_evidence_to_atomic_backfill(monkeypatch):
+    from api.routes import _blast_shared as shared
+
+    updated_calls: list[dict[str, object]] = []
+    stored_oracle = {"run_id": "stored-run"}
+
+    class ExistingRow:
+        job_id = "abc123"
+        status = "completed"
+        phase = "completed"
+        job_title = "blastn - core_nt"
+        program = "blastn"
+        db = "core_nt"
+        query_label = "q1"
+        payload: ClassVar[dict] = {
+            "external": {
+                "submission_source": "external_api",
+                "exact_oracle": stored_oracle,
+            }
+        }
+
+    class FakeRepo:
+        def get_many(self, ids):
+            return {"abc123": ExistingRow()}
+
+        def update(self, job_id, **kwargs):
+            updated_calls.append({"job_id": job_id, **kwargs})
+
+        def backfill_payload_section(self, job_id, section, values):
+            assert job_id == "abc123"
+            assert section == "external"
+            assert values["exact_oracle"] != stored_oracle
+            assert values["web_blast_statistics"] == ext["web_blast_statistics"]
+            return True
+
+        def create(self, state):  # pragma: no cover - defensive
+            raise AssertionError("must not create an existing row")
+
+    from api.services import state_repo
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+
+    ext = {
+        "job_id": "abc123",
+        "status": "success",
+        "created_at": "2026-09-05T00:00:00Z",
+        "program": "blastn",
+        "db_name": "core_nt",
+        "exact_oracle": {"run_id": "fresh-run"},
+        "web_blast_statistics": {"effective_search_space": 123},
+    }
+
+    assert shared._sync_external_jobs_to_table([ext], caller_oid="oid-1") == (
+        0,
+        1,
+        set(),
+    )
+    assert updated_calls == []
 
 
 def test_sync_external_jobs_backfills_empty_cluster_scope(monkeypatch):

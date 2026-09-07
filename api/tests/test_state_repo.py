@@ -15,6 +15,7 @@ Validation: `uv run pytest -q api/tests/test_state_repo.py`.
 
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 from api.services.state import repository as state_repo
@@ -1047,6 +1048,185 @@ def test_backfill_elastic_blast_job_id_reads_winner_after_repeated_etag_races(
     monkeypatch.setattr(state_repo, "get_credential", lambda: object())
 
     assert JobStateRepository().backfill_elastic_blast_job_id("job-runtime-id", incoming) == winner
+
+
+def test_backfill_payload_section_uses_conditional_payload_only_merge(monkeypatch) -> None:
+    submitted: list[dict[str, object]] = []
+    update_kwargs: list[dict[str, object]] = []
+    existing_entity = JobState(
+        job_id="job-evidence",
+        type="blast",
+        status="completed",
+        phase="completed",
+        owner_oid="owner-1",
+        payload={
+            "local_marker": "preserved",
+            "external": {"submission_source": "external_api"},
+        },
+        job_title="18S search",
+        program="blastn",
+        db="core_nt",
+    ).to_entity()
+
+    class Entity(dict[str, object]):
+        metadata: ClassVar[dict[str, str]] = {"etag": "etag-1"}
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, **_kwargs: object) -> Entity:
+            return Entity(existing_entity)
+
+        def update_entity(self, entity: dict[str, object], **kwargs: object) -> None:
+            submitted.append(entity)
+            update_kwargs.append(kwargs)
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    changed = JobStateRepository().backfill_payload_section(
+        "job-evidence",
+        "external",
+        {
+            "exact_oracle": {"run_id": "run-1"},
+            "web_blast_statistics": {"effective_search_space": 123},
+        },
+    )
+
+    assert changed is True
+    assert len(submitted) == 1
+    patch = submitted[0]
+    assert set(patch) == {"PartitionKey", "RowKey", "payload_json", "updated_at"}
+    payload = json.loads(str(patch["payload_json"]))
+    assert payload["local_marker"] == "preserved"
+    assert payload["external"] == {
+        "submission_source": "external_api",
+        "exact_oracle": {"run_id": "run-1"},
+        "web_blast_statistics": {"effective_search_space": 123},
+    }
+    assert update_kwargs == [
+        {
+            "mode": state_repo.UpdateMode.MERGE,
+            "etag": "etag-1",
+            "match_condition": MatchConditions.IfNotModified,
+        }
+    ]
+
+
+def test_backfill_payload_section_retries_without_losing_concurrent_fields(monkeypatch) -> None:
+    initial = JobState(
+        job_id="job-evidence",
+        type="blast",
+        status="completed",
+        payload={"external": {"submission_source": "external_api"}},
+    ).to_entity()
+    concurrent = dict(initial)
+    concurrent["payload_json"] = json.dumps(
+        {
+            "external": {"submission_source": "external_api"},
+            "concurrent_marker": "kept",
+        }
+    )
+
+    class Entity(dict[str, object]):
+        def __init__(self, values: dict[str, object], etag: str) -> None:
+            super().__init__(values)
+            self.metadata = {"etag": etag}
+
+    entities = iter((Entity(initial, "etag-1"), Entity(concurrent, "etag-2")))
+    submitted: list[dict[str, object]] = []
+
+    class RacingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RacingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, **_kwargs: object) -> Entity:
+            return next(entities)
+
+        def update_entity(self, entity: dict[str, object], **_kwargs: object) -> None:
+            submitted.append(entity)
+            if len(submitted) == 1:
+                raise ResourceModifiedError("etag changed")
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RacingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    changed = JobStateRepository().backfill_payload_section(
+        "job-evidence",
+        "external",
+        {"exact_oracle": {"run_id": "run-1"}},
+    )
+
+    assert changed is True
+    assert len(submitted) == 2
+    payload = json.loads(str(submitted[-1]["payload_json"]))
+    assert payload["concurrent_marker"] == "kept"
+    assert payload["external"]["exact_oracle"] == {"run_id": "run-1"}
+
+
+def test_backfill_payload_section_preserves_conflicts(monkeypatch, caplog) -> None:
+    existing_entity = JobState(
+        job_id="job-evidence",
+        type="blast",
+        status="completed",
+        payload={"external": {"exact_oracle": {"run_id": "stored-run"}}},
+    ).to_entity()
+    submitted: list[dict[str, object]] = []
+
+    class Entity(dict[str, object]):
+        metadata: ClassVar[dict[str, str]] = {"etag": "etag-1"}
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_entity(self, **_kwargs: object) -> Entity:
+            return Entity(existing_entity)
+
+        def update_entity(self, entity: dict[str, object], **_kwargs: object) -> None:
+            submitted.append(entity)
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    changed = JobStateRepository().backfill_payload_section(
+        "job-evidence",
+        "external",
+        {
+            "exact_oracle": {"run_id": "fresh-run"},
+            "web_blast_statistics": {"effective_search_space": 123},
+        },
+    )
+
+    assert changed is True
+    payload = json.loads(str(submitted[0]["payload_json"]))
+    assert payload["external"]["exact_oracle"] == {"run_id": "stored-run"}
+    assert payload["external"]["web_blast_statistics"] == {
+        "effective_search_space": 123
+    }
+    assert "preserving stored value" in caplog.text
 
 
 def test_update_explicit_scope_arg_wins_over_payload(monkeypatch) -> None:

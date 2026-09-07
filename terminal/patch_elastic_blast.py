@@ -8,7 +8,8 @@ wrappers.
 Key entry points: `_replace_once`, `_replace_once_unless_present`,
 `_replace_all_unless_present`, `patch_azure_py`, `patch_azure_cli_glue`,
 `patch_finalizer_template`, `patch_finalizer_script`,
-`patch_kubectl_transient_retries`
+`patch_kubectl_transient_retries`, `patch_disk_backed_monolithic_mode`,
+`patch_requested_max_target_seqs`
 Risky contracts: Do not expose terminal services directly to the internet or log secrets.
 Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py
 api/tests/test_terminal_command_guard.py api/tests/test_terminal_patch_elastic_blast.py`.
@@ -263,6 +264,22 @@ def patch_azure_py(root: Path) -> None:
     _replace_once_unless_present(
         path,
         (
+            "            'ELB_BLAST_PROGRAM': cfg.blast.program,\n"
+            "            'ELB_BLAST_OPTIONS': cfg.blast.options,\n"
+        ),
+        (
+            "            'ELB_BLAST_PROGRAM': cfg.blast.program,\n"
+            "            'ELB_BLAST_OPTIONS': cfg.blast.options,\n"
+            "            'ELB_REQUESTED_MAX_TARGET_SEQS': (\n"
+            "                str(cfg.blast.requested_max_target_seqs)\n"
+            "                if cfg.blast.requested_max_target_seqs > 0 else ''\n"
+            "            ),\n"
+        ),
+        "'ELB_REQUESTED_MAX_TARGET_SEQS': (",
+    )
+    _replace_once_unless_present(
+        path,
+        (
             "        subs = {\n"
             "            'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,\n"
             "            'ELB_RESULTS': self._results_path(),\n"
@@ -318,6 +335,293 @@ def patch_partitioned_outfmt_gate(root: Path) -> None:
             "                    f'{outfmt} is not supported for merge')\n"
         ),
         "outfmt_code not in {'5', '6', '7'}",
+    )
+
+
+def patch_disk_backed_monolithic_mode(root: Path) -> None:
+    """Add an explicit, isolated one-partition local-SSD execution mode.
+
+    A full ``core_nt`` database exceeds E16 RAM but fits its node-local disk.
+    This mode keeps the pod memory limit in force, skips only the conservative
+    database-fit-in-RAM check, disables eager page-cache warming, and uses a
+    cache directory distinct from ordinary multi-shard runs.
+    """
+
+    config_path = root / "src/elastic_blast/elb_config.py"
+    _replace_once_unless_present(
+        config_path,
+        "    db_partition_prefix: str = ''\n\n    # database metadata, not part of config\n",
+        (
+            "    db_partition_prefix: str = ''\n"
+            "    disk_backed_monolithic: bool = False\n\n"
+            "    # database metadata, not part of config\n"
+        ),
+        "disk_backed_monolithic: bool = False",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "               'db_partitions': ParamInfo(CFG_BLAST, CFG_BLAST_DB_PARTITIONS),\n"
+            "               'db_partition_prefix': ParamInfo(CFG_BLAST, CFG_BLAST_DB_PARTITION_PREFIX)}\n"
+        ),
+        (
+            "               'db_partitions': ParamInfo(CFG_BLAST, CFG_BLAST_DB_PARTITIONS),\n"
+            "               'db_partition_prefix': ParamInfo(CFG_BLAST, CFG_BLAST_DB_PARTITION_PREFIX),\n"
+            "               'disk_backed_monolithic': ParamInfo(CFG_BLAST, 'disk-backed-monolithic')}\n"
+        ),
+        "'disk_backed_monolithic': ParamInfo(CFG_BLAST, 'disk-backed-monolithic')",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "        if self.db_partitions < 0:\n"
+            "            errors.append(f'db-partitions must be non-negative, got {self.db_partitions}')\n"
+        ),
+        (
+            "        if self.db_partitions < 0:\n"
+            "            errors.append(f'db-partitions must be non-negative, got {self.db_partitions}')\n"
+            "        if self.disk_backed_monolithic and self.db_partitions != 1:\n"
+            "            errors.append(\n"
+            "                'disk-backed-monolithic requires exactly one DB partition'\n"
+            "            )\n"
+        ),
+        "disk-backed-monolithic requires exactly one DB partition",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "        if task == ElbCommand.SUBMIT:\n"
+            "            # validate number of CPUs and memory limit for searching a batch\n"
+            "            # of queries\n"
+        ),
+        (
+            "        if task == ElbCommand.SUBMIT:\n"
+            "            if self.blast.disk_backed_monolithic and (\n"
+            "                self.cloud_provider.cloud != CSP.AZURE\n"
+            "                or not self.cluster.use_local_ssd\n"
+            "            ):\n"
+            "                errors.append(\n"
+            "                    'disk-backed-monolithic requires Azure node-local SSD storage'\n"
+            "                )\n"
+            "            # validate number of CPUs and memory limit for searching a batch\n"
+            "            # of queries\n"
+        ),
+        "disk-backed-monolithic requires Azure node-local SSD storage",
+    )
+    _replace_once_unless_present(
+        config_path,
+        "                if self.blast.db_metadata:\n",
+        (
+            "                disk_backed_monolithic = (\n"
+            "                    self.blast.disk_backed_monolithic\n"
+            "                    and self.cloud_provider.cloud == CSP.AZURE\n"
+            "                    and self.cluster.use_local_ssd\n"
+            "                    and self.blast.db_partitions == 1\n"
+            "                )\n"
+            "                if self.blast.db_metadata and not disk_backed_monolithic:\n"
+        ),
+        "if self.blast.db_metadata and not disk_backed_monolithic:",
+    )
+
+    azure_path = root / "src/elastic_blast/azure.py"
+    _replace_once_unless_present(
+        azure_path,
+        (
+            "        program = cfg.blast.program\n"
+            "        # CPU allocation: fewer CPUs when 1 job per node, else quarter of total\n"
+        ),
+        (
+            "        program = cfg.blast.program\n"
+            "        disk_backed_monolithic = bool(cfg.blast.disk_backed_monolithic)\n"
+            "        # CPU allocation: fewer CPUs when 1 job per node, else quarter of total\n"
+        ),
+        "disk_backed_monolithic = bool(cfg.blast.disk_backed_monolithic)",
+    )
+    _replace_once_unless_present(
+        azure_path,
+        (
+            "            'ELB_MEM_LIMIT': str(cfg.cluster.mem_limit),\n"
+            "            'ELB_BLAST_OPTIONS': cfg.blast.options,\n"
+        ),
+        (
+            "            'ELB_MEM_LIMIT': str(cfg.cluster.mem_limit),\n"
+            "            'ELB_DB_HOST_PATH': (\n"
+            "                '/workspace/blast-monolithic'\n"
+            "                if disk_backed_monolithic else '/workspace/blast'\n"
+            "            ),\n"
+            "            'ELB_VMTOUCH_DISABLE': '1' if disk_backed_monolithic else '0',\n"
+            "            'ELB_BLAST_OPTIONS': cfg.blast.options,\n"
+        ),
+        "'ELB_DB_HOST_PATH': (",
+    )
+
+    kubernetes_path = root / "src/elastic_blast/kubernetes.py"
+    _replace_once_unless_present(
+        kubernetes_path,
+        ("    if _dashboard_warmup_jobs_ready(cfg, db, num_shards):\n        return\n"),
+        (
+            "    if (\n"
+            "        not cfg.blast.disk_backed_monolithic\n"
+            "        and _dashboard_warmup_jobs_ready(cfg, db, num_shards)\n"
+            "    ):\n"
+            "        return\n"
+        ),
+        "not cfg.blast.disk_backed_monolithic",
+    )
+    _replace_once_unless_present(
+        kubernetes_path,
+        (
+            "        'ELB_PARTITION_PREFIX': partition_prefix,\n"
+            "        'ELB_RESULTS': results_bucket,\n"
+        ),
+        (
+            "        'ELB_PARTITION_PREFIX': partition_prefix,\n"
+            "        'ELB_DB_HOST_PATH': (\n"
+            "            '/workspace/blast-monolithic'\n"
+            "            if cfg.blast.disk_backed_monolithic else '/workspace/blast'\n"
+            "        ),\n"
+            "        'ELB_RESULTS': results_bucket,\n"
+        ),
+        "if cfg.blast.disk_backed_monolithic else '/workspace/blast'",
+    )
+
+    search_template = (
+        root / "src/elastic_blast/templates/blast-batch-job-shard-ssd-aks.yaml.template"
+    )
+    _replace_once_unless_present(
+        search_template,
+        (
+            "      - name: blast-dbs\n"
+            "        hostPath:\n"
+            '          path: "/workspace"\n'
+            "          type: DirectoryOrCreate\n"
+        ),
+        (
+            "      - name: blast-dbs\n"
+            "        hostPath:\n"
+            '          path: "${ELB_DB_HOST_PATH}"\n'
+            "          type: DirectoryOrCreate\n"
+        ),
+        'path: "${ELB_DB_HOST_PATH}"',
+    )
+    _replace_once_unless_present(
+        search_template,
+        (
+            "        - name: blast-dbs\n"
+            "          mountPath: /blast/blastdb\n"
+            "          subPath: blast\n"
+        ),
+        (
+            "        - name: blast-dbs\n"
+            "          # ELB isolated DB host path mount\n"
+            "          mountPath: /blast/blastdb\n"
+        ),
+        "ELB isolated DB host path mount",
+    )
+
+    init_template = root / "src/elastic_blast/templates/job-init-ssd-shard-aks.yaml.template"
+    _replace_once_unless_present(
+        init_template,
+        (
+            "      - name: blastdb\n"
+            "        hostPath:\n"
+            '          path: "/workspace"\n'
+            "      - name: scripts\n"
+        ),
+        (
+            "      - name: blastdb\n"
+            "        hostPath:\n"
+            '          path: "${ELB_DB_HOST_PATH}"\n'
+            "          type: DirectoryOrCreate\n"
+            "      - name: query-cache\n"
+            "        hostPath:\n"
+            '          path: "/workspace/queries"\n'
+            "          type: DirectoryOrCreate\n"
+            "      - name: scripts\n"
+        ),
+        'path: "${ELB_DB_HOST_PATH}"',
+    )
+    _replace_once_unless_present(
+        init_template,
+        (
+            "        - name: blastdb\n"
+            "          mountPath: /blast/blastdb\n"
+            "          subPath: blast\n"
+        ),
+        (
+            "        - name: blastdb\n"
+            "          # ELB isolated DB host path mount\n"
+            "          mountPath: /blast/blastdb\n"
+        ),
+        "ELB isolated DB host path mount",
+    )
+    _replace_once_unless_present(
+        init_template,
+        (
+            "        - name: blastdb\n"
+            "          mountPath: /blast/queries\n"
+            "          subPath: queries\n"
+            "          readOnly: false\n"
+        ),
+        (
+            "        - name: query-cache\n"
+            "          mountPath: /blast/queries\n"
+            "          readOnly: false\n"
+        ),
+        "name: query-cache\n          mountPath: /blast/queries",
+    )
+
+
+def patch_requested_max_target_seqs(root: Path) -> None:
+    """Add an internal final-result cap distinct from the shard candidate pool.
+
+    The runtime model uses zero only as the optional-field sentinel. The API
+    serializer emits this key only with a validated positive value.
+    """
+
+    config_path = root / "src/elastic_blast/elb_config.py"
+    _replace_once_unless_present(
+        config_path,
+        "    disk_backed_monolithic: bool = False\n\n",
+        (
+            "    disk_backed_monolithic: bool = False\n"
+            "    requested_max_target_seqs: int = 0\n\n"
+        ),
+        "requested_max_target_seqs: int = 0",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "               'disk_backed_monolithic': "
+            "ParamInfo(CFG_BLAST, 'disk-backed-monolithic')}\n"
+        ),
+        (
+            "               'disk_backed_monolithic': "
+            "ParamInfo(CFG_BLAST, 'disk-backed-monolithic'),\n"
+            "               'requested_max_target_seqs': "
+            "ParamInfo(CFG_BLAST, 'requested-max-target-seqs')}\n"
+        ),
+        "'requested_max_target_seqs': ParamInfo(CFG_BLAST, 'requested-max-target-seqs')",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "        if self.disk_backed_monolithic and self.db_partitions != 1:\n"
+            "            errors.append(\n"
+            "                'disk-backed-monolithic requires exactly one DB partition'\n"
+            "            )\n"
+        ),
+        (
+            "        if self.requested_max_target_seqs < 0:\n"
+            "            errors.append(\n"
+            "                'requested-max-target-seqs must be non-negative'\n"
+            "            )\n"
+            "        if self.disk_backed_monolithic and self.db_partitions != 1:\n"
+            "            errors.append(\n"
+            "                'disk-backed-monolithic requires exactly one DB partition'\n"
+            "            )\n"
+        ),
+        "requested-max-target-seqs must be non-negative",
     )
 
 
@@ -408,6 +712,41 @@ def patch_finalizer_template(root: Path) -> None:
             "        - name: BLAST_ELB_JOB_ID\n"
         ),
         "name: ELB_BLAST_OPTIONS",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "        - name: ELB_BLAST_OPTIONS\n"
+            "          value: >-\n"
+            "            ${ELB_BLAST_OPTIONS}\n"
+            "        - name: BLAST_ELB_JOB_ID\n"
+        ),
+        (
+            "        - name: ELB_BLAST_OPTIONS\n"
+            "          value: >-\n"
+            "            ${ELB_BLAST_OPTIONS}\n"
+            "        - name: ELB_REQUESTED_MAX_TARGET_SEQS\n"
+            '          value: "${ELB_REQUESTED_MAX_TARGET_SEQS}"\n'
+            "        - name: BLAST_ELB_JOB_ID\n"
+        ),
+        "name: ELB_REQUESTED_MAX_TARGET_SEQS",
+        allow_absent=True,
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "        - name: ELB_BLAST_OPTIONS\n"
+            '          value: "${ELB_BLAST_OPTIONS}"\n'
+            "        - name: BLAST_ELB_JOB_ID\n"
+        ),
+        (
+            "        - name: ELB_BLAST_OPTIONS\n"
+            '          value: "${ELB_BLAST_OPTIONS}"\n'
+            "        - name: ELB_REQUESTED_MAX_TARGET_SEQS\n"
+            '          value: "${ELB_REQUESTED_MAX_TARGET_SEQS}"\n'
+            "        - name: BLAST_ELB_JOB_ID\n"
+        ),
+        "name: ELB_REQUESTED_MAX_TARGET_SEQS",
     )
     _replace_once_unless_present(
         path,
@@ -1677,6 +2016,22 @@ def patch_sharded_reader_lock_opt_in(root: Path) -> None:
             ),
             "name: ELB_DB_READER_LOCK",
         )
+        _replace_once_unless_present(
+            path,
+            (
+                "        - name: ELB_DB_READER_LOCK\n"
+                '          value: "1"\n'
+                "        - name: QUERY_DIR\n"
+            ),
+            (
+                "        - name: ELB_DB_READER_LOCK\n"
+                '          value: "1"\n'
+                "        - name: ELB_VMTOUCH_DISABLE\n"
+                '          value: "${ELB_VMTOUCH_DISABLE}"\n'
+                "        - name: QUERY_DIR\n"
+            ),
+            "name: ELB_VMTOUCH_DISABLE",
+        )
 
 
 def patch_aks_job_ttl(root: Path) -> None:
@@ -1812,6 +2167,7 @@ def patch_init_job_wait_filters(root: Path) -> None:
             "get jobs -l elb-job-id={cfg.azure.elb_job_id} -o jsonpath=' \\\n"
         ),
         "get jobs -l elb-job-id={cfg.azure.elb_job_id} -o jsonpath=",
+        allow_absent=True,
     )
     _replace_once_unless_present(
         path,
@@ -1825,6 +2181,7 @@ def patch_init_job_wait_filters(root: Path) -> None:
             "-o jsonpath=' \\\n"
         ),
         "get jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id} -o jsonpath=",
+        allow_absent=True,
     )
     _replace_all_unless_present(
         path,
@@ -2051,6 +2408,8 @@ def main() -> int:
 
     patch_azure_py(root)
     patch_partitioned_outfmt_gate(root)
+    patch_disk_backed_monolithic_mode(root)
+    patch_requested_max_target_seqs(root)
     patch_azure_cli_glue(root)
     patch_kubectl_transient_retries(root)
     patch_azure_traits(root)

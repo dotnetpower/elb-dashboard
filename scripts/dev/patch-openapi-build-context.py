@@ -6,7 +6,7 @@ Responsibility: Patch the sibling docker-openapi build context for dashboard run
 Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
 Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
 `_disable_warmed_cache_skip`, `_patch_canonical_merged_result_validation`,
-`_harden_openapi_runtime_ids`,
+`_patch_web_blast_candidate_selection_evidence`, `_harden_openapi_runtime_ids`,
 `_harden_elb_scripts_configmap_reconciliation`, `patch_app`, `main`
 Risky contracts: Preserve strict result-path validation; only shard outputs and the exact canonical
 merged filename may pass. Assume local developer context only; avoid broad production-side effects.
@@ -257,11 +257,28 @@ def _patch_external_soft_masking(root: Path) -> None:
 
 def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
     """Pin active DB paths while preserving an explicit query search space."""
-    stale = (
+    fallback_only = (
         '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
         '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
     )
-    active = (
+    fresh = (
+        "        partitions = max(1, min(NUM_NODES, 10))\n"
+        '        config["blast"]["db-partitions"] = str(partitions)\n'
+        '        config["blast"]["db-partition-prefix"] = (\n'
+        '            f"{_blob_base()}/blast-db/{partitions}shards/core_nt_shard_"\n'
+        "        )\n" + fallback_only
+    )
+    legacy = (
+        "        partitions = max(1, min(NUM_NODES, 10))\n"
+        '        config["blast"]["db-partitions"] = str(partitions)\n'
+        '        config["blast"]["db-partition-prefix"] = (\n'
+        '            f"{_blob_base()}/blast-db/{partitions}shards/core_nt_shard_"\n'
+        "        )\n"
+        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
+        "            raise HTTPException(\n"
+        "                400,\n"
+        '                "Precise core_nt sharding requires db_effective_search_space",\n'
+        "            )\n"
         "        try:\n"
         "            active_database = _exact_oracle.read_active_database(\n"
         "                blob_base=_blob_base(),\n"
@@ -297,10 +314,151 @@ def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
         '                "Active database statistics are required for precise core_nt sharding",\n'
         "            ) from exc\n"
     )
-    _replace_once(path, stale, active)
+    desired = (
+        "        default_partitions = max(1, min(NUM_NODES, 10))\n"
+        "        one_shard_layout = None\n"
+        '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
+        "            raise HTTPException(\n"
+        "                400,\n"
+        '                "Precise core_nt sharding requires db_effective_search_space",\n'
+        "            )\n"
+        "        try:\n"
+        "            active_database = _exact_oracle.read_active_database(\n"
+        "                blob_base=_blob_base(),\n"
+        "                db_name=db_name,\n"
+        "                token=_storage_oauth_token(),\n"
+        "            )\n"
+        "            opts, web_blast_statistics = _exact_oracle.prepare_web_blast_statistics(\n"
+        '                context=(req.model_extra or {}).get("web_blast_statistical_context"),\n'
+        '                query_fasta=str(req.query_fasta or ""),\n'
+        "                active_database=active_database,\n"
+        "                options=opts,\n"
+        "            )\n"
+        "            partitions = _exact_oracle.select_web_blast_partitions(\n"
+        "                web_blast_statistics,\n"
+        "                default_partitions=default_partitions,\n"
+        "            )\n"
+        "            if web_blast_statistics is not None and partitions == 1:\n"
+        "                one_shard_layout = _exact_oracle.read_one_shard_layout(\n"
+        "                    blob_base=_blob_base(),\n"
+        "                    db_name=db_name,\n"
+        "                    active_database=active_database,\n"
+        "                    token=_storage_oauth_token(),\n"
+        "                )\n"
+        "            if web_blast_statistics is None:\n"
+        "                opts = _exact_oracle.preserve_or_set_search_space(\n"
+        "                    opts, active_database.search_space\n"
+        "                )\n"
+        '            config["blast"]["db-partitions"] = str(partitions)\n'
+        "            if web_blast_statistics is not None and partitions == 1:\n"
+        '                config["blast"]["disk-backed-monolithic"] = "true"\n'
+        '                config["blast"]["mem-request"] = "104Gi"\n'
+        '                config["blast"]["mem-limit"] = "112Gi"\n'
+        '            config["blast"]["db"] = (\n'
+        '                f"{_blob_base()}/blast-db/{active_database.db_prefix}"\n'
+        "            )\n"
+        '            config["blast"]["db-partition-prefix"] = (\n'
+        '                f"{_blob_base()}/blast-db/{active_database.shard_layout_prefix}/"\n'
+        '                f"{partitions}shards/{db_name}_shard_"\n'
+        "            )\n"
+        '            config["blast"]["options"] = opts\n'
+        "        except Exception as exc:\n"
+        "            logger.warning(\n"
+        '                "active DB search-space resolution failed db=%s reason=%s",\n'
+        "                db_name,\n"
+        "                type(exc).__name__,\n"
+        "            )\n"
+        "            raise HTTPException(\n"
+        "                503,\n"
+        '                "Active database statistics are required for precise core_nt sharding",\n'
+        "            ) from exc\n"
+    )
     text = path.read_text()
-    if stale in text or text.count(active) != 1:
+    if "select_web_blast_partitions(" not in text and fresh not in text and legacy not in text:
+        _replace_once(path, fallback_only, desired)
+    else:
+        _replace_fresh_or_legacy(
+            path,
+            fresh=fresh,
+            legacy=legacy,
+            desired=desired,
+            marker="select_web_blast_partitions(",
+        )
+    text = path.read_text()
+    if fresh in text or legacy in text or fallback_only in text or text.count(desired) != 1:
         raise RuntimeError("precise core_nt active search-space patch is invalid")
+
+
+def _patch_web_blast_candidate_selection_evidence(path: Path) -> None:
+    """Record whether exact execution used monolithic or partitioned candidates."""
+    anchor = "            ).as_dict()\n            if web_blast_statistics is not None:\n"
+    legacy = (
+        "            ).as_dict()\n"
+        "            exact_oracle_info.update(\n"
+        "                {\n"
+        '                    "candidate_selection": (\n'
+        '                        "monolithic_full_database"\n'
+        "                        if partitions == 1\n"
+        '                        else "partitioned_shards"\n'
+        "                    ),\n"
+        '                    "db_partitions": partitions,\n'
+        "                }\n"
+        "            )\n"
+        "            if web_blast_statistics is not None:\n"
+    )
+    legacy_with_layout = (
+        legacy.removesuffix("            if web_blast_statistics is not None:\n")
+        + "            if one_shard_layout is not None:\n"
+        "                exact_oracle_info.update(one_shard_layout.as_dict())\n"
+        "            if web_blast_statistics is not None:\n"
+    )
+    execution_evidence = (
+        "            if web_blast_statistics is not None:\n"
+        "                exact_oracle_info.update(\n"
+        "                    _exact_oracle.validate_web_blast_execution_options(\n"
+        "                        opts, program=req.program\n"
+        "                    )\n"
+        "                )\n"
+    )
+    desired = (
+        "            ).as_dict()\n"
+        "            exact_oracle_info.update(\n"
+        "                {\n"
+        '                    "candidate_selection": (\n'
+        '                        "monolithic_full_database"\n'
+        "                        if partitions == 1\n"
+        '                        else "partitioned_shards"\n'
+        "                    ),\n"
+        '                    "db_partitions": partitions,\n'
+        '                    "memory_mode": (\n'
+        '                        "disk_backed_bounded"\n'
+        "                        if web_blast_statistics is not None and partitions == 1\n"
+        '                        else "memory_cached_shards"\n'
+        "                    ),\n"
+        '                    "memory_request": "104Gi" if partitions == 1 else None,\n'
+        '                    "memory_limit": "112Gi" if partitions == 1 else None,\n'
+        "                }\n"
+        "            )\n"
+        "            if one_shard_layout is not None:\n"
+        "                exact_oracle_info.update(one_shard_layout.as_dict())\n"
+        + execution_evidence
+        + "            if web_blast_statistics is not None:\n"
+    )
+    legacy_with_memory = desired.replace(execution_evidence, "", 1)
+    text = path.read_text()
+    if "opts, program=req.program" in text:
+        return
+    source = next(
+        (
+            candidate
+            for candidate in (legacy_with_memory, legacy_with_layout, legacy, anchor)
+            if candidate in text
+        ),
+        None,
+    )
+    if source is None or text.count(source) != 1:
+        raise RuntimeError(f"expected one candidate-selection evidence block in {path}")
+    path.write_text(text.replace(source, desired, 1))
 
 
 def _patch_canonical_merged_result_discovery(path: Path) -> None:
@@ -1088,16 +1246,20 @@ def patch_app(root: Path) -> None:
             '            raise HTTPException(503, "Exact DB-order oracle support is unavailable")\n'
             "        opts = _exact_oracle.ensure_tabular_raw_score(opts)\n"
             '        config["blast"]["options"] = opts\n'
-            "        partitions = max(1, min(NUM_NODES, 10))\n"
-            '        config["blast"]["db-partitions"] = str(partitions)\n'
-            '        config["blast"]["db-partition-prefix"] = (\n'
-            '            f"{_blob_base()}/blast-db/{partitions}shards/core_nt_shard_"\n'
-            "        )\n"
+            "        default_partitions = max(1, min(NUM_NODES, 10))\n"
+            "        one_shard_layout = None\n"
             '        if "-searchsp" not in opts and "-dbsize" not in opts:\n'
             "            raise HTTPException(\n"
             "                400,\n"
             '                "Precise core_nt sharding requires db_effective_search_space",\n'
             "            )\n"
+            "            if web_blast_statistics is not None and partitions == 1:\n"
+            "                one_shard_layout = _exact_oracle.read_one_shard_layout(\n"
+            "                    blob_base=_blob_base(),\n"
+            "                    db_name=db_name,\n"
+            "                    active_database=active_database,\n"
+            "                    token=_storage_oauth_token(),\n"
+            "                )\n"
         ),
         'profile in {"core_nt_precise", "precise", "core_nt_safe"}',
     )
@@ -1193,6 +1355,31 @@ def patch_app(root: Path) -> None:
             "                expected_source_version=active_database.source_version,\n"
             "                token=_storage_oauth_token(),\n"
             "            ).as_dict()\n"
+            "            exact_oracle_info.update(\n"
+            "                {\n"
+            '                    "candidate_selection": (\n'
+            '                        "monolithic_full_database"\n'
+            "                        if partitions == 1\n"
+            '                        else "partitioned_shards"\n'
+            "                    ),\n"
+            '                    "db_partitions": partitions,\n'
+            '                    "memory_mode": (\n'
+            '                        "disk_backed_bounded"\n'
+            "                        if web_blast_statistics is not None and partitions == 1\n"
+            '                        else "memory_cached_shards"\n'
+            "                    ),\n"
+            '                    "memory_request": "104Gi" if partitions == 1 else None,\n'
+            '                    "memory_limit": "112Gi" if partitions == 1 else None,\n'
+            "                }\n"
+            "            )\n"
+            "            if one_shard_layout is not None:\n"
+            "                exact_oracle_info.update(one_shard_layout.as_dict())\n"
+            "            if web_blast_statistics is not None:\n"
+            "                exact_oracle_info.update(\n"
+            "                    _exact_oracle.validate_web_blast_execution_options(\n"
+            "                        opts, program=req.program\n"
+            "                    )\n"
+            "                )\n"
             "            if web_blast_statistics is not None:\n"
             "                _exact_oracle.attach_web_blast_statistics(\n"
             "                    blob_base=_blob_base(),\n"
@@ -1214,6 +1401,7 @@ def patch_app(root: Path) -> None:
         ),
         "exact_oracle_info = None",
     )
+    _patch_web_blast_candidate_selection_evidence(path)
     _insert_once(
         path,
         '    if passthrough:\n        job_data["passthrough"] = passthrough\n',

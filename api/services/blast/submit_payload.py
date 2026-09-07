@@ -416,6 +416,15 @@ def resolve_sharding_plan(
             )
             validated_errors = []
 
+    web_context = resolved.get("web_blast_statistical_context")
+    if isinstance(web_context, dict) and web_context and (
+        resolved.get("tie_order_oracle_accessions")
+        or resolved.get("tie_order_oracle_text")
+    ):
+        validated_errors.append(
+            "web_blast_statistical_context cannot be combined with a query tie-order oracle"
+        )
+
     query_count = positive_int(resolved.get("query_count"))
     report = build_precision_report(
         resolved,

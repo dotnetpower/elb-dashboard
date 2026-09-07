@@ -12,6 +12,7 @@ Validation: ``uv run pytest -q scripts/dev/openapi-overlays/test_exact_oracle.py
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -186,6 +187,7 @@ def test_read_active_database_uses_generation_identity_and_counts(monkeypatch) -
                 ),
                 "total_letters": 998_069_435_926,
                 "total_sequences": 130_155_243,
+                "total_bytes": 295_616_990_673,
             }
         ),
     )
@@ -201,7 +203,86 @@ def test_read_active_database_uses_generation_identity_and_counts(monkeypatch) -
     assert active.shard_layout_prefix.endswith("/ncbi-direct-20260819-cab30d18c360/shards")
     assert active.total_letters == 998_069_435_926
     assert active.total_sequences == 130_155_243
+    assert active.total_bytes == 295_616_990_673
     assert active.search_space == 30_807_003_700_117
+
+
+def test_read_one_shard_layout_validates_active_generation(monkeypatch) -> None:
+    manifest = b"core_nt.00\ncore_nt.01\n"
+    nal = b"TITLE core_nt_shard_00\nDBLIST core_nt.00 core_nt.01\n"
+    layout_sha = exact_oracle.hashlib.sha256(manifest + b"\0" + nal).hexdigest()
+    responses = iter(
+        (
+            _Response(content=manifest),
+            _Response(content=nal),
+            _Response(content=f"{layout_sha} 1995000\n".encode()),
+            _Response(content=b"DBLIST core_nt.00 core_nt.01\n"),
+        )
+    )
+    monkeypatch.setattr(exact_oracle.requests, "get", lambda *_a, **_k: next(responses))
+    active = exact_oracle.ActiveDatabase(
+        source_version="generation-1",
+        db_prefix="core_nt/generations/generation-1/core_nt",
+        shard_layout_prefix="core_nt/generations/generation-1/shards",
+        total_letters=1_000_000,
+        total_sequences=100,
+        search_space=123,
+        total_bytes=2_000_000,
+    )
+
+    layout = exact_oracle.read_one_shard_layout(
+        blob_base="https://acct.blob.core.windows.net",
+        db_name="core_nt",
+        active_database=active,
+        token=_test_credential(),
+    )
+
+    assert layout.volume_count == 2
+    assert layout.required_bytes == 1_995_000
+    assert layout.layout_sha256 == layout_sha
+    assert layout.as_dict()["shard_layout_source"] == "active_generation"
+
+
+@pytest.mark.parametrize("failure", ["gap", "digest", "manifest", "shard_nal", "active_nal"])
+def test_read_one_shard_layout_rejects_incomplete_or_tampered_layout(
+    monkeypatch,
+    failure: str,
+) -> None:
+    manifest = b"core_nt.00\ncore_nt.02\n" if failure == "manifest" else b"core_nt.00\n"
+    nal = b"DBLIST core_nt.01\n" if failure == "shard_nal" else b"DBLIST core_nt.00\n"
+    active_nal = (
+        b"DBLIST core_nt.00 core_nt.01\n" if failure == "active_nal" else b"DBLIST core_nt.00\n"
+    )
+    digest = exact_oracle.hashlib.sha256(manifest + b"\0" + nal).hexdigest()
+    if failure == "digest":
+        digest = "0" * 64
+    required_bytes = 800_000_000 if failure == "gap" else 1_995_000_000
+    responses = iter(
+        (
+            _Response(content=manifest),
+            _Response(content=nal),
+            _Response(content=f"{digest} {required_bytes}\n".encode()),
+            _Response(content=active_nal),
+        )
+    )
+    monkeypatch.setattr(exact_oracle.requests, "get", lambda *_a, **_k: next(responses))
+    active = exact_oracle.ActiveDatabase(
+        source_version="generation-1",
+        db_prefix="core_nt/generations/generation-1/core_nt",
+        shard_layout_prefix="core_nt/generations/generation-1/shards",
+        total_letters=1_000_000,
+        total_sequences=100,
+        search_space=123,
+        total_bytes=2_000_000_000,
+    )
+
+    with pytest.raises(exact_oracle.ExactOracleUnavailable):
+        exact_oracle.read_one_shard_layout(
+            blob_base="https://acct.blob.core.windows.net",
+            db_name="core_nt",
+            active_database=active,
+            token=_test_credential(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -313,6 +394,67 @@ def test_preserve_or_set_search_space_keeps_query_specific_value() -> None:
     assert result == f"-outfmt 5 -searchsp {query_value} -dust yes"
 
 
+def test_validate_web_blast_execution_options_returns_runtime_evidence() -> None:
+    evidence = exact_oracle.validate_web_blast_execution_options(
+        "-outfmt 5 -word_size 28 -dust yes -soft_masking false -evalue 0.05 "
+        "-max_target_seqs 500 -negative_taxids 3418604,32630 "
+        "-dbsize 756264949991 -searchsp 16070630187308750",
+        program="blastn",
+    )
+
+    assert evidence == {
+        "filter_semantics": "blast_taxonomy_filter",
+        "filter_mode": "exclude",
+        "filter_taxids": [3418604, 32630],
+        "candidate_budget": 500,
+        "candidate_budget_verified": True,
+        "scoring_profile": "megablast_web_default",
+        "scoring_profile_verified": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "-word_size 24",
+        "-dust no",
+        "-soft_masking true",
+        "-evalue 1",
+        "-max_target_seqs 1000",
+        "-outfmt 7",
+        "-negative_taxids 0",
+        "-negative_taxids 5833 -taxids 10244",
+    ],
+)
+def test_validate_web_blast_execution_options_rejects_inexact_profile(
+    replacement: str,
+) -> None:
+    options = (
+        "-outfmt 5 -word_size 28 -dust yes -soft_masking false -evalue 0.05 "
+        "-max_target_seqs 500 -negative_taxids 5833"
+    )
+    option = replacement.split()[0]
+    tokens = shlex.split(options)
+    index = tokens.index(option)
+    end = index + 2
+    if replacement == "-negative_taxids 5833 -taxids 10244":
+        mutated = f"{options} -taxids 10244"
+    else:
+        mutated = shlex.join([*tokens[:index], *shlex.split(replacement), *tokens[end:]])
+
+    with pytest.raises(exact_oracle.ExactOracleUnavailable):
+        exact_oracle.validate_web_blast_execution_options(mutated, program="blastn")
+
+
+def test_validate_web_blast_execution_options_rejects_non_blastn_program() -> None:
+    with pytest.raises(exact_oracle.ExactOracleUnavailable, match="requires blastn"):
+        exact_oracle.validate_web_blast_execution_options(
+            "-outfmt 5 -word_size 28 -dust yes -soft_masking false -evalue 0.05 "
+            "-max_target_seqs 500 -negative_taxids 5833",
+            program="blastx",
+        )
+
+
 def test_preserve_or_set_search_space_uses_active_fallback_when_absent() -> None:
     assert (
         exact_oracle.preserve_or_set_search_space(
@@ -379,6 +521,34 @@ def test_prepare_web_blast_statistics_canonicalizes_runtime_options() -> None:
         "active_database_sequences": 130_155_243,
         "active_source_version": "ncbi-direct-20260819-cab30d18c360",
     }
+
+
+def test_web_blast_statistics_select_monolithic_candidate_search() -> None:
+    statistics = exact_oracle.WebBlastStatistics(
+        query_id="q1",
+        query_length=462,
+        filtered_database_letters=994_867_281_343,
+        filtered_database_sequences=130_118_804,
+        length_adjustment=36,
+        effective_search_space=421_817_959_873_974,
+        scoring_search_space=423_813_461_852_118,
+        result_database_letters=998_069_435_926,
+        active_database_letters=998_069_435_926,
+        active_database_sequences=130_155_243,
+        active_source_version="ncbi-direct-20260819-cab30d18c360",
+    )
+
+    assert exact_oracle.select_web_blast_partitions(statistics, default_partitions=10) == 1
+
+
+def test_precise_request_without_web_statistics_keeps_parallel_shards() -> None:
+    assert exact_oracle.select_web_blast_partitions(None, default_partitions=10) == 10
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, exact_oracle._MAX_PARTS + 1])
+def test_web_blast_partition_selection_rejects_invalid_default(value: object) -> None:
+    with pytest.raises(exact_oracle.ExactOracleUnavailable):
+        exact_oracle.select_web_blast_partitions(None, default_partitions=value)  # type: ignore[arg-type]
 
 
 def test_attach_web_blast_statistics_uploads_private_manifest(monkeypatch) -> None:

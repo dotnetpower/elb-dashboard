@@ -71,7 +71,8 @@ class ExternalBlastOptions(BaseModel):
         None,
         description=(
             "Single-query NCBI Web BLAST taxonomy-filtered database statistics. "
-            "The server validates both reported and scoring search-space formulas."
+            "The server validates both reported and scoring search-space formulas "
+            "and selects an isolated disk-backed full-database execution topology."
         ),
     )
     evalue: float = Field(
@@ -166,6 +167,8 @@ class ExternalBlastSubmitRequest(BaseModel):
             self.is_inclusive = True
         context = self.options.web_blast_statistical_context
         if context is not None:
+            if self.program != "blastn":
+                raise ValueError("web_blast_statistical_context requires blastn")
             if self.db.rstrip("/").rsplit("/", 1)[-1] != "core_nt":
                 raise ValueError("web_blast_statistical_context requires core_nt")
             if self.options.sharding_mode != "precise":

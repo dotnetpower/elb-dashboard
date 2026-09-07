@@ -261,6 +261,26 @@ def generate_config(params: dict[str, Any]) -> str:
     max_target_seqs = params.get("max_target_seqs")
     if max_target_seqs is not None:
         options_parts.append(f"-max_target_seqs {max_target_seqs}")
+    requested_max_target_seqs = params.get("requested_max_target_seqs")
+    if requested_max_target_seqs is not None:
+        if max_target_seqs is None:
+            raise ValueError(
+                "requested_max_target_seqs requires an integer max_target_seqs candidate pool"
+            )
+        try:
+            requested_max_target_seqs = int(requested_max_target_seqs)
+            candidate_pool_size = int(max_target_seqs)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "requested_max_target_seqs requires an integer max_target_seqs candidate pool"
+            ) from exc
+        if requested_max_target_seqs <= 0:
+            raise ValueError("requested_max_target_seqs must be positive")
+        if requested_max_target_seqs > candidate_pool_size:
+            raise ValueError(
+                "requested_max_target_seqs cannot exceed max_target_seqs candidate pool"
+            )
+        cfg.set("blast", "requested-max-target-seqs", str(requested_max_target_seqs))
     taxonomy_filter = _taxonomy_filter_option()
     if taxonomy_filter is not None:
         taxonomy_option, taxonomy_id = taxonomy_filter

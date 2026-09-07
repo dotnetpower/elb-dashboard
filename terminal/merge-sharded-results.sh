@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -158,7 +159,7 @@ def _accession_base(accession):
     return head if tail.isdigit() else accession
 
 
-def load_tie_order_oracle(warnings):
+def load_tie_order_oracle(warnings, candidate_accessions=None):
     oracle_path = os.environ.get("ELB_TIE_ORDER_FILE", "").strip()
     if not oracle_path:
         return None, {}, 0, []
@@ -167,53 +168,76 @@ def load_tie_order_oracle(warnings):
         warnings.append(f"Tie-order oracle file was not found: {oracle_path}")
         return oracle_path, {}, 0, []
 
+    db_order = tie_order_oracle_source() == "db_order"
+    wanted_accessions = (
+        observed_accession_keys(candidate_accessions or ())
+        if db_order and candidate_accessions is not None
+        else None
+    )
     order = {}
     accessions = []
     unique_accessions = 0
+    parsed_accessions = 0
     logical_oid_rank = -1
     previous_oid_key = None
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        tokens = re.split(r"[\t, ]+", line)
-        explicit_oid_key = None
-        if (
-            len(tokens) >= 3
-            and re.fullmatch(r"[0-9]{2}", tokens[0])
-            and tokens[1].isdigit()
-        ):
-            explicit_oid_key = (tokens[0], int(tokens[1]))
-            accession = tokens[2]
-        elif len(tokens) >= 12:
-            accession = tokens[1]
-        elif len(tokens) >= 2 and tokens[0].isdigit():
-            accession = tokens[1]
-        else:
-            accession = tokens[0]
-        if not accession:
-            continue
-        if explicit_oid_key is not None:
-            if explicit_oid_key != previous_oid_key:
-                logical_oid_rank += 1
-                previous_oid_key = explicit_oid_key
-            accession_rank = logical_oid_rank
-        else:
-            accession_rank = unique_accessions
-        if accession not in order:
-            order[accession] = accession_rank
-            accessions.append(accession)
-            unique_accessions += 1
-        base = _accession_base(accession)
-        if base and base not in order:
-            order[base] = order[accession]
-    if unique_accessions:
+    with path.open() as oracle_file:
+        for raw_line in oracle_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            tokens = re.split(r"[\t, ]+", line)
+            explicit_oid_key = None
+            if (
+                len(tokens) >= 3
+                and re.fullmatch(r"[0-9]{2}", tokens[0])
+                and tokens[1].isdigit()
+            ):
+                explicit_oid_key = (tokens[0], int(tokens[1]))
+                accession = tokens[2]
+            elif len(tokens) >= 12:
+                accession = tokens[1]
+            elif len(tokens) >= 2 and tokens[0].isdigit():
+                accession = tokens[1]
+            else:
+                accession = tokens[0]
+            if not accession:
+                continue
+            if explicit_oid_key is not None:
+                if explicit_oid_key != previous_oid_key:
+                    logical_oid_rank += 1
+                    previous_oid_key = explicit_oid_key
+                accession_rank = logical_oid_rank
+            elif wanted_accessions is not None:
+                accession_rank = parsed_accessions
+            else:
+                accession_rank = unique_accessions
+            parsed_accessions += 1
+            base = _accession_base(accession)
+            if wanted_accessions is not None and not (
+                accession in wanted_accessions or base in wanted_accessions
+            ):
+                continue
+            if accession not in order:
+                order[accession] = accession_rank
+                if wanted_accessions is None:
+                    accessions.append(accession)
+                    unique_accessions += 1
+            if base and base not in order:
+                order[base] = order[accession]
+    oracle_accession_count = (
+        parsed_accessions if wanted_accessions is not None else unique_accessions
+    )
+    if oracle_accession_count:
         warnings.append(
             "Tie-order oracle is enabled; ties are ordered by the supplied same-snapshot accession list"
         )
+        if wanted_accessions is not None:
+            warnings.append(
+                "DB-order oracle was streamed; only candidate accession ranks were retained in memory"
+            )
     else:
         warnings.append(f"Tie-order oracle file contained no usable accessions: {oracle_path}")
-    return oracle_path, order, unique_accessions, accessions
+    return oracle_path, order, oracle_accession_count, accessions
 
 
 def observed_accession_keys(accessions):
@@ -418,59 +442,51 @@ def unmapped_oracle_accessions(order, accessions):
     return sorted({accession for accession in accessions if oracle_rank(order, accession) is None})
 
 
-def tabular_subject_accession(line, subject_idx=1):
-    cols = line.split("\t")
-    return cols[subject_idx] if len(cols) > subject_idx else ""
+def tabular_subject_hits(connection, query_id):
+    # Select one best-ranked HSP per subject on disk. The first ordinal remains
+    # the stable fallback even when another HSP supplies the subject's best
+    # e-value/score, matching the historical in-memory grouping contract.
+    rows = connection.execute(
+        """
+        SELECT evalue_key, negative_score, first_ordinal, accession,
+               subject_key, display_evalue, display_bitscore, raw_score
+        FROM (
+            SELECT evalue_key, negative_score, ordinal, accession, subject_key,
+                   display_evalue, display_bitscore, raw_score,
+                   MIN(ordinal) OVER (PARTITION BY subject_key) AS first_ordinal,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY subject_key
+                       ORDER BY evalue_key, negative_score, ordinal
+                   ) AS subject_rank
+            FROM tabular_hits
+            WHERE query_id = ?
+        )
+        WHERE subject_rank = 1
+        """,
+        (query_id,),
+    )
+    return list(rows)
 
 
-def group_tabular_subject_hits(rows, subject_idx):
-    # BLAST max_target_seqs limits subjects, not tabular HSP rows. Rank each
-    # subject by its best HSP, retain the first input ordinal as the stable
-    # fallback, and carry every row so selected subjects keep all HSPs.
-    grouped = {}
-    for row in rows:
-        accession = (
-            tabular_subject_accession(row[3], subject_idx)
-            if subject_idx is not None
-            else ""
+def selected_tabular_row_offsets(connection, query_id, subject_keys):
+    offsets = {key: [] for key in subject_keys}
+    # Stay below SQLite's conservative host-parameter limit while fetching
+    # every HSP offset for only the subjects selected for final output.
+    for start in range(0, len(subject_keys), 400):
+        chunk = subject_keys[start : start + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = connection.execute(
+            f"""
+            SELECT subject_key, row_offset
+            FROM tabular_hits
+            WHERE query_id = ? AND subject_key IN ({placeholders})
+            ORDER BY ordinal
+            """,
+            (query_id, *chunk),
         )
-        key = ("subject", accession) if accession else ("row", row[2])
-        item = grouped.get(key)
-        if item is None:
-            item = {
-                "accession": accession,
-                "best_evalue_key": row[0],
-                "best_negative_score": row[1],
-                "first_ordinal": row[2],
-                "display_evalue": row[4],
-                "display_bitscore": row[5],
-                "raw_score": row[6],
-                "rows": [],
-            }
-            grouped[key] = item
-        elif (row[0], row[1]) < (
-            item["best_evalue_key"],
-            item["best_negative_score"],
-        ):
-            item["best_evalue_key"] = row[0]
-            item["best_negative_score"] = row[1]
-            item["display_evalue"] = row[4]
-            item["display_bitscore"] = row[5]
-            item["raw_score"] = row[6]
-        item["rows"].append(row)
-    return [
-        (
-            item["best_evalue_key"],
-            item["best_negative_score"],
-            item["first_ordinal"],
-            item["accession"],
-            item["rows"],
-            item["display_evalue"],
-            item["display_bitscore"],
-            item["raw_score"],
-        )
-        for item in grouped.values()
-    ]
+        for subject_key, row_offset in rows:
+            offsets[subject_key].append(row_offset)
+    return offsets
 
 
 # Field-aware tabular column resolution. The shard merge historically assumed
@@ -592,6 +608,24 @@ def parse_max_target_seqs(options_text):
     return max_hits, warnings
 
 
+def resolve_result_max_target_seqs(candidate_pool_size):
+    raw = os.environ.get("ELB_REQUESTED_MAX_TARGET_SEQS", "").strip()
+    if not raw:
+        return candidate_pool_size
+    try:
+        requested = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"requested max_target_seqs must be an integer, got {raw}") from exc
+    if requested <= 0:
+        raise ValueError(f"requested max_target_seqs must be positive, got {raw}")
+    if requested > candidate_pool_size:
+        raise ValueError(
+            "requested max_target_seqs cannot exceed the shard candidate pool "
+            f"({requested} > {candidate_pool_size})"
+        )
+    return requested
+
+
 def parse_outfmt(options_text):
     try:
         tokens = shlex.split(options_text or "")
@@ -646,12 +680,20 @@ def parse_outfmt_spec(options_text):
     return spec.strip()
 
 
-def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings, outfmt="6", outfmt_spec=""):
-    oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
-    strict_oracle = bool(tie_order) and strict_oracle_enabled()
-    db_order_exact = bool(tie_order) and tie_order_oracle_source() == "db_order"
-    if strict_oracle:
-        warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
+def merge_tabular(
+    input_tsv,
+    output_gz,
+    report_json,
+    num_shards,
+    blast_program,
+    max_hits,
+    candidate_pool_size,
+    warnings,
+    outfmt="6",
+    outfmt_spec="",
+):
+    oracle_path = os.environ.get("ELB_TIE_ORDER_FILE", "").strip() or None
+    db_order_requested = bool(oracle_path) and tie_order_oracle_source() == "db_order"
     # Resolve the group / rank / oracle columns BY NAME from the outfmt
     # specifier (handles reordered + extended layouts like
     # `7 sseqid staxids ... evalue bitscore ...`). For a plain or `std`-prefixed
@@ -663,14 +705,11 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     # A subject accession column is required for the tie-order oracle and the
     # deterministic accession tie-break; without it, neither can run.
     if subject_idx is None:
-        if db_order_exact:
+        if db_order_requested:
             raise ValueError(
                 "DB-order exact merge requires a subject accession column in outfmt"
             )
-        strict_oracle = False
-        tie_order = {}
-        db_order_exact = False
-    if db_order_exact and score_idx is None:
+    if db_order_requested and score_idx is None:
         raise ValueError(
             "DB-order exact tabular merge requires the raw score column in outfmt"
         )
@@ -681,7 +720,6 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         for idx in (qseqid_idx, evalue_idx, bitscore_idx, score_idx, subject_idx)
         if idx is not None
     ) + 1
-    query_hits = defaultdict(list)
     unsupported_rows = 0
     total_input_rows = 0
     ordinal = 0
@@ -696,10 +734,40 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     captured_fields = None
 
     input_path = Path(input_tsv)
+    database_fd, database_name = tempfile.mkstemp(
+        prefix="merge-tabular-", suffix=".sqlite3", dir=input_path.parent
+    )
+    os.close(database_fd)
+    database_path = Path(database_name)
+    connection = sqlite3.connect(database_path)
+    connection.execute("PRAGMA journal_mode=OFF")
+    connection.execute("PRAGMA synchronous=OFF")
+    connection.execute("PRAGMA temp_store=FILE")
+    connection.execute(
+        """
+        CREATE TABLE tabular_hits (
+            query_id TEXT NOT NULL,
+            subject_key TEXT NOT NULL,
+            accession TEXT NOT NULL,
+            evalue_key REAL NOT NULL,
+            negative_score REAL NOT NULL,
+            ordinal INTEGER NOT NULL,
+            display_evalue REAL NOT NULL,
+            display_bitscore REAL NOT NULL,
+            raw_score REAL,
+            row_offset INTEGER NOT NULL
+        )
+        """
+    )
+    insert_rows = []
     if input_path.exists():
-        with input_path.open() as handle:
-            for raw_line in handle:
-                line = raw_line.rstrip("\n")
+        with input_path.open("rb") as handle:
+            while True:
+                row_offset = handle.tell()
+                raw_line = handle.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode().rstrip("\n")
                 if not line:
                     continue
                 if line.startswith("#"):
@@ -722,18 +790,67 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                     continue
                 ranking_score = raw_score if raw_score is not None else bitscore
                 group_key = cols[qseqid_idx] if qseqid_idx is not None else ""
-                query_hits[group_key].append(
+                accession = cols[subject_idx] if subject_idx is not None else ""
+                subject_key = f"subject:{accession}" if accession else f"row:{ordinal}"
+                insert_rows.append(
                     (
+                        group_key,
+                        subject_key,
+                        accession,
                         blast_evalue_sort_key(evalue),
                         -ranking_score,
                         ordinal,
-                        line,
                         evalue,
                         bitscore,
                         raw_score,
+                        row_offset,
                     )
                 )
                 ordinal += 1
+                if len(insert_rows) >= 1000:
+                    connection.executemany(
+                        "INSERT INTO tabular_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        insert_rows,
+                    )
+                    insert_rows.clear()
+    if insert_rows:
+        connection.executemany(
+            "INSERT INTO tabular_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            insert_rows,
+        )
+    connection.commit()
+    connection.execute(
+        "CREATE INDEX tabular_hits_subject_idx "
+        "ON tabular_hits(query_id, subject_key, ordinal)"
+    )
+    candidate_accessions = (
+        row[0]
+        for row in connection.execute(
+            "SELECT DISTINCT accession FROM tabular_hits WHERE accession != ''"
+        )
+    )
+    (
+        oracle_path,
+        tie_order,
+        oracle_unique_accessions,
+        oracle_accessions,
+    ) = load_tie_order_oracle(warnings, candidate_accessions)
+    strict_oracle = bool(tie_order) and strict_oracle_enabled()
+    db_order_exact = db_order_requested
+    if db_order_exact and total_input_rows and not tie_order:
+        raise ValueError("DB-order oracle does not cover any candidate subjects")
+    if subject_idx is None:
+        strict_oracle = False
+        tie_order = {}
+        db_order_exact = False
+    if strict_oracle:
+        warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
+    query_ids = [
+        row[0]
+        for row in connection.execute(
+            "SELECT DISTINCT query_id FROM tabular_hits ORDER BY query_id"
+        )
+    ]
 
     if unsupported_rows:
         warnings.append("Some rows were skipped because they were not outfmt 6 compatible")
@@ -765,9 +882,9 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     total_output_subjects = 0
     total_output_rows = 0
 
-    with gzip.open(output_gz, "wt") as out:
-        for query_id in sorted(query_hits):
-            hits = group_tabular_subject_hits(query_hits[query_id], subject_idx)
+    with input_path.open("rb") as row_source, gzip.open(output_gz, "wt") as out:
+        for query_id in query_ids:
+            hits = tabular_subject_hits(connection, query_id)
             total_input_subjects += len(hits)
             if db_order_exact:
                 unmapped = unmapped_oracle_accessions(
@@ -860,9 +977,14 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
             out.write(f"# Database: merged from {num_shards} shards\n")
             out.write(f"# Fields: {fields}\n")
             out.write(f"# {len(selected)} hits found\n")
+            selected_offsets = selected_tabular_row_offsets(
+                connection, query_id, [hit[4] for hit in selected]
+            )
             for hit in selected:
-                for row in hit[4]:
-                    out.write(row[3] + "\n")
+                for row_offset in selected_offsets[hit[4]]:
+                    row_source.seek(row_offset)
+                    row = row_source.readline().decode().rstrip("\n")
+                    out.write(row + "\n")
                     total_output_rows += 1
             total_output_subjects += len(selected)
 
@@ -899,7 +1021,8 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
             **({"score": score_idx} if score_idx is not None else {}),
         },
         "max_target_seqs": max_hits,
-        "queries": len(query_hits),
+        "candidate_pool_size": candidate_pool_size,
+        "queries": len(query_ids),
         # Keep the historical tabular `*_hits` row semantics for report
         # consumers; the new `*_subjects` fields carry max_target_seqs units.
         "total_input_hits": total_input_rows,
@@ -932,7 +1055,9 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         "warnings": warnings,
     }
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
-    return total_output_subjects, len(query_hits)
+    connection.close()
+    database_path.unlink(missing_ok=True)
+    return total_output_subjects, len(query_ids)
 
 
 def text_at(element, path, default=""):
@@ -1140,15 +1265,13 @@ def merge_xml(
     report_json,
     num_shards,
     max_hits,
+    candidate_pool_size,
     warnings,
     blast_program,
     blast_options,
 ):
-    oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
-    strict_oracle = bool(tie_order) and strict_oracle_enabled()
-    db_order_exact = bool(tie_order) and tie_order_oracle_source() == "db_order"
-    if strict_oracle:
-        warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
+    oracle_path = os.environ.get("ELB_TIE_ORDER_FILE", "").strip() or None
+    db_order_requested = bool(oracle_path) and tie_order_oracle_source() == "db_order"
     input_root = Path(input_tsv).parent
     output_path = Path(output_gz).resolve()
     xml_files = []
@@ -1257,6 +1380,24 @@ def merge_xml(
         raise ValueError("No valid BLAST XML results found")
     if unsupported_records:
         warnings.append("Some XML records were skipped because query or HSP metadata was incomplete")
+
+    candidate_accessions = (
+        xml_subject_accession(hit[3])
+        for item in queries.values()
+        for hit in item["hits"]
+    )
+    (
+        oracle_path,
+        tie_order,
+        oracle_unique_accessions,
+        oracle_accessions,
+    ) = load_tie_order_oracle(warnings, candidate_accessions)
+    strict_oracle = bool(tie_order) and strict_oracle_enabled()
+    db_order_exact = db_order_requested
+    if db_order_exact and total_input_hits and not tie_order:
+        raise ValueError("DB-order oracle does not cover any candidate subjects")
+    if strict_oracle:
+        warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
 
     web_blast_statistics = load_web_blast_statistics()
     if web_blast_statistics is not None:
@@ -1484,6 +1625,7 @@ def merge_xml(
         "outfmt": 5,
         "format": "blast_xml",
         "max_target_seqs": max_hits,
+        "candidate_pool_size": candidate_pool_size,
         "queries": len(query_order),
         "total_input_hits": total_input_hits,
         "total_input_subjects": total_input_hits,
@@ -1536,7 +1678,8 @@ def merge_xml(
 
 
 input_tsv, output_gz, report_json, num_shards, blast_program, blast_options = sys.argv[1:]
-max_hits, warnings = parse_max_target_seqs(blast_options)
+candidate_pool_size, warnings = parse_max_target_seqs(blast_options)
+max_hits = resolve_result_max_target_seqs(candidate_pool_size)
 outfmt = parse_outfmt(blast_options)
 outfmt_spec = parse_outfmt_spec(blast_options)
 if outfmt == "5":
@@ -1546,6 +1689,7 @@ if outfmt == "5":
         report_json,
         num_shards,
         max_hits,
+        candidate_pool_size,
         warnings,
         blast_program,
         blast_options,
@@ -1556,7 +1700,14 @@ elif outfmt in ("6", "7"):
     # oracle columns by NAME from the full specifier, so reordered + extended
     # layouts (e.g. `7 sseqid staxids ... evalue bitscore ...`) merge correctly.
     total_hits, query_count = merge_tabular(
-        input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings,
+        input_tsv,
+        output_gz,
+        report_json,
+        num_shards,
+        blast_program,
+        max_hits,
+        candidate_pool_size,
+        warnings,
         outfmt=outfmt, outfmt_spec=outfmt_spec,
     )
 else:

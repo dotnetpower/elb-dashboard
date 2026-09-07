@@ -376,6 +376,33 @@ def test_browser_submit_degrades_on_calibration_snapshot_mismatch() -> None:
     assert "use_db_order_oracle" not in opts
 
 
+@pytest.mark.parametrize("submission_source", [None, "servicebus"])
+def test_web_blast_context_rejects_query_tie_order_oracle(
+    submission_source: str | None,
+) -> None:
+    body: dict[str, object] = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": ">q1\nATGCATGCATGC\n",
+        "options": {
+            "sharding_mode": "precise",
+            "web_blast_statistical_context": {"schema_version": 1},
+            "tie_order_oracle_accessions": ["PX485240.1"],
+            "tie_order_oracle_strict": True,
+        },
+    }
+    if submission_source is not None:
+        body["submission_source"] = submission_source
+
+    compatibility = submit_contracts(body)["compatibility_contract"]
+
+    assert compatibility["eligible"] is False
+    assert (
+        "web_blast_statistical_context cannot be combined with a query tie-order oracle"
+        in compatibility["blocking_errors"]
+    )
+
+
 def test_web_blast_searchsp_default_applies_for_core_nt() -> None:
     options: dict[str, object] = {}
 

@@ -7,8 +7,8 @@ does not pay another TLS handshake.
 Edit boundaries: Azure-Tables SDK lives here. Domain shaping
 (JobState / canonical metadata) lives in `job_state.py`. Connection
 pool primitive lives in `table_pool.py`.
-Key entry points: `JobStateRepository`, `get_state_repo`, `reset_state_repo_cache`,
-`reset_state_repo_cache_after_fork`.
+Key entry points: `JobStateRepository`, `backfill_payload_section`, `get_state_repo`,
+`reset_state_repo_cache`, `reset_state_repo_cache_after_fork`.
 Risky contracts: Every OData filter MUST flow through `_sanitise_odata_value`.
 The optional time-ordered index (#50) is flag-gated by `time_index_enabled()`
 and writes an IMMUTABLE index row keyed on `owner_oid` + `created_at`; never
@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -612,6 +613,119 @@ class JobStateRepository:
             except ResourceNotFoundError as exc:
                 raise KeyError(job_id) from exc
             return canonical_elastic_blast_job_id(entity.get("elastic_blast_job_id"))
+
+    def backfill_payload_section(
+        self,
+        job_id: str,
+        section: str,
+        values: Mapping[str, Any],
+    ) -> bool:
+        """Atomically fill missing keys in one nested payload section.
+
+        This deliberately patches only ``payload_json`` and ``updated_at``.
+        Calling :meth:`update` with a nested external payload would re-derive
+        canonical list columns from the wrong payload level and could replace
+        valid ``program`` / ``db`` / scope values with defaults.
+        """
+
+        section_name = section.strip()
+        if not section_name:
+            raise ValueError("payload section must not be empty")
+        incoming = {
+            str(key): value
+            for key, value in values.items()
+            if str(key) and value not in (None, "", {}, [])
+        }
+        if not incoming:
+            return False
+
+        import json
+
+        with self._state_client() as table:
+            for attempt in range(3):
+                try:
+                    entity = table.get_entity(partition_key=job_id, row_key="current")
+                except ResourceNotFoundError as exc:
+                    self._ensure_table("jobstate")
+                    raise KeyError(job_id) from exc
+
+                raw_payload = entity.get("payload_json")
+                if raw_payload:
+                    try:
+                        payload = json.loads(str(raw_payload))
+                    except (TypeError, ValueError):
+                        LOGGER.warning(
+                            "payload section backfill skipped: invalid payload job_id=%s",
+                            job_id,
+                        )
+                        return False
+                    if not isinstance(payload, dict):
+                        LOGGER.warning(
+                            "payload section backfill skipped: non-object payload job_id=%s",
+                            job_id,
+                        )
+                        return False
+                else:
+                    payload = {}
+
+                current_section = payload.get(section_name)
+                if current_section not in (None, {}) and not isinstance(current_section, dict):
+                    LOGGER.warning(
+                        "payload section backfill conflict job_id=%s section=%s; "
+                        "preserving stored value",
+                        job_id,
+                        section_name,
+                    )
+                    return False
+                merged_section = dict(current_section or {})
+                changed = False
+                for key, value in incoming.items():
+                    current = merged_section.get(key)
+                    if current in (None, "", {}, []):
+                        merged_section[key] = value
+                        changed = True
+                    elif current != value:
+                        LOGGER.warning(
+                            "payload section backfill conflict job_id=%s section=%s "
+                            "field=%s; preserving stored value",
+                            job_id,
+                            section_name,
+                            key,
+                        )
+                if not changed:
+                    return False
+
+                payload[section_name] = merged_section
+                etag = _entity_etag(entity)
+                if not etag:
+                    LOGGER.warning(
+                        "payload section backfill skipped: no etag job_id=%s",
+                        job_id,
+                    )
+                    return False
+                now = _now_iso()
+                try:
+                    table.update_entity(
+                        {
+                            "PartitionKey": job_id,
+                            "RowKey": "current",
+                            "payload_json": json.dumps(payload, default=str),
+                            "updated_at": now,
+                        },
+                        mode=UpdateMode.MERGE,
+                        etag=etag,
+                        match_condition=MatchConditions.IfNotModified,
+                    )
+                    return True
+                except ResourceModifiedError:
+                    if attempt < 2:
+                        continue
+                    LOGGER.warning(
+                        "payload section backfill raced three times job_id=%s section=%s",
+                        job_id,
+                        section_name,
+                    )
+        return False
 
     def update(
         self,

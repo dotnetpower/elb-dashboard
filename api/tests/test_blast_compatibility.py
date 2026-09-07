@@ -40,8 +40,9 @@ def test_core_nt_precise_contract_uses_verified_default() -> None:
 
     assert contract.mode == "precise"
     assert contract.eligible is True
-    assert contract.level == "full_db_hitlist_exact_sharded"
+    assert contract.level == "full_db_statistics_exact_sharded"
     assert contract.selection_basis == "blast_evalue_raw_score_db_oid_desc"
+    assert "candidate selection" in contract.warnings[0]
     assert contract.search_space_source == "verified_default"
     assert contract.evidence is not None
     assert contract.evidence["db_name"] == "core_nt"
@@ -71,9 +72,38 @@ def test_core_nt_precise_contract_uses_query_specific_search_space() -> None:
     assert precision.eligible is True
     assert contract.mode == "precise"
     assert contract.eligible is True
-    assert contract.level == "full_db_hitlist_exact_sharded"
+    assert contract.level == "full_db_statistics_exact_sharded"
     assert contract.searchsp == query_search_space
     assert contract.search_space_source == "query_effective_search_spaces"
+
+
+def test_web_statistical_context_marks_monolithic_execution_as_planned() -> None:
+    query_search_space = 421_817_959_873_974
+    options = {
+        "sharding_mode": "precise",
+        "outfmt": 5,
+        "query_count": 1,
+        "query_effective_search_spaces": [query_search_space],
+        "db_total_letters": 998_069_435_926,
+        "db_total_sequences": 130_155_243,
+        "use_db_order_oracle": True,
+        "web_blast_statistical_context": {
+            "effective_search_space": query_search_space,
+        },
+    }
+    precision = build_precision_report(options, query_count=1, db_stats_available=True)
+
+    contract = build_compatibility_contract(
+        database="core_nt",
+        options=options,
+        precision_report=precision,
+    )
+
+    assert contract.mode == "precise"
+    assert contract.eligible is True
+    assert contract.level == "full_db_hitlist_exact_monolithic_planned"
+    assert contract.selection_basis == "native_full_database_planned"
+    assert "runtime evidence" in contract.warnings[0]
 
 
 def test_unknown_db_precise_contract_requires_calibration_even_with_searchsp() -> None:
@@ -236,6 +266,6 @@ def test_drifted_snapshot_recomputed_searchsp_is_web_blast_compatible() -> None:
 
     assert contract.mode == "precise"
     assert contract.eligible is True
-    assert contract.level == "full_db_hitlist_exact_sharded"
+    assert contract.level == "full_db_statistics_exact_sharded"
     assert contract.search_space_source == "verified_default"
 

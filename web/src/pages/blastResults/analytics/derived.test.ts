@@ -240,12 +240,12 @@ describe("searchSpacePin", () => {
 });
 
 describe("parityVerdict", () => {
-  it("reports full-DB exact only for the exact sharded contract", () => {
+  it("reports full-DB exact only for runtime-attested monolithic selection", () => {
     const job = {
       provenance: {
         compatibility: {
           mode: "precise",
-          level: "full_db_hitlist_exact_sharded",
+          level: "full_db_hitlist_exact_monolithic",
           eligible: true,
           warnings: [],
         },
@@ -253,6 +253,36 @@ describe("parityVerdict", () => {
     } as unknown as BlastJobSummary;
     expect(parityVerdict(job).state).toBe("equivalent");
     expect(parityVerdict(job).label).toBe("Full-DB exact");
+  });
+
+  it("does not overclaim a planned monolithic run before runtime evidence", () => {
+    const job = {
+      provenance: {
+        compatibility: {
+          mode: "precise",
+          level: "full_db_hitlist_exact_monolithic_planned",
+          eligible: true,
+          warnings: [],
+        },
+      },
+    } as unknown as BlastJobSummary;
+    expect(parityVerdict(job).state).toBe("unknown");
+    expect(parityVerdict(job).label).toBe("Exactness pending");
+  });
+
+  it("labels calibrated sharded candidate selection as approximate", () => {
+    const job = {
+      provenance: {
+        compatibility: {
+          mode: "precise",
+          level: "full_db_statistics_exact_sharded",
+          eligible: true,
+          warnings: [],
+        },
+      },
+    } as unknown as BlastJobSummary;
+    expect(parityVerdict(job).state).toBe("approximate");
+    expect(parityVerdict(job).label).toBe("Partitioned candidates");
   });
 
   it("does not overclaim exact parity for a legacy precise contract", () => {
@@ -298,7 +328,7 @@ describe("buildMethodsText", () => {
         options: { evalue: 0.05 },
         compatibility: {
           mode: "precise",
-          level: "full_db_hitlist_exact_sharded",
+          level: "full_db_hitlist_exact_monolithic",
           eligible: true,
           warnings: [],
           searchsp: 3.2e13,
@@ -311,7 +341,7 @@ describe("buildMethodsText", () => {
     expect(text).toContain("core_nt");
     expect(text).toContain("snapshot 2026-05-09");
     expect(text).toContain("E-value threshold of 0.05");
-    expect(text).toContain("reproduces full-database BLAST hitlist membership and order");
+    expect(text).toContain("used native full-database candidate selection");
     expect(text).toContain(
       "NCBI parity additionally requires the same NCBI database snapshot",
     );
