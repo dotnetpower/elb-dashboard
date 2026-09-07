@@ -88,3 +88,8 @@ sidecar topology is being reprovisioned.
   528-byte query blob was removed successfully.
 - Final network posture: both ACR and Storage report `publicNetworkAccess=Disabled` and
   `defaultAction=Deny`.
+- Post-rollout load check found 42 readiness timeouts while six concurrent `elastic-blast submit`
+  processes saturated the OpenAPI pod's 1-CPU limit. The pod stayed restart-free and returned 20/20
+  direct health checks, but healthy responses occasionally exceeded the manifest's 3-second budget.
+  Manifest revision 6 raises readiness `timeoutSeconds` to 10 while retaining `failureThreshold=3`
+  (a bounded ~30-second removal budget); liveness remains the existing 10 seconds x 6 attempts.

@@ -251,9 +251,12 @@ def test_build_manifests_single_queue_owner() -> None:
     liveness = container["livenessProbe"]
     assert liveness["timeoutSeconds"] == 10
     assert liveness["failureThreshold"] == 6
-    # Readiness stays strict so a transient spike still pulls the pod out of the
-    # Service rotation quickly while liveness refrains from restarting it.
-    assert container["readinessProbe"]["failureThreshold"] == 3
+    # Readiness tolerates one CPU-saturated response while retaining a bounded
+    # three-strike (~30 second) removal budget.
+    readiness = container["readinessProbe"]
+    assert readiness["timeoutSeconds"] == 10
+    assert readiness["failureThreshold"] == 3
+    assert readiness["timeoutSeconds"] * readiness["failureThreshold"] == 30
 
     # Rollout must never run two queue owners at once: the old pod terminates
     # before the new one starts (maxUnavailable:1, maxSurge:0).

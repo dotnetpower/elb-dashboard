@@ -78,7 +78,11 @@ FED_CRED_NAME = "fc-elb-openapi"
 #       BLAST shard-pod fan-out per E16 node (3-way co-schedule under
 #       ELB_OPENAPI_NUM_CPUS=7) caps useful run-parallelism at 3 distinct jobs
 #       so further admit-cap bumps do not raise sustained throughput.
-OPENAPI_MANIFEST_REVISION = 5
+#   6 — readiness burst tolerance: timeout 3s -> 10s while retaining
+#       failureThreshold 3. A six-submit live backlog saturated the 1-CPU pod
+#       and produced healthy 3-5s `/healthz` responses, causing false-unready
+#       Service removal even though the pod never restarted or emitted errors.
+OPENAPI_MANIFEST_REVISION = 6
 OPENAPI_MANIFEST_REVISION_ANNOTATION = "elb-dashboard/manifest-revision"
 
 

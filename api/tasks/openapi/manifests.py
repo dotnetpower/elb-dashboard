@@ -24,10 +24,12 @@ Risky contracts: The blast-pool toleration and `nodeSelector workload=blast` are
     from its ConfigMaps on startup. The PodDisruptionBudget is `maxUnavailable: 1`
     (NOT `minAvailable: 1`, which on a single replica would block every voluntary node
     drain / AKS upgrade forever). Readiness/liveness probes on `/healthz` restart a
-    wedged pod, but liveness is deliberately slack (timeout 10s, failureThreshold 6 =
-    ~3 min of sustained unresponsiveness) so a transient load spike does not restart a
-    merely-busy pod — see issue #54, where a 50-concurrent submit burst OOMKilled the
-    pod and the strict liveness turned that into a restart loop. The container memory
+    wedged pod. Readiness allows 10 seconds per probe but still removes the pod after
+    three consecutive misses (~30 seconds), while liveness is deliberately slacker
+    (timeout 10s, failureThreshold 6 = ~3 min of sustained unresponsiveness) so a
+    transient load spike does not restart a merely-busy pod — see issue #54, where a
+    50-concurrent submit burst OOMKilled the pod and the strict liveness turned that
+    into a restart loop. The container memory
     limit is 2Gi (was 512Mi) and cpu 1 for the same burst-resilience reason. Single-node
     blast pools still work because
     `topologySpreadConstraints.whenUnsatisfiable` is `ScheduleAnyway`. The pod's
@@ -316,7 +318,11 @@ def build_manifests(
                                 "httpGet": {"path": "/healthz", "port": 8000},
                                 "initialDelaySeconds": 5,
                                 "periodSeconds": 10,
-                                "timeoutSeconds": 3,
+                                # A live six-submit backlog saturated the pod's
+                                # 1-CPU limit and made healthy responses take
+                                # 3-5 seconds. Keep three-strike removal but
+                                # avoid flapping on one legitimately slow probe.
+                                "timeoutSeconds": 10,
                                 "failureThreshold": 3,
                             },
                             # Liveness is deliberately MORE forgiving than
@@ -328,8 +334,8 @@ def build_manifests(
                             # path. With timeout 10s + failureThreshold 6 the pod
                             # is only killed after ~3 minutes of sustained
                             # unresponsiveness (a genuine wedge), while readiness
-                            # still pulls it out of the Service rotation quickly
-                            # during a transient spike.
+                            # still removes it after ~30 seconds of consecutive
+                            # probe failures.
                             "livenessProbe": {
                                 "httpGet": {"path": "/healthz", "port": 8000},
                                 "initialDelaySeconds": 30,
