@@ -72,6 +72,102 @@ def test_quick_deploy_resolves_built_digests_before_private_acr_restore() -> Non
     assert single_prune < single_resolve < single_restore
 
 
+def test_postprovision_validates_each_platform_network_surface() -> None:
+    """Lockdown checks must not infer ACR / Key Vault posture from Storage."""
+    script = _POSTPROVISION_PATH.read_text(encoding="utf-8")
+
+    assert "  KEY_VAULT_NAME\n" in script
+    assert 'az storage account show -g "$AZURE_RESOURCE_GROUP"' in script
+    assert 'az acr show -g "$AZURE_RESOURCE_GROUP"' in script
+    assert 'az keyvault show -g "$AZURE_RESOURCE_GROUP"' in script
+    assert "LOCKDOWN_PRIVATE_NETWORKING=true but one or more" in script
+    assert "${storage_public,,}" not in script
+
+    precheck = script.index('validate_platform_network_posture "pre-build"')
+    build_open = script.index('acr_ensure_build_access "$ACR_NAME"', precheck)
+    final_restore = script.rindex('acr_restore_build_access "$ACR_NAME"')
+    final_check = script.index('validate_platform_network_posture "final"', final_restore)
+    assert precheck < build_open < final_restore < final_check
+
+
+def _run_network_posture_guard(
+    tmp_path: Path,
+    *,
+    lockdown: str,
+    storage: str = "Disabled",
+    acr: str = "Disabled",
+    key_vault: str = "Disabled",
+) -> subprocess.CompletedProcess[str]:
+    script = _POSTPROVISION_PATH.read_text(encoding="utf-8")
+    start = script.index("network_lockdown_enabled() {")
+    end = script.index('\n}\n\nprogress step 5 "Resource validation"', start) + len("\n}")
+    functions = script[start:end]
+
+    fake_az = tmp_path / "az"
+    fake_az.write_text(
+        """#!/usr/bin/env bash
+case "$*" in
+  *"storage account show"*"--query kind"*) printf 'StorageV2\\n' ;;
+  *"storage account show"*"--query isHnsEnabled"*) printf 'true\\n' ;;
+  *"storage account show"*"--query publicNetworkAccess"*) printf '%s\\n' "$FAKE_STORAGE_PUBLIC" ;;
+  *"acr show"*"--query publicNetworkAccess"*) printf '%s\\n' "$FAKE_ACR_PUBLIC" ;;
+  *"keyvault show"*"--query properties.publicNetworkAccess"*) printf '%s\\n' "$FAKE_KV_PUBLIC" ;;
+  *) printf 'unexpected az args: %s\\n' "$*" >&2; exit 2 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_az.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "LOCKDOWN_PRIVATE_NETWORKING": lockdown,
+        "AZURE_RESOURCE_GROUP": "rg-test",
+        "STORAGE_ACCOUNT_NAME": "storage-test",
+        "ACR_NAME": "acr-test",
+        "KEY_VAULT_NAME": "kv-test",
+        "FAKE_STORAGE_PUBLIC": storage,
+        "FAKE_ACR_PUBLIC": acr,
+        "FAKE_KV_PUBLIC": key_vault,
+    }
+    return subprocess.run(  # noqa: S603 - executes reviewed repo function text with a fake az.
+        [
+            "/bin/bash",
+            "-c",
+            f"set -euo pipefail\nts() {{ printf '%s\\n' \"$*\"; }}\n{functions}\n"
+            'validate_platform_network_posture "test"',
+        ],
+        cwd=_REPO_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_postprovision_lockdown_accepts_three_private_resources(tmp_path: Path) -> None:
+    result = _run_network_posture_guard(tmp_path, lockdown="true")
+
+    assert result.returncode == 0, result.stderr
+    assert "Storage, ACR, and Key Vault are private-only" in result.stdout
+
+
+def test_postprovision_lockdown_rejects_public_key_vault(tmp_path: Path) -> None:
+    result = _run_network_posture_guard(tmp_path, lockdown="true", key_vault="Enabled")
+
+    assert result.returncode == 1
+    assert "one or more platform resources still expose a public network path" in result.stderr
+    assert "Storage=Disabled ACR=Disabled KeyVault=Enabled" in result.stderr
+
+
+def test_postprovision_bootstrap_reports_each_resource_without_failing(tmp_path: Path) -> None:
+    result = _run_network_posture_guard(tmp_path, lockdown="false", key_vault="Enabled")
+
+    assert result.returncode == 0, result.stderr
+    assert "One or more platform resources remain in BOOTSTRAP posture" in result.stdout
+    assert "Storage=Disabled ACR=Disabled KeyVault=Enabled" in result.stdout
+
+
 def test_expected_sidecars_present() -> None:
     data = _load()
     for sidecar in ("api", "worker", "beat"):
@@ -288,15 +384,12 @@ def test_quick_deploy_does_not_overwrite_storage_account_with_empty_value() -> N
         text=True,
         env=env,
     )
-    assert not any(
-        line.startswith("STORAGE_ACCOUNT_NAME=") for line in result.stdout.splitlines()
-    )
+    assert not any(line.startswith("STORAGE_ACCOUNT_NAME=") for line in result.stdout.splitlines())
 
 
 def test_quick_deploy_backfills_prepare_db_image_on_api_only() -> None:
     expected = (
-        "PREPARE_DB_AKS_AZCOPY_IMAGE="
-        "acrelbdashboardtest.azurecr.io/elb-prepare-db:v0.3.0-test"
+        "PREPARE_DB_AKS_AZCOPY_IMAGE=acrelbdashboardtest.azurecr.io/elb-prepare-db:v0.3.0-test"
     )
     assert expected in _control_plane_pairs("api")
     assert expected not in _control_plane_pairs("worker")

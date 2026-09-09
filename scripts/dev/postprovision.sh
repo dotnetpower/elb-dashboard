@@ -34,6 +34,7 @@ REQUIRED_VARS=(
   AZURE_TENANT_ID
   AZURE_SUBSCRIPTION_ID
   STORAGE_ACCOUNT_NAME
+  KEY_VAULT_NAME
 )
 for v in "${REQUIRED_VARS[@]}"; do
   if [ -z "${!v:-}" ]; then
@@ -260,19 +261,40 @@ ts "    Logs:      $LOG_DIR/*.log"
 ts "    Tip:       follow in another terminal:"
 ts "                 tail -f $LOG_DIR/build-*.log"
 
-validate_storage_account() {
-  local hns kind public_network_access
+network_lockdown_enabled() {
+  case "${LOCKDOWN_PRIVATE_NETWORKING:-false}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
-  ts "==> Validating platform Storage account ARM properties"
+validate_platform_network_posture() {
+  local phase="${1:-check}"
+  local hns kind storage_public acr_public key_vault_public
+  local storage_public_normalized acr_public_normalized key_vault_public_normalized
+
+  ts "==> Validating platform network posture ($phase)"
   kind="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$STORAGE_ACCOUNT_NAME" --query kind -o tsv --only-show-errors 2>/dev/null || true)"
   hns="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$STORAGE_ACCOUNT_NAME" --query isHnsEnabled -o tsv --only-show-errors 2>/dev/null || true)"
-  public_network_access="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$STORAGE_ACCOUNT_NAME" --query publicNetworkAccess -o tsv --only-show-errors 2>/dev/null || true)"
+  storage_public="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$STORAGE_ACCOUNT_NAME" --query publicNetworkAccess -o tsv --only-show-errors 2>/dev/null || true)"
+  acr_public="$(az acr show -g "$AZURE_RESOURCE_GROUP" -n "$ACR_NAME" --query publicNetworkAccess -o tsv --only-show-errors 2>/dev/null || true)"
+  key_vault_public="$(az keyvault show -g "$AZURE_RESOURCE_GROUP" -n "$KEY_VAULT_NAME" --query properties.publicNetworkAccess -o tsv --only-show-errors 2>/dev/null || true)"
   if [ -z "$kind" ] || [ -z "$hns" ]; then
     cat >&2 <<EOF
 FATAL: cannot read Storage account ARM properties for '$STORAGE_ACCOUNT_NAME' in '$AZURE_RESOURCE_GROUP'.
 
 This is an ARM/provider/RBAC lookup failure, not a data-plane or browser issue.
 Confirm Microsoft.Storage is registered and the deployer can read Microsoft.Storage/storageAccounts/read.
+EOF
+    exit 1
+  fi
+  if [ -z "$storage_public" ] || [ -z "$acr_public" ] || [ -z "$key_vault_public" ]; then
+    cat >&2 <<EOF
+FATAL: cannot read the public-network posture for every platform resource.
+
+Storage=$STORAGE_ACCOUNT_NAME (${storage_public:-unknown})
+ACR=$ACR_NAME (${acr_public:-unknown})
+Key Vault=$KEY_VAULT_NAME (${key_vault_public:-unknown})
 EOF
     exit 1
   fi
@@ -285,7 +307,29 @@ Delete the failed environment or use a new azd environment name so azd up can re
 EOF
     exit 1
   fi
-  ts "    ✓ Storage kind=$kind HNS=$hns publicNetworkAccess=${public_network_access:-unknown}"
+  ts "    Storage:   kind=$kind HNS=$hns publicNetworkAccess=$storage_public"
+  ts "    ACR:       publicNetworkAccess=$acr_public"
+  ts "    Key Vault: publicNetworkAccess=$key_vault_public"
+  storage_public_normalized="$(printf '%s' "$storage_public" | tr '[:upper:]' '[:lower:]')"
+  acr_public_normalized="$(printf '%s' "$acr_public" | tr '[:upper:]' '[:lower:]')"
+  key_vault_public_normalized="$(printf '%s' "$key_vault_public" | tr '[:upper:]' '[:lower:]')"
+
+  if network_lockdown_enabled; then
+    if [ "$storage_public_normalized" != "disabled" ] \
+        || [ "$acr_public_normalized" != "disabled" ] \
+        || [ "$key_vault_public_normalized" != "disabled" ]; then
+      cat >&2 <<EOF
+FATAL: LOCKDOWN_PRIVATE_NETWORKING=true but one or more platform resources still expose a public network path.
+
+Storage=$storage_public ACR=$acr_public KeyVault=$key_vault_public
+Re-run azd provision and do not declare the deployment healthy until all three are Disabled.
+EOF
+      exit 1
+    fi
+    ts "    ✓ Storage, ACR, and Key Vault are private-only"
+    return 0
+  fi
+
   # Production posture per .github/copilot-instructions.md §9 is
   # `publicNetworkAccess: Disabled` (private endpoints only). The first
   # `azd up` intentionally provisions Storage / KV / ACR with
@@ -296,9 +340,12 @@ EOF
   # follow-up `azd provision`. The dashboard's Storage card relies on
   # this — see web/src/components/cards/storage/StorageWarnings.tsx
   # "Private only" banner.
-  if [ "${public_network_access:-}" = "Enabled" ]; then
+    if [ "$storage_public_normalized" != "disabled" ] \
+      || [ "$acr_public_normalized" != "disabled" ] \
+      || [ "$key_vault_public_normalized" != "disabled" ]; then
     ts ""
-    ts "    ℹ Storage / Key Vault / ACR are still in BOOTSTRAP posture (public path open)."
+    ts "    ℹ One or more platform resources remain in BOOTSTRAP posture."
+    ts "       Storage=$storage_public ACR=$acr_public KeyVault=$key_vault_public"
     ts "       This is the expected first-deploy state so postprovision can push images and"
     ts "       seed secrets. Once the workspace is ready, lock the data plane down with:"
     ts ""
@@ -312,7 +359,7 @@ EOF
 }
 
 progress step 5 "Resource validation" "Validate Storage HNS and merge dashboard discovery tags."
-validate_storage_account
+validate_platform_network_posture "pre-build"
 
 resolve_platform_private_endpoint_subnet_id() {
   local explicit subnet_id vnet_id resolved
@@ -858,6 +905,12 @@ if [[ -f "$PROBE_SCRIPT" ]]; then
   fi
   ts "    ✓ capability probe passed"
 fi
+
+# Restore the temporary ACR build opening before the final posture check. The
+# EXIT trap remains as a crash/interruption backstop and becomes a no-op after a
+# successful restore.
+acr_restore_build_access "$ACR_NAME"
+validate_platform_network_posture "final"
 
 # Soft-fail policy: do not break azd up just because health was slow to
 # come up. Hard-fail above stays for image-build / swap-deploy errors / probe.
