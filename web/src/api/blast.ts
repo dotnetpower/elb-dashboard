@@ -20,6 +20,7 @@ import type {
   BlastRecommendGoal,
   BlastResultFile,
   BlastResultManifest,
+  BlastShardDetailsResponse,
   BlastSubjectAggregate,
   BlastSubmitRequest,
   BlastSubmitResponse,
@@ -197,6 +198,11 @@ export const blastApi = {
   getExecutionSteps: (jobId: string) =>
     api.get<BlastExecutionStepsSnapshot>(
       `/blast/jobs/${encodeURIComponent(jobId)}/execution-steps`,
+    ),
+
+  getShardDetails: (jobId: string) =>
+    api.get<BlastShardDetailsResponse>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/shards`,
     ),
 
   createLogStreamTicket: (

@@ -51,6 +51,12 @@ the submit form.
 
 The active tab is encoded in `?tab=…` so deep links survive a reload and browser back/forward work as expected.
 
+For a split-query parent, **Run details** includes a Shard details table with
+each child job's group, query filename, status, duration, effective search
+space, and sanitized failure text. It polls while any child is active and stops
+automatically after every child reaches a terminal state. Non-split jobs do not
+make the shard-detail request or render the table.
+
 ## Run States You Will See
 
 | Body state | When it appears | What to do |

@@ -7,13 +7,14 @@ in `api/services/blast/*` and the shared helpers in `api/routes/_blast_shared.py
 listing, `/jobs/{job_id}` projection, and lifecycle (cancel/delete) routes live in the sibling
 `jobs.py` / `jobs_lifecycle.py` modules; this router is included onto `jobs.router`.
 Key entry points: `blast_job_execution_steps`, `blast_job_citation`,
-`blast_job_reproducibility`, `blast_job_events`, `blast_job_query`, `blast_job_queue`.
+`blast_job_reproducibility`, `blast_job_shards`, `blast_job_events`, `blast_job_query`,
+`blast_job_queue`.
 Risky contracts: Every route enforces `require_caller` + `_assert_job_owner`. Never issue a
 browser SAS token; `blast_job_query` streams the original FASTA through the api sidecar with a
 hard byte cap.
 Validation: `uv run pytest -q api/tests/test_blast_jobs_routes.py
 api/tests/test_blast_results_routes.py api/tests/test_blast_reproducibility.py
-api/tests/test_route_contracts.py`.
+api/tests/test_blast_shard_details.py api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -320,6 +321,44 @@ def blast_job_events(
             {
                 "code": "job_events_unavailable",
                 "message": f"Could not read job events: {type(exc).__name__}",
+            },
+        ) from exc
+
+
+@router.get("/jobs/{job_id}/shards")
+def blast_job_shards(
+    job_id: str = Path(..., min_length=1, max_length=128),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return sanitized per-shard details from existing split child rows."""
+    try:
+        from api.services.blast.split_details import build_split_details
+        from api.services.state_repo import get_state_repo
+
+        repo = get_state_repo()
+        parent = repo.get(job_id)
+        if parent is None:
+            raise HTTPException(404, "job not found")
+        _assert_job_owner(parent.owner_oid, caller)
+        children = list(repo.list_children(job_id, limit=1000))
+        # A malformed/corrupt row must never leak another owner's details even
+        # if its parent_job_id points at the authorized parent.
+        visible_children = [
+            child
+            for child in children
+            if not getattr(child, "owner_oid", "")
+            or getattr(child, "owner_oid", "") == getattr(parent, "owner_oid", "")
+        ]
+        return build_split_details(job_id, visible_children).model_dump(mode="json")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("blast_job_shards failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            {
+                "code": "shard_details_unavailable",
+                "message": f"Could not read shard details: {type(exc).__name__}",
             },
         ) from exc
 

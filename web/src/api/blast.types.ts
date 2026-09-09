@@ -331,6 +331,36 @@ export interface BlastJobSummary {
   message_trace?: BlastMessageTrace;
 }
 
+export interface BlastShardDetail {
+  job_id: string;
+  group_id?: string | null;
+  query_file?: string | null;
+  status: string;
+  phase: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  duration_seconds?: number | null;
+  effective_search_space?: number | null;
+  error_code?: string | null;
+  error?: string | null;
+}
+
+export interface BlastShardDetailsResponse {
+  schema_version: number;
+  parent_job_id: string;
+  summary: {
+    total: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    active: number;
+    other: number;
+    terminal: number;
+    progress_percent: number;
+  };
+  shards: BlastShardDetail[];
+}
+
 /** One stage in the BLAST message lifecycle (server-ordered). */
 export interface BlastMessageTraceStage {
   stage: string;
