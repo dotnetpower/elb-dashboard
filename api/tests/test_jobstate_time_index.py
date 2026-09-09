@@ -29,6 +29,7 @@ from api.services.state import repository as state_repo
 from api.services.state import time_index
 from api.services.state.repository import JobState, JobStateRepository
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from billiard.exceptions import SoftTimeLimitExceeded
 
 # ---------------------------------------------------------------------------
 # Pure helper tests
@@ -595,9 +596,11 @@ def _load_backfill_module() -> Any:
 def test_backfill_dry_run_writes_nothing_then_real_run_is_idempotent(
     repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The backfill scans non-deleted jobstate rows and upserts one index row
-    each (skipping tombstones); --dry-run writes nothing; a second real run is
-    idempotent (same RowKey per job -> no duplicates)."""
+    """The backfill scans non-deleted jobs and creates both required index rows.
+
+    ``--dry-run`` writes nothing; a second real run observes the same RowKeys
+    and performs no writes.
+    """
     # Seed jobstate with the flag OFF so create writes NO index rows (simulating
     # pre-existing rows that predate the feature).
     monkeypatch.delenv("JOBSTATE_TIME_INDEX_ENABLED", raising=False)
@@ -616,13 +619,14 @@ def test_backfill_dry_run_writes_nothing_then_real_run_is_idempotent(
     rc = backfill.backfill(dry_run=True)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "DRY-RUN done scanned=3 backfilled=3" in out
+    assert "DRY-RUN done scanned=3 backfilled=6" in out
     # No index table touched in dry-run.
     assert time_index.INDEX_TABLE_NAME not in repo._test_tables  # type: ignore[attr-defined]
 
-    # --- real run: upserts one index row per non-deleted job ---
+    # --- real run: creates owner/shared + global rows per non-deleted job ---
     rc = backfill.backfill(dry_run=False)
     assert rc == 0
+    assert "done scanned=3 backfilled=6" in capsys.readouterr().out
     index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     keys = set(index.rows.keys())
     rk0 = time_index.row_key("2026-06-18T10:00:00+00:00", "job-0")
@@ -640,8 +644,9 @@ def test_backfill_dry_run_writes_nothing_then_real_run_is_idempotent(
     assert all("job-del" not in rk for _pk, rk in keys)
     assert len(keys) == 6  # 3 non-deleted jobs x (owner/shared + __all__)
 
-    # --- idempotent: a second run upserts the same RowKeys, no duplicates ---
+    # --- idempotent: a second run observes the same RowKeys and writes none ---
     backfill.backfill(dry_run=False)
+    assert "done scanned=3 backfilled=0" in capsys.readouterr().out
     index_again = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     assert set(index_again.rows.keys()) == keys
     assert len(index_again.rows) == 6
@@ -661,8 +666,31 @@ def test_reconcile_time_index_method_dry_run_touches_no_table(
     repo.create(_job("job-1", owner="owner-a", created_at="2026-06-18T10:00:01+00:00"))
 
     scanned, written = repo.reconcile_time_index(dry_run=True)
-    assert (scanned, written) == (2, 2)
+    assert (scanned, written) == (2, 4)
     assert time_index.INDEX_TABLE_NAME not in repo._test_tables  # type: ignore[attr-defined]
+
+
+def test_reconcile_time_index_progress_uses_scanned_cadence(
+    repo: JobStateRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    caplog.set_level("INFO", logger="api.services.state.repository")
+    repo.create(_job("job-0", owner="owner-a", created_at="2026-06-18T10:00:00+00:00"))
+    repo.create(_job("job-1", owner="owner-a", created_at="2026-06-18T10:00:01+00:00"))
+
+    assert repo.reconcile_time_index(batch_log_every=1) == (2, 0)
+
+    progress = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("jobstate time-index reconcile progress")
+    ]
+    assert progress == [
+        "jobstate time-index reconcile progress scanned=1 written=0",
+        "jobstate time-index reconcile progress scanned=2 written=0",
+    ]
 
 
 def test_reconcile_time_index_task_noop_when_flag_off(
@@ -698,10 +726,14 @@ def test_reconcile_time_index_task_heals_missing_rows_when_flag_on(
     state_repo.reset_state_repo_cache()
     monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
 
-    from api.tasks.blast import reconcile_time_index
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    monkeypatch.setattr(task_module, "_acquire_reconcile_lock", lambda: ((object(), "token"), ""))
+    monkeypatch.setattr(task_module, "_release_reconcile_lock", lambda _handle: None)
+    reconcile_time_index = task_module.reconcile_time_index
 
     result = reconcile_time_index.run()
-    assert result == {"scanned": 2, "written": 2}
+    assert result == {"scanned": 2, "written": 4}
 
     index = repo._test_tables[time_index.INDEX_TABLE_NAME]  # type: ignore[attr-defined]
     keys = set(index.rows.keys())
@@ -715,7 +747,134 @@ def test_reconcile_time_index_task_heals_missing_rows_when_flag_on(
     assert all("job-del" not in rk for _pk, rk in keys)
     assert len(keys) == 4  # 2 non-deleted jobs x (owner/shared + __all__)
 
-    # Idempotent: a second pass writes the same RowKeys, no duplicates.
+    # Idempotent: a second pass observes the same RowKeys and performs no writes.
     result2 = reconcile_time_index.run()
-    assert result2 == {"scanned": 2, "written": 2}
+    assert result2 == {"scanned": 2, "written": 0}
     assert set(repo._test_tables[time_index.INDEX_TABLE_NAME].rows.keys()) == keys  # type: ignore[attr-defined]
+
+
+def test_reconcile_time_index_task_skips_when_lock_is_held(
+    repo: JobStateRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    monkeypatch.setattr(
+        task_module,
+        "_acquire_reconcile_lock",
+        lambda: (None, "reconcile_already_running"),
+    )
+    monkeypatch.setattr(
+        repo,
+        "reconcile_time_index",
+        lambda: (_ for _ in ()).throw(AssertionError("locked task must not scan")),
+    )
+
+    assert task_module.reconcile_time_index.run() == {
+        "skipped": "reconcile_already_running",
+        "scanned": 0,
+        "written": 0,
+    }
+
+
+def test_reconcile_time_index_lock_uses_nx_ttl_and_owned_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import redis_clients
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    calls: list[tuple[Any, ...]] = []
+
+    class FakeRedis:
+        def set(self, *args: Any, **kwargs: Any) -> bool:
+            calls.append(("set", *args, kwargs))
+            return True
+
+        def eval(self, *args: Any) -> int:
+            calls.append(("eval", *args))
+            return 1
+
+    fake = FakeRedis()
+    monkeypatch.setattr(redis_clients, "get_ops_redis_client", lambda **_kwargs: fake)
+    monkeypatch.setattr(task_module.uuid, "uuid4", lambda: type("Token", (), {"hex": "owned"})())
+
+    handle, reason = task_module._acquire_reconcile_lock()
+
+    assert reason == ""
+    assert handle == (fake, "owned")
+    assert calls == [
+        (
+            "set",
+            task_module._RECONCILE_LOCK_KEY,
+            "owned",
+            {"nx": True, "ex": task_module._RECONCILE_LOCK_TTL_SECONDS},
+        )
+    ]
+
+    task_module._release_reconcile_lock(handle)
+    assert calls[1] == (
+        "eval",
+        task_module._RECONCILE_RELEASE_LUA,
+        1,
+        task_module._RECONCILE_LOCK_KEY,
+        "owned",
+    )
+
+
+def test_reconcile_time_index_lock_acquire_propagates_soft_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import redis_clients
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    monkeypatch.setattr(
+        redis_clients,
+        "get_ops_redis_client",
+        lambda **_kwargs: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        task_module._acquire_reconcile_lock()
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("storage unavailable"), SoftTimeLimitExceeded()])
+def test_reconcile_time_index_task_propagates_failure_and_releases_lock(
+    repo: JobStateRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    exc: Exception,
+) -> None:
+    monkeypatch.setenv("JOBSTATE_TIME_INDEX_ENABLED", "true")
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    handle = (object(), "token")
+    released: list[tuple[Any, str]] = []
+    monkeypatch.setattr(task_module, "_acquire_reconcile_lock", lambda: (handle, ""))
+    monkeypatch.setattr(task_module, "_release_reconcile_lock", released.append)
+    monkeypatch.setattr(state_repo, "get_state_repo", lambda: repo)
+    monkeypatch.setattr(
+        repo,
+        "reconcile_time_index",
+        lambda: (_ for _ in ()).throw(exc),
+    )
+
+    with pytest.raises(type(exc)):
+        task_module.reconcile_time_index.run()
+
+    assert released == [handle]
+
+
+def test_reconcile_time_index_task_and_schedule_are_bounded() -> None:
+    from api.celery_app import celery_app
+    from api.tasks.blast import time_index_reconcile_task as task_module
+
+    assert (
+        task_module.reconcile_time_index.soft_time_limit
+        == task_module._RECONCILE_SOFT_TIME_LIMIT_SECONDS
+    )
+    assert (
+        task_module.reconcile_time_index.time_limit
+        == task_module._RECONCILE_HARD_TIME_LIMIT_SECONDS
+    )
+    schedule = celery_app.conf.beat_schedule["blast-reconcile-time-index"]
+    assert schedule["options"]["expires"] < schedule["schedule"]
+    assert task_module.reconcile_time_index.time_limit < schedule["options"]["expires"]

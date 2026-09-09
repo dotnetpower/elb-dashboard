@@ -7,12 +7,15 @@ read path (``JobStateRepository.list_owner_page``) returns the genuinely
 most-recent N without scanning beyond the page. MUST be run (and verified to
 complete) BEFORE flipping ``JOBSTATE_TIME_INDEX_ENABLED=true`` — an
 un-backfilled index would under-report old jobs.
-Edit boundaries: Read-only against ``jobstate``; upsert-only against
-``jobstateindex``. Never deletes or mutates a ``jobstate`` row.
+Edit boundaries: Read-only against ``jobstate`` and existing index rows;
+create-only against missing ``jobstateindex`` rows. Never deletes or mutates a
+``jobstate`` row.
 Key entry points: ``main``, ``backfill``.
-Risky contracts: Idempotent — re-running upserts the SAME RowKey per job
+Risky contracts: Idempotent — re-running observes the SAME RowKey per job
 (derived from the immutable ``owner_oid`` + ``created_at``), so a partial run
-can be safely resumed by re-running from the start.
+can be safely resumed without rewriting existing index rows. The
+``backfilled=<n>`` output key is retained for script compatibility and counts
+index entities actually created (two per previously unindexed job).
 Validation: ``uv run python scripts/dev/backfill_jobstate_time_index.py --dry-run``
 against an env with ``AZURE_TABLE_ENDPOINT`` set; the live run prints a per-batch
 progress line and a final ``backfilled=<n>`` summary.
@@ -28,19 +31,18 @@ EXIT_BAD_ENV = 2
 
 
 def backfill(*, dry_run: bool = False, batch_log_every: int = 500) -> int:
-    """Upsert an index row for every non-deleted ``jobstate`` row.
+    """Create missing index rows for every non-deleted ``jobstate`` row.
 
     Thin CLI wrapper around ``JobStateRepository.reconcile_time_index`` — the
-    same idempotent scan-and-upsert the periodic reconcile task runs, so the
+    same idempotent scan-and-repair the periodic reconcile task runs, so the
     one-shot backfill and the steady-state reconcile can never drift. Prints a
-    ``{mode}done scanned=<n> backfilled=<n>`` summary and returns ``EXIT_OK``.
+    ``{mode}done scanned=<n> backfilled=<n>`` summary where ``backfilled`` is
+    the number of index entities actually created, then returns ``EXIT_OK``.
     """
     from api.services.state.repository import get_state_repo
 
     repo = get_state_repo()
-    scanned, written = repo.reconcile_time_index(
-        dry_run=dry_run, batch_log_every=batch_log_every
-    )
+    scanned, written = repo.reconcile_time_index(dry_run=dry_run, batch_log_every=batch_log_every)
 
     mode = "DRY-RUN " if dry_run else ""
     print(f"{mode}done scanned={scanned} backfilled={written}")
@@ -60,8 +62,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not os.environ.get("AZURE_TABLE_ENDPOINT"):
         print(
-            "AZURE_TABLE_ENDPOINT is not set; point it at "
-            "https://<account>.table.core.windows.net",
+            "AZURE_TABLE_ENDPOINT is not set; point it at https://<account>.table.core.windows.net",
             file=sys.stderr,
         )
         return EXIT_BAD_ENV
