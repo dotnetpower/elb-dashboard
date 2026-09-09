@@ -110,11 +110,11 @@ announcement did not make that exact-versus-diverse boundary sufficiently explic
   boundary without altering a real job: a partitioned success marker without a canonical merge
   remained `running` / `finalizing` at 121 seconds and became `failed` / `finalizer_failed` at
   1,801 seconds.
-- ACR run `de9p` built the matching control-plane API image at digest
-  `sha256:f7eb1011975ee1ec411288879bc9cb60020cd255f27de291d3f6f0dca867dc33`.
+- ACR run `de9r` built commit `c22d2b6a` as the control-plane API image at digest
+  `sha256:8afef97afc645237f62123f189f8773ffcc36440ef53ea012762b3c06552f82c`.
   The bundled Container App converged api, worker, and beat on that digest; revision
-  `ca-elb-dashboard--env-beat-1788971496-6223` reached Running, and `/api/health/ready` reported
-  Redis, managed identity, terminal, and Storage healthy.
+  `ca-elb-dashboard--env-beat-1788973172-11863` reached Running, and `/api/health/ready`
+  reported Redis, managed identity, terminal, and Storage healthy.
 - The one-shot OpenAPI deploy task stopped before manifest mutation when the interactive caller
   lacked `Microsoft.Authorization/roleAssignments/write` to reapply existing Workload Identity
   roles. The live Deployment already matched manifest revision 6 and retained its service account,
