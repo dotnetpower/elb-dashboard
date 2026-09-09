@@ -103,6 +103,95 @@ def test_additive_operation_and_optional_property_are_compatible() -> None:
     assert module.breaking_changes(old, module.extract_contract(new_spec)) == []
 
 
+def test_breaking_changes_detect_tightened_constraints_and_union_removal() -> None:
+    module = _module()
+    old_spec = _spec()
+    old_spec["components"]["schemas"]["Item"]["properties"]["name"] = {
+        "type": "string",
+        "maxLength": 120,
+    }
+    old_spec["components"]["schemas"]["Item"]["properties"]["note"] = {
+        "anyOf": [{"type": "string"}, {"type": "null"}]
+    }
+    new_spec = _spec()
+    new_spec["components"]["schemas"]["Item"]["properties"]["name"] = {
+        "type": "string",
+        "maxLength": 20,
+    }
+    new_spec["components"]["schemas"]["Item"]["properties"]["note"] = {
+        "anyOf": [{"type": "string"}]
+    }
+
+    changes = module.breaking_changes(
+        module.extract_contract(old_spec), module.extract_contract(new_spec)
+    )
+
+    assert any("maxLength tightened" in change for change in changes)
+    assert any("anyOf variants removed" in change for change in changes)
+
+
+def test_breaking_changes_detect_added_allof_constraint_not_removed_constraint() -> None:
+    module = _module()
+    old = {"type": "object", "allOf": [{"$ref": "#/components/schemas/Base"}]}
+    narrower = {
+        "type": "object",
+        "allOf": [
+            {"$ref": "#/components/schemas/Base"},
+            {"required": ["mode"]},
+        ],
+    }
+    broader = {"type": "object", "allOf": []}
+
+    assert any(
+        "allOf constraints added" in change
+        for change in module._schema_breaks(old, narrower, "fixture")
+    )
+    assert module._schema_breaks(old, broader, "fixture") == []
+
+
+def test_breaking_changes_detect_constrained_map_values() -> None:
+    module = _module()
+
+    assert any(
+        "additional properties constrained" in change
+        for change in module._schema_breaks(
+            {"type": "object", "additionalProperties": True},
+            {"type": "object", "additionalProperties": {"type": "string"}},
+            "fixture",
+        )
+    )
+    assert any(
+        "maxLength tightened" in change
+        for change in module._schema_breaks(
+            {
+                "type": "object",
+                "additionalProperties": {"type": "string", "maxLength": 100},
+            },
+            {
+                "type": "object",
+                "additionalProperties": {"type": "string", "maxLength": 10},
+            },
+            "fixture",
+        )
+    )
+
+
+def test_breaking_changes_detect_operation_and_global_security_changes() -> None:
+    module = _module()
+    old_spec = _spec()
+    old_spec["paths"]["/api/items"]["post"]["security"] = [{"BearerAuth": []}]
+    new_spec = _spec()
+    new_spec["security"] = []
+    new_spec["paths"]["/api/items"]["post"]["security"] = []
+
+    changes = module.breaking_changes(
+        module.extract_contract(old_spec), module.extract_contract(new_spec)
+    )
+
+    assert any("operation security changed" in change for change in changes)
+    assert "global security requirement changed" in changes
+
+
 def test_current_app_operation_ids_are_present_and_unique(monkeypatch) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     module = _module()

@@ -128,6 +128,51 @@ def _schema_breaks(old: Any, new: Any, location: str) -> list[str]:
     new_enum = set(new.get("enum", [])) if isinstance(new.get("enum"), list) else set()
     if old_enum - new_enum:
         changes.append(f"enum values removed: {location}")
+    for key in ("anyOf", "oneOf"):
+        old_variants = old.get(key) if isinstance(old.get(key), list) else []
+        new_variants = new.get(key) if isinstance(new.get(key), list) else []
+        if old_variants:
+            old_set = {json.dumps(_normalize(item), sort_keys=True) for item in old_variants}
+            new_set = {json.dumps(_normalize(item), sort_keys=True) for item in new_variants}
+            if old_set - new_set:
+                changes.append(f"schema {key} variants removed or narrowed: {location}")
+    old_all_of = old.get("allOf") if isinstance(old.get("allOf"), list) else []
+    new_all_of = new.get("allOf") if isinstance(new.get("allOf"), list) else []
+    if new_all_of:
+        old_set = {json.dumps(_normalize(item), sort_keys=True) for item in old_all_of}
+        new_set = {json.dumps(_normalize(item), sort_keys=True) for item in new_all_of}
+        if new_set - old_set:
+            changes.append(f"schema allOf constraints added or narrowed: {location}")
+    lower_bounds = ("minimum", "exclusiveMinimum", "minLength", "minItems", "minProperties")
+    upper_bounds = ("maximum", "exclusiveMaximum", "maxLength", "maxItems", "maxProperties")
+    for key in lower_bounds:
+        old_value = old.get(key)
+        new_value = new.get(key)
+        if new_value is not None and (old_value is None or new_value > old_value):
+            changes.append(f"schema {key} tightened: {location}")
+    for key in upper_bounds:
+        old_value = old.get(key)
+        new_value = new.get(key)
+        if new_value is not None and (old_value is None or new_value < old_value):
+            changes.append(f"schema {key} tightened: {location}")
+    for key in ("pattern", "multipleOf", "const"):
+        if key in new and old.get(key) != new.get(key):
+            changes.append(f"schema {key} added or changed: {location}")
+    if old.get("nullable") is True and new.get("nullable") is not True:
+        changes.append(f"schema nullable removed: {location}")
+    if old.get("uniqueItems") is not True and new.get("uniqueItems") is True:
+        changes.append(f"schema uniqueItems enabled: {location}")
+    old_additional = old.get("additionalProperties", True)
+    new_additional = new.get("additionalProperties", True)
+    if old_additional is not False and new_additional is False:
+        changes.append(f"schema additional properties disabled: {location}")
+    elif isinstance(new_additional, dict):
+        if old_additional is True:
+            changes.append(f"schema additional properties constrained: {location}")
+        elif isinstance(old_additional, dict):
+            changes.extend(
+                _schema_breaks(old_additional, new_additional, f"{location}{{}}")
+            )
     old_required = set(old.get("required", [])) if isinstance(old.get("required"), list) else set()
     new_required = set(new.get("required", [])) if isinstance(new.get("required"), list) else set()
     if new_required - old_required:
@@ -156,6 +201,8 @@ def breaking_changes(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
             continue
         if old_operation.get("operation_id") != new_operation.get("operation_id"):
             changes.append(f"operationId changed: {key}")
+        if old_operation.get("security", []) != new_operation.get("security", []):
+            changes.append(f"operation security changed: {key}")
         old_parameters = old_operation.get("parameters", {})
         new_parameters = new_operation.get("parameters", {})
         for name, old_parameter in old_parameters.items():
@@ -197,8 +244,8 @@ def breaking_changes(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
             changes.append(f"component schema removed: {name}")
         else:
             changes.extend(_schema_breaks(old_schema, new_schemas[name], f"component {name}"))
-    if old.get("global_security") and not new.get("global_security"):
-        changes.append("global security requirement removed")
+    if old.get("global_security", []) != new.get("global_security", []):
+        changes.append("global security requirement changed")
     return sorted(set(changes))
 
 

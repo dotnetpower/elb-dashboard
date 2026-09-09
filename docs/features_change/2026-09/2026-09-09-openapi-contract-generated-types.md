@@ -15,14 +15,18 @@ types were also unavailable to new frontend surfaces.
 
 ## Change
 
-- A deterministic structural baseline records 241 operations and component
+- A deterministic structural baseline records 242 operations and component
   schemas while ignoring documentation-only text.
 - CI detects removed operations/properties, changed operation ids, narrowed
-  enums, newly-required inputs, removed response media types, and removal of the
-  global bearer security requirement.
+  enums, tightened numeric/string/collection constraints, removed union
+  variants, added `allOf` constraints, constrained map values, newly-required
+  inputs, removed response media types, and changed global or operation
+  security requirements.
 - Intentional breaking changes require an explicit breaking commit marker.
 - `openapi-typescript` 7.13.0 generates a declaration-only namespace at
   `web/src/api/generated/openapi.d.ts`.
+- Generation invokes only the pinned local executable and fails if `npm ci`
+  has not installed it; it never performs an implicit network install.
 - Generation is byte-deterministic and a fail-closed checker catches missing,
   untracked, or stale declarations.
 - The existing hand-written API clients and imports are unchanged.
@@ -38,8 +42,10 @@ environment value changes at runtime.
 
 ## Validation
 
-- `uv run pytest -q api/tests/test_openapi_contract.py` - 4 passed.
-- `uv run python scripts/dev/check_openapi_contract.py` - 241 operations unchanged.
+- `uv run pytest -q api/tests/test_openapi_contract.py` - 8 passed.
+- `uv run python scripts/dev/check_openapi_contract.py` - 242 operations unchanged.
+- Source bootstrap comparison - 238 pre-expansion operations to 242 current,
+  zero breaking changes.
 - `npm --prefix web run check:api-types` - generated declarations current.
 - `npm --prefix web audit` - zero vulnerabilities.
 - ShellCheck passed for generation/check and pre-push scripts.
