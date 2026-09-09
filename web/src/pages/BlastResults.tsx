@@ -7,6 +7,7 @@ import { BlastJobHeader } from "@/pages/blastResults/BlastJobHeader";
 import {
   BlastResultsTabs,
   resolveBlastResultsTab,
+  shouldOpenDescriptionsOnCompletion,
   shouldOpenRunDetailsForFailedJob,
 } from "@/pages/blastResults/BlastResultsTabs";
 import { ExecutionStepsCard } from "@/pages/blastResults/ExecutionStepsCard";
@@ -76,18 +77,18 @@ export function BlastResults() {
   // non-completed) so a user who navigates BACK to "run" on an already
   // completed job is not flipped away again. The transition is captured
   // here in the URL so deep-link / back-button stays predictable.
-  const previousPhaseRef = useRef<string | null>(null);
+  const previousPhaseRef = useRef<{ jobId: string; phase: string } | null>(null);
   useEffect(() => {
-    const previous = previousPhaseRef.current;
-    previousPhaseRef.current = effectivePhase;
-    if (!effectivePhase || !jobId) return;
-    if (previous === effectivePhase) return;
-    if (effectivePhase !== "completed") return;
-    if (tab !== "run") return;
+    if (!job || !effectivePhase || !jobId) return;
+    const previousObservation = previousPhaseRef.current;
+    const previous =
+      previousObservation?.jobId === jobId ? previousObservation.phase : null;
+    previousPhaseRef.current = { jobId, phase: effectivePhase };
+    if (!shouldOpenDescriptionsOnCompletion(previous, effectivePhase, tab)) return;
     const next = new URLSearchParams(searchParams);
     next.set("tab", "descriptions");
     setSearchParams(next, { replace: true });
-  }, [effectivePhase, jobId, tab, searchParams, setSearchParams]);
+  }, [effectivePhase, job, jobId, tab, searchParams, setSearchParams]);
 
   // Per-tab scroll memory: record the window scroll position for the active
   // tab continuously, then restore it when the user returns to that tab so
@@ -233,7 +234,9 @@ export function BlastResults() {
         />
       )}
       {tab === "files" && <ResultsCard jobId={jobId!} state={state} />}
-      {tab === "comparison" && <ResultComparisonPanel job={job} />}
+      {tab === "comparison" && (
+        <ResultComparisonPanel key={job?.job_id || jobId || "loading"} job={job} />
+      )}
       {tab === "run" && (
         <>
           <JobDetailsCard jobId={jobId!} state={state} />

@@ -30,6 +30,11 @@ execution idempotency/correlation identifiers. A missing result manifest or a
 legacy job without workflow-export metadata degrades to an explicit
 availability flag; it does not make the download fail.
 
+The download boundary recursively filters legacy or corrupt nested metadata as
+well as current producer output. Credential-bearing Blob/DFS/File URLs are
+reduced to portable paths, while secret, token, raw-query, and replay-identity
+keys are omitted.
+
 ## API change
 
 `GET /api/blast/jobs/{job_id}/reproducibility` is an additive, owner-scoped,
@@ -39,8 +44,10 @@ enqueue work, or call Azure Service Bus.
 
 ## Validation
 
-- `uv run pytest -q api/tests/test_blast_reproducibility.py` - 5 passed.
+- `uv run pytest -q api/tests/test_blast_reproducibility.py` - 6 passed.
 - `npm --prefix web run build` - passed.
+- Playwright observed HTTP 200, the expected attachment filename, and the
+  successful browser download toast.
 - Service Bus backend regression suite - 354 passed.
 - Protected Service Bus source hashes remained identical to the pre-expansion
   baseline.

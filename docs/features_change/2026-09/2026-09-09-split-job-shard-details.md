@@ -21,6 +21,12 @@ per child with status, phase, duration, effective search space, and sanitized
 error text. Polling runs every five seconds only while at least one child is
 active and is disabled entirely for non-split jobs.
 
+The response is capped at 1,000 rows. When more children exist, the API sets
+`truncated=true` and the page states that the summary covers the displayed
+rows. A completed job opened directly on **Run details** remains on that tab;
+only a job observed transitioning from running to completed auto-opens
+Descriptions.
+
 ## API change
 
 `GET /api/blast/jobs/{job_id}/shards` is an additive, owner-scoped, read-only
@@ -30,8 +36,11 @@ Malformed child rows owned by another caller are excluded defensively.
 
 ## Validation
 
-- `uv run pytest -q api/tests/test_blast_shard_details.py` - 3 passed.
+- `uv run pytest -q api/tests/test_blast_shard_details.py` - 5 passed.
 - `npm --prefix web test -- --run src/pages/blastResults/ShardDetailsCard.test.ts` - 2 passed.
+- Results tab transition and shard card focused suite - 8 passed.
 - `npm --prefix web run build` - passed.
+- Desktop and mobile Playwright checks rendered the truncation warning and
+  sanitized failure row; the completed-job `?tab=run` URL remained stable.
 - Protected Service Bus source hashes remained identical to the pre-expansion
   baseline.

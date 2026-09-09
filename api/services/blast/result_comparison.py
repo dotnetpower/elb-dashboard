@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from hashlib import sha256
+from heapq import nsmallest
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -33,6 +35,7 @@ from api.services.blast.results_parser import parse_blast_result_content
 from api.services.sanitise import sanitise
 
 _MAX_DIFF_ITEMS = 500
+_MAX_IDENTIFIER_CHARS = 512
 ComparisonStatus = Literal["added", "removed", "changed"]
 
 
@@ -85,6 +88,16 @@ class ComparisonDataset:
     truncated: bool
 
 
+def _comparison_identifier(value: object, *, fallback: str = "") -> str:
+    raw = str(value or fallback).strip()
+    safe = sanitise(raw, mask_subscription_ids=False)
+    if len(safe) <= _MAX_IDENTIFIER_CHARS and safe == raw:
+        return safe
+    digest = sha256(raw.encode("utf-8")).hexdigest()[:16]
+    prefix = safe[: _MAX_IDENTIFIER_CHARS - len(digest) - 1]
+    return f"{prefix}#{digest}"
+
+
 def _aggregate_hit(bucket: dict[str, Any] | None, hit: dict[str, Any]) -> dict[str, Any]:
     evalue = numeric_result_value(hit.get("evalue"))
     bitscore = numeric_result_value(hit.get("bitscore"))
@@ -124,6 +137,8 @@ def _aggregate_hit(bucket: dict[str, Any] | None, hit: dict[str, Any]) -> dict[s
 def load_comparison_dataset(job_id: str, storage_account: str) -> ComparisonDataset:
     """Read and aggregate one job's result set within existing analytics caps."""
     blobs = list_parseable_result_blobs(storage_account, job_id)
+    if not blobs:
+        raise ComparisonReadError(f"no parseable result file is available for {job_id}")
     selected_blobs = blobs[:RESULTS_MAX_FILES]
     reads = read_result_blob_texts_parallel(
         storage_account,
@@ -154,8 +169,8 @@ def load_comparison_dataset(job_id: str, storage_account: str) -> ComparisonData
             if total_hsps >= RESULTS_ALIGNMENTS_MAX_HITS:
                 truncated = True
                 break
-            query_id = str(hit.get("qseqid") or "Query_1").strip()
-            subject_id = str(hit.get("sseqid") or "").strip()
+            query_id = _comparison_identifier(hit.get("qseqid"), fallback="Query_1")
+            subject_id = _comparison_identifier(hit.get("sseqid"))
             if not subject_id:
                 continue
             key = (query_id, subject_id)
@@ -186,6 +201,8 @@ def _metrics(value: dict[str, Any]) -> dict[str, float | int | None]:
 
 
 def _changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    if int(before.get("hsp_count") or 0) != int(after.get("hsp_count") or 0):
+        return True
     for key in ("bitscore", "identity", "query_cover"):
         left = before.get(key)
         right = after.get(key)
@@ -203,18 +220,20 @@ def _changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
         float(right_evalue),
         rel_tol=1e-6,
         abs_tol=1e-300,
-    ) or int(before.get("hsp_count") or 0) != int(after.get("hsp_count") or 0)
+    )
 
 
 def compare_datasets(
     *,
     job_id: str,
     against_job_id: str,
-    before: ComparisonDataset,
-    after: ComparisonDataset,
+    current: ComparisonDataset,
+    against: ComparisonDataset,
     max_items: int,
 ) -> ResultComparisonResponse:
-    """Compare two aggregated hit sets without mutating either input."""
+    """Compare the current job against a selected baseline without mutating either input."""
+    before = against
+    after = current
     before_keys = set(before.hits)
     after_keys = set(after.hits)
     added_keys = after_keys - before_keys
@@ -224,6 +243,7 @@ def compare_datasets(
     unchanged = len(common_keys) - len(changed_keys)
 
     items: list[HitComparison] = []
+    limit = max(1, min(int(max_items), _MAX_DIFF_ITEMS))
     change_groups: tuple[
         tuple[ComparisonStatus, set[tuple[str, str]]],
         ...,
@@ -233,16 +253,19 @@ def compare_datasets(
         ("changed", changed_keys),
     )
     for status, keys in change_groups:
-        for query_id, subject_id in sorted(keys):
+        remaining = limit - len(items)
+        if remaining <= 0:
+            break
+        for query_id, subject_id in nsmallest(remaining, keys):
             source = (
-                after.hits[(query_id, subject_id)]
-                if status == "added"
-                else before.hits[(query_id, subject_id)]
+                before.hits[(query_id, subject_id)]
+                if status == "removed"
+                else after.hits[(query_id, subject_id)]
             )
             items.append(
                 HitComparison(
-                    query_id=query_id,
-                    subject_id=subject_id,
+                    query_id=_comparison_identifier(query_id, fallback="Query_1"),
+                    subject_id=_comparison_identifier(subject_id),
                     status=status,
                     title=source.get("title"),
                     organism=source.get("organism"),
@@ -258,9 +281,8 @@ def compare_datasets(
                     ),
                 )
             )
-    total_changes = len(items)
+    total_changes = len(added_keys) + len(removed_keys) + len(changed_keys)
     union_count = len(before_keys | after_keys)
-    limit = max(1, min(int(max_items), _MAX_DIFF_ITEMS))
     return ResultComparisonResponse(
         job_id=job_id,
         against_job_id=against_job_id,
@@ -276,7 +298,7 @@ def compare_datasets(
             if union_count
             else 100.0,
         },
-        items=items[:limit],
+        items=items,
         returned=min(total_changes, limit),
         truncated=total_changes > limit,
         partial=before.truncated
@@ -284,16 +306,16 @@ def compare_datasets(
         or bool(before.read_failures or after.read_failures),
         inputs={
             job_id: {
-                "files_seen": before.files_seen,
-                "files_parsed": before.files_parsed,
-                "read_failures": before.read_failures,
-                "truncated": before.truncated,
+                "files_seen": current.files_seen,
+                "files_parsed": current.files_parsed,
+                "read_failures": current.read_failures,
+                "truncated": current.truncated,
             },
             against_job_id: {
-                "files_seen": after.files_seen,
-                "files_parsed": after.files_parsed,
-                "read_failures": after.read_failures,
-                "truncated": after.truncated,
+                "files_seen": against.files_seen,
+                "files_parsed": against.files_parsed,
+                "read_failures": against.read_failures,
+                "truncated": against.truncated,
             },
         },
     )

@@ -343,7 +343,8 @@ def blast_job_shards(
         if parent is None:
             raise HTTPException(404, "job not found")
         _assert_job_owner(parent.owner_oid, caller)
-        children = list(repo.list_children(job_id, limit=1000))
+        child_limit = 1000
+        children = list(repo.list_children(job_id, limit=child_limit + 1))
         # A malformed/corrupt row must never leak another owner's details even
         # if its parent_job_id points at the authorized parent.
         visible_children = [
@@ -352,7 +353,11 @@ def blast_job_shards(
             if not getattr(child, "owner_oid", "")
             or getattr(child, "owner_oid", "") == getattr(parent, "owner_oid", "")
         ]
-        return build_split_details(job_id, visible_children).model_dump(mode="json")
+        return build_split_details(
+            job_id,
+            visible_children[:child_limit],
+            truncated=len(children) > child_limit,
+        ).model_dump(mode="json")
     except HTTPException:
         raise
     except Exception as exc:
@@ -384,6 +389,8 @@ def _comparison_storage_account(state: Any) -> str:
 
 
 def _comparison_identity(state: Any) -> tuple[str, str]:
+    from api.services.web_blast_searchsp import database_name_from_path
+
     payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
     raw_external = payload.get("external")
     external: dict[str, Any] = raw_external if isinstance(raw_external, dict) else {}
@@ -398,7 +405,7 @@ def _comparison_identity(state: Any) -> tuple[str, str]:
         or external.get("db")
         or ""
     )
-    return program.strip().casefold(), database.strip().casefold()
+    return program.strip().casefold(), database_name_from_path(database).casefold()
 
 
 @router.post("/jobs/{job_id}/comparison")
@@ -466,13 +473,13 @@ def blast_job_comparison(
                     "message": "Both jobs must record their result storage account.",
                 },
             )
-        before = load_comparison_dataset(job_id, before_storage)
-        after = load_comparison_dataset(body.against_job_id, after_storage)
+        current = load_comparison_dataset(job_id, before_storage)
+        against = load_comparison_dataset(body.against_job_id, after_storage)
         return compare_datasets(
             job_id=job_id,
             against_job_id=body.against_job_id,
-            before=before,
-            after=after,
+            current=current,
+            against=against,
             max_items=body.max_items,
         ).model_dump(mode="json")
     except HTTPException:

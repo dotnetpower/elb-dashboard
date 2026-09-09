@@ -31,7 +31,7 @@ export function buildRuntimeEstimateInput({
   const workloadPool = cluster.agent_pools?.find(
     (pool) =>
       pool.name.toLowerCase().includes("blast") ||
-      (pool.mode ?? "").toLowerCase() !== "system",
+      (pool.mode ?? "").toLowerCase() === "user",
   );
   const nodeCount = workloadPool ? workloadPool.count : cluster.node_count;
   const nodeSku = workloadPool ? workloadPool.vm_size : cluster.node_sku;

@@ -87,7 +87,7 @@ export function ResultComparisonPanel({ job }: ResultComparisonPanelProps) {
         onSubmit={submit}
         style={{
           display: "grid",
-          gridTemplateColumns: "minmax(220px, 1fr) auto",
+          gridTemplateColumns: "minmax(0, 1fr) auto",
           gap: "var(--space-2)",
           marginTop: "var(--space-3)",
         }}
@@ -101,7 +101,10 @@ export function ResultComparisonPanel({ job }: ResultComparisonPanelProps) {
             className="glass-input"
             list="comparison-job-options"
             value={againstJobId}
-            onChange={(event) => setAgainstJobId(event.target.value)}
+            onChange={(event) => {
+              setAgainstJobId(event.target.value);
+              mutation.reset();
+            }}
             placeholder="Job ID"
             autoComplete="off"
             style={{ width: "100%", marginTop: 4 }}
@@ -154,6 +157,9 @@ export function ResultComparisonPanel({ job }: ResultComparisonPanelProps) {
               This comparison is partial because an input or response limit was reached.
             </div>
           )}
+          <div className="muted" style={{ marginTop: 12, fontSize: 11 }}>
+            Added and removed hits describe this search relative to {result.against_job_id}.
+          </div>
           <div style={{ overflowX: "auto", marginTop: "var(--space-4)" }}>
             <table className="data-table" style={{ width: "100%", minWidth: 760 }}>
               <thead>

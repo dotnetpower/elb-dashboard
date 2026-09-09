@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { resultTabBadge, shouldOpenRunDetailsForFailedJob } from "@/pages/blastResults/BlastResultsTabs";
+import {
+  resultTabBadge,
+  shouldOpenDescriptionsOnCompletion,
+  shouldOpenRunDetailsForFailedJob,
+} from "@/pages/blastResults/BlastResultsTabs";
 
 describe("BLAST results tab routing", () => {
   it("opens Run details for failed jobs that deep-link to result analytics tabs", () => {
@@ -15,6 +19,21 @@ describe("BLAST results tab routing", () => {
     expect(shouldOpenRunDetailsForFailedJob("files", true)).toBe(false);
     expect(shouldOpenRunDetailsForFailedJob("run", true)).toBe(false);
     expect(shouldOpenRunDetailsForFailedJob("descriptions", false)).toBe(false);
+  });
+});
+
+describe("completed-job tab transition", () => {
+  it("keeps a completed job on a directly requested Run details tab", () => {
+    expect(shouldOpenDescriptionsOnCompletion(null, "completed", "run")).toBe(false);
+    expect(shouldOpenDescriptionsOnCompletion("completed", "completed", "run")).toBe(
+      false,
+    );
+  });
+
+  it("opens Descriptions only when a live Run details view completes", () => {
+    expect(shouldOpenDescriptionsOnCompletion("running", "completed", "run")).toBe(true);
+    expect(shouldOpenDescriptionsOnCompletion("running", "completed", "files")).toBe(false);
+    expect(shouldOpenDescriptionsOnCompletion("running", "failed", "run")).toBe(false);
   });
 });
 

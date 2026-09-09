@@ -76,11 +76,14 @@ def _positive_number(*values: object) -> float | None:
         if isinstance(value, bool):
             continue
         if isinstance(value, (int, float)):
-            number = float(value)
+            try:
+                number = float(value)
+            except OverflowError:
+                continue
         elif isinstance(value, str):
             try:
                 number = float(value.strip())
-            except ValueError:
+            except (OverflowError, ValueError):
                 continue
         else:
             continue

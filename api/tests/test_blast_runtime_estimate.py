@@ -97,6 +97,19 @@ def test_estimate_filters_program_database_and_sku_mismatch() -> None:
     assert result.sample_count == 1
 
 
+def test_estimate_ignores_corrupt_oversized_numeric_evidence() -> None:
+    corrupt = _state(100)
+    corrupt.payload["db_total_letters"] = 10**10_000
+
+    result = estimate_runtime_cost(
+        _request(),
+        [_state(90), _state(100), _state(110), corrupt],
+    )
+
+    assert result.available is True
+    assert result.sample_count == 3
+
+
 def test_runtime_estimate_route_is_read_only_and_degrades(monkeypatch) -> None:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
 

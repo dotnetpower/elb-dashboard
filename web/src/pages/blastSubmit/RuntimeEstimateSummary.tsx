@@ -9,6 +9,19 @@ interface RuntimeEstimateSummaryProps {
   input: BlastRuntimeEstimateRequest | null;
 }
 
+interface RuntimeEstimateStatusInput {
+  available?: boolean;
+  reason?: string | null;
+  sampleCount?: number;
+  requiredSamples?: number;
+  isLoading: boolean;
+  isError: boolean;
+  inputPending: boolean;
+  estimateSeconds?: number | null;
+  lowSeconds?: number | null;
+  highSeconds?: number | null;
+}
+
 function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds)) return "—";
   if (seconds < 60) return `${Math.max(1, Math.round(seconds))}s`;
@@ -29,6 +42,24 @@ export function runtimeEstimateLabel(
   return `${estimate} (${formatDuration(lowSeconds)}–${formatDuration(highSeconds)})`;
 }
 
+export function runtimeEstimateStatusLabel({
+  available,
+  reason,
+  sampleCount = 0,
+  requiredSamples = 3,
+  isLoading,
+  isError,
+  inputPending,
+  estimateSeconds,
+  lowSeconds,
+  highSeconds,
+}: RuntimeEstimateStatusInput): string {
+  if (inputPending || isLoading) return "Calculating…";
+  if (isError || reason === "estimate_unavailable") return "Estimate unavailable";
+  if (available) return runtimeEstimateLabel(estimateSeconds, lowSeconds, highSeconds);
+  return `Collecting baseline (${sampleCount}/${requiredSamples})`;
+}
+
 export function RuntimeEstimateSummary({ input }: RuntimeEstimateSummaryProps) {
   const [debounced, setDebounced] = useState(input);
   useEffect(() => {
@@ -45,12 +76,20 @@ export function RuntimeEstimateSummary({ input }: RuntimeEstimateSummaryProps) {
   });
   if (!input) return null;
 
-  const data = query.data;
-  const runtime = data?.available
-    ? runtimeEstimateLabel(data.estimate_seconds, data.low_seconds, data.high_seconds)
-    : query.isLoading
-      ? "Calculating…"
-      : `Collecting baseline (${data?.sample_count ?? 0}/${data?.required_samples ?? 3})`;
+  const inputPending = input !== debounced;
+  const data = inputPending ? undefined : query.data;
+  const runtime = runtimeEstimateStatusLabel({
+    available: data?.available,
+    reason: data?.reason,
+    sampleCount: data?.sample_count,
+    requiredSamples: data?.required_samples,
+    isLoading: query.isLoading,
+    isError: query.isError,
+    inputPending,
+    estimateSeconds: data?.estimate_seconds,
+    lowSeconds: data?.low_seconds,
+    highSeconds: data?.high_seconds,
+  });
   const cost = data?.available && data.estimated_cost_usd != null
     ? `$${data.estimated_cost_usd.toFixed(2)}`
     : "—";

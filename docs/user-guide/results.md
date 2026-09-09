@@ -63,6 +63,11 @@ space, and sanitized failure text. It polls while any child is active and stops
 automatically after every child reaches a terminal state. Non-split jobs do not
 make the shard-detail request or render the table.
 
+The table returns at most 1,000 child rows. A visible warning marks larger jobs
+as truncated and clarifies that the displayed summary covers only those rows.
+A completed-job **Run details** deep link survives refresh; the page switches to
+Descriptions automatically only when it observes an active job complete.
+
 ## Run States You Will See
 
 | Body state | When it appears | What to do |

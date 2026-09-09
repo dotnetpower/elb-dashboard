@@ -12,9 +12,11 @@ Validation: ``uv run pytest -q api/tests/test_blast_reproducibility.py``.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +28,33 @@ from api.services.blast.workflow_export import (
     MissingDatabaseError,
     render_workflow_export,
 )
+from api.services.sanitise import sanitise
+
+_SENSITIVE_KEYS = frozenset(
+    {
+        "access_token",
+        "authorization",
+        "bearer",
+        "client_secret",
+        "credential",
+        "external_correlation_id",
+        "idempotency_key",
+        "password",
+        "query_data",
+        "query_fasta",
+        "query_sequence",
+        "raw_query",
+        "refresh_token",
+        "sas",
+        "sas_token",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+    }
+)
+_STORAGE_HOST_MARKERS = (".blob.core.", ".dfs.core.", ".file.core.")
+_FASTA_SEQUENCE_RE = re.compile(r"^[A-Za-z*.-]+$")
 
 
 class WorkflowModule(BaseModel):
@@ -51,16 +80,62 @@ class ReproducibilityPackage(BaseModel):
     raw_query_included: bool = False
 
 
+def _is_sensitive_key(key: object) -> bool:
+    normalized = str(key).strip().casefold().replace("-", "_")
+    return (
+        normalized in _SENSITIVE_KEYS
+        or normalized.endswith("_token")
+        or normalized.endswith("_secret")
+        or ("query" in normalized and "sequence" in normalized)
+    )
+
+
+def _portable_string(value: str) -> str:
+    lines = [line.strip() for line in value.strip().splitlines() if line.strip()]
+    if (
+        len(lines) >= 2
+        and lines[0].startswith(">")
+        and all(_FASTA_SEQUENCE_RE.fullmatch(line) for line in lines[1:])
+    ):
+        return "<query-sequence-redacted>"
+    cleaned = sanitise(value, mask_subscription_ids=False)
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return cleaned
+    hostname = (parsed.hostname or "").casefold()
+    if parsed.scheme in {"http", "https"} and any(
+        marker in hostname for marker in _STORAGE_HOST_MARKERS
+    ):
+        return parsed.path.lstrip("/")
+    return cleaned
+
+
+def _portable_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _portable_value(item)
+            for key, item in value.items()
+            if not _is_sensitive_key(key)
+        }
+    if isinstance(value, list):
+        return [_portable_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_portable_value(item) for item in value]
+    if isinstance(value, str):
+        return _portable_string(value)
+    return deepcopy(value)
+
+
+def _portable_mapping(value: object) -> dict[str, Any]:
+    portable = _portable_value(value)
+    return portable if isinstance(portable, dict) else {}
+
+
 def _safe_submit_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     raw = payload.get("canonical_request")
-    snapshot = deepcopy(raw) if isinstance(raw, dict) else canonical_submit_snapshot(payload)
-    metadata = snapshot.get("metadata")
-    if isinstance(metadata, dict):
-        # These identify one execution attempt, not its scientific inputs. A
-        # portable package must never encourage replay with the same identity.
-        metadata.pop("idempotency_key", None)
-        metadata.pop("external_correlation_id", None)
-    return snapshot
+    snapshot = raw if isinstance(raw, dict) else canonical_submit_snapshot(payload)
+    return _portable_mapping(snapshot)
 
 
 def build_reproducibility_package(
@@ -81,16 +156,18 @@ def build_reproducibility_package(
     snapshot = _safe_submit_snapshot(payload)
 
     raw_provenance = payload.get("provenance")
-    provenance = (
-        deepcopy(raw_provenance)
+    raw_or_built_provenance = (
+        raw_provenance
         if isinstance(raw_provenance, dict)
         else build_blast_provenance(job_id=job_id, payload=payload)
     )
+    provenance = _portable_mapping(raw_or_built_provenance)
     job_title = getattr(state, "job_title", None) or payload.get("job_title")
+    safe_job_title = _portable_string(job_title) if isinstance(job_title, str) else None
     citation_bundle = build_citation(
         job_id=job_id,
         provenance=provenance,
-        job_title=job_title if isinstance(job_title, str) else None,
+        job_title=safe_job_title,
     )
 
     workflow_exports: dict[str, WorkflowModule] = {}
@@ -113,9 +190,13 @@ def build_reproducibility_package(
         generated_at=generated_at or datetime.now(UTC).isoformat(timespec="seconds"),
         job={
             "job_id": job_id,
-            "job_title": job_title if isinstance(job_title, str) else None,
-            "program": str(getattr(state, "program", "") or snapshot.get("program") or ""),
-            "database": str(getattr(state, "db", "") or snapshot.get("database") or ""),
+            "job_title": safe_job_title,
+            "program": _portable_string(
+                str(getattr(state, "program", "") or snapshot.get("program") or "")
+            ),
+            "database": _portable_string(
+                str(getattr(state, "db", "") or snapshot.get("database") or "")
+            ),
             "status": str(getattr(state, "status", "") or ""),
             "created_at": getattr(state, "created_at", None),
             "updated_at": getattr(state, "updated_at", None),
@@ -129,7 +210,9 @@ def build_reproducibility_package(
             "rid": citation_bundle.rid,
         },
         workflow_exports=workflow_exports,
-        result_manifest=deepcopy(result_manifest) if isinstance(result_manifest, dict) else None,
+        result_manifest=_portable_mapping(result_manifest)
+        if isinstance(result_manifest, dict)
+        else None,
         availability={
             "result_manifest": isinstance(result_manifest, dict),
             "workflow_exports": bool(workflow_exports),

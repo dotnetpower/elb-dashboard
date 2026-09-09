@@ -92,4 +92,40 @@ describe("runtime estimate input", () => {
 
     expect(result).toBeNull();
   });
+
+  it("uses canonical cluster workload fields when legacy pool modes are absent", () => {
+    const result = buildRuntimeEstimateInput({
+      subscriptionId: "sub",
+      program: "blastn",
+      database: { name: "core_nt", total_letters: 1_000_000 },
+      queryData: ">q\nACGT",
+      cluster: {
+        name: "cluster",
+        resource_group: "rg",
+        region: "koreacentral",
+        k8s_version: null,
+        provisioning_state: "Succeeded",
+        power_state: "Running",
+        node_count: 4,
+        node_sku: "Standard_E32s_v5",
+        kubelet_object_id: null,
+        agent_pools: [
+          {
+            name: "systempool",
+            mode: null,
+            vm_size: "system-sku",
+            count: 1,
+            min_count: 1,
+            max_count: 1,
+            os_type: "Linux",
+            power_state: "Running",
+            enable_auto_scaling: false,
+          },
+        ],
+      },
+    });
+
+    expect(result?.node_count).toBe(4);
+    expect(result?.node_sku).toBe("Standard_E32s_v5");
+  });
 });

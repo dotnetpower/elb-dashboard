@@ -112,6 +112,19 @@ export function shouldOpenRunDetailsForFailedJob(
   return effectiveIsFailed && RESULT_ANALYTICS_TABS.has(activeTab);
 }
 
+export function shouldOpenDescriptionsOnCompletion(
+  previousPhase: string | null,
+  effectivePhase: string,
+  activeTab: BlastResultsTab,
+): boolean {
+  return (
+    previousPhase !== null &&
+    previousPhase !== "completed" &&
+    effectivePhase === "completed" &&
+    activeTab === "run"
+  );
+}
+
 /**
  * Label + tone for the in-progress badge on result tabs. A queued-family phase
  * reads a calm grey "Queued" so it matches the header phase banner and the Job

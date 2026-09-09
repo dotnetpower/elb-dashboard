@@ -76,6 +76,26 @@ def test_build_split_details_counts_sorts_and_sanitizes() -> None:
     assert "secret" not in response["shards"][0]
 
 
+def test_build_split_details_bounds_corrupt_values() -> None:
+    child = _child("x" * 200, status="running", group_id="group")
+    child.phase = "Bearer private-token-value-1234567890"
+    child.error_code = "code-" + "x" * 200
+    child.payload["query_file"] = (
+        "https://acct.blob.core.windows.net/queries/private.fa?sv=1&sp=r&sig=secret"
+    )
+    child.payload["effective_search_space"] = 10**1000
+    child.updated_at = "2026-09-01T00:01:30"
+
+    shard = build_split_details("parent", [child]).shards[0]
+
+    assert len(shard.job_id) == 128
+    assert "private-token" not in shard.phase
+    assert len(shard.error_code or "") == 80
+    assert shard.query_file == "private.fa"
+    assert shard.effective_search_space is None
+    assert shard.duration_seconds is None
+
+
 class _Repo:
     def __init__(self, parent: SimpleNamespace | None, children: list[SimpleNamespace]) -> None:
         self.parent = parent
@@ -86,8 +106,8 @@ class _Repo:
 
     def list_children(self, parent_job_id: str, limit: int = 1000) -> list[SimpleNamespace]:
         assert parent_job_id == "parent-1"
-        assert limit == 1000
-        return self.children
+        assert limit == 1001
+        return self.children[:limit]
 
 
 def _parent(owner_oid: str = _OWNER) -> SimpleNamespace:
@@ -131,3 +151,23 @@ def test_shard_route_enforces_parent_owner_and_missing(monkeypatch) -> None:
         lambda: _Repo(None, []),
     )
     assert client.get("/api/blast/jobs/missing/shards").status_code == 404
+
+
+def test_shard_route_reports_truncation(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    children = [
+        _child(f"child-{index}", status="completed", group_id=f"g-{index:04d}")
+        for index in range(1001)
+    ]
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: _Repo(_parent(), children),
+    )
+
+    from api.main import app
+
+    response = TestClient(app).get("/api/blast/jobs/parent-1/shards")
+
+    assert response.status_code == 200
+    assert response.json()["truncated"] is True
+    assert len(response.json()["shards"]) == 1000

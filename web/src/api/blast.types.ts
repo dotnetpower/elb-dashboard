@@ -348,6 +348,7 @@ export interface BlastShardDetail {
 export interface BlastShardDetailsResponse {
   schema_version: number;
   parent_job_id: string;
+  truncated: boolean;
   summary: {
     total: number;
     completed: number;

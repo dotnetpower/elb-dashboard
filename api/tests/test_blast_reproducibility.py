@@ -90,6 +90,46 @@ def test_package_degrades_when_database_and_manifest_are_missing() -> None:
     }
 
 
+def test_package_redacts_sensitive_legacy_metadata_and_storage_urls() -> None:
+    state = _state()
+    state.payload = {
+        **_PAYLOAD,
+        "canonical_request": {
+            **_PAYLOAD["canonical_request"],
+            "query": {
+                "kind": "query_file",
+                "path": "https://acct.blob.core.windows.net/queries/private.fa?sv=1&sp=r&sig=secret",
+                "query_data": ">private\nACGT",
+            },
+            "metadata": {"access_token": "Bearer private-token-value-1234567890"},
+            "legacy_query": ">private\nACGTACGT",
+        },
+    }
+
+    package = build_reproducibility_package(
+        state=state,
+        result_manifest={
+            "files": [
+                {
+                    "name": "https://acct.blob.core.windows.net/results/out.xml?sv=1&sp=r&sig=secret"
+                }
+            ],
+            "client_secret": "private-secret-value",
+        },
+        generated_at="2026-09-09T00:00:00+00:00",
+    ).model_dump(mode="json")
+
+    encoded = json.dumps(package)
+    assert ">private" not in encoded
+    assert "private-token" not in encoded
+    assert "private-secret" not in encoded
+    assert "sig=" not in encoded
+    assert "acct.blob.core.windows.net" not in encoded
+    assert package["submit_snapshot"]["legacy_query"] == "<query-sequence-redacted>"
+    assert package["submit_snapshot"]["query"]["path"] == "queries/private.fa"
+    assert package["result_manifest"]["files"][0]["name"] == "results/out.xml"
+
+
 class _Repo:
     def __init__(self, state: SimpleNamespace | None) -> None:
         self.state = state

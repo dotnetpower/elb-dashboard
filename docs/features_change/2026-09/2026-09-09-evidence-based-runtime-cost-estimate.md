@@ -21,6 +21,10 @@ median duration, interquartile range, comparable sample count, confidence, and
 approximate compute cost. Input changes are debounced by 750 ms and estimates
 are cached for 60 seconds.
 
+While changed input is still inside the debounce window, the previous input's
+estimate is hidden and the summary reads **Calculating**. An estimate for one
+query/cluster combination is never shown beside a newer form state.
+
 Fewer than three comparable completed jobs returns an explicit
 `insufficient_samples` state. No duration or cost is shown in that case. The
 estimate is informational: it is not part of validation, preflight, submit
@@ -43,7 +47,7 @@ The pre-existing `/api/blast/cost-estimate` lab-tool stub is unchanged.
 
 ## Validation
 
-- `uv run pytest -q api/tests/test_blast_runtime_estimate.py` - 4 passed.
+- `uv run pytest -q api/tests/test_blast_runtime_estimate.py` - 5 passed.
 - Runtime estimate plus existing cost route/estimator suites - 18 passed.
 - Frontend runtime model/display tests - 5 passed.
 - `npm --prefix web run build` - passed.

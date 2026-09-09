@@ -13,10 +13,28 @@ interface ShardDetailsCardProps {
 }
 
 const ACTIVE_REFRESH_MS = 5_000;
+const TERMINAL_JOB_STATUSES = new Set([
+  "completed",
+  "succeeded",
+  "success",
+  "failed",
+  "error",
+  "cancelled",
+  "canceled",
+  "deleted",
+]);
 
 export function shardProgressLabel(summary: BlastShardDetailsResponse["summary"]): string {
   if (summary.total === 0) return "No shard work";
   return `${summary.terminal} of ${summary.total} settled`;
+}
+
+export function shouldPollShardDetails(
+  data: BlastShardDetailsResponse | undefined,
+  jobStatus: string,
+): boolean {
+  if (!data || data.summary.active > 0) return true;
+  return data.truncated && !TERMINAL_JOB_STATUSES.has(jobStatus.toLowerCase());
 }
 
 function formatDuration(seconds: number | null | undefined): string {
@@ -73,7 +91,7 @@ export function ShardDetailsCard({ job }: ShardDetailsCardProps) {
     enabled: hasShards,
     refetchInterval: (current) => {
       const data = current.state.data as BlastShardDetailsResponse | undefined;
-      return data && data.summary.active === 0 ? false : ACTIVE_REFRESH_MS;
+      return shouldPollShardDetails(data, job?.status ?? "") ? ACTIVE_REFRESH_MS : false;
     },
     staleTime: 2_000,
   });
@@ -157,6 +175,11 @@ export function ShardDetailsCard({ job }: ShardDetailsCardProps) {
               }}
             />
           </div>
+          {query.data?.truncated && (
+            <div role="status" style={{ color: "var(--warning)", marginBottom: 12, fontSize: 12 }}>
+              Showing the first 1,000 shard rows. Summary values cover only the rows shown.
+            </div>
+          )}
           <div style={{ overflowX: "auto" }}>
             <table className="data-table" style={{ width: "100%", minWidth: 720 }}>
               <thead>
