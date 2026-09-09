@@ -3,6 +3,7 @@
 #
 # Runs the EXPENSIVE half of the GitHub Actions gates so a push that would turn
 # the Actions dashboard red is blocked locally first:
+#   - `check_mypy_baseline.py`    (mirrors the production mypy debt ratchet)
 #   - `uv run pytest -q api/tests`   (mirrors .github/workflows/test.yml)
 #   - `uv run mkdocs build --strict` (mirrors .github/workflows/docs.yml)
 # Each runs only when the pushed range actually touches the files that CI gates
@@ -54,7 +55,7 @@ ZERO="0000000000000000000000000000000000000000"
 changed=""
 refs_seen=0
 declare -a push_shas=()
-while read -r local_ref local_sha remote_ref remote_sha; do
+while read -r _local_ref local_sha _remote_ref remote_sha; do
   [[ -z "${local_sha:-}" ]] && continue
   refs_seen=$((refs_seen + 1))
   if [[ "$local_sha" == "$ZERO" ]]; then
@@ -113,6 +114,8 @@ run_gates_in_dir() {
     # `ruff check` (no path) honours the `src` list in pyproject.toml so it
     # lints both api/ and scripts/ in one pass.
     hook_run_in "$dir" "ruff check" uv run ruff check || rc=$?
+    hook_run_in "$dir" "mypy production debt ratchet" \
+      uv run python scripts/dev/check_mypy_baseline.py || rc=$?
   fi
   if [[ "$run_api" -eq 1 ]]; then
     CI=true hook_run_in "$dir" "pytest -q api/tests" uv run pytest -q api/tests || rc=$?

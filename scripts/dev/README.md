@@ -163,6 +163,7 @@ can reproduce the bug.**
 ```bash
 uv run pytest -q api/tests
 uv run pytest -q api/tests/test_terminal_exec.py     # focused
+uv run python scripts/dev/check_mypy_baseline.py     # production type-debt ratchet
 ```
 
 Use for: anything that doesn't need a live HTTP server (sanitisation, auth

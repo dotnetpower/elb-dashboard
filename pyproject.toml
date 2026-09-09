@@ -119,9 +119,10 @@ strict = true
 ignore_missing_imports = true
 files = ["api"]
 
-# Tests use a lot of mock objects and dynamic constructs — relax strict
-# mode for test files so the 770-error backlog does not block progress
-# on production code.  Production modules stay fully strict.
+# Tests use a lot of mock objects and dynamic constructs, so relax selected
+# diagnostics there. Production diagnostics are tracked separately by
+# scripts/dev/check_mypy_baseline.py; every file/error-code count is ratcheted
+# in CI while the historical backlog is reduced toward zero.
 [[tool.mypy.overrides]]
 module = "api.tests.*"
 disallow_untyped_defs = false

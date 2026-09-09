@@ -160,7 +160,10 @@ Calm, muted, low-contrast surfaces. **Detail moved to [docs/copilot/glass-ui.md]
   behaviour family. When editing a large module, prefer adding a focused helper
   module over broadening the existing header.
 * Format with `ruff format`, lint with `ruff check`. No `black`/`isort` duplication.
-* Type hints required on all public functions; `mypy --strict` clean.
+* Type hints are required on all public functions. Production-code mypy debt is
+  ratcheted by `uv run python scripts/dev/check_mypy_baseline.py`: no
+  file/error-code count may change without review and a baseline refresh. Drive
+  the checked-in baseline toward zero; do not add blanket suppressions.
 * Pydantic v2 for request/response models; never accept untyped `dict` at HTTP boundaries.
 * Azure SDK calls go through `api/services/` wrappers — FastAPI routes and Celery tasks must not import `azure.mgmt.*` directly.
 * **Never use Azure Run Command** (`ManagedClusters.begin_run_command`, `VirtualMachines.begin_run_command`). Both are ~30 s slow and ARM-rate-limited. For Kubernetes operations use the existing `api.services.monitoring.k8s_*` helpers (direct K8s API via the kubeconfig token) — add a new `k8s_*` function if needed. For genuinely shell-only work (`azcopy`, `elastic-blast` CLI, `kubectl exec`, `az`) call `api.services.terminal_exec.run()` / `.stream()`; that helper POSTs to a stdlib HTTP server in the `terminal` sidecar (loopback `127.0.0.1:7682`) authenticated by the `exec-token` Container Apps secret, with `argv[0]` allowlisted to `{azcopy, kubectl, elastic-blast, elb, az}` and concurrency capped at `EXEC_MAX_CONCURRENCY`. The api / worker images intentionally do not ship those CLIs — they only live in the `terminal` sidecar.
@@ -425,7 +428,7 @@ A push must never turn the Actions dashboard red. Two workflows gate `main` and 
 
 | Workflow | File | What it runs | Local equivalent |
 | --- | --- | --- | --- |
-| Tests | [.github/workflows/test.yml](.github/workflows/test.yml) | `uv run ruff check api` + `uv run pytest -q api/tests` | same two commands |
+| Tests | [.github/workflows/test.yml](.github/workflows/test.yml) | `uv run ruff check` + `uv run python scripts/dev/check_mypy_baseline.py` + `uv run pytest -q api/tests` | same three commands |
 | Publish Docs | [.github/workflows/docs.yml](.github/workflows/docs.yml) | `check_frontmatter.py` + `mkdocs build --strict` | `uv run python scripts/docs/check_frontmatter.py` then `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` |
 
 The repo ships version-controlled git hooks that run exactly these checks automatically — **install them once per clone**:
@@ -435,7 +438,7 @@ scripts/dev/install-git-hooks.sh   # sets core.hooksPath=scripts/dev/git-hooks
 ```
 
 * **pre-commit** (fast, staged files only): `ruff check api` when `api/**` is staged; the docs frontmatter guard when `docs/**` / `mkdocs.yml` is staged.
-* **pre-push** (full CI mirror): `pytest -q api/tests` and/or `mkdocs build --strict`, scoped to the file paths the push actually touches (so a docs-only push skips pytest and vice-versa).
+* **pre-push** (full CI mirror): the production mypy debt ratchet plus `pytest -q api/tests` and/or `mkdocs build --strict`, scoped to the file paths the push actually touches (so a docs-only push skips API checks and vice-versa).
 
 The hooks are the safety net, not a substitute for thinking: when you change `mkdocs.yml`-relevant docs, confirm every new page under `docs/**` is wired into the `nav:` (an orphan page fails `--strict`). Bypass only for genuine emergencies with `git commit/push --no-verify` (or `ELB_SKIP_HOOKS=1`), and never push a red build knowingly.
 
