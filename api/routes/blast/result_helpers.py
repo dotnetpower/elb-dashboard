@@ -28,12 +28,56 @@ from api.services.blast.result_analytics import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _shard_only_manifest(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return False
+    names = [
+        str(item.get("name") or item.get("filename") or "")
+        for item in files
+        if isinstance(item, dict)
+    ]
+    return any("/shard_" in name for name in names) and not any(
+        name.rsplit("/", 1)[-1] == "merged_results.out.gz" for name in names
+    )
+
+
 def read_ready_result_artifact(job_id: str, artifact_type: str) -> dict[str, Any] | None:
     try:
-        from api.services.job_artifacts import read_result_analytics_artifact
+        from api.services.job_artifacts import (
+            _invalidate_ready_artifact_if_unchanged,
+            get_artifact_state,
+            read_result_analytics_artifact,
+        )
 
+        initial_state = get_artifact_state(job_id, artifact_type)
         payload = read_result_analytics_artifact(job_id, artifact_type)
         if payload is not None:
+            manifest = (
+                payload
+                if artifact_type == "result_manifest"
+                else read_result_analytics_artifact(job_id, "result_manifest")
+            )
+            if _shard_only_manifest(manifest):
+                invalidated = bool(
+                    initial_state is not None
+                    and _invalidate_ready_artifact_if_unchanged(
+                        job_id,
+                        artifact_type,
+                        expected_updated_at=initial_state.updated_at,
+                        expected_content_hash=initial_state.content_hash,
+                        error_code="stale_shard_only_manifest",
+                    )
+                )
+                LOGGER.info(
+                    "stale shard-only result artifact rejected job_id=%s type=%s invalidated=%s",
+                    job_id,
+                    artifact_type,
+                    invalidated,
+                )
+                return None
             return {**payload, "artifact_state": "ready", "source": "artifact"}
     except Exception as exc:
         LOGGER.info(

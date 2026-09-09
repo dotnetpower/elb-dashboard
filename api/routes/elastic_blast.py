@@ -204,6 +204,22 @@ class BlastV1Options(BaseModel):
     max_target_seqs: int | None = Field(None, ge=1)
     outfmt: str | None = Field(None, max_length=512)
     extra: str | None = Field(None, max_length=2048)
+    result_selection_policy: Literal["native_top_n", "diversity_aware"] = Field(
+        "native_top_n",
+        description=(
+            "Final subject-selection policy. native_top_n reproduces BLAST's "
+            "score/raw-score/DB-order top-N; diversity_aware proportionally "
+            "reserves lower-score subjects when one tied class overflows N."
+        ),
+    )
+    web_blast_statistical_context: WebBlastStatisticalContext | None = Field(
+        None,
+        description=(
+            "Optional single-query taxonomy-filtered statistics. Values must "
+            "describe the filtered database used by the reference result; "
+            "omit when those measured values are unavailable."
+        ),
+    )
     # Calibrated Web BLAST effective search space (oracle value). The sibling
     # ``/v1/jobs`` ``BlastOptions`` has no structured searchsp field and
     # auto-injects a FIXED default ``-searchsp`` (core_nt's calibration) when
@@ -264,13 +280,32 @@ class ExternalBlastV1Request(BaseModel):
         if ".." in self.db.split("/"):
             raise ValueError("db must not contain '..' path segments")
         try:
-            parse_fasta_metadata(self.query_fasta)
+            metadata = parse_fasta_metadata(self.query_fasta)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         if self.taxid is None and self.is_inclusive is not None:
             raise ValueError("is_inclusive requires taxid")
         if self.taxid is not None and self.is_inclusive is None:
             self.is_inclusive = True
+
+        context = self.blast_options.web_blast_statistical_context
+        if context is not None:
+            if self.program != "blastn":
+                raise ValueError("web_blast_statistical_context requires blastn")
+            if self.db.rstrip("/").rsplit("/", 1)[-1] != "core_nt":
+                raise ValueError("web_blast_statistical_context requires core_nt")
+            if self.blast_options.result_selection_policy != "native_top_n":
+                raise ValueError(
+                    "web_blast_statistical_context requires native_top_n result selection"
+                )
+            from api.services.blast.live_search_space import (
+                validate_web_blast_statistical_context,
+            )
+
+            validate_web_blast_statistical_context(
+                context.model_dump(),
+                query_lengths=[record.length for record in metadata.records],
+            )
 
         # A sharded DB (e.g. core_nt) runs the shard-merge finalizer, which
         # re-ranks by evalue + bitscore resolved by NAME. Reject a tabular
@@ -483,6 +518,26 @@ def _normalise_external_job_payload(
     out.setdefault("blast_version", None)
     out.setdefault("db_version", None)
     _normalise_result_files(out)
+    result = out.get("result")
+    files = result.get("files") if isinstance(result, dict) else None
+    normalized_files = files if isinstance(files, list) else []
+    if "results_ready" not in out:
+        out["results_ready"] = out["status"] == "success" and bool(normalized_files)
+    if out.get("results_ready"):
+        ready_at = out.get("results_ready_at") or out.get("completed_at") or out.get("updated_at")
+        if ready_at:
+            out["results_ready_at"] = ready_at
+        exact_oracle = out.get("exact_oracle")
+        partitions = (
+            out.get("db_partitions") or exact_oracle.get("db_partitions", 0)
+            if isinstance(exact_oracle, dict)
+            else out.get("db_partitions", 0)
+        )
+        try:
+            if int(partitions or 0) > 1 and ready_at:
+                out.setdefault("merged_at", ready_at)
+        except (TypeError, ValueError):
+            pass
     return out
 
 

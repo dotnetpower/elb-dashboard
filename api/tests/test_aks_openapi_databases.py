@@ -56,9 +56,7 @@ def _patch_metadata_blobs(
     A missing key raises ResourceNotFoundError (the genuine 404 path); an
     Exception value is raised as a transient failure.
     """
-    monkeypatch.setattr(
-        "api.services.storage.data._blob_service", lambda *a, **k: _FakeService()
-    )
+    monkeypatch.setattr("api.services.storage.data._blob_service", lambda *a, **k: _FakeService())
 
     def _fake_read(blob_client: Any, *, label: str = "metadata", **_k: Any) -> bytes:
         value = blobs.get(blob_client.name)
@@ -68,9 +66,7 @@ def _patch_metadata_blobs(
             raise value
         return value
 
-    monkeypatch.setattr(
-        "api.services.storage.blob_io.read_metadata_blob_bytes", _fake_read
-    )
+    monkeypatch.setattr("api.services.storage.blob_io.read_metadata_blob_bytes", _fake_read)
 
 
 _NUCL_16S = json.dumps(
@@ -153,6 +149,30 @@ def test_get_database_projects_nucl_metadata(monkeypatch: pytest.MonkeyPatch) ->
     assert meta["cached_at"]  # populated ISO timestamp
 
 
+def test_get_database_overlays_active_generation_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_metadata_blobs(
+        monkeypatch,
+        {"core_nt/core_nt-nucl-metadata.json": _NUCL_16S},
+    )
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args: {
+            "active_generation": {"id": "ncbi-direct-20260819-cab30d18c360"},
+            "total_sequences": 130_155_243,
+            "total_letters": 998_069_435_926,
+        },
+    )
+
+    meta = db_svc.get_database(object(), "stgacct", "core_nt")
+
+    assert meta is not None
+    assert meta["snapshot"] == "ncbi-direct-20260819-cab30d18c360"
+    assert meta["number_of_sequences"] == 130_155_243
+    assert meta["number_of_letters"] == 998_069_435_926
+
+
 def test_get_database_falls_through_to_prot(monkeypatch: pytest.MonkeyPatch) -> None:
     # nucl suffix is absent (404) -> the prot suffix is tried and wins.
     _patch_metadata_blobs(
@@ -200,9 +220,7 @@ def test_get_database_nucl_404_then_prot_transient_raises(
 
 def test_snapshot_unknown_when_no_files(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = json.dumps({"dbtype": "Nucleotide"}).encode("utf-8")
-    _patch_metadata_blobs(
-        monkeypatch, {"x/x-nucl-metadata.json": payload}
-    )
+    _patch_metadata_blobs(monkeypatch, {"x/x-nucl-metadata.json": payload})
     meta = db_svc.get_database(object(), "stgacct", "x")
     assert meta is not None
     assert meta["snapshot"] == "unknown"
@@ -217,15 +235,9 @@ def test_resolve_molecule_nucl_and_prot() -> None:
 def test_account_from_endpoint_parsing() -> None:
     from api.routes.aks.openapi_databases import _account_from_endpoint
 
-    assert (
-        _account_from_endpoint("https://stelbacct01.blob.core.windows.net/")
-        == "stelbacct01"
-    )
+    assert _account_from_endpoint("https://stelbacct01.blob.core.windows.net/") == "stelbacct01"
     # Host label is lower-cased to match Storage account naming.
-    assert (
-        _account_from_endpoint("https://STELBACCT01.table.core.windows.net")
-        == "stelbacct01"
-    )
+    assert _account_from_endpoint("https://STELBACCT01.table.core.windows.net") == "stelbacct01"
     # Empty / unparseable / non-account-shaped hosts yield "".
     assert _account_from_endpoint("") == ""
     assert _account_from_endpoint("not a url") == ""
@@ -303,9 +315,7 @@ def test_list_route_derives_account_from_blob_endpoint(
     instead of 400ing with missing_parameters.
     """
     monkeypatch.delenv("STORAGE_ACCOUNT_NAME", raising=False)
-    monkeypatch.setenv(
-        "AZURE_BLOB_ENDPOINT", "https://stelbderived01.blob.core.windows.net/"
-    )
+    monkeypatch.setenv("AZURE_BLOB_ENDPOINT", "https://stelbderived01.blob.core.windows.net/")
     captured: dict[str, Any] = {}
 
     def _fake_list(cred: Any, account: str, container: str = "blast-db") -> list[dict[str, Any]]:
@@ -327,9 +337,7 @@ def test_list_route_explicit_storage_account_overrides_endpoint(
 ) -> None:
     """An explicit STORAGE_ACCOUNT_NAME wins over the endpoint-derived fallback."""
     monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stgenv")
-    monkeypatch.setenv(
-        "AZURE_BLOB_ENDPOINT", "https://stelbderived01.blob.core.windows.net/"
-    )
+    monkeypatch.setenv("AZURE_BLOB_ENDPOINT", "https://stelbderived01.blob.core.windows.net/")
     captured: dict[str, Any] = {}
 
     def _fake_list(cred: Any, account: str, container: str = "blast-db") -> list[dict[str, Any]]:
@@ -366,12 +374,18 @@ def test_list_route_storage_failure_degrades_503(
     assert body["databases"] == []
 
 
-def test_detail_route_returns_metadata(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_detail_route_returns_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_metadata_blobs(
         monkeypatch,
         {"core_nt/core_nt-nucl-metadata.json": _NUCL_16S},
+    )
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args: {
+            "active_generation": {"id": "active-core-nt"},
+            "total_sequences": 27_648,
+            "total_letters": 40_000_000,
+        },
     )
     resp = client.get("/api/aks/openapi/databases/core_nt?storage_account=stgq")
     assert resp.status_code == 200
@@ -379,6 +393,28 @@ def test_detail_route_returns_metadata(
     assert body["name"] == "core_nt"
     assert body["molecule_type"] == "dna"
     assert body["container"] == "blast-db"
+
+
+def test_detail_route_core_nt_active_metadata_failure_returns_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_metadata_blobs(
+        monkeypatch,
+        {"core_nt/core_nt-nucl-metadata.json": _NUCL_16S},
+    )
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data.classify_storage_failure",
+        lambda *a, **k: {"degraded": True, "degraded_reason": "metadata_unavailable"},
+    )
+
+    resp = client.get("/api/aks/openapi/databases/core_nt?storage_account=stgq")
+
+    assert resp.status_code == 503
+    assert resp.json()["degraded_reason"] == "metadata_unavailable"
 
 
 def test_detail_route_invalid_name_returns_400(client: TestClient) -> None:
@@ -454,17 +490,13 @@ def token_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def test_token_auth_correct_token_lists(token_client: TestClient) -> None:
-    resp = token_client.get(
-        "/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"}
-    )
+    resp = token_client.get("/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"})
     assert resp.status_code == 200
     assert resp.json()["count"] == 2
 
 
 def test_token_auth_wrong_token_rejected(token_client: TestClient) -> None:
-    resp = token_client.get(
-        "/api/aks/openapi/databases", headers={"X-ELB-API-Token": "WRONG"}
-    )
+    resp = token_client.get("/api/aks/openapi/databases", headers={"X-ELB-API-Token": "WRONG"})
     assert resp.status_code == 401
     # A present-but-wrong token is a clear 401, NOT a fall-through to MSAL.
     assert "X-ELB-API-Token" in resp.json()["detail"]
@@ -476,6 +508,14 @@ def test_token_auth_detail_correct_token(
     _patch_metadata_blobs(
         monkeypatch,
         {"core_nt/core_nt-nucl-metadata.json": _NUCL_16S},
+    )
+    monkeypatch.setattr(
+        "api.services.blast.db_metadata.resolve_db_metadata",
+        lambda *_args: {
+            "active_generation": {"id": "active-core-nt"},
+            "total_sequences": 27_648,
+            "total_letters": 40_000_000,
+        },
     )
     resp = token_client.get(
         "/api/aks/openapi/databases/core_nt",
@@ -495,9 +535,7 @@ def test_token_auth_empty_expected_rejects(
         "api.services.openapi.runtime.get_openapi_api_token",
         lambda *a, **k: "",
     )
-    resp = token_client.get(
-        "/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"}
-    )
+    resp = token_client.get("/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"})
     assert resp.status_code == 401
 
 
@@ -514,9 +552,7 @@ def test_token_auth_gate_off_ignores_token(monkeypatch: pytest.MonkeyPatch) -> N
     from api.main import app
 
     c = TestClient(app)
-    resp = c.get(
-        "/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"}
-    )
+    resp = c.get("/api/aks/openapi/databases", headers={"X-ELB-API-Token": "secret-tok"})
     assert resp.status_code == 401
     # Not the token-path error — it fell through to the MSAL bearer requirement.
     assert resp.json()["detail"] == "missing bearer token"
@@ -585,4 +621,3 @@ def test_is_openapi_token_caller_identifies_synthetic_identity() -> None:
         claims={},
     )
     assert auth.is_openapi_token_caller(msal_caller) is False
-

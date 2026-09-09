@@ -308,11 +308,19 @@ def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
     schemas = app / "schemas.py"
     schemas.write_text(
         "from pydantic import BaseModel, Field\n\n"
+        "class BlastOptions(BaseModel):\n"
+        "    extra: Optional[str] = Field(None, "
+        'description="Additional BLAST CLI options as raw string.")\n\n'
         "class ExternalBlastOptions(BaseModel):\n"
         "    dust: bool = Field(True)\n"
     )
     main = app / "main.py"
     main.write_text(
+        "def _build_options(opts):\n"
+        "    parts = []\n"
+        "    if opts:\n"
+        "        if opts.extra: parts.append(opts.extra)\n"
+        "    return parts\n\n"
         "def _build_external_options(opts):\n"
         "    parts = [\n"
         '        "-dust yes" if opts.dust else "-dust no",\n'
@@ -337,16 +345,39 @@ def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
     assert schemas.read_text() == first_schema
     assert main.read_text() == first_main
     assert "soft_masking: bool = Field(False)" in first_schema
+    assert "class BlastOptions(BaseModel):" in first_schema
+    assert first_schema.count("db_effective_search_space: Optional[int]") == 2
+    assert 'result_selection_policy: Literal["native_top_n", "diversity_aware"]' in first_schema
+    assert 'web_blast_statistical_context: Optional["WebBlastStatisticalContext"]' in first_schema
     assert "db_effective_search_space: Optional[int] = Field(None, ge=1)" in first_schema
     assert "class WebBlastStatisticalContext(BaseModel):" in first_schema
     assert '"-soft_masking false"' in first_main
     assert "req.options.soft_masking" in first_main
-    assert 'parts.append(f"-searchsp {opts.db_effective_search_space}")' in first_main
+    assert 'parts.append("-searchsp " + str(opts.db_effective_search_space))' in first_main
     assert 'f" -searchsp {req.options.db_effective_search_space}"' in first_main
     assert "opts.web_blast_statistical_context.filtered_database_letters" in first_main
     assert "web_blast_statistical_context=(" in first_main
+    assert 'parts.append(f"-searchsp {opts.db_effective_search_space}")' in first_main
+    assert "blast_options.extra -searchsp/-dbsize" in first_main
     ast.parse(first_schema)
     ast.parse(first_main)
+
+    class FakeHTTPException(Exception):
+        pass
+
+    namespace: dict[str, Any] = {"HTTPException": FakeHTTPException, "re": re}
+    exec(first_main, namespace)  # noqa: S102 - generated temporary fixture code.
+    build_options = namespace["_build_options"]
+    assert build_options(SimpleNamespace(extra="", db_effective_search_space=123)) == [
+        "-searchsp 123"
+    ]
+    with pytest.raises(FakeHTTPException):
+        build_options(
+            SimpleNamespace(
+                extra="-dbsize 123",
+                db_effective_search_space=456,
+            )
+        )
 
 
 def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> None:
@@ -474,9 +505,11 @@ def test_patch_prefers_canonical_merged_result_and_rechecks_shard_cache(
         "        return existing\n"
         "    files = []\n"
         "    seen = set()\n"
-        '    for name in ["batch_1.out.gz"]:\n'
+        '    for name in job_info.get("listed_names", []):\n'
         '        if not name.startswith("batch_"):\n'
         "            continue\n"
+        '        files.append({"filename": name})\n'
+        "    return files\n"
     )
 
     module._patch_canonical_merged_result_discovery(path)
@@ -484,10 +517,37 @@ def test_patch_prefers_canonical_merged_result_and_rechecks_shard_cache(
     module._patch_canonical_merged_result_discovery(path)
 
     assert path.read_text() == first
+    ast.parse(first)
     assert 'item.get("filename") == "merged_results.out.gz"' in first
+    assert "requires_merged_result" in first
     assert 'if name == "merged_results.out.gz":' in first
     assert "files = []" in first
     assert "seen = set()" in first
+
+    namespace: dict[str, Any] = {}
+    exec(first, namespace)  # noqa: S102 - generated temporary fixture code.
+    list_result_files = namespace["_list_result_files"]
+    shard = {"filename": "batch_1.out.gz"}
+    merged = {"filename": "merged_results.out.gz"}
+
+    assert list_result_files({"result_files": [shard]}) == [shard]
+    assert (
+        list_result_files(
+            {
+                "exact_oracle": {"db_partitions": 10},
+                "result_files": [shard],
+                "listed_names": ["batch_1.out.gz"],
+            }
+        )
+        == []
+    )
+    assert list_result_files(
+        {
+            "exact_oracle": {"db_partitions": 10},
+            "result_files": [shard],
+            "listed_names": ["batch_1.out.gz", "merged_results.out.gz"],
+        }
+    ) == [merged]
 
 
 def test_patch_allows_only_canonical_merged_result_through_blob_path_guard(
@@ -533,6 +593,177 @@ def test_patch_allows_only_canonical_merged_result_through_blob_path_guard(
         validate("job-runtime/other.out.gz", "ignored.out.gz")
     with pytest.raises(FakeHTTPException):
         validate("../merged_results.out.gz", "ignored.out.gz")
+
+
+def test_patch_database_detail_uses_active_generation(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def get_blast_database(db_name, response):\n"
+        "    safe = db_name\n"
+        "    meta = {'snapshot': 'legacy', 'number_of_sequences': 1, 'number_of_letters': 2}\n"
+        "    cache_status = 'HIT'\n"
+        "    if not meta:\n"
+        "        raise HTTPException(404, 'missing')\n"
+        '    response.headers["X-Cache"] = cache_status\n'
+        "    return meta\n"
+    )
+
+    module._patch_active_database_metadata(path)
+    first = path.read_text()
+    module._patch_active_database_metadata(path)
+
+    assert path.read_text() == first
+    assert '"snapshot": active_database.source_version' in first
+    assert '"number_of_sequences": active_database.total_sequences' in first
+    assert '"number_of_letters": active_database.total_letters' in first
+    ast.parse(first)
+
+
+def test_patch_status_payloads_expose_result_readiness(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def _external_job_payload(job_info):\n"
+        "    public_status = 'success'\n"
+        "    payload = {}\n"
+        '    elif public_status == "success":\n'
+        '        payload["completed_at"] = job_info.get("completed_at") or '
+        'job_info.get("updated_at", "")\n'
+        "        files = _list_result_files(job_info)\n"
+        '        result_payload: dict[str, Any] = {"files": files}\n'
+        '        if "hit_count" in job_info:\n'
+        '            result_payload["hit_count"] = int(job_info.get("hit_count", 0) or 0)\n'
+        '        payload["result"] = result_payload\n'
+        "\n"
+        "def get_job_status(job_info):\n"
+        "    _status_payload = {\n"
+        '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n'
+        "    }\n"
+        '    _pt = job_info.get("passthrough")\n'
+        "    return _status_payload\n"
+    )
+
+    module._patch_result_readiness_payloads(path)
+    first = path.read_text()
+    module._patch_result_readiness_payloads(path)
+
+    assert path.read_text() == first
+    assert 'payload["results_ready"] = bool(files)' in first
+    assert '_status_payload["results_ready"] = bool(status_files)' in first
+    assert first.count('["merged_at"] = ready_at') == 2
+    status_ready = first.index('_status_payload["results_ready"]')
+    assert status_ready < first.index("    return _status_payload\n", status_ready)
+
+
+def test_patch_normalizes_unreachable_status_tail(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    eta_block = (
+        '    if _eta is not None and _eta.enabled() and job_info.get("status") '
+        'in {"queued", "dispatching", "submitting", "running"}:\n'
+        "        with _jobs_lock:\n"
+        "            _eta_jobs = [dict(v) for v in _jobs.values()]\n"
+        "        _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)\n"
+        "        if _eta_out:\n"
+        '            _status_payload["eta"] = _eta_out\n'
+    )
+    path.write_text(
+        "def get_job_status(job_info):\n"
+        "    _status_payload = {}\n"
+        + eta_block
+        + "    return _status_payload\n"
+        + '    _pt = job_info.get("passthrough")\n'
+        + "    if isinstance(_pt, dict) and _pt:\n"
+        + '        _status_payload["passthrough"] = _pt\n'
+        + eta_block
+        + "    return _status_payload\n"
+    )
+
+    module._normalize_status_payload_tail(path)
+    first = path.read_text()
+    module._normalize_status_payload_tail(path)
+
+    assert path.read_text() == first
+    assert first.count("    return _status_payload\n") == 1
+    assert first.index('_status_payload["passthrough"]') < first.index(
+        "    return _status_payload\n"
+    )
+    ast.parse(first)
+
+
+def test_patch_result_selection_policy_controls_oracle_and_provenance(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def submit(req, config, job_data, passthrough, payload, job_info):\n"
+        "    is_b = req.query_fasta is not None\n"
+        "    web_blast_statistics = None\n"
+        "    value = prepare(\n"
+        '                context=(req.model_extra or {}).get("web_blast_statistical_context"),\n'
+        "    )\n"
+        "    if req.batch_len is not None:\n"
+        '        config["blast"]["batch-len"] = str(req.batch_len)\n'
+        "    exact_oracle_info = None\n"
+        '    if db_name == "core_nt" and profile in '
+        '{"core_nt_precise", "precise", "core_nt_safe"}:\n'
+        "        db_version = {\n"
+        '            "version": active_database.source_version,\n'
+        "        }\n"
+        "    if passthrough:\n"
+        '        job_data["passthrough"] = passthrough\n'
+        "    _pt = job_info.get('passthrough')\n"
+        "    if isinstance(_pt, dict) and _pt:\n"
+        '        payload["passthrough"] = _pt\n'
+        '    for _runtime_key in ("exact_oracle", "web_blast_statistics"):\n'
+        "        pass\n"
+    )
+
+    module._patch_result_selection_policy(path)
+    first = path.read_text()
+    module._patch_result_selection_policy(path)
+
+    assert path.read_text() == first
+    assert "req.blast_options.result_selection_policy" in first
+    assert "req.blast_options.web_blast_statistical_context.model_dump()" in first
+    assert "web_blast_statistical_context requires native_top_n result selection" in first
+    assert 'config["blast"]["result-selection-policy"] = selection_policy' in first
+    assert 'and selection_policy == "native_top_n"' in first
+    assert 'job_data["result_selection_policy"] = selection_policy' in first
+    assert 'job_data["db_partitions"] = int(' in first
+    assert 'payload["result_selection_policy"] = job_info.get(' in first
+    assert "Keep diversity-aware runs on the same active DB provenance" in first
+    ast.parse(first)
+
+
+def test_patch_finalizer_failure_becomes_terminal(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def summarize(app_label, status, job_failed_terminal, summary):\n"
+        "    empty = {\n"
+        '        "finalizer_active": 0,\n'
+        "    }\n"
+        "    for _item in [None]:\n"
+        '        if app_label == "blast":\n'
+        "            pass\n"
+        '        elif app_label == "finalizer":\n'
+        '            summary["finalizer_active"] += status.get("active", 0) or 0\n'
+        '    if summary.get("submit_failed_terminal"):\n'
+        "        updates = {}\n"
+    )
+
+    module._patch_finalizer_failure_status(path)
+    first = path.read_text()
+    module._patch_finalizer_failure_status(path)
+
+    assert path.read_text() == first
+    assert '"finalizer_failed_terminal": 0' in first
+    assert 'summary["finalizer_failed_terminal"] += 1' in first
+    assert '"phase": "finalizer_failed"' in first
+    ast.parse(first)
 
 
 def test_patch_app_rejects_late_warmed_cache_skip_assignment(tmp_path: Path) -> None:

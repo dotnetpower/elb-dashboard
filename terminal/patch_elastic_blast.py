@@ -9,7 +9,7 @@ Key entry points: `_replace_once`, `_replace_once_unless_present`,
 `_replace_all_unless_present`, `patch_azure_py`, `patch_azure_cli_glue`,
 `patch_finalizer_template`, `patch_finalizer_script`,
 `patch_kubectl_transient_retries`, `patch_disk_backed_monolithic_mode`,
-`patch_requested_max_target_seqs`
+`patch_requested_max_target_seqs`, `patch_aks_job_ttl`
 Risky contracts: Do not expose terminal services directly to the internet or log secrets.
 Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py
 api/tests/test_terminal_command_guard.py api/tests/test_terminal_patch_elastic_blast.py`.
@@ -276,6 +276,23 @@ def patch_azure_py(root: Path) -> None:
             "            ),\n"
         ),
         "'ELB_REQUESTED_MAX_TARGET_SEQS': (",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "            'ELB_REQUESTED_MAX_TARGET_SEQS': (\n"
+            "                str(cfg.blast.requested_max_target_seqs)\n"
+            "                if cfg.blast.requested_max_target_seqs > 0 else ''\n"
+            "            ),\n"
+        ),
+        (
+            "            'ELB_REQUESTED_MAX_TARGET_SEQS': (\n"
+            "                str(cfg.blast.requested_max_target_seqs)\n"
+            "                if cfg.blast.requested_max_target_seqs > 0 else ''\n"
+            "            ),\n"
+            "            'ELB_RESULT_SELECTION_POLICY': cfg.blast.result_selection_policy,\n"
+        ),
+        "'ELB_RESULT_SELECTION_POLICY': cfg.blast.result_selection_policy",
     )
     _replace_once_unless_present(
         path,
@@ -583,11 +600,17 @@ def patch_requested_max_target_seqs(root: Path) -> None:
     _replace_once_unless_present(
         config_path,
         "    disk_backed_monolithic: bool = False\n\n",
-        (
-            "    disk_backed_monolithic: bool = False\n"
-            "    requested_max_target_seqs: int = 0\n\n"
-        ),
+        ("    disk_backed_monolithic: bool = False\n    requested_max_target_seqs: int = 0\n\n"),
         "requested_max_target_seqs: int = 0",
+    )
+    _replace_once_unless_present(
+        config_path,
+        "    requested_max_target_seqs: int = 0\n\n",
+        (
+            "    requested_max_target_seqs: int = 0\n"
+            "    result_selection_policy: str = 'native_top_n'\n\n"
+        ),
+        "result_selection_policy: str = 'native_top_n'",
     )
     _replace_once_unless_present(
         config_path,
@@ -602,6 +625,20 @@ def patch_requested_max_target_seqs(root: Path) -> None:
             "ParamInfo(CFG_BLAST, 'requested-max-target-seqs')}\n"
         ),
         "'requested_max_target_seqs': ParamInfo(CFG_BLAST, 'requested-max-target-seqs')",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "               'requested_max_target_seqs': "
+            "ParamInfo(CFG_BLAST, 'requested-max-target-seqs')}\n"
+        ),
+        (
+            "               'requested_max_target_seqs': "
+            "ParamInfo(CFG_BLAST, 'requested-max-target-seqs'),\n"
+            "               'result_selection_policy': "
+            "ParamInfo(CFG_BLAST, 'result-selection-policy')}\n"
+        ),
+        "'result_selection_policy': ParamInfo(CFG_BLAST, 'result-selection-policy')",
     )
     _replace_once_unless_present(
         config_path,
@@ -622,6 +659,26 @@ def patch_requested_max_target_seqs(root: Path) -> None:
             "            )\n"
         ),
         "requested-max-target-seqs must be non-negative",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "        if self.requested_max_target_seqs < 0:\n"
+            "            errors.append(\n"
+            "                'requested-max-target-seqs must be non-negative'\n"
+            "            )\n"
+        ),
+        (
+            "        if self.requested_max_target_seqs < 0:\n"
+            "            errors.append(\n"
+            "                'requested-max-target-seqs must be non-negative'\n"
+            "            )\n"
+            "        if self.result_selection_policy not in {'native_top_n', 'diversity_aware'}:\n"
+            "            errors.append(\n"
+            "                'result-selection-policy must be native_top_n or diversity_aware'\n"
+            "            )\n"
+        ),
+        "result-selection-policy must be native_top_n or diversity_aware",
     )
 
 
@@ -747,6 +804,20 @@ def patch_finalizer_template(root: Path) -> None:
             "        - name: BLAST_ELB_JOB_ID\n"
         ),
         "name: ELB_REQUESTED_MAX_TARGET_SEQS",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "        - name: ELB_REQUESTED_MAX_TARGET_SEQS\n"
+            '          value: "${ELB_REQUESTED_MAX_TARGET_SEQS}"\n'
+        ),
+        (
+            "        - name: ELB_REQUESTED_MAX_TARGET_SEQS\n"
+            '          value: "${ELB_REQUESTED_MAX_TARGET_SEQS}"\n'
+            "        - name: ELB_RESULT_SELECTION_POLICY\n"
+            '          value: "${ELB_RESULT_SELECTION_POLICY}"\n'
+        ),
+        "name: ELB_RESULT_SELECTION_POLICY",
     )
     _replace_once_unless_present(
         path,
@@ -906,6 +977,11 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             '[ -z "${ELB_WEB_BLAST_STATISTICS_FILE:-}" ]; then\n'
             '            echo "ERROR: -dbsize requires a Web BLAST statistics manifest"\n'
             "            exit 1\n"
+            "        fi\n\n"
+            '        if [ "${ELB_RESULT_SELECTION_POLICY:-native_top_n}" = "diversity_aware" ]; then\n'
+            '            export ELB_DIVERSITY_AWARE_CUTOFF="auto"\n'
+            '            ORACLE_SEARCH_BASES=""\n'
+            '            echo "Using diversity-aware proportional result selection"\n'
             "        fi\n\n"
             "        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
             '            [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break\n'
@@ -2073,6 +2149,15 @@ def patch_aks_job_ttl(root: Path) -> None:
         )
     ttl = raw if raw.isdigit() else "1800"
     ttl_line = f"  ttlSecondsAfterFinished: {ttl}\n"
+    deadline_raw = os.environ.get("ELB_FINALIZER_ACTIVE_DEADLINE_SECONDS", "1800")
+    if not deadline_raw.isdigit() or int(deadline_raw) <= 0:
+        print(
+            "warning: ELB_FINALIZER_ACTIVE_DEADLINE_SECONDS="
+            f"{deadline_raw!r} is not a positive integer; using 1800",
+            file=sys.stderr,
+        )
+        deadline_raw = "1800"
+    deadline_line = f"  activeDeadlineSeconds: {deadline_raw}\n"
     templates = [
         "blast-batch-job-aks.yaml.template",
         "blast-batch-job-local-ssd-aks.yaml.template",
@@ -2082,7 +2167,12 @@ def patch_aks_job_ttl(root: Path) -> None:
     for name in templates:
         path = root / "src/elastic_blast/templates" / name
         text = path.read_text()
-        if "ttlSecondsAfterFinished" in text:
+        insertion = ""
+        if "ttlSecondsAfterFinished" not in text:
+            insertion += ttl_line
+        if name == "elb-finalizer-aks.yaml.template" and "activeDeadlineSeconds" not in text:
+            insertion += deadline_line
+        if not insertion:
             continue
         # Anchor on the REAL Job.spec field: line-start + 2-space indent +
         # `backoffLimit:` + a numeric value. A line-anchored numeric match can
@@ -2096,7 +2186,7 @@ def patch_aks_job_ttl(root: Path) -> None:
                 "ttlSecondsAfterFinished insertion"
             )
         insert_at = matches[-1].start()  # the last (sole) real field
-        path.write_text(text[:insert_at] + ttl_line + text[insert_at:])
+        path.write_text(text[:insert_at] + insertion + text[insert_at:])
 
 
 def patch_unique_init_ssd_job_names(root: Path) -> None:

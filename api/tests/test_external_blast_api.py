@@ -253,6 +253,72 @@ def test_external_projection_requires_terminal_success_for_exact_provenance() ->
     assert "provenance" not in projected
 
 
+def test_external_payload_normalization_adds_partitioned_result_readiness() -> None:
+    from api.routes.elastic_blast import _normalise_external_job_payload
+
+    normalized = _normalise_external_job_payload(
+        {
+            "job_id": "abcdef123456",
+            "status": "success",
+            "completed_at": "2026-09-08T02:04:35Z",
+            "exact_oracle": {"db_partitions": 10},
+            "result": {
+                "files": [
+                    {
+                        "filename": "merged_results.out.gz",
+                        "file_id": "result-001",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert normalized["results_ready"] is True
+    assert normalized["results_ready_at"] == "2026-09-08T02:04:35Z"
+    assert normalized["merged_at"] == "2026-09-08T02:04:35Z"
+
+
+def test_v1_request_accepts_explicit_diversity_selection_policy() -> None:
+    from api.routes.elastic_blast import ExternalBlastV1Request
+
+    request = ExternalBlastV1Request(
+        query_fasta=">q1\nACGT",
+        db="core_nt",
+        blast_options={
+            "outfmt": "7 std",
+            "result_selection_policy": "diversity_aware",
+        },
+    )
+
+    assert request.blast_options.result_selection_policy == "diversity_aware"
+    assert "staxids" in str(request.blast_options.outfmt)
+
+
+def test_v1_request_rejects_web_context_with_diversity_selection() -> None:
+    from api.routes.elastic_blast import ExternalBlastV1Request
+
+    with pytest.raises(
+        ValidationError,
+        match="web_blast_statistical_context requires native_top_n result selection",
+    ):
+        ExternalBlastV1Request(
+            query_fasta=">q1\nACGT",
+            db="core_nt",
+            blast_options={
+                "outfmt": "7 std",
+                "result_selection_policy": "diversity_aware",
+                "web_blast_statistical_context": {
+                    "filtered_database_letters": 100,
+                    "filtered_database_sequences": 10,
+                    "length_adjustment": 1,
+                    "effective_search_space": 270,
+                    "scoring_search_space": 300,
+                    "result_database_letters": 100,
+                },
+            },
+        )
+
+
 def test_external_blast_submit_forwards_contract(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app

@@ -56,6 +56,8 @@ Source: `PROGRAMS` in [blastSubmitModel.ts](../../web/src/pages/blastSubmitModel
 | `db_total_letters` | `db_total_letters` | `-dbsize` (sharded only) | (auto, from DB metadata) | Pre-populated from `/api/blast/databases`. Used by the backend for `-dbsize` when sharding is enabled but a verified `-searchsp` is not available. |
 | `db_total_bytes` | `db_total_bytes` | (not a BLAST flag) | (auto) | Used for shard layout / placement only. |
 | `db_effective_search_space` | `db_effective_search_space` | `-searchsp <value>` | (auto, if calibrated) | Only emitted when a verified Web-equivalent search space is recorded for the chosen database. See [Web BLAST search-space discovery](../research/blast-searchsp-discovery.md) for how this value is calibrated. |
+| Result selection | `blast_options.result_selection_policy` | Finalizer policy | `native_top_n` | `native_top_n` reproduces BLAST's top-N subject comparator. `diversity_aware` proportionally reserves lower-score subjects when one tied class overflows the result window and is not an exact hit-list mode. |
+| Filtered statistical context | `blast_options.web_blast_statistical_context` | `-dbsize` + `-searchsp` | (unset) | Advanced single-query input containing measured post-filter database counts and both reported/scoring spaces. Omit unless all six values come from a matching reference result. It cannot be combined with `diversity_aware`. |
 | `db_sharded` | `db_sharded` | (controls shard layout selection) | (auto, from DB metadata) | True when the prepared database carries pre-built shard manifests. |
 
 !!! warning "Database paths are not free-form"
@@ -128,6 +130,11 @@ The `disable_sharding` boolean is a legacy opt-out kept for older callers. New c
     A strict query-oracle run may widen the internal per-shard candidate pool to avoid pruning an oracle subject before the merge. That internal expansion does not change the requested final result limit: the merger still emits at most the original `max_target_seqs` subjects and records both limits in `merge-report.json`.
 
     Approximate mode has no exact OID contract. When one score class fills and overflows its complete result window, it preserves a proportional share `ceil(N * L / (T + L))` of distinct lower-scoring subjects from the shard candidate pool. Operators can set `ELB_DIVERSITY_AWARE_CUTOFF=0` for strict score-only selection, `auto` for proportional selection, or a positive fixed reservation. This heuristic does not claim full-DB equality. Exact NCBI parity additionally requires NCBI and ELB to use the same database snapshot and BLAST options.
+
+    Direct `/v1/jobs` and Service Bus tabular requests expose this choice as
+    `blast_options.result_selection_policy`. The default `native_top_n` keeps precise DB-order
+    selection. Set `diversity_aware` only when lower-score subject representation is more important
+    than native top-N membership.
 
 !!! warning "outfmt and sharding"
 

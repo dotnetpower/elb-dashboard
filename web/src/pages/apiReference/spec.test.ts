@@ -42,12 +42,14 @@ describe("API Reference spec parser", () => {
       "mode_b_core_nt",
       "mode_b_core_nt_outfmt7",
       "mode_b_core_nt_outfmt7_taxids",
+      "mode_b_core_nt_diversity",
       "mode_a",
     ]);
     for (const key of [
       "mode_b_core_nt",
       "mode_b_core_nt_outfmt7",
       "mode_b_core_nt_outfmt7_taxids",
+      "mode_b_core_nt_diversity",
     ]) {
       const example = examples[key] as { description?: string };
       expect(example.description).toContain(
@@ -116,6 +118,15 @@ describe("API Reference spec parser", () => {
       "7 std staxids sstrand qseq sseq",
     );
     expect(coreNtOutfmt7Taxids.blast_options.outfmt.startsWith("7 std")).toBe(true);
+
+    const diversity = examples.mode_b_core_nt_diversity.value as {
+      blast_options: {
+        max_target_seqs: number;
+        result_selection_policy: string;
+      };
+    };
+    expect(diversity.blast_options.max_target_seqs).toBe(5000);
+    expect(diversity.blast_options.result_selection_policy).toBe("diversity_aware");
   });
 
   it("selects the small 16S rRNA example as the default request body for POST /v1/jobs", () => {

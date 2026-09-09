@@ -5,7 +5,8 @@ Edit boundaries: Keep reusable domain logic here; routes and tasks should call t
 instead of duplicating SDK code.
 Key entry points: `_number`, `_hit_is_better`, `_StreamingAggregate`,
 `build_result_manifest_payload`, `build_result_aggregate_payload`,
-`build_default_alignments_payload`, `_load_merge_report_tie_cutoff`
+`build_default_alignments_payload`, `partitioned_result_readiness`,
+`_load_merge_report_tie_cutoff`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
@@ -29,6 +30,7 @@ from api.services.blast.result_analytics import (
     annotate_result_hit,
     enrich_taxonomy_with_lineage,
     list_parseable_result_blobs,
+    list_result_blobs_for_job,
     read_result_blob_texts_parallel,
     result_hit_matches_filters,
     result_hit_rank_aggregates,
@@ -47,6 +49,46 @@ LOGGER = logging.getLogger(__name__)
 # job root in the results container (split parents and DB-partitioned jobs).
 _MERGE_REPORT_BLOB = "merge-report.json"
 _MERGE_REPORT_MAX_BYTES = 256 * 1024
+_CANONICAL_MERGED_RESULT_BLOB = "merged_results.out.gz"
+
+
+def partitioned_result_readiness(storage_account: str, job_id: str) -> dict[str, Any]:
+    """Return durable result readiness for a completed BLAST job.
+
+    A partitioned run is ready only after both the canonical merged result and
+    the final SUCCESS marker are visible. Non-partitioned runs retain the
+    existing result-file readiness contract.
+    """
+    blobs = list_result_blobs_for_job(storage_account, job_id)
+    names = [str(blob.get("name") or "") for blob in blobs]
+    partitioned = any("/shard_" in name for name in names)
+    merged = next(
+        (
+            blob
+            for blob in blobs
+            if str(blob.get("name") or "").rsplit("/", 1)[-1] == _CANONICAL_MERGED_RESULT_BLOB
+        ),
+        None,
+    )
+    success_marker = any(name.endswith("/metadata/SUCCESS.txt") for name in names)
+    has_result = merged is not None or any(
+        name.rsplit("/", 1)[-1].startswith("batch_") for name in names
+    )
+    results_ready = bool(merged is not None and success_marker) if partitioned else has_result
+    merged_at: str | None = None
+    if merged is not None:
+        modified = merged.get("last_modified")
+        isoformat = getattr(modified, "isoformat", None)
+        if callable(isoformat):
+            merged_at = str(isoformat())
+        elif modified not in (None, ""):
+            merged_at = str(modified)
+    return {
+        "requires_canonical_merge": partitioned,
+        "results_ready": results_ready,
+        "merged_at": merged_at,
+        "success_marker": success_marker,
+    }
 
 
 def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str, Any] | None:
@@ -69,9 +111,7 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
             max_bytes=_MERGE_REPORT_MAX_BYTES,
         )
     except Exception as exc:
-        LOGGER.debug(
-            "merge report unavailable for %s: %s", job_id, type(exc).__name__
-        )
+        LOGGER.debug("merge report unavailable for %s: %s", job_id, type(exc).__name__)
         return None
     try:
         report = json.loads(text)
@@ -118,7 +158,6 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
     if isinstance(max_target, int) and not isinstance(max_target, bool):
         summary["max_target_seqs"] = max_target
     return summary
-
 
 
 def _number(value: Any) -> float | None:
@@ -344,9 +383,7 @@ def _read_hits(
         "total_files": len(result_blobs),
         "read_failures": read_failures,
         "truncated": (
-            len(result_blobs) > RESULTS_MAX_FILES
-            or hit_limit_reached
-            or content_truncated
+            len(result_blobs) > RESULTS_MAX_FILES or hit_limit_reached or content_truncated
         ),
         "hit_limit_reached": hit_limit_reached,
     }
@@ -407,9 +444,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
         "total_files": len(result_blobs),
         "read_failures": read_failures,
         "truncated": (
-            len(result_blobs) > RESULTS_MAX_FILES
-            or content_truncated
-            or read_budget_truncated
+            len(result_blobs) > RESULTS_MAX_FILES or content_truncated or read_budget_truncated
         ),
     }
 
@@ -500,9 +535,7 @@ def build_default_taxonomy_payload(job_id: str, storage_account: str) -> dict[st
     # organisms get the NCBI lookup, which is cheap (cached) and bounded.
     if organisms:
         try:
-            organisms, lineage_meta = enrich_taxonomy_with_lineage(
-                organisms, taxid_limit=20
-            )
+            organisms, lineage_meta = enrich_taxonomy_with_lineage(organisms, taxid_limit=20)
         except Exception as exc:
             # Lineage enrichment is best-effort; never fail the artifact
             # bake because of an upstream eutils hiccup.

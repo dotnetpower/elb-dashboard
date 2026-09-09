@@ -140,6 +140,15 @@ Field rules (consistent with `/v1/jobs`):
   the Service Bus drain strips it and downgrades `precise` to
   `approximate`/`off` instead of trusting it blindly. Any other unknown key is
   ignored.
+- Free-form `/v1/jobs` messages may set
+  `blast_options.result_selection_policy` to `native_top_n` (default) or
+  `diversity_aware`. The former keeps exact DB-order top-N subject selection;
+  the latter enables proportional lower-score subject reservation and does not
+  claim full-database hit-list equality.
+- Leave `blast_options.db_effective_search_space`, raw `-searchsp`, and raw
+  `-dbsize` unset for normal `core_nt` messages. The consumer and execution
+  service resolve the active generation. A typed explicit value conflicts with
+  raw `-searchsp`/`-dbsize` rather than silently choosing one.
 
 ### Optional transition event — `elastic-blast-completions` topic
 

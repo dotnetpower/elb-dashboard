@@ -167,9 +167,7 @@ def get_database(
     for molecule_token, suffix in _METADATA_CANDIDATES:
         blob_name = f"{db_name}/{db_name}{suffix}"
         try:
-            data = read_metadata_blob_bytes(
-                cc.get_blob_client(blob_name), label="db-ncbi-metadata"
-            )
+            data = read_metadata_blob_bytes(cc.get_blob_client(blob_name), label="db-ncbi-metadata")
         except ResourceNotFoundError:
             # This suffix does not exist — try the other molecule.
             continue
@@ -186,7 +184,8 @@ def get_database(
             last_exc = exc
             continue
         if isinstance(payload, dict):
-            return _project_metadata(db_name, payload, molecule_token, container)
+            projected = _project_metadata(db_name, payload, molecule_token, container)
+            return _overlay_active_generation(projected, account_name, db_name)
         last_exc = ValueError(f"non-object metadata JSON for {blob_name}")
 
     if last_exc is not None:
@@ -195,6 +194,39 @@ def get_database(
         # rather than synthesise a false "not found".
         raise last_exc
     return None
+
+
+def _overlay_active_generation(
+    projected: dict[str, Any], account_name: str, db_name: str
+) -> dict[str, Any]:
+    """Overlay execution-owned counts when an active generation is available."""
+    from api.services.blast.db_metadata import resolve_db_metadata
+
+    active = resolve_db_metadata(account_name, db_name)
+    if not isinstance(active, dict):
+        if db_name == "core_nt":
+            raise RuntimeError("active core_nt generation metadata is unavailable")
+        return projected
+    generation = active.get("active_generation")
+    generation_id = str(generation.get("id") or "").strip() if isinstance(generation, dict) else ""
+    source_version = generation_id or str(active.get("source_version") or "").strip()
+    field_map = {
+        "number_of_sequences": ("total_sequences", "number_of_sequences", "number-of-sequences"),
+        "number_of_letters": ("total_letters", "number_of_letters", "number-of-letters"),
+        "number_of_volumes": ("number_of_volumes", "number-of-volumes"),
+        "bytes_total": ("bytes_total", "bytes-total"),
+        "bytes_to_cache": ("bytes_to_cache", "bytes-to-cache"),
+    }
+    out = dict(projected)
+    if source_version:
+        out["snapshot"] = source_version
+    for target, sources in field_map.items():
+        for source in sources:
+            value = _raw_int(active.get(source))
+            if value is not None:
+                out[target] = value
+                break
+    return out
 
 
 def _project_metadata(
@@ -224,4 +256,3 @@ def _project_metadata(
         "metadata_schema_version": str(raw.get("version") or "").strip(),
         "cached_at": _utc_now_iso(),
     }
-

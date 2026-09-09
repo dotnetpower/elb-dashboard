@@ -4,9 +4,11 @@ Responsibility: Job artifact storage helpers for large BLAST UI data
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `ArtifactState`, `_now_iso`, `_platform_storage_account_name`,
-`write_json_artifact`, `read_json_artifact`, `upsert_artifact_state`
+`write_json_artifact`, `read_json_artifact`, `upsert_artifact_state`,
+`_invalidate_ready_artifact_if_unchanged`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
+log boundaries. Stale ready artifacts must use ETag compare-and-set invalidation so an older reader
+cannot overwrite a concurrent rebuild.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -391,6 +393,55 @@ def upsert_artifact_state(
         runtime_identity=runtime_identity,
         reconcile_attempts=max(0, int(reconcile_attempts or 0)),
     )
+
+
+def _invalidate_ready_artifact_if_unchanged(
+    job_id: str,
+    artifact_type: str,
+    *,
+    expected_updated_at: str,
+    expected_content_hash: str,
+    error_code: str,
+) -> bool:
+    """Conditionally invalidate the exact ready artifact generation that was read."""
+    from azure.core import MatchConditions
+    from azure.core.exceptions import ResourceModifiedError
+
+    with _artifact_table_client() as table:
+        try:
+            entity = table.get_entity(partition_key=job_id, row_key=artifact_type)
+        except ResourceNotFoundError:
+            return False
+        if (
+            str(entity.get("status") or "") != "ready"
+            or str(entity.get("updated_at") or "") != expected_updated_at
+            or str(entity.get("content_hash") or "") != expected_content_hash
+        ):
+            return False
+        etag = str(getattr(entity, "metadata", {}).get("etag") or "")
+        if not etag:
+            LOGGER.warning(
+                "artifact conditional invalidation skipped without etag job_id=%s type=%s",
+                job_id,
+                artifact_type,
+            )
+            return False
+        try:
+            table.update_entity(
+                {
+                    "PartitionKey": job_id,
+                    "RowKey": artifact_type,
+                    "status": "failed",
+                    "updated_at": _now_iso(),
+                    "error_code": error_code,
+                },
+                mode=UpdateMode.MERGE,
+                etag=etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+        except (ResourceModifiedError, ResourceNotFoundError):
+            return False
+    return True
 
 
 def get_artifact_state(job_id: str, artifact_type: str) -> ArtifactState | None:

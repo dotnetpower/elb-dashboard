@@ -6,6 +6,7 @@ Responsibility: Patch the sibling docker-openapi build context for dashboard run
 Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
 Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
 `_disable_warmed_cache_skip`, `_patch_canonical_merged_result_validation`,
+`_patch_result_selection_policy`, `_patch_finalizer_failure_status`,
 `_patch_web_blast_candidate_selection_evidence`, `_harden_openapi_runtime_ids`,
 `_patch_submit_runtime_id_priority`, `_harden_elb_scripts_configmap_reconciliation`,
 `patch_app`, `main`
@@ -133,6 +134,66 @@ def _patch_external_soft_masking(root: Path) -> None:
     """Keep external XML filtering/statistics equal to dashboard submit."""
     schemas = root / "app" / "schemas.py"
     main = root / "app" / "main.py"
+    _insert_once(
+        schemas,
+        '    extra: Optional[str] = Field(None, description="Additional BLAST CLI options as raw string.")\n',
+        (
+            "    db_effective_search_space: Optional[int] = Field(\n"
+            "        None,\n"
+            "        ge=1,\n"
+            "        description=(\n"
+            '            "Optional explicit scoring search space. Omit for core_nt so the "\n'
+            '            "server derives it from the active database generation."\n'
+            "        ),\n"
+            "    )\n"
+        ),
+        "Optional explicit scoring search space. Omit for core_nt",
+    )
+    _insert_once(
+        schemas,
+        '    extra: Optional[str] = Field(None, description="Additional BLAST CLI options as raw string.")\n',
+        (
+            '    result_selection_policy: Literal["native_top_n", "diversity_aware"] = Field(\n'
+            '        "native_top_n",\n'
+            "        description=(\n"
+            '            "Final subject-selection policy. native_top_n reproduces the "\n'
+            '            "BLAST top-N comparator; diversity_aware reserves lower-score "\n'
+            '            "subjects when a tied score class fills the result window."\n'
+            "        ),\n"
+            "    )\n"
+        ),
+        "Final subject-selection policy. native_top_n reproduces the",
+    )
+    _insert_once(
+        schemas,
+        '    extra: Optional[str] = Field(None, description="Additional BLAST CLI options as raw string.")\n',
+        (
+            '    web_blast_statistical_context: Optional["WebBlastStatisticalContext"] = Field(\n'
+            "        None,\n"
+            "        description=(\n"
+            '            "Optional measured single-query taxonomy-filtered statistics; "\n'
+            '            "omit when these reference values are unavailable."\n'
+            "        ),\n"
+            "    )\n"
+        ),
+        "Optional measured single-query taxonomy-filtered statistics",
+    )
+    _insert_once(
+        main,
+        "        if opts.extra: parts.append(opts.extra)\n",
+        (
+            "        if opts.db_effective_search_space is not None:\n"
+            '            raw_extra = str(opts.extra or "")\n'
+            '            if re.search(r"(?<!\\S)-(?:searchsp|dbsize)(?:\\s|=|$)", raw_extra):\n'
+            "                raise HTTPException(\n"
+            "                    400,\n"
+            '                    "blast_options.db_effective_search_space conflicts with "\n'
+            '                    "blast_options.extra -searchsp/-dbsize",\n'
+            "                )\n"
+            '            parts.append("-searchsp " + str(opts.db_effective_search_space))\n'
+        ),
+        'parts.append("-searchsp " + str(opts.db_effective_search_space))',
+    )
     _replace_once(
         schemas,
         "class ExternalBlastOptions(BaseModel):\n",
@@ -242,15 +303,23 @@ def _patch_external_soft_masking(root: Path) -> None:
     main_text = main.read_text()
     if schema_text.count("soft_masking: bool = Field(False)") != 1:
         raise RuntimeError("external soft-masking schema patch is missing or duplicated")
-    if schema_text.count("db_effective_search_space: Optional[int]") != 1:
-        raise RuntimeError("external search-space schema patch is missing or duplicated")
+    if schema_text.count("db_effective_search_space: Optional[int]") != 2:
+        raise RuntimeError("search-space schema patches are missing or duplicated")
+    if schema_text.count("result_selection_policy:") != 1:
+        raise RuntimeError("result-selection policy schema patch is missing or duplicated")
+    if schema_text.count("Optional measured single-query taxonomy-filtered statistics") != 1:
+        raise RuntimeError("direct Web statistics schema patch is missing or duplicated")
     if schema_text.count("class WebBlastStatisticalContext(BaseModel):") != 1:
         raise RuntimeError("external Web BLAST statistics schema patch is missing or duplicated")
     if main_text.count("req.options.soft_masking") != 1:
         raise RuntimeError("external soft-masking bridge patch is missing or duplicated")
     if main_text.count("opts.soft_masking") != 1:
         raise RuntimeError("external soft-masking option patch is missing or duplicated")
-    if main_text.count("opts.db_effective_search_space") != 2:
+    if main_text.count("if opts.db_effective_search_space is not None:") != 2:
+        raise RuntimeError("search-space option guards are missing or duplicated")
+    if main_text.count('parts.append("-searchsp " + str(opts.db_effective_search_space))') != 1:
+        raise RuntimeError("direct search-space option patch is missing or duplicated")
+    if main_text.count('parts.append(f"-searchsp {opts.db_effective_search_space}")') != 1:
         raise RuntimeError("external search-space option patch is missing or duplicated")
     if main_text.count("req.options.db_effective_search_space") != 2:
         raise RuntimeError("external search-space bridge patch is missing or duplicated")
@@ -389,7 +458,14 @@ def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
             marker="select_web_blast_partitions(",
         )
     text = path.read_text()
-    if fresh in text or legacy in text or fallback_only in text or text.count(desired) != 1:
+    if (
+        fresh in text
+        or legacy in text
+        or fallback_only in text
+        or text.count("select_web_blast_partitions(") != 1
+        or text.count("preserve_or_set_search_space(") != 1
+        or text.count("Active database statistics are required for precise core_nt sharding") != 1
+    ):
         raise RuntimeError("precise core_nt active search-space patch is invalid")
 
 
@@ -467,6 +543,36 @@ def _patch_web_blast_candidate_selection_evidence(path: Path) -> None:
 
 def _patch_canonical_merged_result_discovery(path: Path) -> None:
     """Expose a partitioned run's merged XML instead of shard intermediates."""
+    text = path.read_text()
+    signature = next(
+        (
+            candidate
+            for candidate in (
+                "def _list_result_files(job_info: dict[str, Any]) -> list[dict[str, Any]]:\n",
+                "def _list_result_files(job_info):\n",
+            )
+            if candidate in text
+        ),
+        "def _list_result_files(job_info):\n",
+    )
+    _insert_once(
+        path,
+        signature,
+        (
+            '    exact_oracle = job_info.get("exact_oracle")\n'
+            "    result_partitions = (\n"
+            '        job_info.get("db_partitions")\n'
+            '        or exact_oracle.get("db_partitions", 0)\n'
+            "        if isinstance(exact_oracle, dict)\n"
+            '        else job_info.get("db_partitions", 0)\n'
+            "    )\n"
+            "    try:\n"
+            "        requires_merged_result = int(result_partitions or 0) > 1\n"
+            "    except (TypeError, ValueError):\n"
+            "        requires_merged_result = False\n"
+        ),
+        "requires_merged_result = int(result_partitions or 0) > 1",
+    )
     legacy_existing = (
         '    existing = job_info.get("result_files")\n'
         "    if isinstance(existing, list) and existing:\n"
@@ -477,8 +583,12 @@ def _patch_canonical_merged_result_discovery(path: Path) -> None:
         "    if isinstance(existing, list) and existing:\n"
         '        if any(item.get("filename") == "merged_results.out.gz" for item in existing):\n'
         "            return existing\n"
+        "        if not requires_merged_result:\n"
+        "            return existing\n"
         "        # A pre-finalizer poll may cache shard `batch_*` intermediates.\n"
-        "        # Re-list until the canonical merged output appears.\n"
+        "        # A partitioned run is not downloadable until the canonical\n"
+        "        # merged output appears, so re-list instead of completing on\n"
+        "        # cached shard files.\n"
     )
     _replace_fresh_or_legacy(
         path,
@@ -492,7 +602,7 @@ def _patch_canonical_merged_result_discovery(path: Path) -> None:
         '        if name == "merged_results.out.gz":\n'
         "            files = []\n"
         "            seen = set()\n"
-        '        elif not name.startswith("batch_") or any(\n'
+        '        elif requires_merged_result or not name.startswith("batch_") or any(\n'
         '            item.get("filename") == "merged_results.out.gz" for item in files\n'
         "        ):\n"
         "            continue\n"
@@ -523,6 +633,291 @@ def _patch_canonical_merged_result_validation(path: Path) -> None:
         legacy=canonical_or_shard,
         desired=canonical_or_shard,
         marker='basename == "merged_results.out.gz"',
+    )
+
+
+def _patch_active_database_metadata(path: Path) -> None:
+    """Project the same active-generation counts used by precise execution."""
+    anchor = '    response.headers["X-Cache"] = cache_status\n    return meta\n'
+    desired = (
+        '    if safe == "core_nt":\n'
+        "        try:\n"
+        "            active_database = _exact_oracle.read_active_database(\n"
+        "                blob_base=_blob_base(),\n"
+        '                db_name="core_nt",\n'
+        "                token=_storage_oauth_token(),\n"
+        "            )\n"
+        "        except Exception as exc:\n"
+        "            raise HTTPException(\n"
+        "                503,\n"
+        '                "Active core_nt generation metadata is unavailable",\n'
+        "            ) from exc\n"
+        "        meta = {\n"
+        "            **meta,\n"
+        '            "snapshot": active_database.source_version,\n'
+        '            "number_of_sequences": active_database.total_sequences,\n'
+        '            "number_of_letters": active_database.total_letters,\n'
+        "        }\n" + anchor
+    )
+    _replace_once_unless_marker(
+        path,
+        anchor,
+        desired,
+        '"snapshot": active_database.source_version',
+    )
+
+
+def _patch_result_readiness_payloads(path: Path) -> None:
+    """Expose canonical result readiness on both public status surfaces."""
+    external_legacy = (
+        '    elif public_status == "success":\n'
+        '        payload["completed_at"] = job_info.get("completed_at") or job_info.get("updated_at", "")\n'
+        "        files = _list_result_files(job_info)\n"
+        '        result_payload: dict[str, Any] = {"files": files}\n'
+        '        if "hit_count" in job_info:\n'
+        '            result_payload["hit_count"] = int(job_info.get("hit_count", 0) or 0)\n'
+        '        payload["result"] = result_payload\n'
+    )
+    external_desired = (
+        '    elif public_status == "success":\n'
+        '        ready_at = job_info.get("completed_at") or job_info.get("updated_at", "")\n'
+        '        payload["completed_at"] = ready_at\n'
+        "        files = _list_result_files(job_info)\n"
+        '        result_payload: dict[str, Any] = {"files": files}\n'
+        '        if "hit_count" in job_info:\n'
+        '            result_payload["hit_count"] = int(job_info.get("hit_count", 0) or 0)\n'
+        '        payload["result"] = result_payload\n'
+        '        payload["results_ready"] = bool(files)\n'
+        "        if files:\n"
+        '            payload["results_ready_at"] = ready_at\n'
+        '            exact_oracle = job_info.get("exact_oracle")\n'
+        "            try:\n"
+        "                result_partitions = int(\n"
+        '                    job_info.get("db_partitions")\n'
+        '                    or exact_oracle.get("db_partitions", 0)\n'
+        "                    if isinstance(exact_oracle, dict)\n"
+        '                    else job_info.get("db_partitions", 0)\n'
+        "                )\n"
+        "            except (TypeError, ValueError):\n"
+        "                result_partitions = 0\n"
+        "            if result_partitions > 1:\n"
+        '                payload["merged_at"] = ready_at\n'
+    )
+    _replace_once_unless_marker(
+        path,
+        external_legacy,
+        external_desired,
+        'payload["results_ready_at"] = ready_at',
+    )
+
+    status_anchor = '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n    }\n'
+    status_insertion = (
+        '    if job_info.get("status") == "completed":\n'
+        "        status_files = _list_result_files(job_info)\n"
+        '        _status_payload["results_ready"] = bool(status_files)\n'
+        "        if status_files:\n"
+        '            ready_at = job_info.get("completed_at") or job_info.get("updated_at", "")\n'
+        '            _status_payload["results_ready_at"] = ready_at\n'
+        '            exact_oracle = job_info.get("exact_oracle")\n'
+        "            try:\n"
+        "                result_partitions = int(\n"
+        '                    job_info.get("db_partitions")\n'
+        '                    or exact_oracle.get("db_partitions", 0)\n'
+        "                    if isinstance(exact_oracle, dict)\n"
+        '                    else job_info.get("db_partitions", 0)\n'
+        "                )\n"
+        "            except (TypeError, ValueError):\n"
+        "                result_partitions = 0\n"
+        "            if result_partitions > 1:\n"
+        '                _status_payload["merged_at"] = ready_at\n'
+    )
+    _insert_once(
+        path,
+        status_anchor,
+        status_insertion,
+        '_status_payload["results_ready_at"] = ready_at',
+    )
+
+
+def _normalize_status_payload_tail(path: Path) -> None:
+    """Collapse the inherited unreachable duplicate status payload tail."""
+    eta_block = (
+        '    if _eta is not None and _eta.enabled() and job_info.get("status") in {"queued", "dispatching", "submitting", "running"}:\n'
+        "        with _jobs_lock:\n"
+        "            _eta_jobs = [dict(v) for v in _jobs.values()]\n"
+        "        _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)\n"
+        "        if _eta_out:\n"
+        '            _status_payload["eta"] = _eta_out\n'
+    )
+    passthrough_block = (
+        '    _pt = job_info.get("passthrough")\n'
+        "    if isinstance(_pt, dict) and _pt:\n"
+        '        _status_payload["passthrough"] = _pt\n'
+    )
+    inherited = (
+        eta_block
+        + "    return _status_payload\n"
+        + passthrough_block
+        + eta_block
+        + "    return _status_payload\n"
+    )
+    desired = (
+        "    # Keep status metadata reachable before the single return.\n"
+        + passthrough_block
+        + eta_block
+        + "    return _status_payload\n"
+    )
+    _replace_once_unless_marker(
+        path,
+        inherited,
+        desired,
+        "Keep status metadata reachable before the single return",
+    )
+
+
+def _patch_result_selection_policy(path: Path) -> None:
+    """Carry an explicit native-vs-diversity selection policy to finalization."""
+    _insert_once(
+        path,
+        "    is_b = req.query_fasta is not None\n",
+        (
+            "    selection_policy = (\n"
+            "        req.blast_options.result_selection_policy\n"
+            "        if req.blast_options is not None\n"
+            '        else "native_top_n"\n'
+            "    )\n"
+            "    if (\n"
+            '        selection_policy == "diversity_aware"\n'
+            "        and req.blast_options is not None\n"
+            "        and req.blast_options.web_blast_statistical_context is not None\n"
+            "    ):\n"
+            "        raise HTTPException(\n"
+            "            400,\n"
+            '            "web_blast_statistical_context requires native_top_n result selection",\n'
+            "        )\n"
+        ),
+        "web_blast_statistical_context requires native_top_n result selection",
+    )
+    _insert_once(
+        path,
+        '    if req.batch_len is not None:\n        config["blast"]["batch-len"] = str(req.batch_len)\n',
+        '    config["blast"]["result-selection-policy"] = selection_policy\n',
+        'config["blast"]["result-selection-policy"]',
+    )
+    exact_legacy = (
+        "    exact_oracle_info = None\n"
+        '    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:\n'
+        "        db_version = {\n"
+    )
+    exact_desired = (
+        "    exact_oracle_info = None\n"
+        "    if (\n"
+        '        db_name == "core_nt"\n'
+        '        and profile in {"core_nt_precise", "precise", "core_nt_safe"}\n'
+        '        and selection_policy == "native_top_n"\n'
+        "    ):\n"
+        "        db_version = {\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=exact_legacy,
+        legacy=exact_desired,
+        desired=exact_desired,
+        marker='and selection_policy == "native_top_n"',
+    )
+    _insert_once(
+        path,
+        "    exact_oracle_info = None\n",
+        (
+            "    # Keep diversity-aware runs on the same active DB provenance.\n"
+            '    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:\n'
+            "        db_version = {\n"
+            '            "version": active_database.source_version,\n'
+            '            "source": "active_generation",\n'
+            '            "detail": {\n'
+            '                "number_of_letters": str(active_database.total_letters),\n'
+            '                "number_of_sequences": str(active_database.total_sequences),\n'
+            "            },\n"
+            "        }\n"
+        ),
+        "Keep diversity-aware runs on the same active DB provenance",
+    )
+    _insert_once(
+        path,
+        '    if passthrough:\n        job_data["passthrough"] = passthrough\n',
+        (
+            '    job_data["result_selection_policy"] = selection_policy\n'
+            '    job_data["db_partitions"] = int(\n'
+            '        config["blast"].get("db-partitions", 0) or 0\n'
+            "    )\n"
+        ),
+        'job_data["result_selection_policy"] = selection_policy',
+    )
+    _insert_once(
+        path,
+        '    if isinstance(_pt, dict) and _pt:\n        payload["passthrough"] = _pt\n',
+        (
+            '    payload["result_selection_policy"] = job_info.get(\n'
+            '        "result_selection_policy", "native_top_n"\n'
+            "    )\n"
+            '    payload["db_partitions"] = int(job_info.get("db_partitions", 0) or 0)\n'
+        ),
+        'payload["result_selection_policy"] = job_info.get(',
+    )
+    _replace_once_unless_marker(
+        path,
+        '                context=(req.model_extra or {}).get("web_blast_statistical_context"),\n',
+        (
+            "                context=(\n"
+            "                    req.blast_options.web_blast_statistical_context.model_dump()\n"
+            "                    if (\n"
+            "                        req.blast_options is not None\n"
+            "                        and req.blast_options.web_blast_statistical_context is not None\n"
+            "                    )\n"
+            '                    else (req.model_extra or {}).get("web_blast_statistical_context")\n'
+            "                ),\n"
+        ),
+        "req.blast_options.web_blast_statistical_context.model_dump()",
+    )
+
+
+def _patch_finalizer_failure_status(path: Path) -> None:
+    """Make a terminal merge-finalizer failure visible and terminal."""
+    _insert_once(
+        path,
+        '        "finalizer_active": 0,\n',
+        '        "finalizer_failed_terminal": 0,\n',
+        '"finalizer_failed_terminal": 0',
+    )
+    _replace_once_unless_marker(
+        path,
+        (
+            '        elif app_label == "finalizer":\n'
+            '            summary["finalizer_active"] += status.get("active", 0) or 0\n'
+        ),
+        (
+            '        elif app_label == "finalizer":\n'
+            '            summary["finalizer_active"] += status.get("active", 0) or 0\n'
+            "            if job_failed_terminal:\n"
+            '                summary["finalizer_failed_terminal"] += 1\n'
+        ),
+        'summary["finalizer_failed_terminal"] += 1',
+    )
+    _replace_once_unless_marker(
+        path,
+        '    if summary.get("submit_failed_terminal"):\n',
+        (
+            '    if summary.get("finalizer_failed_terminal"):\n'
+            "        updates.update(\n"
+            "            {\n"
+            '                "status": "failed",\n'
+            '                "phase": "finalizer_failed",\n'
+            '                "error": "result merge finalizer failed or exceeded its deadline",\n'
+            "            }\n"
+            "        )\n"
+            '    elif summary.get("submit_failed_terminal"):\n'
+        ),
+        '"phase": "finalizer_failed"',
     )
 
 
@@ -932,13 +1327,14 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parents[child] = parent
-    for call_name in (
-        "read_active_database",
-        "preserve_or_set_search_space",
-        "prepare_web_blast_statistics",
-        "attach_web_blast_statistics",
-        "attach_db_order_oracle",
-    ):
+    expected_call_counts = {
+        "read_active_database": 2,
+        "preserve_or_set_search_space": 1,
+        "prepare_web_blast_statistics": 1,
+        "attach_web_blast_statistics": 1,
+        "attach_db_order_oracle": 1,
+    }
+    for call_name, expected_count in expected_call_counts.items():
         calls = [
             node
             for node in ast.walk(tree)
@@ -946,15 +1342,17 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == call_name
         ]
-        if len(calls) != 1:
+        if len(calls) != expected_count:
             raise RuntimeError(
-                f"OpenAPI runtime policy requires one {call_name} call, found {len(calls)}"
+                "OpenAPI runtime policy requires "
+                f"{expected_count} {call_name} call(s), found {len(calls)}"
             )
-        current: ast.AST | None = calls[0]
-        while current in parents:
-            current = parents[current]
-            if isinstance(current, (ast.For, ast.AsyncFor, ast.While)):
-                raise RuntimeError(f"OpenAPI {call_name} call must not run inside a loop")
+        for call in calls:
+            current: ast.AST | None = call
+            while current in parents:
+                current = parents[current]
+                if isinstance(current, (ast.For, ast.AsyncFor, ast.While)):
+                    raise RuntimeError(f"OpenAPI {call_name} call must not run inside a loop")
 
 
 def patch_dockerfile(root: Path) -> None:
@@ -1327,6 +1725,7 @@ def patch_app(root: Path) -> None:
     )
     _replace_stale_core_nt_search_space_fallback(path)
     _patch_canonical_merged_result_discovery(path)
+    _patch_active_database_metadata(path)
     _insert_once(
         path,
         '    if req.batch_len is not None:\n        config["blast"]["batch-len"] = str(req.batch_len)\n',
@@ -1453,6 +1852,8 @@ def patch_app(root: Path) -> None:
         ),
         'for _runtime_key in ("exact_oracle", "web_blast_statistics")',
     )
+    _patch_result_selection_policy(path)
+    _patch_finalizer_failure_status(path)
     _replace_once_unless_marker(
         path,
         "def _job_marker_phase(results_url: str) -> str | None:\n"
@@ -1520,11 +1921,26 @@ def patch_app(root: Path) -> None:
         "\n",
         "",
     )
-    _replace_once(
-        path,
-        '    marker = _job_marker_phase(job.get("results", ""))\n',
+    marker_fresh = '    marker = _job_marker_phase(job.get("results", ""))\n'
+    marker_legacy = (
         "    elb_job_id = _effective_elb_job_id(job)\n"
-        '    marker = _job_marker_phase(job.get("results", ""), elb_job_id)\n',
+        '    marker = _job_marker_phase(job.get("results", ""), elb_job_id)\n'
+    )
+    marker_desired = (
+        "    elb_job_id = _effective_elb_job_id(job)\n"
+        '    marker_results_url = str(job.get("results", "")).rstrip("/")\n'
+        "    marker = None\n"
+        '    if marker_results_url and re.fullmatch(r"job-[0-9a-f]{32}", elb_job_id, re.IGNORECASE):\n'
+        '        marker = _job_marker_phase(f"{marker_results_url}/{elb_job_id}")\n'
+        "    if marker is None:\n"
+        "        marker = _job_marker_phase(marker_results_url)\n"
+    )
+    _replace_fresh_or_legacy(
+        path,
+        fresh=marker_fresh,
+        legacy=marker_legacy,
+        desired=marker_desired,
+        marker='    marker_results_url = str(job.get("results", "")).rstrip("/")\n',
     )
     _replace_once(
         path,
@@ -1640,7 +2056,7 @@ def patch_app(root: Path) -> None:
     # the ETA hook above never reaches it. Inject the same gated projection here
     # so callers polling the canonical status_url see `eta` for active/queued
     # jobs. Terminal jobs are skipped (compute_eta returns None anyway).
-    _replace_once(
+    _replace_once_unless_marker(
         path,
         "    return {\n"
         '        "job_id": job_id,\n'
@@ -1648,8 +2064,9 @@ def patch_app(root: Path) -> None:
         "    _status_payload: dict[str, Any] = {\n"
         '        "job_id": job_id,\n'
         '        "status": job_info.get("status", "unknown"),\n',
+        "    _status_payload: dict[str, Any] = {\n",
     )
-    _replace_once(
+    _replace_once_unless_marker(
         path,
         '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n    }\n',
         '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n'
@@ -1661,7 +2078,10 @@ def patch_app(root: Path) -> None:
         "        if _eta_out:\n"
         '            _status_payload["eta"] = _eta_out\n'
         "    return _status_payload\n",
+        '            _status_payload["eta"] = _eta_out\n    return _status_payload\n',
     )
+    _normalize_status_payload_tail(path)
+    _patch_result_readiness_payloads(path)
     _harden_openapi_runtime_id_consumers(path)
     _validate_openapi_runtime_policy(path)
 

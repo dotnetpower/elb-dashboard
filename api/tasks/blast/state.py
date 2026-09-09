@@ -73,6 +73,8 @@ def _enqueue_artifact_finalizer(
                 job_id,
                 type(exc).__name__,
             )
+            if reconcile_attempts > 0:
+                return False
         try:
             finalize_job_artifacts.apply_async(
                 kwargs={"job_id": job_id},

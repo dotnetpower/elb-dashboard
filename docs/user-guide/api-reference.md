@@ -106,7 +106,7 @@ This is the shortest end-to-end API Reference path for a test job.
 3. Open API Reference and confirm the token panel says `configured`.
 4. Expand `POST /v1/jobs`, choose the inline FASTA example, and click **Send Request**.
 5. Copy the returned short `job_id`.
-6. Expand `GET /v1/jobs/{job_id}/status`, paste that OpenAPI job id, and poll until `status` becomes `completed`.
+6. Expand `GET /v1/jobs/{job_id}/status`, paste that OpenAPI job id, and poll until `status` is `completed` and `results_ready` is `true`.
 7. Expand `GET /v1/jobs/{job_id}/results`, paste the same job id, choose a `content` mode, and download the artifact.
 
 ![POST /v1/jobs with query_fasta and a job_id response](../images/screenshots/api-job-submit-flow.svg)
@@ -198,6 +198,28 @@ JSON
 
 Use `idempotency_key` for automation so a retry returns the same job handle instead of creating duplicate BLAST work.
 
+### Result selection and search space
+
+`blast_options.result_selection_policy` controls the final subject set for partitioned tabular
+results:
+
+| Value | Contract |
+| --- | --- |
+| `native_top_n` (default) | Selects at most `max_target_seqs` distinct subject accessions using BLAST's e-value, raw-score, and database-order comparator. It does not promise sequence-content diversity. Every HSP row for a selected subject is retained, so the output can have more rows than subjects. |
+| `diversity_aware` | When one tied score class fills and overflows the complete result window, proportionally reserves slots for distinct lower-scoring subjects from the shard candidate pool. This is intentionally heuristic and does not claim full-database hit-list equality. |
+
+For `core_nt`, omit `blast_options.db_effective_search_space`, `-searchsp`, and `-dbsize` by
+default. The server resolves the active database generation and injects the matching search space.
+If an integration must pin a measured value, use the typed
+`blast_options.db_effective_search_space` field; do not combine it with raw `-searchsp` or
+`-dbsize` in `extra`.
+
+`blast_options.web_blast_statistical_context` is an advanced single-query contract, not an
+alternative spelling for `db_effective_search_space`. Its six values must come from a measured
+reference result for the same query, taxonomy-filtered population, options, and database
+generation. Do not derive `filtered_database_letters` from the unfiltered
+`GET /v1/databases/{db}` count. When those measurements are unavailable, omit the context.
+
 ## Status Example: `GET /v1/jobs/{job_id}/status`
 
 After copying the OpenAPI job id, expand `GET /v1/jobs/{job_id}/status`, paste the value into the **OpenAPI job id** path parameter, and click **Send Request**.
@@ -244,12 +266,17 @@ Interpret status values conservatively:
 | `queued` | Accepted but waiting behind active work | Poll after a short delay. |
 | `dispatching` / `submitting` | The service is preparing ElasticBLAST execution | Keep polling status. |
 | `running` | AKS BLAST jobs are active or finalizing | Watch `kubernetes.summary` and keep polling. |
-| `completed` | Result files are available | Call a result endpoint. |
+| `completed` | Canonical result files and the durable success marker are available | Confirm `results_ready=true`, then call a result endpoint. |
 | `failed` / `cancelled` | Work stopped before success | Use `error` and operator logs for diagnosis. |
 
 ## Result Example: `GET /v1/jobs/{job_id}/results`
 
-Use `GET /v1/jobs/{job_id}/results` after status is `completed`. The endpoint streams files through the OpenAPI service; it does not return Storage SAS URLs.
+Use `GET /v1/jobs/{job_id}/results` after status is `completed` and `results_ready` is `true`.
+Partitioned responses also carry `merged_at`; `results_ready_at` is the common readiness
+timestamp. A merge finalizer has a 30-minute execution deadline. A deadline or terminal finalizer
+failure changes the job to `failed` with phase `finalizer_failed`, rather than leaving it in an
+unbounded `finalizing` state. The endpoint streams files through the OpenAPI service; it does not
+return Storage SAS URLs.
 
 The `content` query parameter chooses the artifact shape:
 
@@ -354,7 +381,14 @@ When `content=xml` succeeds, the response body is BLAST XML. The example below s
 </BlastOutput>
 ```
 
-If `content=merged` or `content=xml` returns `404`, the job may be complete but the merger has not published `merged_results.out.gz` yet, or the run used a result mode that only produced shard files. Try `content=full` to inspect available raw outputs.
+For a newly submitted partitioned job, `completed` implies that `content=merged` and
+`content=xml` are ready. A `404` after `results_ready=true` is therefore a contract violation; keep
+the job id and request id for diagnosis rather than treating a shard-only archive as completion.
+
+For tabular `outfmt 7`, the service preserves caller fields in their original order and appends any
+missing compatibility fields in this stable order: `staxids`, `sscinames`, `stitle`, `qcovs`,
+`score`. The merged output preserves the authoritative `# Fields:` header. Consumers should map
+columns by that header rather than a fixed count. `outfmt 6` has no comment header by definition.
 
 ## External ElasticBLAST Facade
 

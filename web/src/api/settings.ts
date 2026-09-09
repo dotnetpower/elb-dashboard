@@ -464,13 +464,23 @@ export interface ServiceBusSendRequest {
     max_target_seqs?: number;
     outfmt?: string;
     extra?: string;
+    result_selection_policy?: "native_top_n" | "diversity_aware";
     /**
      * Calibrated Web BLAST effective search space (oracle value). Leave unset to
      * let the backend apply the calibrated value automatically for a known DB
      * (e.g. core_nt); set it to pin an explicit value. Forwarded to BLAST as a
-     * `-searchsp` flag; a `-searchsp` already in `extra` always wins.
+     * `-searchsp` flag. Do not combine it with `-searchsp` or `-dbsize` in
+     * `extra`; ambiguous inputs are rejected.
      */
     db_effective_search_space?: number;
+    web_blast_statistical_context?: {
+      filtered_database_letters: number;
+      filtered_database_sequences: number;
+      length_adjustment: number;
+      effective_search_space: number;
+      scoring_search_space: number;
+      result_database_letters: number;
+    };
   };
   /** Sharding/precision profile (e.g. `core_nt_safe`). Backend auto-promotes core_nt. */
   resource_profile?: string;

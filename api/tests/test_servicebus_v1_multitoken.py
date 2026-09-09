@@ -237,6 +237,7 @@ def test_build_v1_payload_accepts_external_queue_body_without_internal_metadata(
     assert payload["blast_options"] == {
         **body["blast_options"],
         "outfmt": body["blast_options"]["outfmt"] + " staxids sscinames stitle qcovs score",
+        "result_selection_policy": "native_top_n",
     }
     assert "request_id" not in payload
     assert "type" not in payload
@@ -295,6 +296,22 @@ def test_build_v1_payload_injects_oracle_searchsp_when_absent() -> None:
     assert f"-searchsp {_CORE_NT_SEARCHSP}" in extra
     # The pre-existing flags are preserved alongside the injected searchsp.
     assert "-word_size 28" in extra and "-dust yes" in extra
+
+
+def test_build_v1_payload_preserves_diversity_selection_policy() -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    body = _v1_no_searchsp_body()
+    body["blast_options"] = {
+        **body["blast_options"],
+        "result_selection_policy": "diversity_aware",
+    }
+
+    payload = sb._build_v1_jobs_payload(_msg(body), ServiceBusConfig())
+
+    assert payload is not None
+    assert payload["blast_options"]["result_selection_policy"] == "diversity_aware"
 
 
 def test_build_v1_payload_honors_structured_db_effective_search_space() -> None:

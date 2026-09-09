@@ -18,8 +18,7 @@ const CORE_NT_SEARCH_SPACE_NOTE =
 
 const CORE_NT_JOB_EXAMPLE = {
   summary: "Mode B - Web BLAST-equivalent core_nt",
-  description:
-    `Search core_nt with the same BLAST options used by New Search. ${CORE_NT_SEARCH_SPACE_NOTE} Precise execution fails if the active statistics are unavailable.`,
+  description: `Search core_nt with the same BLAST options used by New Search. ${CORE_NT_SEARCH_SPACE_NOTE} Precise execution fails if the active statistics are unavailable.`,
   value: {
     program: "blastn",
     db: "core_nt",
@@ -70,8 +69,7 @@ const SMALL_16S_RRNA_JOB_EXAMPLE = {
 
 const CORE_NT_OUTFMT7_JOB_EXAMPLE = {
   summary: "Mode B - core_nt tabular (outfmt 7)",
-  description:
-    `Same Web BLAST-equivalent core_nt search as Mode B, but requests tabular output with comment lines (outfmt 7) instead of XML. outfmt 7 shares outfmt 6's 12-column data rows, so it runs sharded: the shard merge skips the per-shard comment headers and re-emits a single merged comment header. Use outfmt 7 when a downstream consumer wants tabular rows with the BLASTN / Query / Fields / hit-count comments. ${CORE_NT_SEARCH_SPACE_NOTE}`,
+  description: `Same Web BLAST-equivalent core_nt search as Mode B, but requests tabular output with comment lines (outfmt 7) instead of XML. outfmt 7 shares outfmt 6's 12-column data rows, so it runs sharded: the shard merge skips the per-shard comment headers and re-emits a single merged comment header. Use outfmt 7 when a downstream consumer wants tabular rows with the BLASTN / Query / Fields / hit-count comments. ${CORE_NT_SEARCH_SPACE_NOTE}`,
   value: {
     program: "blastn",
     db: "core_nt",
@@ -89,7 +87,7 @@ const CORE_NT_OUTFMT7_JOB_EXAMPLE = {
 const CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE = {
   summary: "Mode B - core_nt tabular + taxids (outfmt 7 std staxids)",
   description: [
-    "Adds taxonomy + strand + sequence columns to the tabular output via an extended outfmt specifier. The standard 12 columns MUST stay first (the `std` token), because the shard merge re-ranks by the fixed std positions (evalue=col11, bitscore=col12) and only then preserves the trailing columns; a non-std-leading order is rejected.",
+    "Adds taxonomy + strand + sequence columns to the tabular output via an extended outfmt specifier. The shard merge resolves evalue, bitscore, and subject accession by field name, preserves the caller order, and appends any missing staxids, sscinames, stitle, qcovs, and score fields.",
     "The full specifier is passed as the `outfmt` value (the sibling keeps it verbatim) so the standard columns are not duplicated; do NOT also place -outfmt in `extra`.",
     "For Web BLAST-equivalent e-values and ranking, this preset uses the precise core_nt profile (search-space correction + tie-order oracle).",
     CORE_NT_SEARCH_SPACE_NOTE,
@@ -102,8 +100,31 @@ const CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE = {
     blast_options: {
       evalue: 0.05,
       max_target_seqs: 100,
-      outfmt: '7 std staxids sstrand qseq sseq',
+      outfmt: "7 std staxids sstrand qseq sseq",
       extra: CORE_NT_BLAST_OPTIONS,
+    },
+    resource_profile: "core_nt_safe",
+  },
+};
+
+const CORE_NT_DIVERSITY_JOB_EXAMPLE = {
+  summary: "Mode B - core_nt diversity-aware tabular",
+  description: [
+    "Uses proportional lower-score subject reservation when one tied score class fills and overflows max_target_seqs.",
+    "The output remains capped by distinct subjects, retains every HSP row for each selected subject, and preserves the outfmt 7 Fields header.",
+    "This policy is intentionally heuristic and does not claim native full-database top-N membership.",
+    CORE_NT_SEARCH_SPACE_NOTE,
+  ].join(" "),
+  value: {
+    program: "blastn",
+    db: "core_nt",
+    query_fasta: CORE_NT_NC_003310_FASTA,
+    blast_options: {
+      evalue: 0.05,
+      max_target_seqs: 5000,
+      outfmt: "7 std sseq",
+      extra: CORE_NT_BLAST_OPTIONS,
+      result_selection_policy: "diversity_aware",
     },
     resource_profile: "core_nt_safe",
   },
@@ -327,11 +348,14 @@ const JOB_STATUS_SUCCESS_RESPONSE: ResponseMap = {
     description: "Current BLAST job lifecycle state.",
     shapeName: "JobStatus",
     nextAction:
-      "Continue polling this endpoint with the same OpenAPI job id while status is dispatching, queued, or running.",
+      "Continue polling while status is dispatching, queued, or running. Download only after status is completed and results_ready is true.",
     fields: [
       "job_id (OpenAPI short id)",
       "status",
       "phase",
+      "results_ready",
+      "results_ready_at",
+      "merged_at (partitioned jobs)",
       "target.dashboard_job_id",
       "meta.request_id",
     ],
@@ -340,6 +364,7 @@ const JOB_STATUS_SUCCESS_RESPONSE: ResponseMap = {
       job_id: OPENAPI_JOB_ID_EXAMPLE,
       status: "running",
       phase: "submitting",
+      results_ready: false,
       program: "blastn",
       db: "core_nt",
       target: JOB_TARGET_EXAMPLE,
@@ -502,6 +527,7 @@ function withCuratedRequestExamples(
           mode_b_core_nt: CORE_NT_JOB_EXAMPLE,
           mode_b_core_nt_outfmt7: CORE_NT_OUTFMT7_JOB_EXAMPLE,
           mode_b_core_nt_outfmt7_taxids: CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE,
+          mode_b_core_nt_diversity: CORE_NT_DIVERSITY_JOB_EXAMPLE,
           ...(jsonBody.examples || {}),
         },
       },

@@ -26,6 +26,8 @@ LOGGER = logging.getLogger(__name__)
 # has almost certainly evicted the pod logs anyway.
 _POD_LOG_RETRY_MAX = 3
 _POD_LOG_RETRY_COUNTDOWN_S = 60
+_RESULT_READY_RETRY_MAX = 20
+_RESULT_READY_RETRY_COUNTDOWN_S = 30
 _RECONCILE_ATTEMPT_MAX = 5
 
 
@@ -136,9 +138,7 @@ def reconcile_terminal_artifacts(
                 )
             )
             prior_attempts = (
-                sentinel.reconcile_attempts
-                if same_generation and sentinel is not None
-                else 0
+                sentinel.reconcile_attempts if same_generation and sentinel is not None else 0
             )
             if prior_attempts >= _RECONCILE_ATTEMPT_MAX:
                 LOGGER.warning(
@@ -179,6 +179,7 @@ def finalize_job_artifacts(
     *,
     job_id: str,
     pod_log_attempt: int = 1,
+    result_ready_attempt: int = 1,
 ) -> dict[str, Any]:
     """Persist immutable UI artifacts for a terminal BLAST job.
 
@@ -192,6 +193,7 @@ def finalize_job_artifacts(
         "execution_steps": "skipped",
         "results": "skipped",
         "pod_log_attempt": pod_log_attempt,
+        "result_ready_attempt": result_ready_attempt,
     }
     runtime_identity = ""
     sentinel: Any = None
@@ -261,7 +263,53 @@ def finalize_job_artifacts(
         if not storage_account and isinstance(state.payload, dict):
             storage_account = str(state.payload.get("storage_account") or "")
         if str(state.status or "").casefold() == "completed" and storage_account:
-            from api.services.blast.result_artifacts import build_and_write_default_result_artifacts
+            from api.services.blast.result_artifacts import (
+                build_and_write_default_result_artifacts,
+                partitioned_result_readiness,
+            )
+
+            readiness = partitioned_result_readiness(storage_account, job_id)
+            summary["results_ready"] = readiness["results_ready"]
+            if readiness["merged_at"]:
+                summary["merged_at"] = readiness["merged_at"]
+            if readiness["requires_canonical_merge"] and not readiness["results_ready"]:
+                if result_ready_attempt < _RESULT_READY_RETRY_MAX:
+                    finalize_job_artifacts.apply_async(
+                        kwargs={
+                            "job_id": job_id,
+                            "pod_log_attempt": pod_log_attempt,
+                            "result_ready_attempt": result_ready_attempt + 1,
+                        },
+                        countdown=_RESULT_READY_RETRY_COUNTDOWN_S,
+                    )
+                    upsert_artifact_state(
+                        job_id,
+                        "artifact_finalizer",
+                        status="pending",
+                        error_code="results_pending",
+                        runtime_identity=runtime_identity,
+                        reconcile_attempts=reconcile_attempts,
+                    )
+                    return {**summary, "status": "results_pending"}
+                upsert_artifact_state(
+                    job_id,
+                    "artifact_finalizer",
+                    status="failed",
+                    error_code="results_not_ready",
+                    runtime_identity=runtime_identity,
+                    reconcile_attempts=reconcile_attempts,
+                )
+                repo.append_history(
+                    job_id,
+                    "result_artifact_readiness_exhausted",
+                    {"attempt": result_ready_attempt},
+                )
+                LOGGER.warning(
+                    "result artifact readiness exhausted job_id=%s attempt=%d",
+                    job_id,
+                    result_ready_attempt,
+                )
+                return {**summary, "status": "results_not_ready"}
 
             summary["results"] = build_and_write_default_result_artifacts(
                 job_id,
@@ -341,9 +389,7 @@ def finalize_job_artifacts(
                 status="failed",
                 error_code=type(exc).__name__,
                 runtime_identity=runtime_identity,
-                reconcile_attempts=(
-                    sentinel.reconcile_attempts if sentinel is not None else 0
-                ),
+                reconcile_attempts=(sentinel.reconcile_attempts if sentinel is not None else 0),
             )
         except Exception:
             LOGGER.debug("artifact finalizer failure state write failed", exc_info=True)

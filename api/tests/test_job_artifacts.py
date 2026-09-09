@@ -6,12 +6,14 @@ Azure calls.
 Key entry points: `_state`, `test_build_execution_steps_snapshot_preserves_steps`,
 `test_artifact_finalizer_only_runs_for_terminal_phases`,
 `test_artifact_finalizer_deduplicates_pending_sentinel`,
+`test_artifact_finalizer_reconcile_requires_persisted_attempt`,
 `test_artifact_finalizer_waits_for_pending_runtime_identity`,
 `test_reconcile_terminal_artifacts_resets_empty_identity_budget`,
 `test_finalizer_records_exhausted_pod_log_capture`,
 `test_finalizer_records_pod_log_retry_enqueue_failure`,
 `test_streaming_aggregate_marks_read_budget_skip_as_truncated`,
-`test_read_json_artifact_supports_gzip`, `test_artifact_build_should_enqueue_stale_pending`,
+`test_read_json_artifact_supports_gzip`, `test_invalidate_ready_artifact_is_compare_and_set`,
+`test_artifact_build_should_enqueue_stale_pending`,
 `test_load_merge_report_tie_cutoff_summarizes_overflow`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
@@ -29,6 +31,7 @@ from api.services import job_artifacts
 from api.services.blast.result_artifacts import (
     build_result_aggregate_payload,
     build_result_manifest_payload,
+    partitioned_result_readiness,
 )
 from api.services.job_artifacts import ArtifactState, build_execution_steps_snapshot
 from api.tasks import blast as blast_tasks
@@ -105,6 +108,91 @@ def test_result_manifest_payload_uses_parseable_result_files(monkeypatch) -> Non
     assert payload["manifest"]["file_count"] == 1
 
 
+def test_partitioned_result_readiness_requires_merge_and_success(monkeypatch) -> None:
+    blobs = [
+        {"name": "job-1/runtime/shard_00/batch_000.out.gz"},
+        {"name": "job-1/runtime/merged_results.out.gz", "last_modified": "2026-09-08T02:04:30Z"},
+    ]
+    monkeypatch.setattr(
+        "api.services.blast.result_artifacts.list_result_blobs_for_job",
+        lambda *_args: list(blobs),
+    )
+
+    waiting = partitioned_result_readiness("storage1", "job-1")
+    assert waiting == {
+        "requires_canonical_merge": True,
+        "results_ready": False,
+        "merged_at": "2026-09-08T02:04:30Z",
+        "success_marker": False,
+    }
+
+    blobs.append({"name": "job-1/runtime/metadata/SUCCESS.txt"})
+    ready = partitioned_result_readiness("storage1", "job-1")
+    assert ready["results_ready"] is True
+
+
+def test_finalizer_rechecks_partitioned_results_with_bounded_delay(monkeypatch) -> None:
+    import api.services.job_logs.persist as log_persist
+    import api.services.state_repo as state_repo
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    state = _state(storage_account="storage1", elastic_blast_job_id="")
+    writes: list[tuple[str, dict[str, object]]] = []
+    retries: list[dict[str, object]] = []
+
+    class FakeRepo:
+        @staticmethod
+        def get(_job_id: str):
+            return state
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(job_artifacts, "get_artifact_state", lambda *_args: None)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda _job_id, artifact_type, **kwargs: writes.append((artifact_type, kwargs)),
+    )
+    monkeypatch.setattr(job_artifacts, "write_execution_steps_snapshot", lambda *_args: {})
+    monkeypatch.setattr(log_persist, "persist_completed_job_pod_logs", lambda *_args: {})
+    monkeypatch.setattr(
+        "api.services.blast.result_artifacts.partitioned_result_readiness",
+        lambda *_args: {
+            "requires_canonical_merge": True,
+            "results_ready": False,
+            "merged_at": None,
+            "success_marker": False,
+        },
+    )
+    monkeypatch.setattr(
+        blast_artifacts.finalize_job_artifacts,
+        "apply_async",
+        lambda **kwargs: retries.append(kwargs),
+    )
+
+    result = blast_artifacts.finalize_job_artifacts.run(job_id="job-1")
+
+    assert result["status"] == "results_pending"
+    assert retries == [
+        {
+            "kwargs": {
+                "job_id": "job-1",
+                "pod_log_attempt": 1,
+                "result_ready_attempt": 2,
+            },
+            "countdown": blast_artifacts._RESULT_READY_RETRY_COUNTDOWN_S,
+        }
+    ]
+    assert writes[-1] == (
+        "artifact_finalizer",
+        {
+            "status": "pending",
+            "error_code": "results_pending",
+            "runtime_identity": "",
+            "reconcile_attempts": 0,
+        },
+    )
+
+
 def test_build_execution_steps_snapshot_synthesizes_external_row_steps() -> None:
     # A synced `/v1/jobs` row has no dashboard `_progress`; the terminal
     # execution-steps snapshot the SPA overlays must still carry an honest
@@ -133,7 +221,6 @@ def test_build_execution_steps_snapshot_external_failure_surfaces_error() -> Non
     assert "no error detail" in snapshot["output"]["error"].lower()
     assert snapshot["output"]["failed_step"] == "submitting"
     assert snapshot["output"]["steps"]["submitting"]["status"] == "failed"
-
 
 
 def test_artifact_finalizer_only_runs_for_terminal_phases(monkeypatch) -> None:
@@ -240,6 +327,37 @@ def test_artifact_finalizer_enqueues_when_dedup_state_is_unavailable(monkeypatch
     assert calls == [{"job_id": "job-1"}]
 
 
+def test_artifact_finalizer_reconcile_requires_persisted_attempt(monkeypatch) -> None:
+    calls: list[dict[str, str]] = []
+
+    class FakeFinalizer:
+        @staticmethod
+        def apply_async(*, kwargs, retry):
+            assert retry is False
+            calls.append(dict(kwargs))
+
+    import api.tasks.blast_artifacts as blast_artifacts
+
+    monkeypatch.setattr(blast_artifacts, "finalize_job_artifacts", FakeFinalizer)
+    monkeypatch.setattr(job_artifacts, "artifact_build_should_enqueue", lambda *_args: True)
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("table unavailable")),
+    )
+
+    assert (
+        blast_tasks._enqueue_artifact_finalizer(
+            "job-1",
+            "completed",
+            "completed",
+            reconcile_attempts=1,
+        )
+        is False
+    )
+    assert calls == []
+
+
 def test_artifact_finalizer_force_rebuild_bypasses_ready_dedup(monkeypatch) -> None:
     calls: list[dict[str, str]] = []
 
@@ -259,9 +377,7 @@ def test_artifact_finalizer_force_rebuild_bypasses_ready_dedup(monkeypatch) -> N
     )
     monkeypatch.setattr(job_artifacts, "upsert_artifact_state", lambda *_args, **_kwargs: None)
 
-    assert blast_tasks._enqueue_artifact_finalizer(
-        "job-1", "completed", "completed", force=True
-    )
+    assert blast_tasks._enqueue_artifact_finalizer("job-1", "completed", "completed", force=True)
     assert calls == [{"job_id": "job-1"}]
 
 
@@ -682,6 +798,84 @@ def test_read_json_artifact_marks_failed_when_gzip_blob_missing(monkeypatch) -> 
     assert upserts[0]["error_code"] == "blob_missing"
 
 
+def test_invalidate_ready_artifact_is_compare_and_set(monkeypatch) -> None:
+    from azure.core import MatchConditions
+    from azure.core.exceptions import ResourceModifiedError
+    from azure.data.tables import UpdateMode
+
+    class FakeEntity(dict):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.metadata = {"etag": 'W/"generation-1"'}
+
+    class FakeTable:
+        def __init__(self) -> None:
+            self.entity = FakeEntity(
+                status="ready",
+                updated_at="2026-09-09T00:00:00+00:00",
+                content_hash="hash-1",
+            )
+            self.conflict = False
+            self.updates: list[dict[str, object]] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def get_entity(self, **_kwargs):
+            return self.entity
+
+        def update_entity(self, entity, mode, *, etag, match_condition) -> None:
+            if self.conflict:
+                raise ResourceModifiedError("generation changed")
+            self.updates.append(
+                {
+                    "entity": entity,
+                    "mode": mode,
+                    "etag": etag,
+                    "match_condition": match_condition,
+                }
+            )
+
+    table = FakeTable()
+    monkeypatch.setattr(job_artifacts, "_artifact_table_client", lambda: table)
+
+    assert job_artifacts._invalidate_ready_artifact_if_unchanged(
+        "job-1",
+        "result_manifest",
+        expected_updated_at="2026-09-09T00:00:00+00:00",
+        expected_content_hash="hash-1",
+        error_code="stale_shard_only_manifest",
+    )
+    assert table.updates[0]["mode"] is UpdateMode.MERGE
+    assert table.updates[0]["etag"] == 'W/"generation-1"'
+    assert table.updates[0]["match_condition"] is MatchConditions.IfNotModified
+    assert table.updates[0]["entity"]["status"] == "failed"
+
+    table.entity["updated_at"] = "2026-09-09T00:01:00+00:00"
+    assert not job_artifacts._invalidate_ready_artifact_if_unchanged(
+        "job-1",
+        "result_manifest",
+        expected_updated_at="2026-09-09T00:00:00+00:00",
+        expected_content_hash="hash-1",
+        error_code="stale_shard_only_manifest",
+    )
+    assert len(table.updates) == 1
+
+    table.entity["updated_at"] = "2026-09-09T00:00:00+00:00"
+    table.conflict = True
+    assert not job_artifacts._invalidate_ready_artifact_if_unchanged(
+        "job-1",
+        "result_manifest",
+        expected_updated_at="2026-09-09T00:00:00+00:00",
+        expected_content_hash="hash-1",
+        error_code="stale_shard_only_manifest",
+    )
+    assert len(table.updates) == 1
+
+
 def test_artifact_build_should_enqueue_stale_pending(monkeypatch) -> None:
     fresh = ArtifactState(
         job_id="job-1",
@@ -795,10 +989,7 @@ def test_write_execution_log_chunk_uses_safe_paths(monkeypatch) -> None:
 
 
 def test_streaming_aggregate_does_not_hit_cap(monkeypatch) -> None:
-    rows = [
-        f"query{i}\tNC_{i}\t99.0\t100\t0\t0\t1\t100\t1\t100\t1e-20\t{i}"
-        for i in range(3)
-    ]
+    rows = [f"query{i}\tNC_{i}\t99.0\t100\t0\t0\t1\t100\t1\t100\t1e-20\t{i}" for i in range(3)]
 
     monkeypatch.setattr(
         "api.services.blast.result_artifacts.list_parseable_result_blobs",
@@ -817,9 +1008,7 @@ def test_streaming_aggregate_does_not_hit_cap(monkeypatch) -> None:
     assert payload["truncated"] is False
 
 
-def test_streaming_aggregate_marks_read_budget_skip_as_truncated(
-    monkeypatch, caplog
-) -> None:
+def test_streaming_aggregate_marks_read_budget_skip_as_truncated(monkeypatch, caplog) -> None:
     from api.services.blast import result_artifacts
     from api.services.blast.result_analytics import ResultReadBudgetExceeded
 
@@ -865,9 +1054,7 @@ def _patch_merge_report(monkeypatch, text):
             raise text
         return text
 
-    monkeypatch.setattr(
-        "api.services.blast.result_artifacts.storage_data.read_blob_text", _read
-    )
+    monkeypatch.setattr("api.services.blast.result_artifacts.storage_data.read_blob_text", _read)
     monkeypatch.setattr("api.services.blast.result_artifacts.get_credential", lambda: object())
 
 
@@ -1105,9 +1292,7 @@ def test_read_result_aggregate_v3_is_stale_after_prefix_fallback_fix(
         lambda *args, **kwargs: upserts.append({**kwargs, "args": list(args)}),
     )
 
-    result = job_artifacts.read_result_analytics_artifact(
-        "external-job-1", "result_aggregate"
-    )
+    result = job_artifacts.read_result_analytics_artifact("external-job-1", "result_aggregate")
 
     assert result is None
     assert upserts[0]["status"] == "failed"
@@ -1134,9 +1319,7 @@ def test_read_result_manifest_without_schema_is_stale_after_prefix_fallback_fix(
         lambda *args, **kwargs: upserts.append({**kwargs, "args": list(args)}),
     )
 
-    result = job_artifacts.read_result_analytics_artifact(
-        "external-job-1", "result_manifest"
-    )
+    result = job_artifacts.read_result_analytics_artifact("external-job-1", "result_manifest")
 
     assert result is None
     assert upserts[0]["status"] == "failed"

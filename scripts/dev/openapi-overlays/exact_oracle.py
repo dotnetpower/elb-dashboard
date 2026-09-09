@@ -664,7 +664,7 @@ def attach_web_blast_statistics(
 
 
 def ensure_tabular_raw_score(options: str) -> str:
-    """Append ``score`` to a tabular outfmt while preserving all other flags."""
+    """Append result parity and raw-score fields while preserving caller fields."""
     try:
         tokens = shlex.split(options or "")
     except ValueError as exc:
@@ -686,7 +686,13 @@ def ensure_tabular_raw_score(options: str) -> str:
             spec = argument.split("=", 1)[1].split()
             break
     if start is None:
-        return " ".join([*tokens, "-outfmt", "6 std score"])
+        return " ".join(
+            [
+                *tokens,
+                "-outfmt",
+                "6 std staxids sscinames stitle qcovs score",
+            ]
+        )
     if not spec or spec[0] not in {"6", "7"}:
         return options
     fields = spec[1:] or ["std"]
@@ -708,8 +714,10 @@ def ensure_tabular_raw_score(options: str) -> str:
                 "bitscore",
             }
         )
-    if "score" not in expanded:
-        fields.append("score")
+    for field in ("staxids", "sscinames", "stitle", "qcovs", "score"):
+        if field not in expanded:
+            fields.append(field)
+            expanded.add(field)
     replacement = ["-outfmt", " ".join([spec[0], *fields])]
     return " ".join([*tokens[:start], *replacement, *tokens[end:]])
 

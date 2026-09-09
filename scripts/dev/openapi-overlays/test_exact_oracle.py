@@ -322,10 +322,22 @@ def test_read_active_database_fails_closed_on_incomplete_metadata(
     ("options", "expected"),
     [
         ("-evalue 1e-5 -outfmt 5", "-evalue 1e-5 -outfmt 5"),
-        ("-evalue 1e-5 -outfmt 6", "-evalue 1e-5 -outfmt 6 std score"),
-        ("-outfmt '7 std staxids' -dust yes", "-outfmt 7 std staxids score -dust yes"),
-        ("-outfmt 6 std score", "-outfmt 6 std score"),
-        ("-evalue 1e-5", "-evalue 1e-5 -outfmt 6 std score"),
+        (
+            "-evalue 1e-5 -outfmt 6",
+            "-evalue 1e-5 -outfmt 6 std staxids sscinames stitle qcovs score",
+        ),
+        (
+            "-outfmt '7 std staxids' -dust yes",
+            "-outfmt 7 std staxids sscinames stitle qcovs score -dust yes",
+        ),
+        (
+            "-outfmt 6 std score",
+            "-outfmt 6 std score staxids sscinames stitle qcovs",
+        ),
+        (
+            "-evalue 1e-5",
+            "-evalue 1e-5 -outfmt 6 std staxids sscinames stitle qcovs score",
+        ),
     ],
 )
 def test_ensure_tabular_raw_score(options: str, expected: str) -> None:
