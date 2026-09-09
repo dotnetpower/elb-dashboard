@@ -20,6 +20,7 @@ import type {
   BlastRecommendGoal,
   BlastResultFile,
   BlastResultManifest,
+  BlastResultComparison,
   BlastShardDetailsResponse,
   BlastSubjectAggregate,
   BlastSubmitRequest,
@@ -203,6 +204,12 @@ export const blastApi = {
   getShardDetails: (jobId: string) =>
     api.get<BlastShardDetailsResponse>(
       `/blast/jobs/${encodeURIComponent(jobId)}/shards`,
+    ),
+
+  compareJobs: (jobId: string, againstJobId: string, maxItems = 200) =>
+    api.post<BlastResultComparison>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/comparison`,
+      { against_job_id: againstJobId, max_items: maxItems },
     ),
 
   createLogStreamTicket: (

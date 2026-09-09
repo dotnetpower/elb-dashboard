@@ -17,7 +17,7 @@ The Results page is the detail view for a single BLAST search. It opens when you
 The page is built around three regions:
 
 1. **Job header** — NCBI-style metadata about the search.
-2. **Sticky tab bar** — switches the body between Descriptions, Graphic Summary, Alignments, Taxonomy, Files, and Run details.
+2. **Sticky tab bar** — switches the body between Descriptions, Graphic Summary, Alignments, Taxonomy, Files, Comparison, and Run details.
 3. **Body** — the table, panel, or timeline for the active tab.
 
 ## Job Header
@@ -47,9 +47,15 @@ the submit form.
 | Alignments | Pairwise alignment view for each hit, with score/E-value/identity per HSP. |
 | Taxonomy | Organism rollup of the current hit set, grouped by lineage. |
 | Files | The raw result files in Storage — merged XML, per-shard outputs, support files, and (for failed runs) debug logs. Click **Download** to stream a file through the API. |
+| Comparison | Compare this completed result set with another completed search that used the same program and database. Shows added, removed, changed, and unchanged query/subject hits. |
 | Run details | Execution timeline, per-pod / per-shard status, sharding mode, warmup state, and the resolved BLAST command. |
 
 The active tab is encoded in `?tab=…` so deep links survive a reload and browser back/forward work as expected.
+
+Comparison reads both jobs' existing result files through the API's normal
+bounded Storage path. A warning appears when a byte, file, hit, or response-item
+limit makes the comparison partial; the UI never presents that subset as a full
+result-set equality claim.
 
 For a split-query parent, **Run details** includes a Shard details table with
 each child job's group, query filename, status, duration, effective search

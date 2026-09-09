@@ -13,6 +13,7 @@ import { ExecutionStepsCard } from "@/pages/blastResults/ExecutionStepsCard";
 import { JobDetailsCard } from "@/pages/blastResults/JobDetailsCard";
 import { MessageTraceCard } from "@/pages/blastResults/MessageTraceCard";
 import { ResultsCard } from "@/pages/blastResults/ResultsCard";
+import { ResultComparisonPanel } from "@/pages/blastResults/ResultComparisonPanel";
 import { ShardDetailsCard } from "@/pages/blastResults/ShardDetailsCard";
 import { AlignmentsTabBody } from "@/pages/blastResults/analytics/AlignmentsTabBody";
 import { DescriptionsTabBody } from "@/pages/blastResults/analytics/DescriptionsTabBody";
@@ -232,6 +233,7 @@ export function BlastResults() {
         />
       )}
       {tab === "files" && <ResultsCard jobId={jobId!} state={state} />}
+      {tab === "comparison" && <ResultComparisonPanel job={job} />}
       {tab === "run" && (
         <>
           <JobDetailsCard jobId={jobId!} state={state} />

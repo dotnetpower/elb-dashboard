@@ -8,6 +8,7 @@ describe("BLAST results tab routing", () => {
     expect(shouldOpenRunDetailsForFailedJob("graphic", true)).toBe(true);
     expect(shouldOpenRunDetailsForFailedJob("alignments", true)).toBe(true);
     expect(shouldOpenRunDetailsForFailedJob("taxonomy", true)).toBe(true);
+    expect(shouldOpenRunDetailsForFailedJob("comparison", true)).toBe(true);
   });
 
   it("keeps operator tabs and non-failed jobs on the requested tab", () => {

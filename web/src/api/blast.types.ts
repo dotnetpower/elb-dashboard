@@ -361,6 +361,40 @@ export interface BlastShardDetailsResponse {
   shards: BlastShardDetail[];
 }
 
+export interface BlastHitComparison {
+  query_id: string;
+  subject_id: string;
+  status: "added" | "removed" | "changed";
+  title?: string | null;
+  organism?: string | null;
+  before?: Record<string, number | null> | null;
+  after?: Record<string, number | null> | null;
+}
+
+export interface BlastResultComparison {
+  schema_version: number;
+  job_id: string;
+  against_job_id: string;
+  summary: {
+    before_hits: number;
+    after_hits: number;
+    common: number;
+    unchanged: number;
+    changed: number;
+    added: number;
+    removed: number;
+    jaccard_percent: number;
+  };
+  items: BlastHitComparison[];
+  returned: number;
+  truncated: boolean;
+  partial: boolean;
+  inputs: Record<
+    string,
+    { files_seen: number; files_parsed: number; read_failures: number; truncated: boolean }
+  >;
+}
+
 /** One stage in the BLAST message lifecycle (server-ordered). */
 export interface BlastMessageTraceStage {
   stage: string;

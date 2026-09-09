@@ -14,7 +14,8 @@ browser SAS token; `blast_job_query` streams the original FASTA through the api 
 hard byte cap.
 Validation: `uv run pytest -q api/tests/test_blast_jobs_routes.py
 api/tests/test_blast_results_routes.py api/tests/test_blast_reproducibility.py
-api/tests/test_blast_shard_details.py api/tests/test_route_contracts.py`.
+api/tests/test_blast_shard_details.py api/tests/test_blast_result_comparison.py
+api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Response
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import (
@@ -30,6 +31,8 @@ from api.routes._blast_shared import (
     _payload_value,
     _queries_blob_path,
 )
+from api.services.blast.result_comparison import ResultComparisonRequest
+from api.services.sanitise import sanitise
 from api.services.storage.blob_ids import safe_download_filename
 
 LOGGER = logging.getLogger(__name__)
@@ -359,6 +362,133 @@ def blast_job_shards(
             {
                 "code": "shard_details_unavailable",
                 "message": f"Could not read shard details: {type(exc).__name__}",
+            },
+        ) from exc
+
+
+def _comparison_storage_account(state: Any) -> str:
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    raw_infrastructure = payload.get("infrastructure")
+    infrastructure: dict[str, Any] = (
+        raw_infrastructure if isinstance(raw_infrastructure, dict) else {}
+    )
+    raw_external = payload.get("external")
+    external: dict[str, Any] = raw_external if isinstance(raw_external, dict) else {}
+    return str(
+        getattr(state, "storage_account", "")
+        or payload.get("storage_account")
+        or infrastructure.get("storage_account")
+        or external.get("storage_account")
+        or ""
+    ).strip()
+
+
+def _comparison_identity(state: Any) -> tuple[str, str]:
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    raw_external = payload.get("external")
+    external: dict[str, Any] = raw_external if isinstance(raw_external, dict) else {}
+    program = str(
+        getattr(state, "program", "") or payload.get("program") or external.get("program") or ""
+    )
+    database = str(
+        getattr(state, "db", "")
+        or payload.get("db")
+        or payload.get("database")
+        or external.get("db_name")
+        or external.get("db")
+        or ""
+    )
+    return program.strip().casefold(), database.strip().casefold()
+
+
+@router.post("/jobs/{job_id}/comparison")
+def blast_job_comparison(
+    job_id: str = Path(..., min_length=1, max_length=128),
+    body: ResultComparisonRequest = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Compare two completed result sets without writing job or artifact state."""
+    from api.services.blast.result_comparison import (
+        ComparisonReadError,
+        compare_datasets,
+        load_comparison_dataset,
+    )
+    from api.services.state_repo import get_state_repo
+
+    if body.against_job_id == job_id:
+        raise HTTPException(
+            422,
+            {"code": "same_job", "message": "Choose a different job to compare."},
+        )
+    try:
+        repo = get_state_repo()
+        before_state = repo.get(job_id)
+        after_state = repo.get(body.against_job_id)
+        if before_state is None or after_state is None:
+            raise HTTPException(404, "job not found")
+        _assert_job_owner(before_state.owner_oid, caller)
+        _assert_job_owner(after_state.owner_oid, caller)
+        terminal_success = {"completed", "succeeded", "success"}
+        if (
+            str(getattr(before_state, "status", "") or "").casefold() not in terminal_success
+            or str(getattr(after_state, "status", "") or "").casefold() not in terminal_success
+        ):
+            raise HTTPException(
+                409,
+                {
+                    "code": "comparison_not_ready",
+                    "message": "Both jobs must be completed before comparison.",
+                },
+            )
+        before_program, before_database = _comparison_identity(before_state)
+        after_program, after_database = _comparison_identity(after_state)
+        incompatible_fields: list[str] = []
+        if before_program and after_program and before_program != after_program:
+            incompatible_fields.append("program")
+        if before_database and after_database and before_database != after_database:
+            incompatible_fields.append("database")
+        if incompatible_fields:
+            raise HTTPException(
+                422,
+                {
+                    "code": "comparison_incompatible",
+                    "message": "Compare jobs that use the same program and database.",
+                    "fields": incompatible_fields,
+                },
+            )
+        before_storage = _comparison_storage_account(before_state)
+        after_storage = _comparison_storage_account(after_state)
+        if not before_storage or not after_storage:
+            raise HTTPException(
+                422,
+                {
+                    "code": "comparison_storage_unknown",
+                    "message": "Both jobs must record their result storage account.",
+                },
+            )
+        before = load_comparison_dataset(job_id, before_storage)
+        after = load_comparison_dataset(body.against_job_id, after_storage)
+        return compare_datasets(
+            job_id=job_id,
+            against_job_id=body.against_job_id,
+            before=before,
+            after=after,
+            max_items=body.max_items,
+        ).model_dump(mode="json")
+    except HTTPException:
+        raise
+    except ComparisonReadError as exc:
+        raise HTTPException(
+            503,
+            {"code": "comparison_result_unavailable", "message": sanitise(str(exc))[:300]},
+        ) from exc
+    except Exception as exc:
+        LOGGER.warning("blast_job_comparison failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            {
+                "code": "comparison_unavailable",
+                "message": f"Could not compare results: {type(exc).__name__}",
             },
         ) from exc
 

@@ -5,6 +5,7 @@ import {
   BarChart3,
   FileSearch,
   FileText,
+  GitCompareArrows,
   Settings,
   TreePine,
 } from "lucide-react";
@@ -48,6 +49,12 @@ const TABS: Array<{
     icon: <FileText size={14} strokeWidth={1.5} />,
   },
   {
+    key: "comparison",
+    label: "Comparison",
+    subtitle: "Compare this result set with another completed search",
+    icon: <GitCompareArrows size={14} strokeWidth={1.5} />,
+  },
+  {
     key: "run",
     label: "Run details",
     subtitle: "Execution timeline and cluster details",
@@ -61,6 +68,7 @@ export type BlastResultsTab =
   | "alignments"
   | "taxonomy"
   | "files"
+  | "comparison"
   | "run";
 
 const RESULT_TABS = new Set<BlastResultsTab>([
@@ -69,6 +77,7 @@ const RESULT_TABS = new Set<BlastResultsTab>([
   "alignments",
   "taxonomy",
   "files",
+  "comparison",
 ]);
 
 const RESULT_ANALYTICS_TABS = new Set<BlastResultsTab>([
@@ -76,6 +85,7 @@ const RESULT_ANALYTICS_TABS = new Set<BlastResultsTab>([
   "graphic",
   "alignments",
   "taxonomy",
+  "comparison",
 ]);
 
 export const DEFAULT_BLAST_TAB: BlastResultsTab = "descriptions";
@@ -87,6 +97,7 @@ export function resolveBlastResultsTab(value: string | null): BlastResultsTab {
     case "alignments":
     case "taxonomy":
     case "files":
+    case "comparison":
     case "run":
       return value;
     default:
