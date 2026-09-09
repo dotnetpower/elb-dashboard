@@ -42,6 +42,20 @@ Provide a **browser-only** control plane for ElasticBLAST on Azure so a research
 
 ---
 
+## 1a. Assistant Request Framing (CONTENT-FILTER HYGIENE)
+
+This repository is a software control plane for an existing search executable. Unless the user explicitly asks for scientific interpretation, treat work as application, cloud, and workflow engineering. To reduce domain-content false positives without evading safety controls:
+
+* Lead requests, progress updates, tool prompts, and subagent prompts with a concrete software anchor: file, symbol, route, test, observed error, and expected behaviour. Do not restate broad scientific background when it is not needed to modify or validate code.
+* Keep domain payloads out of chat context when possible. Refer to FASTA or sequence data by fixture path, record ID, digest, length, and format; do not paste complete sequence bodies or large database excerpts into messages, plans, issue comments, commit bodies, or subagent prompts.
+* Reuse the smallest existing synthetic fixture for tests. When only the input shape matters, use neutral placeholders and preserve software-relevant properties such as format, size, cardinality, and malformed boundaries without inferring or expanding scientific meaning.
+* Quote only the error lines and metadata needed from logs or UI payloads, and redact query bodies before relaying output.
+* If an assistant service rejects a request, do not resend the same content or disguise it. Reframe once as a narrow software-maintenance task with a concrete file, symbol, test, or error and omit nonessential domain payload. If that also fails, ask the user to start a fresh chat with only that software anchor. If scientific content is genuinely required, ask for a higher-level, non-procedural statement of the legitimate objective.
+* Do not rename domain APIs, weaken tests, or alter repository fixtures solely to avoid a refusal. Minimize assistant-transmitted context, not product correctness.
+* Provider safety policy remains authoritative. These rules minimize irrelevant context; they do not authorize filter bypasses.
+
+---
+
 ## 2. Language Policy (NON-NEGOTIABLE)
 
 * **Conversation with the user**: Korean (the user's preferred language).
