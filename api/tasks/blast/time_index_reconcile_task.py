@@ -11,7 +11,7 @@ script). Do not duplicate the upsert loop here.
 Key entry points:
   - ``reconcile_time_index`` (``@shared_task``
      ``name="api.tasks.blast.reconcile_time_index"``, scheduled by Celery beat).
-Risky contracts: Idempotent — re-running upserts the SAME immutable RowKey per
+Risky contracts: Idempotent — re-running derives the SAME immutable RowKeys per
 job, and existing rows are never rewritten. A token-owned Redis lock prevents
 old/new revisions from running the full scan together; its TTL exceeds the hard
 task limit. No-op (returns early) unless ``JOBSTATE_TIME_INDEX_ENABLED`` is set,
@@ -94,10 +94,10 @@ def _release_reconcile_lock(handle: tuple[Any, str]) -> None:
 def reconcile_time_index(self: Any) -> dict[str, Any]:
     """Run one bounded, single-flight pass that heals missing index rows.
 
-    Side effects: upserts one ``jobstateindex`` row per non-deleted ``jobstate``
-    row (read-only against ``jobstate``). Idempotent — the RowKey is derived from
-    the immutable ``owner_oid`` + ``created_at`` so a steady-state pass writes the
-    same keys and adds nothing new.
+    Side effects: creates any missing owner/global ``jobstateindex`` rows for
+    each non-deleted ``jobstate`` row (read-only against ``jobstate``).
+    Idempotent — each RowKey is derived from immutable ``owner_oid`` +
+    ``created_at`` values, so a steady-state pass performs no writes.
 
     This periodic maintenance task intentionally acknowledges on start: losing
     one pass to worker termination is safe because existing writes are
