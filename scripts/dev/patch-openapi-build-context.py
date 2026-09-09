@@ -6,7 +6,8 @@ Responsibility: Patch the sibling docker-openapi build context for dashboard run
 Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
 Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
 `_disable_warmed_cache_skip`, `_patch_canonical_merged_result_validation`,
-`_patch_result_selection_policy`, `_patch_finalizer_failure_status`,
+`_patch_partitioned_completion_fail_closed`, `_patch_result_selection_policy`,
+`_patch_finalizer_failure_status`,
 `_patch_web_blast_candidate_selection_evidence`, `_harden_openapi_runtime_ids`,
 `_patch_submit_runtime_id_priority`, `_harden_elb_scripts_configmap_reconciliation`,
 `patch_app`, `main`
@@ -555,24 +556,50 @@ def _patch_canonical_merged_result_discovery(path: Path) -> None:
         ),
         "def _list_result_files(job_info):\n",
     )
-    _insert_once(
+    _replace_once_unless_marker(
         path,
         signature,
         (
+            "def _result_partition_count(job_info):\n"
             '    exact_oracle = job_info.get("exact_oracle")\n'
-            "    result_partitions = (\n"
+            "    raw_partitions = (\n"
             '        job_info.get("db_partitions")\n'
             '        or exact_oracle.get("db_partitions", 0)\n'
             "        if isinstance(exact_oracle, dict)\n"
             '        else job_info.get("db_partitions", 0)\n'
             "    )\n"
             "    try:\n"
-            "        requires_merged_result = int(result_partitions or 0) > 1\n"
+            "        return max(0, int(raw_partitions or 0))\n"
             "    except (TypeError, ValueError):\n"
-            "        requires_merged_result = False\n"
+            "        return 0\n"
+            "\n\n" + signature
         ),
-        "requires_merged_result = int(result_partitions or 0) > 1",
+        "def _result_partition_count(job_info):",
     )
+    legacy_partition_block = (
+        '    exact_oracle = job_info.get("exact_oracle")\n'
+        "    result_partitions = (\n"
+        '        job_info.get("db_partitions")\n'
+        '        or exact_oracle.get("db_partitions", 0)\n'
+        "        if isinstance(exact_oracle, dict)\n"
+        '        else job_info.get("db_partitions", 0)\n'
+        "    )\n"
+        "    try:\n"
+        "        requires_merged_result = int(result_partitions or 0) > 1\n"
+        "    except (TypeError, ValueError):\n"
+        "        requires_merged_result = False\n"
+    )
+    desired_partition_line = "    requires_merged_result = _result_partition_count(job_info) > 1\n"
+    text = path.read_text()
+    if legacy_partition_block in text:
+        path.write_text(text.replace(legacy_partition_block, desired_partition_line, 1))
+    else:
+        _insert_once(
+            path,
+            signature,
+            desired_partition_line,
+            desired_partition_line.strip(),
+        )
     legacy_existing = (
         '    existing = job_info.get("result_files")\n'
         "    if isinstance(existing, list) and existing:\n"
@@ -736,6 +763,135 @@ def _patch_result_readiness_payloads(path: Path) -> None:
         status_anchor,
         status_insertion,
         '_status_payload["results_ready_at"] = ready_at',
+    )
+
+
+def _patch_partitioned_completion_fail_closed(path: Path) -> None:
+    """Never complete a partitioned job without its marker and canonical merge."""
+    visibility_constant = (
+        "RESULTS_VISIBILITY_GRACE_SECONDS = max(0, int(os.environ.get("
+        '"ELB_OPENAPI_RESULTS_VISIBILITY_GRACE_SECONDS", "120")))\n'
+    )
+    _insert_once(
+        path,
+        visibility_constant,
+        (
+            "PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS = max(\n"
+            "    1,\n"
+            "    int(os.environ.get(\n"
+            '        "ELB_FINALIZER_ACTIVE_DEADLINE_SECONDS", "1800"\n'
+            "    )),\n"
+            ")\n"
+        ),
+        "PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS = max(",
+    )
+    terminal_guard = (
+        '    if job.get("status") in _TERMINAL_STATES or job.get("status") == "queued":\n'
+        "        return job\n"
+    )
+    _insert_once(
+        path,
+        terminal_guard,
+        "\n    requires_canonical_merge = _result_partition_count(job) > 1\n",
+        "requires_canonical_merge = _result_partition_count(job) > 1",
+    )
+    legacy_visibility_fallback = (
+        "        if _age_seconds(seen_at) > RESULTS_VISIBILITY_GRACE_SECONDS:\n"
+        "            updates = {\n"
+        '                "status": "completed",\n'
+        '                "phase": "completed",\n'
+        '                "completed_at": _now_iso(),\n'
+        '                "last_progress_at": _now_iso(),\n'
+        "            }\n"
+        "            summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)\n"
+        "            if summary_snapshot is not None:\n"
+        '                updates["k8s_summary"] = summary_snapshot\n'
+        "            result = _update_job(job_id, **updates)\n"
+        "            _notify_terminal_transition(job_id, updates)\n"
+        "            return result\n"
+    )
+    fail_closed_visibility_fallback = (
+        "        marker_age = _age_seconds(seen_at)\n"
+        "        if (\n"
+        "            requires_canonical_merge\n"
+        "            and marker_age > PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS\n"
+        "        ):\n"
+        "            updates = {\n"
+        '                "status": "failed",\n'
+        '                "phase": "finalizer_failed",\n'
+        '                "error": "canonical merged result was not published before the finalizer deadline",\n'
+        '                "last_progress_at": _now_iso(),\n'
+        "            }\n"
+        "            summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)\n"
+        "            if summary_snapshot is not None:\n"
+        '                updates["k8s_summary"] = summary_snapshot\n'
+        "            result = _update_job(job_id, **updates)\n"
+        "            _notify_terminal_transition(job_id, updates)\n"
+        "            return result\n"
+        "        if (\n"
+        "            not requires_canonical_merge\n"
+        "            and marker_age > RESULTS_VISIBILITY_GRACE_SECONDS\n"
+        "        ):\n"
+        "            updates = {\n"
+        '                "status": "completed",\n'
+        '                "phase": "completed",\n'
+        '                "completed_at": _now_iso(),\n'
+        '                "last_progress_at": _now_iso(),\n'
+        "            }\n"
+        "            summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)\n"
+        "            if summary_snapshot is not None:\n"
+        '                updates["k8s_summary"] = summary_snapshot\n'
+        "            result = _update_job(job_id, **updates)\n"
+        "            _notify_terminal_transition(job_id, updates)\n"
+        "            return result\n"
+    )
+    _replace_once_unless_marker(
+        path,
+        legacy_visibility_fallback,
+        fail_closed_visibility_fallback,
+        "marker_age > PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS",
+    )
+    summary_completion = (
+        '        if summary.get("succeeded", 0) >= summary.get("total", 0) and summary.get("total", 0) > 0:\n'
+        "            if _list_result_files(job):\n"
+        '                updates.update({"status": "completed", "phase": "completed", "completed_at": _now_iso()})\n'
+        "            else:\n"
+        '                updates.update({"status": "running", "phase": "finalizing"})\n'
+    )
+    summary_fail_closed = (
+        '        if summary.get("succeeded", 0) >= summary.get("total", 0) and summary.get("total", 0) > 0:\n'
+        "            if requires_canonical_merge:\n"
+        '                updates.update({"status": "running", "phase": "finalizing"})\n'
+        "            elif _list_result_files(job):\n"
+        '                updates.update({"status": "completed", "phase": "completed", "completed_at": _now_iso()})\n'
+        "            else:\n"
+        '                updates.update({"status": "running", "phase": "finalizing"})\n'
+    )
+    _replace_once_unless_marker(
+        path,
+        summary_completion,
+        summary_fail_closed,
+        "            if requires_canonical_merge:\n",
+    )
+    no_summary_completion = (
+        "    else:\n"
+        "        if _list_result_files(job):\n"
+        '            updates.update({"status": "completed", "phase": "completed", "completed_at": _now_iso()})\n'
+        "        else:\n"
+        '            updates.update({"phase": "submitting"})\n'
+    )
+    no_summary_fail_closed = (
+        "    else:\n"
+        "        if not requires_canonical_merge and _list_result_files(job):\n"
+        '            updates.update({"status": "completed", "phase": "completed", "completed_at": _now_iso()})\n'
+        "        else:\n"
+        '            updates.update({"phase": "submitting"})\n'
+    )
+    _replace_once_unless_marker(
+        path,
+        no_summary_completion,
+        no_summary_fail_closed,
+        "if not requires_canonical_merge and _list_result_files(job):",
     )
 
 
@@ -1286,6 +1442,12 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         're.fullmatch(r"job-[0-9a-f]{32}", elb_job_id, re.IGNORECASE)',
         'safe_exec(["kubectl", "get", "jobs", "-l", f"elb-job-id={elb_job_id}"',
         'safe_exec(["kubectl", "get", "pods", "-l", f"elb-job-id={elb_job_id}"',
+        "def _result_partition_count(job_info):",
+        "PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS = max(",
+        "requires_canonical_merge = _result_partition_count(job) > 1",
+        "marker_age > PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS",
+        "not requires_canonical_merge",
+        "canonical merged result was not published before the finalizer deadline",
         "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
         "active_database = _exact_oracle.read_active_database(",
         "opts = _exact_oracle.preserve_or_set_search_space(",
@@ -2081,6 +2243,7 @@ def patch_app(root: Path) -> None:
         '            _status_payload["eta"] = _eta_out\n    return _status_payload\n',
     )
     _normalize_status_payload_tail(path)
+    _patch_partitioned_completion_fail_closed(path)
     _patch_result_readiness_payloads(path)
     _harden_openapi_runtime_id_consumers(path)
     _validate_openapi_runtime_policy(path)

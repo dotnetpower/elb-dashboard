@@ -135,6 +135,14 @@ from __future__ import annotations
 # values as ElasticBLAST runtime IDs so terminal webhooks carry the real
 # `job-<32hex>` identity before pod-log TTL cleanup. ACR run de9a produced
 # digest sha256:73bda8e52b754deac8558398a247eb8fe3fb5b48243413e6e8d543e73318f83f.
+# 4.53 was the first result-readiness validation image. Live inspection found
+# that its inherited 120-second visibility fallback could still complete a
+# partitioned job without the canonical merge. 4.54 makes that path fail closed:
+# the durable success marker and merged artifact are both required, and a
+# missing merge becomes finalizer_failed at the bounded 30-minute deadline. ACR
+# run de9n produced digest
+# sha256:d697254ca259840c76006efc30ddf2dee447c30857038906d9d03498cbd5f26b.
+# Tag 4.52 remains the pre-change rollback boundary; 4.53 remains diagnostic.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -162,7 +170,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.52",
+    "elb-openapi": "4.54",
 }
 
 # GitHub source repo for ACR Build Tasks.

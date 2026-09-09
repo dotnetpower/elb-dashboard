@@ -518,6 +518,7 @@ def test_patch_prefers_canonical_merged_result_and_rechecks_shard_cache(
 
     assert path.read_text() == first
     ast.parse(first)
+    assert "def _result_partition_count(job_info):" in first
     assert 'item.get("filename") == "merged_results.out.gz"' in first
     assert "requires_merged_result" in first
     assert 'if name == "merged_results.out.gz":' in first
@@ -548,6 +549,158 @@ def test_patch_prefers_canonical_merged_result_and_rechecks_shard_cache(
             "listed_names": ["batch_1.out.gz", "merged_results.out.gz"],
         }
     ) == [merged]
+
+
+def test_patch_partitioned_completion_requires_marker_and_merge(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "RESULTS_VISIBILITY_GRACE_SECONDS = max(0, int(os.environ.get("
+        '"ELB_OPENAPI_RESULTS_VISIBILITY_GRACE_SECONDS", "120")))\n'
+        "\n"
+        "def _result_partition_count(job_info):\n"
+        '    return int(job_info.get("db_partitions", 0) or 0)\n'
+        "\n"
+        "def _refresh_job_status(job_id):\n"
+        "    with _jobs_lock:\n"
+        "        job = dict(_jobs.get(job_id, {}))\n"
+        "    if not job:\n"
+        "        return None\n"
+        '    if job.get("status") in _TERMINAL_STATES or job.get("status") == "queued":\n'
+        "        return job\n"
+        "\n"
+        "    elb_job_id = _effective_elb_job_id(job)\n"
+        '    marker_results_url = str(job.get("results", "")).rstrip("/")\n'
+        "    marker = _job_marker_phase(marker_results_url)\n"
+        '    if marker == "failed":\n'
+        '        return _update_job(job_id, status="failed", phase="failed")\n'
+        '    if marker == "completed":\n'
+        "        if _list_result_files(job):\n"
+        "            updates = {\n"
+        '                "status": "completed",\n'
+        '                "phase": "completed",\n'
+        '                "completed_at": _now_iso(),\n'
+        '                "last_progress_at": _now_iso(),\n'
+        "            }\n"
+        "            summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)\n"
+        "            if summary_snapshot is not None:\n"
+        '                updates["k8s_summary"] = summary_snapshot\n'
+        "            result = _update_job(job_id, **updates)\n"
+        "            _notify_terminal_transition(job_id, updates)\n"
+        "            return result\n"
+        '        seen_at = job.get("success_marker_seen_at") or _now_iso()\n'
+        "        if _age_seconds(seen_at) > RESULTS_VISIBILITY_GRACE_SECONDS:\n"
+        "            updates = {\n"
+        '                "status": "completed",\n'
+        '                "phase": "completed",\n'
+        '                "completed_at": _now_iso(),\n'
+        '                "last_progress_at": _now_iso(),\n'
+        "            }\n"
+        "            summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)\n"
+        "            if summary_snapshot is not None:\n"
+        '                updates["k8s_summary"] = summary_snapshot\n'
+        "            result = _update_job(job_id, **updates)\n"
+        "            _notify_terminal_transition(job_id, updates)\n"
+        "            return result\n"
+        "        return _update_job(\n"
+        '            job_id, status="running", phase="finalizing",\n'
+        "            success_marker_seen_at=seen_at, last_progress_at=_now_iso(),\n"
+        "        )\n"
+        "\n"
+        "    summary = _k8s_job_summary(elb_job_id)\n"
+        "    stuck_reason = _k8s_pod_stuck_reason(elb_job_id)\n"
+        '    updates = {"k8s_summary": summary}\n'
+        "    if stuck_reason:\n"
+        '        return _update_job(job_id, status="failed", phase="stuck_cancelled")\n'
+        '    if summary.get("finalizer_failed_terminal"):\n'
+        '        updates.update({"status": "failed", "phase": "finalizer_failed"})\n'
+        '    elif summary.get("submit_failed_terminal"):\n'
+        '        updates.update({"status": "failed", "phase": "submit_failed"})\n'
+        '    elif summary.get("failed_terminal"):\n'
+        '        updates.update({"status": "failed", "phase": "blast_failed"})\n'
+        '    elif summary.get("total", 0) > 0:\n'
+        '        if summary.get("succeeded", 0) >= summary.get("total", 0) '
+        'and summary.get("total", 0) > 0:\n'
+        "            if _list_result_files(job):\n"
+        '                updates.update({"status": "completed", "phase": "completed", '
+        '"completed_at": _now_iso()})\n'
+        "            else:\n"
+        '                updates.update({"status": "running", "phase": "finalizing"})\n'
+        '        elif summary.get("active", 0) > 0:\n'
+        '            updates.update({"status": "running", "phase": "running"})\n'
+        "        else:\n"
+        '            updates.update({"status": "running", "phase": "pending"})\n'
+        "    else:\n"
+        "        if _list_result_files(job):\n"
+        '            updates.update({"status": "completed", "phase": "completed", '
+        '"completed_at": _now_iso()})\n'
+        "        else:\n"
+        '            updates.update({"phase": "submitting"})\n'
+        "    return _update_job(job_id, **updates)\n"
+    )
+
+    module._patch_partitioned_completion_fail_closed(path)
+    first = path.read_text()
+    module._patch_partitioned_completion_fail_closed(path)
+
+    assert path.read_text() == first
+    ast.parse(first)
+    assert "PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS" in first
+    assert "requires_canonical_merge = _result_partition_count(job) > 1" in first
+    assert '"phase": "finalizer_failed"' in first
+
+    state: dict[str, Any] = {
+        "age": 121,
+        "files": [],
+        "marker": "completed",
+        "summary": {},
+    }
+    jobs = {
+        "partitioned": {"status": "running", "db_partitions": 10, "results": "r"},
+        "single": {"status": "running", "db_partitions": 1, "results": "r"},
+    }
+
+    def update(job_id: str, **updates: Any) -> dict[str, Any]:
+        jobs[job_id].update(updates)
+        return dict(jobs[job_id])
+
+    namespace: dict[str, Any] = {
+        "os": __import__("os"),
+        "_jobs": jobs,
+        "_jobs_lock": __import__("contextlib").nullcontext(),
+        "_TERMINAL_STATES": {"completed", "failed"},
+        "_effective_elb_job_id": lambda job: str(job.get("job_id") or "runtime"),
+        "_job_marker_phase": lambda _url: state["marker"],
+        "_list_result_files": lambda _job: state["files"],
+        "_age_seconds": lambda _seen: state["age"],
+        "_now_iso": lambda: "now",
+        "_snapshot_k8s_summary_for_terminal": lambda *_args: None,
+        "_update_job": update,
+        "_notify_terminal_transition": lambda *_args: None,
+        "_k8s_job_summary": lambda _job_id: state["summary"],
+        "_k8s_pod_stuck_reason": lambda _job_id: None,
+    }
+    exec(first, namespace)  # noqa: S102 - generated temporary fixture code.
+    refresh = namespace["_refresh_job_status"]
+
+    assert refresh("partitioned")["phase"] == "finalizing"
+    assert refresh("single")["status"] == "completed"
+
+    jobs["partitioned"].update(status="running", phase="finalizing")
+    state["age"] = 1801
+    failed = refresh("partitioned")
+    assert failed["status"] == "failed"
+    assert failed["phase"] == "finalizer_failed"
+
+    jobs["partitioned"].update(status="running", phase="running")
+    state.update(
+        marker=None,
+        files=[{"filename": "merged_results.out.gz"}],
+        summary={"total": 10, "succeeded": 10},
+    )
+    held = refresh("partitioned")
+    assert held["status"] == "running"
+    assert held["phase"] == "finalizing"
 
 
 def test_patch_allows_only_canonical_merged_result_through_blob_path_guard(

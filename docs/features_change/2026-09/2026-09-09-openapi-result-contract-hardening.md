@@ -26,6 +26,9 @@ announcement did not make that exact-versus-diverse boundary sufficiently explic
 ## User-facing change
 
 - A partitioned job does not become `completed` until `merged_results.out.gz` is discoverable.
+- The legacy 120-second result-list visibility fail-open remains available only to non-partitioned
+  jobs. A partitioned job with a success marker but no canonical merge stays `finalizing` and
+  becomes `failed` / `finalizer_failed` at the 30-minute finalizer deadline.
 - Successful status payloads expose `results_ready`, `results_ready_at`, and `merged_at` for
   partitioned jobs. Clients wait for `results_ready=true` instead of using a fixed post-completion
   retry window.
@@ -77,7 +80,7 @@ announcement did not make that exact-versus-diverse boundary sufficiently explic
 - Focused backend contract sweep: 686 passed, covering canonical completion, readiness fields,
   active metadata, typed search space, selection policy, generated source, finalizer templates,
   Service Bus parity, artifact ETag races, and bounded reconciliation.
-- Full backend suite: 5,792 passed, 5 environment-dependent evidence checks skipped. Full frontend
+- Full backend suite: 5,793 passed, 5 environment-dependent evidence checks skipped. Full frontend
   suite: 1,023 passed across 116 files. API Reference spec tests: 5 passed.
 - The patcher applied twice, compiled, and passed all 113 `docker-openapi` tests against a temporary
   clone of sibling source `352a1f4c` using its declared runtime and test dependencies.
@@ -87,6 +90,36 @@ announcement did not make that exact-versus-diverse boundary sufficiently explic
 - Local host-mode smoke passed 27/27 endpoints. Playwright rendered `/docs` with no console or page
   errors at 1440 x 1000 and 390 x 844; both viewports had no horizontal overflow or clipped
   interactive text. Desktop and mobile screenshots were captured in the validation session.
-- The production investigation was read-only. No job was submitted, no Azure resource was started,
-  no configuration was changed, and no deployment was performed. The OpenAPI runtime source change
-  follows the normal immutable image build-and-pin release flow rather than overwriting tag `4.52`.
+- The initial production investigation was read-only. Live validation of `elb-openapi:4.53` caught
+  an inherited partitioned-result fail-open before acceptance. The corrected runtime targets the
+  new immutable `elb-openapi:4.54` image; deployed tag `4.52` remains a rollback boundary and
+  `4.53` is retained only as diagnostic build evidence.
+- ACR run `de9n` built `elb-openapi:4.54` at digest
+  `sha256:d697254ca259840c76006efc30ddf2dee447c30857038906d9d03498cbd5f26b` from
+  the twice-applied patched sibling context. The isolated Python 3.11 sibling runtime passed all
+  113 tests. AKS Deployment generation 53 reached 1/1 Ready and Available with zero pod restarts;
+  the running pod image ID matched the ACR digest. ACR was restored to
+  `publicNetworkAccess=Disabled` and `defaultAction=Deny` after the build.
+- Two naturally arriving ten-partition canaries (`0aef87be3aad`, `58d204b84b23`) completed with
+  `results_ready=true`, `results_ready_at`, and `merged_at`. Two concurrent ten-partition canaries
+  (`e44142a0a445`, `fc71278292d3`) remained `running` / `finalizing` after all ten shard Jobs
+  succeeded while the canonical result was absent, then both transitioned to `completed` only when
+  `results_ready=true` and `merged_at` appeared. The completed result endpoint returned HTTP 206
+  for a range probe while the finalizing result endpoint returned HTTP 404.
+- An isolated call to the state machine inside the deployed `4.54` image verified the failure
+  boundary without altering a real job: a partitioned success marker without a canonical merge
+  remained `running` / `finalizing` at 121 seconds and became `failed` / `finalizer_failed` at
+  1,801 seconds.
+- ACR run `de9p` built the matching control-plane API image at digest
+  `sha256:f7eb1011975ee1ec411288879bc9cb60020cd255f27de291d3f6f0dca867dc33`.
+  The bundled Container App converged api, worker, and beat on that digest; revision
+  `ca-elb-dashboard--env-beat-1788971496-6223` reached Running, and `/api/health/ready` reported
+  Redis, managed identity, terminal, and Storage healthy.
+- The one-shot OpenAPI deploy task stopped before manifest mutation when the interactive caller
+  lacked `Microsoft.Authorization/roleAssignments/write` to reapply existing Workload Identity
+  roles. The live Deployment already matched manifest revision 6 and retained its service account,
+  client identity, Service, and 1/1 Ready state, so the recovery changed only the `openapi`
+  container image after verifying the ACR digest. No role or network configuration was changed.
+- From deployment start at 15:35 UTC through final validation, Container App api/worker/beat logs
+  and the OpenAPI pod had no `ERROR`, `CRITICAL`, traceback, or unexpected-task entries. App
+  Insights returned zero exceptions, severity 3+ traces, and HTTP 5xx requests for the same window.
