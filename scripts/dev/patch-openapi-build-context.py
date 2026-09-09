@@ -4,7 +4,8 @@
 
 Responsibility: Patch the sibling docker-openapi build context for dashboard runtime policy
 Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
-Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
+Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`,
+`_ensure_reference_context_dependency`, `patch_dockerfile`,
 `_disable_warmed_cache_skip`, `_patch_canonical_merged_result_validation`,
 `_patch_partitioned_completion_fail_closed`, `_patch_result_selection_policy`,
 `_patch_finalizer_failure_status`,
@@ -122,13 +123,38 @@ def _copy_app_overlay(root: Path) -> None:
     ``main.py`` makes their imports resolve at runtime.
     """
     project_root = Path(__file__).resolve().parents[2]
-    for name in ("eta.py", "exact_oracle.py"):
+    for name in ("eta.py", "exact_oracle.py", "reference_context.py"):
         src = project_root / "scripts" / "dev" / "openapi-overlays" / name
         if not src.is_file():
             raise RuntimeError(f"missing OpenAPI overlay: {src}")
         dest = root / "app" / name
         if not dest.exists() or dest.read_bytes() != src.read_bytes():
             dest.write_bytes(src.read_bytes())
+
+
+def _ensure_reference_context_dependency(root: Path) -> None:
+    """Pin the hardened XML parser used by the reference-context overlay."""
+    path = root / "app" / "requirements.txt"
+    lines = path.read_text().splitlines()
+    operators = ("==", ">=", "<=", "~=", "!=", ">", "<", "[", " @", ";")
+
+    def is_defusedxml_requirement(line: str) -> bool:
+        requirement = line.split("#", 1)[0].strip().lower()
+        return requirement == "defusedxml" or any(
+            requirement.startswith(f"defusedxml{operator}") for operator in operators
+        )
+
+    matches = [index for index, line in enumerate(lines) if is_defusedxml_requirement(line)]
+    if len(matches) > 1:
+        raise RuntimeError(f"duplicate defusedxml requirements in {path}")
+    pinned = "defusedxml==0.7.1"
+    if matches:
+        lines[matches[0]] = pinned
+    else:
+        lines.append(pinned)
+    desired = "\n".join(lines) + "\n"
+    if path.read_text() != desired:
+        path.write_text(desired)
 
 
 def _patch_external_soft_masking(root: Path) -> None:
@@ -195,7 +221,7 @@ def _patch_external_soft_masking(root: Path) -> None:
         ),
         'parts.append("-searchsp " + str(opts.db_effective_search_space))',
     )
-    _replace_once(
+    _replace_once_unless_marker(
         schemas,
         "class ExternalBlastOptions(BaseModel):\n",
         (
@@ -208,6 +234,7 @@ def _patch_external_soft_masking(root: Path) -> None:
             "    result_database_letters: int = Field(..., ge=1)\n\n\n"
             "class ExternalBlastOptions(BaseModel):\n"
         ),
+        "class WebBlastStatisticalContext(BaseModel):",
     )
     _insert_once(
         schemas,
@@ -306,7 +333,9 @@ def _patch_external_soft_masking(root: Path) -> None:
         raise RuntimeError("external soft-masking schema patch is missing or duplicated")
     if schema_text.count("db_effective_search_space: Optional[int]") != 2:
         raise RuntimeError("search-space schema patches are missing or duplicated")
-    if schema_text.count("result_selection_policy:") != 1:
+    if schema_text.count(
+        '    result_selection_policy: Literal["native_top_n", "diversity_aware"]'
+    ) != 1:
         raise RuntimeError("result-selection policy schema patch is missing or duplicated")
     if schema_text.count("Optional measured single-query taxonomy-filtered statistics") != 1:
         raise RuntimeError("direct Web statistics schema patch is missing or duplicated")
@@ -326,6 +355,245 @@ def _patch_external_soft_masking(root: Path) -> None:
         raise RuntimeError("external search-space bridge patch is missing or duplicated")
     if main_text.count("req.options.web_blast_statistical_context") != 4:
         raise RuntimeError("external Web BLAST statistics bridge patch is missing or duplicated")
+
+
+def _patch_openapi_response_schemas(root: Path) -> None:
+    """Publish additive readiness, selection, and reference-resolver schemas."""
+    schemas = root / "app" / "schemas.py"
+    main = root / "app" / "main.py"
+    _replace_once_unless_marker(
+        schemas,
+        "class ExternalBlastOptions(BaseModel):\n",
+        (
+            "class WebBlastStatisticalContextRequest(BaseModel):\n"
+            '    rid: str = Field(..., min_length=8, max_length=16, pattern=r"^[A-Z0-9]{8,16}$")\n'
+            "    query_fasta: str = Field(..., min_length=1, max_length=10_000_000)\n"
+            '    db: Literal["core_nt"] = "core_nt"\n'
+            "    taxid: Optional[int] = Field(None, ge=1, le=2_147_483_647)\n"
+            "    is_inclusive: Optional[bool] = Field(\n"
+            "        None,\n"
+            '        description="With taxid, true includes the taxon and false excludes it; omitted defaults to true.",\n'
+            "    )\n"
+            "\n\n"
+            "class WebBlastStatisticalContextResponse(BaseModel):\n"
+            '    status: Literal["resolved"]\n'
+            "    rid: str\n"
+            '    database: Literal["core_nt"]\n'
+            "    reference_query_id: str\n"
+            "    submitted_query_id: str\n"
+            "    query_length: int = Field(..., ge=1)\n"
+            "    active_source_version: str\n"
+            "    web_blast_statistical_context: WebBlastStatisticalContext\n"
+            "    query_effective_search_spaces: list[int]\n"
+            "    expected_filter: dict[str, Any]\n"
+            "    evidence: dict[str, Any]\n"
+            "    warnings: list[str]\n"
+            "\n\n"
+            "class JobStatusResponse(BaseModel):\n"
+            '    model_config = {"extra": "allow"}\n'
+            "\n"
+            "    job_id: str\n"
+            "    status: str\n"
+            "    phase: Optional[str] = None\n"
+            "    results_ready: Optional[bool] = None\n"
+            "    results_ready_at: Optional[str] = None\n"
+            "    merged_at: Optional[str] = None\n"
+            "    db_partitions: Optional[int] = Field(None, ge=0)\n"
+            '    result_selection_policy: Optional[Literal["native_top_n", "diversity_aware"]] = None\n'
+            "\n\n"
+            "class JobListResponse(BaseModel):\n"
+            '    model_config = {"extra": "allow"}\n'
+            "\n"
+            "    jobs: list[JobStatusResponse]\n"
+            "    count: int = Field(..., ge=0)\n"
+            "    next_cursor: Optional[str] = None\n"
+            "    has_more: bool = False\n"
+            "\n\n"
+            "class ExternalBlastOptions(BaseModel):\n"
+        ),
+        "class WebBlastStatisticalContextRequest(BaseModel):",
+    )
+    _insert_once(
+        main,
+        "    JobSubmitRequest,\n",
+        (
+            "    JobListResponse,\n"
+            "    JobStatusResponse,\n"
+            "    WebBlastStatisticalContextRequest,\n"
+            "    WebBlastStatisticalContextResponse,\n"
+        ),
+        "    WebBlastStatisticalContextResponse,\n",
+    )
+    _replace_once_unless_marker(
+        main,
+        '@v1.get("/jobs", tags=["Jobs"], summary="List all jobs")\n',
+        (
+            '@v1.get(\n'
+            '    "/jobs",\n'
+            '    tags=["Jobs"],\n'
+            '    summary="List all jobs",\n'
+            '    response_model=JobListResponse,\n'
+            ')\n'
+        ),
+        "response_model=JobListResponse",
+    )
+    _replace_once_unless_marker(
+        main,
+        '@v1.get("/jobs/{job_id}/status", tags=["Jobs"], summary="Get job status")\n',
+        (
+            '@v1.get(\n'
+            '    "/jobs/{job_id}/status",\n'
+            '    tags=["Jobs"],\n'
+            '    summary="Get job status",\n'
+            '    response_model=JobStatusResponse,\n'
+            ')\n'
+        ),
+        "response_model=JobStatusResponse",
+    )
+    _replace_once_unless_marker(
+        main,
+        '@external_v1.post("/submit", status_code=202, summary="Submit an external ElasticBLAST job")\n',
+        (
+            '@external_v1.post(\n'
+            '    "/submit",\n'
+            '    status_code=202,\n'
+            '    summary="Submit an external ElasticBLAST job",\n'
+            '    response_model=JobStatusResponse,\n'
+            ')\n'
+        ),
+        'summary="Submit an external ElasticBLAST job",\n    response_model=JobStatusResponse,',
+    )
+    _replace_once_unless_marker(
+        main,
+        '@external_v1.get("/jobs/{job_id}", summary="Get external ElasticBLAST job status")\n',
+        (
+            '@external_v1.get(\n'
+            '    "/jobs/{job_id}",\n'
+            '    summary="Get external ElasticBLAST job status",\n'
+            '    response_model=JobStatusResponse,\n'
+            ')\n'
+        ),
+        'summary="Get external ElasticBLAST job status",\n    response_model=JobStatusResponse,',
+    )
+
+
+def _patch_reference_context_endpoint(root: Path) -> None:
+    """Add the authenticated RID-to-statistical-context resolver endpoint."""
+    main = root / "app" / "main.py"
+    _insert_once(
+        main,
+        "from util import run_cancellable, safe_exec\n",
+        "import reference_context as _reference_context\n",
+        "import reference_context as _reference_context",
+    )
+    submit_anchor = (
+        "# ── Jobs — Submit ──────────────────────────────────────────────────────────\n"
+    )
+    route = (
+        '@v1.post(\n'
+        '    "/web-blast/statistical-context",\n'
+        '    tags=["Jobs"],\n'
+        '    summary="Resolve Web BLAST statistical context from an NCBI RID",\n'
+        '    response_model=WebBlastStatisticalContextResponse,\n'
+        ')\n'
+        "def resolve_web_blast_statistical_context(\n"
+        "    req: WebBlastStatisticalContextRequest,\n"
+        ") -> dict[str, Any]:\n"
+        "    if req.taxid is None and req.is_inclusive is not None:\n"
+        '        raise HTTPException(422, "is_inclusive requires taxid")\n'
+        "    if _exact_oracle is None:\n"
+        '        raise HTTPException(503, "Active database metadata support is unavailable")\n'
+        "    try:\n"
+        "        active_database = _exact_oracle.read_active_database(\n"
+        "            blob_base=_blob_base(),\n"
+        "            db_name=req.db,\n"
+        "            token=_storage_oauth_token(),\n"
+        "        )\n"
+        "    except Exception as exc:\n"
+        "        raise HTTPException(\n"
+        "            503,\n"
+        '            detail={"code": "active_database_unavailable", "message": "Active database generation metadata is unavailable", "retryable": True},\n'
+        "        ) from exc\n"
+        "    try:\n"
+        "        return _reference_context.resolve_reference_context(\n"
+        "            rid=req.rid,\n"
+        "            query_fasta=req.query_fasta,\n"
+        "            active_total_letters=active_database.total_letters,\n"
+        "            active_total_sequences=active_database.total_sequences,\n"
+        "            active_source_version=active_database.source_version,\n"
+        "            taxid=req.taxid,\n"
+        "            is_inclusive=(True if req.taxid is not None and req.is_inclusive is None else req.is_inclusive),\n"
+        "        )\n"
+        "    except _reference_context.ReferenceContextNotReady as exc:\n"
+        "        raise HTTPException(\n"
+        "            409,\n"
+        '            detail={"code": "reference_not_ready", "message": str(exc), "retryable": True},\n'
+        '            headers={"Retry-After": "30"},\n'
+        "        ) from exc\n"
+        "    except _reference_context.ReferenceContextUnavailable as exc:\n"
+        "        raise HTTPException(\n"
+        "            503,\n"
+        '            detail={"code": "reference_unavailable", "message": str(exc), "retryable": True},\n'
+        "        ) from exc\n"
+        "    except _reference_context.ReferenceContextError as exc:\n"
+        "        raise HTTPException(\n"
+        "            422,\n"
+        '            detail={"code": "reference_invalid", "message": str(exc), "retryable": False},\n'
+        "        ) from exc\n"
+        "\n\n"
+    )
+    legacy_lookup_boundary = (
+        "            token=_storage_oauth_token(),\n"
+        "        )\n"
+        "        return _reference_context.resolve_reference_context(\n"
+    )
+    hardened_lookup_boundary = (
+        "            token=_storage_oauth_token(),\n"
+        "        )\n"
+        "    except Exception as exc:\n"
+        "        raise HTTPException(\n"
+        "            503,\n"
+        '            detail={"code": "active_database_unavailable", "message": "Active database generation metadata is unavailable", "retryable": True},\n'
+        "        ) from exc\n"
+        "    try:\n"
+        "        return _reference_context.resolve_reference_context(\n"
+    )
+    main_text = main.read_text()
+    if (
+        "def resolve_web_blast_statistical_context(" in main_text
+        and '"active_database_unavailable"' not in main_text
+    ):
+        _replace_once(main, legacy_lookup_boundary, hardened_lookup_boundary)
+    _insert_once(
+        main,
+        submit_anchor,
+        route,
+        'def resolve_web_blast_statistical_context(',
+    )
+    metadata_error = (
+        "    except Exception as exc:\n"
+        "        raise HTTPException(\n"
+        "            503,\n"
+        '            detail={"code": "active_database_unavailable", "message": "Active database generation metadata is unavailable", "retryable": True},\n'
+        "        ) from exc\n"
+    )
+    metadata_error_with_log = (
+        "    except Exception as exc:\n"
+        "        logger.warning(\n"
+        '            "reference context active database metadata unavailable error_type=%s",\n'
+        "            type(exc).__name__,\n"
+        "        )\n"
+        "        raise HTTPException(\n"
+        "            503,\n"
+        '            detail={"code": "active_database_unavailable", "message": "Active database generation metadata is unavailable", "retryable": True},\n'
+        "        ) from exc\n"
+    )
+    _replace_once_unless_marker(
+        main,
+        metadata_error,
+        metadata_error_with_log,
+        "reference context active database metadata unavailable error_type=%s",
+    )
 
 
 def _replace_stale_core_nt_search_space_fallback(path: Path) -> None:
@@ -1448,6 +1716,12 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "marker_age > PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS",
         "not requires_canonical_merge",
         "canonical merged result was not published before the finalizer deadline",
+        "import reference_context as _reference_context",
+        'def resolve_web_blast_statistical_context(',
+        "reference context active database metadata unavailable error_type=%s",
+        "response_model=WebBlastStatisticalContextResponse",
+        "response_model=JobListResponse",
+        "response_model=JobStatusResponse",
         "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
         "active_database = _exact_oracle.read_active_database(",
         "opts = _exact_oracle.preserve_or_set_search_space(",
@@ -1490,7 +1764,7 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         for child in ast.iter_child_nodes(parent):
             parents[child] = parent
     expected_call_counts = {
-        "read_active_database": 2,
+        "read_active_database": 3,
         "preserve_or_set_search_space": 1,
         "prepare_web_blast_statistics": 1,
         "attach_web_blast_statistics": 1,
@@ -1774,7 +2048,10 @@ def patch_dockerfile(root: Path) -> None:
 
 def patch_app(root: Path) -> None:
     _copy_app_overlay(root)
+    _ensure_reference_context_dependency(root)
     _patch_external_soft_masking(root)
+    _patch_openapi_response_schemas(root)
+    _patch_reference_context_endpoint(root)
     path = root / "app" / "main.py"
     _patch_canonical_merged_result_validation(root / "app" / "helpers.py")
     _patch_terminal_webhook_runtime_id(path)

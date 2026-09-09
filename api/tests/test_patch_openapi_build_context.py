@@ -7,7 +7,8 @@ Key entry points: `test_patch_dockerfile_asserts_ttl_in_all_runtime_copies`,
 `test_patch_removes_obsolete_precise_search_space_guard`,
 `test_patch_app_reconciles_elb_scripts_by_content`,
 `test_patch_allows_only_canonical_merged_result_through_blob_path_guard`,
-`test_patch_submit_runtime_id_rejects_noncanonical_correlation`.
+`test_patch_submit_runtime_id_rejects_noncanonical_correlation`,
+`test_patched_reference_context_route_enforces_auth_and_response_model`.
 Risky contracts: The assertions must cover source, system Python, and venv templates; OpenAPI
 submits must never trust historical warmup Jobs or name-only ConfigMap checks as node-local
 cache-presence proof. Missing precise search space must reach the active-generation fallback. Result
@@ -21,6 +22,7 @@ import ast
 import importlib.util
 import json
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -254,7 +256,7 @@ def test_patch_app_disables_warmed_cache_skip(tmp_path: Path) -> None:
     )
 
 
-def test_copy_app_overlay_includes_exact_oracle(tmp_path: Path) -> None:
+def test_copy_app_overlay_includes_runtime_modules(tmp_path: Path) -> None:
     module = _load_module()
     (tmp_path / "app").mkdir()
 
@@ -264,6 +266,35 @@ def test_copy_app_overlay_includes_exact_oracle(tmp_path: Path) -> None:
     exact = tmp_path / "app" / "exact_oracle.py"
     assert exact.is_file()
     assert "def attach_db_order_oracle(" in exact.read_text()
+    reference = tmp_path / "app" / "reference_context.py"
+    assert reference.is_file()
+    assert "def resolve_reference_context(" in reference.read_text()
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "fastapi\nrequests>=2.31.0\n",
+        "fastapi\ndefusedxml>=0.6\nrequests>=2.31.0\n",
+    ],
+)
+def test_reference_context_dependency_is_pinned_once(
+    tmp_path: Path,
+    existing: str,
+) -> None:
+    module = _load_module()
+    app = tmp_path / "app"
+    app.mkdir()
+    requirements = app / "requirements.txt"
+    requirements.write_text(existing)
+
+    module._ensure_reference_context_dependency(tmp_path)
+    first = requirements.read_text()
+    module._ensure_reference_context_dependency(tmp_path)
+
+    assert requirements.read_text() == first
+    assert first.count("defusedxml==0.7.1") == 1
+    assert "defusedxml>=0.6" not in first
 
 
 def test_patch_source_wires_exact_oracle_before_dispatch() -> None:
@@ -378,6 +409,345 @@ def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
                 db_effective_search_space=456,
             )
         )
+
+
+def test_patch_publishes_reference_and_job_response_schemas(tmp_path: Path) -> None:
+    module = _load_module()
+    app = tmp_path / "app"
+    app.mkdir()
+    schemas = app / "schemas.py"
+    schemas.write_text(
+        "from typing import Any, Literal, Optional\n"
+        "from pydantic import BaseModel, Field\n\n"
+        "class WebBlastStatisticalContext(BaseModel):\n"
+        "    filtered_database_letters: int\n\n"
+        "class ExternalBlastOptions(BaseModel):\n"
+        "    pass\n"
+    )
+    main = app / "main.py"
+    main.write_text(
+        "from schemas import (\n"
+        "    JobSubmitRequest,\n"
+        ")\n"
+        "from util import run_cancellable, safe_exec\n\n"
+        "# ── Jobs — Submit ──────────────────────────────────────────────────────────\n"
+        '@v1.post("/jobs", tags=["Jobs"], status_code=202, summary="Submit a BLAST search",\n'
+        "          openapi_extra={})\n"
+        "def submit_job(req):\n"
+        "    return {}\n\n"
+        '@v1.get("/jobs", tags=["Jobs"], summary="List all jobs")\n'
+        "async def list_jobs():\n"
+        "    return {}\n\n"
+        '@v1.get("/jobs/{job_id}/status", tags=["Jobs"], summary="Get job status")\n'
+        "async def get_job_status(job_id):\n"
+        "    return {}\n\n"
+        '@external_v1.post("/submit", status_code=202, '
+        'summary="Submit an external ElasticBLAST job")\n'
+        "def external_submit(req):\n"
+        "    return {}\n\n"
+        '@external_v1.get("/jobs/{job_id}", '
+        'summary="Get external ElasticBLAST job status")\n'
+        "async def external_job_status(job_id):\n"
+        "    return {}\n"
+    )
+
+    module._patch_openapi_response_schemas(tmp_path)
+    module._patch_reference_context_endpoint(tmp_path)
+    first_schema = schemas.read_text()
+    first_main = main.read_text()
+    module._patch_openapi_response_schemas(tmp_path)
+    module._patch_reference_context_endpoint(tmp_path)
+
+    assert schemas.read_text() == first_schema
+    assert main.read_text() == first_main
+    assert "class WebBlastStatisticalContextRequest(BaseModel):" in first_schema
+    assert 'pattern=r"^[A-Z0-9]{8,16}$"' in first_schema
+    assert "omitted defaults to true" in first_schema
+    assert "class WebBlastStatisticalContextResponse(BaseModel):" in first_schema
+    assert "class JobStatusResponse(BaseModel):" in first_schema
+    assert "class JobListResponse(BaseModel):" in first_schema
+    assert "results_ready: Optional[bool] = None" in first_schema
+    assert "merged_at: Optional[str] = None" in first_schema
+    assert 'result_selection_policy: Optional[Literal["native_top_n", "diversity_aware"]]' in (
+        first_schema
+    )
+    assert '"/web-blast/statistical-context"' in first_main
+    assert "response_model=WebBlastStatisticalContextResponse" in first_main
+    assert "response_model=JobListResponse" in first_main
+    assert first_main.count("response_model=JobStatusResponse") == 3
+    assert "import reference_context as _reference_context" in first_main
+    ast.parse(first_schema)
+    ast.parse(first_main)
+
+
+def test_patched_reference_context_route_enforces_auth_and_response_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    module = _load_module()
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "schemas.py").write_text(
+        "from typing import Any, Literal, Optional\n"
+        "from pydantic import BaseModel, Field\n\n"
+        "class JobSubmitRequest(BaseModel):\n"
+        "    pass\n\n"
+        "class WebBlastStatisticalContext(BaseModel):\n"
+        "    filtered_database_letters: int\n"
+        "    filtered_database_sequences: int\n"
+        "    length_adjustment: int\n"
+        "    effective_search_space: int\n"
+        "    scoring_search_space: int\n"
+        "    result_database_letters: int\n\n"
+        "class WebBlastStatisticalContextRequest(BaseModel):\n"
+        '    rid: str = Field(..., pattern=r"^[A-Z0-9]{8,16}$")\n'
+        "    query_fasta: str\n"
+        '    db: Literal["core_nt"] = "core_nt"\n'
+        "    taxid: Optional[int] = None\n"
+        "    is_inclusive: Optional[bool] = None\n\n"
+        "class WebBlastStatisticalContextResponse(BaseModel):\n"
+        '    status: Literal["resolved"]\n'
+        "    rid: str\n"
+        '    database: Literal["core_nt"]\n'
+        "    reference_query_id: str\n"
+        "    submitted_query_id: str\n"
+        "    query_length: int\n"
+        "    active_source_version: str\n"
+        "    web_blast_statistical_context: WebBlastStatisticalContext\n"
+        "    query_effective_search_spaces: list[int]\n"
+        "    expected_filter: dict[str, Any]\n"
+        "    evidence: dict[str, Any]\n"
+        "    warnings: list[str]\n"
+    )
+    (app_dir / "util.py").write_text(
+        "def run_cancellable(*_args, **_kwargs):\n"
+        "    return None\n\n"
+        "def safe_exec(*_args, **_kwargs):\n"
+        "    return None\n"
+    )
+    (app_dir / "reference_context.py").write_text(
+        "class ReferenceContextError(ValueError):\n"
+        "    pass\n\n"
+        "class ReferenceContextNotReady(ReferenceContextError):\n"
+        "    pass\n\n"
+        "class ReferenceContextUnavailable(RuntimeError):\n"
+        "    pass\n\n"
+        "def resolve_reference_context(**_kwargs):\n"
+        "    raise AssertionError('resolver must be replaced by the test')\n"
+    )
+    main = app_dir / "main.py"
+    main.write_text(
+        "import logging\n"
+        "from typing import Any, Optional\n"
+        "from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException\n"
+        "from schemas import (\n"
+        "    JobSubmitRequest,\n"
+        "    WebBlastStatisticalContextRequest,\n"
+        "    WebBlastStatisticalContextResponse,\n"
+        ")\n"
+        "from util import run_cancellable, safe_exec\n\n"
+        'logger = logging.getLogger("test-openapi")\n'
+        "app = FastAPI()\n"
+        '_API_TOKEN = "test-token"\n\n'
+        "def require_api_token(\n"
+        '    token: Optional[str] = Header(None, alias="X-ELB-API-Token"),\n'
+        ") -> None:\n"
+        "    if token != _API_TOKEN:\n"
+        '        raise HTTPException(401, "missing or invalid token")\n\n'
+        'v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_api_token)])\n'
+        "_exact_oracle = None\n\n"
+        "def _blob_base() -> str:\n"
+        '    return "https://example.invalid/container"\n\n'
+        "def _storage_oauth_token() -> str:\n"
+        '    return "mock-token"\n\n'
+        "# ── Jobs — Submit ──────────────────────────────────────────────────────────\n"
+        "app.include_router(v1)\n"
+    )
+
+    module._patch_reference_context_endpoint(tmp_path)
+    monkeypatch.syspath_prepend(str(app_dir))
+    for name in ("schemas", "util", "reference_context", "patched_openapi_main"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    spec = importlib.util.spec_from_file_location("patched_openapi_main", main)
+    assert spec is not None and spec.loader is not None
+    generated = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, generated)
+    spec.loader.exec_module(generated)
+
+    generated._exact_oracle = SimpleNamespace(
+        read_active_database=lambda **_kwargs: SimpleNamespace(
+            total_letters=1000,
+            total_sequences=100,
+            source_version="test-generation",
+        )
+    )
+    resolver_calls: list[dict[str, Any]] = []
+
+    def resolve_reference_context(**kwargs: Any) -> dict[str, Any]:
+        resolver_calls.append(kwargs)
+        return {
+            "status": "resolved",
+            "rid": "ABCDEFGH",
+            "database": "core_nt",
+            "reference_query_id": "q1",
+            "submitted_query_id": "q1",
+            "query_length": 4,
+            "active_source_version": "test-generation",
+            "web_blast_statistical_context": {
+                "filtered_database_letters": 1000,
+                "filtered_database_sequences": 100,
+                "length_adjustment": 1,
+                "effective_search_space": 2700,
+                "scoring_search_space": 3000,
+                "result_database_letters": 1000,
+            },
+            "query_effective_search_spaces": [2700],
+            "expected_filter": {
+                "taxid": 1,
+                "is_inclusive": True,
+                "verified_from_result": False,
+            },
+            "evidence": {"source": "mock"},
+            "warnings": [],
+            "internal_only": "must be removed by the response model",
+        }
+
+    monkeypatch.setattr(
+        generated._reference_context,
+        "resolve_reference_context",
+        resolve_reference_context,
+    )
+
+    from fastapi.testclient import TestClient
+
+    client = TestClient(generated.app)
+    payload = {
+        "rid": "ABCDEFGH",
+        "query_fasta": ">q1\nACGT\n",
+        "db": "core_nt",
+        "taxid": 1,
+    }
+    unauthenticated = client.post("/v1/web-blast/statistical-context", json=payload)
+    authenticated = client.post(
+        "/v1/web-blast/statistical-context",
+        json=payload,
+        headers={"X-ELB-API-Token": "test-token"},
+    )
+
+    assert unauthenticated.status_code == 401
+    assert authenticated.status_code == 200
+    assert authenticated.json()["web_blast_statistical_context"][
+        "effective_search_space"
+    ] == 2700
+    assert "internal_only" not in authenticated.json()
+    assert resolver_calls == [
+        {
+            "rid": "ABCDEFGH",
+            "query_fasta": ">q1\nACGT\n",
+            "active_total_letters": 1000,
+            "active_total_sequences": 100,
+            "active_source_version": "test-generation",
+            "taxid": 1,
+            "is_inclusive": True,
+        }
+    ]
+
+    def fail_with(error: Exception):
+        def fail_resolver(**_kwargs: Any) -> None:
+            raise error
+
+        return fail_resolver
+
+    error_cases = (
+        (
+            generated._reference_context.ReferenceContextNotReady("not ready"),
+            409,
+            "reference_not_ready",
+            "30",
+        ),
+        (
+            generated._reference_context.ReferenceContextUnavailable("unavailable"),
+            503,
+            "reference_unavailable",
+            None,
+        ),
+        (
+            generated._reference_context.ReferenceContextError("invalid"),
+            422,
+            "reference_invalid",
+            None,
+        ),
+    )
+    for error, status_code, error_code, retry_after in error_cases:
+        monkeypatch.setattr(
+            generated._reference_context,
+            "resolve_reference_context",
+            fail_with(error),
+        )
+        failed = client.post(
+            "/v1/web-blast/statistical-context",
+            json=payload,
+            headers={"X-ELB-API-Token": "test-token"},
+        )
+        assert failed.status_code == status_code
+        assert failed.json()["detail"]["code"] == error_code
+        assert failed.headers.get("Retry-After") == retry_after
+
+    def fail_active_database(**_kwargs: Any) -> None:
+        raise RuntimeError("sensitive storage detail")
+
+    generated._exact_oracle = SimpleNamespace(
+        read_active_database=fail_active_database,
+    )
+    unavailable = client.post(
+        "/v1/web-blast/statistical-context",
+        json=payload,
+        headers={"X-ELB-API-Token": "test-token"},
+    )
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {
+        "detail": {
+            "code": "active_database_unavailable",
+            "message": "Active database generation metadata is unavailable",
+            "retryable": True,
+        }
+    }
+    assert "sensitive storage detail" not in unavailable.text
+    assert "active database metadata unavailable error_type=RuntimeError" in caplog.text
+    assert "sensitive storage detail" not in caplog.text
+
+
+def test_patch_upgrades_existing_reference_context_route(tmp_path: Path) -> None:
+    module = _load_module()
+    app = tmp_path / "app"
+    app.mkdir()
+    main = app / "main.py"
+    main.write_text(
+        "from util import run_cancellable, safe_exec\n\n"
+        "def resolve_web_blast_statistical_context(req):\n"
+        "    try:\n"
+        "        active_database = _exact_oracle.read_active_database(\n"
+        "            blob_base=_blob_base(),\n"
+        "            db_name=req.db,\n"
+        "            token=_storage_oauth_token(),\n"
+        "        )\n"
+        "        return _reference_context.resolve_reference_context(\n"
+        "            rid=req.rid,\n"
+        "        )\n"
+        "    except _reference_context.ReferenceContextError as exc:\n"
+        "        raise RuntimeError from exc\n"
+    )
+
+    module._patch_reference_context_endpoint(tmp_path)
+    first = main.read_text()
+    module._patch_reference_context_endpoint(tmp_path)
+
+    assert main.read_text() == first
+    assert first.count('"active_database_unavailable"') == 1
+    assert first.count("active database metadata unavailable error_type=%s") == 1
+    assert first.count("import reference_context as _reference_context") == 1
+    ast.parse(first)
 
 
 def test_patch_replaces_stale_core_nt_search_space_fallback(tmp_path: Path) -> None:

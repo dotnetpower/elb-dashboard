@@ -62,7 +62,12 @@ describe("API Reference spec parser", () => {
       program: string;
       db: string;
       query_fasta: string;
-      blast_options: { evalue: number; max_target_seqs: number; outfmt: string };
+      blast_options: {
+        evalue: number;
+        max_target_seqs: number;
+        outfmt: string;
+        result_selection_policy: string;
+      };
       resource_profile: string;
     };
     expect(small16s.program).toBe("blastn");
@@ -73,6 +78,7 @@ describe("API Reference spec parser", () => {
       evalue: 0.01,
       max_target_seqs: 50,
       outfmt: "5",
+      result_selection_policy: "native_top_n",
     });
     expect(small16s.resource_profile).toBe("standard");
 
@@ -102,22 +108,26 @@ describe("API Reference spec parser", () => {
 
     const coreNtOutfmt7 = examples.mode_b_core_nt_outfmt7.value as {
       db: string;
-      blast_options: { outfmt: string };
+      blast_options: { outfmt: string; result_selection_policy: string };
     };
     expect(coreNtOutfmt7.db).toBe("core_nt");
     expect(coreNtOutfmt7.blast_options.outfmt).toBe("7");
+    expect(coreNtOutfmt7.blast_options.result_selection_policy).toBe("native_top_n");
 
     // The taxid variant keeps the standard 12 columns first (std) so the shard
     // merge can re-rank, then appends the taxonomy/strand/sequence columns.
     const coreNtOutfmt7Taxids = examples.mode_b_core_nt_outfmt7_taxids.value as {
       db: string;
-      blast_options: { outfmt: string };
+      blast_options: { outfmt: string; result_selection_policy: string };
     };
     expect(coreNtOutfmt7Taxids.db).toBe("core_nt");
     expect(coreNtOutfmt7Taxids.blast_options.outfmt).toBe(
       "7 std staxids sstrand qseq sseq",
     );
     expect(coreNtOutfmt7Taxids.blast_options.outfmt.startsWith("7 std")).toBe(true);
+    expect(coreNtOutfmt7Taxids.blast_options.result_selection_policy).toBe(
+      "native_top_n",
+    );
 
     const diversity = examples.mode_b_core_nt_diversity.value as {
       blast_options: {

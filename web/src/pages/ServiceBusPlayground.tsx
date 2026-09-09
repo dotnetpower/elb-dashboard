@@ -45,6 +45,7 @@ import { useToast } from "@/components/Toast";
 
 type CodeTab = "python-send" | "python-consume" | "curl";
 type SubmitMode = "xml" | "tabular";
+type ResultSelectionPolicy = "native_top_n" | "diversity_aware";
 
 const PROGRAMS = [
   "blastn",
@@ -114,6 +115,7 @@ interface PlaygroundPreset {
   extra: string;
   /** Optional structured Web BLAST search space (db_effective_search_space). */
   searchsp?: string;
+  resultSelectionPolicy: ResultSelectionPolicy;
   resourceProfile: string;
 }
 
@@ -133,6 +135,7 @@ const PRESETS: PlaygroundPreset[] = [
     maxTargetSeqs: "50",
     outfmt: "7 std staxids sstrand qseq sseq",
     extra: "",
+    resultSelectionPolicy: "native_top_n",
     resourceProfile: "standard",
   },
   {
@@ -150,6 +153,7 @@ const PRESETS: PlaygroundPreset[] = [
     maxTargetSeqs: "100",
     outfmt: "7 std staxids sstrand qseq sseq",
     extra: "",
+    resultSelectionPolicy: "native_top_n",
     resourceProfile: "core_nt_safe",
   },
   {
@@ -167,6 +171,7 @@ const PRESETS: PlaygroundPreset[] = [
     maxTargetSeqs: "100",
     outfmt: "7",
     extra: CORE_NT_EXTRA,
+    resultSelectionPolicy: "native_top_n",
     resourceProfile: "core_nt_safe",
   },
   {
@@ -184,6 +189,25 @@ const PRESETS: PlaygroundPreset[] = [
     maxTargetSeqs: "100",
     outfmt: "7 std staxids sstrand qseq sseq",
     extra: CORE_NT_EXTRA,
+    resultSelectionPolicy: "native_top_n",
+    resourceProfile: "core_nt_safe",
+  },
+  {
+    key: "core-nt-diversity",
+    label: "Monkeypox → core_nt · Diversity aware",
+    hint: "Reserves a proportional share of lower-score subjects when one tied score class fills the result window. This is heuristic and intentionally differs from native top-N membership.",
+    fasta: MONKEYPOX_FASTA,
+    db: "core_nt",
+    program: "blastn",
+    taxid: "",
+    isInclusive: true,
+    mode: "tabular",
+    wordSize: "28",
+    evalue: "0.05",
+    maxTargetSeqs: "5000",
+    outfmt: "7 std sseq",
+    extra: CORE_NT_EXTRA,
+    resultSelectionPolicy: "diversity_aware",
     resourceProfile: "core_nt_safe",
   },
 ];
@@ -225,6 +249,8 @@ export function ServiceBusPlayground() {
   const [outfmt, setOutfmt] = useState(DEFAULT_PRESET.outfmt);
   const [extra, setExtra] = useState(DEFAULT_PRESET.extra);
   const [searchsp, setSearchsp] = useState(DEFAULT_PRESET.searchsp ?? "");
+  const [resultSelectionPolicy, setResultSelectionPolicy] =
+    useState<ResultSelectionPolicy>(DEFAULT_PRESET.resultSelectionPolicy);
   const [resourceProfile, setResourceProfile] = useState(DEFAULT_PRESET.resourceProfile);
   const [requestId, setRequestId] = useState("");
   const [codeTab, setCodeTab] = useState<CodeTab>("python-send");
@@ -249,6 +275,7 @@ export function ServiceBusPlayground() {
     setOutfmt(preset.outfmt);
     setExtra(preset.extra);
     setSearchsp(preset.searchsp ?? "");
+    setResultSelectionPolicy(preset.resultSelectionPolicy);
     setResourceProfile(preset.resourceProfile);
   }, []);
 
@@ -309,6 +336,7 @@ export function ServiceBusPlayground() {
         body.blast_options = {
           evalue: Number(evalue) || 0.05,
           max_target_seqs: Number(maxTargetSeqs) || 500,
+          result_selection_policy: resultSelectionPolicy,
         };
         const of = outfmt.trim();
         if (of) body.blast_options.outfmt = of;
@@ -362,6 +390,7 @@ export function ServiceBusPlayground() {
       outfmt,
       extra,
       searchsp,
+      resultSelectionPolicy,
       resourceProfile,
       taxid,
       isInclusive,
@@ -780,6 +809,23 @@ export function ServiceBusPlayground() {
                 />
               </div>
               <div>
+                <label style={labelStyle} htmlFor="pg-result-selection-policy">
+                  result_selection_policy
+                </label>
+                <select
+                  id="pg-result-selection-policy"
+                  value={resultSelectionPolicy}
+                  onChange={(event) =>
+                    setResultSelectionPolicy(event.target.value as ResultSelectionPolicy)
+                  }
+                  title="Native top N preserves the BLAST comparator. Diversity aware reserves lower-score subjects and is not exact top-N."
+                  style={inputStyle}
+                >
+                  <option value="native_top_n">Native top N</option>
+                  <option value="diversity_aware">Diversity aware</option>
+                </select>
+              </div>
+              <div>
                 <label style={labelStyle} htmlFor="pg-rp">
                   resource_profile
                 </label>
@@ -797,7 +843,9 @@ export function ServiceBusPlayground() {
                 evalue/bitscore, so a tabular layout must keep <code>std</code> leading.
                 Leave <code>searchsp</code> blank to apply the calibrated Web BLAST value
                 automatically (matching the New Search path); a <code>-searchsp</code>
-                pinned in <code>extra</code> always wins.
+                pinned in <code>extra</code> always wins. <code>native_top_n</code>
+                preserves BLAST ranking; choose <code>diversity_aware</code> when
+                lower-score subject representation is preferred.
               </p>
             </>
           )}

@@ -12,7 +12,7 @@ The API Reference page is for developers and platform maintainers who need to in
 !!! tip "Quick jumps"
 
     - **[When To Use It](#when-to-use-it)** · **[Setup checklist](#before-the-api-page-works)** · **[Auth + token](#authentication)**
-    - **[Submit example](#submit-example-post-v1jobs)** · **[Status example](#status-example-get-v1jobsjob_idstatus)** · **[Result example](#result-example-get-v1jobsjob_idresults)**
+    - **[Submit example](#submit-example-post-v1jobs)** · **[Reference resolver](#reference-context-resolver)** · **[Status example](#status-example-get-v1jobsjob_idstatus)** · **[Result example](#result-example-get-v1jobsjob_idresults)**
     - **[External façade](#external-elasticblast-facade)** · **[Response contract](#response-contract)** · **[Error codes](#error-codes)** · **[Troubleshooting](#troubleshooting)**
 
 ![API Reference page with endpoint groups and API menu selected](../images/screenshots/api-reference.png)
@@ -219,6 +219,42 @@ alternative spelling for `db_effective_search_space`. Its six values must come f
 reference result for the same query, taxonomy-filtered population, options, and database
 generation. Do not derive `filtered_database_letters` from the unfiltered
 `GET /v1/databases/{db}` count. When those measurements are unavailable, omit the context.
+
+### Reference context resolver
+
+`POST /v1/web-blast/statistical-context` derives the six-field context from one completed
+[NCBI BLAST](https://blast.ncbi.nlm.nih.gov/Blast.cgi) RID. The endpoint is protected by the same
+`X-ELB-API-Token` dependency as the other `/v1` routes. It retrieves XML1 and XML2 only from the
+fixed NCBI result URL; it does not submit a search, poll a pending RID, or accept a caller-supplied
+URL.
+
+Send the exact single-record FASTA associated with the completed RID:
+
+```json
+{
+  "rid": "<completed-rid>",
+  "query_fasta": "<exact single-record FASTA used by that RID>",
+  "db": "core_nt",
+  "taxid": 1234,
+  "is_inclusive": false
+}
+```
+
+The resolver checks the query length, `core_nt` identity, active database counts, database-length
+encoding, and all integer relationships used to derive the context. A successful response includes
+`web_blast_statistical_context`, `query_effective_search_spaces`, source hashes, and explicit
+verification flags.
+
+!!! warning "A completed RID is evidence, not full request provenance"
+
+    The result formats do not prove the original query content, taxonomy expression, every submit
+    option, or the active source-version identifier. Confirm those inputs independently before
+    copying the returned context into `POST /v1/jobs`. The response keeps the corresponding
+    `*_verified` flags false and repeats this warning.
+
+The endpoint returns `409 reference_not_ready` with `Retry-After: 30` for a pending RID,
+`422 reference_invalid` for inconsistent evidence, and retryable `503` responses when the external
+result service, active database metadata, or bounded resolver gate is unavailable.
 
 ## Status Example: `GET /v1/jobs/{job_id}/status`
 
