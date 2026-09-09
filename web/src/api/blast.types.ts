@@ -395,6 +395,40 @@ export interface BlastResultComparison {
   >;
 }
 
+export interface BlastRuntimeEstimateRequest {
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+  program: string;
+  database: string;
+  query_letters: number;
+  database_letters: number;
+  node_count: number;
+  node_sku: string;
+  region?: string;
+}
+
+export interface BlastRuntimeCostEstimate {
+  schema_version: number;
+  available: boolean;
+  reason?: string | null;
+  sample_count: number;
+  required_samples: number;
+  estimate_seconds?: number | null;
+  low_seconds?: number | null;
+  high_seconds?: number | null;
+  confidence?: string | null;
+  estimated_cost_usd?: number | null;
+  pricing?: {
+    priced: boolean;
+    source?: string | null;
+    priced_as_of: string;
+    hourly_usd: number;
+    is_estimate: boolean;
+  } | null;
+  basis: Record<string, unknown>;
+}
+
 /** One stage in the BLAST message lifecycle (server-ordered). */
 export interface BlastMessageTraceStage {
   stage: string;

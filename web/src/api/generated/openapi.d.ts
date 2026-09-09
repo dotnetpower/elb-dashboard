@@ -1857,6 +1857,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/blast/runtime-estimate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Blast Runtime Estimate
+         * @description Return an evidence-gated runtime and cost estimate for a proposed job.
+         */
+        post: operations["blast_runtime_estimate_api_blast_runtime_estimate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/blast/schedules": {
         parameters: {
             query?: never;
@@ -5496,6 +5516,35 @@ export interface components {
              * @default 200
              */
             max_items: number;
+        };
+        /**
+         * RuntimeEstimateRequest
+         * @description Scientific/runtime inputs for an evidence-based estimate.
+         */
+        RuntimeEstimateRequest: {
+            /** Cluster Name */
+            cluster_name: string;
+            /** Database */
+            database: string;
+            /** Database Letters */
+            database_letters: number;
+            /** Node Count */
+            node_count: number;
+            /** Node Sku */
+            node_sku: string;
+            /** Program */
+            program: string;
+            /** Query Letters */
+            query_letters: number;
+            /**
+             * Region
+             * @default
+             */
+            region: string;
+            /** Resource Group */
+            resource_group: string;
+            /** Subscription Id */
+            subscription_id: string;
         };
         /**
          * SkuListResponse
@@ -11705,6 +11754,78 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description Missing or invalid bearer token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Authenticated caller lacks the required role. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Resource or route not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Unexpected server or upstream Azure error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    blast_runtime_estimate_api_blast_runtime_estimate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+                "X-ELB-API-Token"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeEstimateRequest"];
             };
         };
         responses: {

@@ -21,6 +21,8 @@ import type {
   BlastResultFile,
   BlastResultManifest,
   BlastResultComparison,
+  BlastRuntimeCostEstimate,
+  BlastRuntimeEstimateRequest,
   BlastShardDetailsResponse,
   BlastSubjectAggregate,
   BlastSubmitRequest,
@@ -211,6 +213,9 @@ export const blastApi = {
       `/blast/jobs/${encodeURIComponent(jobId)}/comparison`,
       { against_job_id: againstJobId, max_items: maxItems },
     ),
+
+  estimateRuntimeCost: (request: BlastRuntimeEstimateRequest) =>
+    api.post<BlastRuntimeCostEstimate>("/blast/runtime-estimate", request),
 
   createLogStreamTicket: (
     jobId: string,

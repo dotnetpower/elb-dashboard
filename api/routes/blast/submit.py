@@ -4,11 +4,11 @@ Responsibility: BLAST submit route and payload validation controller
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
 Key entry points: `_submit_job_id`, `_submit_response`, `_validate_submit_contracts`,
-`blast_submit`, `blast_job_submit`, `blast_submit_status`
+`blast_submit`, `blast_job_submit`, `blast_submit_status`, `blast_runtime_estimate`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
-api/tests/test_route_contracts.py`.
+api/tests/test_blast_runtime_estimate.py api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from api._http_utils import BLAST_SUBMIT_RESPONSES
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _normalise_blast_submit_body, _stub_log
 from api.routes.blast.common import LAB_TOOL_PENDING
+from api.services.blast.runtime_estimate import RuntimeEstimateRequest
 from api.services.blast.submit_payload import (
     canonical_submit_metadata,
     canonical_submit_snapshot,
@@ -760,6 +761,41 @@ def blast_upload_query(
         "degraded": True,
         "degraded_reason": "streaming_proxy_not_yet_implemented",
     }
+
+
+@router.post("/runtime-estimate")
+def blast_runtime_estimate(
+    body: RuntimeEstimateRequest,
+    _caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return an evidence-gated runtime and cost estimate for a proposed job."""
+    try:
+        from api.services.blast.runtime_estimate import estimate_runtime_cost
+        from api.services.state_repo import get_state_repo
+
+        rows = get_state_repo().list_for_scope(
+            subscription_id=body.subscription_id,
+            resource_group=body.resource_group,
+            cluster_name=body.cluster_name,
+            limit=500,
+            include_payload=True,
+        )
+        return estimate_runtime_cost(body, rows).model_dump(mode="json")
+    except Exception as exc:
+        LOGGER.warning("blast runtime estimate failed: %s", type(exc).__name__)
+        return {
+            "schema_version": 1,
+            "available": False,
+            "reason": "estimate_unavailable",
+            "sample_count": 0,
+            "required_samples": 3,
+            "basis": {
+                "program": body.program,
+                "database": body.database,
+                "node_sku": body.node_sku,
+                "node_count": body.node_count,
+            },
+        }
 
 
 @router.post("/cost-estimate")

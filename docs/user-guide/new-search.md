@@ -70,6 +70,14 @@ The **Execution profile** step is where you choose the AKS cluster, sharding mod
 
 The **Algorithm parameters** step exposes the underlying BLAST flags — `evalue`, `max_target_seqs`, `outfmt`, `word_size`, and the low-complexity filter. Leave the defaults unless you have a specific reason to change them; the command preview will reflect every change immediately.
 
+When at least three comparable completed jobs exist for the selected program,
+database, workload VM size, and cluster scope, the Runtime summary shows an
+estimated compute duration, interquartile range, sample count, confidence, and
+approximate compute cost. The estimate normalizes historical query/database
+work by workload-node count. If evidence is missing or inconsistent, the page
+shows that it is still collecting a baseline instead of inventing a number.
+Estimation never changes, blocks, or delays submission.
+
 For a per-field reference of every option on this page — UI field, OpenAPI body field, BLAST+ CLI flag, default, allowed values, and validation rules — see [BLAST Options Reference](blast-options.md).
 
 ## Preflight And Command Preview

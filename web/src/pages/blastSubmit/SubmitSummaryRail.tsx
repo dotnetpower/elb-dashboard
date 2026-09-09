@@ -12,6 +12,8 @@ import type { PreFlightResult } from "@/pages/blastSubmit/usePreFlight";
 import { PreFlightResultPanel } from "@/pages/blastSubmit/PreFlightResultPanel";
 import type { ProgramMeta, ToastFn } from "@/pages/blastSubmit/types";
 import type { MissingItem } from "@/pages/blastSubmit/submitValidation";
+import type { BlastRuntimeEstimateRequest } from "@/api/endpoints";
+import { RuntimeEstimateSummary } from "@/pages/blastSubmit/RuntimeEstimateSummary";
 
 /* ─── Helpers ──────────────────────────────────────────────────────── */
 
@@ -62,6 +64,7 @@ export interface SubmitSummaryRailProps {
    *  "you do not have permission to submit BLAST jobs" tooltip
    *  computed by ``permissionDeniedTooltip``. Critique #6. */
   permissionTooltip?: string;
+  runtimeEstimateInput?: BlastRuntimeEstimateRequest | null;
   set: <K extends keyof FormState>(key: K, value: FormState[K]) => void;
   onPreFlight: () => void;
   onSubmit: () => void;
@@ -90,6 +93,7 @@ export function SubmitSummaryRail({
   effectiveShardingMode,
   isDbAlreadyWarm,
   permissionTooltip,
+  runtimeEstimateInput = null,
   set,
   onPreFlight,
   onSubmit,
@@ -228,6 +232,7 @@ export function SubmitSummaryRail({
           <span className="bsl-rail__k">Output fmt</span>
           <span className="bsl-rail__v">{form.outfmt}</span>
         </div>
+        <RuntimeEstimateSummary input={runtimeEstimateInput} />
       </div>
 
       {/* ── Readiness block ─────────────────────────────────────── */}

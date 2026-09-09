@@ -46,6 +46,7 @@ import {
   useSubmitMutation,
 } from "@/pages/blastSubmit/useSubmitMutation";
 import { useWarmupStatus } from "@/pages/blastSubmit/useWarmupStatus";
+import { buildRuntimeEstimateInput } from "@/pages/blastSubmit/runtimeEstimateModel";
 import { permissionDeniedTooltip } from "@/components/PermissionGate";
 import { usePermissions } from "@/hooks/usePermissions";
 import { parsePositiveTaxid, PROGRAMS } from "@/pages/blastSubmitModel";
@@ -406,6 +407,17 @@ export function BlastSubmit() {
     ? permissionDeniedTooltip("can_submit_blast", submitPermissions)
     : undefined;
   const effectiveCanSubmit = validation.canSubmit && !submitPermissionDenied;
+  const runtimeEstimateInput = useMemo(
+    () =>
+      buildRuntimeEstimateInput({
+        subscriptionId: subId,
+        program: form.program,
+        database: selectedDbInfo,
+        queryData: form.query_data,
+        cluster: selectedCluster,
+      }),
+    [form.program, form.query_data, selectedCluster, selectedDbInfo, subId],
+  );
 
   // The Run button is disabled when `effectiveCanSubmit` is false, but a
   // permission denial only lives in the button's hover `title` — which leaves
@@ -730,6 +742,7 @@ export function BlastSubmit() {
           effectiveShardingMode={effectiveShardingMode}
           isDbAlreadyWarm={isDbAlreadyWarm}
           permissionTooltip={submitPermissionTooltip}
+          runtimeEstimateInput={runtimeEstimateInput}
           set={set}
           onPreFlight={() => preFlightMutation.mutate()}
           onSubmit={handleSubmit}

@@ -14675,6 +14675,78 @@
       },
       "security": []
     },
+    "POST /api/blast/runtime-estimate": {
+      "operation_id": "blast_runtime_estimate_api_blast_runtime_estimate_post",
+      "parameters": {
+        "header:X-ELB-API-Token": {
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "header:authorization": {
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "request_body": {
+        "content": {
+          "application/json": {
+            "$ref": "#/components/schemas/RuntimeEstimateRequest"
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "application/json": {
+            "type": "object"
+          }
+        },
+        "401": {
+          "application/json": {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        },
+        "403": {
+          "application/json": {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        },
+        "404": {
+          "application/json": {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        },
+        "422": {
+          "application/json": {
+            "$ref": "#/components/schemas/HTTPValidationError"
+          }
+        },
+        "500": {
+          "application/json": {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        }
+      },
+      "security": []
+    },
     "POST /api/blast/schedules": {
       "operation_id": "blast_schedules_create_api_blast_schedules_post",
       "parameters": {
@@ -19875,6 +19947,70 @@
       },
       "required": [
         "against_job_id"
+      ],
+      "type": "object"
+    },
+    "RuntimeEstimateRequest": {
+      "properties": {
+        "cluster_name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "database": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "database_letters": {
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "node_count": {
+          "maximum": 1000.0,
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "node_sku": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "program": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "query_letters": {
+          "maximum": 100000000.0,
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "region": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "resource_group": {
+          "maxLength": 90,
+          "minLength": 1,
+          "type": "string"
+        },
+        "subscription_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscription_id",
+        "resource_group",
+        "cluster_name",
+        "program",
+        "database",
+        "query_letters",
+        "database_letters",
+        "node_count",
+        "node_sku"
       ],
       "type": "object"
     },
