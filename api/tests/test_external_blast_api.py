@@ -2350,6 +2350,63 @@ def test_discover_subscription_clusters_skips_stopped(monkeypatch):
     assert ("rg-2", "stopped-b") not in pairs
 
 
+def test_explicit_external_jobs_target_skips_stopped_cluster(monkeypatch):
+    """An explicit stopped target must not resolve its Kubernetes Service."""
+    import api.services as services_pkg
+    from api.services import cluster_health
+    from api.services.blast import external_jobs
+
+    monkeypatch.setattr(services_pkg, "get_credential", lambda: object())
+    monkeypatch.setattr(
+        cluster_health,
+        "get_cluster_health",
+        lambda *_args: {
+            "healthy": False,
+            "exists": True,
+            "power_state": "Stopped",
+            "provisioning_state": "Succeeded",
+            "reason": "cluster_stopped",
+        },
+    )
+    monkeypatch.setattr(
+        external_jobs,
+        "_openapi_client_kwargs_from_cluster",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("stopped cluster must not resolve an OpenAPI endpoint")
+        ),
+    )
+
+    assert external_jobs._resolve_external_list_targets("sub-1", "rg-1", "stopped") == []
+
+
+def test_explicit_external_jobs_target_degrades_open_when_health_unknown(monkeypatch):
+    """An ARM health failure preserves the existing endpoint-resolution path."""
+    import api.services as services_pkg
+    from api.services import cluster_health
+    from api.services.blast import external_jobs
+
+    monkeypatch.setattr(services_pkg, "get_credential", lambda: object())
+    monkeypatch.setattr(
+        cluster_health,
+        "get_cluster_health",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("ARM unavailable")),
+    )
+    monkeypatch.setattr(
+        external_jobs,
+        "_openapi_client_kwargs_from_cluster",
+        lambda *_args: {"base_url": "http://openapi", "api_token": "token"},
+    )
+
+    assert external_jobs._resolve_external_list_targets("sub-1", "rg-1", "unknown") == [
+        {
+            "kwargs": {"base_url": "http://openapi", "api_token": "token"},
+            "subscription_id": "sub-1",
+            "resource_group": "rg-1",
+            "cluster_name": "unknown",
+        }
+    ]
+
+
 def test_collect_and_sync_external_jobs_discovers_and_upserts(monkeypatch):
     """The shared orchestration resolves the subscription's clusters, fetches
     each one's ``/v1/jobs`` list, and upserts the discovered rows into the
@@ -3999,9 +4056,7 @@ def test_sync_external_jobs_backfills_complete_runtime_evidence(monkeypatch):
             updated_calls.append({"job_id": job_id, **kwargs})
 
         def backfill_payload_section(self, job_id, section, values):
-            updated_calls.append(
-                {"job_id": job_id, "section": section, "values": values}
-            )
+            updated_calls.append({"job_id": job_id, "section": section, "values": values})
             return True
 
         def create(self, state):  # pragma: no cover - defensive

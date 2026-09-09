@@ -215,6 +215,42 @@ def _cluster_power_state_allows_openapi(power_state: object) -> bool:
     return str(power_state).strip().casefold() == "running"
 
 
+def _explicit_cluster_allows_openapi(
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> bool:
+    """Return False only when ARM proves the explicit target is unreachable.
+
+    The subscription-wide discovery path already filters stopped clusters from
+    its ARM list. An explicitly scoped request previously skipped that gate and
+    resolved the Kubernetes Service even while AKS was stopped, producing a
+    handled DNS exception on every cache miss. Reuse the same cached ARM health
+    gate here. Missing scope or an unavailable ARM plane degrades open so this
+    guard cannot hide a reachable OpenAPI deployment on incomplete evidence.
+    """
+    if not (subscription_id and resource_group and cluster_name):
+        return True
+    try:
+        from api.services import get_credential
+        from api.services.cluster_health import get_cluster_health
+
+        health = get_cluster_health(
+            get_credential(),
+            subscription_id,
+            resource_group,
+            cluster_name,
+        )
+    except Exception as exc:
+        LOGGER.debug(
+            "explicit external-jobs health gate degraded open cluster=%s reason=%s",
+            cluster_name,
+            type(exc).__name__,
+        )
+        return True
+    return bool(health.get("healthy", True))
+
+
 def _external_list_jobs_cached(external_kwargs: dict[str, Any]) -> list[dict[str, Any]]:
     """Cached wrapper around ``external_blast.list_jobs(**kwargs)``."""
 
@@ -965,6 +1001,12 @@ def _resolve_external_list_targets(
         )
 
     if cluster_name:
+        if not _explicit_cluster_allows_openapi(
+            subscription_id,
+            resource_group,
+            cluster_name,
+        ):
+            return targets
         kwargs = _openapi_client_kwargs_from_cluster(subscription_id, resource_group, cluster_name)
         _add(kwargs, subscription_id, resource_group, cluster_name)
         return targets
