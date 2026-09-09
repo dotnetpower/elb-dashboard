@@ -56,9 +56,10 @@ hook_run() {
 }
 
 # Does the given newline-separated file list contain anything that the Tests
-# workflow gates on? (api/**, pyproject.toml, uv.lock, pytest.ini)
+# workflow gates on? Includes OpenAPI baseline/codegen inputs because a drifted
+# generated declaration is an API contract failure even when Python is unchanged.
 paths_touch_api() {
-  grep -qE '^(api/|pyproject\.toml$|uv\.lock$|pytest\.ini$)' <<<"$1"
+  grep -qE '^(api/|pyproject\.toml$|uv\.lock$|pytest\.ini$|scripts/dev/(check_openapi_contract\.py|generate-openapi-types\.sh|check-openapi-types\.sh|openapi-contract-baseline\.json)$|web/(package(-lock)?\.json|src/api/generated/))' <<<"$1"
 }
 
 # Does the list touch any Python source inside scripts/? Those are in the

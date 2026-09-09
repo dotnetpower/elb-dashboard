@@ -118,6 +118,11 @@ run_gates_in_dir() {
       uv run python scripts/dev/check_mypy_baseline.py || rc=$?
   fi
   if [[ "$run_api" -eq 1 ]]; then
+    hook_run_in "$dir" "OpenAPI contract" \
+      uv run python scripts/dev/check_openapi_contract.py || rc=$?
+    hook_run_in "$dir" "install OpenAPI generator" npm ci --prefix web || rc=$?
+    hook_run_in "$dir" "generated OpenAPI type drift" \
+      npm --prefix web run check:api-types || rc=$?
     CI=true hook_run_in "$dir" "pytest -q api/tests" uv run pytest -q api/tests || rc=$?
   fi
   if [[ "$run_docs" -eq 1 ]]; then

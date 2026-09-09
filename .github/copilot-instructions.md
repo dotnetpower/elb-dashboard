@@ -428,7 +428,7 @@ A push must never turn the Actions dashboard red. Two workflows gate `main` and 
 
 | Workflow | File | What it runs | Local equivalent |
 | --- | --- | --- | --- |
-| Tests | [.github/workflows/test.yml](.github/workflows/test.yml) | `uv run ruff check` + `uv run python scripts/dev/check_mypy_baseline.py` + `uv run pytest -q api/tests` | same three commands |
+| Tests | [.github/workflows/test.yml](.github/workflows/test.yml) | Ruff + mypy debt ratchet + OpenAPI contract/generated-type drift + `pytest -q api/tests` | `uv run ruff check`, both contract checks, then pytest |
 | Publish Docs | [.github/workflows/docs.yml](.github/workflows/docs.yml) | `check_frontmatter.py` + `mkdocs build --strict` | `uv run python scripts/docs/check_frontmatter.py` then `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` |
 
 The repo ships version-controlled git hooks that run exactly these checks automatically — **install them once per clone**:
@@ -438,7 +438,9 @@ scripts/dev/install-git-hooks.sh   # sets core.hooksPath=scripts/dev/git-hooks
 ```
 
 * **pre-commit** (fast, staged files only): `ruff check api` when `api/**` is staged; the docs frontmatter guard when `docs/**` / `mkdocs.yml` is staged.
-* **pre-push** (full CI mirror): the production mypy debt ratchet plus `pytest -q api/tests` and/or `mkdocs build --strict`, scoped to the file paths the push actually touches (so a docs-only push skips API checks and vice-versa).
+* **pre-push** (full CI mirror): the production mypy debt ratchet, OpenAPI
+  contract/generated-type drift checks, `pytest -q api/tests`, and/or
+  `mkdocs build --strict`, scoped to the file paths the push actually touches.
 
 The hooks are the safety net, not a substitute for thinking: when you change `mkdocs.yml`-relevant docs, confirm every new page under `docs/**` is wired into the `nav:` (an orphan page fails `--strict`). Bypass only for genuine emergencies with `git commit/push --no-verify` (or `ELB_SKIP_HOOKS=1`), and never push a red build knowingly.
 

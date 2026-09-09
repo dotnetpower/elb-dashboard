@@ -34,3 +34,29 @@ The `copilot/` section is the agent-facing handbook extracted from `.github/copi
 - **Conventional Commits** (`feat:`, `fix:`, `chore:`, `docs:`, …).
 - **Per-feature change notes** in `docs/features_change/YYYY-MM/YYYY-MM-DD-<name>.md` before each behaviour-changing commit.
 - See [.github/copilot-instructions.md](https://github.com/dotnetpower/elb-dashboard/blob/main/.github/copilot-instructions.md) for the full charter.
+
+## OpenAPI contract and generated types
+
+The checked-in OpenAPI compatibility baseline and generated TypeScript
+declarations are validation artifacts. They do not replace the hand-written API
+client at runtime.
+
+```bash
+uv run python scripts/dev/check_openapi_contract.py
+npm --prefix web run check:api-types
+```
+
+After an intentional additive API change, review the schema diff, then refresh
+both artifacts:
+
+```bash
+uv run python scripts/dev/check_openapi_contract.py --update
+npm --prefix web run generate:api-types
+```
+
+CI allows additive operations and optional properties. Route removal,
+`operationId` changes, narrower enums, required input additions, and schema
+property removal require a commit with a `BREAKING CHANGE:`, `breaking:`, or
+Conventional Commit `!` marker. New frontend code may import generated types
+from `web/src/api/generated/openapi.d.ts`; existing clients migrate only through
+separate reviewed changes.

@@ -10,6 +10,8 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
     "test": "vitest run",
+    "generate:api-types": "bash ../scripts/dev/generate-openapi-types.sh",
+    "check:api-types": "bash ../scripts/dev/check-openapi-types.sh",
     "e2e:list": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts --list",
     "e2e:ui": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts --project ui-mock",
     "e2e:api": "NODE_PATH=./node_modules playwright test -c playwright.e2e.config.ts --project api-smoke",
@@ -60,10 +62,14 @@
     "@vitejs/plugin-react": "^5.2.0",
     "eslint": "^9.14.0",
     "eslint-plugin-react-hooks": "^7.1.1",
+    "openapi-typescript": "7.13.0",
     "prettier": "^3.3.3",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.59.3",
     "vite": "^7.3.6",
     "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "js-yaml": "4.3.2"
   }
 }

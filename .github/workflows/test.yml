@@ -7,7 +7,13 @@ on:
     paths:
       - api/**
       - scripts/**/*.py
+      - scripts/dev/generate-openapi-types.sh
+      - scripts/dev/check-openapi-types.sh
       - scripts/dev/mypy-baseline.txt
+      - scripts/dev/openapi-contract-baseline.json
+      - web/package.json
+      - web/package-lock.json
+      - web/src/api/generated/**
       - pyproject.toml
       - uv.lock
       - pytest.ini
@@ -16,7 +22,13 @@ on:
     paths:
       - api/**
       - scripts/**/*.py
+      - scripts/dev/generate-openapi-types.sh
+      - scripts/dev/check-openapi-types.sh
       - scripts/dev/mypy-baseline.txt
+      - scripts/dev/openapi-contract-baseline.json
+      - web/package.json
+      - web/package-lock.json
+      - web/src/api/generated/**
       - pyproject.toml
       - uv.lock
       - pytest.ini
@@ -40,6 +52,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,6 +69,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-groups
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci --prefix web
+
       - name: ruff check
         # No path arg — honours the `src = ["api", "scripts"]` list in
         # pyproject.toml so both trees are linted in one pass.
@@ -62,6 +86,17 @@ jobs:
 
       - name: mypy production debt ratchet
         run: uv run python scripts/dev/check_mypy_baseline.py
+
+      - name: OpenAPI contract and generated type drift
+        env:
+          BASE_SHA: ${{ github.event.before || github.event.pull_request.base.sha || '' }}
+        run: |
+          if [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            uv run python scripts/dev/check_openapi_contract.py --against-ref "$BASE_SHA"
+          else
+            uv run python scripts/dev/check_openapi_contract.py
+          fi
+          npm --prefix web run check:api-types
 
       - name: pytest (fast loop — slow/subprocess excluded)
         # Uses the default `-n auto` from pytest.ini (one xdist worker per

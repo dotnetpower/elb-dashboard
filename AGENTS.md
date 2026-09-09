@@ -216,6 +216,7 @@ where the failure was found, but knowing them up front saves a lot of time.
 | Backend smoke | `AUTH_DEV_BYPASS=true uv run uvicorn api.main:app --reload --port 8080` then `curl :8080/api/health` |
 | Backend lint | `uv run ruff check api` |
 | Backend type debt ratchet | `uv run python scripts/dev/check_mypy_baseline.py` |
+| OpenAPI contract | `uv run python scripts/dev/check_openapi_contract.py` + `npm --prefix web run check:api-types` |
 | Worker | `uv run celery -A api.celery_app worker -l info` (needs local Redis) |
 | Frontend build | `cd web && npm run build` |
 | Docs frontmatter guard | `uv run python scripts/docs/check_frontmatter.py` (same check Publish Docs CI runs) |
