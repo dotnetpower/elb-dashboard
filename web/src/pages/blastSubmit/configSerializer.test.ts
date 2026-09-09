@@ -34,9 +34,11 @@ describe("pickExportableForm", () => {
       program: "blastp",
       db: "nr",
       query_data: ">q\nATCG",
+      query_accession: "NC_000001.1",
       evalue: 1e-10,
       max_target_seqs: 500,
       outfmt: 6,
+      outfmt_taxonomy_columns: true,
       word_size: "6",
       gap_open: "11",
       gap_extend: "1",
@@ -61,9 +63,11 @@ describe("pickExportableForm", () => {
     expect(fields.program).toBe("blastp");
     expect(fields.db).toBe("nr");
     expect(fields.query_data).toBe(">q\nATCG");
+    expect(fields.query_accession).toBe("NC_000001.1");
     expect(fields.evalue).toBe(1e-10);
     expect(fields.max_target_seqs).toBe(500);
     expect(fields.outfmt).toBe(6);
+    expect(fields.outfmt_taxonomy_columns).toBe(true);
     expect(fields.word_size).toBe("6");
     expect(fields.gap_open).toBe("11");
     expect(fields.gap_extend).toBe("1");
@@ -112,6 +116,22 @@ describe("serializeFormToConfig", () => {
       source: {},
     });
     expect(snapshot.source).toBeUndefined();
+  });
+
+  it("round-trips accession and taxonomy-column mode", () => {
+    const snapshot = serializeFormToConfig({
+      form: makeForm({
+        query_accession: "NC_000001.1",
+        outfmt: 7,
+        outfmt_taxonomy_columns: true,
+      }),
+    });
+
+    expect(partialFormFromConfig(snapshot)).toMatchObject({
+      query_accession: "NC_000001.1",
+      outfmt: 7,
+      outfmt_taxonomy_columns: true,
+    });
   });
 });
 

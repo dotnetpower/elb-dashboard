@@ -30,6 +30,17 @@ The stepper is organised in two groups:
 
 A step shows a check mark when its current value passes validation. The footer's **Submit** button is enabled only when every required step is ready.
 
+## Reuse Saved Parameters
+
+**Submit templates** stores a named set of reusable scientific parameters for
+the signed-in researcher. Applying one can update the program, database,
+algorithm options, taxonomy filter, sharding, and warmup choices. It never
+replaces the current FASTA or accession, query range, job title, or cluster.
+
+Templates are owner-scoped and persist across browser sessions. If template
+Storage is temporarily unavailable, the control reports that state without
+blocking a search; submit behavior and the current draft remain unchanged.
+
 ## Choose A Program And Query
 
 The **Program** step selects the BLAST program (`blastn`, `blastp`, `blastx`, `tblastn`, `tblastx`). The choice determines which databases are valid, which algorithm parameters apply, and which task profiles are available.

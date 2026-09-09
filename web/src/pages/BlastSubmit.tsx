@@ -7,6 +7,10 @@ import type { BlastProgram } from "@/api/endpoints";
 import { AlgorithmParametersSection } from "@/pages/blastSubmit/AlgorithmParametersSection";
 import { BlastSubmitFooter } from "@/pages/blastSubmit/BlastSubmitFooter";
 import { BlastSubmitHeader } from "@/pages/blastSubmit/BlastSubmitHeader";
+import {
+  applyTemplateFields,
+  BlastTemplatesControl,
+} from "@/pages/blastSubmit/BlastTemplatesControl";
 import { ComputeSection } from "@/pages/blastSubmit/ComputeSection";
 import { DatabaseSection } from "@/pages/blastSubmit/DatabaseSection";
 import { OptimizeSection } from "@/pages/blastSubmit/OptimizeSection";
@@ -571,6 +575,10 @@ export function BlastSubmit() {
 
         {/* ── Center: form sections with group dividers ────────── */}
         <main className="bsl-center">
+          <BlastTemplatesControl
+            form={form}
+            onApply={(fields) => setForm((current) => applyTemplateFields(current, fields))}
+          />
 
           {/* ─ Input group (steps 1–4) ──────────────────────── */}
           <div className="bsl-divider">

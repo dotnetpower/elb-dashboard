@@ -22,8 +22,7 @@ export function useBlastTemplates() {
     retry: false,
   });
 
-  const invalidate = () =>
-    void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: QUERY_KEY });
 
   const createMutation = useMutation({
     mutationFn: ({ name, fields }: { name: string; fields: ExportableFormFields }) =>

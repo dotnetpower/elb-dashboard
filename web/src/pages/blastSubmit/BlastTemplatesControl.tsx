@@ -6,7 +6,7 @@
  * algorithm params, sharding) — never the query data — so applying one fills
  * the parameters and leaves the researcher's query untouched.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { BookMarked, Save, Trash2 } from "lucide-react";
 
 import { useToast } from "@/components/Toast";
@@ -17,14 +17,53 @@ import {
 } from "@/pages/blastSubmit/configSerializer";
 import type { FormState } from "@/pages/blastSubmitModel";
 
+const PER_RUN_ADDITIONAL_FLAGS = ["-query", "-query_loc", "-subject", "-subject_loc"];
+
+export function stripPerRunAdditionalOptions(options: string): string {
+  let reusable = options;
+  for (const flag of PER_RUN_ADDITIONAL_FLAGS) {
+    const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    reusable = reusable.replace(
+      new RegExp(
+        `(?:^|\\s)${escaped}(?:=(?:"(?:\\\\.|[^"])*"|'(?:\\\\.|[^'])*'|\\S+)|` +
+          `\\s+(?:"(?:\\\\.|[^"])*"|'(?:\\\\.|[^'])*'|\\S+))?(?=\\s|$)`,
+        "gi",
+      ),
+      " ",
+    );
+  }
+  return reusable.replace(/\s+/g, " ").trim();
+}
+
 /** Option-only snapshot: drop the query + per-run fields a preset must not pin. */
 export function pickTemplateFields(form: FormState): ExportableFormFields {
   const fields = pickExportableForm(form);
   delete fields.query_data;
+  delete fields.query_accession;
   delete fields.query_from;
   delete fields.query_to;
   delete fields.job_title;
+  if (typeof fields.additional_options === "string") {
+    fields.additional_options = stripPerRunAdditionalOptions(fields.additional_options);
+  }
   return fields;
+}
+
+/** Apply reusable options without replacing the current run's identity/input. */
+export function applyTemplateFields(
+  current: FormState,
+  fields: ExportableFormFields,
+): FormState {
+  return {
+    ...current,
+    ...fields,
+    query_data: current.query_data,
+    query_accession: current.query_accession,
+    query_from: current.query_from,
+    query_to: current.query_to,
+    job_title: current.job_title,
+    selectedCluster: current.selectedCluster,
+  };
 }
 
 export function BlastTemplatesControl({
@@ -34,16 +73,31 @@ export function BlastTemplatesControl({
   form: FormState;
   onApply: (fields: ExportableFormFields) => void;
 }) {
-  const { templates, isLoading, create, remove } = useBlastTemplates();
+  const { templates, isLoading, isError, create, remove } = useBlastTemplates();
   const { toast } = useToast();
   const [selectedId, setSelectedId] = useState("");
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
+  const openSaveButtonRef = useRef<HTMLButtonElement>(null);
+
+  const closeSaveForm = () => {
+    setSaving(false);
+    setName("");
+    window.setTimeout(() => openSaveButtonRef.current?.focus(), 0);
+  };
 
   const handleApply = (id: string) => {
-    setSelectedId(id);
+    if (!id) {
+      setSelectedId("");
+      return;
+    }
     const template = templates.find((t) => t.id === id);
-    if (!template) return;
+    if (!template) {
+      setSelectedId("");
+      toast("That template is no longer available.", "info");
+      return;
+    }
+    setSelectedId(id);
     onApply(template.fields);
     toast(`Applied template "${template.name}" — your query is unchanged.`, "success");
   };
@@ -59,8 +113,7 @@ export function BlastTemplatesControl({
       {
         onSuccess: () => {
           toast(`Saved template "${trimmed}".`, "success");
-          setName("");
-          setSaving(false);
+          closeSaveForm();
         },
         onError: (err) =>
           toast(
@@ -72,11 +125,17 @@ export function BlastTemplatesControl({
   };
 
   const handleDelete = (id: string, label: string) => {
+    if (!window.confirm(`Delete template "${label}"? This cannot be undone.`)) return;
     remove.mutate(id, {
       onSuccess: () => {
         if (selectedId === id) setSelectedId("");
         toast(`Deleted template "${label}".`, "info");
       },
+      onError: (err) =>
+        toast(
+          `Could not delete template: ${err instanceof Error ? err.message : "unknown error"}`,
+          "error",
+        ),
     });
   };
 
@@ -137,9 +196,16 @@ export function BlastTemplatesControl({
         )}
       </div>
 
+      {isError && (
+        <div role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>
+          Saved templates are temporarily unavailable.
+        </div>
+      )}
+
       {saving ? (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <input
+            autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Template name"
@@ -171,10 +237,7 @@ export function BlastTemplatesControl({
           </button>
           <button
             type="button"
-            onClick={() => {
-              setSaving(false);
-              setName("");
-            }}
+            onClick={closeSaveForm}
             style={{
               padding: "6px 10px",
               fontSize: 12,
@@ -189,6 +252,7 @@ export function BlastTemplatesControl({
         </div>
       ) : (
         <button
+          ref={openSaveButtonRef}
           type="button"
           onClick={() => setSaving(true)}
           style={{

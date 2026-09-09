@@ -35,10 +35,10 @@ sessions. Researchers re-filled the whole parameter set each run.
   `ExportableFormFields` shape the existing config export/duplicate flow uses, so
   the frontend reuses `pickExportableForm` to save and `setForm(...spread)` to
   apply.
-* The backend treats `fields` as **opaque** (it does not interpret submit-option
-  semantics) and only enforces limits: per-user count (50), name length (120),
-  field byte size (32 KB — so the large query FASTA can never be pinned in a
-  template) and field key count (200).
+* The backend does not interpret submit-option semantics, but rejects known
+  query, per-run, and execution-identity keys before storage. It also enforces
+  limits: per-user count (50), name length (120), field byte size (32 KB), and
+  field key count (200).
 * The authenticated `caller.object_id` is the only owner ever passed to the
   service — a caller can read/write only their own partition.
 

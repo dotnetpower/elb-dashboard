@@ -58,12 +58,14 @@ export function pickExportableForm(form: FormState): ExportableFormFields {
     program: form.program,
     db: form.db,
     query_data: form.query_data,
+    query_accession: form.query_accession,
     query_from: form.query_from,
     query_to: form.query_to,
     job_title: form.job_title,
     evalue: form.evalue,
     max_target_seqs: form.max_target_seqs,
     outfmt: form.outfmt,
+    outfmt_taxonomy_columns: form.outfmt_taxonomy_columns,
     word_size: form.word_size,
     gap_open: form.gap_open,
     gap_extend: form.gap_extend,
@@ -325,12 +327,14 @@ function normaliseFormFields(raw: object): ExportableFormFields {
     "program",
     "db",
     "query_data",
+    "query_accession",
     "query_from",
     "query_to",
     "job_title",
     "evalue",
     "max_target_seqs",
     "outfmt",
+    "outfmt_taxonomy_columns",
     "word_size",
     "gap_open",
     "gap_extend",
@@ -384,6 +388,7 @@ function normaliseFormFields(raw: object): ExportableFormFields {
       }
     } else if (
       key === "low_complexity_filter" ||
+      key === "outfmt_taxonomy_columns" ||
       key === "short_query_adjust" ||
       key === "mask_lookup_table_only" ||
       key === "mask_lowercase" ||
