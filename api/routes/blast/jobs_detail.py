@@ -6,13 +6,14 @@ Edit boundaries: Keep HTTP validation and response shaping here; reusable domain
 in `api/services/blast/*` and the shared helpers in `api/routes/_blast_shared.py`. The job
 listing, `/jobs/{job_id}` projection, and lifecycle (cancel/delete) routes live in the sibling
 `jobs.py` / `jobs_lifecycle.py` modules; this router is included onto `jobs.router`.
-Key entry points: `blast_job_execution_steps`, `blast_job_citation`, `blast_job_events`,
-`blast_job_query`, `blast_job_queue`.
+Key entry points: `blast_job_execution_steps`, `blast_job_citation`,
+`blast_job_reproducibility`, `blast_job_events`, `blast_job_query`, `blast_job_queue`.
 Risky contracts: Every route enforces `require_caller` + `_assert_job_owner`. Never issue a
 browser SAS token; `blast_job_query` streams the original FASTA through the api sidecar with a
 hard byte cap.
 Validation: `uv run pytest -q api/tests/test_blast_jobs_routes.py
-api/tests/test_blast_results_routes.py api/tests/test_route_contracts.py`.
+api/tests/test_blast_results_routes.py api/tests/test_blast_reproducibility.py
+api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from api.routes._blast_shared import (
     _payload_value,
     _queries_blob_path,
 )
+from api.services.storage.blob_ids import safe_download_filename
 
 LOGGER = logging.getLogger(__name__)
 
@@ -237,6 +239,59 @@ def blast_job_export(
         ) from exc
 
 
+@router.get("/jobs/{job_id}/reproducibility")
+def blast_job_reproducibility(
+    job_id: str = Path(..., min_length=1, max_length=128),
+    caller: CallerIdentity = Depends(require_caller),
+) -> Response:
+    """Download a portable JSON package describing an existing BLAST run.
+
+    The package is assembled from the persisted job row and an optional baked
+    result manifest. It never includes raw FASTA, credentials, SAS URLs, or
+    execution idempotency/correlation keys.
+    """
+    try:
+        from api.services.blast.reproducibility import build_reproducibility_package
+        from api.services.job_artifacts import read_json_artifact
+        from api.services.state_repo import get_state_repo
+
+        state = get_state_repo().get(job_id)
+        if state is None:
+            raise HTTPException(404, "job not found")
+        _assert_job_owner(state.owner_oid, caller)
+
+        manifest = None
+        try:
+            manifest = read_json_artifact(job_id, "result_manifest")
+        except Exception as exc:
+            LOGGER.info(
+                "reproducibility manifest unavailable job_id=%s reason=%s",
+                job_id,
+                type(exc).__name__,
+            )
+        package = build_reproducibility_package(state=state, result_manifest=manifest)
+        filename = safe_download_filename(f"{job_id}-reproducibility.json")
+        return Response(
+            content=package.model_dump_json(indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Elb-Export-Format": "reproducibility-v1",
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("blast_job_reproducibility failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            {
+                "code": "reproducibility_unavailable",
+                "message": f"Could not build reproducibility package: {type(exc).__name__}",
+            },
+        ) from exc
+
+
 @router.get("/jobs/{job_id}/events")
 def blast_job_events(
     job_id: str = Path(..., min_length=1, max_length=128),
@@ -319,9 +374,7 @@ def blast_job_query(
     external_payload = (
         payload.get("external") if isinstance(payload.get("external"), dict) else None
     )
-    blob_path = _queries_blob_path(
-        _payload_value(payload, "query_file", "query_blob_url")
-    )
+    blob_path = _queries_blob_path(_payload_value(payload, "query_file", "query_blob_url"))
     if not blob_path and external_payload is not None:
         # External (OpenAPI) jobs carry no query field on the job row: the
         # sibling elastic-blast-azure plane uploads the inline FASTA to
@@ -361,9 +414,7 @@ def blast_job_query(
                 "message": "recorded query path is not safe to read",
             },
         ) from exc
-    storage_account = state.storage_account or str(
-        _payload_value(payload, "storage_account") or ""
-    )
+    storage_account = state.storage_account or str(_payload_value(payload, "storage_account") or "")
     if not storage_account and external_payload is not None:
         # External jobs never populate infrastructure.storage_account but carry
         # the BLAST database as a full blob URL. Recover the account behind the

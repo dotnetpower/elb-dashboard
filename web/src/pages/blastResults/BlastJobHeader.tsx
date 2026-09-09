@@ -11,6 +11,7 @@ import {
   Edit3,
   Link2,
   Loader2,
+  PackageCheck,
   StopCircle,
   RotateCcw,
   Workflow,
@@ -132,6 +133,7 @@ export function BlastJobHeader({
   const [loadingQuery, setLoadingQuery] = useState(false);
   const [copyingCitation, setCopyingCitation] = useState(false);
   const [exportingWorkflow, setExportingWorkflow] = useState<WorkflowExportFormat | null>(null);
+  const [exportingReproducibility, setExportingReproducibility] = useState(false);
   const [showPipelineMenu, setShowPipelineMenu] = useState(false);
 
   const hydratableFields = jobPayload ? partialFormFromJobPayload(jobPayload) : null;
@@ -196,7 +198,7 @@ export function BlastJobHeader({
     setExportingWorkflow(format);
     try {
       const exported = await blastApi.getWorkflowExport(jobId, format);
-      triggerWorkflowDownload(
+      triggerTextDownload(
         exported.text,
         exported.filename ?? workflowExportFilename(format),
       );
@@ -218,6 +220,24 @@ export function BlastJobHeader({
       }
     } finally {
       setExportingWorkflow(null);
+    }
+  };
+
+  const handleReproducibilityExport = async () => {
+    if (exportingReproducibility) return;
+    setExportingReproducibility(true);
+    try {
+      const exported = await blastApi.getReproducibilityPackage(jobId);
+      triggerTextDownload(
+        exported.text,
+        exported.filename ?? `${jobId}-reproducibility.json`,
+        exported.contentType,
+      );
+      toast("Downloaded reproducibility package", "success");
+    } catch {
+      toast("Reproducibility package is not available for this search yet", "error");
+    } finally {
+      setExportingReproducibility(false);
     }
   };
 
@@ -483,6 +503,25 @@ export function BlastJobHeader({
           )}{" "}
           {copyingCitation ? "Copying…" : "Copy citation"}
         </button>
+        <button
+          className="glass-button"
+          onClick={handleReproducibilityExport}
+          disabled={exportingReproducibility}
+          title="Download the submit snapshot, provenance, citations, pipeline modules, and result manifest as JSON. Raw query sequence and execution identities are excluded."
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: 12,
+          }}
+        >
+          {exportingReproducibility ? (
+            <Loader2 size={14} strokeWidth={1.5} className="spin" />
+          ) : (
+            <PackageCheck size={14} strokeWidth={1.5} />
+          )}{" "}
+          {exportingReproducibility ? "Preparing…" : "Reproducibility"}
+        </button>
         <PipelineExportMenu
           exportingWorkflow={exportingWorkflow}
           onExport={handleWorkflowExport}
@@ -712,8 +751,12 @@ interface DownloadAllMenuProps {
 /** Trigger a browser download of a text workflow module without any external
  * library (mirrors configSerializer.downloadConfigJson, but for arbitrary
  * text/plain content). */
-function triggerWorkflowDownload(content: string, filename: string): void {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+function triggerTextDownload(
+  content: string,
+  filename: string,
+  contentType = "text/plain;charset=utf-8",
+): void {
+  const blob = new Blob([content], { type: contentType });
   const url = URL.createObjectURL(blob);
   try {
     const anchor = document.createElement("a");

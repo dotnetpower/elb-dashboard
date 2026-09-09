@@ -31,6 +31,13 @@ The header is laid out in four lines, top to bottom:
 
 Cluster, region, and storage account live on the **Run details** tab, not in the header.
 
+The **Reproducibility** action downloads a portable JSON package containing the
+canonical submit snapshot, provenance, Methods citations, workflow-manager
+modules, and the result manifest when one is available. It intentionally omits
+the raw FASTA and execution idempotency/correlation identifiers. Use the
+separate **Edit search** action when you need to reload the original query into
+the submit form.
+
 ## Tabs
 
 | Tab | What it shows |

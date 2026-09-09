@@ -376,6 +376,10 @@ export const blastApi = {
       `/blast/jobs/${encodeURIComponent(jobId)}/export?format=${encodeURIComponent(format)}`,
     ),
 
+  /** Download the portable, secret-free metadata package for one job. */
+  getReproducibilityPackage: (jobId: string) =>
+    api.getText(`/blast/jobs/${encodeURIComponent(jobId)}/reproducibility`),
+
   /**
    * Recommend one NCBI database plus an alternative for a described search
    * (R8 selection oracle). Pure decision logic on the backend — no Azure
