@@ -45,7 +45,7 @@ class WebBlastStatisticalContext(BaseModel):
 
     filtered_database_letters: int = Field(..., ge=1)
     filtered_database_sequences: int = Field(..., ge=1)
-    length_adjustment: int = Field(..., ge=1)
+    length_adjustment: int = Field(..., ge=0)
     effective_search_space: int = Field(..., ge=1)
     scoring_search_space: int = Field(..., ge=1)
     result_database_letters: int = Field(..., ge=1)

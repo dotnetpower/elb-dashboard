@@ -116,6 +116,28 @@ def _copy_support_files(root: Path) -> None:
             dest.write_bytes(source_bytes)
 
 
+def _is_tracked_sibling_module(root: Path, path: Path) -> bool:
+    """Return whether ``path`` is native source tracked by the sibling clone."""
+    import shutil
+    import subprocess
+
+    try:
+        relative = path.relative_to(root).as_posix()
+        git = shutil.which("git")
+        if not git:
+            return False
+        result = subprocess.run(  # noqa: S603 - resolved executable and fixed argv.
+            [git, "-C", str(root), "ls-files", "--error-unmatch", "--", relative],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _copy_app_overlay(root: Path) -> None:
     """Copy dashboard runtime overlays into the build-context ``app/``.
 
@@ -128,6 +150,9 @@ def _copy_app_overlay(root: Path) -> None:
         if not src.is_file():
             raise RuntimeError(f"missing OpenAPI overlay: {src}")
         dest = root / "app" / name
+        if name in {"exact_oracle.py", "reference_context.py"} and dest.is_file():
+            if _is_tracked_sibling_module(root, dest):
+                continue
         if not dest.exists() or dest.read_bytes() != src.read_bytes():
             dest.write_bytes(src.read_bytes())
 
@@ -155,6 +180,46 @@ def _ensure_reference_context_dependency(root: Path) -> None:
     desired = "\n".join(lines) + "\n"
     if path.read_text() != desired:
         path.write_text(desired)
+    pinned_count = sum(
+        line.split("#", 1)[0].strip().lower() == pinned
+        for line in path.read_text().splitlines()
+    )
+    if pinned_count != 1:
+        raise RuntimeError(f"expected one pinned defusedxml requirement in {path}")
+
+
+def _validate_copied_runtime_policy(root: Path) -> None:
+    """Verify native or copied runtime helpers retain required safety contracts."""
+    required = {
+        root / "app" / "exact_oracle.py": (
+            "def _context_nonnegative_int(",
+            "One-shard manifest exceeds the volume limit",
+            "oracle_source != source_version",
+        ),
+        root / "app" / "reference_context.py": (
+            "from defusedxml import ElementTree as ET",
+            "active_total_letters,",
+            "deepcopy(cached[1])",
+            "_FETCH_LOCK.acquire(timeout=_FETCH_LOCK_WAIT_SECONDS)",
+        ),
+        root / "merge-sharded-results.sh": (
+            "num_shards must be between 1 and 1024",
+        ),
+    }
+    missing: list[str] = []
+    for path, fragments in required.items():
+        if not path.is_file():
+            missing.append(f"missing file {path}")
+            continue
+        text = path.read_text()
+        missing.extend(
+            f"{path}: {fragment}" for fragment in fragments if fragment not in text
+        )
+    requirements = (root / "app" / "requirements.txt").read_text().splitlines()
+    if requirements.count("defusedxml==0.7.1") != 1:
+        missing.append("app/requirements.txt: exactly one defusedxml==0.7.1")
+    if missing:
+        raise RuntimeError("OpenAPI copied runtime policy mismatch: " + "; ".join(missing))
 
 
 def _patch_external_soft_masking(root: Path) -> None:
@@ -228,7 +293,7 @@ def _patch_external_soft_masking(root: Path) -> None:
             "class WebBlastStatisticalContext(BaseModel):\n"
             "    filtered_database_letters: int = Field(..., ge=1)\n"
             "    filtered_database_sequences: int = Field(..., ge=1)\n"
-            "    length_adjustment: int = Field(..., ge=1)\n"
+            "    length_adjustment: int = Field(..., ge=0)\n"
             "    effective_search_space: int = Field(..., ge=1)\n"
             "    scoring_search_space: int = Field(..., ge=1)\n"
             "    result_database_letters: int = Field(..., ge=1)\n\n\n"
@@ -1205,6 +1270,14 @@ def _patch_result_selection_policy(path: Path) -> None:
         path,
         "    is_b = req.query_fasta is not None\n",
         (
+            "    web_blast_context = (\n"
+            "        req.blast_options.web_blast_statistical_context.model_dump()\n"
+            "        if (\n"
+            "            req.blast_options is not None\n"
+            "            and req.blast_options.web_blast_statistical_context is not None\n"
+            "        )\n"
+            '        else (req.model_extra or {}).get("web_blast_statistical_context")\n'
+            "    )\n"
             "    selection_policy = (\n"
             "        req.blast_options.result_selection_policy\n"
             "        if req.blast_options is not None\n"
@@ -1212,8 +1285,7 @@ def _patch_result_selection_policy(path: Path) -> None:
             "    )\n"
             "    if (\n"
             '        selection_policy == "diversity_aware"\n'
-            "        and req.blast_options is not None\n"
-            "        and req.blast_options.web_blast_statistical_context is not None\n"
+            '        and web_blast_context not in (None, "")\n'
             "    ):\n"
             "        raise HTTPException(\n"
             "            400,\n"
@@ -1291,17 +1363,8 @@ def _patch_result_selection_policy(path: Path) -> None:
     _replace_once_unless_marker(
         path,
         '                context=(req.model_extra or {}).get("web_blast_statistical_context"),\n',
-        (
-            "                context=(\n"
-            "                    req.blast_options.web_blast_statistical_context.model_dump()\n"
-            "                    if (\n"
-            "                        req.blast_options is not None\n"
-            "                        and req.blast_options.web_blast_statistical_context is not None\n"
-            "                    )\n"
-            '                    else (req.model_extra or {}).get("web_blast_statistical_context")\n'
-            "                ),\n"
-        ),
-        "req.blast_options.web_blast_statistical_context.model_dump()",
+        "                context=web_blast_context,\n",
+        "                context=web_blast_context,\n",
     )
 
 
@@ -2536,6 +2599,7 @@ def main() -> int:
         return 2
     patch_dockerfile(root)
     patch_app(root)
+    _validate_copied_runtime_policy(root)
     print("patched docker-openapi build context for dashboard OpenAPI runtime policy")
     return 0
 

@@ -294,6 +294,29 @@ def test_v1_request_accepts_explicit_diversity_selection_policy() -> None:
     assert "staxids" in str(request.blast_options.outfmt)
 
 
+def test_v1_request_accepts_zero_reference_length_adjustment() -> None:
+    from api.routes.elastic_blast import ExternalBlastV1Request
+
+    request = ExternalBlastV1Request(
+        query_fasta=">q1\nACGT",
+        db="core_nt",
+        blast_options={
+            "outfmt": "5",
+            "web_blast_statistical_context": {
+                "filtered_database_letters": 100,
+                "filtered_database_sequences": 10,
+                "length_adjustment": 0,
+                "effective_search_space": 400,
+                "scoring_search_space": 400,
+                "result_database_letters": 100,
+            },
+        },
+    )
+
+    assert request.blast_options.web_blast_statistical_context is not None
+    assert request.blast_options.web_blast_statistical_context.length_adjustment == 0
+
+
 def test_v1_request_rejects_web_context_with_diversity_selection() -> None:
     from api.routes.elastic_blast import ExternalBlastV1Request
 

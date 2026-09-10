@@ -285,6 +285,38 @@ def test_read_one_shard_layout_rejects_incomplete_or_tampered_layout(
         )
 
 
+def test_read_one_shard_layout_rejects_oversized_manifest(monkeypatch) -> None:
+    manifest = "".join(
+        f"core_nt.{index:04d}\n" for index in range(exact_oracle._MAX_PARTS + 1)
+    ).encode()
+    responses = iter(
+        (
+            _Response(content=manifest),
+            _Response(content=b"DBLIST core_nt.00\n"),
+            _Response(content=(b"0" * 64) + b" 1\n"),
+            _Response(content=b"DBLIST core_nt.00\n"),
+        )
+    )
+    monkeypatch.setattr(exact_oracle.requests, "get", lambda *_a, **_k: next(responses))
+    active = exact_oracle.ActiveDatabase(
+        source_version="generation-1",
+        db_prefix="core_nt/generations/generation-1/core_nt",
+        shard_layout_prefix="core_nt/generations/generation-1/shards",
+        total_letters=1_000_000,
+        total_sequences=100,
+        search_space=123,
+        total_bytes=2_000_000,
+    )
+
+    with pytest.raises(exact_oracle.ExactOracleUnavailable, match="volume limit"):
+        exact_oracle.read_one_shard_layout(
+            blob_base="https://acct.blob.core.windows.net",
+            db_name="core_nt",
+            active_database=active,
+            token=_test_credential(),
+        )
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -540,6 +572,36 @@ def test_prepare_web_blast_statistics_canonicalizes_runtime_options() -> None:
         "active_database_sequences": 130_155_243,
         "active_source_version": "ncbi-direct-20260819-cab30d18c360",
     }
+
+
+def test_prepare_web_blast_statistics_accepts_zero_length_adjustment() -> None:
+    active = exact_oracle.ActiveDatabase(
+        source_version="generation-1",
+        db_prefix="core_nt/generations/generation-1/core_nt",
+        shard_layout_prefix="core_nt/generations/generation-1/shards",
+        total_letters=100,
+        total_sequences=10,
+        search_space=400,
+    )
+    context = {
+        "filtered_database_letters": 100,
+        "filtered_database_sequences": 10,
+        "length_adjustment": 0,
+        "effective_search_space": 400,
+        "scoring_search_space": 400,
+        "result_database_letters": 100,
+    }
+
+    options, statistics = exact_oracle.prepare_web_blast_statistics(
+        context=context,
+        query_fasta=">query-1\nACGT\n",
+        active_database=active,
+        options="-outfmt 5",
+    )
+
+    assert options == "-outfmt 5 -dbsize 100 -searchsp 400"
+    assert statistics is not None
+    assert statistics.length_adjustment == 0
 
 
 def test_web_blast_statistics_select_monolithic_candidate_search() -> None:

@@ -66,9 +66,16 @@ def validate_web_blast_statistical_context(
         raise ValueError("web_blast_statistical_context requires exactly one query")
     values: dict[str, int] = {}
     for field in _WEB_BLAST_CONTEXT_FIELDS:
-        value = _positive_int(context.get(field))
+        value = (
+            _nonnegative_int(context.get(field))
+            if field == "length_adjustment"
+            else _positive_int(context.get(field))
+        )
         if value is None:
-            raise ValueError(f"web_blast_statistical_context.{field} must be positive")
+            requirement = "non-negative" if field == "length_adjustment" else "positive"
+            raise ValueError(
+                f"web_blast_statistical_context.{field} must be {requirement}"
+            )
         values[field] = value
 
     query_length = query_lengths[0]
@@ -123,6 +130,14 @@ def _positive_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _nonnegative_int(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _metadata_count(metadata: Mapping[str, Any], *keys: str) -> int | None:

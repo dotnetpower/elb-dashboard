@@ -828,6 +828,27 @@ def test_query_oracle_is_disabled_without_subject_accession(tmp_path: Path) -> N
     assert report["selection_equivalence"] == "heuristic"
 
 
+@pytest.mark.parametrize("num_shards", ["not-an-integer", "0", "1025"])
+def test_merge_rejects_invalid_shard_count(tmp_path: Path, num_shards: str) -> None:
+    proc = subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(tmp_path / "hits.tsv"),
+            str(tmp_path / "merged.out.gz"),
+            str(tmp_path / "merge-report.json"),
+            num_shards,
+            "blastn",
+            "-outfmt 6 std score -max_target_seqs 10",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode != 0
+    assert "num_shards" in proc.stderr
+
+
 def _run_tabular_merge(
     tmp_path: Path,
     rows: list[str],

@@ -1678,6 +1678,13 @@ def merge_xml(
 
 
 input_tsv, output_gz, report_json, num_shards, blast_program, blast_options = sys.argv[1:]
+try:
+    num_shards_value = int(num_shards)
+except ValueError as exc:
+    raise ValueError("num_shards must be an integer") from exc
+if not 1 <= num_shards_value <= 1024:
+    raise ValueError("num_shards must be between 1 and 1024")
+num_shards = str(num_shards_value)
 candidate_pool_size, warnings = parse_max_target_seqs(blast_options)
 max_hits = resolve_result_max_target_seqs(candidate_pool_size)
 outfmt = parse_outfmt(blast_options)

@@ -359,6 +359,8 @@ def read_one_shard_layout(
     except UnicodeDecodeError as exc:
         raise ExactOracleUnavailable("One-shard metadata encoding is invalid") from exc
     volumes = [line.strip() for line in manifest_text.splitlines() if line.strip()]
+    if len(volumes) > _MAX_PARTS:
+        raise ExactOracleUnavailable("One-shard manifest exceeds the volume limit")
     volume_pattern = re.compile(rf"^{re.escape(db_name)}\.([0-9]+)$")
     ordinals: list[int] = []
     for volume in volumes:
@@ -446,6 +448,16 @@ def _context_positive_int(context: dict[str, Any], field: str) -> int:
     return value
 
 
+def _context_nonnegative_int(context: dict[str, Any], field: str) -> int:
+    try:
+        value = int(context.get(field))
+    except (TypeError, ValueError) as exc:
+        raise ExactOracleUnavailable(f"Web BLAST statistical context {field} is invalid") from exc
+    if value < 0:
+        raise ExactOracleUnavailable(f"Web BLAST statistical context {field} is invalid")
+    return value
+
+
 def _set_web_blast_statistical_options(
     options: str,
     *,
@@ -496,7 +508,7 @@ def prepare_web_blast_statistics(
     query_id, query_length = _single_fasta_record(query_fasta)
     filtered_letters = _context_positive_int(context, "filtered_database_letters")
     filtered_sequences = _context_positive_int(context, "filtered_database_sequences")
-    length_adjustment = _context_positive_int(context, "length_adjustment")
+    length_adjustment = _context_nonnegative_int(context, "length_adjustment")
     effective_search_space = _context_positive_int(context, "effective_search_space")
     scoring_search_space = _context_positive_int(context, "scoring_search_space")
     result_database_letters = _context_positive_int(context, "result_database_letters")

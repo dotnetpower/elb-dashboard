@@ -129,6 +129,26 @@ def test_web_blast_statistical_context_uses_distinct_scoring_space() -> None:
     }
 
 
+def test_web_blast_statistical_context_accepts_zero_length_adjustment() -> None:
+    context = {
+        "filtered_database_letters": 100,
+        "filtered_database_sequences": 10,
+        "length_adjustment": 0,
+        "effective_search_space": 400,
+        "scoring_search_space": 400,
+        "result_database_letters": 100,
+    }
+
+    validated = live_search_space.validate_web_blast_statistical_context(
+        context,
+        query_lengths=[4],
+        active_total_letters=100,
+        active_total_sequences=10,
+    )
+
+    assert validated == context
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

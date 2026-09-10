@@ -20243,7 +20243,7 @@
           "type": "integer"
         },
         "length_adjustment": {
-          "minimum": 1.0,
+          "minimum": 0.0,
           "type": "integer"
         },
         "result_database_letters": {

@@ -146,6 +146,11 @@ from __future__ import annotations
 # 4.55 adds the authenticated RID reference-context resolver, typed readiness
 # response models, hardened bounded XML evidence parsing, and explicit
 # result-selection policy examples while retaining 4.54 as the rollback image.
+# 4.56 sources those runtime contracts natively from sibling commit 8c0bacf,
+# accepts a valid zero length adjustment, rejects legacy top-level statistical
+# context with diversity-aware selection, and bounds layout/merge cardinality.
+# It is a source-publication target; deployed 4.55 remains the rollback image
+# until 4.56 is built and rolled out explicitly.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -173,14 +178,14 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.55",
+    "elb-openapi": "4.56",
 }
 
 # GitHub source repo for ACR Build Tasks.
 SOURCE_REPO = "https://github.com/dotnetpower/elastic-blast-azure.git"
 SOURCE_BRANCH = "master"
 DASHBOARD_SOURCE_REPO = "https://github.com/dotnetpower/elb-dashboard.git"
-OPENAPI_SIBLING_SOURCE_REF = "352a1f4ccf32dc8d76add5bcdb901530f0ad4c14"
+OPENAPI_SIBLING_SOURCE_REF = "8c0bacf97ce9df9b4266e54338e42f1cd502948c"
 
 # Build info per image: context subdirectory within the repo, Dockerfile path
 # relative to the context. Image-name → build args mirror exactly what the
@@ -231,9 +236,10 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
         "dockerfile": "Dockerfile.azure",
     },
     "elb-openapi": {
-        # A raw sibling build omits dashboard runtime overlays. Schedule this
-        # image from the dashboard source, clone the reviewed sibling commit,
-        # patch its context, then build from the generated directory. ACR's
+        # Clone one reviewed sibling commit and reapply the dashboard patcher
+        # idempotently as a compatibility/safety assertion. Since sibling
+        # commit 8c0bacf, the runtime contracts are native; the patcher must
+        # produce no semantic drift. ACR's
         # implicit cmd-step image does not contain git, so pin an explicit
         # tool image that carries git + Python + grep + bash.
         "source_repo": DASHBOARD_SOURCE_REPO,

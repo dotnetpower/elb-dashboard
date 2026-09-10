@@ -271,6 +271,48 @@ def test_copy_app_overlay_includes_runtime_modules(tmp_path: Path) -> None:
     assert "def resolve_reference_context(" in reference.read_text()
 
 
+def test_copy_app_overlay_preserves_tracked_sibling_modules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "exact_oracle.py").write_text("# sibling-native exact oracle\n")
+    (app / "reference_context.py").write_text("# sibling-native resolver\n")
+    monkeypatch.setattr(
+        module,
+        "_is_tracked_sibling_module",
+        lambda _root, path: path.name in {"exact_oracle.py", "reference_context.py"},
+    )
+
+    module._copy_app_overlay(tmp_path)
+
+    assert (app / "exact_oracle.py").read_text() == "# sibling-native exact oracle\n"
+    assert (app / "reference_context.py").read_text() == "# sibling-native resolver\n"
+    assert (app / "eta.py").is_file()
+
+
+def test_validate_copied_runtime_policy_rejects_missing_marker(tmp_path: Path) -> None:
+    module = _load_module()
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "exact_oracle.py").write_text("def _context_nonnegative_int():\n    pass\n")
+    (app / "reference_context.py").write_text(
+        "from defusedxml import ElementTree as ET\n"
+        "active_total_letters,\n"
+        "deepcopy(cached[1])\n"
+        "_FETCH_LOCK.acquire(timeout=_FETCH_LOCK_WAIT_SECONDS)\n"
+    )
+    (app / "requirements.txt").write_text("defusedxml==0.7.1\n")
+    (tmp_path / "merge-sharded-results.sh").write_text(
+        "num_shards must be between 1 and 1024\n"
+    )
+
+    with pytest.raises(RuntimeError, match="volume limit"):
+        module._validate_copied_runtime_policy(tmp_path)
+
+
 @pytest.mark.parametrize(
     "existing",
     [
@@ -420,7 +462,8 @@ def test_patch_publishes_reference_and_job_response_schemas(tmp_path: Path) -> N
         "from typing import Any, Literal, Optional\n"
         "from pydantic import BaseModel, Field\n\n"
         "class WebBlastStatisticalContext(BaseModel):\n"
-        "    filtered_database_letters: int\n\n"
+        "    filtered_database_letters: int\n"
+        "    length_adjustment: int = Field(..., ge=0)\n\n"
         "class ExternalBlastOptions(BaseModel):\n"
         "    pass\n"
     )
@@ -461,6 +504,7 @@ def test_patch_publishes_reference_and_job_response_schemas(tmp_path: Path) -> N
     assert schemas.read_text() == first_schema
     assert main.read_text() == first_main
     assert "class WebBlastStatisticalContextRequest(BaseModel):" in first_schema
+    assert "length_adjustment: int = Field(..., ge=0)" in first_schema
     assert 'pattern=r"^[A-Z0-9]{8,16}$"' in first_schema
     assert "omitted defaults to true" in first_schema
     assert "class WebBlastStatisticalContextResponse(BaseModel):" in first_schema
@@ -1251,6 +1295,9 @@ def test_patch_result_selection_policy_controls_oracle_and_provenance(
     assert path.read_text() == first
     assert "req.blast_options.result_selection_policy" in first
     assert "req.blast_options.web_blast_statistical_context.model_dump()" in first
+    assert 'else (req.model_extra or {}).get("web_blast_statistical_context")' in first
+    assert 'and web_blast_context not in (None, "")' in first
+    assert "context=web_blast_context" in first
     assert "web_blast_statistical_context requires native_top_n result selection" in first
     assert 'config["blast"]["result-selection-policy"] = selection_policy' in first
     assert 'and selection_policy == "native_top_n"' in first
