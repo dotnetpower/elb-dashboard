@@ -817,7 +817,7 @@ def test_patch_requested_max_target_seqs_transport_is_complete_and_idempotent(
     assert "result_selection_policy: str = 'native_top_n'" in config_path.read_text()
     assert "candidate_pool_size_requested: int = 0" in config_path.read_text()
     assert "'native_top_n', 'diversity_aware', 'sequence_diversity'" in config_path.read_text()
-    assert "candidate-pool-size-requested must be between 0 and 5000" in config_path.read_text()
+    assert "candidate-pool-size-requested must be non-negative" in config_path.read_text()
     assert "'ELB_REQUESTED_MAX_TARGET_SEQS': (" in azure_path.read_text()
     assert (
         "'ELB_RESULT_SELECTION_POLICY': cfg.blast.result_selection_policy" in azure_path.read_text()
@@ -826,6 +826,24 @@ def test_patch_requested_max_target_seqs_transport_is_complete_and_idempotent(
     assert "name: ELB_REQUESTED_MAX_TARGET_SEQS" in template_path.read_text()
     assert "name: ELB_RESULT_SELECTION_POLICY" in template_path.read_text()
     assert "name: ELB_CANDIDATE_POOL_SIZE_REQUESTED" in template_path.read_text()
+
+    current_config = config_path.read_text()
+    legacy_config = current_config.replace(
+            "        if self.candidate_pool_size_requested < 0:\n"
+            "            errors.append(\n"
+            "                'candidate-pool-size-requested must be non-negative'\n"
+            "            )\n",
+            "        if not 0 <= self.candidate_pool_size_requested <= 5000:\n"
+            "            errors.append(\n"
+            "                'candidate-pool-size-requested must be between 0 and 5000'\n"
+            "            )\n",
+    )
+    assert legacy_config != current_config
+    config_path.write_text(legacy_config)
+    patch_module.patch_requested_max_target_seqs(tmp_path)
+
+    assert "candidate-pool-size-requested must be non-negative" in config_path.read_text()
+    assert "candidate-pool-size-requested must be between 0 and 5000" not in config_path.read_text()
 
 
 def test_patch_requested_max_target_seqs_supports_folded_options_yaml(

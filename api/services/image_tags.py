@@ -186,7 +186,7 @@ IMAGE_TAGS: dict[str, str] = {
 SOURCE_REPO = "https://github.com/dotnetpower/elastic-blast-azure.git"
 SOURCE_BRANCH = "master"
 DASHBOARD_SOURCE_REPO = "https://github.com/dotnetpower/elb-dashboard.git"
-OPENAPI_SIBLING_SOURCE_REF = "149416c9fb0236513ed592cf46c1aa2384059bec"
+OPENAPI_SIBLING_SOURCE_REF = "142b9cea0629bdee4c325fa4af56ed77a72983d8"
 
 # Build info per image: context subdirectory within the repo, Dockerfile path
 # relative to the context. Image-name → build args mirror exactly what the

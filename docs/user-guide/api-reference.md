@@ -226,13 +226,17 @@ the other semantic fields or silently fall back to an existing policy.
 }
 ```
 
-The per-shard candidate cap defaults to `2000` and cannot exceed `5000`.
-`max_target_seqs` remains the final per-query sequence-group count. The merge
-report records requested/applied policy, identity version, observed rows,
-subjects and groups, expected/succeeded shards, cap saturation, and shortfall
-reasons. These counts describe the observed bounded candidate pool, not the
-entire database. `observed_pool_complete=true` means no observed shard/query
-set reached the configured cap; it is not a database-exhaustion claim.
+The per-shard candidate cap defaults to `2000` when omitted. There is no fixed
+server maximum: an explicit value must be a positive integer greater than or
+equal to `max_target_seqs`, and remains the finite bound for that request.
+Larger values increase BLAST output, storage, and merge work. The merge report
+records requested/applied policy, identity version, observed rows, subjects and
+groups, expected/succeeded shards, cap saturation, and shortfall reasons. Its
+per-group detail list is limited to 5,000 entries with an explicit truncation
+flag; canonical results and aggregate counts are not truncated by that report
+limit. These counts describe the observed bounded candidate pool, not the
+entire database. `observed_pool_complete=true` means no observed shard/query set
+reached the configured cap; it is not a database-exhaustion claim.
 
 The same accession may appear in several groups. A downstream parser that
 collapses HSPs by accession, computes union coverage, and then filters by

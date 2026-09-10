@@ -245,7 +245,7 @@ class BlastV1Options(BaseModel):
     )
     candidate_pool_size: int | None = Field(
         None,
-        json_schema_extra={"minimum": 1, "maximum": 5000},
+        json_schema_extra={"minimum": 1},
         description=(
             "Per-shard BLAST subject candidate cap for sequence_diversity. "
             "Rejected for other result-selection policies."

@@ -313,6 +313,48 @@ def test_validate_copied_runtime_policy_rejects_missing_marker(tmp_path: Path) -
         module._validate_copied_runtime_policy(tmp_path)
 
 
+def test_validate_copied_runtime_policy_rejects_legacy_candidate_cap(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "result_selection.py").write_text(
+        "SEQUENCE_DIVERSITY_DEFAULT_CANDIDATE_POOL_SIZE = 2_000\n"
+        "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE = 5_000\n"
+        "if applied_pool <= 0:\n"
+        "    pass\n"
+        "def prepare_sequence_diversity_options():\n"
+        "    pass\n"
+    )
+    (app / "exact_oracle.py").write_text(
+        "def _context_nonnegative_int():\n"
+        "    pass\n"
+        "One-shard manifest exceeds the volume limit\n"
+        "oracle_source != source_version\n"
+    )
+    (app / "reference_context.py").write_text(
+        "from defusedxml import ElementTree as ET\n"
+        "active_total_letters,\n"
+        "deepcopy(cached[1])\n"
+        "_FETCH_LOCK.acquire(timeout=_FETCH_LOCK_WAIT_SECONDS)\n"
+    )
+    (app / "requirements.txt").write_text("defusedxml==0.7.1\n")
+    (tmp_path / "merge-sharded-results.sh").write_text(
+        "num_shards must be between 1 and 1024\n"
+        "SEQUENCE_GROUP_REPORT_LIMIT = 5_000\n"
+        "def sequence_diversity_representatives():\n"
+        "    pass\n"
+        "len(observed_source_shards) == expected_shards\n"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="forbidden SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE",
+    ):
+        module._validate_copied_runtime_policy(tmp_path)
+
+
 @pytest.mark.parametrize(
     "existing",
     [

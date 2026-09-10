@@ -12,6 +12,8 @@ Key entry points: `_blast_xml`, `test_merge_sharded_results_respects_top_n_and_r
 `test_db_order_oracle_uses_raw_score_and_evalue_epsilon`,
 `test_deterministic_tie_order_on_sorts_by_accession`,
 `test_tabular_max_target_seqs_counts_subjects_and_preserves_hsps`,
+`test_sequence_diversity_accepts_pool_above_legacy_limit`,
+`test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory`,
 `test_large_sseq_rows_merge_under_bounded_memory`,
 `test_large_db_order_oracle_streams_under_bounded_memory`,
 `test_diversity_aware_cutoff_defaults_to_proportional_near_misses`,
@@ -950,6 +952,82 @@ def test_sequence_diversity_selects_one_representative_per_signature(
     assert report["observed_candidate_subjects"] == 2
     assert report["observed_sequence_groups"] == 2
     assert report["returned_sequence_groups"] == 2
+
+
+def test_sequence_diversity_accepts_pool_above_legacy_limit(tmp_path: Path) -> None:
+    row = "q1\tacc-a\tACGT\t1\t4\t1e-20\t80\t90"
+
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        [row],
+        num_shards="1",
+        max_target_seqs=5_001,
+        outfmt_spec="6 qseqid saccver sseq qstart qend evalue bitscore score",
+        env={
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "1",
+        },
+    )
+
+    assert out_rows == [row]
+    assert report["candidate_pool_size"] == 5_001
+    assert report["returned_sequence_groups"] == 1
+
+
+@pytest.mark.slow
+def test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory(
+    tmp_path: Path,
+) -> None:
+    input_tsv = tmp_path / "sequence-hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    sequence = "A" * 16_384
+    with input_tsv.open("w") as handle:
+        handle.write("# ELB source-shard:00\n")
+        for index in range(6_000):
+            handle.write(
+                f"q1\tacc-{index:05d}\t{sequence}{index:06d}\t1\t16384\t"
+                "1e-20\t80\t90\n"
+            )
+
+    memory_limit = 96 * 1024 * 1024
+
+    def limit_address_space() -> None:
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+    proc = subprocess.run(  # noqa: S603 -- executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "1",
+            "blastn",
+            "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
+            "-max_target_seqs 6000",
+        ],
+        capture_output=True,
+        text=True,
+        preexec_fn=limit_address_space,
+        env={
+            **os.environ,
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "6000",
+            "ELB_SUCCEEDED_SHARDS": "1",
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    with gzip.open(output_gz, "rt") as handle:
+        output_rows = sum(1 for line in handle if line.strip() and not line.startswith("#"))
+    report = json.loads(report_json.read_text())
+    assert output_rows == 6_000
+    assert report["observed_candidate_rows"] == 6_000
+    assert report["observed_sequence_groups"] == 6_000
+    assert report["returned_sequence_groups"] == 6_000
+    assert len(report["sequence_group_counts"]) == 5_000
+    assert report["sequence_group_counts_truncated"] is True
 
 
 def test_sequence_diversity_rejects_xml_at_merge_boundary(tmp_path: Path) -> None:

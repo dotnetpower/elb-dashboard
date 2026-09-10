@@ -99,7 +99,7 @@ def test_v1_options_schema_exposes_sequence_policy_and_candidate_bounds() -> Non
         "sequence_diversity",
     ]
     assert properties["candidate_pool_size"]["minimum"] == 1
-    assert properties["candidate_pool_size"]["maximum"] == 5000
+    assert "maximum" not in properties["candidate_pool_size"]
 
 
 def test_v1_sequence_diversity_validates_after_score_enrichment() -> None:
@@ -122,6 +122,26 @@ def test_v1_sequence_diversity_validates_after_score_enrichment() -> None:
     assert req.blast_options.candidate_pool_size is None
 
 
+def test_v1_sequence_diversity_accepts_pool_above_legacy_limit() -> None:
+    from api.routes.elastic_blast import ExternalBlastV1Request
+
+    req = ExternalBlastV1Request(
+        program="blastn",
+        db="core_nt",
+        query_fasta=_FASTA,
+        resource_profile="core_nt_safe",
+        blast_options={
+            "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+            "max_target_seqs": 10_000,
+            "candidate_pool_size": 20_000,
+            "result_selection_policy": "sequence_diversity",
+        },
+    )
+
+    assert req.blast_options.max_target_seqs == 10_000
+    assert req.blast_options.candidate_pool_size == 20_000
+
+
 @pytest.mark.parametrize(
     ("blast_options", "expected_code", "expected_missing"),
     [
@@ -137,16 +157,6 @@ def test_v1_sequence_diversity_validates_after_score_enrichment() -> None:
             },
             "sequence_diversity_missing_fields",
             "sseq",
-        ),
-        (
-            {
-                "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
-                "max_target_seqs": 2,
-                "candidate_pool_size": 5001,
-                "result_selection_policy": "sequence_diversity",
-            },
-            "sequence_diversity_invalid_candidate_pool",
-            "",
         ),
     ],
 )

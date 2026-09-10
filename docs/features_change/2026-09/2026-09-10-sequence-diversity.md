@@ -38,8 +38,10 @@ accessions and one accession may occur in several groups.
 
 `max_target_seqs` is the final per-query group count. The optional
 `candidate_pool_size` is a separate per-shard subject cap with server default
-`2000` and hard maximum `5000`. Values below the requested group count, above
-the maximum, or attached to another policy are rejected instead of clamped.
+`2000` and no fixed server maximum. Explicit values remain finite per-request
+bounds and must be positive and at least the requested group count. Values
+below the requested group count or attached to another policy are rejected
+instead of clamped. Larger pools increase BLAST output, storage, and merge work.
 
 The policy supports outfmt 6/7 only. Callers provide query identity, accession,
 `sseq`, `qstart`, `qend`, `evalue`, and `bitscore`; server enrichment adds
@@ -60,6 +62,8 @@ The policy supports outfmt 6/7 only. Callers provide query identity, accession,
 - The merge report adds requested/applied policy, identity metadata, observed
   candidate/group counts, requested/applied pool size, shard completion,
   saturation, and bounded shortfall reasons.
+- Per-group report detail is capped at 5,000 entries with an explicit
+  truncation flag; canonical results and aggregate counts are unaffected.
 - `observed_pool_complete` means no observed shard/query set reached the cap;
   it does not mean the full database was exhausted.
 - The runtime has no stable deduplicated exact-HSP identity beyond source-row
@@ -96,13 +100,13 @@ existing result.
   normalization, literal ambiguity handling, no reverse-complement folding,
   repeated accessions, query spans, cross-shard groups, representative order,
   shortfalls, zero results, saturation, missing shards, and report counts.
-- A 5,000-row synthetic candidate pool with long aligned-sequence fields passes
+- A 6,000-row synthetic candidate pool with long aligned-sequence fields passes
   under a 96 MiB address-space limit using the disk-backed merge path.
 - Dashboard Pydantic, Service Bus translation, durable failure-event, DLQ,
   result-artifact, split-report, runtime-patcher, and local merge tests pass.
-- The full Dashboard backend suite passes with `5,835 passed, 4 skipped`; the
+- The full Dashboard backend suite passes with `5,836 passed, 4 skipped`; the
   skipped checks require external parity evidence directories. Subprocess merge
-  and patcher coverage passes with `147 passed`.
+  and slow coverage passes with `137 passed`.
 - Ruff, the mypy debt ratchet, the 242-operation OpenAPI contract check,
   generated TypeScript drift check, docs frontmatter guard, and strict MkDocs
   build pass.
@@ -114,5 +118,5 @@ existing result.
 No [Azure](https://azure.microsoft.com/) image was built or deployed. The live
 `elb-openapi:4.55` runtime is unchanged; `elb-openapi:4.56` remains a future
 source target pinned to sibling commit
-`149416c9fb0236513ed592cf46c1aa2384059bec`, published on the sibling remote
+`142b9cea0629bdee4c325fa4af56ed77a72983d8`, published on the sibling remote
 `master` branch before the Dashboard commit was pushed.

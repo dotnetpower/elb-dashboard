@@ -193,7 +193,7 @@ def _validate_copied_runtime_policy(root: Path) -> None:
     required = {
         root / "app" / "result_selection.py": (
             "SEQUENCE_DIVERSITY_DEFAULT_CANDIDATE_POOL_SIZE = 2_000",
-            "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE = 5_000",
+            "if applied_pool <= 0:",
             "def prepare_sequence_diversity_options(",
         ),
         root / "app" / "exact_oracle.py": (
@@ -209,9 +209,18 @@ def _validate_copied_runtime_policy(root: Path) -> None:
         ),
         root / "merge-sharded-results.sh": (
             "num_shards must be between 1 and 1024",
-            "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE = 5_000",
+            "SEQUENCE_GROUP_REPORT_LIMIT = 5_000",
             "def sequence_diversity_representatives(",
             "len(observed_source_shards) == expected_shards",
+        ),
+    }
+    forbidden = {
+        root / "app" / "result_selection.py": (
+            "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE",
+        ),
+        root / "merge-sharded-results.sh": (
+            "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE",
+            "candidate pool cannot exceed 5000",
         ),
     }
     missing: list[str] = []
@@ -222,6 +231,11 @@ def _validate_copied_runtime_policy(root: Path) -> None:
         text = path.read_text()
         missing.extend(
             f"{path}: {fragment}" for fragment in fragments if fragment not in text
+        )
+        missing.extend(
+            f"{path}: forbidden {fragment}"
+            for fragment in forbidden.get(path, ())
+            if fragment in text
         )
     requirements = (root / "app" / "requirements.txt").read_text().splitlines()
     if requirements.count("defusedxml==0.7.1") != 1:

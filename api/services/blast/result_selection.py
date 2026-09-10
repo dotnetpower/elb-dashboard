@@ -20,7 +20,6 @@ ResultSelectionPolicy = Literal[
 ]
 
 SEQUENCE_DIVERSITY_DEFAULT_CANDIDATE_POOL_SIZE = 2_000
-SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE = 5_000
 SEQUENCE_IDENTITY_MODE = "aligned_sequence_query_span"
 SEQUENCE_IDENTITY_VERSION = 1
 
@@ -139,11 +138,10 @@ def validate_result_selection_options(
         isinstance(requested_groups, bool)
         or not isinstance(requested_groups, int)
         or requested_groups <= 0
-        or requested_groups > SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE
     ):
         raise SequenceDiversityValidationError(
             "sequence_diversity_invalid_candidate_pool",
-            "sequence_diversity max_target_seqs must be between 1 and 5000",
+            "sequence_diversity max_target_seqs must be a positive integer",
         )
 
     requested_pool = candidate_pool_size
@@ -160,10 +158,10 @@ def validate_result_selection_options(
     else:
         applied_pool = requested_pool
 
-    if applied_pool <= 0 or applied_pool > SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE:
+    if applied_pool <= 0:
         raise SequenceDiversityValidationError(
             "sequence_diversity_invalid_candidate_pool",
-            "candidate_pool_size must be between 1 and 5000",
+            "candidate_pool_size must be a positive integer",
         )
     if applied_pool < requested_groups:
         raise SequenceDiversityValidationError(
