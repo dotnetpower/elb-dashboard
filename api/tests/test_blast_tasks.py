@@ -2996,6 +2996,44 @@ def test_aggregate_split_merge_reports_preserves_sequence_diversity() -> None:
         3,
     ]
     assert report["sequence_group_counts_truncated"] is False
+    assert [
+        child["candidate_pool_size_requested_per_shard"] for child in report["children"]
+    ] == [4, 4]
+    assert [
+        child["candidate_pool_size_applied_per_shard"] for child in report["children"]
+    ] == [4, 4]
+    assert [child["observed_pool_complete"] for child in report["children"]] == [
+        True,
+        False,
+    ]
+    assert [
+        child["sequence_group_counts_truncated"] for child in report["children"]
+    ] == [False, False]
+
+
+def test_aggregate_split_merge_reports_ignores_boolean_numeric_fields() -> None:
+    report = blast._aggregate_split_merge_reports(
+        parent_job_id="job-123",
+        child_reports=[
+            {
+                "child_job_id": "job-123-qg1",
+                "group_id": "qg1",
+                "report": {
+                    "outfmt": 6,
+                    "format": "blast_tabular",
+                    "queries": True,
+                    "total_input_hits": True,
+                    "max_target_seqs": True,
+                    "candidate_pool_size": True,
+                },
+            }
+        ],
+    )
+
+    assert report["queries"] == 0
+    assert report["total_input_hits"] == 0
+    assert report["max_target_seqs"] is None
+    assert report["candidate_pool_size"] is None
 
 
 def test_aggregate_split_merge_reports_preserves_exact_selection() -> None:

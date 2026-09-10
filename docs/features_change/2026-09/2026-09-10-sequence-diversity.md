@@ -94,7 +94,7 @@ existing result.
 
 ## Validation
 
-- All `185` sibling OpenAPI tests pass in an isolated environment built from
+- All `188` sibling OpenAPI tests pass in an isolated environment built from
   the sibling's declared runtime and development requirements.
 - The merge matrix covers unchanged existing policies, signature
   normalization, literal ambiguity handling, no reverse-complement folding,
@@ -104,9 +104,9 @@ existing result.
   under a 96 MiB address-space limit using the disk-backed merge path.
 - Dashboard Pydantic, Service Bus translation, durable failure-event, DLQ,
   result-artifact, split-report, runtime-patcher, and local merge tests pass.
-- The full Dashboard backend suite passes with `5,836 passed, 4 skipped`; the
+- The full Dashboard backend suite passes with `5,837 passed, 4 skipped`; the
   skipped checks require external parity evidence directories. Subprocess merge
-  and slow coverage passes with `137 passed`.
+  and slow coverage passes with `139 passed`.
 - Ruff, the mypy debt ratchet, the 242-operation OpenAPI contract check,
   generated TypeScript drift check, docs frontmatter guard, and strict MkDocs
   build pass.
@@ -118,5 +118,5 @@ existing result.
 No [Azure](https://azure.microsoft.com/) image was built or deployed. The live
 `elb-openapi:4.55` runtime is unchanged; `elb-openapi:4.56` remains a future
 source target pinned to sibling commit
-`142b9cea0629bdee4c325fa4af56ed77a72983d8`, published on the sibling remote
+`787b1939c334d33d37cd9b7f37da470411e027e7`, published on the sibling remote
 `master` branch before the Dashboard commit was pushed.

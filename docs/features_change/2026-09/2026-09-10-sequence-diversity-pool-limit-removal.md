@@ -45,15 +45,16 @@ limit does not truncate canonical output or aggregate group counts.
 - Hardened the Dashboard build-context validator to reject sibling source that
   still contains the legacy cap.
 - Advanced the immutable sibling source pin to commit
-  `142b9cea0629bdee4c325fa4af56ed77a72983d8`.
+  `787b1939c334d33d37cd9b7f37da470411e027e7`, including the follow-up merge
+  publication hardening.
 - No infrastructure or deployed image changed.
 
 ## Validation
 
-- The full sibling OpenAPI suite passes with `185 passed`.
-- The full Dashboard backend suite passes with `5,836 passed, 4 skipped`; the
+- The full sibling OpenAPI suite passes with `188 passed`.
+- The full Dashboard backend suite passes with `5,837 passed, 4 skipped`; the
   skipped tests require external parity evidence directories.
-- Dashboard slow and subprocess coverage passes with `137 passed`.
+- Dashboard slow and subprocess coverage passes with `139 passed`.
 - A 6,000-row candidate pool with 16 KiB aligned-sequence values returned all
   6,000 groups under a 96 MiB address-space limit through the file-backed merge
   path; only the 5,000-entry report-detail list was marked truncated.

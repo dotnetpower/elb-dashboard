@@ -212,6 +212,9 @@ def _validate_copied_runtime_policy(root: Path) -> None:
             "SEQUENCE_GROUP_REPORT_LIMIT = 5_000",
             "def sequence_diversity_representatives(",
             "len(observed_source_shards) == expected_shards",
+            "def acquire_merge_lock(",
+            "def cleanup_merge_resources(",
+            "def completed_merge_from_owner(",
         ),
     }
     forbidden = {

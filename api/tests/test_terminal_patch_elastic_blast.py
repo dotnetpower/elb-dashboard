@@ -845,6 +845,16 @@ def test_patch_requested_max_target_seqs_transport_is_complete_and_idempotent(
     assert "candidate-pool-size-requested must be non-negative" in config_path.read_text()
     assert "candidate-pool-size-requested must be between 0 and 5000" not in config_path.read_text()
 
+    config_path.write_text(
+        config_path.read_text()
+        + "        if not 0 <= self.candidate_pool_size_requested <= 5000:\n"
+        + "            errors.append(\n"
+        + "                'candidate-pool-size-requested must be between 0 and 5000'\n"
+        + "            )\n"
+    )
+    with pytest.raises(RuntimeError, match="candidate pool validation patch mismatch"):
+        patch_module.patch_requested_max_target_seqs(tmp_path)
+
 
 def test_patch_requested_max_target_seqs_supports_folded_options_yaml(
     tmp_path: Path,

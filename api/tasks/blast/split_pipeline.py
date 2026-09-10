@@ -1240,13 +1240,21 @@ def _aggregate_split_merge_reports(
             )
         for key in totals:
             raw_value = report.get(key, 0)
-            if isinstance(raw_value, (int, float)):
+            if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
                 totals[key] += int(raw_value)
         max_target = report.get("max_target_seqs")
-        if isinstance(max_target, (int, float)) and max_target > 0:
+        if (
+            isinstance(max_target, (int, float))
+            and not isinstance(max_target, bool)
+            and max_target > 0
+        ):
             max_target_values.add(int(max_target))
         candidate_pool_size = report.get("candidate_pool_size")
-        if isinstance(candidate_pool_size, (int, float)) and candidate_pool_size > 0:
+        if (
+            isinstance(candidate_pool_size, (int, float))
+            and not isinstance(candidate_pool_size, bool)
+            and candidate_pool_size > 0
+        ):
             candidate_pool_values.add(int(candidate_pool_size))
         for warning in report.get("warnings", []):
             if isinstance(warning, str) and warning not in warnings:
@@ -1261,37 +1269,51 @@ def _aggregate_split_merge_reports(
             for entry in child_diversity_queries:
                 if isinstance(entry, dict) and len(diversity_queries) < 10:
                     diversity_queries.append(entry)
-        child_items.append(
-            {
-                "child_job_id": item.get("child_job_id"),
-                "group_id": item.get("group_id"),
-                "queries": report.get("queries", 0),
-                "candidate_pool_size": candidate_pool_size,
-                "total_input_hits": report.get("total_input_hits", 0),
-                "total_input_rows": report.get("total_input_rows", 0),
-                "total_input_subjects": report.get("total_input_subjects", 0),
-                "total_output_hits": report.get("total_output_hits", 0),
-                "total_output_rows": report.get("total_output_rows", 0),
-                "total_output_subjects": report.get("total_output_subjects", 0),
-                "unsupported_rows": report.get("unsupported_rows", 0),
-                "unsupported_records": report.get("unsupported_records", 0),
-                "malformed_xml_count": report.get("malformed_xml_count", 0),
-                "total_input_hsps": report.get("total_input_hsps", 0),
-                "total_output_hsps": report.get("total_output_hsps", 0),
-                "tie_break_count": report.get("tie_break_count", 0),
-                "tie_cutoff_overflow_count": report.get("tie_cutoff_overflow_count", 0),
-                "diversity_reserved_count": report.get("diversity_reserved_count", 0),
-                "diversity_candidate_count": report.get("diversity_candidate_count", 0),
-                "diversity_reservation_mode": diversity_mode,
-                "selection_equivalence": selection_equivalence,
-                "ranking_basis": ranking_basis,
-                "result_selection_policy_requested": requested_policy,
-                "result_selection_policy_applied": applied_policy,
-                "num_shards": report.get("num_shards", 0),
-                "format": report_format,
-                "warnings": report.get("warnings", []),
-            }
-        )
+        child_item = {
+            "child_job_id": item.get("child_job_id"),
+            "group_id": item.get("group_id"),
+            "queries": report.get("queries", 0),
+            "candidate_pool_size": candidate_pool_size,
+            "total_input_hits": report.get("total_input_hits", 0),
+            "total_input_rows": report.get("total_input_rows", 0),
+            "total_input_subjects": report.get("total_input_subjects", 0),
+            "total_output_hits": report.get("total_output_hits", 0),
+            "total_output_rows": report.get("total_output_rows", 0),
+            "total_output_subjects": report.get("total_output_subjects", 0),
+            "unsupported_rows": report.get("unsupported_rows", 0),
+            "unsupported_records": report.get("unsupported_records", 0),
+            "malformed_xml_count": report.get("malformed_xml_count", 0),
+            "total_input_hsps": report.get("total_input_hsps", 0),
+            "total_output_hsps": report.get("total_output_hsps", 0),
+            "tie_break_count": report.get("tie_break_count", 0),
+            "tie_cutoff_overflow_count": report.get("tie_cutoff_overflow_count", 0),
+            "diversity_reserved_count": report.get("diversity_reserved_count", 0),
+            "diversity_candidate_count": report.get("diversity_candidate_count", 0),
+            "diversity_reservation_mode": diversity_mode,
+            "selection_equivalence": selection_equivalence,
+            "ranking_basis": ranking_basis,
+            "result_selection_policy_requested": requested_policy,
+            "result_selection_policy_applied": applied_policy,
+            "num_shards": report.get("num_shards", 0),
+            "format": report_format,
+            "warnings": report.get("warnings", []),
+        }
+        if child_is_sequence:
+            child_item.update(
+                {
+                    "candidate_pool_size_requested_per_shard": report.get(
+                        "candidate_pool_size_requested_per_shard"
+                    ),
+                    "candidate_pool_size_applied_per_shard": report.get(
+                        "candidate_pool_size_applied_per_shard"
+                    ),
+                    "observed_pool_complete": report.get("observed_pool_complete"),
+                    "sequence_group_counts_truncated": report.get(
+                        "sequence_group_counts_truncated"
+                    ),
+                }
+            )
+        child_items.append(child_item)
     if len(max_target_values) > 1:
         warnings.append("child merge reports used different max_target_seqs values")
     if len(candidate_pool_values) > 1:
