@@ -114,5 +114,5 @@ existing result.
 No [Azure](https://azure.microsoft.com/) image was built or deployed. The live
 `elb-openapi:4.55` runtime is unchanged; `elb-openapi:4.56` remains a future
 source target pinned to sibling commit
-`149416c9fb0236513ed592cf46c1aa2384059bec`. The commit is local and intentionally
-not pushed by this validation session.
+`149416c9fb0236513ed592cf46c1aa2384059bec`, published on the sibling remote
+`master` branch before the Dashboard commit was pushed.
