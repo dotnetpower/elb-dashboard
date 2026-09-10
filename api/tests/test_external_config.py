@@ -24,6 +24,8 @@ def test_build_snapshot_filters_known_keys_and_drops_empty() -> None:
             "word_size": 28,
             "dust": "yes",
             "max_target_seqs": 500,
+            "candidate_pool_size": 20_000,
+            "result_selection_policy": "sequence_diversity",
             "taxid": 3431483,
             "is_inclusive": False,
             "unknown_field": "ignored",
@@ -35,6 +37,8 @@ def test_build_snapshot_filters_known_keys_and_drops_empty() -> None:
     assert snap["evalue"] == 0.05
     assert snap["word_size"] == 28
     assert snap["max_target_seqs"] == 500
+    assert snap["candidate_pool_size"] == 20_000
+    assert snap["result_selection_policy"] == "sequence_diversity"
     assert snap["taxid"] == 3431483
     assert snap["is_inclusive"] is False
     assert "unknown_field" not in snap

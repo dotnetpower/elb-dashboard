@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Iterator, Mapping
 from typing import Any
 
@@ -1103,6 +1104,54 @@ def _aggregate_split_merge_reports(
     child_reports: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Combine child finalizer reports into one parent-level report."""
+
+    def report_integer(
+        report: dict[str, Any],
+        key: str,
+        *,
+        default: int | None = None,
+        minimum: int = 0,
+    ) -> int | None:
+        if key not in report or report[key] is None:
+            return default
+        value = report[key]
+        if isinstance(value, bool):
+            raise ValueError(f"split child merge report field {key} must be an integer")
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
+            parsed = int(value)
+        else:
+            raise ValueError(f"split child merge report field {key} must be an integer")
+        if parsed < minimum:
+            raise ValueError(
+                f"split child merge report field {key} must be at least {minimum}"
+            )
+        return parsed
+
+    def detail_integer(detail: dict[str, Any], key: str, *, minimum: int = 0) -> int:
+        value = report_integer(detail, key, minimum=minimum)
+        if value is None:
+            raise ValueError(f"split child merge report detail field {key} is required")
+        return value
+
+    def report_boolean(
+        report: dict[str, Any], key: str, *, default: bool = False
+    ) -> bool:
+        if key not in report or report[key] is None:
+            return default
+        value = report[key]
+        if not isinstance(value, bool):
+            raise ValueError(f"split child merge report field {key} must be a boolean")
+        return value
+
+    def bounded_identifier(value: Any, field: str) -> str:
+        if not isinstance(value, str) or not value or len(value) > 128:
+            raise ValueError(
+                f"split child merge report detail field {field} must be a short string"
+            )
+        return value
+
     warnings: list[str] = []
     max_target_values: set[int] = set()
     candidate_pool_values: set[int] = set()
@@ -1123,6 +1172,11 @@ def _aggregate_split_merge_reports(
     shortfall_reasons: list[str] = []
     sequence_group_counts: list[dict[str, Any]] = []
     sequence_group_counts_truncated = False
+    sequence_saturation_details: list[dict[str, Any]] = []
+    sequence_saturation_details_truncated = False
+    merge_disk_pressure_warning = False
+    merge_disk_available_before_values: list[int] = []
+    merge_disk_available_after_values: list[int] = []
     totals = {
         "queries": 0,
         "total_input_hits": 0,
@@ -1150,6 +1204,10 @@ def _aggregate_split_merge_reports(
         "expected_shards": 0,
         "succeeded_shards": 0,
         "candidate_pool_saturated_shards": 0,
+        "merge_input_bytes": 0,
+        "sqlite_temp_bytes": 0,
+        "merge_disk_estimated_required_bytes": 0,
+        "merge_disk_reserve_bytes": 0,
     }
     # Per-query score-class cutoff samples (which queries had a tied top-score
     # class larger than max_target_seqs). The merge step computes these per
@@ -1192,30 +1250,49 @@ def _aggregate_split_merge_reports(
             requested_policy == "sequence_diversity"
             or applied_policy == "sequence_diversity"
         )
+        normalized_sequence_totals: dict[str, int] = {}
+        present_sequence_totals: set[str] = set()
+        requested_pool: int | None = None
+        applied_pool: int | None = None
+        child_observed_pool_complete = False
+        child_group_counts_truncated = False
+        child_saturation_details_truncated = False
+        child_disk_pressure_warning = False
         if child_is_sequence:
             sequence_report_seen = True
             identity_mode = report.get("sequence_identity_mode")
             if isinstance(identity_mode, str) and identity_mode:
                 sequence_identity_modes.add(identity_mode)
-            identity_version = report.get("sequence_identity_version")
-            if isinstance(identity_version, int) and not isinstance(identity_version, bool):
+            identity_version = report_integer(report, "sequence_identity_version")
+            if identity_version is not None:
                 sequence_identity_versions.add(identity_version)
-            requested_groups = report.get("requested_sequence_groups")
-            if isinstance(requested_groups, int) and not isinstance(requested_groups, bool):
+            requested_groups = report_integer(
+                report, "requested_sequence_groups", minimum=1
+            )
+            if requested_groups is not None:
                 sequence_requested_groups.add(requested_groups)
-            requested_pool = report.get("candidate_pool_size_requested_per_shard")
-            if isinstance(requested_pool, int) and not isinstance(requested_pool, bool):
+            requested_pool = report_integer(
+                report, "candidate_pool_size_requested_per_shard", minimum=1
+            )
+            if requested_pool is not None:
                 sequence_candidate_pool_requested.add(requested_pool)
-            applied_pool = report.get("candidate_pool_size_applied_per_shard")
-            if isinstance(applied_pool, int) and not isinstance(applied_pool, bool):
+            applied_pool = report_integer(
+                report, "candidate_pool_size_applied_per_shard", minimum=1
+            )
+            if applied_pool is not None:
                 sequence_candidate_pool_applied.add(applied_pool)
-            observed_pool_complete = observed_pool_complete and report.get(
-                "observed_pool_complete"
-            ) is True
+            child_observed_pool_complete = report_boolean(
+                report, "observed_pool_complete"
+            )
+            observed_pool_complete = (
+                observed_pool_complete and child_observed_pool_complete
+            )
             for key in sequence_totals:
-                raw_value = report.get(key, 0)
-                if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
-                    sequence_totals[key] += int(raw_value)
+                normalized_value = report_integer(report, key, default=0) or 0
+                normalized_sequence_totals[key] = normalized_value
+                if key in report and report[key] is not None:
+                    present_sequence_totals.add(key)
+                sequence_totals[key] += normalized_value
             for reason in report.get("shortfall_reasons", []):
                 if isinstance(reason, str) and reason not in shortfall_reasons:
                     shortfall_reasons.append(reason)
@@ -1229,33 +1306,80 @@ def _aggregate_split_merge_reports(
                         break
                     sequence_group_counts.append(
                         {
-                            **entry,
                             "sequence_group_ordinal": len(sequence_group_counts) + 1,
+                            "sequence_group_accession_count": detail_integer(
+                                entry, "sequence_group_accession_count"
+                            ),
+                            "sequence_group_source_row_count": detail_integer(
+                                entry, "sequence_group_source_row_count"
+                            ),
                             "child_job_id": item.get("child_job_id"),
                             "group_id": item.get("group_id"),
                         }
                     )
-            sequence_group_counts_truncated = sequence_group_counts_truncated or bool(
-                report.get("sequence_group_counts_truncated")
+            child_group_counts_truncated = report_boolean(
+                report, "sequence_group_counts_truncated"
             )
+            sequence_group_counts_truncated = (
+                sequence_group_counts_truncated or child_group_counts_truncated
+            )
+            child_disk_pressure_warning = report_boolean(
+                report, "merge_disk_pressure_warning"
+            )
+            merge_disk_pressure_warning = (
+                merge_disk_pressure_warning or child_disk_pressure_warning
+            )
+            available_before = report_integer(
+                report, "merge_disk_available_bytes_before"
+            )
+            if available_before is not None:
+                merge_disk_available_before_values.append(available_before)
+            available_after = report_integer(report, "merge_disk_available_bytes_after")
+            if available_after is not None:
+                merge_disk_available_after_values.append(available_after)
+            child_saturation_details = report.get("candidate_pool_saturation_details")
+            if isinstance(child_saturation_details, list):
+                for detail in child_saturation_details:
+                    if len(sequence_saturation_details) >= 100:
+                        sequence_saturation_details_truncated = True
+                        break
+                    if not isinstance(detail, dict):
+                        continue
+                    sequence_saturation_details.append(
+                        {
+                            "source_shard": bounded_identifier(
+                                detail.get("source_shard"), "source_shard"
+                            ),
+                            "saturated_query_count": detail_integer(
+                                detail, "saturated_query_count"
+                            ),
+                            "max_observed_subjects": detail_integer(
+                                detail, "max_observed_subjects"
+                            ),
+                            "child_job_id": item.get("child_job_id"),
+                            "group_id": item.get("group_id"),
+                        }
+                    )
+            child_saturation_details_truncated = report_boolean(
+                report, "candidate_pool_saturation_details_truncated"
+            )
+            sequence_saturation_details_truncated = (
+                sequence_saturation_details_truncated
+                or child_saturation_details_truncated
+            )
+        normalized_totals: dict[str, int] = {}
         for key in totals:
-            raw_value = report.get(key, 0)
-            if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
-                totals[key] += int(raw_value)
-        max_target = report.get("max_target_seqs")
-        if (
-            isinstance(max_target, (int, float))
-            and not isinstance(max_target, bool)
-            and max_target > 0
-        ):
-            max_target_values.add(int(max_target))
-        candidate_pool_size = report.get("candidate_pool_size")
-        if (
-            isinstance(candidate_pool_size, (int, float))
-            and not isinstance(candidate_pool_size, bool)
-            and candidate_pool_size > 0
-        ):
-            candidate_pool_values.add(int(candidate_pool_size))
+            normalized_value = report_integer(report, key, default=0) or 0
+            normalized_totals[key] = normalized_value
+            totals[key] += normalized_value
+        max_target = report_integer(report, "max_target_seqs", minimum=1)
+        if max_target is not None:
+            max_target_values.add(max_target)
+        candidate_pool_size = report_integer(
+            report, "candidate_pool_size", minimum=1
+        )
+        if candidate_pool_size is not None:
+            candidate_pool_values.add(candidate_pool_size)
         for warning in report.get("warnings", []):
             if isinstance(warning, str) and warning not in warnings:
                 warnings.append(warning)
@@ -1272,44 +1396,49 @@ def _aggregate_split_merge_reports(
         child_item = {
             "child_job_id": item.get("child_job_id"),
             "group_id": item.get("group_id"),
-            "queries": report.get("queries", 0),
             "candidate_pool_size": candidate_pool_size,
-            "total_input_hits": report.get("total_input_hits", 0),
-            "total_input_rows": report.get("total_input_rows", 0),
-            "total_input_subjects": report.get("total_input_subjects", 0),
-            "total_output_hits": report.get("total_output_hits", 0),
-            "total_output_rows": report.get("total_output_rows", 0),
-            "total_output_subjects": report.get("total_output_subjects", 0),
-            "unsupported_rows": report.get("unsupported_rows", 0),
-            "unsupported_records": report.get("unsupported_records", 0),
-            "malformed_xml_count": report.get("malformed_xml_count", 0),
-            "total_input_hsps": report.get("total_input_hsps", 0),
-            "total_output_hsps": report.get("total_output_hsps", 0),
-            "tie_break_count": report.get("tie_break_count", 0),
-            "tie_cutoff_overflow_count": report.get("tie_cutoff_overflow_count", 0),
-            "diversity_reserved_count": report.get("diversity_reserved_count", 0),
-            "diversity_candidate_count": report.get("diversity_candidate_count", 0),
+            **normalized_totals,
             "diversity_reservation_mode": diversity_mode,
             "selection_equivalence": selection_equivalence,
             "ranking_basis": ranking_basis,
             "result_selection_policy_requested": requested_policy,
             "result_selection_policy_applied": applied_policy,
-            "num_shards": report.get("num_shards", 0),
             "format": report_format,
             "warnings": report.get("warnings", []),
         }
         if child_is_sequence:
             child_item.update(
                 {
-                    "candidate_pool_size_requested_per_shard": report.get(
-                        "candidate_pool_size_requested_per_shard"
+                    "candidate_pool_size_requested_per_shard": requested_pool,
+                    "candidate_pool_size_applied_per_shard": applied_pool,
+                    "observed_pool_complete": child_observed_pool_complete,
+                    "sequence_group_counts_truncated": child_group_counts_truncated,
+                    "candidate_pool_saturation_details_truncated": (
+                        child_saturation_details_truncated
                     ),
-                    "candidate_pool_size_applied_per_shard": report.get(
-                        "candidate_pool_size_applied_per_shard"
+                    "merge_disk_pressure_warning": child_disk_pressure_warning,
+                    "merge_input_bytes": (
+                        normalized_sequence_totals["merge_input_bytes"]
+                        if "merge_input_bytes" in present_sequence_totals
+                        else None
                     ),
-                    "observed_pool_complete": report.get("observed_pool_complete"),
-                    "sequence_group_counts_truncated": report.get(
-                        "sequence_group_counts_truncated"
+                    "sqlite_temp_bytes": (
+                        normalized_sequence_totals["sqlite_temp_bytes"]
+                        if "sqlite_temp_bytes" in present_sequence_totals
+                        else None
+                    ),
+                    "merge_disk_estimated_required_bytes": (
+                        normalized_sequence_totals[
+                            "merge_disk_estimated_required_bytes"
+                        ]
+                        if "merge_disk_estimated_required_bytes"
+                        in present_sequence_totals
+                        else None
+                    ),
+                    "merge_disk_reserve_bytes": (
+                        normalized_sequence_totals["merge_disk_reserve_bytes"]
+                        if "merge_disk_reserve_bytes" in present_sequence_totals
+                        else None
                     ),
                 }
             )
@@ -1412,6 +1541,21 @@ def _aggregate_split_merge_reports(
                 "shortfall_reasons": shortfall_reasons,
                 "sequence_group_counts": sequence_group_counts,
                 "sequence_group_counts_truncated": sequence_group_counts_truncated,
+                "candidate_pool_saturation_details": sequence_saturation_details,
+                "candidate_pool_saturation_details_truncated": (
+                    sequence_saturation_details_truncated
+                ),
+                "merge_disk_pressure_warning": merge_disk_pressure_warning,
+                "merge_disk_available_bytes_before": (
+                    min(merge_disk_available_before_values)
+                    if merge_disk_available_before_values
+                    else None
+                ),
+                "merge_disk_available_bytes_after": (
+                    min(merge_disk_available_after_values)
+                    if merge_disk_available_after_values
+                    else None
+                ),
             }
         )
     return aggregated
@@ -1730,7 +1874,7 @@ def _write_split_parent_result_artifacts(
         storage_account,
         "results",
         paths["merge_report_path"],
-        json.dumps(parent_report, sort_keys=True) + "\n",
+        json.dumps(parent_report, sort_keys=True, allow_nan=False) + "\n",
         content_type="application/json; charset=utf-8",
     )
     upload_blob_text(

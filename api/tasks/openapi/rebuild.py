@@ -82,7 +82,14 @@ _BUILD_TERMINAL_FAIL = frozenset({"Failed", "Canceled", "Cancelled", "Error", "T
 # Sentinel returned by ``_poll_acr_build`` when the deadline elapses before the
 # run reaches any terminal status.
 _BUILD_TIMEOUT = "__timeout__"
-_BUILD_CANCEL_WAIT_SECONDS = int(os.environ.get("OPENAPI_REBUILD_CANCEL_WAIT_SECONDS", "180"))
+try:
+    _BUILD_CANCEL_WAIT_SECONDS = int(
+        os.environ.get("OPENAPI_REBUILD_CANCEL_WAIT_SECONDS", "180")
+    )
+except ValueError as exc:
+    raise ValueError("OPENAPI_REBUILD_CANCEL_WAIT_SECONDS must be an integer") from exc
+if not 1 <= _BUILD_CANCEL_WAIT_SECONDS <= 3600:
+    raise ValueError("OPENAPI_REBUILD_CANCEL_WAIT_SECONDS must be between 1 and 3600")
 
 
 def _open_acr_build_access(
@@ -123,6 +130,10 @@ def _cancel_acr_build_and_wait(
     interval_seconds: int = 5,
 ) -> bool:
     """Cancel one timed-out run and wait boundedly for a terminal state."""
+    if not 1 <= deadline_seconds <= 3600:
+        raise ValueError("deadline_seconds must be between 1 and 3600")
+    if not 1 <= interval_seconds <= 60:
+        raise ValueError("interval_seconds must be between 1 and 60")
     from azure.mgmt.containerregistry import ContainerRegistryManagementClient
 
     client = ContainerRegistryManagementClient(
@@ -139,7 +150,7 @@ def _cancel_acr_build_and_wait(
             read_timeout=30,
         )
         poller.result(timeout=60)
-        deadline = time.monotonic() + max(1, deadline_seconds)
+        deadline = time.monotonic() + deadline_seconds
         while time.monotonic() < deadline:
             status = str(
                 client.runs.get(
@@ -153,7 +164,7 @@ def _cancel_acr_build_and_wait(
             ).strip()
             if status == "Succeeded" or status in _BUILD_TERMINAL_FAIL:
                 return True
-            time.sleep(max(1, interval_seconds))
+            time.sleep(interval_seconds)
     except Exception as exc:
         LOGGER.error(
             "ACR timed-out build cancel failed run_id=%s error=%s",

@@ -41,6 +41,8 @@ _SNAPSHOT_OPTION_KEYS: tuple[str, ...] = (
     "word_size",
     "dust",
     "max_target_seqs",
+    "candidate_pool_size",
+    "result_selection_policy",
     "additional_options",
     "extra",
     "taxid",

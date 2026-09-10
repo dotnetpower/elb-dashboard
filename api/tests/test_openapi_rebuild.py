@@ -302,6 +302,31 @@ def test_cancel_timed_out_build_wait_is_bounded(monkeypatch: pytest.MonkeyPatch)
     )
 
 
+@pytest.mark.parametrize(
+    ("deadline_seconds", "interval_seconds", "message"),
+    [
+        (0, 1, "deadline_seconds must be between 1 and 3600"),
+        (3601, 1, "deadline_seconds must be between 1 and 3600"),
+        (1, 0, "interval_seconds must be between 1 and 60"),
+        (1, 61, "interval_seconds must be between 1 and 60"),
+    ],
+)
+def test_cancel_timed_out_build_rejects_unbounded_waits(
+    deadline_seconds: int,
+    interval_seconds: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        rebuild_mod._cancel_acr_build_and_wait(
+            "s",
+            "rg",
+            "acr",
+            "run-1",
+            deadline_seconds=deadline_seconds,
+            interval_seconds=interval_seconds,
+        )
+
+
 # ── route ──────────────────────────────────────────────────────────────────
 
 

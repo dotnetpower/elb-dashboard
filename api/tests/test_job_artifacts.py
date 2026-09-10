@@ -1166,6 +1166,22 @@ def test_merge_report_result_selection_projects_sequence_metadata() -> None:
             "expected_shards": 2,
             "succeeded_shards": 2,
             "candidate_pool_saturated_shards": 1,
+            "candidate_pool_saturation_details": [
+                {
+                    "source_shard": "00",
+                    "saturated_query_count": 1,
+                    "max_observed_subjects": 4,
+                    "must_not_be_exposed": True,
+                }
+            ],
+            "merge_input_bytes": 100,
+            "sqlite_temp_bytes": 200,
+            "merge_disk_available_bytes_before": 1_000,
+            "merge_disk_available_bytes_after": 900,
+            "merge_disk_estimated_required_bytes": 400,
+            "merge_disk_reserve_bytes": 100,
+            "merge_disk_pressure_warning": True,
+            "candidate_pool_saturation_details_truncated": False,
             "observed_pool_complete": False,
             "shortfall_reasons": [
                 "candidate_pool_saturated",
@@ -1191,6 +1207,21 @@ def test_merge_report_result_selection_projects_sequence_metadata() -> None:
         "expected_shards": 2,
         "succeeded_shards": 2,
         "candidate_pool_saturated_shards": 1,
+        "candidate_pool_saturation_details": [
+            {
+                "source_shard": "00",
+                "saturated_query_count": 1,
+                "max_observed_subjects": 4,
+            }
+        ],
+        "merge_input_bytes": 100,
+        "sqlite_temp_bytes": 200,
+        "merge_disk_available_bytes_before": 1_000,
+        "merge_disk_available_bytes_after": 900,
+        "merge_disk_estimated_required_bytes": 400,
+        "merge_disk_reserve_bytes": 100,
+        "merge_disk_pressure_warning": True,
+        "candidate_pool_saturation_details_truncated": False,
         "observed_pool_complete": False,
         "shortfall_reasons": [
             "candidate_pool_saturated",

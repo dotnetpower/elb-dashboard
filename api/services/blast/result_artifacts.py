@@ -207,6 +207,12 @@ def _merge_report_result_selection(
         "expected_shards",
         "succeeded_shards",
         "candidate_pool_saturated_shards",
+        "merge_input_bytes",
+        "sqlite_temp_bytes",
+        "merge_disk_available_bytes_before",
+        "merge_disk_available_bytes_after",
+        "merge_disk_estimated_required_bytes",
+        "merge_disk_reserve_bytes",
     )
     for key in integer_fields:
         value = report.get(key)
@@ -215,6 +221,40 @@ def _merge_report_result_selection(
     observed_pool_complete = report.get("observed_pool_complete")
     if isinstance(observed_pool_complete, bool):
         summary["observed_pool_complete"] = observed_pool_complete
+    disk_pressure = report.get("merge_disk_pressure_warning")
+    if isinstance(disk_pressure, bool):
+        summary["merge_disk_pressure_warning"] = disk_pressure
+    saturation_details = report.get("candidate_pool_saturation_details")
+    if isinstance(saturation_details, list):
+        bounded_details = []
+        for item in saturation_details[:100]:
+            if not isinstance(item, dict):
+                continue
+            source_shard = item.get("source_shard")
+            saturated_queries = item.get("saturated_query_count")
+            max_subjects = item.get("max_observed_subjects")
+            if (
+                isinstance(source_shard, str)
+                and len(source_shard) <= 64
+                and isinstance(saturated_queries, int)
+                and not isinstance(saturated_queries, bool)
+                and saturated_queries >= 0
+                and isinstance(max_subjects, int)
+                and not isinstance(max_subjects, bool)
+                and max_subjects >= 0
+            ):
+                bounded_details.append(
+                    {
+                        "source_shard": source_shard,
+                        "saturated_query_count": saturated_queries,
+                        "max_observed_subjects": max_subjects,
+                    }
+                )
+        summary["candidate_pool_saturation_details"] = bounded_details
+        summary["candidate_pool_saturation_details_truncated"] = (
+            len(saturation_details) > 100
+            or report.get("candidate_pool_saturation_details_truncated") is True
+        )
     reasons = report.get("shortfall_reasons")
     if isinstance(reasons, list):
         summary["shortfall_reasons"] = [

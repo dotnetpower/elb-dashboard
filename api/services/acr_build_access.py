@@ -118,6 +118,12 @@ def open_build_access(
     settle_seconds: float = 75.0,
 ) -> BuildAccessLease:
     """Open build access and return the restoration lease."""
+    if not 1 <= max_attempts <= 120:
+        raise ValueError("max_attempts must be between 1 and 120")
+    if not 0 <= interval_seconds <= 300:
+        raise ValueError("interval_seconds must be between 0 and 300")
+    if not 0 <= settle_seconds <= 120:
+        raise ValueError("settle_seconds must be between 0 and 120")
     client = acr_client(credential, subscription_id)
     registry = client.registries.get(resource_group, registry_name)
     public, default_action, bypass = _network_state(registry)
@@ -166,7 +172,10 @@ def open_build_access(
             if _network_state(current) == ("Enabled", "Allow", "AzureServices"):
                 if settle_seconds > 0:
                     time.sleep(settle_seconds)
-                return lease
+                settled = client.registries.get(resource_group, registry_name)
+                if _network_state(settled) == ("Enabled", "Allow", "AzureServices"):
+                    return lease
+                raise RuntimeError("ACR build access policy changed during propagation settle")
             if interval_seconds > 0:
                 time.sleep(interval_seconds)
         raise RuntimeError("ACR build access policy did not become effective")

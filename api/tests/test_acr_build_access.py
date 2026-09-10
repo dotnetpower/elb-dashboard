@@ -34,7 +34,9 @@ def _run_harness(
     open_update_fails: bool = False,
     restore_update_fails: bool = False,
     open_wait_fails: bool = False,
+    open_wait_fail_call: int | None = None,
     preserve_open: bool = False,
+    settle_seconds: str = "0",
 ) -> tuple[subprocess.CompletedProcess[str], str, str]:
     calls = tmp_path / "az-calls.log"
     logs = tmp_path / "messages.log"
@@ -48,9 +50,9 @@ def _run_harness(
         "STATE_QUERY_FAILS": "1" if state_query_fails else "0",
         "OPEN_UPDATE_FAILS": "1" if open_update_fails else "0",
         "RESTORE_UPDATE_FAILS": "1" if restore_update_fails else "0",
-        "OPEN_WAIT_FAILS": "1" if open_wait_fails else "0",
+        "OPEN_WAIT_FAIL_CALL": str(open_wait_fail_call or (1 if open_wait_fails else 0)),
         "ACR_BUILD_ACCESS_PRESERVE_OPEN": "1" if preserve_open else "0",
-        "ACR_BUILD_ACCESS_SETTLE_SECONDS": "0",
+        "ACR_BUILD_ACCESS_SETTLE_SECONDS": settle_seconds,
     }
     command = f"""
 set -euo pipefail
@@ -60,8 +62,10 @@ acr_show_network_state() {{
     if [[ "$STATE_QUERY_FAILS" == "1" ]]; then return 1; fi
     printf '%s\n' "$INITIAL_STATE"
 }}
+WAIT_CALLS=0
 acr_wait_for_build_access_state() {{
-    if [[ "$OPEN_WAIT_FAILS" == "1" ]]; then
+    WAIT_CALLS=$((WAIT_CALLS + 1))
+    if [[ "$OPEN_WAIT_FAIL_CALL" == "$WAIT_CALLS" ]]; then
         acr_build_access_log "simulated open-policy convergence timeout"
         return 1
     fi
@@ -254,6 +258,30 @@ def test_open_policy_convergence_timeout_is_fatal(tmp_path: Path) -> None:
     assert "simulated open-policy convergence timeout" in logs
 
 
+def test_open_policy_is_rechecked_after_settle(tmp_path: Path) -> None:
+    result, calls, logs = _run_harness(
+        tmp_path,
+        initial_state="Disabled Deny AzureServices",
+        open_wait_fail_call=2,
+    )
+
+    assert result.returncode != 0
+    assert calls.count("--public-network-enabled true") == 1
+    assert "simulated open-policy convergence timeout" in logs
+
+
+def test_open_rejects_unbounded_settle_before_mutation(tmp_path: Path) -> None:
+    result, calls, logs = _run_harness(
+        tmp_path,
+        initial_state="Disabled Deny AzureServices",
+        settle_seconds="121",
+    )
+
+    assert result.returncode != 0
+    assert calls == ""
+    assert "ACR_BUILD_ACCESS_SETTLE_SECONDS must be between 0 and 120" in logs
+
+
 def test_private_origin_defers_restore_while_other_build_is_active(tmp_path: Path) -> None:
     result, calls, logs = _run_harness(
         tmp_path,
@@ -283,6 +311,8 @@ def _run_reconcile_harness(
     *,
     initial_state: str,
     active_builds: list[str],
+    idle_grace_seconds: int = 0,
+    idle_interval_seconds: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], str, str]:
     calls = tmp_path / "az-calls.log"
     logs = tmp_path / "messages.log"
@@ -320,7 +350,8 @@ acr_reconcile_private_steady_state testregistry
             "STATE": str(state),
             "BUILDS": str(builds),
             "ACR_BUILD_ACCESS_IDLE_ATTEMPTS": str(len(active_builds)),
-            "ACR_BUILD_ACCESS_IDLE_INTERVAL_SECONDS": "0",
+            "ACR_BUILD_ACCESS_IDLE_INTERVAL_SECONDS": str(idle_interval_seconds),
+            "ACR_BUILD_ACCESS_IDLE_GRACE_SECONDS": str(idle_grace_seconds),
             "ACR_BUILD_ACCESS_PRIVATE_VERIFY_ATTEMPTS": "2",
             "ACR_BUILD_ACCESS_PRIVATE_VERIFY_INTERVAL_SECONDS": "0",
         },
@@ -374,6 +405,36 @@ def test_reconciler_defers_when_build_starts_after_idle_check(tmp_path: Path) ->
     assert "private steady state did not become effective" in logs
 
 
+def test_reconciler_requires_continuous_idle_grace(tmp_path: Path) -> None:
+    result, calls, logs = _run_reconcile_harness(
+        tmp_path,
+        initial_state="Enabled Allow AzureServices",
+        active_builds=["0", "0", "1"],
+        idle_grace_seconds=20,
+        idle_interval_seconds=10,
+    )
+
+    assert result.returncode == 1
+    assert calls == ""
+    assert "remain idle before private restore (0/20s)" in logs
+    assert "remain idle before private restore (10/20s)" in logs
+    assert "Waiting for 1 active ACR build(s)" in logs
+
+
+def test_reconciler_restores_after_continuous_idle_grace(tmp_path: Path) -> None:
+    result, calls, logs = _run_reconcile_harness(
+        tmp_path,
+        initial_state="Enabled Allow AzureServices",
+        active_builds=["0", "0", "0", "0"],
+        idle_grace_seconds=20,
+        idle_interval_seconds=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert calls.count("--public-network-enabled false") == 1
+    assert "ACR private steady state verified" in logs
+
+
 def test_azure_calls_use_configured_subscription() -> None:
     source = _SCRIPT.read_text()
 
@@ -393,6 +454,9 @@ def test_build_workflow_has_immediate_and_independent_restore_paths() -> None:
     assert 'ACR_BUILD_ACCESS_PRIVATE_VERIFY_INTERVAL_SECONDS: "5"' in build_workflow
     assert 'workflows: ["Build Images"]' in reconcile_workflow
     assert "types: [completed]" in reconcile_workflow
-    assert 'cron: "17 * * * *"' in reconcile_workflow
+    assert 'cron: "2,17,32,47 * * * *"' in reconcile_workflow
+    assert build_workflow.count("group: build-images-main") == 1
+    assert reconcile_workflow.count("group: restore-acr-private-network") == 1
     assert 'ACR_BUILD_ACCESS_IDLE_ATTEMPTS: "180"' in reconcile_workflow
+    assert 'ACR_BUILD_ACCESS_IDLE_GRACE_SECONDS: "180"' in reconcile_workflow
     assert 'acr_reconcile_private_steady_state "$ACR_NAME"' in reconcile_workflow

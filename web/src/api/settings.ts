@@ -464,7 +464,11 @@ export interface ServiceBusSendRequest {
     max_target_seqs?: number;
     outfmt?: string;
     extra?: string;
-    result_selection_policy?: "native_top_n" | "diversity_aware";
+    result_selection_policy?:
+      | "native_top_n"
+      | "diversity_aware"
+      | "sequence_diversity";
+    candidate_pool_size?: number;
     /**
      * Calibrated Web BLAST effective search space (oracle value). Leave unset to
      * let the backend apply the calibrated value automatically for a known DB

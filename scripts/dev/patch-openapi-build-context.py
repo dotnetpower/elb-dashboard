@@ -215,6 +215,11 @@ def _validate_copied_runtime_policy(root: Path) -> None:
             "def acquire_merge_lock(",
             "def cleanup_merge_resources(",
             "def completed_merge_from_owner(",
+            "MERGE_COMPLETION_SCHEMA_VERSION = 1",
+            "def cleanup_scoped_stale_artifacts(",
+            "SEQUENCE_SATURATION_REPORT_LIMIT = 100",
+            "candidate_pool_saturation_summary",
+            "merge_disk_pressure_warning",
         ),
     }
     forbidden = {

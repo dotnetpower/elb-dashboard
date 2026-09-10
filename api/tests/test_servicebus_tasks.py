@@ -721,7 +721,7 @@ def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("api.services.blast.external_jobs._sync_external_jobs_to_table", _fake_sync)
     monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FakeRepo())
-    monkeypatch.setattr(external_blast, "submit_job", lambda p, **k: {"job_id": "openapi-9"})
+    monkeypatch.setattr(external_blast, "submit_job_v1", lambda p, **k: {"job_id": "openapi-9"})
     monkeypatch.setattr(service_bus, "publish_event", lambda c, e: None)
 
     enq = datetime.datetime(2026, 6, 14, 0, 0, 0, tzinfo=datetime.UTC)
@@ -734,6 +734,15 @@ def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) 
                     "db": "core_nt",
                     "query_fasta": ">s\nACGT",
                     "external_correlation_id": "corr-9",
+                    "resource_profile": "core_nt_safe",
+                    "blast_options": {
+                        "outfmt": (
+                            "7 qseqid saccver sseq qstart qend evalue bitscore"
+                        ),
+                        "max_target_seqs": 10_000,
+                        "candidate_pool_size": 20_000,
+                        "result_selection_policy": "sequence_diversity",
+                    },
                 },
                 enqueued_time_utc=enq,
             )
@@ -754,6 +763,12 @@ def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) 
     assert rows[0]["job_id"] == "openapi-9"
     assert rows[0]["submission_source"] == "servicebus"
     assert rows[0]["external_correlation_id"] == "corr-9"
+    assert rows[0]["config_snapshot"]["max_target_seqs"] == 10_000
+    assert rows[0]["config_snapshot"]["candidate_pool_size"] == 20_000
+    assert (
+        rows[0]["config_snapshot"]["result_selection_policy"]
+        == "sequence_diversity"
+    )
     assert kw.get("caller_oid") == ""
 
     # Trace stages recorded, keyed by the OpenAPI job id.

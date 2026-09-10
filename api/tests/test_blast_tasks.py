@@ -2944,6 +2944,26 @@ def test_aggregate_split_merge_reports_preserves_sequence_diversity() -> None:
                     "expected_shards": 2,
                     "succeeded_shards": 2,
                     "candidate_pool_saturated_shards": index - 1,
+                    "candidate_pool_saturation_details": (
+                        [
+                            {
+                                "source_shard": f"0{index - 1}",
+                                "saturated_query_count": 1,
+                                "max_observed_subjects": 4,
+                                "must_not_be_copied": True,
+                            }
+                        ]
+                        if index == 2
+                        else []
+                    ),
+                    "merge_input_bytes": 100 * index,
+                    "sqlite_temp_bytes": 200 * index,
+                    "merge_disk_available_bytes_before": 1_000 - index,
+                    "merge_disk_available_bytes_after": 900 - index,
+                    "merge_disk_estimated_required_bytes": 400 * index,
+                    "merge_disk_reserve_bytes": 50 * index,
+                    "merge_disk_pressure_warning": index == 2,
+                    "candidate_pool_saturation_details_truncated": False,
                     "observed_pool_complete": index == 1,
                     "shortfall_reasons": (
                         ["insufficient_unique_groups_in_observed_pool"]
@@ -2958,6 +2978,7 @@ def test_aggregate_split_merge_reports_preserves_sequence_diversity() -> None:
                             "sequence_group_ordinal": group_index + 1,
                             "sequence_group_accession_count": 1,
                             "sequence_group_source_row_count": 1,
+                            "must_not_be_copied": True,
                         }
                         for group_index in range(observed_groups)
                     ],
@@ -2996,6 +3017,26 @@ def test_aggregate_split_merge_reports_preserves_sequence_diversity() -> None:
         3,
     ]
     assert report["sequence_group_counts_truncated"] is False
+    assert all(
+        "must_not_be_copied" not in item for item in report["sequence_group_counts"]
+    )
+    assert report["candidate_pool_saturation_details"] == [
+        {
+            "source_shard": "01",
+            "saturated_query_count": 1,
+            "max_observed_subjects": 4,
+            "child_job_id": "job-123-qg2",
+            "group_id": "qg2",
+        }
+    ]
+    assert report["merge_input_bytes"] == 300
+    assert report["sqlite_temp_bytes"] == 600
+    assert report["merge_disk_estimated_required_bytes"] == 1_200
+    assert report["merge_disk_reserve_bytes"] == 150
+    assert report["merge_disk_available_bytes_before"] == 998
+    assert report["merge_disk_available_bytes_after"] == 898
+    assert report["merge_disk_pressure_warning"] is True
+    assert report["candidate_pool_saturation_details_truncated"] is False
     assert [
         child["candidate_pool_size_requested_per_shard"] for child in report["children"]
     ] == [4, 4]
@@ -3011,7 +3052,7 @@ def test_aggregate_split_merge_reports_preserves_sequence_diversity() -> None:
     ] == [False, False]
 
 
-def test_aggregate_split_merge_reports_ignores_boolean_numeric_fields() -> None:
+def test_aggregate_split_merge_reports_normalizes_child_metadata() -> None:
     report = blast._aggregate_split_merge_reports(
         parent_job_id="job-123",
         child_reports=[
@@ -3021,19 +3062,85 @@ def test_aggregate_split_merge_reports_ignores_boolean_numeric_fields() -> None:
                 "report": {
                     "outfmt": 6,
                     "format": "blast_tabular",
-                    "queries": True,
-                    "total_input_hits": True,
-                    "max_target_seqs": True,
-                    "candidate_pool_size": True,
+                    "result_selection_policy_requested": "sequence_diversity",
+                    "result_selection_policy_applied": "sequence_diversity",
+                    "queries": 1.0,
+                    "candidate_pool_size": 20_000.0,
+                    "candidate_pool_size_requested_per_shard": 20_000.0,
+                    "candidate_pool_size_applied_per_shard": 20_000.0,
+                    "merge_input_bytes": 100.0,
+                    "observed_pool_complete": True,
+                    "sequence_group_counts_truncated": False,
+                    "candidate_pool_saturation_details_truncated": False,
+                    "merge_disk_pressure_warning": False,
                 },
             }
         ],
     )
 
-    assert report["queries"] == 0
-    assert report["total_input_hits"] == 0
-    assert report["max_target_seqs"] is None
-    assert report["candidate_pool_size"] is None
+    child = report["children"][0]
+    assert child["queries"] == 1
+    assert type(child["queries"]) is int
+    assert child["candidate_pool_size"] == 20_000
+    assert type(child["candidate_pool_size"]) is int
+    assert child["candidate_pool_size_requested_per_shard"] == 20_000
+    assert type(child["candidate_pool_size_requested_per_shard"]) is int
+    assert child["candidate_pool_size_applied_per_shard"] == 20_000
+    assert type(child["candidate_pool_size_applied_per_shard"]) is int
+    assert child["merge_input_bytes"] == 100
+    assert type(child["merge_input_bytes"]) is int
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "observed_pool_complete",
+        "sequence_group_counts_truncated",
+        "candidate_pool_saturation_details_truncated",
+        "merge_disk_pressure_warning",
+    ],
+)
+def test_aggregate_split_merge_reports_rejects_malformed_boolean_fields(
+    field: str,
+) -> None:
+    with pytest.raises(ValueError, match=rf"field {field} must be a boolean"):
+        blast._aggregate_split_merge_reports(
+            parent_job_id="job-123",
+            child_reports=[
+                {
+                    "child_job_id": "job-123-qg1",
+                    "group_id": "qg1",
+                    "report": {
+                        "outfmt": 6,
+                        "format": "blast_tabular",
+                        "result_selection_policy_requested": "sequence_diversity",
+                        "result_selection_policy_applied": "sequence_diversity",
+                        field: "false",
+                    },
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize("invalid_value", [True, float("nan"), float("inf"), 1.5])
+def test_aggregate_split_merge_reports_rejects_malformed_numeric_fields(
+    invalid_value: object,
+) -> None:
+    with pytest.raises(ValueError, match="field queries must be an integer"):
+        blast._aggregate_split_merge_reports(
+            parent_job_id="job-123",
+            child_reports=[
+                {
+                    "child_job_id": "job-123-qg1",
+                    "group_id": "qg1",
+                    "report": {
+                        "outfmt": 6,
+                        "format": "blast_tabular",
+                        "queries": invalid_value,
+                    },
+                }
+            ],
+        )
 
 
 def test_aggregate_split_merge_reports_preserves_exact_selection() -> None:

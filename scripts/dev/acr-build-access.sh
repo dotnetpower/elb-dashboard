@@ -79,6 +79,11 @@ acr_ensure_build_access() {
   local subscription_args=()
   [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]] && subscription_args=(--subscription "$AZURE_SUBSCRIPTION_ID")
 
+  if [[ ! "$settle_seconds" =~ ^[0-9]+$ || "$settle_seconds" -gt 120 ]]; then
+    acr_build_access_log "ERROR: ACR_BUILD_ACCESS_SETTLE_SECONDS must be between 0 and 120"
+    return 2
+  fi
+
   acr_capture_build_access_state "$acr_name" || return 1
   ACR_BUILD_ACCESS_RESTORE_NEEDED=0
   ACR_BUILD_ACCESS_RESTORE_TO_STEADY_STATE=0
@@ -103,6 +108,10 @@ acr_ensure_build_access() {
     acr_wait_for_build_access_state "$acr_name" || return 1
     acr_build_access_log "    ACR policy accepted; settling ${settle_seconds}s for build-agent propagation"
     sleep "$settle_seconds"
+    # A scheduled recovery may have observed the short pre-registration idle
+    # window. Verify again after settling so a caller never schedules against a
+    # registry that was returned to private posture in the meantime.
+    acr_wait_for_build_access_state "$acr_name" || return 1
   else
     case "${ACR_BUILD_ACCESS_PRESERVE_OPEN:-}" in
       1|true|TRUE|yes|YES)
@@ -199,9 +208,10 @@ acr_reconcile_private_steady_state() {
   local acr_name="${1:?acr name required}"
   local max_attempts="${ACR_BUILD_ACCESS_IDLE_ATTEMPTS:-1}"
   local interval_seconds="${ACR_BUILD_ACCESS_IDLE_INTERVAL_SECONDS:-10}"
+  local idle_grace_seconds="${ACR_BUILD_ACCESS_IDLE_GRACE_SECONDS:-0}"
   local verify_attempts="${ACR_BUILD_ACCESS_PRIVATE_VERIFY_ATTEMPTS:-18}"
   local verify_interval_seconds="${ACR_BUILD_ACCESS_PRIVATE_VERIFY_INTERVAL_SECONDS:-5}"
-  local attempt active_builds
+  local attempt active_builds idle_verified_seconds=0 idle_observed=0
 
   if [[ ! "$max_attempts" =~ ^[0-9]+$ || "$max_attempts" -lt 1 || "$max_attempts" -gt 360 ]]; then
     acr_build_access_log "ERROR: ACR_BUILD_ACCESS_IDLE_ATTEMPTS must be between 1 and 360"
@@ -209,6 +219,14 @@ acr_reconcile_private_steady_state() {
   fi
   if [[ ! "$interval_seconds" =~ ^[0-9]+$ || "$interval_seconds" -gt 300 ]]; then
     acr_build_access_log "ERROR: ACR_BUILD_ACCESS_IDLE_INTERVAL_SECONDS must be between 0 and 300"
+    return 2
+  fi
+  if [[ ! "$idle_grace_seconds" =~ ^[0-9]+$ || "$idle_grace_seconds" -gt 900 ]]; then
+    acr_build_access_log "ERROR: ACR_BUILD_ACCESS_IDLE_GRACE_SECONDS must be between 0 and 900"
+    return 2
+  fi
+  if (( idle_grace_seconds > 0 && interval_seconds == 0 )); then
+    acr_build_access_log "ERROR: ACR_BUILD_ACCESS_IDLE_INTERVAL_SECONDS must be positive when idle grace is enabled"
     return 2
   fi
   if [[ ! "$verify_attempts" =~ ^[0-9]+$ || "$verify_attempts" -lt 1 || "$verify_attempts" -gt 120 ]]; then
@@ -227,30 +245,48 @@ acr_reconcile_private_steady_state() {
   fi
 
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    if acr_private_steady_state_ready "$acr_name"; then
+      acr_build_access_log "ACR private steady state verified"
+      return 0
+    fi
     if active_builds="$(acr_active_build_count "$acr_name")" && \
        [[ "$active_builds" =~ ^[0-9]+$ ]]; then
       if (( active_builds == 0 )); then
-        ACR_BUILD_ACCESS_RESTORE_NEEDED=1
-        ACR_BUILD_ACCESS_RESTORE_TO_STEADY_STATE=1
-        if ! acr_restore_build_access "$acr_name"; then
-          acr_build_access_log "ERROR: ACR private restore request failed"
+        idle_observed=1
+        if (( idle_verified_seconds >= idle_grace_seconds )); then
+          ACR_BUILD_ACCESS_RESTORE_NEEDED=1
+          ACR_BUILD_ACCESS_RESTORE_TO_STEADY_STATE=1
+          if ! acr_restore_build_access "$acr_name"; then
+            acr_build_access_log "ERROR: ACR private restore request failed"
+            return 1
+          fi
+          for ((verify = 1; verify <= verify_attempts; verify++)); do
+            if acr_private_steady_state_ready "$acr_name"; then
+              acr_build_access_log "ACR private steady state verified"
+              return 0
+            fi
+            (( verify < verify_attempts )) && sleep "$verify_interval_seconds"
+          done
+          acr_build_access_log "ERROR: ACR private steady state did not become effective"
           return 1
         fi
-        for ((verify = 1; verify <= verify_attempts; verify++)); do
-          if acr_private_steady_state_ready "$acr_name"; then
-            acr_build_access_log "ACR private steady state verified"
-            return 0
-          fi
-          (( verify < verify_attempts )) && sleep "$verify_interval_seconds"
-        done
-        acr_build_access_log "ERROR: ACR private steady state did not become effective"
-        return 1
+        acr_build_access_log "Waiting for ACR to remain idle before private restore (${idle_verified_seconds}/${idle_grace_seconds}s)"
+      else
+        idle_observed=0
+        idle_verified_seconds=0
+        acr_build_access_log "Waiting for ${active_builds} active ACR build(s) before private restore (${attempt}/${max_attempts})"
       fi
-      acr_build_access_log "Waiting for ${active_builds} active ACR build(s) before private restore (${attempt}/${max_attempts})"
     else
+      idle_observed=0
+      idle_verified_seconds=0
       acr_build_access_log "WARN: could not verify active ACR builds (${attempt}/${max_attempts})"
     fi
-    (( attempt < max_attempts )) && sleep "$interval_seconds"
+    if (( attempt < max_attempts )); then
+      sleep "$interval_seconds"
+      if (( idle_observed == 1 )); then
+        idle_verified_seconds=$((idle_verified_seconds + interval_seconds))
+      fi
+    fi
   done
 
   acr_build_access_log "ERROR: ACR builds did not become idle before the restore deadline"

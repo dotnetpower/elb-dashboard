@@ -70,10 +70,18 @@ test("Service Bus Playground validates without enqueueing", async ({ uiPage }) =
       }),
     }),
   );
-  let dryRun = false;
+  const dryRunBodies: Array<{
+    dry_run?: boolean;
+    blast_options?: {
+      max_target_seqs?: number;
+      outfmt?: string;
+      result_selection_policy?: string;
+      candidate_pool_size?: number;
+    };
+  }> = [];
   await uiPage.route("**/api/settings/service-bus/send", async (route) => {
-    const body = route.request().postDataJSON() as { dry_run?: boolean };
-    dryRun = body.dry_run === true;
+    const body = route.request().postDataJSON() as (typeof dryRunBodies)[number];
+    dryRunBodies.push(body);
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -87,8 +95,42 @@ test("Service Bus Playground validates without enqueueing", async ({ uiPage }) =
 
   await uiPage.goto("/blast/playground");
   await expect(uiPage.getByRole("heading", { name: "Service Bus Playground" })).toBeVisible();
-  await uiPage.getByRole("button", { name: "Validate" }).click();
-  await expect.poll(() => dryRun).toBe(true);
+  await uiPage.locator("#pg-preset").selectOption("core-nt-sequence-diversity");
+  const candidatePool = uiPage.locator("#pg-candidate-pool-size");
+  const maxTarget = uiPage.locator("#pg-mts-t");
+  const validate = uiPage.getByRole("button", { name: "Validate" });
+
+  await expect(candidatePool).toHaveValue("2000");
+  await candidatePool.fill("");
+  await validate.click();
+  await expect.poll(() => dryRunBodies.length).toBe(1);
+  expect(dryRunBodies[0].dry_run).toBe(true);
+  expect(dryRunBodies[0].blast_options).toMatchObject({
+    max_target_seqs: 100,
+    outfmt: "7 std sseq",
+    result_selection_policy: "sequence_diversity",
+  });
+  expect(dryRunBodies[0].blast_options?.candidate_pool_size).toBeUndefined();
+
+  await maxTarget.fill("10000");
+  await candidatePool.fill("5000");
+  await expect(
+    uiPage.getByText(
+      "candidate_pool_size must be greater than or equal to max_target_seqs.",
+    ),
+  ).toBeVisible();
+  await expect(validate).toBeDisabled();
+
+  await candidatePool.fill("20000");
+  await expect(validate).toBeEnabled();
+  await validate.click();
+  await expect.poll(() => dryRunBodies.length).toBe(2);
+  expect(dryRunBodies[1].blast_options).toMatchObject({
+    max_target_seqs: 10000,
+    outfmt: "7 std sseq",
+    result_selection_policy: "sequence_diversity",
+    candidate_pool_size: 20000,
+  });
   await expect(uiPage.getByText(/Validated \(no message sent\)/)).toBeVisible();
 });
 

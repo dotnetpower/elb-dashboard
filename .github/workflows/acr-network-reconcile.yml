@@ -5,7 +5,7 @@ on:
     workflows: ["Build Images"]
     types: [completed]
   schedule:
-    - cron: "17 * * * *"
+    - cron: "2,17,32,47 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -13,6 +13,9 @@ permissions:
   contents: read
 
 concurrency:
+  # Keep this separate from Build Images: GitHub retains only one pending run
+  # per concurrency group and would otherwise cancel an older queued build.
+  # The continuous idle grace below protects the pre-registration window.
   group: restore-acr-private-network
   cancel-in-progress: false
 
@@ -28,6 +31,7 @@ jobs:
       ACR_NAME: ${{ vars.ACR_NAME }}
       ACR_BUILD_ACCESS_IDLE_ATTEMPTS: "180"
       ACR_BUILD_ACCESS_IDLE_INTERVAL_SECONDS: "10"
+      ACR_BUILD_ACCESS_IDLE_GRACE_SECONDS: "180"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

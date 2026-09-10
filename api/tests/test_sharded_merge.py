@@ -13,6 +13,7 @@ Key entry points: `_blast_xml`, `test_merge_sharded_results_respects_top_n_and_r
 `test_deterministic_tie_order_on_sorts_by_accession`,
 `test_tabular_max_target_seqs_counts_subjects_and_preserves_hsps`,
 `test_sequence_diversity_accepts_pool_above_legacy_limit`,
+`test_sequence_diversity_bounds_candidate_pool_saturation_details`,
 `test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory`,
 `test_sequence_diversity_publish_failure_is_atomic`,
 `test_sequence_diversity_sigterm_cleans_temporary_artifacts`,
@@ -33,6 +34,7 @@ import gzip
 import json
 import os
 import resource
+import signal
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -978,6 +980,38 @@ def test_sequence_diversity_accepts_pool_above_legacy_limit(tmp_path: Path) -> N
     assert report["returned_sequence_groups"] == 1
 
 
+def test_sequence_diversity_bounds_candidate_pool_saturation_details(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        row
+        for shard in range(101)
+        for row in (
+            f"# ELB source-shard:{shard:03d}",
+            f"q1\tacc-{shard:03d}\tAAAA{shard:03d}\t1\t4\t1e-20\t80\t90",
+        )
+    ]
+
+    _out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="101",
+        max_target_seqs=1,
+        outfmt_spec="6 qseqid saccver sseq qstart qend evalue bitscore score",
+        env={
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "1",
+            "ELB_CANDIDATE_POOL_SIZE_REQUESTED": "1",
+        },
+    )
+
+    assert report["candidate_pool_saturated_shards"] == 101
+    assert len(report["candidate_pool_saturation_details"]) == 100
+    assert report["candidate_pool_saturation_details"][0]["source_shard"] == "000"
+    assert report["candidate_pool_saturation_details"][-1]["source_shard"] == "099"
+    assert report["candidate_pool_saturation_details_truncated"] is True
+
+
 def test_sequence_diversity_publish_failure_is_atomic(tmp_path: Path) -> None:
     input_tsv = tmp_path / "hits.tsv"
     output_gz = tmp_path / "merged.out.gz"
@@ -1012,7 +1046,7 @@ def test_sequence_diversity_publish_failure_is_atomic(tmp_path: Path) -> None:
     assert proc.returncode != 0
     assert not output_gz.exists()
     assert report_target.is_dir()
-    assert list(tmp_path.glob("merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
@@ -1053,10 +1087,10 @@ def test_sequence_diversity_sigterm_cleans_temporary_artifacts(tmp_path: Path) -
     )
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and process.poll() is None:
-        if list(tmp_path.glob("merge-tabular-*.sqlite3*")):
+        if list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")):
             break
         time.sleep(0.01)
-    assert list(tmp_path.glob("merge-tabular-*.sqlite3*"))
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*"))
 
     process.terminate()
     process.communicate(timeout=10)
@@ -1064,12 +1098,102 @@ def test_sequence_diversity_sigterm_cleans_temporary_artifacts(tmp_path: Path) -
     assert process.returncode != 0
     assert not output_gz.exists()
     assert not report_json.exists()
-    assert list(tmp_path.glob("merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
     lock_path = Path(f"{output_gz}.lock")
     with lock_path.open("r+") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def test_sequence_diversity_recovers_orphans_after_sigkill(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    sequence = "ACGT" * 64
+    with input_tsv.open("w") as handle:
+        handle.write("# ELB source-shard:00\n")
+        for index in range(20_000):
+            handle.write(
+                f"q1\tacc-{index:05d}\t{sequence}{index:06d}\t1\t256\t"
+                "1e-20\t80\t90\n"
+            )
+
+    process = subprocess.Popen(  # noqa: S603 -- executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "1",
+            "blastn",
+            "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
+            "-max_target_seqs 20000",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        env={
+            **os.environ,
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "20000",
+            "ELB_SUCCEEDED_SHARDS": "1",
+        },
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and process.poll() is None:
+        if list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")):
+            break
+        time.sleep(0.01)
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*"))
+
+    os.killpg(process.pid, signal.SIGKILL)
+    process.communicate(timeout=10)
+    assert process.returncode != 0
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*"))
+    unrelated_temp = tmp_path / ".other-output.gz.abcdefgh.tmp"
+    unrelated_temp.write_text("keep")
+    prefixed_sibling_output = tmp_path / ".merged.out.gz.sibling.abcdefgh.tmp"
+    prefixed_sibling_output.write_text("keep")
+    prefixed_sibling_report = tmp_path / ".merge-report.json.sibling.abcdefgh.tmp"
+    prefixed_sibling_report.write_text("keep")
+
+    input_tsv.write_text(
+        "# ELB source-shard:00\nq1\tacc-a\tACGT\t1\t4\t1e-20\t80\t90\n"
+    )
+    retry = subprocess.run(  # noqa: S603 -- executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "1",
+            "blastn",
+            "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
+            "-max_target_seqs 1",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "1",
+            "ELB_SUCCEEDED_SHARDS": "1",
+        },
+    )
+
+    assert retry.returncode == 0, retry.stderr
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".merged.out.gz.*.tmp")) == [prefixed_sibling_output]
+    assert list(tmp_path.glob(".merge-report.json.*.tmp")) == [
+        prefixed_sibling_report
+    ]
+    assert unrelated_temp.read_text() == "keep"
+    assert prefixed_sibling_output.read_text() == "keep"
+    assert prefixed_sibling_report.read_text() == "keep"
 
 
 @pytest.mark.slow

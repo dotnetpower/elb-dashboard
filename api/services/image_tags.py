@@ -147,7 +147,7 @@ from __future__ import annotations
 # response models, hardened bounded XML evidence parsing, and explicit
 # result-selection policy examples while retaining 4.54 as the rollback image.
 # 4.56 sources those runtime contracts plus opt-in sequence-diversity result
-# selection natively from sibling commit 787b193. It accepts a valid zero
+# selection natively from sibling commit 6132ccb. It accepts a valid zero
 # length adjustment, rejects unsupported policy combinations without fallback,
 # and keeps each explicit candidate pool as a finite per-request shard bound.
 # It is a source-publication target; deployed 4.55 remains the rollback image
@@ -186,7 +186,7 @@ IMAGE_TAGS: dict[str, str] = {
 SOURCE_REPO = "https://github.com/dotnetpower/elastic-blast-azure.git"
 SOURCE_BRANCH = "master"
 DASHBOARD_SOURCE_REPO = "https://github.com/dotnetpower/elb-dashboard.git"
-OPENAPI_SIBLING_SOURCE_REF = "787b1939c334d33d37cd9b7f37da470411e027e7"
+OPENAPI_SIBLING_SOURCE_REF = "6132ccba35714c77ee724642697674ec3cf975e3"
 
 # Build info per image: context subdirectory within the repo, Dockerfile path
 # relative to the context. Image-name → build args mirror exactly what the
@@ -239,7 +239,7 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
     "elb-openapi": {
         # Clone one reviewed sibling commit and reapply the dashboard patcher
         # idempotently as a compatibility/safety assertion. Since sibling
-        # commit 787b193, the runtime contracts are native; the patcher must
+        # commit 6132ccb, the hardened runtime contracts are native; the patcher must
         # produce no semantic drift. ACR's
         # implicit cmd-step image does not contain git, so pin an explicit
         # tool image that carries git + Python + grep + bash.

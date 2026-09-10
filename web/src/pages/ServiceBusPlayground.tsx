@@ -45,7 +45,10 @@ import { useToast } from "@/components/Toast";
 
 type CodeTab = "python-send" | "python-consume" | "curl";
 type SubmitMode = "xml" | "tabular";
-type ResultSelectionPolicy = "native_top_n" | "diversity_aware";
+type ResultSelectionPolicy =
+  | "native_top_n"
+  | "diversity_aware"
+  | "sequence_diversity";
 
 const PROGRAMS = [
   "blastn",
@@ -116,6 +119,7 @@ interface PlaygroundPreset {
   /** Optional structured Web BLAST search space (db_effective_search_space). */
   searchsp?: string;
   resultSelectionPolicy: ResultSelectionPolicy;
+  candidatePoolSize?: string;
   resourceProfile: string;
 }
 
@@ -210,6 +214,25 @@ const PRESETS: PlaygroundPreset[] = [
     resultSelectionPolicy: "diversity_aware",
     resourceProfile: "core_nt_safe",
   },
+  {
+    key: "core-nt-sequence-diversity",
+    label: "Monkeypox → core_nt · Sequence diversity",
+    hint: "Selects one representative per aligned subject sequence and query span. The candidate pool is a finite per-shard request bound and may exceed 5,000.",
+    fasta: MONKEYPOX_FASTA,
+    db: "core_nt",
+    program: "blastn",
+    taxid: "",
+    isInclusive: true,
+    mode: "tabular",
+    wordSize: "28",
+    evalue: "0.05",
+    maxTargetSeqs: "100",
+    outfmt: "7 std sseq",
+    extra: CORE_NT_EXTRA,
+    resultSelectionPolicy: "sequence_diversity",
+    candidatePoolSize: "2000",
+    resourceProfile: "core_nt_safe",
+  },
 ];
 
 const inputStyle: React.CSSProperties = {
@@ -251,6 +274,9 @@ export function ServiceBusPlayground() {
   const [searchsp, setSearchsp] = useState(DEFAULT_PRESET.searchsp ?? "");
   const [resultSelectionPolicy, setResultSelectionPolicy] =
     useState<ResultSelectionPolicy>(DEFAULT_PRESET.resultSelectionPolicy);
+  const [candidatePoolSize, setCandidatePoolSize] = useState(
+    DEFAULT_PRESET.candidatePoolSize ?? "",
+  );
   const [resourceProfile, setResourceProfile] = useState(DEFAULT_PRESET.resourceProfile);
   const [requestId, setRequestId] = useState("");
   const [codeTab, setCodeTab] = useState<CodeTab>("python-send");
@@ -276,6 +302,7 @@ export function ServiceBusPlayground() {
     setExtra(preset.extra);
     setSearchsp(preset.searchsp ?? "");
     setResultSelectionPolicy(preset.resultSelectionPolicy);
+    setCandidatePoolSize(preset.candidatePoolSize ?? "");
     setResourceProfile(preset.resourceProfile);
   }, []);
 
@@ -338,6 +365,12 @@ export function ServiceBusPlayground() {
           max_target_seqs: Number(maxTargetSeqs) || 500,
           result_selection_policy: resultSelectionPolicy,
         };
+        if (resultSelectionPolicy === "sequence_diversity") {
+          const pool = Number(candidatePoolSize.trim());
+          if (candidatePoolSize.trim() && Number.isSafeInteger(pool) && pool >= 1) {
+            body.blast_options.candidate_pool_size = pool;
+          }
+        }
         const of = outfmt.trim();
         if (of) body.blast_options.outfmt = of;
         const ex = extra.trim();
@@ -391,6 +424,7 @@ export function ServiceBusPlayground() {
       extra,
       searchsp,
       resultSelectionPolicy,
+      candidatePoolSize,
       resourceProfile,
       taxid,
       isInclusive,
@@ -409,6 +443,19 @@ export function ServiceBusPlayground() {
   );
   const [bodyDraft, setBodyDraft] = useState(formBodyJson);
   const [bodyDirty, setBodyDirty] = useState(false);
+  const sequencePoolError = useMemo(() => {
+    if (mode !== "tabular" || resultSelectionPolicy !== "sequence_diversity") return null;
+    if (!candidatePoolSize.trim()) return null;
+    const pool = Number(candidatePoolSize.trim());
+    const requested = Number(maxTargetSeqs);
+    if (!Number.isSafeInteger(pool) || pool < 1) {
+      return "candidate_pool_size must be a positive safe integer.";
+    }
+    if (Number.isFinite(requested) && requested >= 1 && pool < requested) {
+      return "candidate_pool_size must be greater than or equal to max_target_seqs.";
+    }
+    return null;
+  }, [candidatePoolSize, maxTargetSeqs, mode, resultSelectionPolicy]);
   useEffect(() => {
     if (!bodyDirty) setBodyDraft(formBodyJson);
   }, [formBodyJson, bodyDirty]);
@@ -431,6 +478,7 @@ export function ServiceBusPlayground() {
       };
     }
   }, [bodyDraft]);
+  const requestError = bodyError ?? (!bodyDirty ? sequencePoolError : null);
 
   const sendMutation = useMutation({
     mutationFn: (dryRun: boolean) => {
@@ -815,16 +863,43 @@ export function ServiceBusPlayground() {
                 <select
                   id="pg-result-selection-policy"
                   value={resultSelectionPolicy}
-                  onChange={(event) =>
-                    setResultSelectionPolicy(event.target.value as ResultSelectionPolicy)
-                  }
-                  title="Native top N preserves the BLAST comparator. Diversity aware reserves lower-score subjects and is not exact top-N."
+                  onChange={(event) => {
+                    const nextPolicy = event.target.value as ResultSelectionPolicy;
+                    setResultSelectionPolicy(nextPolicy);
+                    if (nextPolicy === "sequence_diversity" && !/(?:^|\s)sseq(?:\s|$)/.test(outfmt)) {
+                      setOutfmt("7 std sseq");
+                    }
+                  }}
+                  title="Native top N preserves BLAST ranking. Diversity aware reserves lower-score subjects. Sequence diversity groups aligned subject sequence and query span."
                   style={inputStyle}
                 >
                   <option value="native_top_n">Native top N</option>
                   <option value="diversity_aware">Diversity aware</option>
+                  <option value="sequence_diversity">Sequence diversity</option>
                 </select>
               </div>
+              {resultSelectionPolicy === "sequence_diversity" ? (
+                <div>
+                  <label style={labelStyle} htmlFor="pg-candidate-pool-size">
+                    candidate_pool_size{" "}
+                    <span className="muted">(blank = max(2000, max_target))</span>
+                  </label>
+                  <input
+                    id="pg-candidate-pool-size"
+                    value={candidatePoolSize}
+                    onChange={(event) => setCandidatePoolSize(event.target.value)}
+                    inputMode="numeric"
+                    aria-invalid={Boolean(sequencePoolError)}
+                    placeholder="2000"
+                    style={inputStyle}
+                  />
+                  {sequencePoolError ? (
+                    <p style={{ margin: "4px 0 0", color: "var(--status-error)", fontSize: 11 }}>
+                      {sequencePoolError}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               <div>
                 <label style={labelStyle} htmlFor="pg-rp">
                   resource_profile
@@ -845,7 +920,9 @@ export function ServiceBusPlayground() {
                 automatically (matching the New Search path); a <code>-searchsp</code>
                 pinned in <code>extra</code> always wins. <code>native_top_n</code>
                 preserves BLAST ranking; choose <code>diversity_aware</code> when
-                lower-score subject representation is preferred.
+                lower-score subject representation is preferred. Sequence diversity requires
+                <code> sseq</code>; its candidate pool defaults to at least 2,000 and never
+                below <code>max_target</code>. It has no fixed server maximum.
               </p>
             </>
           )}
@@ -975,8 +1052,8 @@ export function ServiceBusPlayground() {
               type="button"
               className="glass-button"
               onClick={() => sendMutation.mutate(true)}
-              disabled={sendMutation.isPending || Boolean(bodyError)}
-              title={bodyError ? "Fix the request body JSON first" : "Server-side validate (dry run)"}
+              disabled={sendMutation.isPending || Boolean(requestError)}
+              title={requestError ?? "Server-side validate (dry run)"}
             >
               Validate
             </button>
@@ -984,12 +1061,12 @@ export function ServiceBusPlayground() {
               type="button"
               className="glass-button glass-button--primary"
               onClick={() => sendMutation.mutate(false)}
-              disabled={sendMutation.isPending || !effectiveEnabled || Boolean(bodyError)}
+              disabled={sendMutation.isPending || !effectiveEnabled || Boolean(requestError)}
               title={
                 !effectiveEnabled
                   ? "Service Bus integration is not active"
-                  : bodyError
-                    ? "Fix the request body JSON first"
+                  : requestError
+                    ? requestError
                     : undefined
               }
             >

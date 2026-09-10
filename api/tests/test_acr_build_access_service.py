@@ -144,6 +144,57 @@ def test_open_waits_for_build_agent_settle(monkeypatch: pytest.MonkeyPatch) -> N
     assert sleeps == [75]
 
 
+def test_open_fails_and_rolls_back_when_policy_changes_during_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client(("Disabled", "Deny", "AzureServices"))
+
+    def close_during_settle(_seconds: float) -> None:
+        client.registries.state = ("Disabled", "Deny", "AzureServices")
+
+    monkeypatch.setattr(acr_build_access, "acr_client", lambda *_args: client)
+    monkeypatch.setattr(acr_build_access.time, "sleep", close_during_settle)
+
+    with pytest.raises(
+        RuntimeError, match="build access policy changed during propagation settle"
+    ):
+        acr_build_access.open_build_access(
+            object(),
+            subscription_id="sub",
+            resource_group="rg",
+            registry_name="acr",
+            interval_seconds=0,
+            settle_seconds=75,
+        )
+
+    assert client.registries.updates == [
+        ("Enabled", "Allow", "AzureServices"),
+        ("Disabled", "Deny", "AzureServices"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_attempts": 0}, "max_attempts must be between 1 and 120"),
+        ({"interval_seconds": 301}, "interval_seconds must be between 0 and 300"),
+        ({"settle_seconds": 121}, "settle_seconds must be between 0 and 120"),
+    ],
+)
+def test_open_rejects_unbounded_wait_configuration(
+    kwargs: dict[str, int],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        acr_build_access.open_build_access(
+            object(),
+            subscription_id="sub",
+            resource_group="rg",
+            registry_name="acr",
+            **kwargs,
+        )
+
+
 def test_idle_stale_open_registry_heals_private(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _patch_client(monkeypatch, ("Enabled", "Allow", "AzureServices"))
     monkeypatch.setattr(acr_build_access, "_active_build_count", lambda *_a, **_k: 0)
