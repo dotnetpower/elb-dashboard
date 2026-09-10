@@ -13,7 +13,7 @@ tags:
 
 Removing the fixed 5,000-candidate maximum widened the valid workload range.
 The request contract remained finite per shard, but larger merges made cleanup,
-publication, concurrency, and report aggregation failures more expensive. An
+publication, concurrency, and report aggregation failures more expensive. A
 25-round critique reviewed those boundaries until no reproducible finding above
 Low severity remained.
 
