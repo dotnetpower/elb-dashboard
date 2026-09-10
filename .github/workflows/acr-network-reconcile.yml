@@ -1,0 +1,48 @@
+name: Restore ACR Private Network
+
+on:
+  workflow_run:
+    workflows: ["Build Images"]
+    types: [completed]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: restore-acr-private-network
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    name: restore private ACR posture
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_BUILD_ACCESS_IDLE_ATTEMPTS: "180"
+      ACR_BUILD_ACCESS_IDLE_INTERVAL_SECONDS: "10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Reconcile ACR private network policy
+        run: |
+          set -euo pipefail
+          source scripts/dev/acr-build-access.sh
+          acr_reconcile_private_steady_state "$ACR_NAME"

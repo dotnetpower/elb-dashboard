@@ -117,6 +117,17 @@ jobs:
           bash scripts/dev/quick-deploy.sh all "$TAG" --build-only --yes
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
+      - name: Restore ACR private network policy
+        if: ${{ always() }}
+        env:
+          ACR_BUILD_ACCESS_IDLE_ATTEMPTS: "1"
+          ACR_BUILD_ACCESS_IDLE_INTERVAL_SECONDS: "0"
+          ACR_BUILD_ACCESS_PRIVATE_VERIFY_INTERVAL_SECONDS: "5"
+        run: |
+          set -euo pipefail
+          source scripts/dev/acr-build-access.sh
+          acr_reconcile_private_steady_state "$ACR_NAME"
+
       - name: Upload per-image build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

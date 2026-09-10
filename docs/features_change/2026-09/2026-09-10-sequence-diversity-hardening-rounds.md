@@ -1,6 +1,6 @@
 ---
 title: Harden sequence-diversity merge publication
-description: Resolve merge lifecycle, partial-publication, patch migration, and split-report findings through 18 iterative hardening reviews.
+description: Resolve merge lifecycle, partial-publication, patch migration, split-report, and ACR cancellation findings through 25 iterative hardening reviews.
 tags:
   - blast
   - architecture
@@ -14,7 +14,7 @@ tags:
 Removing the fixed 5,000-candidate maximum widened the valid workload range.
 The request contract remained finite per shard, but larger merges made cleanup,
 publication, concurrency, and report aggregation failures more expensive. An
-18-round critique reviewed those boundaries until no reproducible finding above
+25-round critique reviewed those boundaries until no reproducible finding above
 Low severity remained.
 
 ## Runtime hardening
@@ -37,6 +37,14 @@ Low severity remained.
 - The outer ElasticBLAST finalizer still validates gzip integrity and XML shape,
   uploads output and report by their explicit names, and writes the durable
   success marker last.
+- A canceled GitHub image workflow can bypass a child shell's exit trap after
+  temporarily opening ACR build access. The build job now has an `always()`
+  restore step, while an independent workflow-run reconciler waits for active
+  ACR tasks to finish and restores `Disabled / Deny / AzureServices`. An hourly
+  schedule is the final fallback if a runner itself is interrupted.
+- The review reproduced that stranded `Enabled / Allow` state after canceling
+  the source-only build workflow. The registry was immediately restored and
+  verified at `Disabled / Deny / AzureServices` before this guard was added.
 
 ## Contract and patch hardening
 
@@ -55,7 +63,7 @@ Low severity remained.
 
 ## Review disposition
 
-The 18 rounds covered request/resource admission, REST and Service Bus errors,
+The 25 rounds covered request/resource admission, REST and Service Bus errors,
 SQLite/disk behavior, patch migration, signal handling, concurrent finalizers,
 split reports, byte and permission compatibility, and a final holistic
 self-critique. Findings above Low were repaired and re-reviewed. Claims that
@@ -71,13 +79,18 @@ Low residual risks remain explicit:
   disk, and Storage by design; the API does not restore a fixed maximum.
 - Conservative filesystem timestamp checks may repeat a merge after extreme
   clock skew, but never accept an older artifact pair as fresh.
+- ACR cleanup depends on GitHub OIDC and ARM availability; the independent
+  hourly reconciler retries a prior failed restore without interrupting active
+  builds.
 
 ## Validation
 
 - The full sibling OpenAPI suite passes with `188 passed`.
 - The full Dashboard backend suite passes with `5,837 passed, 4 skipped`; the
   skipped tests require external parity evidence directories.
-- Dashboard slow and subprocess coverage passes with `139 passed`.
+- The complete unfiltered Dashboard suite passes with `5,988 passed, 4 skipped`.
+- Dashboard slow and subprocess coverage passes with `151 passed`; the focused
+  ACR cancellation and restoration suite contributes `19 passed`.
 - Failure injection covers missing shards, report publication failure,
   termination cleanup, bounded lock timeout, duplicate-owner coalescing, and
   mixed legacy/current config guards.
@@ -86,7 +99,8 @@ Low residual risks remain explicit:
   detail truncation at 5,000.
 - Ruff, the production mypy debt ratchet, the 242-operation OpenAPI contract,
   generated TypeScript drift, docs frontmatter, and strict MkDocs checks pass.
-- Hardening rounds 17 and 18 found no reproducible Medium, High, or Critical
-  issue after the repairs; only the documented Low residual risks remain.
+- Hardening rounds 17, 18, 22, 24, and 25 found no reproducible Medium, High, or
+  Critical issue after their preceding repairs; only the documented Low
+  residual risks remain.
 - Host-mode API smoke passes all `27/27` checks after detached service readiness.
 - No Azure image or runtime deployment is part of this source hardening.

@@ -54,7 +54,7 @@ limit does not truncate canonical output or aggregate group counts.
 - The full sibling OpenAPI suite passes with `188 passed`.
 - The full Dashboard backend suite passes with `5,837 passed, 4 skipped`; the
   skipped tests require external parity evidence directories.
-- Dashboard slow and subprocess coverage passes with `139 passed`.
+- Dashboard slow and subprocess coverage passes with `150 passed`.
 - A 6,000-row candidate pool with 16 KiB aligned-sequence values returned all
   6,000 groups under a 96 MiB address-space limit through the file-backed merge
   path; only the 5,000-entry report-detail list was marked truncated.

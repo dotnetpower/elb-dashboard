@@ -106,7 +106,7 @@ existing result.
   result-artifact, split-report, runtime-patcher, and local merge tests pass.
 - The full Dashboard backend suite passes with `5,837 passed, 4 skipped`; the
   skipped checks require external parity evidence directories. Subprocess merge
-  and slow coverage passes with `139 passed`.
+  and slow coverage passes with `150 passed`.
 - Ruff, the mypy debt ratchet, the 242-operation OpenAPI contract check,
   generated TypeScript drift check, docs frontmatter guard, and strict MkDocs
   build pass.
