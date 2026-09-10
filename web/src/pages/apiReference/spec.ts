@@ -133,12 +133,29 @@ const CORE_NT_DIVERSITY_JOB_EXAMPLE = {
   },
 };
 
+const REFERENCE_CONTEXT_REQUEST_EXAMPLE = {
+  summary: "Completed RID context",
+  description:
+    "Replace rid and query_fasta with one completed RID and the exact single-record FASTA used by that request. Set taxid and is_inclusive only when they match the original filter.",
+  value: {
+    rid: "REPLACE-ME",
+    query_fasta: ">query-id\nACGT\n",
+    db: "core_nt",
+    taxid: null,
+    is_inclusive: null,
+  },
+};
+
 const OPENAPI_JOB_ID_DESCRIPTION =
   "Short OpenAPI job id returned by POST /v1/jobs, for example 17dfd2825089. Do not paste a Dashboard job UUID from /blast/jobs/<uuid>.";
 const OPENAPI_JOB_ID_USAGE_HINT =
   "Use the short id returned as job_id / target.openapi_job_id. Dashboard UUIDs belong to /api/blast/jobs/{uuid} and /blast/jobs/<uuid>.";
 
 type ResponseMap = NonNullable<SpecEndpoint["responses"]>;
+type CuratedRequestExamples = Record<
+  string,
+  { summary?: string; description?: string; value: unknown }
+>;
 type JsonSchema = {
   $ref?: string;
   type?: string;
@@ -515,9 +532,23 @@ function withCuratedRequestExamples(
   method: string,
   requestBody: SpecEndpoint["requestBody"],
 ): SpecEndpoint["requestBody"] {
-  if (path !== "/v1/jobs" || method !== "post") return requestBody;
+  if (method !== "post") return requestBody;
   const jsonBody = requestBody?.content?.["application/json"];
   if (!jsonBody) return requestBody;
+
+  const curatedExamples: CuratedRequestExamples | null =
+    path === "/v1/jobs"
+      ? {
+          small_16s_rrna: SMALL_16S_RRNA_JOB_EXAMPLE,
+          mode_b_core_nt: CORE_NT_JOB_EXAMPLE,
+          mode_b_core_nt_outfmt7: CORE_NT_OUTFMT7_JOB_EXAMPLE,
+          mode_b_core_nt_outfmt7_taxids: CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE,
+          mode_b_core_nt_diversity: CORE_NT_DIVERSITY_JOB_EXAMPLE,
+        }
+      : path === "/v1/web-blast/statistical-context"
+        ? { completed_rid_context: REFERENCE_CONTEXT_REQUEST_EXAMPLE }
+        : null;
+  if (!curatedExamples) return requestBody;
 
   return {
     ...requestBody,
@@ -526,11 +557,7 @@ function withCuratedRequestExamples(
       "application/json": {
         ...jsonBody,
         examples: {
-          small_16s_rrna: SMALL_16S_RRNA_JOB_EXAMPLE,
-          mode_b_core_nt: CORE_NT_JOB_EXAMPLE,
-          mode_b_core_nt_outfmt7: CORE_NT_OUTFMT7_JOB_EXAMPLE,
-          mode_b_core_nt_outfmt7_taxids: CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE,
-          mode_b_core_nt_diversity: CORE_NT_DIVERSITY_JOB_EXAMPLE,
+          ...curatedExamples,
           ...(jsonBody.examples || {}),
         },
       },

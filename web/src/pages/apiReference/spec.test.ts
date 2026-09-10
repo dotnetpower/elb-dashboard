@@ -165,6 +165,43 @@ describe("API Reference spec parser", () => {
     ).toBe("small_16s_rrna");
   });
 
+  it("adds a replaceable request shape for the reference-context resolver", () => {
+    const parsed = parseSpec(
+      {
+        info: { title: "ElasticBLAST API", version: "1" },
+        paths: {
+          "/v1/web-blast/statistical-context": {
+            post: {
+              tags: ["Jobs"],
+              requestBody: {
+                content: {
+                  "application/json": {
+                    schema: { type: "object" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "https://api.example.internal",
+    );
+
+    const examples =
+      parsed.endpoints[0].requestBody?.content?.["application/json"]?.examples || {};
+    expect(Object.keys(examples)).toEqual(["completed_rid_context"]);
+    expect(examples.completed_rid_context.description).toContain(
+      "exact single-record FASTA",
+    );
+    expect(examples.completed_rid_context.value).toEqual({
+      rid: "REPLACE-ME",
+      query_fasta: ">query-id\nACGT\n",
+      db: "core_nt",
+      taxid: null,
+      is_inclusive: null,
+    });
+  });
+
   it("adds response shapes and examples to submit and job status endpoints", () => {
     const parsed = parseSpec(
       {
