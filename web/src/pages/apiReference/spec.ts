@@ -133,6 +133,30 @@ const CORE_NT_DIVERSITY_JOB_EXAMPLE = {
   },
 };
 
+const CORE_NT_SEQUENCE_DIVERSITY_JOB_EXAMPLE = {
+  summary: "Mode B - core_nt sequence-diversity tabular",
+  description: [
+    "Selects one representative HSP for each aligned subject-sequence and query-span signature.",
+    "The tabular layout includes sseq because sequence_diversity requires it; the server enriches the merge-ranking fields without changing the requested leading columns.",
+    "candidate_pool_size is a finite per-shard request bound, must be at least max_target_seqs, and has no fixed server maximum. Omit it to use max(2,000, max_target_seqs).",
+    CORE_NT_SEARCH_SPACE_NOTE,
+  ].join(" "),
+  value: {
+    program: "blastn",
+    db: "core_nt",
+    query_fasta: CORE_NT_NC_003310_FASTA,
+    blast_options: {
+      evalue: 0.05,
+      max_target_seqs: 100,
+      candidate_pool_size: 2000,
+      outfmt: "7 std sseq",
+      extra: CORE_NT_BLAST_OPTIONS,
+      result_selection_policy: "sequence_diversity",
+    },
+    resource_profile: "core_nt_safe",
+  },
+};
+
 const REFERENCE_CONTEXT_REQUEST_EXAMPLE = {
   summary: "Completed RID context",
   description:
@@ -544,6 +568,7 @@ function withCuratedRequestExamples(
           mode_b_core_nt_outfmt7: CORE_NT_OUTFMT7_JOB_EXAMPLE,
           mode_b_core_nt_outfmt7_taxids: CORE_NT_OUTFMT7_TAXID_JOB_EXAMPLE,
           mode_b_core_nt_diversity: CORE_NT_DIVERSITY_JOB_EXAMPLE,
+          mode_b_core_nt_sequence_diversity: CORE_NT_SEQUENCE_DIVERSITY_JOB_EXAMPLE,
         }
       : path === "/v1/web-blast/statistical-context"
         ? { completed_rid_context: REFERENCE_CONTEXT_REQUEST_EXAMPLE }

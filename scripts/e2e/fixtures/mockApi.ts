@@ -840,6 +840,28 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
             parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 10 } }],
             responses: { "200": { description: "OK", content: { "application/json": { example: { jobs: [] } } } } },
           },
+          post: {
+            tags: ["Jobs"],
+            summary: "Submit job",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: { type: "object" },
+                },
+              },
+            },
+            responses: {
+              "201": {
+                description: "Created",
+                content: {
+                  "application/json": {
+                    example: { job_id: "17dfd2825089", status: "submitted" },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     }),

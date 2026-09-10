@@ -1334,6 +1334,38 @@ def test_send_rejects_sequence_diversity_with_typed_422(
     }
 
 
+def test_send_dry_run_accepts_sequence_diversity_above_legacy_limit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    monkeypatch.setattr(
+        service_bus,
+        "send_request",
+        lambda *_a, **_k: pytest.fail("dry-run validation must not enqueue"),
+    )
+    response = client.post(
+        "/api/settings/service-bus/send",
+        json={
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">q1\nACGTACGTACGTACGTACGT\n",
+            "resource_profile": "core_nt_safe",
+            "dry_run": True,
+            "blast_options": {
+                "outfmt": "7 std sseq",
+                "max_target_seqs": 10_000,
+                "candidate_pool_size": 20_000,
+                "result_selection_policy": "sequence_diversity",
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "valid"
+    assert response.json()["dry_run"] is True
+
+
 @pytest.mark.parametrize(
     "misplaced",
     [

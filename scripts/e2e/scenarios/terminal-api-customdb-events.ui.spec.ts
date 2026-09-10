@@ -32,6 +32,34 @@ test("API Reference sidebar, try-it, and token controls are event-safe", async (
   await expect(uiPage.getByText("e2e-token-regenerated")).toBeVisible();
 });
 
+test("API Reference exposes the sequence-diversity submit preset", async ({ uiPage }) => {
+  await uiPage.goto("/docs");
+  await expect(uiPage.getByRole("heading", { name: "ElasticBLAST API Reference" })).toBeVisible();
+
+  await uiPage.getByPlaceholder(/Search path or summary/i).fill("Submit job");
+  await uiPage.getByRole("button", { name: "POST", exact: true }).click();
+  await uiPage.getByRole("link", { name: /\/v1\/jobs/ }).click();
+
+  const submitCard = uiPage.locator(".endpoint-card", { hasText: "Submit job" });
+  const examples = submitCard.locator("select");
+  await examples.selectOption("mode_b_core_nt_sequence_diversity");
+
+  const body = JSON.parse(await submitCard.locator("textarea").inputValue()) as {
+    blast_options: {
+      max_target_seqs: number;
+      candidate_pool_size: number;
+      outfmt: string;
+      result_selection_policy: string;
+    };
+  };
+  expect(body.blast_options).toMatchObject({
+    max_target_seqs: 100,
+    candidate_pool_size: 2000,
+    outfmt: "7 std sseq",
+    result_selection_policy: "sequence_diversity",
+  });
+});
+
 test("Custom DB builder covers config, FASTA input, build, and copy path events", async ({ uiPage, uiMocks }) => {
   await uiPage.goto("/blast/databases/build");
   await expect(uiPage.getByText("ElasticBLAST Custom DB")).toBeVisible();

@@ -43,6 +43,7 @@ describe("API Reference spec parser", () => {
       "mode_b_core_nt_outfmt7",
       "mode_b_core_nt_outfmt7_taxids",
       "mode_b_core_nt_diversity",
+      "mode_b_core_nt_sequence_diversity",
       "mode_a",
     ]);
     for (const key of [
@@ -50,6 +51,7 @@ describe("API Reference spec parser", () => {
       "mode_b_core_nt_outfmt7",
       "mode_b_core_nt_outfmt7_taxids",
       "mode_b_core_nt_diversity",
+      "mode_b_core_nt_sequence_diversity",
     ]) {
       const example = examples[key] as { description?: string };
       expect(example.description).toContain(
@@ -137,6 +139,25 @@ describe("API Reference spec parser", () => {
     };
     expect(diversity.blast_options.max_target_seqs).toBe(5000);
     expect(diversity.blast_options.result_selection_policy).toBe("diversity_aware");
+
+    const sequenceDiversity = examples.mode_b_core_nt_sequence_diversity.value as {
+      blast_options: {
+        max_target_seqs: number;
+        candidate_pool_size: number;
+        outfmt: string;
+        result_selection_policy: string;
+      };
+    };
+    expect(sequenceDiversity.blast_options).toMatchObject({
+      max_target_seqs: 100,
+      candidate_pool_size: 2000,
+      outfmt: "7 std sseq",
+      result_selection_policy: "sequence_diversity",
+    });
+    expect(
+      (examples.mode_b_core_nt_sequence_diversity as { description?: string })
+        .description,
+    ).toContain("has no fixed server maximum");
   });
 
   it("selects the small 16S rRNA example as the default request body for POST /v1/jobs", () => {
