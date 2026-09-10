@@ -191,6 +191,11 @@ def _ensure_reference_context_dependency(root: Path) -> None:
 def _validate_copied_runtime_policy(root: Path) -> None:
     """Verify native or copied runtime helpers retain required safety contracts."""
     required = {
+        root / "app" / "result_selection.py": (
+            "SEQUENCE_DIVERSITY_DEFAULT_CANDIDATE_POOL_SIZE = 2_000",
+            "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE = 5_000",
+            "def prepare_sequence_diversity_options(",
+        ),
         root / "app" / "exact_oracle.py": (
             "def _context_nonnegative_int(",
             "One-shard manifest exceeds the volume limit",
@@ -204,6 +209,9 @@ def _validate_copied_runtime_policy(root: Path) -> None:
         ),
         root / "merge-sharded-results.sh": (
             "num_shards must be between 1 and 1024",
+            "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE = 5_000",
+            "def sequence_diversity_representatives(",
+            "len(observed_source_shards) == expected_shards",
         ),
     }
     missing: list[str] = []
@@ -245,12 +253,16 @@ def _patch_external_soft_masking(root: Path) -> None:
         schemas,
         '    extra: Optional[str] = Field(None, description="Additional BLAST CLI options as raw string.")\n',
         (
-            '    result_selection_policy: Literal["native_top_n", "diversity_aware"] = Field(\n'
+            "    result_selection_policy: Literal[\n"
+            '        "native_top_n", "diversity_aware", "sequence_diversity"\n'
+            "    ] = Field(\n"
             '        "native_top_n",\n'
             "        description=(\n"
             '            "Final subject-selection policy. native_top_n reproduces the "\n'
             '            "BLAST top-N comparator; diversity_aware reserves lower-score "\n'
-            '            "subjects when a tied score class fills the result window."\n'
+            '            "subjects when a tied score class fills the result window; "\n'
+            '            "sequence_diversity selects one representative per aligned subject "\n'
+            '            "sequence and query span for tabular output."\n'
             "        ),\n"
             "    )\n"
         ),
@@ -398,9 +410,10 @@ def _patch_external_soft_masking(root: Path) -> None:
         raise RuntimeError("external soft-masking schema patch is missing or duplicated")
     if schema_text.count("db_effective_search_space: Optional[int]") != 2:
         raise RuntimeError("search-space schema patches are missing or duplicated")
-    if schema_text.count(
-        '    result_selection_policy: Literal["native_top_n", "diversity_aware"]'
-    ) != 1:
+    if (
+        schema_text.count("    result_selection_policy: Literal[") != 1
+        or '"sequence_diversity"' not in schema_text
+    ):
         raise RuntimeError("result-selection policy schema patch is missing or duplicated")
     if schema_text.count("Optional measured single-query taxonomy-filtered statistics") != 1:
         raise RuntimeError("direct Web statistics schema patch is missing or duplicated")
@@ -464,7 +477,14 @@ def _patch_openapi_response_schemas(root: Path) -> None:
             "    results_ready_at: Optional[str] = None\n"
             "    merged_at: Optional[str] = None\n"
             "    db_partitions: Optional[int] = Field(None, ge=0)\n"
-            '    result_selection_policy: Optional[Literal["native_top_n", "diversity_aware"]] = None\n'
+            "    result_selection_policy: Optional[\n"
+            '        Literal["native_top_n", "diversity_aware", "sequence_diversity"]\n'
+            "    ] = None\n"
+            '    sequence_identity_mode: Optional[Literal["aligned_sequence_query_span"]] = None\n'
+            "    sequence_identity_version: Optional[int] = Field(None, ge=1)\n"
+            "    requested_sequence_groups: Optional[int] = Field(None, ge=1)\n"
+            "    candidate_pool_size_requested_per_shard: Optional[int] = Field(None, ge=1)\n"
+            "    candidate_pool_size_applied_per_shard: Optional[int] = Field(None, ge=1)\n"
             "\n\n"
             "class JobListResponse(BaseModel):\n"
             '    model_config = {"extra": "allow"}\n'
@@ -1757,6 +1777,7 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "from pathlib import Path",
         "from util import run_cancellable, safe_exec",
         "import exact_oracle as _exact_oracle",
+        "import result_selection as _result_selection",
         'logger = logging.getLogger("elb-openapi")',
         'config["cluster"].pop("exp-skip-warmed-ssd-init", None)',
         '"init-db-shard-aks.sh",',
@@ -1786,6 +1807,9 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "response_model=JobListResponse",
         "response_model=JobStatusResponse",
         "opts = _exact_oracle.ensure_tabular_raw_score(opts)",
+        "_result_selection.prepare_sequence_diversity_options(",
+        'config["blast"]["requested-max-target-seqs"] = str(',
+        '"sequence_identity_mode": _result_selection.SEQUENCE_IDENTITY_MODE',
         "active_database = _exact_oracle.read_active_database(",
         "opts = _exact_oracle.preserve_or_set_search_space(",
         "opts, active_database.search_space",

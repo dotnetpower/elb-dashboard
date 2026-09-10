@@ -6,7 +6,7 @@ instead of duplicating SDK code.
 Key entry points: `_number`, `_hit_is_better`, `_StreamingAggregate`,
 `build_result_manifest_payload`, `build_result_aggregate_payload`,
 `build_default_alignments_payload`, `partitioned_result_readiness`,
-`_load_merge_report_tie_cutoff`
+`_load_merge_report_tie_cutoff`, `_merge_report_result_selection`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
@@ -48,8 +48,18 @@ LOGGER = logging.getLogger(__name__)
 # The merge step writes the score-class truncation signal to this blob at the
 # job root in the results container (split parents and DB-partitioned jobs).
 _MERGE_REPORT_BLOB = "merge-report.json"
-_MERGE_REPORT_MAX_BYTES = 256 * 1024
+_MERGE_REPORT_MAX_BYTES = 1024 * 1024
 _CANONICAL_MERGED_RESULT_BLOB = "merged_results.out.gz"
+_RESULT_SELECTION_POLICIES = frozenset(
+    {"native_top_n", "diversity_aware", "sequence_diversity"}
+)
+_SEQUENCE_SHORTFALL_REASONS = frozenset(
+    {
+        "candidate_pool_saturated",
+        "insufficient_unique_groups_in_observed_pool",
+        "no_candidates_observed",
+    }
+)
 
 
 def partitioned_result_readiness(storage_account: str, job_id: str) -> dict[str, Any]:
@@ -91,16 +101,8 @@ def partitioned_result_readiness(storage_account: str, job_id: str) -> dict[str,
     }
 
 
-def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str, Any] | None:
-    """Best-effort read of the score-class truncation signal from the job's
-    merge-report.json.
-
-    Returns a compact summary when the max_target_seqs cutoff split a tied
-    score class (or the diversity-aware cutoff reserved near-miss slots),
-    otherwise ``None`` so the field is simply omitted and the UI shows
-    no badge. The read is intentionally tolerant of a missing or malformed
-    report -- result serving must never fail because the report is absent.
-    """
+def _load_merge_report(job_id: str, storage_account: str) -> dict[str, Any] | None:
+    """Best-effort read of one bounded merge report object."""
     blob_path = f"{job_id}/{_MERGE_REPORT_BLOB}"
     try:
         text = storage_data.read_blob_text(
@@ -118,6 +120,13 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
     except (ValueError, TypeError):
         return None
     if not isinstance(report, dict):
+        return None
+    return report
+
+
+def _merge_report_tie_cutoff(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the existing compact score-cutoff summary from a merge report."""
+    if report is None:
         return None
     overflow = report.get("tie_cutoff_overflow_count")
     overflow = overflow if isinstance(overflow, int) and not isinstance(overflow, bool) else 0
@@ -157,6 +166,62 @@ def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str
         summary["ranking_basis"] = ranking_basis
     if isinstance(max_target, int) and not isinstance(max_target, bool):
         summary["max_target_seqs"] = max_target
+    return summary
+
+
+def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str, Any] | None:
+    """Backward-compatible loader for the existing tie-cutoff artifact field."""
+    return _merge_report_tie_cutoff(_load_merge_report(job_id, storage_account))
+
+
+def _merge_report_result_selection(
+    report: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return bounded, allowlisted result-selection metadata for API consumers."""
+    if report is None:
+        return None
+    requested = report.get("result_selection_policy_requested")
+    applied = report.get("result_selection_policy_applied")
+    if requested not in _RESULT_SELECTION_POLICIES and applied not in _RESULT_SELECTION_POLICIES:
+        return None
+    summary: dict[str, Any] = {}
+    if requested in _RESULT_SELECTION_POLICIES:
+        summary["result_selection_policy_requested"] = requested
+    if applied in _RESULT_SELECTION_POLICIES:
+        summary["result_selection_policy_applied"] = applied
+    if requested != "sequence_diversity" and applied != "sequence_diversity":
+        return summary
+
+    identity_mode = report.get("sequence_identity_mode")
+    if identity_mode == "aligned_sequence_query_span":
+        summary["sequence_identity_mode"] = identity_mode
+    integer_fields = (
+        "sequence_identity_version",
+        "requested_sequence_groups",
+        "returned_sequence_groups",
+        "candidate_pool_size_requested_per_shard",
+        "candidate_pool_size_applied_per_shard",
+        "observed_candidate_rows",
+        "observed_candidate_subjects",
+        "observed_sequence_groups",
+        "expected_shards",
+        "succeeded_shards",
+        "candidate_pool_saturated_shards",
+    )
+    for key in integer_fields:
+        value = report.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            summary[key] = value
+    observed_pool_complete = report.get("observed_pool_complete")
+    if isinstance(observed_pool_complete, bool):
+        summary["observed_pool_complete"] = observed_pool_complete
+    reasons = report.get("shortfall_reasons")
+    if isinstance(reasons, list):
+        summary["shortfall_reasons"] = [
+            reason
+            for reason in reasons
+            if isinstance(reason, str) and reason in _SEQUENCE_SHORTFALL_REASONS
+        ][:3]
     return summary
 
 
@@ -476,7 +541,9 @@ def build_default_alignments_payload(job_id: str, storage_account: str) -> dict[
     page_size = RESULTS_DEFAULT_PAGE_SIZE
     page_hits = filtered[:page_size]
     page_count = (len(filtered) + page_size - 1) // page_size
-    tie_cutoff = _load_merge_report_tie_cutoff(job_id, storage_account)
+    merge_report = _load_merge_report(job_id, storage_account)
+    tie_cutoff = _merge_report_tie_cutoff(merge_report)
+    result_selection = _merge_report_result_selection(merge_report)
     payload: dict[str, Any] = {
         "artifact_schema_version": 4,
         "job_id": job_id,
@@ -510,6 +577,8 @@ def build_default_alignments_payload(job_id: str, storage_account: str) -> dict[
     }
     if tie_cutoff is not None:
         payload["tie_cutoff"] = tie_cutoff
+    if result_selection is not None:
+        payload["result_selection"] = result_selection
     return payload
 
 

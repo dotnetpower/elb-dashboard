@@ -3,12 +3,13 @@
 Responsibility: External ElasticBLAST API facade
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `WebBlastStatisticalContext`, `ExternalBlastOptions`,
-`ExternalBlastSubmitRequest`,
+Key entry points: `WebBlastStatisticalContext`, `ExternalBlastOptions`, `BlastV1Options`,
+`ExternalBlastSubmitRequest`, `ExternalBlastV1Request`,
 `submit_external_blast_job`, `list_external_blast_jobs`, `get_external_blast_job`,
 `list_external_blast_job_events`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
-auth gate.
+auth gate; sequence-diversity validation runs after raw-score enrichment and never mutates legacy
+selection policies.
 Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
@@ -20,6 +21,7 @@ from typing import Any, Literal, TypedDict
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from api.auth import CallerIdentity, require_caller, require_caller_or_download_token
 from api.services import external_blast
@@ -141,6 +143,31 @@ class ExternalBlastSubmitRequest(BaseModel):
     resource_group: str | None = Field(None, min_length=1, max_length=120)
     cluster_name: str | None = Field(None, min_length=1, max_length=120)
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_sequence_diversity_on_xml_facade(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        raw_options = value.get("options")
+        options: dict[str, Any] = raw_options if isinstance(raw_options, dict) else {}
+        raw_blast_options = value.get("blast_options")
+        blast_options: dict[str, Any] = (
+            raw_blast_options if isinstance(raw_blast_options, dict) else {}
+        )
+        if (
+            value.get("result_selection_policy") == "sequence_diversity"
+            or "candidate_pool_size" in value
+            or options.get("result_selection_policy") == "sequence_diversity"
+            or "candidate_pool_size" in options
+            or blast_options.get("result_selection_policy") == "sequence_diversity"
+            or "candidate_pool_size" in blast_options
+        ):
+            raise PydanticCustomError(
+                "sequence_diversity_invalid_outfmt",
+                "sequence_diversity requires tabular outfmt 6 or 7 via /v1/jobs",
+            )
+        return value
+
     @model_validator(mode="after")
     def validate_query_and_taxonomy(self) -> ExternalBlastSubmitRequest:
         from api.services.query_metadata import parse_fasta_metadata
@@ -204,14 +231,38 @@ class BlastV1Options(BaseModel):
     max_target_seqs: int | None = Field(None, ge=1)
     outfmt: str | None = Field(None, max_length=512)
     extra: str | None = Field(None, max_length=2048)
-    result_selection_policy: Literal["native_top_n", "diversity_aware"] = Field(
+    result_selection_policy: Literal[
+        "native_top_n", "diversity_aware", "sequence_diversity"
+    ] = Field(
         "native_top_n",
         description=(
             "Final subject-selection policy. native_top_n reproduces BLAST's "
             "score/raw-score/DB-order top-N; diversity_aware proportionally "
-            "reserves lower-score subjects when one tied class overflows N."
+            "reserves lower-score subjects when one tied class overflows N; "
+            "sequence_diversity selects one representative per aligned subject "
+            "sequence and query span."
         ),
     )
+    candidate_pool_size: int | None = Field(
+        None,
+        json_schema_extra={"minimum": 1, "maximum": 5000},
+        description=(
+            "Per-shard BLAST subject candidate cap for sequence_diversity. "
+            "Rejected for other result-selection policies."
+        ),
+    )
+
+    @field_validator("candidate_pool_size", mode="before")
+    @classmethod
+    def validate_candidate_pool_type(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise PydanticCustomError(
+                "sequence_diversity_invalid_candidate_pool",
+                "candidate_pool_size must be a positive integer",
+            )
+        return value
     web_blast_statistical_context: WebBlastStatisticalContext | None = Field(
         None,
         description=(
@@ -295,6 +346,14 @@ class ExternalBlastV1Request(BaseModel):
             if self.db.rstrip("/").rsplit("/", 1)[-1] != "core_nt":
                 raise ValueError("web_blast_statistical_context requires core_nt")
             if self.blast_options.result_selection_policy != "native_top_n":
+                if self.blast_options.result_selection_policy == "sequence_diversity":
+                    raise PydanticCustomError(
+                        "sequence_diversity_incompatible_context",
+                        (
+                            "web_blast_statistical_context requires native_top_n "
+                            "result selection"
+                        ),
+                    )
                 raise ValueError(
                     "web_blast_statistical_context requires native_top_n result selection"
                 )
@@ -330,6 +389,24 @@ class ExternalBlastV1Request(BaseModel):
             # way they do for outfmt 5 (XML). Idempotent + preserves the caller's
             # columns; a no-op for XML or an already-enriched layout.
             self.blast_options.outfmt = enrich_exact_tabular_outfmt(outfmt)
+        from api.services.blast.result_selection import (
+            SequenceDiversityValidationError,
+            validate_result_selection_options,
+        )
+
+        try:
+            validate_result_selection_options(
+                policy=self.blast_options.result_selection_policy,
+                effective_outfmt=self.blast_options.outfmt,
+                max_target_seqs=self.blast_options.max_target_seqs,
+                candidate_pool_size=self.blast_options.candidate_pool_size,
+            )
+        except SequenceDiversityValidationError as exc:
+            raise PydanticCustomError(
+                exc.code,
+                exc.message,
+                {"missing_fields": ",".join(exc.missing_fields)},
+            ) from exc
         return self
 
 

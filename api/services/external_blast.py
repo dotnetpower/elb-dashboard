@@ -3,10 +3,10 @@
 Responsibility: Client for the sibling ElasticBLAST OpenAPI execution plane
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
-Key entry points: `DownloadedFile`, `StreamedFile`, `_base_url`, `submit_job`, `get_job`,
-`list_jobs`, `ready`
+Key entry points: `DownloadedFile`, `StreamedFile`, `_base_url`, `_raise_upstream_error`,
+`submit_job`, `get_job`, `list_jobs`, `ready`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
+log boundaries; preserve bounded machine-readable FastAPI errors for queue consumers.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -360,6 +360,10 @@ def _raise_upstream_error(exc: httpx.HTTPStatusError) -> None:
         raise
     except Exception:
         detail = {"code": "openapi_error", "message": sanitise(exc.response.text[:500])}
+    if isinstance(detail, dict) and isinstance(detail.get("detail"), dict):
+        nested_detail = cast(dict[str, Any], detail["detail"])
+        if str(nested_detail.get("code") or "").startswith("sequence_diversity_"):
+            detail = dict(nested_detail)
     if isinstance(detail, dict):
         detail = dict(detail)
         detail.setdefault("code", f"openapi_http_{exc.response.status_code}")

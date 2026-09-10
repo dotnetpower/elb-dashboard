@@ -1147,6 +1147,58 @@ def test_load_merge_report_tie_cutoff_reports_diversity_only(monkeypatch) -> Non
     }
 
 
+def test_merge_report_result_selection_projects_sequence_metadata() -> None:
+    from api.services.blast import result_artifacts
+
+    summary = result_artifacts._merge_report_result_selection(
+        {
+            "result_selection_policy_requested": "sequence_diversity",
+            "result_selection_policy_applied": "sequence_diversity",
+            "sequence_identity_mode": "aligned_sequence_query_span",
+            "sequence_identity_version": 1,
+            "requested_sequence_groups": 3,
+            "returned_sequence_groups": 2,
+            "candidate_pool_size_requested_per_shard": 4,
+            "candidate_pool_size_applied_per_shard": 4,
+            "observed_candidate_rows": 5,
+            "observed_candidate_subjects": 4,
+            "observed_sequence_groups": 2,
+            "expected_shards": 2,
+            "succeeded_shards": 2,
+            "candidate_pool_saturated_shards": 1,
+            "observed_pool_complete": False,
+            "shortfall_reasons": [
+                "candidate_pool_saturated",
+                "insufficient_unique_groups_in_observed_pool",
+                "database_exhausted",
+            ],
+            "sequence_group_counts": [{"must_not_be_exposed": True}],
+        }
+    )
+
+    assert summary == {
+        "result_selection_policy_requested": "sequence_diversity",
+        "result_selection_policy_applied": "sequence_diversity",
+        "sequence_identity_mode": "aligned_sequence_query_span",
+        "sequence_identity_version": 1,
+        "requested_sequence_groups": 3,
+        "returned_sequence_groups": 2,
+        "candidate_pool_size_requested_per_shard": 4,
+        "candidate_pool_size_applied_per_shard": 4,
+        "observed_candidate_rows": 5,
+        "observed_candidate_subjects": 4,
+        "observed_sequence_groups": 2,
+        "expected_shards": 2,
+        "succeeded_shards": 2,
+        "candidate_pool_saturated_shards": 1,
+        "observed_pool_complete": False,
+        "shortfall_reasons": [
+            "candidate_pool_saturated",
+            "insufficient_unique_groups_in_observed_pool",
+        ],
+    }
+
+
 def test_worker_command_rejects_untrusted_queue_values() -> None:
     from api import run_celery_workers
 

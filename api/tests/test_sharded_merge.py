@@ -921,6 +921,60 @@ def _tabular_row(query: str, subject: str, evalue: str, bitscore: str) -> str:
     return f"{query}\t{subject}\t100\t20\t0\t0\t1\t20\t1\t20\t{evalue}\t{bitscore}"
 
 
+def test_sequence_diversity_selects_one_representative_per_signature(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        "q1\tacc-a\ta-cg\t1\t4\t1e-20\t80\t90",
+        "q1\tacc-b\tACG\t1\t4\t1e-30\t70\t85",
+        "q1\tacc-a\tTTTT\t1\t4\t1e-10\t60\t70",
+    ]
+
+    out_rows, report = _run_tabular_merge(
+        tmp_path,
+        rows,
+        num_shards="2",
+        max_target_seqs=2,
+        outfmt_spec="6 qseqid saccver sseq qstart qend evalue bitscore score",
+        env={
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "2",
+        },
+    )
+
+    assert out_rows == [rows[1], rows[2]]
+    assert report["result_selection_policy_applied"] == "sequence_diversity"
+    assert report["sequence_identity_mode"] == "aligned_sequence_query_span"
+    assert report["sequence_identity_version"] == 1
+    assert report["observed_candidate_rows"] == 3
+    assert report["observed_candidate_subjects"] == 2
+    assert report["observed_sequence_groups"] == 2
+    assert report["returned_sequence_groups"] == 2
+
+
+def test_sequence_diversity_rejects_xml_at_merge_boundary(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    input_tsv.write_text("")
+    proc = subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(tmp_path / "merged.out.gz"),
+            str(tmp_path / "merge-report.json"),
+            "1",
+            "blastn",
+            "-outfmt 5 -max_target_seqs 2",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ELB_RESULT_SELECTION_POLICY": "sequence_diversity"},
+    )
+
+    assert proc.returncode != 0
+    assert "supports only tabular BLAST outfmt 6 or 7" in proc.stderr
+
+
 def test_deterministic_tie_order_off_preserves_ordinal(tmp_path: Path) -> None:
     rows = [
         _tabular_row("q1", "s2", "1e-30", "90"),

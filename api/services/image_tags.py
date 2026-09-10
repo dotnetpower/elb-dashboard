@@ -146,9 +146,10 @@ from __future__ import annotations
 # 4.55 adds the authenticated RID reference-context resolver, typed readiness
 # response models, hardened bounded XML evidence parsing, and explicit
 # result-selection policy examples while retaining 4.54 as the rollback image.
-# 4.56 sources those runtime contracts natively from sibling commit 8c0bacf,
-# accepts a valid zero length adjustment, rejects legacy top-level statistical
-# context with diversity-aware selection, and bounds layout/merge cardinality.
+# 4.56 sources those runtime contracts plus opt-in, bounded sequence-diversity
+# result selection natively from sibling commit 149416c. It accepts a valid zero
+# length adjustment, rejects unsupported policy combinations without fallback,
+# and bounds layout/merge/candidate cardinality.
 # It is a source-publication target; deployed 4.55 remains the rollback image
 # until 4.56 is built and rolled out explicitly.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
@@ -185,7 +186,7 @@ IMAGE_TAGS: dict[str, str] = {
 SOURCE_REPO = "https://github.com/dotnetpower/elastic-blast-azure.git"
 SOURCE_BRANCH = "master"
 DASHBOARD_SOURCE_REPO = "https://github.com/dotnetpower/elb-dashboard.git"
-OPENAPI_SIBLING_SOURCE_REF = "8c0bacf97ce9df9b4266e54338e42f1cd502948c"
+OPENAPI_SIBLING_SOURCE_REF = "149416c9fb0236513ed592cf46c1aa2384059bec"
 
 # Build info per image: context subdirectory within the repo, Dockerfile path
 # relative to the context. Image-name → build args mirror exactly what the
@@ -238,7 +239,7 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
     "elb-openapi": {
         # Clone one reviewed sibling commit and reapply the dashboard patcher
         # idempotently as a compatibility/safety assertion. Since sibling
-        # commit 8c0bacf, the runtime contracts are native; the patcher must
+        # commit 149416c, the runtime contracts are native; the patcher must
         # produce no semantic drift. ACR's
         # implicit cmd-step image does not contain git, so pin an explicit
         # tool image that carries git + Python + grep + bash.

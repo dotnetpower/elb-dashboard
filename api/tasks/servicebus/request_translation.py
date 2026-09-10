@@ -6,10 +6,11 @@ Responsibility: Validate XML and free-form queue request bodies and derive the
 Edit boundaries: Request validation and payload shaping only. Queue settlement,
     admission, OpenAPI calls, persistence, and producer responses remain in
     ``api.tasks.servicebus.tasks``.
-Key entry points: ``build_request_payload``, ``is_v1_jobs_message``,
-    ``build_v1_jobs_payload``.
+Key entry points: ``RequestTranslationError``, ``build_request_payload``,
+    ``is_v1_jobs_message``, ``build_v1_jobs_payload``.
 Risky contracts: Correlation fallback order is body, Service Bus correlation,
-    then message id; invalid requests return ``None`` for terminal rejection;
+    then message id; legacy invalid requests return ``None`` while typed
+    sequence-diversity failures raise ``RequestTranslationError``;
     producers cannot spoof submission source; core_nt retains its safe sharded
     profile; custom v1 profiles and target scope survive validation; caller
     search-space flags are preserved only without a configured workload account;
@@ -25,8 +26,47 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pydantic import ValidationError
+
 from api.services.service_bus import ParsedMessage
 from api.services.service_bus_pref import ServiceBusConfig
+
+
+class RequestTranslationError(ValueError):
+    """A typed permanent request rejection safe to publish and dead-letter."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        missing_fields: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.missing_fields = missing_fields
+
+
+def _typed_validation_error(exc: ValidationError) -> RequestTranslationError | None:
+    for error in exc.errors(include_url=False):
+        code = str(error.get("type") or "")
+        if not code.startswith("sequence_diversity_"):
+            continue
+        context = error.get("ctx") if isinstance(error.get("ctx"), dict) else {}
+        missing_raw = str((context or {}).get("missing_fields") or "")
+        missing_fields = tuple(
+            field for field in missing_raw.split(",") if field
+        )
+        return RequestTranslationError(
+            code,
+            str(error.get("msg") or code),
+            retryable=False,
+            missing_fields=missing_fields,
+        )
+    return None
 
 
 def build_request_payload(
@@ -63,6 +103,19 @@ def build_request_payload(
     raw_options = body.get("options")
     if isinstance(raw_options, dict):
         options.update(raw_options)
+    if (
+        body.get("result_selection_policy") == "sequence_diversity"
+        or "candidate_pool_size" in body
+        or options.get("result_selection_policy") == "sequence_diversity"
+        or "candidate_pool_size" in options
+    ):
+        raise RequestTranslationError(
+            "sequence_diversity_requires_structured_options",
+            (
+                "sequence_diversity and candidate_pool_size must be nested "
+                "under blast_options"
+            ),
+        )
     for key in (
         "outfmt",
         "word_size",
@@ -210,6 +263,17 @@ def build_v1_jobs_payload(
 
     try:
         request = ExternalBlastV1Request(**candidate)
+    except ValidationError as exc:
+        typed_error = _typed_validation_error(exc)
+        if typed_error is not None:
+            logger.warning(
+                "service bus v1 request rejected corr=%s code=%s",
+                correlation_id,
+                typed_error.code,
+            )
+            raise typed_error from exc
+        logger.warning("service bus v1 request validation failed corr=%s", correlation_id)
+        return None
     except Exception:
         logger.warning("service bus v1 request validation failed corr=%s", correlation_id)
         return None

@@ -420,7 +420,7 @@ def test_patch_external_submit_preserves_parity_options(tmp_path: Path) -> None:
     assert "soft_masking: bool = Field(False)" in first_schema
     assert "class BlastOptions(BaseModel):" in first_schema
     assert first_schema.count("db_effective_search_space: Optional[int]") == 2
-    assert 'result_selection_policy: Literal["native_top_n", "diversity_aware"]' in first_schema
+    assert '"native_top_n", "diversity_aware", "sequence_diversity"' in first_schema
     assert 'web_blast_statistical_context: Optional["WebBlastStatisticalContext"]' in first_schema
     assert "db_effective_search_space: Optional[int] = Field(None, ge=1)" in first_schema
     assert "class WebBlastStatisticalContext(BaseModel):" in first_schema
@@ -512,9 +512,9 @@ def test_patch_publishes_reference_and_job_response_schemas(tmp_path: Path) -> N
     assert "class JobListResponse(BaseModel):" in first_schema
     assert "results_ready: Optional[bool] = None" in first_schema
     assert "merged_at: Optional[str] = None" in first_schema
-    assert 'result_selection_policy: Optional[Literal["native_top_n", "diversity_aware"]]' in (
-        first_schema
-    )
+    assert 'Literal["native_top_n", "diversity_aware", "sequence_diversity"]' in first_schema
+    assert "sequence_identity_mode" in first_schema
+    assert "candidate_pool_size_applied_per_shard" in first_schema
     assert '"/web-blast/statistical-context"' in first_main
     assert "response_model=WebBlastStatisticalContextResponse" in first_main
     assert "response_model=JobListResponse" in first_main

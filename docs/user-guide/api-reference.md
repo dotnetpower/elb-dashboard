@@ -207,6 +207,54 @@ results:
 | --- | --- |
 | `native_top_n` (default) | Selects at most `max_target_seqs` distinct subject accessions using BLAST's e-value, raw-score, and database-order comparator. It does not promise sequence-content diversity. Every HSP row for a selected subject is retained, so the output can have more rows than subjects. |
 | `diversity_aware` | When one tied score class fills and overflows the complete result window, proportionally reserves slots for distinct lower-scoring subjects from the shard candidate pool. This is intentionally heuristic and does not claim full-database hit-list equality. |
+| `sequence_diversity` | For partitioned tabular outfmt 6/7 only. Groups observed HSP rows by `(query identity, uppercase sseq with ASCII '-' removed, qstart, qend)`, ranks one representative per group with the existing BLAST comparator, and returns at most `max_target_seqs` groups per query. |
+
+`sequence_diversity` requires query identity, subject accession, `sseq`,
+`qstart`, `qend`, `evalue`, and `bitscore` in the caller's tabular layout. The
+server adds raw `score` before validating the effective layout. It does not add
+the other semantic fields or silently fall back to an existing policy.
+
+```json
+{
+  "blast_options": {
+    "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+    "max_target_seqs": 100,
+    "candidate_pool_size": 2000,
+    "result_selection_policy": "sequence_diversity"
+  },
+  "resource_profile": "core_nt_safe"
+}
+```
+
+The per-shard candidate cap defaults to `2000` and cannot exceed `5000`.
+`max_target_seqs` remains the final per-query sequence-group count. The merge
+report records requested/applied policy, identity version, observed rows,
+subjects and groups, expected/succeeded shards, cap saturation, and shortfall
+reasons. These counts describe the observed bounded candidate pool, not the
+entire database. `observed_pool_complete=true` means no observed shard/query
+set reached the configured cap; it is not a database-exhaustion claim.
+
+The same accession may appear in several groups. A downstream parser that
+collapses HSPs by accession, computes union coverage, and then filters by
+identity or coverage can therefore return fewer than N accessions. Group counts
+cannot reconstruct accession-level union coverage.
+
+Invalid output formats, missing fields, and invalid pools return HTTP 422 with
+`sequence_diversity_invalid_outfmt`, `sequence_diversity_missing_fields`, or
+`sequence_diversity_invalid_candidate_pool`. The response sets
+`retryable=false` and never includes query content.
+Misplaced fields, non-partitioned profiles, and Web statistical contexts are
+also rejected with sequence-specific 422 codes. Reusing an idempotency key that
+already names a job with different result-selection semantics returns HTTP 409
+`sequence_diversity_idempotency_conflict`; it never returns the existing job as
+though the requested policy had been applied.
+
+Result downloads remain compatible: `content=full` returns all shard files,
+`content=merged` returns a ZIP containing the policy-applied
+`merged_results.out.gz`, and `content=xml` retains its existing XML behavior for
+outfmt 5 jobs. Sequence diversity does not support XML and adds no new download
+mode. Compare policies by submitting separate jobs; one job has one canonical
+policy-applied result.
 
 For `core_nt`, omit `blast_options.db_effective_search_space`, `-searchsp`, and `-dbsize` by
 default. The server resolves the active database generation and injects the matching search space.

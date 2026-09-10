@@ -6,10 +6,11 @@ Responsibility: Verify a message carrying ``blast_options`` is routed to the
     accepts a merge-compatible tabular layout and rejects an incompatible one,
     and that server-derived metadata (source, sharded-DB profile) is stamped.
 Edit boundaries: Pure payload-shaping + routing behaviour; no live sibling.
-Key entry points: ``ExternalBlastV1Request``, ``_is_v1_jobs_message``,
-    ``_build_v1_jobs_payload``, ``external_blast.submit_job_v1``.
-Risky contracts: a tabular outfmt missing evalue/bitscore must be rejected at
-    submit time (the shard merge re-ranks by those columns).
+Key entry points: ``BlastV1Options``, ``ExternalBlastV1Request``,
+    ``_is_v1_jobs_message``, ``_build_v1_jobs_payload``,
+    ``external_blast.submit_job_v1``.
+Risky contracts: merge ranking fields and sequence-diversity signature fields
+    must be validated after server enrichment and before queue submission.
 Validation: ``uv run pytest -q api/tests/test_servicebus_v1_multitoken.py``.
 """
 
@@ -76,6 +77,100 @@ def test_v1_request_accepts_xml_outfmt() -> None:
     assert req.blast_options.outfmt == "5"
 
 
+def test_v1_options_default_serialization_is_unchanged() -> None:
+    from api.routes.elastic_blast import BlastV1Options
+
+    assert BlastV1Options().model_dump(exclude_none=True) == {
+        "result_selection_policy": "native_top_n"
+    }
+    assert BlastV1Options(result_selection_policy="diversity_aware").model_dump(
+        exclude_none=True
+    ) == {"result_selection_policy": "diversity_aware"}
+
+
+def test_v1_options_schema_exposes_sequence_policy_and_candidate_bounds() -> None:
+    from api.routes.elastic_blast import BlastV1Options
+
+    properties = BlastV1Options.model_json_schema()["properties"]
+
+    assert properties["result_selection_policy"]["enum"] == [
+        "native_top_n",
+        "diversity_aware",
+        "sequence_diversity",
+    ]
+    assert properties["candidate_pool_size"]["minimum"] == 1
+    assert properties["candidate_pool_size"]["maximum"] == 5000
+
+
+def test_v1_sequence_diversity_validates_after_score_enrichment() -> None:
+    from api.routes.elastic_blast import ExternalBlastV1Request
+
+    req = ExternalBlastV1Request(
+        program="blastn",
+        db="core_nt",
+        query_fasta=_FASTA,
+        resource_profile="core_nt_safe",
+        blast_options={
+            "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+            "max_target_seqs": 3,
+            "result_selection_policy": "sequence_diversity",
+        },
+    )
+
+    assert req.blast_options.outfmt.endswith(" score")
+    assert req.blast_options.max_target_seqs == 3
+    assert req.blast_options.candidate_pool_size is None
+
+
+@pytest.mark.parametrize(
+    ("blast_options", "expected_code", "expected_missing"),
+    [
+        (
+            {"outfmt": "5", "result_selection_policy": "sequence_diversity"},
+            "sequence_diversity_invalid_outfmt",
+            "",
+        ),
+        (
+            {
+                "outfmt": "7 qseqid saccver qstart qend evalue bitscore",
+                "result_selection_policy": "sequence_diversity",
+            },
+            "sequence_diversity_missing_fields",
+            "sseq",
+        ),
+        (
+            {
+                "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+                "max_target_seqs": 2,
+                "candidate_pool_size": 5001,
+                "result_selection_policy": "sequence_diversity",
+            },
+            "sequence_diversity_invalid_candidate_pool",
+            "",
+        ),
+    ],
+)
+def test_v1_sequence_diversity_has_machine_readable_validation_errors(
+    blast_options: dict[str, object],
+    expected_code: str,
+    expected_missing: str,
+) -> None:
+    from api.routes.elastic_blast import ExternalBlastV1Request
+
+    with pytest.raises(ValidationError) as error:
+        ExternalBlastV1Request(
+            program="blastn",
+            db="core_nt",
+            query_fasta=_FASTA,
+            resource_profile="core_nt_safe",
+            blast_options=blast_options,
+        )
+
+    detail = error.value.errors(include_url=False)[0]
+    assert detail["type"] == expected_code
+    assert detail.get("ctx", {}).get("missing_fields", "") == expected_missing
+
+
 def test_v1_request_rejects_db_path_traversal() -> None:
     from api.routes.elastic_blast import ExternalBlastV1Request
 
@@ -134,6 +229,76 @@ def test_build_v1_payload_preserves_multitoken_and_stamps_metadata() -> None:
     assert payload["external_correlation_id"] == "corr-1"
     # Explicit sharding profile preserved.
     assert payload["resource_profile"] == "core_nt_safe"
+
+
+def test_build_v1_payload_preserves_sequence_policy_and_candidate_pool() -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import tasks as sb
+
+    body = {
+        **_USER_BODY,
+        "external_correlation_id": "corr-sequence",
+        "blast_options": {
+            **_USER_BODY["blast_options"],
+            "candidate_pool_size": 2000,
+            "result_selection_policy": "sequence_diversity",
+        },
+    }
+
+    payload = sb._build_v1_jobs_payload(_msg(body), ServiceBusConfig())
+
+    assert payload is not None
+    assert payload["blast_options"]["result_selection_policy"] == "sequence_diversity"
+    assert payload["blast_options"]["candidate_pool_size"] == 2000
+    assert payload["blast_options"]["max_target_seqs"] == 100
+
+
+def test_build_v1_payload_raises_typed_sequence_validation_error() -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import request_translation
+
+    body = {
+        **_USER_BODY,
+        "external_correlation_id": "corr-sequence-invalid",
+        "blast_options": {
+            "outfmt": "7 qseqid saccver qstart qend evalue bitscore",
+            "result_selection_policy": "sequence_diversity",
+        },
+    }
+
+    with pytest.raises(request_translation.RequestTranslationError) as error:
+        request_translation.build_v1_jobs_payload(
+            _msg(body),
+            ServiceBusConfig(),
+            logger=__import__("logging").getLogger(__name__),
+        )
+
+    assert error.value.code == "sequence_diversity_missing_fields"
+    assert error.value.missing_fields == ("sseq",)
+    assert error.value.retryable is False
+
+
+def test_legacy_translation_rejects_misplaced_sequence_policy() -> None:
+    from api.services.service_bus_pref import ServiceBusConfig
+    from api.tasks.servicebus import request_translation
+
+    with pytest.raises(request_translation.RequestTranslationError) as error:
+        request_translation.build_request_payload(
+            _msg(
+                {
+                    "program": "blastn",
+                    "db": "core_nt",
+                    "query_fasta": _FASTA,
+                    "external_correlation_id": "corr-misplaced",
+                    "options": {"result_selection_policy": "sequence_diversity"},
+                }
+            ),
+            ServiceBusConfig(),
+            logger=__import__("logging").getLogger(__name__),
+        )
+
+    assert error.value.code == "sequence_diversity_requires_structured_options"
+    assert error.value.retryable is False
 
 
 def test_build_v1_payload_preserves_custom_profile_and_scope() -> None:

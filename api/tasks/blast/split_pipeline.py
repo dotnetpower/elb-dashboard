@@ -1111,6 +1111,18 @@ def _aggregate_split_merge_reports(
     diversity_modes: set[str] = set()
     selection_equivalences: set[str] = set()
     ranking_bases: set[str] = set()
+    selection_policies_requested: set[str] = set()
+    selection_policies_applied: set[str] = set()
+    sequence_identity_modes: set[str] = set()
+    sequence_identity_versions: set[int] = set()
+    sequence_requested_groups: set[int] = set()
+    sequence_candidate_pool_requested: set[int] = set()
+    sequence_candidate_pool_applied: set[int] = set()
+    sequence_report_seen = False
+    observed_pool_complete = True
+    shortfall_reasons: list[str] = []
+    sequence_group_counts: list[dict[str, Any]] = []
+    sequence_group_counts_truncated = False
     totals = {
         "queries": 0,
         "total_input_hits": 0,
@@ -1129,6 +1141,15 @@ def _aggregate_split_merge_reports(
         "diversity_reserved_count": 0,
         "diversity_candidate_count": 0,
         "num_shards": 0,
+    }
+    sequence_totals = {
+        "returned_sequence_groups": 0,
+        "observed_candidate_rows": 0,
+        "observed_candidate_subjects": 0,
+        "observed_sequence_groups": 0,
+        "expected_shards": 0,
+        "succeeded_shards": 0,
+        "candidate_pool_saturated_shards": 0,
     }
     # Per-query score-class cutoff samples (which queries had a tied top-score
     # class larger than max_target_seqs). The merge step computes these per
@@ -1161,6 +1182,62 @@ def _aggregate_split_merge_reports(
         ranking_basis = report.get("ranking_basis")
         if isinstance(ranking_basis, str) and ranking_basis:
             ranking_bases.add(ranking_basis)
+        requested_policy = report.get("result_selection_policy_requested")
+        if isinstance(requested_policy, str) and requested_policy:
+            selection_policies_requested.add(requested_policy)
+        applied_policy = report.get("result_selection_policy_applied")
+        if isinstance(applied_policy, str) and applied_policy:
+            selection_policies_applied.add(applied_policy)
+        child_is_sequence = (
+            requested_policy == "sequence_diversity"
+            or applied_policy == "sequence_diversity"
+        )
+        if child_is_sequence:
+            sequence_report_seen = True
+            identity_mode = report.get("sequence_identity_mode")
+            if isinstance(identity_mode, str) and identity_mode:
+                sequence_identity_modes.add(identity_mode)
+            identity_version = report.get("sequence_identity_version")
+            if isinstance(identity_version, int) and not isinstance(identity_version, bool):
+                sequence_identity_versions.add(identity_version)
+            requested_groups = report.get("requested_sequence_groups")
+            if isinstance(requested_groups, int) and not isinstance(requested_groups, bool):
+                sequence_requested_groups.add(requested_groups)
+            requested_pool = report.get("candidate_pool_size_requested_per_shard")
+            if isinstance(requested_pool, int) and not isinstance(requested_pool, bool):
+                sequence_candidate_pool_requested.add(requested_pool)
+            applied_pool = report.get("candidate_pool_size_applied_per_shard")
+            if isinstance(applied_pool, int) and not isinstance(applied_pool, bool):
+                sequence_candidate_pool_applied.add(applied_pool)
+            observed_pool_complete = observed_pool_complete and report.get(
+                "observed_pool_complete"
+            ) is True
+            for key in sequence_totals:
+                raw_value = report.get(key, 0)
+                if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+                    sequence_totals[key] += int(raw_value)
+            for reason in report.get("shortfall_reasons", []):
+                if isinstance(reason, str) and reason not in shortfall_reasons:
+                    shortfall_reasons.append(reason)
+            child_group_counts = report.get("sequence_group_counts")
+            if isinstance(child_group_counts, list):
+                for entry in child_group_counts:
+                    if not isinstance(entry, dict):
+                        continue
+                    if len(sequence_group_counts) >= 5_000:
+                        sequence_group_counts_truncated = True
+                        break
+                    sequence_group_counts.append(
+                        {
+                            **entry,
+                            "sequence_group_ordinal": len(sequence_group_counts) + 1,
+                            "child_job_id": item.get("child_job_id"),
+                            "group_id": item.get("group_id"),
+                        }
+                    )
+            sequence_group_counts_truncated = sequence_group_counts_truncated or bool(
+                report.get("sequence_group_counts_truncated")
+            )
         for key in totals:
             raw_value = report.get(key, 0)
             if isinstance(raw_value, (int, float)):
@@ -1208,6 +1285,8 @@ def _aggregate_split_merge_reports(
                 "diversity_reservation_mode": diversity_mode,
                 "selection_equivalence": selection_equivalence,
                 "ranking_basis": ranking_basis,
+                "result_selection_policy_requested": requested_policy,
+                "result_selection_policy_applied": applied_policy,
                 "num_shards": report.get("num_shards", 0),
                 "format": report_format,
                 "warnings": report.get("warnings", []),
@@ -1227,10 +1306,20 @@ def _aggregate_split_merge_reports(
         warnings.append("child merge reports used different selection equivalence modes")
     if len(ranking_bases) > 1:
         warnings.append("child merge reports used different ranking bases")
+    if len(selection_policies_requested) > 1 or len(selection_policies_applied) > 1:
+        raise ValueError("split child merge reports used different result-selection policies")
+    if len(sequence_identity_modes) > 1 or len(sequence_identity_versions) > 1:
+        raise ValueError("split child merge reports used different sequence identity contracts")
+    if len(sequence_requested_groups) > 1:
+        raise ValueError("split child merge reports used different requested sequence groups")
+    if len(sequence_candidate_pool_requested) > 1:
+        raise ValueError("split child merge reports used different requested candidate pools")
+    if len(sequence_candidate_pool_applied) > 1:
+        raise ValueError("split child merge reports used different applied candidate pools")
     report_format = next(iter(formats), "blast_tabular")
     outfmt = 5 if report_format == "blast_xml" else 6
 
-    return {
+    aggregated = {
         "precision_level": (
             "split_query_child_finalizer_xml_concat"
             if report_format == "blast_xml"
@@ -1272,6 +1361,38 @@ def _aggregate_split_merge_reports(
         "warnings": warnings,
         "children": child_items,
     }
+    if selection_policies_requested:
+        aggregated["result_selection_policy_requested"] = next(
+            iter(selection_policies_requested)
+        )
+    if selection_policies_applied:
+        aggregated["result_selection_policy_applied"] = next(
+            iter(selection_policies_applied)
+        )
+    if sequence_report_seen:
+        aggregated.update(
+            {
+                "sequence_identity_mode": next(iter(sequence_identity_modes), None),
+                "sequence_identity_version": next(
+                    iter(sequence_identity_versions), None
+                ),
+                "requested_sequence_groups": next(
+                    iter(sequence_requested_groups), None
+                ),
+                "candidate_pool_size_requested_per_shard": next(
+                    iter(sequence_candidate_pool_requested), None
+                ),
+                "candidate_pool_size_applied_per_shard": next(
+                    iter(sequence_candidate_pool_applied), None
+                ),
+                **sequence_totals,
+                "observed_pool_complete": observed_pool_complete,
+                "shortfall_reasons": shortfall_reasons,
+                "sequence_group_counts": sequence_group_counts,
+                "sequence_group_counts_truncated": sequence_group_counts_truncated,
+            }
+        )
+    return aggregated
 
 
 def _iter_split_child_merged_result_chunks(

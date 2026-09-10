@@ -1659,6 +1659,31 @@ def test_external_blast_rejects_string_priority(monkeypatch):
     assert response.status_code == 422
 
 
+def test_external_xml_facade_rejects_sequence_diversity(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+
+    response = TestClient(app).post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nACGT\n",
+            "db": "core_nt",
+            "blast_options": {
+                "result_selection_policy": "sequence_diversity"
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body.pop("request_id")
+    assert body == {
+        "code": "sequence_diversity_invalid_outfmt",
+        "message": "sequence_diversity requires tabular outfmt 6 or 7 via /v1/jobs",
+        "retryable": False,
+    }
+
+
 def test_upstream_error_detail_is_sanitised() -> None:
     from api.services import external_blast
 
@@ -1686,6 +1711,34 @@ def test_streaming_upstream_error_detail_is_read_and_sanitised() -> None:
 
     assert raised.value.status_code == 500
     assert raised.value.detail["message"] == "failed ?sig=<redacted>"
+
+
+def test_upstream_error_unwraps_fastapi_detail_code() -> None:
+    from api.services import external_blast
+
+    request = httpx.Request("POST", "https://example.test/v1/jobs")
+    response = httpx.Response(
+        422,
+        request=request,
+        json={
+            "detail": {
+                "code": "sequence_diversity_missing_fields",
+                "message": "sequence_diversity requires sseq",
+                "missing_fields": ["sseq"],
+                "retryable": False,
+            }
+        },
+    )
+    exc = httpx.HTTPStatusError("boom", request=request, response=response)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast._raise_upstream_error(exc)
+
+    assert raised.value.status_code == 422
+    assert raised.value.detail["code"] == "sequence_diversity_missing_fields"
+    assert raised.value.detail["missing_fields"] == ["sseq"]
+    assert raised.value.detail["retryable"] is False
+    assert raised.value.detail["upstream_status"] == 422
 
 
 def test_upstream_error_logs_sanitised_response_detail(caplog: pytest.LogCaptureFixture) -> None:

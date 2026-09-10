@@ -141,10 +141,15 @@ Field rules (consistent with `/v1/jobs`):
   `approximate`/`off` instead of trusting it blindly. Any other unknown key is
   ignored.
 - Free-form `/v1/jobs` messages may set
-  `blast_options.result_selection_policy` to `native_top_n` (default) or
-  `diversity_aware`. The former keeps exact DB-order top-N subject selection;
-  the latter enables proportional lower-score subject reservation and does not
-  claim full-database hit-list equality.
+  `blast_options.result_selection_policy` to `native_top_n` (default),
+  `diversity_aware`, or `sequence_diversity`. The first two policies retain
+  their existing accession-based behavior. `sequence_diversity` is opt-in,
+  supports only partitioned tabular outfmt 6/7, and selects one representative
+  HSP for each `(query identity, normalized sseq, qstart, qend)` signature.
+- `blast_options.candidate_pool_size` is valid only with `sequence_diversity`.
+  It caps candidates per shard and is separate from the final per-query group
+  count in `max_target_seqs`. The default is `2000`; the hard maximum is
+  `5000`; invalid values are rejected rather than clamped.
 - Leave `blast_options.db_effective_search_space`, raw `-searchsp`, and raw
   `-dbsize` unset for normal `core_nt` messages. The consumer and execution
   service resolve the active generation. A typed explicit value conflicts with
@@ -181,6 +186,30 @@ The event carries **only a pointer** to the result, never the BLAST XML itself
 pattern). A subscriber receives `succeeded` and then fetches the actual output
 from the OpenAPI result endpoint. This keeps every message well under the
 Service Bus size limit and avoids duplicating large payloads.
+
+Sequence-diversity validation failures are terminal and preserve their specific
+code. For example:
+
+```json
+{
+  "event": "blast.transition",
+  "external_correlation_id": "caller-job-001",
+  "openapi_job_id": "",
+  "status": "failed",
+  "error_code": "sequence_diversity_missing_fields",
+  "error_message": "sequence_diversity requires sseq in the effective tabular outfmt",
+  "retryable": false
+}
+```
+
+The request is dead-lettered with reason
+`sequence_diversity_missing_fields` and the same bounded, sanitized description
+only after the failure event is durable in the response outbox. Other malformed
+requests retain the existing `servicebus_malformed_request` contract, and other
+permanent upstream 422 responses retain `servicebus_submit_rejected_422`.
+The same preservation applies to sequence-specific permanent 409 conflicts such
+as `sequence_diversity_idempotency_conflict`; unrelated 409 responses keep the
+existing generic Service Bus rejection code.
 
 ## Lifecycle (state machine)
 

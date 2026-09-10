@@ -1,15 +1,15 @@
 """FastAPI api sidecar entrypoint and router wiring.
 
-Responsibility: Compose the FastAPI app from helpers in `api.app.*` and wire
-every router with its prefix.
-Edit boundaries: Keep this module thin — middleware logic lives in
-`api.app.middleware`, lifespan in `api.app.lifespan`, inspector rules in
-`api.app.inspector`. Add new routers here; do not add HTTP behaviour.
+Responsibility: Compose the FastAPI app, wire routers, and install global
+exception response handlers.
+Edit boundaries: Keep route business logic out of this module; middleware lives
+in `api.app.middleware`, lifespan in `api.app.lifespan`, and inspector rules in
+`api.app.inspector`.
 Key entry points: `create_app`, `app`. `_inspector_should_capture` is re-exported
 for back-compat with tests that import it from `api.main`.
 Risky contracts: Preserve the existing import surface (`app`, `create_app`,
 `RequestIdMiddleware`, `_inspector_should_capture`, `_lifespan`) — both production
-runners and tests rely on it.
+runners and tests rely on it. Validation errors must not expose sequence/query input.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -429,6 +429,31 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        rid = getattr(request.state, "request_id", None)
+        for error in exc.errors():
+            code = str(error.get("type") or "")
+            if not code.startswith("sequence_diversity_"):
+                continue
+            ctx = error.get("ctx") if isinstance(error.get("ctx"), dict) else {}
+            missing_raw = str((ctx or {}).get("missing_fields") or "")
+            sequence_body: dict[str, object] = {
+                "code": code,
+                "message": str(error.get("msg") or code)[:300],
+                "retryable": False,
+            }
+            missing_fields = [field for field in missing_raw.split(",") if field]
+            if missing_fields:
+                sequence_body["missing_fields"] = missing_fields
+            if rid:
+                sequence_body["request_id"] = rid
+            _annotate_error_span_safe(
+                status_code=422,
+                error_type=code,
+                detail=code,
+                request_id=rid,
+            )
+            return JSONResponse(sequence_body, status_code=422)
+
         errors: list[dict[str, object]] = []
         for error in exc.errors():
             item = dict(error)
@@ -436,7 +461,6 @@ def create_app() -> FastAPI:
             if isinstance(ctx, dict):
                 item["ctx"] = {str(key): str(value) for key, value in ctx.items()}
             errors.append(item)
-        rid = getattr(request.state, "request_id", None)
         body: dict[str, object] = {"detail": errors}
         if rid:
             body["request_id"] = rid

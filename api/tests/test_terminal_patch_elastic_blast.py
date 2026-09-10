@@ -815,15 +815,17 @@ def test_patch_requested_max_target_seqs_transport_is_complete_and_idempotent(
     assert "requested_max_target_seqs: int = 0" in config_path.read_text()
     assert "requested-max-target-seqs must be non-negative" in config_path.read_text()
     assert "result_selection_policy: str = 'native_top_n'" in config_path.read_text()
-    assert (
-        "result-selection-policy must be native_top_n or diversity_aware" in config_path.read_text()
-    )
+    assert "candidate_pool_size_requested: int = 0" in config_path.read_text()
+    assert "'native_top_n', 'diversity_aware', 'sequence_diversity'" in config_path.read_text()
+    assert "candidate-pool-size-requested must be between 0 and 5000" in config_path.read_text()
     assert "'ELB_REQUESTED_MAX_TARGET_SEQS': (" in azure_path.read_text()
     assert (
         "'ELB_RESULT_SELECTION_POLICY': cfg.blast.result_selection_policy" in azure_path.read_text()
     )
+    assert "'ELB_CANDIDATE_POOL_SIZE_REQUESTED': (" in azure_path.read_text()
     assert "name: ELB_REQUESTED_MAX_TARGET_SEQS" in template_path.read_text()
     assert "name: ELB_RESULT_SELECTION_POLICY" in template_path.read_text()
+    assert "name: ELB_CANDIDATE_POOL_SIZE_REQUESTED" in template_path.read_text()
 
 
 def test_patch_requested_max_target_seqs_supports_folded_options_yaml(
@@ -850,6 +852,7 @@ def test_patch_requested_max_target_seqs_supports_folded_options_yaml(
     assert template_path.read_text() == once
     assert once.count("name: ELB_REQUESTED_MAX_TARGET_SEQS") == 1
     assert once.count("name: ELB_RESULT_SELECTION_POLICY") == 1
+    assert once.count("name: ELB_CANDIDATE_POOL_SIZE_REQUESTED") == 1
     assert "value: >-\n            ${ELB_BLAST_OPTIONS}" in once
 
 
@@ -2053,6 +2056,9 @@ def test_patch_source_tags_query_and_db_order_oracles() -> None:
     assert "-dbsize requires a Web BLAST statistics manifest" in source
     assert "ELB_RESULT_SELECTION_POLICY:-native_top_n" in source
     assert 'export ELB_DIVERSITY_AWARE_CUTOFF="auto"' in source
+    assert "Using sequence-diversity result selection" in source
+    assert "# ELB source-shard:%s" in source
+    assert 'export ELB_SUCCEEDED_SHARDS="$DOWNLOAD_SUCCESS_COUNT"' in source
     assert 'ORACLE_SEARCH_BASES=""' in source
 
 

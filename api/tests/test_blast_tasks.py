@@ -2920,6 +2920,84 @@ def test_aggregate_split_merge_reports_marks_mixed_diversity_modes() -> None:
     assert "child merge reports used different candidate_pool_size values" in report["warnings"]
 
 
+def test_aggregate_split_merge_reports_preserves_sequence_diversity() -> None:
+    child_reports = []
+    for index, observed_groups in ((1, 2), (2, 1)):
+        child_reports.append(
+            {
+                "child_job_id": f"job-123-qg{index}",
+                "group_id": f"qg{index}",
+                "report": {
+                    "outfmt": 6,
+                    "format": "blast_tabular",
+                    "result_selection_policy_requested": "sequence_diversity",
+                    "result_selection_policy_applied": "sequence_diversity",
+                    "sequence_identity_mode": "aligned_sequence_query_span",
+                    "sequence_identity_version": 1,
+                    "requested_sequence_groups": 3,
+                    "returned_sequence_groups": observed_groups,
+                    "candidate_pool_size_requested_per_shard": 4,
+                    "candidate_pool_size_applied_per_shard": 4,
+                    "observed_candidate_rows": observed_groups + 1,
+                    "observed_candidate_subjects": observed_groups + 1,
+                    "observed_sequence_groups": observed_groups,
+                    "expected_shards": 2,
+                    "succeeded_shards": 2,
+                    "candidate_pool_saturated_shards": index - 1,
+                    "observed_pool_complete": index == 1,
+                    "shortfall_reasons": (
+                        ["insufficient_unique_groups_in_observed_pool"]
+                        if index == 1
+                        else [
+                            "candidate_pool_saturated",
+                            "insufficient_unique_groups_in_observed_pool",
+                        ]
+                    ),
+                    "sequence_group_counts": [
+                        {
+                            "sequence_group_ordinal": group_index + 1,
+                            "sequence_group_accession_count": 1,
+                            "sequence_group_source_row_count": 1,
+                        }
+                        for group_index in range(observed_groups)
+                    ],
+                    "sequence_group_counts_truncated": False,
+                },
+            }
+        )
+
+    report = blast._aggregate_split_merge_reports(
+        parent_job_id="job-123",
+        child_reports=child_reports,
+    )
+
+    assert report["result_selection_policy_requested"] == "sequence_diversity"
+    assert report["result_selection_policy_applied"] == "sequence_diversity"
+    assert report["sequence_identity_mode"] == "aligned_sequence_query_span"
+    assert report["sequence_identity_version"] == 1
+    assert report["requested_sequence_groups"] == 3
+    assert report["returned_sequence_groups"] == 3
+    assert report["candidate_pool_size_requested_per_shard"] == 4
+    assert report["candidate_pool_size_applied_per_shard"] == 4
+    assert report["observed_candidate_rows"] == 5
+    assert report["observed_candidate_subjects"] == 5
+    assert report["observed_sequence_groups"] == 3
+    assert report["expected_shards"] == 4
+    assert report["succeeded_shards"] == 4
+    assert report["candidate_pool_saturated_shards"] == 1
+    assert report["observed_pool_complete"] is False
+    assert report["shortfall_reasons"] == [
+        "insufficient_unique_groups_in_observed_pool",
+        "candidate_pool_saturated",
+    ]
+    assert [item["sequence_group_ordinal"] for item in report["sequence_group_counts"]] == [
+        1,
+        2,
+        3,
+    ]
+    assert report["sequence_group_counts_truncated"] is False
+
+
 def test_aggregate_split_merge_reports_preserves_exact_selection() -> None:
     children = [
         {

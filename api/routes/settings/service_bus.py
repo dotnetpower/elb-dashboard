@@ -654,6 +654,28 @@ def _validate_send_body(body: dict[str, Any]) -> Any:
         ExternalBlastV1Request,
     )
 
+    raw_legacy_options = body.get("options")
+    legacy_options: dict[str, Any] = (
+        raw_legacy_options if isinstance(raw_legacy_options, dict) else {}
+    )
+    if (
+        body.get("result_selection_policy") == "sequence_diversity"
+        or "candidate_pool_size" in body
+        or legacy_options.get("result_selection_policy") == "sequence_diversity"
+        or "candidate_pool_size" in legacy_options
+    ):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sequence_diversity_requires_structured_options",
+                "message": (
+                    "sequence_diversity and candidate_pool_size must be nested "
+                    "under blast_options"
+                ),
+                "retryable": False,
+            },
+        )
+
     model = (
         ExternalBlastV1Request
         if isinstance(body.get("blast_options"), dict)
@@ -664,6 +686,21 @@ def _validate_send_body(body: dict[str, Any]) -> Any:
     except HTTPException:
         raise
     except ValidationError as exc:
+        for error in exc.errors(include_url=False):
+            code = str(error.get("type") or "")
+            if not code.startswith("sequence_diversity_"):
+                continue
+            context = error.get("ctx") if isinstance(error.get("ctx"), dict) else {}
+            missing_raw = str((context or {}).get("missing_fields") or "")
+            detail: dict[str, Any] = {
+                "code": code,
+                "message": sanitise(str(error.get("msg") or code))[:300],
+                "retryable": False,
+            }
+            missing_fields = [field for field in missing_raw.split(",") if field]
+            if missing_fields:
+                detail["missing_fields"] = missing_fields
+            raise HTTPException(422, detail=detail) from exc
         # Return the SAME per-field detail shape the app-level
         # RequestValidationError handler produces for the native FastAPI submit
         # route, instead of a single 400-char-truncated ``str(exc)`` blob. The

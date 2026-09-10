@@ -692,6 +692,7 @@ def _transition_event(
     attempt: int,
     error_code: str | None = None,
     error_message: str | None = None,
+    retryable: bool | None = None,
     request_id: str = "",
     result_files: list[dict[str, Any]] | None = None,
     event_id_scope: str = "",
@@ -743,6 +744,8 @@ def _transition_event(
         event["error_code"] = error_code
     if error_message:
         event["error_message"] = error_message
+    if retryable is not None:
+        event["retryable"] = retryable
     return event
 
 
@@ -1063,6 +1066,7 @@ def _publish_drain_failure_event(
     request_id: str,
     error_code: str,
     error_message: str,
+    retryable: bool | None = None,
 ) -> bool:
     """Publish a terminal ``failed`` transition for a drain-time rejection.
 
@@ -1091,6 +1095,7 @@ def _publish_drain_failure_event(
             error_message=(str(sanitise(error_message))[:_ERROR_MESSAGE_MAX_LEN] or None)
             if error_message
             else None,
+            retryable=retryable,
             request_id=request_id,
         )
         durable, _delivered = _stage_response_event(cfg, event)
@@ -1484,15 +1489,42 @@ def _drain_handler(
     clock: Callable[[], float] | None = None,
 ) -> MessageAction:
     body = dict(msg.body or {})
-    if _is_v1_jobs_message(body):
-        # Multi-token / tabular outfmt path: forward the producer's
-        # ``blast_options`` to the sibling ``/v1/jobs`` (free-form options)
-        # instead of the XML-locked ``/api/v1/elastic-blast/submit``.
-        payload = _build_v1_jobs_payload(msg, cfg)
-        submit = external_blast.submit_job_v1
-    else:
-        payload = _build_request_payload(msg, cfg)
-        submit = external_blast.submit_job
+    try:
+        if _is_v1_jobs_message(body):
+            # Multi-token / tabular outfmt path: forward the producer's
+            # ``blast_options`` to the sibling ``/v1/jobs`` (free-form options)
+            # instead of the XML-locked ``/api/v1/elastic-blast/submit``.
+            payload = _build_v1_jobs_payload(msg, cfg)
+            submit = external_blast.submit_job_v1
+        else:
+            payload = _build_request_payload(msg, cfg)
+            submit = external_blast.submit_job
+    except request_translation.RequestTranslationError as exc:
+        correlation_id = _correlation_id_from_message(msg)
+        response_durable = _publish_drain_failure_event(
+            cfg,
+            correlation_id=correlation_id,
+            request_id=_extract_request_id(msg),
+            error_code=exc.code,
+            error_message=exc.message,
+            retryable=exc.retryable,
+        )
+        if not response_durable:
+            return _transient_action(msg)
+        _fail_placeholder_for_message(msg, error_code=exc.code)
+        _publish_jobs_cache_invalidate("servicebus_drain_typed_rejection")
+        _record_drain_request_event(
+            "rejected",
+            msg,
+            cfg,
+            action=MessageAction.DEAD_LETTER,
+            error_code=exc.code,
+        )
+        return _dead_letter_action(
+            msg,
+            reason=exc.code,
+            description=exc.message,
+        )
     if payload is None:
         # Cannot ever succeed → dead-letter (do not loop forever). Fail the
         # send-time placeholder (if any) so it does not linger as ``queued``
@@ -1804,15 +1836,19 @@ def _drain_handler(
         permanent = 400 <= status < 500 and status not in (401, 408, 429)
         retry_exhausted = not permanent and _retry_exhausted(msg)
         detail_code = str(exc.detail.get("code") or "") if isinstance(exc.detail, dict) else ""
-        failure_code = (
-            f"servicebus_submit_rejected_{status}"
-            if permanent
-            else (
+        sequence_detail_code = (
+            detail_code
+            if permanent and detail_code.startswith("sequence_diversity_")
+            else ""
+        )
+        if permanent:
+            failure_code = sequence_detail_code or f"servicebus_submit_rejected_{status}"
+        else:
+            failure_code = (
                 "openapi_response_missing_job_id"
                 if detail_code == "openapi_response_missing_job_id"
                 else f"openapi_http_{status or 'unknown'}"
             )
-        )
         LOGGER.warning(
             "service bus → OpenAPI submit %s corr=%s status=%s",
             "rejected (dead-letter)" if permanent else "failed (retry)",
@@ -1827,13 +1863,14 @@ def _drain_handler(
                 cfg,
                 correlation_id=correlation_id,
                 request_id=request_id,
-                error_code=f"servicebus_submit_rejected_{status}",
+                error_code=failure_code,
                 error_message=_detail_text(exc),
+                retryable=False if sequence_detail_code else None,
             )
             if response_durable:
                 _fail_placeholder(
                     correlation_id,
-                    error_code=f"servicebus_submit_rejected_{status}",
+                    error_code=failure_code,
                 )
                 _publish_jobs_cache_invalidate("servicebus_drain_rejected")
             else:
@@ -2664,19 +2701,33 @@ def _stage_dead_letter_response_and_backup(
         )
     raw_reason = str(msg.dead_letter_reason or "servicebus_dead_lettered")
     reason_key = raw_reason.strip().lower().replace(" ", "_")
-    if "ttl" in reason_key or "expired" in reason_key:
+    retryable: bool | None = None
+    if reason_key.startswith("sequence_diversity_"):
+        error_code = reason_key[:128]
+        retryable = False
+    elif "ttl" in reason_key or "expired" in reason_key:
         error_code = "servicebus_request_expired"
     elif "maxdelivery" in reason_key or "max_delivery" in reason_key:
         error_code = "servicebus_max_delivery_exceeded"
     else:
         error_code = "servicebus_dead_lettered"
+    raw_description = str(msg.dead_letter_error_description or "").strip()
+    error_message = (
+        raw_description
+        if raw_description and retryable is False
+        else f"request moved to the dead-letter queue: {raw_reason[:160]}"
+    )
+    from api.services.sanitise import sanitise
+
+    error_message = str(sanitise(error_message))[:_ERROR_MESSAGE_MAX_LEN]
     event = _transition_event(
         correlation_id=correlation_id,
         openapi_job_id="",
         status=_STATUS_FAILED,
         attempt=max(1, msg.retry_attempt + 1),
         error_code=error_code,
-        error_message=f"request moved to the dead-letter queue: {raw_reason[:160]}",
+        error_message=error_message,
+        retryable=retryable,
         request_id=request_id,
     )
     durable, _delivered = _stage_response_event(

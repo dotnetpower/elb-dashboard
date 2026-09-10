@@ -1294,6 +1294,70 @@ def test_send_rejects_unmergeable_v1_outfmt(
     assert r.json()["code"] == "invalid_request"
 
 
+def test_send_rejects_sequence_diversity_with_typed_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_service_bus(client, monkeypatch)
+    from api.services import service_bus
+
+    monkeypatch.setattr(
+        service_bus,
+        "send_request",
+        lambda *_a, **_k: pytest.fail("validation must precede enqueue"),
+    )
+    response = client.post(
+        "/api/settings/service-bus/send",
+        json={
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">q1\nACGTACGTACGTACGTACGT\n",
+            "resource_profile": "core_nt_safe",
+            "dry_run": True,
+            "blast_options": {
+                "outfmt": "7 qseqid saccver qstart qend evalue bitscore",
+                "result_selection_policy": "sequence_diversity",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body.pop("request_id")
+    assert body == {
+        "code": "sequence_diversity_missing_fields",
+        "message": (
+            "sequence_diversity requires query identity, accession, sseq, qstart, "
+            "qend, evalue, bitscore, and score in the effective tabular outfmt"
+        ),
+        "missing_fields": ["sseq"],
+        "retryable": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "misplaced",
+    [
+        {"result_selection_policy": "sequence_diversity"},
+        {"options": {"result_selection_policy": "sequence_diversity"}},
+        {"candidate_pool_size": 2000},
+    ],
+)
+def test_send_rejects_misplaced_sequence_options(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    misplaced: dict[str, object],
+) -> None:
+    _enable_service_bus(client, monkeypatch)
+    response = client.post(
+        "/api/settings/service-bus/send",
+        json={**_VALID_SEND_BODY, **misplaced, "dry_run": True},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "sequence_diversity_requires_structured_options"
+    assert response.json()["retryable"] is False
+
+
 def test_send_propagates_request_id_into_queue_body(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

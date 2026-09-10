@@ -1332,6 +1332,161 @@ def test_drain_dead_letters_on_permanent_4xx(monkeypatch: pytest.MonkeyPatch) ->
     assert message.settlement_reason == "servicebus_submit_rejected_400"
 
 
+def _sequence_diversity_invalid_message() -> ParsedMessage:
+    return _msg(
+        {
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">q1\nACGT\n",
+            "external_correlation_id": "caller-job-001",
+            "request_id": "request-001",
+            "resource_profile": "core_nt_safe",
+            "blast_options": {
+                "outfmt": "7 qseqid saccver qstart qend evalue bitscore",
+                "result_selection_policy": "sequence_diversity",
+            },
+        }
+    )
+
+
+def test_sequence_validation_emits_durable_terminal_event_and_dlq_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    events: list[dict[str, Any]] = []
+    failed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, event, **_kwargs: (events.append(event) is None, False),
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "_fail_placeholder_for_message",
+        lambda msg, *, error_code: failed.append(
+            (str(msg.body.get("external_correlation_id") or ""), error_code)
+        ),
+    )
+    monkeypatch.setattr(sb_tasks, "_publish_jobs_cache_invalidate", lambda _reason: None)
+    monkeypatch.setattr(sb_tasks, "_record_drain_request_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job_v1",
+        lambda *_a, **_k: pytest.fail("local validation must precede submit"),
+    )
+    message = _sequence_diversity_invalid_message()
+
+    action = sb_tasks._drain_handler(message, _enabled_cfg())
+
+    assert action == MessageAction.DEAD_LETTER
+    assert failed == [("caller-job-001", "sequence_diversity_missing_fields")]
+    assert message.settlement_reason == "sequence_diversity_missing_fields"
+    assert "requires query identity" in message.settlement_description
+    assert len(events) == 1
+    assert events[0]["external_correlation_id"] == "caller-job-001"
+    assert events[0]["request_id"] == "request-001"
+    assert events[0]["openapi_job_id"] == ""
+    assert events[0]["status"] == "failed"
+    assert events[0]["error_code"] == "sequence_diversity_missing_fields"
+    assert events[0]["retryable"] is False
+
+
+def test_sequence_validation_does_not_dlq_before_event_is_durable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable(monkeypatch)
+    failed: list[str] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, _event, **_kwargs: (False, False),
+    )
+    monkeypatch.setattr(
+        sb_tasks,
+        "_fail_placeholder_for_message",
+        lambda _msg, *, error_code: failed.append(error_code),
+    )
+    message = _sequence_diversity_invalid_message()
+
+    action = sb_tasks._drain_handler(message, _enabled_cfg())
+
+    assert action == MessageAction.RETRY
+    assert message.settlement_reason == ""
+    assert failed == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "upstream_code", "expected_code", "expected_retryable"),
+    [
+        (
+            422,
+            "sequence_diversity_invalid_candidate_pool",
+            "sequence_diversity_invalid_candidate_pool",
+            False,
+        ),
+        (
+            409,
+            "sequence_diversity_idempotency_conflict",
+            "sequence_diversity_idempotency_conflict",
+            False,
+        ),
+        (422, "other_validation_error", "servicebus_submit_rejected_422", None),
+    ],
+)
+def test_upstream_422_preserves_only_sequence_validation_code(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    upstream_code: str,
+    expected_code: str,
+    expected_retryable: bool | None,
+) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(sb_tasks, "_ATOMIC_CLAIM", False)
+    monkeypatch.setattr(
+        sb_tasks,
+        "_build_v1_jobs_payload",
+        lambda _msg, _cfg: {
+            "external_correlation_id": "caller-job-upstream",
+            "blast_options": {},
+        },
+    )
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job_v1",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            HTTPException(
+                status_code,
+                detail={
+                    "code": upstream_code,
+                    "message": "request was rejected",
+                    "retryable": False,
+                },
+            )
+        ),
+    )
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, event, **_kwargs: (events.append(event) is None, False),
+    )
+    monkeypatch.setattr(sb_tasks, "_fail_placeholder", lambda *_a, **_k: None)
+    monkeypatch.setattr(sb_tasks, "_publish_jobs_cache_invalidate", lambda _reason: None)
+    message = _msg(
+        {
+            "external_correlation_id": "caller-job-upstream",
+            "blast_options": {},
+        }
+    )
+
+    action = sb_tasks._drain_handler(message, _enabled_cfg())
+
+    assert action == MessageAction.DEAD_LETTER
+    assert message.settlement_reason == expected_code
+    assert events[0]["error_code"] == expected_code
+    assert events[0].get("retryable") is expected_retryable
+
+
 def test_drain_schedules_retry_on_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
     """A sibling 5xx / 503 transport error is transient → scheduled retry."""
     from fastapi import HTTPException
@@ -1547,6 +1702,52 @@ def test_dlq_response_is_durable_and_backed_up_before_complete(
     assert events[0]["error_code"] == "servicebus_request_expired"
     assert events[0]["_deliver_immediately"] is False
     assert backups and backups[0]["correlation_id"] == "corr-expired"
+
+
+def test_dlq_reconciliation_preserves_sequence_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enable(monkeypatch)
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sb_tasks,
+        "_stage_response_event",
+        lambda _cfg, event, **_kwargs: (events.append(event) is None, False),
+    )
+    monkeypatch.setattr(sb_tasks, "backup_dead_letter_message", lambda _record: True)
+    monkeypatch.setattr(sb_tasks, "_fail_placeholder", lambda *_a, **_k: None)
+    monkeypatch.setattr(sb_tasks, "_publish_jobs_cache_invalidate", lambda _reason: None)
+    message = _msg(
+        {
+            "external_correlation_id": "caller-job-001",
+            "request_id": "request-001",
+        },
+        dead_letter_reason="sequence_diversity_missing_fields",
+        dead_letter_error_description=(
+            "sequence_diversity requires sseq in the effective tabular outfmt"
+        ),
+    )
+
+    assert sb_tasks._stage_dead_letter_response_and_backup(cfg, message) is True
+
+    assert events == [
+        {
+            "event": "blast.transition",
+            "event_id": sb_tasks._event_id("caller-job-001", "failed"),
+            "attempt": 1,
+            "external_correlation_id": "caller-job-001",
+            "openapi_job_id": "",
+            "status": "failed",
+            "ts": events[0]["ts"],
+            "result_ref": sb_tasks._result_ref(""),
+            "request_id": "request-001",
+            "error_code": "sequence_diversity_missing_fields",
+            "error_message": (
+                "sequence_diversity requires sseq in the effective tabular outfmt"
+            ),
+            "retryable": False,
+        }
+    ]
 
 
 def test_message_payload_is_consistent_with_openapi_jobs_model() -> None:
