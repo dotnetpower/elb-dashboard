@@ -9,8 +9,9 @@ Key entry points: `WebBlastStatisticalContext`, `ExternalBlastOptions`, `BlastV1
 `list_external_blast_job_events`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate; sequence-diversity validation runs after raw-score enrichment and never mutates legacy
-selection policies.
-Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
+selection policies; enriched `outfmt` values must remain within the 512-character wire contract.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py
+api/tests/test_servicebus_v1_multitoken.py`.
 """
 
 from __future__ import annotations
@@ -248,7 +249,9 @@ class BlastV1Options(BaseModel):
         json_schema_extra={"minimum": 1},
         description=(
             "Per-shard BLAST subject candidate cap for sequence_diversity. "
-            "Rejected for other result-selection policies."
+            "Omit to use max(2,000, max_target_seqs). There is no fixed server "
+            "maximum; larger values increase compute, temporary disk, and "
+            "result storage. Rejected for other result-selection policies."
         ),
     )
 
@@ -388,7 +391,16 @@ class ExternalBlastV1Request(BaseModel):
             # name / Query Cover columns populate for an outfmt 6/7 run the same
             # way they do for outfmt 5 (XML). Idempotent + preserves the caller's
             # columns; a no-op for XML or an already-enriched layout.
-            self.blast_options.outfmt = enrich_exact_tabular_outfmt(outfmt)
+            enriched_outfmt = enrich_exact_tabular_outfmt(outfmt)
+            if isinstance(enriched_outfmt, str) and len(enriched_outfmt) > 512:
+                raise PydanticCustomError(
+                    "outfmt_too_long_after_enrichment",
+                    (
+                        "blast_options.outfmt exceeds 512 characters after "
+                        "required merge fields are added"
+                    ),
+                )
+            self.blast_options.outfmt = enriched_outfmt
         from api.services.blast.result_selection import (
             SequenceDiversityValidationError,
             validate_result_selection_options,

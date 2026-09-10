@@ -18,6 +18,8 @@ Risky contracts: The SAS connection string is never returned to the browser
     dedupes any duplicate). ``send`` is intentionally callable by a subscription
     Reader (Playground) — the enqueue runs under the shared MI and never returns
     a SAS token; keep its allowlist entry in ``persona_reader_allowlist.py``.
+    Playground dry-run and real send must apply the same local wire-size check,
+    while dry-run must return before any Service Bus data-plane operation.
     Every full-row config write is serialized through a deployment-wide mutex
     and guarded by an opaque config revision so a stale save cannot overwrite a
     newer update. Routing changes additionally take the queue fence and fail
@@ -688,7 +690,10 @@ def _validate_send_body(body: dict[str, Any]) -> Any:
     except ValidationError as exc:
         for error in exc.errors(include_url=False):
             code = str(error.get("type") or "")
-            if not code.startswith("sequence_diversity_"):
+            if not (
+                code.startswith("sequence_diversity_")
+                or code == "outfmt_too_long_after_enrichment"
+            ):
                 continue
             context = error.get("ctx") if isinstance(error.get("ctx"), dict) else {}
             missing_raw = str((context or {}).get("missing_fields") or "")
@@ -831,10 +836,25 @@ def send(
     if request_id:
         payload["request_id"] = request_id
 
+    try:
+        service_bus.serialise_request_message(payload)
+    except service_bus.ServiceBusRequestValidationError as exc:
+        raise HTTPException(
+            413,
+            detail={
+                "code": "request_too_large",
+                "message": (
+                    "The request is too large for the Service Bus queue. Use the "
+                    "direct ElasticBLAST submit API for this query."
+                ),
+            },
+        ) from exc
+
     if dry_run:
         # Validation is independent of the data plane — usable offline so an
         # operator can compose/verify a request before activating the
-        # integration. Never enqueues, never touches Service Bus.
+        # integration. The local wire-size check above mirrors real Send, but
+        # this branch never enqueues and never touches Service Bus.
         return {
             "status": "valid",
             "dry_run": True,
@@ -868,19 +888,6 @@ def send(
                 ),
             },
         )
-    try:
-        service_bus.serialise_request_message(payload)
-    except service_bus.ServiceBusRequestValidationError as exc:
-        raise HTTPException(
-            413,
-            detail={
-                "code": "request_too_large",
-                "message": (
-                    "The request is too large for the Service Bus queue. Use the "
-                    "direct ElasticBLAST submit API for this query."
-                ),
-            },
-        ) from exc
     _assert_send_capacity(cfg)
     try:
         message_id = service_bus.send_request(

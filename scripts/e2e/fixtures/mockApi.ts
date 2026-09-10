@@ -24,6 +24,11 @@ export interface UiMockState {
   dbDownloads: Array<Record<string, unknown>>;
   dbOracleBuilds: Array<Record<string, unknown>>;
   autoOracleSaves: Array<Record<string, unknown>>;
+  openApiProxyRequests: Array<{
+    method: string;
+    path: string;
+    body: Record<string, unknown> | null;
+  }>;
   jobDeletes: string[];
   scheduleRuns: string[];
   scheduleDeletes: string[];
@@ -188,6 +193,7 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     dbDownloads: [],
     dbOracleBuilds: [],
     autoOracleSaves: [],
+    openApiProxyRequests: [],
     jobDeletes: [],
     scheduleRuns: [],
     scheduleDeletes: [],
@@ -875,9 +881,19 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   await page.route("**/api/aks/openapi/token", (route) =>
     jsonResponse(route, { configured: true, token: "e2e-token-regenerated", masked_token: "e2e-regenerated-****", header_name: "X-ELB-API-Token", env_name: "ELB_OPENAPI_TOKEN", source: "keyvault", updated_at: now, rotated: true }),
   );
-  await page.route("**/api/aks/openapi/proxy?**", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: ["job-e2e"] }) }),
-  );
+  await page.route("**/api/aks/openapi/proxy?**", (route) => {
+    const request = route.request();
+    state.openApiProxyRequests.push({
+      method: request.method(),
+      path: new URL(request.url()).searchParams.get("path") ?? "",
+      body: request.postData() ? (request.postDataJSON() as Record<string, unknown>) : null,
+    });
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ jobs: ["job-e2e"] }),
+    });
+  });
 
   await page.route("**/api/acr/build-images", async (route) => {
     const payload = route.request().postDataJSON() as Record<string, unknown>;

@@ -355,6 +355,7 @@ export function EndpointTryItPanel({
             </span>
             {exampleKeys.length > 0 && (
               <select
+                aria-label="Select request example"
                 value={selectedExample}
                 onChange={(event) => onExampleChange(event.target.value)}
                 style={{
@@ -395,6 +396,7 @@ export function EndpointTryItPanel({
             </p>
           )}
           <textarea
+            aria-label="Request body JSON"
             value={bodyText}
             onChange={(event) => setBodyText(event.target.value)}
             rows={Math.min(14, Math.max(4, bodyText.split("\n").length + 1))}

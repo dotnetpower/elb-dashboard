@@ -32,7 +32,10 @@ test("API Reference sidebar, try-it, and token controls are event-safe", async (
   await expect(uiPage.getByText("e2e-token-regenerated")).toBeVisible();
 });
 
-test("API Reference exposes the sequence-diversity submit preset", async ({ uiPage }) => {
+test("API Reference exposes the sequence-diversity submit preset", async ({
+  uiPage,
+  uiMocks,
+}) => {
   await uiPage.goto("/docs");
   await expect(uiPage.getByRole("heading", { name: "ElasticBLAST API Reference" })).toBeVisible();
 
@@ -41,10 +44,10 @@ test("API Reference exposes the sequence-diversity submit preset", async ({ uiPa
   await uiPage.getByRole("link", { name: /\/v1\/jobs/ }).click();
 
   const submitCard = uiPage.locator(".endpoint-card", { hasText: "Submit job" });
-  const examples = submitCard.locator("select");
+  const examples = submitCard.getByLabel("Select request example");
   await examples.selectOption("mode_b_core_nt_sequence_diversity");
 
-  const body = JSON.parse(await submitCard.locator("textarea").inputValue()) as {
+  const body = JSON.parse(await submitCard.getByLabel("Request body JSON").inputValue()) as {
     blast_options: {
       max_target_seqs: number;
       candidate_pool_size: number;
@@ -57,6 +60,14 @@ test("API Reference exposes the sequence-diversity submit preset", async ({ uiPa
     candidate_pool_size: 2000,
     outfmt: "7 std sseq",
     result_selection_policy: "sequence_diversity",
+  });
+
+  await submitCard.getByRole("button", { name: /Send Request/i }).click();
+  await expect.poll(() => uiMocks.openApiProxyRequests.length).toBe(1);
+  expect(uiMocks.openApiProxyRequests[0]).toEqual({
+    method: "POST",
+    path: "/v1/jobs",
+    body,
   });
 });
 

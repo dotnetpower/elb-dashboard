@@ -304,6 +304,7 @@ export function ServiceBusPlayground() {
     setResultSelectionPolicy(preset.resultSelectionPolicy);
     setCandidatePoolSize(preset.candidatePoolSize ?? "");
     setResourceProfile(preset.resourceProfile);
+    setBodyDirty(false);
   }, []);
 
   const status = useQuery({
@@ -890,11 +891,17 @@ export function ServiceBusPlayground() {
                     onChange={(event) => setCandidatePoolSize(event.target.value)}
                     inputMode="numeric"
                     aria-invalid={Boolean(sequencePoolError)}
+                    aria-describedby={
+                      sequencePoolError ? "pg-candidate-pool-error" : undefined
+                    }
                     placeholder="2000"
                     style={inputStyle}
                   />
                   {sequencePoolError ? (
-                    <p style={{ margin: "4px 0 0", color: "var(--status-error)", fontSize: 11 }}>
+                    <p
+                      id="pg-candidate-pool-error"
+                      style={{ margin: "4px 0 0", color: "var(--status-error)", fontSize: 11 }}
+                    >
                       {sequencePoolError}
                     </p>
                   ) : null}
@@ -922,7 +929,8 @@ export function ServiceBusPlayground() {
                 preserves BLAST ranking; choose <code>diversity_aware</code> when
                 lower-score subject representation is preferred. Sequence diversity requires
                 <code> sseq</code>; its candidate pool defaults to at least 2,000 and never
-                below <code>max_target</code>. It has no fixed server maximum.
+                below <code>max_target</code>. It has no fixed server maximum; larger values
+                increase compute, temporary disk, and result storage.
               </p>
             </>
           )}

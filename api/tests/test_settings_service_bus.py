@@ -1159,6 +1159,29 @@ def test_send_rejects_oversized_request_with_413(
     assert response.json()["code"] == "request_too_large"
 
 
+def test_send_dry_run_rejects_oversized_request_without_data_plane(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    monkeypatch.setattr(
+        service_bus,
+        "send_request",
+        lambda *_args, **_kwargs: pytest.fail("dry-run must not enqueue"),
+    )
+    response = client.post(
+        "/api/settings/service-bus/send",
+        json={
+            **_VALID_SEND_BODY,
+            "dry_run": True,
+            "query_fasta": ">q\n" + ("A" * service_bus._MAX_REQUEST_MESSAGE_BYTES),
+        },
+    )
+
+    assert response.status_code == 413
+    assert response.json()["code"] == "request_too_large"
+
+
 def test_send_does_not_expand_the_legacy_request_body(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1364,6 +1387,50 @@ def test_send_dry_run_accepts_sequence_diversity_above_legacy_limit(
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "valid"
     assert response.json()["dry_run"] is True
+
+
+def test_send_reports_post_enrichment_outfmt_limit_as_typed_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import service_bus
+
+    monkeypatch.setattr(
+        service_bus,
+        "send_request",
+        lambda *_a, **_k: pytest.fail("validation must precede enqueue"),
+    )
+    fields = ["7", "qseqid", "saccver", "sseq", "qstart", "qend", "evalue", "bitscore"]
+    while len(" ".join([*fields, "qseqid"])) <= 512:
+        fields.append("qseqid")
+
+    response = client.post(
+        "/api/settings/service-bus/send",
+        json={
+            "program": "blastn",
+            "db": "core_nt",
+            "query_fasta": ">q1\nACGTACGTACGTACGTACGT\n",
+            "resource_profile": "core_nt_safe",
+            "dry_run": True,
+            "blast_options": {
+                "outfmt": " ".join(fields),
+                "max_target_seqs": 1,
+                "candidate_pool_size": 1,
+                "result_selection_policy": "sequence_diversity",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body.pop("request_id")
+    assert body == {
+        "code": "outfmt_too_long_after_enrichment",
+        "message": (
+            "blast_options.outfmt exceeds 512 characters after required merge "
+            "fields are added"
+        ),
+        "retryable": False,
+    }
 
 
 @pytest.mark.parametrize(

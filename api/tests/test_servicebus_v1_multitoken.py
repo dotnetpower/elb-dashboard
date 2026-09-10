@@ -143,6 +143,86 @@ def test_v1_sequence_diversity_accepts_pool_above_legacy_limit() -> None:
 
 
 @pytest.mark.parametrize(
+    "candidate_pool_size",
+    [
+        True,
+        1.5,
+        -1,
+        0,
+        float("nan"),
+        float("inf"),
+        "1000",
+        "",
+        [],
+        {},
+    ],
+)
+def test_v1_sequence_diversity_rejects_invalid_candidate_pool_values(
+    candidate_pool_size: object,
+) -> None:
+    from api.routes.elastic_blast import ExternalBlastV1Request
+
+    with pytest.raises(ValidationError) as error:
+        ExternalBlastV1Request(
+            program="blastn",
+            db="core_nt",
+            query_fasta=_FASTA,
+            resource_profile="core_nt_safe",
+            blast_options={
+                "outfmt": "7 std sseq",
+                "max_target_seqs": 1,
+                "candidate_pool_size": candidate_pool_size,
+                "result_selection_policy": "sequence_diversity",
+            },
+        )
+
+    assert error.value.errors(include_url=False)[0]["type"] == (
+        "sequence_diversity_invalid_candidate_pool"
+    )
+
+
+def test_v1_sequence_diversity_omitted_pool_uses_runtime_default() -> None:
+    from api.services.blast.result_selection import validate_result_selection_options
+
+    plan = validate_result_selection_options(
+        policy="sequence_diversity",
+        effective_outfmt="7 std sseq score",
+        max_target_seqs=10_000,
+        candidate_pool_size=None,
+    )
+
+    assert plan is not None
+    assert plan.candidate_pool_size_requested_per_shard is None
+    assert plan.candidate_pool_size_applied_per_shard == 10_000
+
+
+def test_v1_rejects_outfmt_that_exceeds_limit_after_enrichment() -> None:
+    from api.routes.elastic_blast import ExternalBlastV1Request
+
+    fields = ["7", "qseqid", "saccver", "sseq", "qstart", "qend", "evalue", "bitscore"]
+    while len(" ".join([*fields, "qseqid"])) <= 512:
+        fields.append("qseqid")
+
+    with pytest.raises(ValidationError) as error:
+        ExternalBlastV1Request(
+            program="blastn",
+            db="core_nt",
+            query_fasta=_FASTA,
+            resource_profile="core_nt_safe",
+            blast_options={
+                "outfmt": " ".join(fields),
+                "max_target_seqs": 1,
+                "candidate_pool_size": 1,
+                "result_selection_policy": "sequence_diversity",
+            },
+        )
+
+    assert error.value.errors(include_url=False)[0]["type"] == (
+        "outfmt_too_long_after_enrichment"
+    )
+
+
+@pytest.mark.parametrize(
     ("blast_options", "expected_code", "expected_missing"),
     [
         (

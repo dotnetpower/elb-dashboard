@@ -95,7 +95,18 @@ test("Service Bus Playground validates without enqueueing", async ({ uiPage }) =
 
   await uiPage.goto("/blast/playground");
   await expect(uiPage.getByRole("heading", { name: "Service Bus Playground" })).toBeVisible();
+  const requestEditor = uiPage.locator("#pg-body-editor");
+  await requestEditor.fill(
+    JSON.stringify({
+      query_fasta: ">stale\nACGT",
+      db: "stale-db",
+      program: "blastn",
+    }),
+  );
+  await expect(uiPage.getByRole("button", { name: "Reset to form" })).toBeVisible();
   await uiPage.locator("#pg-preset").selectOption("core-nt-sequence-diversity");
+  await expect(uiPage.getByRole("button", { name: "Reset to form" })).toHaveCount(0);
+  await expect(requestEditor).not.toHaveValue(/stale-db/);
   const candidatePool = uiPage.locator("#pg-candidate-pool-size");
   const maxTarget = uiPage.locator("#pg-mts-t");
   const validate = uiPage.getByRole("button", { name: "Validate" });
@@ -119,6 +130,10 @@ test("Service Bus Playground validates without enqueueing", async ({ uiPage }) =
       "candidate_pool_size must be greater than or equal to max_target_seqs.",
     ),
   ).toBeVisible();
+  await expect(candidatePool).toHaveAttribute(
+    "aria-describedby",
+    "pg-candidate-pool-error",
+  );
   await expect(validate).toBeDisabled();
 
   await candidatePool.fill("20000");
