@@ -143,6 +143,9 @@ from __future__ import annotations
 # run de9n produced digest
 # sha256:d697254ca259840c76006efc30ddf2dee447c30857038906d9d03498cbd5f26b.
 # Tag 4.52 remains the pre-change rollback boundary; 4.53 remains diagnostic.
+# 4.55 adds the authenticated RID reference-context resolver, typed readiness
+# response models, hardened bounded XML evidence parsing, and explicit
+# result-selection policy examples while retaining 4.54 as the rollback image.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -170,7 +173,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.54",
+    "elb-openapi": "4.55",
 }
 
 # GitHub source repo for ACR Build Tasks.

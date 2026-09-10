@@ -35,6 +35,8 @@ Bus playground did not expose the native-versus-diversity result-selection choic
 
 ## API and runtime summary
 
+- The pinned OpenAPI runtime advances from `elb-openapi:4.54` to the immutable
+  `elb-openapi:4.55` image. The prior 4.54 readiness image remains the rollback boundary.
 - The build-context patch copies a standalone resolver overlay into the sibling OpenAPI app and
   pins `defusedxml==0.7.1` in the image requirements.
 - External XML is fetched only from the fixed NCBI result endpoint with redirects disabled,
