@@ -163,6 +163,10 @@ from __future__ import annotations
 # write before submit side effects, terminates in-memory on persistence failure,
 # and preserves the bounded submit deadline. ACR run dea6 produced digest
 # sha256:c24807bc7aaf9e144054301936caa35addba15421304d346fdb4bedefa59f8d4.
+# 4.60 globally stable-sorts candidate rows by numeric shard/local OID across
+# query batches and verifies the sorted row count before enabling the fast path.
+# ACR run dea7 produced digest
+# sha256:9559103f3d448f3e19535ef11bd59da6fb2900cb9b3770c2356c0c1c2623a961.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -190,7 +194,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.59",
+    "elb-openapi": "4.60",
 }
 
 # GitHub source repo for ACR Build Tasks.

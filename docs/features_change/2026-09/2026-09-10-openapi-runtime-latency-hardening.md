@@ -162,6 +162,14 @@ authenticated UI, so the targeted image-only deployment and browser smoke are re
   and finalized in 53 seconds from 115,090 candidate-oracle bytes. Its merge report recorded
   `tie_order_oracle_scope=candidate`, `selection_equivalence=full_db_hitlist_exact`, 5,000 oracle
   accessions, zero missing accessions, and 500 output rows.
+- ACR run `dea7` built global-order `elb-openapi:4.60` with digest
+  `sha256:9559103f3d448f3e19535ef11bd59da6fb2900cb9b3770c2356c0c1c2623a961`;
+  the registry again returned to `Disabled / Deny / AzureServices`.
+- AKS generation 61 pulled that exact digest and reached 1/1 Ready with zero restarts. No new
+  external request arrived during the validation window, so no synthetic billable job was added.
+  The installed finalizer passed `bash -n`, contained the sorted-row fallback marker, and sorted an
+  in-pod interleaved two-batch fixture into numeric shard/local-OID order while preserving equal-OID
+  alias order.
 - The deployed Container App API reports `status=ok` on the ready revision; Celery reports four
   workers, no errors, all five queue depths at zero, and no reserved tasks. The live frontend loaded
   through the public ingress and correctly redirected unauthenticated access to Microsoft sign-in.
