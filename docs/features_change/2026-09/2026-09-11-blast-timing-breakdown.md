@@ -97,3 +97,12 @@ Fourteen review rounds were run until no reproducible Medium-or-higher finding r
 Live image, rollout, and passive validation evidence will be appended after the immutable image is
 built and the affected services converge. Synthetic billable jobs are not required for rollout; an
 existing or naturally arriving request may be used as a passive timing canary.
+
+## Live rollout
+
+- ACR run `deaj` built `elb-openapi:4.61` from source commit `4becd254` with digest
+  `sha256:f06ab8491703ddec55e800794d1195353c86c0652b8577363f26189ffe5dfaca`.
+- The build context was generated from sibling commit `6132ccba`, accepted two consecutive patch
+  applications with identical hash `a3ff393a...f0b57`, and compiled before upload.
+- ACR returned to `Disabled / Deny / AzureServices` after the build. OpenAPI `4.60` remains the
+  immediate rollback image.

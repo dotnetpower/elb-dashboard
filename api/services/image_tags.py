@@ -167,6 +167,10 @@ from __future__ import annotations
 # query batches and verifies the sorted row count before enabling the fast path.
 # ACR run dea7 produced digest
 # sha256:9559103f3d448f3e19535ef11bd59da6fb2900cb9b3770c2356c0c1c2623a961.
+# 4.61 captures immutable result-ready and bounded terminal-only execution
+# phase timing. ACR run deaj produced digest
+# sha256:f06ab8491703ddec55e800794d1195353c86c0652b8577363f26189ffe5dfaca.
+# Keep 4.60 as the immediate rollback boundary.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -194,7 +198,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.60",
+    "elb-openapi": "4.61",
 }
 
 # GitHub source repo for ACR Build Tasks.
