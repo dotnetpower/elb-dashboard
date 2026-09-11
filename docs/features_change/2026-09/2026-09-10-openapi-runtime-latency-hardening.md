@@ -59,16 +59,17 @@ its displayed duration when an in-memory timing cache was empty.
 
 ## Hardening review
 
-Fourteen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
+Fifteen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
 partial uploads, aggregate bounds, subprocess deadlines, cache generation fencing, marker
 publication, timing validation, terminal-state convergence, artifact retry liveness, concurrency,
 security boundaries, rolling fallback, and runtime-identity binding. The fourteenth round used the
 live rollout to find and fix a High-severity restart replay: four request IDs each had three distinct
 runtime generations because their blocking submit threads died before returning the generated ID.
-All reproducible findings above Low severity were fixed and revalidated. The remaining Low risk is
-that the 24-hour shard attestation fingerprints file metadata rather than every byte;
-source/layout identity, size, mtime, ctime, `blastdbcmd -info`, and the bounded full record probe
-limit that exposure.
+The fifteenth round closed the related Kubernetes outage race: an observation error now blocks
+reclaim instead of being misread as proof that no runtime exists. All reproducible findings above
+Low severity were fixed and revalidated. The remaining Low risk is that the 24-hour shard
+attestation fingerprints file metadata rather than every byte; source/layout identity, size, mtime,
+ctime, `blastdbcmd -info`, and the bounded full record probe limit that exposure.
 
 ## Validation
 
@@ -98,6 +99,22 @@ limit that exposure.
 - AKS rollout generation 58 pulled the exact `4.57` digest and reached 1/1 Ready with zero restarts;
   authenticated `/v1/ready` reported 10 ready workload nodes. Startup recovery exposed the replay
   defect above, so `4.57` remains diagnostic and is not the final rollout image.
+- ACR run `dea0` built immutable replay-safe `elb-openapi:4.58` successfully with digest
+  `sha256:91db00630b0f9f753bb3c28fd05a3eea597b14646e56e1dbc56c6a6dc59494cc`; the
+  registry again returned to `Disabled / Deny / AzureServices` after the build.
+- The `4.58` AKS rollout reached generation 59, 1/1 Ready with zero restarts, and pulled the exact
+  `dea0` digest. Authenticated readiness reported a healthy Kubernetes API and 10 ready workload
+  nodes.
+- Four queued `core_nt_safe` requests became passive canaries. Each persisted the independently
+  calculated deterministic runtime ID before submit, used attempt 1, and completed in 160-194
+  seconds. No canary created an additional runtime generation.
+- Representative canary `98342529e675` used 10 shards. Its merge report recorded
+  `tie_order_oracle_scope=candidate`, `selection_equivalence=full_db_hitlist_exact`, 891 oracle
+  accessions, zero missing accessions, and 500 output rows. The finalizer read 10 candidate files
+  totalling 20,338 bytes and completed in 50 seconds, down from the observed 6 minutes 15 seconds
+  and 3.27 GiB full-oracle path.
+- Node-local setup logs recorded `CACHE_ATTESTATION_REUSE` on all 10 workload nodes for the same
+  immutable source generation, with attestation ages of 778-923 seconds.
 
-Live deployment evidence will record the candidate fast-path byte count, attested SSD reuse, and
-end-to-end canary timing after the new OpenAPI image is rolled out.
+The remaining deployment step is publishing the matching dashboard API and frontend revision so
+durable timing, runtime-scoped completion, and corrected source labels are visible in the live UI.
