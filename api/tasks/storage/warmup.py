@@ -142,6 +142,36 @@ def _build_elb_image(*args: Any, **kwargs: Any) -> str:
     return str(_facade._build_elb_image(*args, **kwargs))
 
 
+def _clear_admission_marker_if_terminal(
+    *, subscription_id: str, resource_group: str, cluster_name: str, job_id: str
+) -> None:
+    """Best-effort cleanup after terminal work or a completed defer handoff."""
+    if not all((subscription_id, resource_group, cluster_name, job_id)):
+        return
+    try:
+        from api.services.aks.execution_admission import clear_active_warmup_job
+        from api.services.state_repo import get_state_repo
+
+        row = get_state_repo().get(job_id)
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        phase = str(getattr(row, "phase", "") or "").strip().lower()
+        defer_handed_off = status == "running" and phase == "waiting_for_warmup_nodes"
+        if status not in {"completed", "failed", "cancelled", "deleted"} and not defer_handed_off:
+            return
+        clear_active_warmup_job(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            job_id=job_id,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "warmup admission marker cleanup deferred job_id=%s error=%s",
+            job_id,
+            type(exc).__name__,
+        )
+
+
 def _env_int_override(name: str, *, lo: int, hi: int) -> int | None:
     """Read a positive, in-range integer ops override from the environment.
 
@@ -687,9 +717,7 @@ def warmup_database(
                     force_release_summary is not None
                     and force_release_summary.get("status") != "released"
                 ):
-                    failure_reason = str(
-                        force_release_summary.get("failure_reason") or "unknown"
-                    )
+                    failure_reason = str(force_release_summary.get("failure_reason") or "unknown")
                     raise RuntimeError(
                         "forced warmup Job release did not fully succeed "
                         f"reason={failure_reason}: "
@@ -802,6 +830,12 @@ def warmup_database(
         _update_state(job_id, "failed", status="failed", error_code=str(exc)[:500])
         return {"database": database_name, "status": "failed", "error": str(exc)[:500]}
     finally:
+        _clear_admission_marker_if_terminal(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            job_id=job_id,
+        )
         # The auto-warmup reconcile claimed a Redis in-flight slot
         # (`autowarmup_inflight_acquire`) before enqueuing this task. Release it
         # here so a deferred/failed warmup is retried on the next beat tick

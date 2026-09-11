@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -47,6 +48,7 @@ def _execution_admission_stubs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     from api.services.state_repo import reset_state_repo_cache
 
     reset_state_repo_cache()
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
     monkeypatch.setattr(
         "api.services.aks.execution_admission.get_lifecycle_barrier",
         lambda *_args: None,
@@ -54,6 +56,14 @@ def _execution_admission_stubs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     monkeypatch.setattr(
         "api.services.aks.execution_admission.record_barrier_warmup_jobs",
         lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_active_warmup_job",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.clear_active_warmup_job",
+        lambda **_kwargs: None,
     )
     yield
     reset_state_repo_cache()
@@ -102,16 +112,25 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
     )
 
     calls, fake_send_task = make_send_task_recorder("warmup-task-1")
+    ordering: list[str] = []
 
-    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    def record_send(*args: Any, **kwargs: Any) -> Any:
+        ordering.append("send")
+        return fake_send_task(*args, **kwargs)
+
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", record_send)
     monkeypatch.setattr(
         "api.services.auto_warmup_reconcile._seed_auto_warmup_job_state",
-        lambda **_kwargs: True,
+        lambda **_kwargs: ordering.append("seed") or True,
     )
     admission_records: list[dict[str, Any]] = []
     monkeypatch.setattr(
         "api.services.aks.execution_admission.record_barrier_warmup_jobs",
-        lambda **kwargs: admission_records.append(kwargs) or True,
+        lambda **kwargs: ordering.append("barrier") or admission_records.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_active_warmup_job",
+        lambda **_kwargs: ordering.append("active-marker") or True,
     )
 
     pref = AutoWarmupPreference(
@@ -138,6 +157,7 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
     assert calls[0]["kwargs"]["machine_type"] == "Standard_E16s_v5"
     assert calls[0]["kwargs"]["num_nodes"] == 10
     assert calls[0]["kwargs"]["require_all_warmup_nodes"] is True
+    assert ordering == ["seed", "barrier", "active-marker", "send"]
     assert admission_records == [
         {
             "token": "barrier-1",
@@ -218,6 +238,11 @@ def test_reconcile_auto_warmup_rolls_back_correlation_when_enqueue_fails(
         "api.services.aks.execution_admission.clear_barrier_warmup_job",
         lambda **kwargs: cleared.append(kwargs) or True,
     )
+    active_cleared: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.clear_active_warmup_job",
+        lambda **kwargs: active_cleared.append(kwargs),
+    )
     released: list[tuple[str, str, str, str]] = []
     monkeypatch.setattr(
         "api.services.auto_warmup_reconcile.autowarmup_inflight_release",
@@ -254,6 +279,64 @@ def test_reconcile_auto_warmup_rolls_back_correlation_when_enqueue_fails(
         }
     ]
     assert released == [("sub-1", "rg-elb", "elb-cluster", "core_nt")]
+    assert active_cleared and active_cleared[0]["cluster_name"] == "elb-cluster"
+
+
+def test_warmup_marker_cleanup_only_for_terminal_jobstate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleared: list[dict[str, Any]] = []
+    row = SimpleNamespace(status="running", phase="applying_warmup_jobs")
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(get=lambda _job_id: row),
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.clear_active_warmup_job",
+        lambda **kwargs: cleared.append(kwargs),
+    )
+
+    warmup_module._clear_admission_marker_if_terminal(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        job_id="warmup-1",
+    )
+    assert cleared == []
+
+    row.status = "completed"
+    warmup_module._clear_admission_marker_if_terminal(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        job_id="warmup-1",
+    )
+    assert cleared == [
+        {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "job_id": "warmup-1",
+        }
+    ]
+
+    cleared.clear()
+    row.status = "running"
+    row.phase = "waiting_for_warmup_nodes"
+    warmup_module._clear_admission_marker_if_terminal(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        job_id="warmup-1",
+    )
+    assert cleared == [
+        {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "job_id": "warmup-1",
+        }
+    ]
 
 
 def test_reconcile_auto_warmup_seeds_job_state_before_enqueue(
@@ -1441,9 +1524,7 @@ def test_warmup_database_force_rewarm_drops_existing_jobs(monkeypatch, tmp_path)
 
     # The forced re-warm released the DB's existing Jobs and that release ran
     # BEFORE ensure recreated them.
-    assert release_calls == [
-        ("elb-cluster", "core_nt", warmup_module._WARMUP_RELEASE_WAIT_SECONDS)
-    ]
+    assert release_calls == [("elb-cluster", "core_nt", warmup_module._WARMUP_RELEASE_WAIT_SECONDS)]
     assert order == ["release", "ensure"]
     # ensure was stubbed to fail, so the task surfaces that as a failure.
     assert result["status"] == "failed"

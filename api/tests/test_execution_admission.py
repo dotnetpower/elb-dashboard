@@ -34,7 +34,7 @@ def _isolated_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(admission, "_CACHE_SECONDS", 0)
     monkeypatch.setattr(
         "api.services.state_repo.get_state_repo",
-        lambda: SimpleNamespace(list_active=lambda **_kwargs: []),
+        lambda: SimpleNamespace(get_many=lambda _ids, **_kwargs: {}),
     )
 
 
@@ -150,6 +150,90 @@ def test_readiness_soft_deadline_is_not_converted_to_deny(
 
     with pytest.raises(SoftTimeLimitExceeded):
         _decision()
+
+
+def test_caller_deadline_stops_before_next_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    now = [0.0]
+    monkeypatch.setattr(
+        admission,
+        "get_lifecycle_barrier",
+        lambda *_args: now.__setitem__(0, 10.0),
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.aks.ensure_running.evaluate_ensure_running",
+        lambda *_args, **_kwargs: (
+            calls.append("readiness")
+            or {"status": "ready", "reason": "ready", "warmup": {"phase": "ready"}}
+        ),
+    )
+    monkeypatch.setattr(
+        admission,
+        "_active_cluster_warmup_jobs",
+        lambda *_args: calls.append("warmup-markers") or [],
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.get_aks_cluster_snapshot",
+        lambda *_args: pytest.fail("snapshot must not start after deadline"),
+    )
+
+    decision = admission.evaluate_execution_admission(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        deadline_monotonic=5.0,
+        clock=lambda: now[0],
+    )
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "admission_budget_exhausted"
+    assert calls == []
+
+
+def test_failed_start_budget_exhaustion_keeps_budget_reason() -> None:
+    barrier = admission.LifecycleBarrier(
+        token="failed-start",
+        action="start",
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        target_node_count=4,
+        databases=(),
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    decision = admission._evaluate_uncached(
+        "sub-1",
+        "rg-elb",
+        "aks-elb",
+        barrier,
+        {"error_code": "start_failed"},
+        deadline_monotonic=1.0,
+        clock=lambda: 2.0,
+    )
+
+    assert decision["reason"] == "admission_budget_exhausted"
+    assert "recovery_blocker" not in decision
+
+
+def test_budget_denial_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(admission, "_CACHE_SECONDS", 60)
+    decisions = iter(
+        (
+            admission._denied("admission_budget_exhausted", barrier=None),
+            {"allowed": True, "reason": "ready", "retry_after_seconds": 0},
+        )
+    )
+    monkeypatch.setattr(admission, "_evaluate_uncached", lambda *_args, **_kwargs: next(decisions))
+
+    first = _decision()
+    second = _decision()
+
+    assert first["reason"] == "admission_budget_exhausted"
+    assert second["allowed"] is True
 
 
 def test_scale_barrier_waits_for_exact_target_node_count(
@@ -447,7 +531,7 @@ def test_scale_barrier_classifies_correlated_warmup_state(
         "api.services.state_repo.get_state_repo",
         lambda: SimpleNamespace(
             list_active=lambda **_kwargs: [],
-            get_many=lambda _ids: {"warm-1": SimpleNamespace(status=status)},
+            get_many=lambda _ids, **_kwargs: {"warm-1": SimpleNamespace(status=status)},
         ),
     )
 
@@ -473,7 +557,7 @@ def test_scale_barrier_opens_only_after_warmup_job_completed(
         "api.services.state_repo.get_state_repo",
         lambda: SimpleNamespace(
             list_active=lambda **_kwargs: [],
-            get_many=lambda _ids: {"warm-1": SimpleNamespace(status="completed")},
+            get_many=lambda _ids, **_kwargs: {"warm-1": SimpleNamespace(status="completed")},
         ),
     )
 
@@ -498,18 +582,19 @@ def test_manual_active_warmup_keeps_queue_closed_without_preference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ready_dependencies(monkeypatch, warmup_phase="ready")
+    admission.record_active_warmup_job(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        job_id="manual-warmup-1",
+        database="core_nt",
+    )
     monkeypatch.setattr(
         "api.services.state_repo.get_state_repo",
         lambda: SimpleNamespace(
-            list_active=lambda **_kwargs: [
-                SimpleNamespace(
-                    job_id="manual-warmup-1",
-                    subscription_id="sub-1",
-                    resource_group="rg-elb",
-                    cluster_name="aks-elb",
-                    payload={},
-                )
-            ]
+            get_many=lambda _ids, **_kwargs: {
+                "manual-warmup-1": SimpleNamespace(job_id="manual-warmup-1", status="running")
+            }
         ),
     )
 
@@ -517,6 +602,180 @@ def test_manual_active_warmup_keeps_queue_closed_without_preference(
 
     assert decision["allowed"] is False
     assert decision["reason"] == "database_warmup_in_progress"
+
+
+def test_terminal_warmup_marker_does_not_block_and_is_cleaned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_dependencies(monkeypatch, warmup_phase="ready")
+    admission.record_active_warmup_job(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        job_id="warmup-done",
+    )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(
+            get_many=lambda _ids, **_kwargs: {
+                "warmup-done": SimpleNamespace(job_id="warmup-done", status="completed")
+            }
+        ),
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is True
+    assert admission_state.list_active_warmup_markers("sub-1", "rg-elb", "aks-elb") == {}
+
+
+def test_fresh_marker_without_jobstate_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_dependencies(monkeypatch, warmup_phase="ready")
+    admission.record_active_warmup_job(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        job_id="warmup-missing",
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "database_warmup_in_progress"
+
+
+def test_admission_never_calls_full_active_job_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_dependencies(monkeypatch, warmup_phase="ready")
+
+    class _Repo:
+        def list_active(self, **_kwargs: object) -> list[object]:
+            raise AssertionError("full active JobState scan is forbidden")
+
+        def get_many(self, _ids: list[str], **_kwargs: object) -> dict[str, object]:
+            return {}
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", _Repo)
+
+    assert _decision()["allowed"] is True
+
+
+def test_active_marker_jobstate_lookup_projects_status_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_dependencies(monkeypatch, warmup_phase="ready")
+    admission.record_active_warmup_job(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        job_id="warmup-projected",
+    )
+    captured: dict[str, object] = {}
+
+    class _Repo:
+        def get_many(self, job_ids: list[str], **kwargs: object) -> dict[str, object]:
+            captured["job_ids"] = job_ids
+            captured.update(kwargs)
+            return {"warmup-projected": SimpleNamespace(status="running")}
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", _Repo)
+
+    decision = _decision()
+
+    assert decision["reason"] == "database_warmup_in_progress"
+    assert captured == {
+        "job_ids": ["warmup-projected"],
+        "select": ["PartitionKey", "RowKey", "status"],
+    }
+
+
+def test_concurrent_warmup_markers_are_all_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_dependencies(monkeypatch, warmup_phase="ready")
+    for job_id in ("warmup-a", "warmup-b"):
+        admission.record_active_warmup_job(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="aks-elb",
+            job_id=job_id,
+        )
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: SimpleNamespace(
+            get_many=lambda ids, **_kwargs: {
+                job_id: SimpleNamespace(job_id=job_id, status="running") for job_id in ids
+            }
+        ),
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is False
+    assert set(decision["warmup_jobs"]) == {"warmup-a", "warmup-b"}
+
+
+def test_local_marker_is_read_from_cross_process_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Redis:
+        def scan_iter(self, **_kwargs: object) -> list[bytes]:
+            return [marker_key.encode("utf-8")]
+
+        def get(self, _key: object) -> bytes:
+            return marker_payload
+
+    marker_key = admission_state._active_warmup_key(
+        "sub-1", "rg-elb", "aks-elb", "warmup-cross-process"
+    )
+    marker_payload = (
+        b'{"subscription_id":"sub-1","resource_group":"rg-elb",'
+        b'"cluster_name":"aks-elb","job_id":"warmup-cross-process",'
+        b'"database":"core_nt","registered_at":"2026-01-01T00:00:00Z"}'
+    )
+    monkeypatch.setattr(admission_state, "_redis_client", lambda: _Redis())
+
+    markers = admission_state.list_active_warmup_markers("sub-1", "rg-elb", "aks-elb")
+
+    assert set(markers) == {"warmup-cross-process"}
+
+
+def test_stale_orphan_marker_is_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_dependencies(monkeypatch, warmup_phase="ready")
+    admission.record_active_warmup_job(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        job_id="orphan",
+    )
+    marker_key = next(key for key in admission_state._MEMORY if "active-warmup" in key)
+    admission_state._MEMORY[marker_key]["registered_at"] = "2000-01-01T00:00:00Z"
+
+    decision = _decision()
+
+    assert decision["allowed"] is True
+    assert admission_state.list_active_warmup_markers("sub-1", "rg-elb", "aks-elb") == {}
+
+
+def test_marker_store_failure_keeps_admission_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_dependencies(monkeypatch, warmup_phase="ready")
+    monkeypatch.setattr(
+        admission,
+        "list_active_warmup_markers",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("table unavailable")),
+    )
+
+    decision = _decision()
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "readiness_check_failed"
 
 
 def test_allow_decision_is_not_cached_across_manual_warmup(

@@ -15,6 +15,7 @@ Validation: `uv run pytest -q api/tests/test_warmup_route.py
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -162,9 +163,7 @@ def warmup_start(
     resource_group = str(body.get("resource_group") or "").strip()
     storage_account = str(body.get("storage_account") or "").strip()
     storage_resource_group = str(body.get("storage_resource_group") or "").strip()
-    cluster_name = str(
-        body.get("aks_cluster_name") or body.get("cluster_name") or ""
-    ).strip()
+    cluster_name = str(body.get("aks_cluster_name") or body.get("cluster_name") or "").strip()
     required = (
         ("subscription_id", subscription_id),
         ("resource_group", resource_group),
@@ -212,27 +211,81 @@ def warmup_start(
         repo.create(state)
     except Exception as exc:
         LOGGER.warning("failed to create warmup job state: %s", exc)
+        if os.environ.get("CONTAINER_APP_NAME"):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "warmup_state_unavailable",
+                    "message": "Warmup state could not be persisted; no task was queued.",
+                    "retryable": True,
+                },
+            ) from exc
 
-    result = _safe_send_task(
-        "api.tasks.storage.warmup_database",
-        queue="storage",
-        job_id=job_id,
-        subscription_id=subscription_id,
-        resource_group=resource_group,
-        storage_account=storage_account,
-        # The Storage account may live in a different RG than the AKS cluster;
-        # forwarding the explicit value avoids the historical silent fall-back
-        # to the cluster RG that broke RBAC ensure in `warmup_database`.
-        storage_resource_group=storage_resource_group,
-        database_name=database_name,
-        cluster_name=cluster_name,
-        machine_type=body.get("machine_type", ""),
-        num_nodes=num_nodes,
-        acr_resource_group=body.get("acr_resource_group", ""),
-        acr_name=body.get("acr_name", ""),
-        program=body.get("program", "blastn"),
-        caller_oid=caller.object_id,
+    from api.services.aks.execution_admission import (
+        clear_active_warmup_job,
+        record_active_warmup_job,
     )
+
+    marker_recorded = False
+    try:
+        record_active_warmup_job(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            job_id=job_id,
+            database=database_name,
+        )
+        marker_recorded = True
+        result = _safe_send_task(
+            "api.tasks.storage.warmup_database",
+            queue="storage",
+            job_id=job_id,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            storage_account=storage_account,
+            # The Storage account may live in a different RG than the AKS cluster;
+            # forwarding the explicit value avoids the historical silent fall-back
+            # to the cluster RG that broke RBAC ensure in `warmup_database`.
+            storage_resource_group=storage_resource_group,
+            database_name=database_name,
+            cluster_name=cluster_name,
+            machine_type=body.get("machine_type", ""),
+            num_nodes=num_nodes,
+            acr_resource_group=body.get("acr_resource_group", ""),
+            acr_name=body.get("acr_name", ""),
+            program=body.get("program", "blastn"),
+            caller_oid=caller.object_id,
+        )
+    except Exception as exc:
+        try:
+            from api.services.state_repo import get_state_repo
+
+            get_state_repo().update(
+                job_id,
+                status="failed",
+                phase="failed",
+                error_code="warmup_enqueue_failed",
+            )
+        except Exception as state_exc:
+            LOGGER.warning("failed to terminalise unqueued warmup: %s", type(state_exc).__name__)
+        clear_active_warmup_job(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            job_id=job_id,
+        )
+        if not marker_recorded:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "warmup_admission_state_unavailable",
+                    "message": (
+                        "Warmup admission state could not be persisted; no task was queued."
+                    ),
+                    "retryable": True,
+                },
+            ) from exc
+        raise
     try:
         from api.services.state_repo import get_state_repo
 
@@ -250,6 +303,8 @@ def warmup_start(
         "statusQueryGetUri": f"/api/tasks/{result.id}",
         "status": "queued",
     }
+
+
 @warmup_router.post("/release")
 def warmup_release(
     body: dict[str, Any] = _WARMUP_RELEASE_BODY,
@@ -484,5 +539,3 @@ def warmup_status(
         "custom_status": custom_status,
         "output": output,
     }
-
-

@@ -166,6 +166,7 @@ _SERVICEBUS_TASK_SUBMIT_TRANSPORT_RETRIES = 0
 _SERVICEBUS_TASK_SUBMIT_ALLOW_TOKEN_RESYNC = False
 _SERVICEBUS_TASK_WORK_BUDGET_SECONDS = 40.0
 _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS = 5.0
+_SERVICEBUS_TASK_POST_SUBMIT_RESERVE_SECONDS = 10.0
 _SERVICEBUS_TASK_MIN_SUBMIT_WINDOW_SECONDS = 0.5
 _SERVICEBUS_TASK_MIN_DRAIN_PASS_SECONDS = 1.0
 _DRAIN_ROUTING_FIELDS = (
@@ -996,7 +997,12 @@ def _resolve_drain_cluster_context(cfg: ServiceBusConfig) -> tuple[str, str, str
     return (sub, rg, cluster)
 
 
-def _execution_admission_for_drain(cfg: ServiceBusConfig) -> dict[str, Any]:
+def _execution_admission_for_drain(
+    cfg: ServiceBusConfig,
+    *,
+    pass_deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> dict[str, Any]:
     """Return the shared pre-receive/pre-submit execution admission decision.
 
     Both the beat task and the resident consumer call this helper before opening
@@ -1006,18 +1012,51 @@ def _execution_admission_for_drain(cfg: ServiceBusConfig) -> dict[str, Any]:
     """
     from api.services.aks.execution_admission import evaluate_execution_admission
 
+    monotonic = clock or time.monotonic
+    admission_deadline = (
+        pass_deadline - _SERVICEBUS_TASK_POST_SUBMIT_RESERVE_SECONDS
+        if pass_deadline is not None
+        else None
+    )
+    if admission_deadline is not None and monotonic() >= admission_deadline:
+        return {
+            "allowed": False,
+            "reason": "task_budget_exhausted",
+            "retry_after_seconds": 10,
+        }
     subscription_id, resource_group, cluster_name = _resolve_drain_cluster_context(cfg)
     decision = evaluate_execution_admission(
         subscription_id=subscription_id,
         resource_group=resource_group,
         cluster_name=cluster_name,
+        deadline_monotonic=admission_deadline,
+        clock=monotonic,
     )
-    if decision.get("allowed") and not _openapi_ready_for_drain(cfg):
+    if decision.get("reason") == "admission_budget_exhausted":
         return {
             "allowed": False,
-            "reason": "openapi_not_ready",
+            "reason": "task_budget_exhausted",
             "retry_after_seconds": 10,
         }
+    if admission_deadline is not None and monotonic() >= admission_deadline:
+        return {
+            "allowed": False,
+            "reason": "task_budget_exhausted",
+            "retry_after_seconds": 10,
+        }
+    if decision.get("allowed"):
+        if not _openapi_ready_for_drain(cfg):
+            return {
+                "allowed": False,
+                "reason": "openapi_not_ready",
+                "retry_after_seconds": 10,
+            }
+        if admission_deadline is not None and monotonic() >= admission_deadline:
+            return {
+                "allowed": False,
+                "reason": "task_budget_exhausted",
+                "retry_after_seconds": 10,
+            }
     return dict(decision)
 
 
@@ -1828,7 +1867,11 @@ def _drain_handler(
     # the broker for execution while start/scale/stop/DB warmup admission has
     # just closed. Roll back only our unconfirmed claim so redelivery retries
     # after the lifecycle converges.
-    pre_submit_admission = _execution_admission_for_drain(cfg)
+    pre_submit_admission = _execution_admission_for_drain(
+        cfg,
+        pass_deadline=submit_deadline,
+        clock=clock,
+    )
     if not pre_submit_admission.get("allowed"):
         if _ATOMIC_CLAIM:
             release_bridge(correlation_id)
@@ -1854,7 +1897,8 @@ def _drain_handler(
         monotonic = clock or time.monotonic
         remaining = submit_deadline - monotonic()
         if remaining <= (
-            _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS + _SERVICEBUS_TASK_MIN_SUBMIT_WINDOW_SECONDS
+            _SERVICEBUS_TASK_POST_SUBMIT_RESERVE_SECONDS
+            + _SERVICEBUS_TASK_MIN_SUBMIT_WINDOW_SECONDS
         ):
             if _ATOMIC_CLAIM:
                 release_bridge(correlation_id)
@@ -1871,7 +1915,7 @@ def _drain_handler(
         if effective_submit_timeout is not None:
             effective_submit_timeout = min(
                 effective_submit_timeout,
-                remaining - _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS,
+                remaining - _SERVICEBUS_TASK_POST_SUBMIT_RESERVE_SECONDS,
             )
 
     submit_kwargs: dict[str, Any] = _openapi_kwargs(cfg)
@@ -2344,7 +2388,11 @@ def _drain_once(
     clock: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
     """Run one admission-gated, queue-scoped, bounded drain pass."""
-    admission = _execution_admission_for_drain(cfg)
+    admission = _execution_admission_for_drain(
+        cfg,
+        pass_deadline=pass_deadline,
+        clock=clock,
+    )
     if not admission.get("allowed"):
         reason = str(admission.get("reason") or "cluster_not_ready")
         if reason in {

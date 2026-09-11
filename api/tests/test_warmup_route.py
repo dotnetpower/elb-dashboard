@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture()
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.setenv("AZURE_TENANT_ID", "common")
     monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
@@ -47,9 +48,18 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 def test_warmup_start_forwards_cluster_topology_to_task(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls, fake_send_task = make_send_task_recorder("task-warmup-123")
+    calls, recorded_send = make_send_task_recorder("task-warmup-123")
+    ordering: list[str] = []
+
+    def fake_send_task(*args: Any, **kwargs: Any) -> Any:
+        ordering.append("send")
+        return recorded_send(*args, **kwargs)
 
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_active_warmup_job",
+        lambda **_kwargs: ordering.append("marker") or True,
+    )
 
     response = client.post(
         "/api/warmup/start",
@@ -76,6 +86,95 @@ def test_warmup_start_forwards_cluster_topology_to_task(
     assert calls[0]["kwargs"]["machine_type"] == "Standard_E16s_v5"
     assert calls[0]["kwargs"]["num_nodes"] == 10
     assert calls[0]["kwargs"]["acr_name"] == "elbacr01"
+    assert ordering == ["marker", "send"]
+
+
+def test_warmup_start_rolls_back_marker_when_enqueue_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cleared: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+
+    class _Repo:
+        def create(self, _state: Any) -> None:
+            return None
+
+        def update(self, _job_id: str, **fields: Any) -> None:
+            updates.append(fields)
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", _Repo)
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_active_warmup_job",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.clear_active_warmup_job",
+        lambda **kwargs: cleared.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "api.routes.warmup._safe_send_task",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broker unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        client.post(
+            "/api/warmup/start",
+            json={
+                "subscription_id": "00000000-0000-0000-0000-000000000001",
+                "resource_group": "rg-elb",
+                "storage_account": "elbstg01",
+                "storage_resource_group": "rg-elb",
+                "database_name": "core_nt",
+                "aks_cluster_name": "aks-elb",
+            },
+        )
+
+    assert updates[-1] == {
+        "status": "failed",
+        "phase": "failed",
+        "error_code": "warmup_enqueue_failed",
+    }
+    assert cleared and cleared[0]["cluster_name"] == "aks-elb"
+
+
+def test_warmup_start_marker_persistence_failure_is_retryable_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: type(
+            "Repo",
+            (),
+            {
+                "create": lambda _self, _state: None,
+                "update": lambda _self, _job_id, **_fields: None,
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.record_active_warmup_job",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("table unavailable")),
+    )
+    monkeypatch.setattr(
+        "api.celery_app.celery_app.send_task",
+        lambda *_args, **_kwargs: pytest.fail("broker must not receive the task"),
+    )
+
+    response = client.post(
+        "/api/warmup/start",
+        json={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "resource_group": "rg-elb",
+            "storage_account": "elbstg01",
+            "storage_resource_group": "rg-elb",
+            "database_name": "core_nt",
+            "aks_cluster_name": "aks-elb",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "warmup_admission_state_unavailable"
+    assert response.json()["retryable"] is True
 
 
 def test_warmup_start_rejects_missing_scope_before_side_effects(
@@ -87,9 +186,7 @@ def test_warmup_start_rejects_missing_scope_before_side_effects(
     )
     monkeypatch.setattr(
         "api.celery_app.celery_app.send_task",
-        lambda *_args, **_kwargs: pytest.fail(
-            "Celery must not be called for an invalid request"
-        ),
+        lambda *_args, **_kwargs: pytest.fail("Celery must not be called for an invalid request"),
     )
 
     response = client.post("/api/warmup/start", json={})

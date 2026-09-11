@@ -829,14 +829,14 @@ def reconcile_auto_warmup_preferences(
                     require_all_warmup_nodes=not partial_warm,
                     admission_token=barrier_token,
                 )
-                if barrier_token and not seeded:
+                if not seeded and (barrier_token or os.environ.get("CONTAINER_APP_NAME")):
                     autowarmup_inflight_release(
                         pref.subscription_id,
                         pref.resource_group,
                         pref.cluster_name,
                         db_name,
                     )
-                    raise RuntimeError("post-lifecycle warmup JobState could not be persisted")
+                    raise RuntimeError("warmup JobState could not be persisted before enqueue")
                 if barrier_token:
                     # Persist the correlation BEFORE enqueueing the side effect.
                     # A durable-write failure prevents send_task via the outer
@@ -867,6 +867,17 @@ def reconcile_auto_warmup_preferences(
                             "post-lifecycle warmup barrier was superseded before enqueue"
                         )
                 try:
+                    from api.services.aks.execution_admission import (
+                        record_active_warmup_job,
+                    )
+
+                    record_active_warmup_job(
+                        subscription_id=pref.subscription_id,
+                        resource_group=pref.resource_group,
+                        cluster_name=pref.cluster_name,
+                        job_id=job_id,
+                        database=db_name,
+                    )
                     task = send_task(
                         "api.tasks.storage.warmup_database",
                         kwargs={
@@ -911,6 +922,16 @@ def reconcile_auto_warmup_preferences(
                         queue="storage",
                     )
                 except Exception:
+                    from api.services.aks.execution_admission import (
+                        clear_active_warmup_job,
+                    )
+
+                    clear_active_warmup_job(
+                        subscription_id=pref.subscription_id,
+                        resource_group=pref.resource_group,
+                        cluster_name=pref.cluster_name,
+                        job_id=job_id,
+                    )
                     if barrier_token:
                         from api.services.aks.execution_admission import (
                             clear_barrier_warmup_job,

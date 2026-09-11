@@ -31,6 +31,7 @@ from billiard.exceptions import SoftTimeLimitExceeded
 from fastapi import HTTPException
 
 _REAL_OPENAPI_READY_FOR_TRANSITION_POLL = sb_tasks._openapi_ready_for_transition_poll
+_REAL_EXECUTION_ADMISSION_FOR_DRAIN = sb_tasks._execution_admission_for_drain
 _REAL_ACQUIRE_DRAIN_LOCK = sb_tasks._acquire_drain_lock
 _REAL_RELEASE_DRAIN_LOCK = sb_tasks._release_drain_lock
 
@@ -51,7 +52,7 @@ def _file_backend(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _cfg: {"allowed": True, "reason": "ready"},
+        lambda _cfg, **_kwargs: {"allowed": True, "reason": "ready"},
     )
     monkeypatch.setattr(service_bus, "acquire_config_io", lambda _cfg: "test-config-io")
     monkeypatch.setattr(service_bus, "release_config_io", lambda *_args, **_kwargs: None)
@@ -117,7 +118,7 @@ def test_drain_defers_when_gate_on_and_cluster_not_ready(
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _c: {"allowed": False, "reason": "cluster_not_ready"},
+        lambda _c, **_kwargs: {"allowed": False, "reason": "cluster_not_ready"},
     )
     pulled: list[int] = []
     monkeypatch.setattr(
@@ -133,7 +134,11 @@ def test_drain_proceeds_when_gate_on_and_cluster_ready(
 ) -> None:
     """R1: gate ON + plane ready → the readiness guard is transparent."""
     _enable(monkeypatch)
-    monkeypatch.setattr(sb_tasks, "_execution_admission_for_drain", lambda _c: {"allowed": True})
+    monkeypatch.setattr(
+        sb_tasks,
+        "_execution_admission_for_drain",
+        lambda _c, **_kwargs: {"allowed": True},
+    )
     monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda q="": (True, "tok"))
     monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda t, q="": None)
     monkeypatch.setattr(service_bus, "drain_requests", lambda *a, **k: _DrainStats())
@@ -236,7 +241,7 @@ def test_fallback_drain_shrinks_submit_timeout_to_remaining_task_budget(
     )
 
     assert result["completed"] == 1
-    assert submit_kwargs[0]["timeout_seconds"] == 15
+    assert submit_kwargs[0]["timeout_seconds"] == 10
     assert captured["max_pass_seconds"] == 15
     assert captured["clock"]() == 20
 
@@ -295,6 +300,42 @@ def test_fallback_drain_does_not_expand_tiny_pass_past_settlement_reserve(
 
     assert result == {"skipped": "task_budget_exhausted"}
     assert received == []
+
+
+def test_admission_maps_readiness_probe_deadline_overrun_to_task_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _enabled_cfg()
+    now = [10.0]
+    captured: dict[str, object] = {}
+
+    def evaluate(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"allowed": True, "reason": "ready"}
+
+    def ready(_cfg: ServiceBusConfig) -> bool:
+        now[0] = 36.0
+        return True
+
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.evaluate_execution_admission",
+        evaluate,
+    )
+    monkeypatch.setattr(sb_tasks, "_resolve_drain_cluster_context", lambda _cfg: ("s", "r", "c"))
+    monkeypatch.setattr(sb_tasks, "_openapi_ready_for_drain", ready)
+
+    decision = _REAL_EXECUTION_ADMISSION_FOR_DRAIN(
+        cfg,
+        pass_deadline=40.0,
+        clock=lambda: now[0],
+    )
+
+    assert decision == {
+        "allowed": False,
+        "reason": "task_budget_exhausted",
+        "retry_after_seconds": 10,
+    }
+    assert captured["deadline_monotonic"] == 30.0
 
 
 def test_drain_handler_releases_claim_when_pre_submit_work_consumes_budget(
@@ -368,7 +409,7 @@ def test_drain_cancels_recovered_start_token_before_opening_receiver(
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _cfg: {
+        lambda _cfg, **_kwargs: {
             "allowed": True,
             "reason": "ready",
             "lifecycle_action": "start",
@@ -411,7 +452,7 @@ def test_drain_continues_when_recovered_token_cleanup_fails(
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _cfg: {
+        lambda _cfg, **_kwargs: {
             "allowed": True,
             "reason": "ready",
             "lifecycle_action": "start",
@@ -444,7 +485,7 @@ def test_normal_ready_drain_does_not_touch_lifecycle_state(
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _cfg: {"allowed": True, "reason": "ready"},
+        lambda _cfg, **_kwargs: {"allowed": True, "reason": "ready"},
     )
     cancelled: list[str] = []
     monkeypatch.setattr(
@@ -471,7 +512,9 @@ def test_drain_always_enforces_execution_admission(
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _c: probed.append(1) or {"allowed": False, "reason": "database_warmup_in_progress"},
+        lambda _c, **_kwargs: (
+            probed.append(1) or {"allowed": False, "reason": "database_warmup_in_progress"}
+        ),
     )
     pulled: list[int] = []
     monkeypatch.setattr(
@@ -491,7 +534,7 @@ def test_multi_hour_database_warmup_never_opens_receiver(
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _cfg: {
+        lambda _cfg, **_kwargs: {
             "allowed": False,
             "reason": "database_warmup_in_progress",
             "retry_after_seconds": 10,
@@ -540,7 +583,7 @@ def test_drain_handler_schedules_retry_if_lifecycle_starts_after_receive(
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _cfg: {"allowed": False, "reason": "aks_scaling"},
+        lambda _cfg, **_kwargs: {"allowed": False, "reason": "aks_scaling"},
     )
     submitted: list[int] = []
     monkeypatch.setattr(

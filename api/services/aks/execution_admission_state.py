@@ -1,14 +1,15 @@
 """Durable per-cluster AKS execution-admission lifecycle state.
 
 Responsibility: Persist immutable lifecycle generations and their token-scoped ARM completion,
-    cancellation, and database warmup correlation records.
+    cancellation, database warmup correlation records, and cluster-scoped active warmup markers.
 Edit boundaries: No ARM, Kubernetes, JobState readiness, queue receive, or lifecycle side effects;
     decision policy belongs in `execution_admission.py`.
 Key entry points: `create_lifecycle_barrier`, `get_lifecycle_barrier`,
     `cancel_lifecycle_barrier`, `record_lifecycle_completed`,
     `record_lifecycle_failed`, `lifecycle_failure`,
     `record_barrier_warmup_jobs`, `clear_barrier_warmup_job`,
-    `get_barrier_warmup_jobs`,
+    `get_barrier_warmup_jobs`, `record_active_warmup_job`,
+    `list_active_warmup_markers`, `clear_active_warmup_job`,
     `lifecycle_barrier_interrupts_job`.
 Risky contracts: Deployed writes fail closed unless Azure Table persistence succeeds. Token-scoped
     records never mutate another lifecycle generation, and per-database keys prevent concurrent
@@ -31,6 +32,7 @@ from typing import Any
 
 from api.services.state.singletons import (
     clear_singleton,
+    list_singletons_by_prefix_strict,
     load_singleton,
     load_singleton_strict,
     save_singleton,
@@ -43,6 +45,8 @@ _WARMUP_PREFIX = "execution-admission-warmup-"
 _CANCEL_PREFIX = "execution-admission-cancel-"
 _COMPLETE_PREFIX = "execution-admission-complete-"
 _FAILURE_PREFIX = "execution-admission-failure-"
+_ACTIVE_WARMUP_PREFIX = "execution-admission-active-warmup-"
+_ACTIVE_WARMUP_MARKER_LIMIT = 256
 _VALID_ACTIONS = frozenset({"start", "scale", "stop", "delete"})
 _MEMORY_MAX_ENTRIES = max(
     128, int(os.environ.get("EXECUTION_ADMISSION_MEMORY_MAX_ENTRIES", "2048"))
@@ -153,6 +157,22 @@ def _complete_key(token: str) -> str:
 
 def _failure_key(token: str) -> str:
     return _FAILURE_PREFIX + token
+
+
+def _active_warmup_prefix(subscription_id: str, resource_group: str, cluster_name: str) -> str:
+    return (
+        _ACTIVE_WARMUP_PREFIX + _context_digest(subscription_id, resource_group, cluster_name) + "-"
+    )
+
+
+def _active_warmup_key(
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    job_id: str,
+) -> str:
+    job_digest = hashlib.sha256(job_id.strip().encode("utf-8")).hexdigest()[:32]
+    return _active_warmup_prefix(subscription_id, resource_group, cluster_name) + job_digest
 
 
 def _redis_client() -> Any | None:
@@ -451,6 +471,126 @@ def get_barrier_warmup_jobs(token: str, databases: tuple[str, ...] | list[str]) 
     return jobs
 
 
+def record_active_warmup_job(
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    job_id: str,
+    database: str = "",
+) -> bool:
+    """Persist one active warmup marker before its broker side effect."""
+    values = tuple(
+        value.strip() for value in (subscription_id, resource_group, cluster_name, job_id)
+    )
+    if not all(values):
+        raise ValueError("subscription_id, resource_group, cluster_name, and job_id are required")
+    subscription_id, resource_group, cluster_name, job_id = values
+    key = _active_warmup_key(subscription_id, resource_group, cluster_name, job_id)
+    existing = _load(key)
+    if existing is not None:
+        if str(existing.get("job_id") or "") != job_id:
+            raise ExecutionAdmissionPersistenceError(
+                "active warmup marker identity does not match its key"
+            )
+        return True
+    _persist(
+        key,
+        {
+            "subscription_id": subscription_id,
+            "resource_group": resource_group,
+            "cluster_name": cluster_name,
+            "job_id": job_id,
+            "database": database.strip(),
+            "registered_at": _now_iso(),
+        },
+    )
+    return True
+
+
+def _list_local_active_warmup_rows(prefix: str) -> list[tuple[str, dict[str, Any]]]:
+    """Read local markers across API/worker processes through the Redis sidecar."""
+    with _MEMORY_LOCK:
+        rows_by_key = {
+            key: dict(payload) for key, payload in _MEMORY.items() if key.startswith(prefix)
+        }
+    client = _redis_client()
+    if client is not None:
+        try:
+            for raw_key in client.scan_iter(
+                match=f"{prefix}*", count=_ACTIVE_WARMUP_MARKER_LIMIT + 1
+            ):
+                key = raw_key.decode("utf-8") if isinstance(raw_key, bytes) else str(raw_key)
+                if key in rows_by_key:
+                    continue
+                raw_payload = client.get(raw_key)
+                if raw_payload is None:
+                    continue
+                if isinstance(raw_payload, bytes):
+                    raw_payload = raw_payload.decode("utf-8")
+                parsed = json.loads(raw_payload)
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"active warmup Redis marker is not an object for {key}")
+                rows_by_key[key] = dict(parsed)
+                if len(rows_by_key) > _ACTIVE_WARMUP_MARKER_LIMIT:
+                    raise ExecutionAdmissionPersistenceError("active warmup marker limit exceeded")
+        except ExecutionAdmissionPersistenceError:
+            raise
+        except Exception as exc:
+            raise ExecutionAdmissionPersistenceError(
+                "local active warmup markers could not be read from Redis"
+            ) from exc
+    if len(rows_by_key) > _ACTIVE_WARMUP_MARKER_LIMIT:
+        raise ExecutionAdmissionPersistenceError("active warmup marker limit exceeded")
+    return list(rows_by_key.items())
+
+
+def list_active_warmup_markers(
+    subscription_id: str, resource_group: str, cluster_name: str
+) -> dict[str, dict[str, Any]]:
+    """Return validated active marker payloads for one exact cluster scope."""
+    prefix = _active_warmup_prefix(subscription_id, resource_group, cluster_name)
+    if os.environ.get("CONTAINER_APP_NAME"):
+        rows = list_singletons_by_prefix_strict(prefix, limit=_ACTIVE_WARMUP_MARKER_LIMIT)
+    else:
+        rows = _list_local_active_warmup_rows(prefix)
+    markers: dict[str, dict[str, Any]] = {}
+    expected_scope = (
+        subscription_id.strip().casefold(),
+        resource_group.strip().casefold(),
+        cluster_name.strip().casefold(),
+    )
+    for row_key, payload in rows:
+        job_id = str(payload.get("job_id") or "").strip()
+        actual_scope = tuple(
+            str(payload.get(name) or "").strip().casefold()
+            for name in ("subscription_id", "resource_group", "cluster_name")
+        )
+        if (
+            not job_id
+            or actual_scope != expected_scope
+            or row_key != _active_warmup_key(subscription_id, resource_group, cluster_name, job_id)
+        ):
+            raise ExecutionAdmissionPersistenceError(
+                "active warmup marker is malformed or belongs to another cluster"
+            )
+        markers[job_id] = dict(payload)
+    return markers
+
+
+def clear_active_warmup_job(
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    job_id: str,
+) -> None:
+    """Best-effort removal of one exact warmup marker."""
+    if not all((subscription_id, resource_group, cluster_name, job_id)):
+        return
+    _remove(_active_warmup_key(subscription_id, resource_group, cluster_name, job_id))
+
+
 def _parse_time(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -488,6 +628,7 @@ __all__ = [
     "LifecycleBarrier",
     "barrier_cancelled",
     "cancel_lifecycle_barrier",
+    "clear_active_warmup_job",
     "clear_barrier_warmup_job",
     "create_lifecycle_barrier",
     "get_barrier_warmup_jobs",
@@ -495,6 +636,8 @@ __all__ = [
     "lifecycle_barrier_interrupts_job",
     "lifecycle_completed",
     "lifecycle_failure",
+    "list_active_warmup_markers",
+    "record_active_warmup_job",
     "record_barrier_warmup_jobs",
     "record_lifecycle_completed",
     "record_lifecycle_failed",

@@ -25,6 +25,8 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, TypedDict, cast
 
 from billiard.exceptions import SoftTimeLimitExceeded
@@ -34,6 +36,7 @@ from api.services.aks.execution_admission_state import (
     LifecycleBarrier,
     barrier_cancelled,
     cancel_lifecycle_barrier,
+    clear_active_warmup_job,
     clear_barrier_warmup_job,
     create_lifecycle_barrier,
     get_barrier_warmup_jobs,
@@ -41,6 +44,8 @@ from api.services.aks.execution_admission_state import (
     lifecycle_barrier_interrupts_job,
     lifecycle_completed,
     lifecycle_failure,
+    list_active_warmup_markers,
+    record_active_warmup_job,
     record_barrier_warmup_jobs,
     record_lifecycle_completed,
     record_lifecycle_failed,
@@ -51,6 +56,10 @@ LOGGER = logging.getLogger(__name__)
 
 _CACHE_SECONDS = max(0.0, float(os.environ.get("SERVICEBUS_ADMISSION_CACHE_SECONDS", "2")))
 _RETRY_SECONDS = max(1, int(os.environ.get("SERVICEBUS_ADMISSION_RETRY_SECONDS", "10")))
+_ACTIVE_WARMUP_MARKER_STALE_SECONDS = max(
+    300,
+    int(os.environ.get("EXECUTION_ADMISSION_WARMUP_MARKER_STALE_SECONDS", "7200")),
+)
 
 
 class AdmissionDecision(TypedDict, total=False):
@@ -105,28 +114,55 @@ def _denied(
 def _active_cluster_warmup_jobs(
     subscription_id: str, resource_group: str, cluster_name: str
 ) -> list[str]:
-    """Return active warmup JobState IDs scoped to the target cluster."""
+    """Return marker-correlated active warmups without scanning JobState."""
     from api.services.state_repo import get_state_repo
 
-    rows = get_state_repo().list_active(job_type="warmup", limit=200)
+    markers = list_active_warmup_markers(subscription_id, resource_group, cluster_name)
+    if not markers:
+        return []
+    rows = get_state_repo().get_many(
+        list(markers),
+        select=["PartitionKey", "RowKey", "status"],
+    )
     active: list[str] = []
-    for row in rows:
-        payload = getattr(row, "payload", None)
-        payload = payload if isinstance(payload, dict) else {}
-        row_subscription = str(
-            getattr(row, "subscription_id", "") or payload.get("subscription_id") or ""
-        )
-        row_resource_group = str(
-            getattr(row, "resource_group", "") or payload.get("resource_group") or ""
-        )
-        row_cluster = str(getattr(row, "cluster_name", "") or payload.get("cluster_name") or "")
-        if (
-            row_subscription == subscription_id
-            and row_resource_group == resource_group
-            and row_cluster == cluster_name
-        ):
-            active.append(str(getattr(row, "job_id", "") or ""))
-    return [job_id for job_id in active if job_id]
+    now = datetime.now(UTC)
+    terminal_statuses = {"completed", "failed", "cancelled", "deleted", "succeeded"}
+    for job_id, marker in markers.items():
+        row = rows.get(job_id)
+        if row is None:
+            registered_at = str(marker.get("registered_at") or "")
+            try:
+                registered = datetime.fromisoformat(registered_at.replace("Z", "+00:00"))
+                if registered.tzinfo is None:
+                    registered = registered.replace(tzinfo=UTC)
+                stale = (now - registered).total_seconds() >= _ACTIVE_WARMUP_MARKER_STALE_SECONDS
+            except (TypeError, ValueError):
+                stale = False
+            if stale:
+                clear_active_warmup_job(
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                    job_id=job_id,
+                )
+                LOGGER.warning(
+                    "execution admission cleared stale orphan warmup marker job_id=%s",
+                    job_id,
+                )
+                continue
+            active.append(job_id)
+            continue
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        if status in terminal_statuses:
+            clear_active_warmup_job(
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+                job_id=job_id,
+            )
+            continue
+        active.append(job_id)
+    return active
 
 
 def _failed_start_warmup_recovered(
@@ -186,6 +222,9 @@ def _evaluate_uncached(
     cluster_name: str,
     barrier: LifecycleBarrier | None,
     lifecycle_failure_state: dict[str, Any] | None,
+    *,
+    deadline_monotonic: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> AdmissionDecision:
     if not all((subscription_id, resource_group, cluster_name)):
         return _denied(
@@ -238,7 +277,19 @@ def _evaluate_uncached(
             )
         return _denied(reason, barrier=barrier, detail=detail, **extra)
 
+    def budget_exhausted() -> bool:
+        return deadline_monotonic is not None and clock() >= deadline_monotonic
+
+    def budget_denied() -> AdmissionDecision:
+        return _denied(
+            "admission_budget_exhausted",
+            barrier=barrier,
+            detail="execution admission deferred before the task settlement reserve",
+        )
+
     try:
+        if budget_exhausted():
+            return budget_denied()
         from api.services import get_credential
         from api.services.aks.ensure_running import evaluate_ensure_running
         from api.services.k8s.monitoring import k8s_ready_warmup_node_names
@@ -251,6 +302,8 @@ def _evaluate_uncached(
             resource_group=resource_group,
             cluster_name=cluster_name,
         )
+        if budget_exhausted():
+            return budget_denied()
         if readiness["status"] != "ready":
             return runtime_denied(
                 f"cluster_{readiness['status']}",
@@ -264,6 +317,8 @@ def _evaluate_uncached(
             )
 
         active_warmups = _active_cluster_warmup_jobs(subscription_id, resource_group, cluster_name)
+        if budget_exhausted():
+            return budget_denied()
         if active_warmups:
             return runtime_denied(
                 "database_warmup_in_progress",
@@ -274,6 +329,8 @@ def _evaluate_uncached(
         snapshot = get_aks_cluster_snapshot(
             credential, subscription_id, resource_group, cluster_name
         )
+        if budget_exhausted():
+            return budget_denied()
         if snapshot is None:
             return runtime_denied("cluster_snapshot_unavailable")
         target = (
@@ -290,6 +347,8 @@ def _evaluate_uncached(
         ready_nodes = k8s_ready_warmup_node_names(
             credential, subscription_id, resource_group, cluster_name
         )
+        if budget_exhausted():
+            return budget_denied()
         if target > 0 and len(ready_nodes) < target:
             return runtime_denied(
                 "waiting_for_target_nodes",
@@ -299,6 +358,8 @@ def _evaluate_uncached(
 
         if barrier is not None and barrier.databases:
             if recovering_start_failure:
+                if budget_exhausted():
+                    return budget_denied()
                 warmup_recovered, recovery_detail = _failed_start_warmup_recovered(
                     credential,
                     subscription_id=subscription_id,
@@ -307,6 +368,8 @@ def _evaluate_uncached(
                     databases=barrier.databases,
                     expected_node_count=target or len(ready_nodes),
                 )
+                if budget_exhausted():
+                    return budget_denied()
                 if not warmup_recovered:
                     return runtime_denied(
                         "database_warmup_pending",
@@ -331,7 +394,11 @@ def _evaluate_uncached(
                 )
             from api.services.state_repo import get_state_repo
 
+            if budget_exhausted():
+                return budget_denied()
             rows = get_state_repo().get_many([jobs[name] for name in barrier.databases])
+            if budget_exhausted():
+                return budget_denied()
             failed: dict[str, str] = {}
             active: dict[str, str] = {}
             for name in barrier.databases:
@@ -387,21 +454,49 @@ def _evaluate_uncached(
 
 
 def evaluate_execution_admission(
-    *, subscription_id: str, resource_group: str, cluster_name: str
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    deadline_monotonic: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> AdmissionDecision:
     """Return a fail-closed decision for Service Bus queue consumption."""
+
+    def budget_exhausted() -> bool:
+        return deadline_monotonic is not None and clock() >= deadline_monotonic
+
+    def budget_denied(barrier: LifecycleBarrier | None = None) -> AdmissionDecision:
+        return _denied(
+            "admission_budget_exhausted",
+            barrier=barrier,
+            detail="execution admission had no remaining caller budget",
+        )
+
+    if budget_exhausted():
+        return budget_denied()
     try:
         barrier = get_lifecycle_barrier(subscription_id, resource_group, cluster_name)
+        if budget_exhausted():
+            return budget_denied(barrier)
         if barrier is not None and barrier_cancelled(barrier.token):
             barrier = None
+        if budget_exhausted():
+            return budget_denied(barrier)
         token = barrier.token if barrier is not None else ""
         warmup_jobs = (
             get_barrier_warmup_jobs(token, barrier.databases)
             if token and barrier is not None
             else {}
         )
+        if budget_exhausted():
+            return budget_denied(barrier)
         completed = lifecycle_completed(token) if token else False
+        if budget_exhausted():
+            return budget_denied(barrier)
         failure_state = lifecycle_failure(token) if token else None
+        if budget_exhausted():
+            return budget_denied(barrier)
     except SoftTimeLimitExceeded:
         raise
     except Exception as exc:
@@ -437,12 +532,18 @@ def evaluate_execution_admission(
         cluster_name,
         barrier,
         failure_state,
+        deadline_monotonic=deadline_monotonic,
+        clock=clock,
     )
     # Never cache an allow decision. A manual DB re-warm can begin without a
     # new lifecycle token, and even a two-second stale allow would let the
     # resident consumer remove messages during that transition. Short-lived
     # deny caching is safe: it only keeps work queued slightly longer.
-    if _CACHE_SECONDS > 0 and not decision.get("allowed"):
+    if (
+        _CACHE_SECONDS > 0
+        and not decision.get("allowed")
+        and decision.get("reason") != "admission_budget_exhausted"
+    ):
         with _DECISION_CACHE_LOCK:
             _DECISION_CACHE[cache_key] = (now, decision)
     return decision
@@ -459,12 +560,14 @@ __all__ = [
     "ExecutionAdmissionPersistenceError",
     "LifecycleBarrier",
     "cancel_lifecycle_barrier",
+    "clear_active_warmup_job",
     "clear_barrier_warmup_job",
     "create_lifecycle_barrier",
     "evaluate_execution_admission",
     "get_barrier_warmup_jobs",
     "get_lifecycle_barrier",
     "lifecycle_barrier_interrupts_job",
+    "record_active_warmup_job",
     "record_barrier_warmup_jobs",
     "record_lifecycle_completed",
     "record_lifecycle_failed",

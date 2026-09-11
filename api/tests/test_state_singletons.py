@@ -48,7 +48,7 @@ class _FakeTableClient:
     def delete_entity(self, partition_key: str, row_key: str) -> None:
         self.rows.pop((partition_key, row_key), None)
 
-    def query_entities(self, query_filter: str) -> list[dict[str, Any]]:
+    def query_entities(self, query_filter: str, **_kwargs: Any) -> list[dict[str, Any]]:
         """Mimic the Azure Tables OData range filter used by the store.
 
         Parses the ``PartitionKey eq '..' and RowKey ge '..' and RowKey lt '..'``
@@ -58,12 +58,13 @@ class _FakeTableClient:
         """
         import re
 
-        pk = re.search(r"PartitionKey eq '([^']*)'", query_filter)
-        ge = re.search(r"RowKey ge '([^']*)'", query_filter)
-        lt = re.search(r"RowKey lt '([^']*)'", query_filter)
-        partition = pk.group(1) if pk else None
-        lower = ge.group(1) if ge else None
-        upper = lt.group(1) if lt else None
+        literal = r"((?:''|[^'])*)"
+        pk = re.search(rf"PartitionKey eq '{literal}'", query_filter)
+        ge = re.search(rf"RowKey ge '{literal}'", query_filter)
+        lt = re.search(rf"RowKey lt '{literal}'", query_filter)
+        partition = pk.group(1).replace("''", "'") if pk else None
+        lower = ge.group(1).replace("''", "'") if ge else None
+        upper = lt.group(1).replace("''", "'") if lt else None
         out: list[dict[str, Any]] = []
         for (row_pk, row_rk), entity in self.rows.items():
             if partition is not None and row_pk != partition:
@@ -152,9 +153,7 @@ def test_list_by_prefix_returns_matching_rows(
     singletons.save_singleton("openapi:runtime:public-base-url", {"n": 0})
     singletons.save_singleton("unrelated:key", {"n": 9})
 
-    rows = singletons.list_singletons_by_prefix(
-        "openapi:runtime:public-base-url:cluster:"
-    )
+    rows = singletons.list_singletons_by_prefix("openapi:runtime:public-base-url:cluster:")
     keys = sorted(rk for rk, _payload in rows)
     assert keys == [
         "openapi:runtime:public-base-url:cluster:aaaa",
@@ -181,9 +180,69 @@ def test_list_by_prefix_includes_suffix_above_tilde(
     assert keys == ["p:~~~~~~~~~more", "p:\u00e9-accented"]
 
 
+def test_list_by_prefix_escapes_odata_quote(
+    _reset_singleton_cache_and_table: _FakeTableClient,
+) -> None:
+    singletons.save_singleton("quoted'prefix-a", {"n": 1})
+    singletons.save_singleton("quoted'prefix-b", {"n": 2})
+
+    rows = singletons.list_singletons_by_prefix_strict("quoted'prefix-", limit=2)
+
+    assert sorted(row_key for row_key, _payload in rows) == [
+        "quoted'prefix-a",
+        "quoted'prefix-b",
+    ]
+
+
 def test_list_by_prefix_empty_prefix_returns_empty(
     _reset_singleton_cache_and_table: _FakeTableClient,
 ) -> None:
     singletons.save_singleton("anything", {"n": 1})
     assert singletons.list_singletons_by_prefix("") == []
 
+
+def test_strict_list_by_prefix_propagates_query_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnavailableClient:
+        def query_entities(self, *, query_filter: str) -> list[dict[str, Any]]:
+            raise RuntimeError(f"table unavailable: {query_filter}")
+
+    monkeypatch.setattr(singletons, "_CLIENT", _UnavailableClient())
+
+    with pytest.raises(RuntimeError, match="table unavailable"):
+        singletons.list_singletons_by_prefix_strict("execution-admission-active-warmup-")
+
+
+def test_strict_list_by_prefix_rejects_malformed_payload(
+    _reset_singleton_cache_and_table: _FakeTableClient,
+) -> None:
+    _reset_singleton_cache_and_table.rows[("singleton", "prefix-bad")] = {
+        "PartitionKey": "singleton",
+        "RowKey": "prefix-bad",
+        "payload": "[]",
+    }
+
+    with pytest.raises(ValueError, match="not an object"):
+        singletons.list_singletons_by_prefix_strict("prefix-")
+
+
+def test_strict_reads_fail_when_table_cannot_be_ensured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(singletons, "_ensure_table", lambda: False)
+
+    with pytest.raises(RuntimeError, match="could not be ensured"):
+        singletons.load_singleton_strict("execution-admission")
+    with pytest.raises(RuntimeError, match="could not be ensured"):
+        singletons.list_singletons_by_prefix_strict("execution-admission-")
+
+
+def test_strict_list_by_prefix_enforces_limit(
+    _reset_singleton_cache_and_table: _FakeTableClient,
+) -> None:
+    for index in range(3):
+        singletons.save_singleton(f"marker-{index}", {"n": index})
+
+    with pytest.raises(RuntimeError, match="row limit exceeded"):
+        singletons.list_singletons_by_prefix_strict("marker-", limit=2)

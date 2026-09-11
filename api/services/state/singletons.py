@@ -14,7 +14,8 @@ Edit boundaries: Pure storage primitive — no Azure-management or
     domain-specific logic. New singletons live in their own caller modules
     and just pass a unique ``key`` string.
 Key entry points: ``save_singleton``, ``load_singleton``,
-    ``load_singleton_strict``, ``clear_singleton``,
+    ``load_singleton_strict``, ``list_singletons_by_prefix_strict``,
+    ``clear_singleton``,
     ``reset_singleton_cache_after_fork``.
 Risky contracts: ``key`` must be ASCII-safe (Azure RowKey forbids ``/ \\ # ?``
     and control chars). ``payload`` must be JSON-serialisable. Best-effort
@@ -54,6 +55,10 @@ _TABLE_ENSURED_LOCK = threading.Lock()
 
 def _sanitise_row_key(key: str) -> str:
     return _ROW_KEY_DISALLOWED_RE.sub("-", key.strip())
+
+
+def _escape_odata_literal(value: str) -> str:
+    return value.replace("'", "''")
 
 
 def _endpoint() -> str:
@@ -103,9 +108,7 @@ def _ensure_table() -> bool:
                 try:
                     service.create_table(_SINGLETON_TABLE_NAME)
                 except Exception as create_exc:
-                    LOGGER.debug(
-                        "singleton create_table fallback failed: %s", create_exc
-                    )
+                    LOGGER.debug("singleton create_table fallback failed: %s", create_exc)
             _TABLE_ENSURED = True
             return True
         except Exception as exc:
@@ -178,6 +181,8 @@ def load_singleton_strict(key: str) -> dict[str, Any] | None:
     client = _get_client()
     if client is None:
         raise RuntimeError("singleton Table Storage is not configured")
+    if not _ensure_table():
+        raise RuntimeError("singleton Table Storage could not be ensured")
     row_key = _sanitise_row_key(key)
     try:
         entity = client.get_entity(_SINGLETON_PARTITION_KEY, row_key)
@@ -250,10 +255,13 @@ def list_singletons_by_prefix(prefix: str) -> list[tuple[str, dict[str, Any]]]:
     # code point incremented so the range covers EVERY key starting with the
     # prefix regardless of the suffix's characters (see _prefix_upper_bound).
     upper = _prefix_upper_bound(sanitised_prefix)
+    escaped_partition = _escape_odata_literal(_SINGLETON_PARTITION_KEY)
+    escaped_prefix = _escape_odata_literal(sanitised_prefix)
+    escaped_upper = _escape_odata_literal(upper)
     query = (
-        f"PartitionKey eq '{_SINGLETON_PARTITION_KEY}' "
-        f"and RowKey ge '{sanitised_prefix}' "
-        f"and RowKey lt '{upper}'"
+        f"PartitionKey eq '{escaped_partition}' "
+        f"and RowKey ge '{escaped_prefix}' "
+        f"and RowKey lt '{escaped_upper}'"
     )
     results: list[tuple[str, dict[str, Any]]] = []
     try:
@@ -275,6 +283,54 @@ def list_singletons_by_prefix(prefix: str) -> list[tuple[str, dict[str, Any]]]:
             type(exc).__name__,
         )
         return []
+    return results
+
+
+def list_singletons_by_prefix_strict(
+    prefix: str, *, limit: int | None = None
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return a prefix range while propagating storage and payload failures.
+
+    Safety state readers use this instead of :func:`list_singletons_by_prefix`
+    so an unavailable Table or malformed marker cannot be mistaken for an
+    empty range that opens execution admission.
+    """
+    if not prefix:
+        return []
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("singleton Table Storage is not configured")
+    if not _ensure_table():
+        raise RuntimeError("singleton Table Storage could not be ensured")
+    if limit is not None and limit < 1:
+        raise ValueError("singleton prefix limit must be positive")
+    sanitised_prefix = _sanitise_row_key(prefix)
+    if not sanitised_prefix:
+        return []
+    upper = _prefix_upper_bound(sanitised_prefix)
+    escaped_partition = _escape_odata_literal(_SINGLETON_PARTITION_KEY)
+    escaped_prefix = _escape_odata_literal(sanitised_prefix)
+    escaped_upper = _escape_odata_literal(upper)
+    query = (
+        f"PartitionKey eq '{escaped_partition}' "
+        f"and RowKey ge '{escaped_prefix}' "
+        f"and RowKey lt '{escaped_upper}'"
+    )
+    results: list[tuple[str, dict[str, Any]]] = []
+    query_kwargs: dict[str, Any] = {"query_filter": query}
+    if limit is not None:
+        query_kwargs["results_per_page"] = min(limit + 1, 1000)
+    for entity in client.query_entities(**query_kwargs):
+        row_key = entity.get("RowKey")
+        raw = entity.get("payload")
+        if not isinstance(row_key, str) or not isinstance(raw, str):
+            raise ValueError(f"singleton prefix row is malformed for {sanitised_prefix}")
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"singleton prefix payload is not an object for {row_key}")
+        results.append((row_key, parsed))
+        if limit is not None and len(results) > limit:
+            raise RuntimeError(f"singleton prefix row limit exceeded for {sanitised_prefix}")
     return results
 
 
@@ -304,6 +360,7 @@ def reset_singleton_cache_after_fork() -> None:
 __all__ = [
     "clear_singleton",
     "list_singletons_by_prefix",
+    "list_singletons_by_prefix_strict",
     "load_singleton",
     "load_singleton_strict",
     "reset_singleton_cache_after_fork",

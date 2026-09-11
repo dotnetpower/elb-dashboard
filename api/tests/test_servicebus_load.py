@@ -41,7 +41,7 @@ def _file_backend(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sb_tasks,
         "_execution_admission_for_drain",
-        lambda _cfg: {"allowed": True, "reason": "ready"},
+        lambda _cfg, **_kwargs: {"allowed": True, "reason": "ready"},
     )
     monkeypatch.setattr(sb_tasks, "_acquire_drain_lock", lambda _queue="": (True, "test"))
     monkeypatch.setattr(sb_tasks, "_release_drain_lock", lambda *_args: None)
