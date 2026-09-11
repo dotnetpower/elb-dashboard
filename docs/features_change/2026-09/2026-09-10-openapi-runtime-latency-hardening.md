@@ -178,3 +178,20 @@ authenticated UI, so the targeted image-only deployment and browser smoke are re
   320px minimum check the 5 status filters, 4 source filters, both source labels, and both durations
   remained visible with no horizontal overflow. Desktop and mobile screenshots were captured.
 - After the mobile fix, all `1,024` frontend tests, the production build, and ESLint passed.
+- Final Container App tag `manual-7e8218ba` converged `api`, `worker`, and `beat` to digest
+  `sha256:e60d17d489fc20bde9301d7685710610beb4e0e7401d1b53681b804f5c51e311`,
+  `frontend` to `sha256:50dfab1a2f62651739d6ae1e6be19de971b65d30fc3bcf44e301512627c2c549`,
+  and rebuilt `terminal` to
+  `sha256:f5dd04d7ba91e4b9d9a728175106721e0d4e3a6544788e76bcc8d69d53904752`.
+  Ready revision `ca-elb-dashboard--env-terminal-1789095495-22738` is Running with one replica.
+- The final API health is `ok`; Celery reports four workers with zero errors and zero queued,
+  active, or reserved tasks. ACR is idle at `Disabled / Deny / AzureServices`, and AKS remains on
+  OpenAPI `4.60` generation 61 with 1/1 Ready.
+- The live compressed asset set contains the mobile Jobs grid rules and 14 occurrences of build
+  stamp `7e8218ba`; the public app renders the Microsoft sign-in shell. Direct credential entry was
+  intentionally not automated.
+- Final hermetic backend sweep: `5,891 passed, 4 skipped`. App Insights from 01:00 UTC onward showed
+  no server exceptions, severity-3 traces, failed dependencies, or 5xx requests; the only failed
+  request was the intentional unauthenticated `/api/health/celery` 401 probe. Final api, worker,
+  beat, and terminal log tails contained no error, critical, traceback, crash, or startup-failure
+  signatures.
