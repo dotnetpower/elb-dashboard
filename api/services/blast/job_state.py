@@ -958,9 +958,12 @@ def _local_to_blast_job(
     if isinstance(_external_snapshot, dict):
         for _timing_key in (
             "started_at",
+            "completed_at",
+            "result_ready_at",
             "run_seconds",
             "queue_wait_seconds",
             "elapsed_seconds",
+            "execution_timing",
         ):
             _timing_value = _external_snapshot.get(_timing_key)
             if out.get(_timing_key) in (None, "") and _timing_value not in (None, ""):
@@ -992,9 +995,12 @@ def _local_to_blast_job(
             if _cached_stats:
                 for _stat_key in (
                     "started_at",
+                    "completed_at",
+                    "result_ready_at",
                     "run_seconds",
                     "queue_wait_seconds",
                     "elapsed_seconds",
+                    "execution_timing",
                 ):
                     if out.get(_stat_key) in (None, "") and _cached_stats.get(_stat_key) not in (
                         None,
@@ -1003,6 +1009,9 @@ def _local_to_blast_job(
                         out[_stat_key] = _cached_stats[_stat_key]
         except Exception:
             LOGGER.debug("sibling stats cache merge skipped job_id=%s", state.job_id, exc_info=True)
+    from api.services.blast.timing import build_job_timing
+
+    out["timing"] = build_job_timing(out)
     out["target"] = build_target(
         resource_type="blast_job",
         job_id=str(state.job_id),

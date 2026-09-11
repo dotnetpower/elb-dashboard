@@ -1,5 +1,14 @@
 import type { BlastJobSummary } from "@/api/endpoints";
 
+const TERMINAL_STATUSES = new Set([
+  "completed",
+  "succeeded",
+  "success",
+  "failed",
+  "cancelled",
+  "canceled",
+]);
+
 /**
  * Pure submit-volume aggregations for the ClusterBento hero cell.
  *
@@ -60,12 +69,16 @@ export function submitWindow(jobs: BlastJobSummary[]): SubmitWindow {
     if (ts >= w1h) last1h += 1;
     if (ts >= w24h) {
       last24h += 1;
-      const isActive =
-        j.status !== "completed" && j.status !== "failed" && j.status !== "cancelled";
+      const isActive = !TERMINAL_STATUSES.has(String(j.status || "").toLowerCase());
       if (isActive) last24hActive += 1;
-      const upd = j.updated_at ? Date.parse(j.updated_at) : ts;
-      if (!isActive && Number.isFinite(upd) && upd > ts) {
-        runtimeSum += (upd - ts) / 1000;
+      const processing = j.timing?.processing_seconds ?? j.run_seconds;
+      if (
+        !isActive &&
+        typeof processing === "number" &&
+        Number.isFinite(processing) &&
+        processing >= 0
+      ) {
+        runtimeSum += processing;
         runtimeCount += 1;
       }
     }

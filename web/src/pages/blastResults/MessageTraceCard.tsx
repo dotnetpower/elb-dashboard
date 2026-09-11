@@ -11,6 +11,7 @@ import {
   traceTerminallyFailed,
   visibleTraceStages,
 } from "./messageTraceModel";
+import { formatTimingSeconds } from "./timingModel";
 
 /**
  * MessageTraceCard — renders the Service Bus message lifecycle for a BLAST job
@@ -45,15 +46,24 @@ function Metric({ label, value }: { label: string; value: string }) {
       <span className="muted" style={{ fontSize: 11 }}>
         {label}
       </span>
-      <strong style={{ fontVariantNumeric: "tabular-nums", fontSize: 13 }}>{value}</strong>
+      <strong style={{ fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
+        {value}
+      </strong>
     </span>
   );
 }
 
-export function MessageTraceCard({ jobId, isActive }: { jobId: string; isActive: boolean }) {
+export function MessageTraceCard({
+  jobId,
+  isActive,
+}: {
+  jobId: string;
+  isActive: boolean;
+}) {
   const query = useQuery({
     queryKey: ["blast-job-trace", jobId],
-    queryFn: () => blastApi.getJob(jobId, { history: true, includeDatabaseMetadata: false }),
+    queryFn: () =>
+      blastApi.getJob(jobId, { history: true, includeDatabaseMetadata: false }),
     enabled: Boolean(jobId),
     // Refetch while in flight so new stages surface; calm once terminal.
     refetchInterval: isActive ? 8_000 : false,
@@ -70,6 +80,23 @@ export function MessageTraceCard({ jobId, isActive }: { jobId: string; isActive:
   const tsByStage = new Map(trace.stages.map((s) => [s.stage, s.ts]));
   const visible = visibleTraceStages(trace);
   const terminalFailed = traceTerminallyFailed(reached);
+  const timing = query.data?.timing;
+  const metrics = timing
+    ? [
+        ["Time to result", timing.time_to_result_seconds],
+        ["Broker queue", timing.service_bus_queue_seconds],
+        ["Execution queue", timing.execution_queue_seconds],
+        ["Submit", timing.submit_seconds],
+        ["Processing", timing.processing_seconds],
+        [
+          "Other execution",
+          timing.unattributed_seconds && timing.unattributed_seconds > 0
+            ? timing.unattributed_seconds
+            : null,
+        ],
+        ["Status delivery", timing.status_delivery_seconds],
+      ].filter((metric): metric is [string, number] => metric[1] != null)
+    : [];
 
   return (
     <section className="glass-card" style={{ padding: "14px 16px" }}>
@@ -86,9 +113,23 @@ export function MessageTraceCard({ jobId, isActive }: { jobId: string; isActive:
       </h3>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-        <Metric label="Queue dwell" value={fmtTraceMs(trace.metrics.queue_dwell_ms)} />
-        <Metric label="Submit latency" value={fmtTraceMs(trace.metrics.submit_latency_ms)} />
-        <Metric label="End-to-end" value={fmtTraceMs(trace.metrics.e2e_ms)} />
+        {metrics.length > 0 ? (
+          metrics.map(([label, seconds]) => (
+            <Metric key={label} label={label} value={formatTimingSeconds(seconds)} />
+          ))
+        ) : (
+          <>
+            <Metric
+              label="Queue dwell"
+              value={fmtTraceMs(trace.metrics.queue_dwell_ms)}
+            />
+            <Metric
+              label="Submit latency"
+              value={fmtTraceMs(trace.metrics.submit_latency_ms)}
+            />
+            <Metric label="End to end" value={fmtTraceMs(trace.metrics.e2e_ms)} />
+          </>
+        )}
       </div>
 
       <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>

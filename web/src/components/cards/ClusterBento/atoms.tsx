@@ -35,22 +35,23 @@ export function HealthPill({ health }: { health: ClusterHealth }) {
       ? "var(--success)"
       : health === "provisioning"
         ? "var(--accent)"
-      : health === "degraded"
-        ? "var(--warning)"
-        : health === "down"
-          ? "var(--danger)"
-          : "var(--text-faint)";
+        : health === "degraded"
+          ? "var(--warning)"
+          : health === "down"
+            ? "var(--danger)"
+            : "var(--text-faint)";
   const Icon =
     health === "healthy"
       ? CheckCircle2
       : health === "provisioning"
         ? Loader2
-      : health === "degraded"
-        ? AlertTriangle
-        : health === "down"
-          ? XCircle
-          : Loader2;
-  const label = health === "unknown" ? "Unknown" : health[0].toUpperCase() + health.slice(1);
+        : health === "degraded"
+          ? AlertTriangle
+          : health === "down"
+            ? XCircle
+            : Loader2;
+  const label =
+    health === "unknown" ? "Unknown" : health[0].toUpperCase() + health.slice(1);
   return (
     <span
       style={{
@@ -484,7 +485,7 @@ export function JobRow({ j, dense = false }: { j: JobRowView; dense?: boolean })
     ? Math.max(0, (Date.now() - createdMs) / 1000)
     : null;
   const durationSec =
-    j.elapsedSec != null && Number.isFinite(j.elapsedSec) ? j.elapsedSec : ageSec;
+    j.elapsedSec != null && Number.isFinite(j.elapsedSec) ? j.elapsedSec : null;
   const displayTitle = j.title || j.jobId;
   const fullTitle = `${j.program} | ${j.db} | ${displayTitle} | ${j.state.toUpperCase()}`;
   return (
@@ -603,7 +604,9 @@ export function EventLine({
         : kind === "info"
           ? Info
           : CheckCircle2;
-  const looksLikeMono = /^(POST|GET|PUT|DELETE|blast-|pod\/|svc\/|node\/|\[)/.test(message);
+  const looksLikeMono = /^(POST|GET|PUT|DELETE|blast-|pod\/|svc\/|node\/|\[)/.test(
+    message,
+  );
   return (
     <div
       style={{

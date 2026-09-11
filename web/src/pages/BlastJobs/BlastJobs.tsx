@@ -10,6 +10,7 @@ import { JobsHeader } from "./JobsHeader";
 import { JobsLoadingSkeleton } from "./JobsLoadingSkeleton";
 import { JobsLoadMore } from "./JobsLoadMore";
 import { NoFilteredEmpty, NoJobsEmpty } from "./JobsEmptyState";
+import { RecentTimingStrip } from "./RecentTimingStrip";
 import { ServiceBusInboundStrip } from "./ServiceBusInboundStrip";
 import { useBlastJobsState } from "./useBlastJobsState";
 
@@ -54,16 +55,19 @@ export function BlastJobs() {
       {jobsQuery.isLoading && <JobsLoadingSkeleton />}
 
       {allJobs.length > 0 && (
-        <JobsFilterBar
-          filter={filter}
-          setFilter={setFilter}
-          search={search}
-          setSearch={setSearch}
-          counts={counts}
-          source={source}
-          setSource={setSource}
-          sourceCounts={sourceCounts}
-        />
+        <>
+          <JobsFilterBar
+            filter={filter}
+            setFilter={setFilter}
+            search={search}
+            setSearch={setSearch}
+            counts={counts}
+            source={source}
+            setSource={setSource}
+            sourceCounts={sourceCounts}
+          />
+          <RecentTimingStrip jobs={allJobs} />
+        </>
       )}
 
       {deleteMutation.isError && (

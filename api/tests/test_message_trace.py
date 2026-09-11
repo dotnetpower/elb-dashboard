@@ -105,6 +105,43 @@ def test_derive_trace_computes_metrics() -> None:
     assert trace["metrics"]["e2e_ms"] == 30000
 
 
+def test_derive_trace_ignores_legacy_running_completion_publish_for_e2e() -> None:
+    rows = [
+        _hist("mf.enqueued", "x", stage_ts="2026-06-14T00:00:00+00:00"),
+        {
+            "event": "mf.completion_published",
+            "ts": "2026-06-14T00:00:10+00:00",
+            "payload_json": json.dumps(
+                {
+                    "stage": "completion_published",
+                    "stage_ts": "2026-06-14T00:00:10+00:00",
+                    "status": "running",
+                }
+            ),
+        },
+        {
+            "event": "mf.completion_published",
+            "ts": "2026-06-14T00:00:30+00:00",
+            "payload_json": json.dumps(
+                {
+                    "stage": "completion_published",
+                    "stage_ts": "2026-06-14T00:00:30+00:00",
+                    "status": "succeeded",
+                }
+            ),
+        },
+    ]
+
+    trace = derive_trace(rows)
+
+    assert trace["metrics"]["e2e_ms"] == 30000
+    assert [stage["stage"] for stage in trace["stages"]] == [
+        "enqueued",
+        "transition_published",
+        "completion_published",
+    ]
+
+
 def test_derive_trace_terminal_and_last_stage() -> None:
     rows = [
         _hist("mf.received", "x", stage_ts="2026-06-14T00:00:02+00:00"),
@@ -116,8 +153,34 @@ def test_derive_trace_terminal_and_last_stage() -> None:
     assert trace["last_stage"] == "completion_published"
 
 
+def test_derive_trace_uses_first_terminal_time_and_rejects_negative_metrics() -> None:
+    rows = [
+        _hist("mf.enqueued", "x", stage_ts="2026-06-14T00:00:10+00:00"),
+        _hist("mf.received", "x", stage_ts="2026-06-14T00:00:05+00:00"),
+        _hist("mf.succeeded", "x", stage_ts="2026-06-14T00:00:30+00:00"),
+        _hist("mf.failed", "x", stage_ts="2026-06-14T00:00:20+00:00"),
+    ]
+
+    trace = derive_trace(rows)
+
+    assert trace["terminal_stage"] == "failed"
+    assert trace["metrics"]["queue_dwell_ms"] is None
+
+
+def test_derive_trace_ignores_terminal_stage_with_invalid_timestamp() -> None:
+    trace = derive_trace(
+        [
+            _hist("mf.succeeded", "not-a-timestamp"),
+            _hist("mf.failed", "x", stage_ts="2026-06-14T00:00:20+00:00"),
+        ]
+    )
+
+    assert trace["terminal_stage"] == "failed"
+
+
 def test_derive_trace_empty_is_stable() -> None:
     trace = derive_trace([])
+    assert trace["schema_version"] == 1
     assert trace["stages"] == []
     assert trace["terminal_stage"] is None
     assert trace["last_stage"] is None

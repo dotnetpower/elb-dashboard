@@ -4,7 +4,7 @@
  *
  *   queued                 -> anchor = created_at  (label: "Queued for")
  *   active (non-queued)    -> anchor = started_at ?? created_at  (label: "Elapsed")
- *   terminal               -> anchor = started_at ?? created_at  (label: "Duration")
+ *   terminal               -> immutable processing seconds only
  *
  * If the anchor falls back to created_at when started_at is present, the
  * "Elapsed" / "Duration" counter folds queue-wait into runtime — exactly the
@@ -82,33 +82,40 @@ describe("runtimeLabel — active (non-queued) state", () => {
 });
 
 describe("runtimeLabel — terminal state", () => {
-  it("computes Duration from started_at -> updated_at, excluding queue wait", () => {
-    // FINISHED_AT - STARTED_AT = 300s -> "5m 0s"
+  it("prefers immutable processing seconds over mutable updated_at", () => {
     const result = runtimeLabel(
-      job({ started_at: STARTED_AT, updated_at: FINISHED_AT }),
-      "Completed",
-      NOW_ANY, // ignored for terminal: end = updated_at
-    );
-    expect(result).toEqual({ label: "Duration", value: "5m 0s" });
-  });
-
-  it("falls back to created_at -> updated_at when started_at missing", () => {
-    // FINISHED_AT - QUEUED_AT = 2100s = 35min -> "35m 0s" (legacy fallback)
-    const result = runtimeLabel(
-      job({ updated_at: FINISHED_AT }),
+      job({
+        started_at: STARTED_AT,
+        updated_at: "2026-06-27T06:30:00.000Z",
+        run_seconds: 300,
+      }),
       "Completed",
       NOW_ANY,
     );
-    expect(result).toEqual({ label: "Duration", value: "35m 0s" });
+    expect(result).toEqual({ label: "Processing", value: "5m 0s" });
   });
 
-  it("labels failed rows with 'Duration' (terminal-state group)", () => {
+  it("does not promote started_at -> updated_at into terminal duration", () => {
     const result = runtimeLabel(
       job({ started_at: STARTED_AT, updated_at: FINISHED_AT }),
+      "Completed",
+      NOW_ANY,
+    );
+    expect(result).toBeNull();
+  });
+
+  it("does not promote created_at -> updated_at when started_at is missing", () => {
+    const result = runtimeLabel(job({ updated_at: FINISHED_AT }), "Completed", NOW_ANY);
+    expect(result).toBeNull();
+  });
+
+  it("labels failed rows with immutable processing when available", () => {
+    const result = runtimeLabel(
+      job({ started_at: STARTED_AT, updated_at: FINISHED_AT, run_seconds: 300 }),
       "Failed",
       NOW_ANY,
     );
-    expect(result?.label).toBe("Duration");
+    expect(result).toEqual({ label: "Processing", value: "5m 0s" });
   });
 });
 
@@ -122,16 +129,15 @@ describe("runtimeLabel — defensive guards", () => {
     expect(result).toBeNull();
   });
 
-  it("returns null when end-of-range is before begin (clock skew / data glitch)", () => {
-    // updated_at BEFORE started_at would yield negative duration -- the row
+  it("returns null when live clock is before begin (clock skew / data glitch)", () => {
+    // now BEFORE started_at would yield negative duration -- the row
     // must render nothing rather than a misleading "0s" or absolute value.
     const result = runtimeLabel(
       job({
         started_at: FINISHED_AT,
-        updated_at: STARTED_AT, // earlier than started_at
       }),
-      "Completed",
-      NOW_ANY,
+      "Running",
+      Date.parse(STARTED_AT),
     );
     expect(result).toBeNull();
   });

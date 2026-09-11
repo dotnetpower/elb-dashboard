@@ -896,6 +896,7 @@ _EXTERNAL_RUNTIME_EVIDENCE_KEYS = (
     "blast_version",
     "blast_version_detail",
     "config_snapshot",
+    "execution_timing",
 )
 _EXTERNAL_TERMINAL_STATUSES = frozenset(
     {"completed", "succeeded", "failed", "cancelled", "deleted"}
@@ -952,13 +953,19 @@ def _external_timing_evidence(external_row: dict[str, Any]) -> dict[str, Any] | 
     """Return immutable lifecycle timing suitable for additive storage."""
 
     evidence: dict[str, Any] = {}
-    for key in ("queued_at", "started_at"):
+    for key in (
+        "queued_at",
+        "started_at",
+        "message_enqueued_at",
+        "message_received_at",
+        "submitted_at",
+    ):
         value = _validated_external_timestamp(external_row.get(key))
         if value is not None:
             evidence[key] = value
     status = str(external_row.get("status") or "").strip().casefold()
     if status in _EXTERNAL_TERMINAL_STATUSES:
-        for key in ("completed_at", "failed_at"):
+        for key in ("completed_at", "failed_at", "result_ready_at"):
             timestamp_value = _validated_external_timestamp(external_row.get(key))
             if timestamp_value is not None:
                 evidence[key] = timestamp_value

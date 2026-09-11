@@ -14,6 +14,10 @@ import { queueReasonText, statusColor } from "@/constants";
 
 import { timeAgo } from "./dateGroup";
 import { jobSourceLabel, jobSubmissionSource } from "./jobSource";
+import {
+  formatTimingSeconds,
+  stableProcessingSeconds,
+} from "../blastResults/timingModel";
 
 export interface JobRowProps {
   job: BlastJobSummary;
@@ -43,12 +47,17 @@ function formatDuration(seconds: number): string {
 }
 
 export function runtimeLabel(job: BlastJobSummary, state: DisplayJobState, now: number) {
+  const active = isActiveJobState(state);
+  const queued = isQueuedJobState(state);
+  const stableProcessing = stableProcessingSeconds(job);
+  if (!active && !queued) {
+    return stableProcessing !== null
+      ? { label: "Processing", value: formatTimingSeconds(stableProcessing) }
+      : null;
+  }
   const created = Date.parse(job.created_at || "");
   if (!Number.isFinite(created)) return null;
-  const active = isActiveJobState(state);
-  const finished = Date.parse(job.updated_at || "");
   const started = Date.parse(job.started_at || "");
-  const queued = isQueuedJobState(state);
   // A queued job's "Queued for" timer counts wall-clock since enqueue
   // (`created_at`). Once the job leaves the queue, switch the anchor to
   // `started_at` — the moment the cluster started executing — so the
@@ -60,10 +69,10 @@ export function runtimeLabel(job: BlastJobSummary, state: DisplayJobState, now: 
   // (legacy rows or a job that flipped terminal before any progress write).
   const runtimeAnchor = Number.isFinite(started) ? started : created;
   const begin = queued ? created : runtimeAnchor;
-  const end = active ? now : finished;
+  const end = now;
   if (!Number.isFinite(end) || end < begin) return null;
   const seconds = Math.floor((end - begin) / 1000);
-  const label = queued ? "Queued for" : active ? "Elapsed" : "Duration";
+  const label = queued ? "Queued for" : "Elapsed";
   return {
     label,
     value: formatDuration(seconds),

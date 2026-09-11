@@ -289,7 +289,7 @@ export interface BlastJobSummary {
   /**
    * Service Bus / external request correlation id for a queue-drained job, so
    * an operator can trace a Jobs row back to its Service Bus request message.
-  * Null / absent when no upstream correlation id was supplied.
+   * Null / absent when no upstream correlation id was supplied.
    */
   external_correlation_id?: string | null;
   error_code?: string;
@@ -304,6 +304,10 @@ export interface BlastJobSummary {
   run_seconds?: number | null;
   queue_wait_seconds?: number | null;
   elapsed_seconds?: number | null;
+  completed_at?: string | null;
+  result_ready_at?: string | null;
+  execution_timing?: BlastExecutionTiming | null;
+  timing?: BlastJobTiming | null;
   /**
    * Query identity captured from the submitted FASTA for queue/API jobs (the
    * sibling never echoes them back): total residue length and molecule type
@@ -329,6 +333,48 @@ export interface BlastJobSummary {
    * "Message lifecycle" card.
    */
   message_trace?: BlastMessageTrace;
+}
+
+export interface BlastExecutionTiming {
+  orchestration_started_at?: string | null;
+  orchestration_completed_at?: string | null;
+  orchestration_seconds?: number | null;
+  k8s_setup_started_at?: string | null;
+  k8s_setup_completed_at?: string | null;
+  k8s_setup_seconds?: number | null;
+  blast_started_at?: string | null;
+  blast_completed_at?: string | null;
+  blast_seconds?: number | null;
+  export_started_at?: string | null;
+  export_completed_at?: string | null;
+  export_seconds?: number | null;
+  finalizer_started_at?: string | null;
+  finalizer_completed_at?: string | null;
+  finalizer_seconds?: number | null;
+}
+
+export interface BlastJobTiming {
+  schema_version: number;
+  result_ready_at: string | null;
+  completion_published_at: string | null;
+  time_to_result_seconds: number | null;
+  total_queue_seconds: number | null;
+  service_bus_queue_seconds: number | null;
+  submit_seconds: number | null;
+  execution_queue_seconds: number | null;
+  processing_seconds: number | null;
+  execution_elapsed_seconds: number | null;
+  status_delivery_seconds: number | null;
+  unattributed_seconds: number | null;
+  queue_complete: boolean;
+  breakdown_complete: boolean;
+  phases: {
+    orchestration_seconds: number | null;
+    k8s_setup_seconds: number | null;
+    blast_seconds: number | null;
+    export_seconds: number | null;
+    finalizer_seconds: number | null;
+  };
 }
 
 export interface BlastShardDetail {
@@ -392,7 +438,12 @@ export interface BlastResultComparison {
   partial: boolean;
   inputs: Record<
     string,
-    { files_seen: number; files_parsed: number; read_failures: number; truncated: boolean }
+    {
+      files_seen: number;
+      files_parsed: number;
+      read_failures: number;
+      truncated: boolean;
+    }
   >;
 }
 
@@ -438,6 +489,7 @@ export interface BlastMessageTraceStage {
 
 /** Derived message lifecycle trace + dwell/latency metrics. */
 export interface BlastMessageTrace {
+  schema_version?: number;
   stages: BlastMessageTraceStage[];
   metrics: {
     queue_dwell_ms: number | null;

@@ -40,6 +40,7 @@ MESSAGE_TRACE_STAGES: tuple[str, ...] = (
     "routed",  # execution backend chosen (openapi | local)
     "submitted",  # backend accepted the job (openapi_job_id known)
     "running",  # execution started
+    "transition_published",  # a non-terminal status event reached completion subscribers
     "succeeded",  # terminal OK
     "failed",  # terminal not-OK
     "completion_published",  # result/transition delivered to the completion topic
@@ -85,9 +86,7 @@ def record_stage(
     try:
         repo.append_history(job_id, f"{_EVENT_PREFIX}{stage}", payload)
     except Exception as exc:  # pragma: no cover - best-effort
-        LOGGER.debug(
-            "message_trace record failed job_id=%s stage=%s: %s", job_id, stage, exc
-        )
+        LOGGER.debug("message_trace record failed job_id=%s stage=%s: %s", job_id, stage, exc)
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -122,6 +121,18 @@ def _stage_from_row(row: dict[str, Any]) -> tuple[str, str] | None:
     return stage, stage_ts or str(row.get("ts") or "")
 
 
+def _completion_status_from_row(row: dict[str, Any]) -> str:
+    """Return the published status for a completion trace row, if present."""
+    raw_payload = row.get("payload_json")
+    if not isinstance(raw_payload, str) or not raw_payload:
+        return ""
+    try:
+        payload = json.loads(raw_payload)
+    except (ValueError, TypeError):
+        return ""
+    return str(payload.get("status") or "").strip().casefold() if isinstance(payload, dict) else ""
+
+
 def derive_trace(history_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Derive an ordered stage timeline + dwell/latency metrics from history.
 
@@ -132,10 +143,16 @@ def derive_trace(history_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
     first_ts: dict[str, str] = {}
     for row in history_rows or []:
-        parsed = _stage_from_row(row if isinstance(row, dict) else {})
+        safe_row = row if isinstance(row, dict) else {}
+        parsed = _stage_from_row(safe_row)
         if parsed is None:
             continue
         stage, ts = parsed
+        if stage == "completion_published" and _completion_status_from_row(safe_row) in {
+            "queued",
+            "running",
+        }:
+            stage = "transition_published"
         if stage not in first_ts and ts:
             first_ts[stage] = ts
 
@@ -158,13 +175,15 @@ def derive_trace(history_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "e2e_ms": _delta_ms("enqueued", "completion_published"),
     }
 
-    terminal = None
+    terminal_candidates = []
     for stage in ("succeeded", "failed", "dead_letter"):
-        if stage in first_ts:
-            terminal = stage
-            break
+        terminal_ts = _parse_iso(first_ts.get(stage))
+        if terminal_ts is not None:
+            terminal_candidates.append((terminal_ts, _STAGE_INDEX[stage], stage))
+    terminal = min(terminal_candidates)[2] if terminal_candidates else None
 
     return {
+        "schema_version": 1,
         "stages": stages,
         "metrics": metrics,
         "terminal_stage": terminal,

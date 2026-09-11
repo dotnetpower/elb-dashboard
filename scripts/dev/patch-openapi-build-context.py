@@ -11,7 +11,8 @@ Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`,
 `_patch_finalizer_failure_status`,
 `_patch_web_blast_candidate_selection_evidence`, `_harden_openapi_runtime_ids`,
 `_patch_replay_safe_submit_identity`, `_patch_dead_thread_reclaim_observation_guard`,
-`_patch_runtime_id_observation_fail_closed`, `_patch_submit_runtime_id_priority`,
+`_patch_runtime_id_observation_fail_closed`, `_patch_openapi_execution_timing`,
+`_patch_submit_runtime_id_priority`,
 `_harden_elb_scripts_configmap_reconciliation`,
 `patch_app`, `main`
 Risky contracts: Preserve strict result-path validation; only shard outputs and the exact canonical
@@ -120,14 +121,10 @@ def _replace_fresh_or_legacy(
                 not (longer_spans[0][0] <= start and end <= longer_spans[0][1])
                 for start, end in shorter_spans
             ):
-                raise RuntimeError(
-                    f"ambiguous fresh/legacy build-context state in {path}"
-                )
+                raise RuntimeError(f"ambiguous fresh/legacy build-context state in {path}")
             source = longer_value
             if text.count(source) != 1:
-                raise RuntimeError(
-                    f"expected one nested {longer_name} match in {path}"
-                )
+                raise RuntimeError(f"expected one nested {longer_name} match in {path}")
         elif fresh_spans:
             if len(fresh_spans) != 1:
                 raise RuntimeError(f"expected one fresh match in {path}")
@@ -230,8 +227,7 @@ def _ensure_reference_context_dependency(root: Path) -> None:
     if path.read_text() != desired:
         path.write_text(desired)
     pinned_count = sum(
-        line.split("#", 1)[0].strip().lower() == pinned
-        for line in path.read_text().splitlines()
+        line.split("#", 1)[0].strip().lower() == pinned for line in path.read_text().splitlines()
     )
     if pinned_count != 1:
         raise RuntimeError(f"expected one pinned defusedxml requirement in {path}")
@@ -279,9 +275,7 @@ def _validate_copied_runtime_policy(root: Path) -> None:
         ),
     }
     forbidden = {
-        root / "app" / "result_selection.py": (
-            "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE",
-        ),
+        root / "app" / "result_selection.py": ("SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE",),
         root / "merge-sharded-results.sh": (
             "SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE",
             "candidate pool cannot exceed 5000",
@@ -293,9 +287,7 @@ def _validate_copied_runtime_policy(root: Path) -> None:
             missing.append(f"missing file {path}")
             continue
         text = path.read_text()
-        missing.extend(
-            f"{path}: {fragment}" for fragment in fragments if fragment not in text
-        )
+        missing.extend(f"{path}: {fragment}" for fragment in fragments if fragment not in text)
         missing.extend(
             f"{path}: forbidden {fragment}"
             for fragment in forbidden.get(path, ())
@@ -591,12 +583,12 @@ def _patch_openapi_response_schemas(root: Path) -> None:
         main,
         '@v1.get("/jobs", tags=["Jobs"], summary="List all jobs")\n',
         (
-            '@v1.get(\n'
+            "@v1.get(\n"
             '    "/jobs",\n'
             '    tags=["Jobs"],\n'
             '    summary="List all jobs",\n'
-            '    response_model=JobListResponse,\n'
-            ')\n'
+            "    response_model=JobListResponse,\n"
+            ")\n"
         ),
         "response_model=JobListResponse",
     )
@@ -604,12 +596,12 @@ def _patch_openapi_response_schemas(root: Path) -> None:
         main,
         '@v1.get("/jobs/{job_id}/status", tags=["Jobs"], summary="Get job status")\n',
         (
-            '@v1.get(\n'
+            "@v1.get(\n"
             '    "/jobs/{job_id}/status",\n'
             '    tags=["Jobs"],\n'
             '    summary="Get job status",\n'
-            '    response_model=JobStatusResponse,\n'
-            ')\n'
+            "    response_model=JobStatusResponse,\n"
+            ")\n"
         ),
         "response_model=JobStatusResponse",
     )
@@ -617,12 +609,12 @@ def _patch_openapi_response_schemas(root: Path) -> None:
         main,
         '@external_v1.post("/submit", status_code=202, summary="Submit an external ElasticBLAST job")\n',
         (
-            '@external_v1.post(\n'
+            "@external_v1.post(\n"
             '    "/submit",\n'
-            '    status_code=202,\n'
+            "    status_code=202,\n"
             '    summary="Submit an external ElasticBLAST job",\n'
-            '    response_model=JobStatusResponse,\n'
-            ')\n'
+            "    response_model=JobStatusResponse,\n"
+            ")\n"
         ),
         'summary="Submit an external ElasticBLAST job",\n    response_model=JobStatusResponse,',
     )
@@ -630,11 +622,11 @@ def _patch_openapi_response_schemas(root: Path) -> None:
         main,
         '@external_v1.get("/jobs/{job_id}", summary="Get external ElasticBLAST job status")\n',
         (
-            '@external_v1.get(\n'
+            "@external_v1.get(\n"
             '    "/jobs/{job_id}",\n'
             '    summary="Get external ElasticBLAST job status",\n'
-            '    response_model=JobStatusResponse,\n'
-            ')\n'
+            "    response_model=JobStatusResponse,\n"
+            ")\n"
         ),
         'summary="Get external ElasticBLAST job status",\n    response_model=JobStatusResponse,',
     )
@@ -653,12 +645,12 @@ def _patch_reference_context_endpoint(root: Path) -> None:
         "# ── Jobs — Submit ──────────────────────────────────────────────────────────\n"
     )
     route = (
-        '@v1.post(\n'
+        "@v1.post(\n"
         '    "/web-blast/statistical-context",\n'
         '    tags=["Jobs"],\n'
         '    summary="Resolve Web BLAST statistical context from an NCBI RID",\n'
-        '    response_model=WebBlastStatisticalContextResponse,\n'
-        ')\n'
+        "    response_model=WebBlastStatisticalContextResponse,\n"
+        ")\n"
         "def resolve_web_blast_statistical_context(\n"
         "    req: WebBlastStatisticalContextRequest,\n"
         ") -> dict[str, Any]:\n"
@@ -731,7 +723,7 @@ def _patch_reference_context_endpoint(root: Path) -> None:
         main,
         submit_anchor,
         route,
-        'def resolve_web_blast_statistical_context(',
+        "def resolve_web_blast_statistical_context(",
     )
     metadata_error = (
         "    except Exception as exc:\n"
@@ -1506,6 +1498,344 @@ def _patch_finalizer_failure_status(path: Path) -> None:
     )
 
 
+def _patch_openapi_execution_timing(path: Path) -> None:
+    """Capture terminal Kubernetes/container timing without taxing active polls."""
+
+    _replace_once_unless_marker(
+        path,
+        "def _k8s_job_summary(elb_job_id: str) -> dict[str, Any]:\n",
+        (
+            "def _k8s_job_summary(\n"
+            "    elb_job_id: str, *, include_container_timing: bool = False\n"
+            ") -> dict[str, Any]:\n"
+        ),
+        "include_container_timing: bool = False",
+    )
+    _insert_once(
+        path,
+        "    summary = dict(empty)\n",
+        (
+            "    timing_values: dict[str, dict[str, list[str]]] = {\n"
+            '        phase: {"started": [], "completed": []}\n'
+            '        for phase in ("k8s_setup", "k8s_workload", "finalizer")\n'
+            "    }\n"
+        ),
+        "    timing_values: dict[str, dict[str, list[str]]] = {\n",
+    )
+    _insert_once(
+        path,
+        (
+            '        labels = item.get("metadata", {}).get("labels", {})\n'
+            '        app_label = labels.get("app", "")\n'
+            '        status = item.get("status", {})\n'
+        ),
+        (
+            "        timing_phase = {\n"
+            '            "setup": "k8s_setup",\n'
+            '            "blast": "k8s_workload",\n'
+            '            "finalizer": "finalizer",\n'
+            "        }.get(app_label)\n"
+            "        if timing_phase:\n"
+            '            if status.get("startTime"):\n'
+            '                timing_values[timing_phase]["started"].append(\n'
+            '                    str(status["startTime"])\n'
+            "                )\n"
+            '            if status.get("completionTime"):\n'
+            '                timing_values[timing_phase]["completed"].append(\n'
+            '                    str(status["completionTime"])\n'
+            "                )\n"
+        ),
+        "        timing_phase = {\n",
+    )
+    summary_tail = """    return summary
+
+
+def _k8s_pod_stuck_reason(elb_job_id: str) -> str | None:
+"""
+    timing_tail = """    def add_span(
+        prefix: str, started_values: list[str], completed_values: list[str]
+    ) -> None:
+        started_at = min(started_values) if started_values else ""
+        completed_at = max(completed_values) if completed_values else ""
+        if started_at:
+            summary[f"{prefix}_started_at"] = started_at
+        if completed_at:
+            summary[f"{prefix}_completed_at"] = completed_at
+        duration = _duration_seconds(started_at, completed_at)
+        if duration is not None:
+            summary[f"{prefix}_seconds"] = duration
+
+    for phase, values in timing_values.items():
+        add_span(phase, values["started"], values["completed"])
+
+    if include_container_timing:
+        container_values: dict[str, dict[str, list[str]]] = {
+            phase: {"started": [], "completed": []}
+            for phase in ("blast", "export")
+        }
+        try:
+            pod_proc = safe_exec(
+                [
+                    "kubectl",
+                    "get",
+                    "pods",
+                    "-l",
+                    f"elb-job-id={elb_job_id}",
+                    "-o",
+                    "json",
+                ],
+                timeout=15,
+            )
+            raw_pod_items = json.loads(pod_proc.stdout or "{}").get("items", [])
+            pod_items = raw_pod_items[:4096] if isinstance(raw_pod_items, list) else []
+            if isinstance(raw_pod_items, list) and len(raw_pod_items) > len(pod_items):
+                logger.warning(
+                    "terminal container timing truncated job=%s pods=%d cap=%d",
+                    elb_job_id,
+                    len(raw_pod_items),
+                    len(pod_items),
+                )
+        except Exception as exc:
+            summary["container_timing_error"] = type(exc).__name__
+            logger.warning(
+                "terminal container timing unavailable job=%s reason=%s",
+                elb_job_id,
+                type(exc).__name__,
+            )
+            pod_items = []
+        for pod in pod_items if isinstance(pod_items, list) else []:
+            statuses = pod.get("status", {}).get("containerStatuses", [])
+            for container in statuses if isinstance(statuses, list) else []:
+                container_name = str(container.get("name") or "")
+                phase = {"blast": "blast", "results-export": "export"}.get(
+                    container_name
+                )
+                if not phase:
+                    continue
+                terminated = container.get("state", {}).get("terminated", {})
+                if not isinstance(terminated, dict):
+                    continue
+                if terminated.get("startedAt"):
+                    container_values[phase]["started"].append(
+                        str(terminated["startedAt"])
+                    )
+                if terminated.get("finishedAt"):
+                    container_values[phase]["completed"].append(
+                        str(terminated["finishedAt"])
+                    )
+        for phase, values in container_values.items():
+            add_span(phase, values["started"], values["completed"])
+    return summary
+
+
+def _execution_timing_payload(
+    job_info: dict[str, Any], summary: dict[str, Any]
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for phase in ("k8s_setup", "blast", "export", "finalizer"):
+        for suffix in ("started_at", "completed_at", "seconds"):
+            key = f"{phase}_{suffix}"
+            value = summary.get(key)
+            if value not in (None, ""):
+                output[key] = value
+    orchestration_started_at = str(job_info.get("started_at") or "")
+    first_k8s_candidates = [
+        str(summary.get(key) or "")
+        for key in ("k8s_setup_started_at", "k8s_workload_started_at")
+        if summary.get(key)
+    ]
+    orchestration_completed_at = min(first_k8s_candidates) if first_k8s_candidates else ""
+    orchestration_seconds = _duration_seconds(
+        orchestration_started_at, orchestration_completed_at
+    )
+    if orchestration_started_at:
+        output["orchestration_started_at"] = orchestration_started_at
+    if orchestration_completed_at:
+        output["orchestration_completed_at"] = orchestration_completed_at
+    if orchestration_seconds is not None:
+        output["orchestration_seconds"] = orchestration_seconds
+    if output.get("finalizer_started_at") and not output.get("finalizer_completed_at"):
+        terminal_at = str(
+            job_info.get("completed_at")
+            or job_info.get("failed_at")
+            or ""
+        )
+        finalizer_seconds = (
+            _duration_seconds(output["finalizer_started_at"], terminal_at)
+            if terminal_at
+            else None
+        )
+        if terminal_at and finalizer_seconds is not None:
+            output["finalizer_completed_at"] = terminal_at
+            output["finalizer_seconds"] = finalizer_seconds
+    return output
+
+
+def _k8s_pod_stuck_reason(elb_job_id: str) -> str | None:
+"""
+    _replace_once_unless_marker(
+        path,
+        summary_tail,
+        timing_tail,
+        "def _execution_timing_payload(\n",
+    )
+    _replace_once_unless_marker(
+        path,
+        "    snapshot = _k8s_job_summary(elb_job_id)\n",
+        "    snapshot = _k8s_job_summary(elb_job_id, include_container_timing=True)\n",
+        "include_container_timing=True",
+    )
+    _insert_once(
+        path,
+        (
+            '        payload["execution"] = {\n'
+            '            "shard_count": int(summary.get("total", 0) or 0),\n'
+            '            "shards_succeeded": int(summary.get("succeeded", 0) or 0),\n'
+            '            "shards_active": int(summary.get("active", 0) or 0),\n'
+            '            "shards_failed": int(summary.get("failed", 0) or 0),\n'
+            "        }\n"
+        ),
+        (
+            "        execution_timing = _execution_timing_payload(job_info, summary)\n"
+            "        if execution_timing:\n"
+            '            payload["execution_timing"] = execution_timing\n'
+        ),
+        '            payload["execution_timing"] = execution_timing\n',
+    )
+    _insert_once(
+        path,
+        (
+            '            payload["run_seconds"] = (\n'
+            "                _duration_seconds(started_at, terminal_at) if started_at else None\n"
+            "            )\n"
+        ),
+        (
+            '            payload["completed_at"] = terminal_at\n'
+            '            payload["result_ready_at"] = terminal_at\n'
+            "            summary = (\n"
+            '                updates.get("k8s_summary")\n'
+            '                if isinstance(updates.get("k8s_summary"), dict)\n'
+            '                else merged.get("k8s_summary", {})\n'
+            "            )\n"
+            "            execution_timing = _execution_timing_payload(merged, summary)\n"
+            "            if execution_timing:\n"
+            '                payload["execution_timing"] = execution_timing\n'
+        ),
+        '            payload["result_ready_at"] = terminal_at\n',
+    )
+
+
+def _patch_terminal_timing_immutability(path: Path) -> None:
+    """Require immutable completion/failure timestamps for terminal durations."""
+
+    _replace_once(
+        path,
+        (
+            "            terminal_at = (\n"
+            '                merged.get("completed_at")\n'
+            '                or merged.get("failed_at")\n'
+            '                or merged.get("updated_at")\n'
+            "            )\n"
+            '            payload["started_at"] = started_at\n'
+            '            payload["elapsed_seconds"] = _duration_seconds(\n'
+            '                merged.get("created_at"), terminal_at\n'
+            "            )\n"
+            '            payload["queue_wait_seconds"] = (\n'
+            '                _duration_seconds(merged.get("queued_at"), started_at)\n'
+            "                if started_at\n"
+            "                else None\n"
+            "            )\n"
+            '            payload["run_seconds"] = (\n'
+            "                _duration_seconds(started_at, terminal_at) if started_at else None\n"
+            "            )\n"
+        ),
+        (
+            '            terminal_at = merged.get("completed_at") or merged.get("failed_at")\n'
+            '            payload["started_at"] = started_at\n'
+            '            payload["elapsed_seconds"] = (\n'
+            '                _duration_seconds(merged.get("created_at"), terminal_at)\n'
+            "                if terminal_at\n"
+            "                else None\n"
+            "            )\n"
+            '            payload["queue_wait_seconds"] = (\n'
+            '                _duration_seconds(merged.get("queued_at"), started_at)\n'
+            "                if started_at\n"
+            "                else None\n"
+            "            )\n"
+            '            payload["run_seconds"] = (\n'
+            "                _duration_seconds(started_at, terminal_at)\n"
+            "                if started_at and terminal_at\n"
+            "                else None\n"
+            "            )\n"
+        ),
+    )
+    _replace_once(
+        path,
+        (
+            '    terminal_at = job_info.get("completed_at") or job_info.get("failed_at") or job_info.get("updated_at")\n'
+            '    elapsed_end = terminal_at if public_status in {"success", "failed"} else None\n'
+            '    elapsed_seconds = _duration_seconds(job_info.get("created_at"), elapsed_end)\n'
+        ),
+        (
+            '    terminal_at = job_info.get("completed_at") or job_info.get("failed_at")\n'
+            '    elapsed_end = terminal_at if public_status in {"success", "failed"} else None\n'
+            "    elapsed_seconds = (\n"
+            '        _duration_seconds(job_info.get("created_at"), elapsed_end)\n'
+            "        if elapsed_end\n"
+            "        else None\n"
+            "    )\n"
+        ),
+    )
+    _replace_once(
+        path,
+        '    run_seconds = _duration_seconds(job_info.get("started_at"), elapsed_end)\n',
+        (
+            "    run_seconds = (\n"
+            '        _duration_seconds(job_info.get("started_at"), elapsed_end)\n'
+            '        if job_info.get("started_at") and elapsed_end\n'
+            "        else None\n"
+            "    )\n"
+        ),
+    )
+    _replace_once(
+        path,
+        (
+            "        terminal_at = (\n"
+            '            i.get("completed_at")\n'
+            '            or i.get("failed_at")\n'
+            '            or i.get("updated_at")\n'
+            "        )\n"
+        ),
+        '        terminal_at = i.get("completed_at") or i.get("failed_at")\n',
+    )
+    _replace_once(
+        path,
+        '            "elapsed_seconds": _duration_seconds(i.get("created_at"), elapsed_end),\n',
+        (
+            '            "elapsed_seconds": (\n'
+            '                _duration_seconds(i.get("created_at"), elapsed_end)\n'
+            "                if elapsed_end\n"
+            "                else None\n"
+            "            ),\n"
+        ),
+    )
+    _replace_once(
+        path,
+        (
+            '            "run_seconds": (\n'
+            "                _duration_seconds(started_at, elapsed_end) if started_at else None\n"
+            "            ),\n"
+        ),
+        (
+            '            "run_seconds": (\n'
+            "                _duration_seconds(started_at, elapsed_end)\n"
+            "                if started_at and elapsed_end\n"
+            "                else None\n"
+            "            ),\n"
+        ),
+    )
+
+
 def _patch_terminal_webhook_runtime_id(path: Path) -> None:
     """Attach a genuine ElasticBLAST runtime id to terminal webhooks."""
 
@@ -1608,7 +1938,7 @@ def _harden_openapi_runtime_ids(path: Path) -> None:
 def _patch_replay_safe_submit_identity(path: Path) -> None:
     """Persist one runtime identity before submit and recover legacy in-flight work."""
 
-    helpers = '''def _deterministic_elb_job_id(job_id: str) -> str:
+    helpers = """def _deterministic_elb_job_id(job_id: str) -> str:
     digest = hashlib.sha256(f"elb-openapi:{job_id}".encode("utf-8")).hexdigest()
     return f"job-{digest[:32]}"
 
@@ -1677,7 +2007,7 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:
     return selected, True
 
 
-'''
+"""
     _replace_once_unless_marker(
         path,
         "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n",
@@ -1695,14 +2025,14 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:
         (
             "    if (\n"
             "        not discovered\n"
-            "        and int(job_info.get(\"attempt\", 0) or 0) > 0\n"
-            "        and str(job_info.get(\"status\") or \"\") in {\n"
-            "        \"dispatching\", \"submitting\", \"running\"\n"
+            '        and int(job_info.get("attempt", 0) or 0) > 0\n'
+            '        and str(job_info.get("status") or "") in {\n'
+            '        "dispatching", "submitting", "running"\n'
             "        }\n"
             "    ):\n"
             "        discovered, observed = _discover_elb_job_id_from_k8s_jobs(job_id)\n"
             "        if not observed:\n"
-            "            job_info[\"_runtime_id_observation_failed\"] = True\n"
+            '            job_info["_runtime_id_observation_failed"] = True\n'
             "    if discovered:\n"
             "        _update_job(job_id, elb_job_id=discovered)\n"
             "        return discovered\n"
@@ -1720,13 +2050,13 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:
         ),
         (
             "\n    runtime_job_id = _effective_elb_job_id(job)\n"
-            "    if job.pop(\"_runtime_id_observation_failed\", False):\n"
+            '    if job.pop("_runtime_id_observation_failed", False):\n'
             "        logger.warning(\n"
-            "            \"submit deferred because runtime-id observation failed job=%s\",\n"
+            '            "submit deferred because runtime-id observation failed job=%s",\n'
             "            job_id,\n"
             "        )\n"
             "        return\n"
-            "    if not re.fullmatch(r\"job-[0-9a-f]{32}\", runtime_job_id, re.IGNORECASE):\n"
+            '    if not re.fullmatch(r"job-[0-9a-f]{32}", runtime_job_id, re.IGNORECASE):\n'
             "        runtime_job_id = _deterministic_elb_job_id(job_id)\n"
         ),
         "        runtime_job_id = _deterministic_elb_job_id(job_id)\n",
@@ -1763,7 +2093,7 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:
             '                "updated_at": _now_iso(),\n'
             "            }\n"
             "        logger.error(\n"
-            "            \"submit deferred because runtime-id persistence failed job=%s reason=%s\",\n"
+            '            "submit deferred because runtime-id persistence failed job=%s reason=%s",\n'
             "            job_id,\n"
             "            type(exc).__name__,\n"
             "        )\n"
@@ -1806,9 +2136,9 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:
     if submit_end < 0:
         raise RuntimeError("could not isolate replay-safe OpenAPI submit function")
     submit_block = text[submit_start:submit_end]
-    if submit_block.index("_save_job(job_id, submit_state, require_persist=True)") > submit_block.index(
-        "result = run_cancellable"
-    ):
+    if submit_block.index(
+        "_save_job(job_id, submit_state, require_persist=True)"
+    ) > submit_block.index("result = run_cancellable"):
         raise RuntimeError("OpenAPI runtime identity must persist before submit side effects")
 
 
@@ -1818,10 +2148,7 @@ def _patch_dead_thread_reclaim_observation_guard(path: Path) -> None:
     _replace_once_unless_marker(
         path,
         '    if summary.get("total") or summary.get("submit_failed"):\n',
-        (
-            '    if summary.get("error") or summary.get("total") '
-            'or summary.get("submit_failed"):\n'
-        ),
+        ('    if summary.get("error") or summary.get("total") or summary.get("submit_failed"):\n'),
         '    if summary.get("error") or summary.get("total")',
     )
 
@@ -2123,6 +2450,11 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "_save_job(job_id, submit_state, require_persist=True)",
         '"phase": "submit_state_persist_failed"',
         '"runtime identity observation unavailable"',
+        "include_container_timing: bool = False",
+        "include_container_timing=True",
+        "def _execution_timing_payload(",
+        'payload["execution_timing"] = execution_timing',
+        'payload["result_ready_at"] = terminal_at',
         '                    "--json",',
         '                    "--idempotency-key",',
         'if summary.get("error") or summary.get("total")',
@@ -2139,7 +2471,7 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "not requires_canonical_merge",
         "canonical merged result was not published before the finalizer deadline",
         "import reference_context as _reference_context",
-        'def resolve_web_blast_statistical_context(',
+        "def resolve_web_blast_statistical_context(",
         "reference context active database metadata unavailable error_type=%s",
         "response_model=WebBlastStatisticalContextResponse",
         "response_model=JobListResponse",
@@ -2737,6 +3069,8 @@ def patch_app(root: Path) -> None:
     )
     _patch_result_selection_policy(path)
     _patch_finalizer_failure_status(path)
+    _patch_openapi_execution_timing(path)
+    _patch_terminal_timing_immutability(path)
     _replace_once_unless_marker(
         path,
         "def _job_marker_phase(results_url: str) -> str | None:\n"

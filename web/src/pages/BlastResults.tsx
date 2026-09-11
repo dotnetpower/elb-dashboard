@@ -134,6 +134,7 @@ export function BlastResults() {
         jobTitle={job?.job_title ?? null}
         createdAt={job?.created_at ?? null}
         updatedAt={job?.updated_at ?? null}
+        timing={job?.timing ?? null}
         isRunning={isRunning}
         canCancel={canRequestCancel}
         cancelDisabled={actions.cancelMutation.isPending}
@@ -202,11 +203,13 @@ export function BlastResults() {
         </div>
       )}
 
-      <BlastResultsTabs active={tab} resultsPending={isRunning} effectivePhase={effectivePhase} />
+      <BlastResultsTabs
+        active={tab}
+        resultsPending={isRunning}
+        effectivePhase={effectivePhase}
+      />
 
-      {isResultAnalyticsTab && !isRunning && job && (
-        <ResultPassportCard job={job} />
-      )}
+      {isResultAnalyticsTab && !isRunning && job && <ResultPassportCard job={job} />}
 
       {resultTabWaitingForJob && (
         <ResultsPendingPanel

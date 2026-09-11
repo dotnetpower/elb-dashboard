@@ -217,7 +217,7 @@ export function toJobRowView(j: BlastJobSummary): JobRowView {
     clusterName: jobClusterName(j),
     state: effectiveState,
     createdAt: j.created_at ?? null,
-    elapsedSec: terminalElapsedSec(j, effectiveState),
+    elapsedSec: processingElapsedSec(j, effectiveState),
     splitsDone,
     splitsTotal,
     note,
@@ -317,12 +317,21 @@ function isStaleActiveWithoutProgress(
   return Date.now() - timestamp > STALE_ACTIVE_WITHOUT_PROGRESS_MS;
 }
 
-function terminalElapsedSec(j: BlastJobSummary, state: DisplayJobState): number | null {
-  if (isActiveJobState(state)) return null;
-  const created = Date.parse(j.created_at || "");
-  const updated = Date.parse(j.updated_at || "");
-  if (!Number.isFinite(created) || !Number.isFinite(updated) || updated < created) {
-    return null;
+function processingElapsedSec(j: BlastJobSummary, state: DisplayJobState): number | null {
+  if (state === "Running" || state === "Reducing") {
+    const startedAt = Date.parse(j.started_at || "");
+    const now = Date.now();
+    return Number.isFinite(startedAt) && now >= startedAt
+      ? Math.floor((now - startedAt) / 1000)
+      : null;
   }
-  return Math.max(0, Math.floor((updated - created) / 1000));
+  if (state === "Completed" || state === "Failed") {
+    const processing = j.timing?.processing_seconds ?? j.run_seconds;
+    return typeof processing === "number" &&
+      Number.isFinite(processing) &&
+      processing >= 0
+      ? Math.floor(processing)
+      : null;
+  }
+  return null;
 }

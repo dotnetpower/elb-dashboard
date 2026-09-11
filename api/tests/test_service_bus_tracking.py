@@ -149,6 +149,27 @@ def test_active_bridge_pages_rotate_without_starving_rows() -> None:
     assert seen[5] == "corr-0"
 
 
+def test_local_transition_markers_are_monotonic_and_terminal_sticky() -> None:
+    t.upsert_bridge(
+        BridgeRecord(
+            correlation_id="corr-monotonic",
+            openapi_job_id="job-monotonic",
+            last_status="queued",
+        )
+    )
+
+    t.mark_published("corr-monotonic", "running")
+    t.mark_published("corr-monotonic", "queued")
+    t.mark_done("corr-monotonic", "succeeded")
+    t.mark_published("corr-monotonic", "running")
+    t.mark_done("corr-monotonic", "failed")
+
+    record = t.get_bridge("corr-monotonic")
+    assert record is not None
+    assert record.last_status == "succeeded"
+    assert record.done is True
+
+
 def test_table_page_does_not_issue_zero_size_wrap_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -201,11 +222,15 @@ def _table_entity(
     *,
     etag: str | None = _ETAG,
     openapi_job_id: str = "",
+    last_status: str = "",
+    done: bool = False,
 ) -> TableEntity:
     """A deserialized row whose etag lives in ``metadata``, as the SDK returns it."""
     record = BridgeRecord(
         correlation_id=correlation_id,
         openapi_job_id=openapi_job_id,
+        last_status=last_status,
+        done=done,
         # Far in the past → stale under any allowed threshold (floored at 30s).
         created_at="2020-01-01T00:00:00+00:00",
         claimed_at="2020-01-01T00:00:00+00:00",
@@ -315,6 +340,54 @@ def test_entity_etag_prefers_metadata_over_mapping_key() -> None:
     # Plain-dict fallback stays supported for fixtures / non-SDK callers.
     assert t._entity_etag({"odata.etag": 'W/"x"'}) == 'W/"x"'
     assert t._entity_etag({}) == ""
+
+
+def test_table_transition_does_not_overwrite_concurrent_terminal_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RacingTable:
+        def __init__(self) -> None:
+            self.entity = _table_entity(
+                "corr-transition-race",
+                etag='W/"v1"',
+                openapi_job_id="job-transition-race",
+                last_status="queued",
+            )
+            self.update_calls = 0
+
+        def get_entity(self, **_kwargs: Any) -> TableEntity:
+            return self.entity
+
+        def update_entity(self, *_args: Any, **_kwargs: Any) -> None:
+            self.update_calls += 1
+            self.entity = _table_entity(
+                "corr-transition-race",
+                etag='W/"v2"',
+                openapi_job_id="job-transition-race",
+                last_status="succeeded",
+                done=True,
+            )
+            raise t.ResourceModifiedError("terminal writer won")
+
+    table = _RacingTable()
+
+    @contextmanager
+    def _client():
+        yield table
+
+    monkeypatch.setattr(t, "_ensure_table", lambda: None)
+    monkeypatch.setattr(t, "_table_client", _client)
+    backoffs: list[float] = []
+    monkeypatch.setattr(t, "sleep", backoffs.append)
+
+    t._mark_table_transition("corr-transition-race", "running", done=False)
+
+    record = t._record_from_entity(dict(table.entity))
+    assert record is not None
+    assert record.last_status == "succeeded"
+    assert record.done is True
+    assert table.update_calls == 1
+    assert backoffs == [t._TRANSITION_RETRY_BACKOFF_SECONDS]
 
 
 def test_release_table_is_quiet_when_the_row_vanishes_mid_delete(

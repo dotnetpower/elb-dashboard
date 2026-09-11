@@ -22,10 +22,12 @@ import { useToast } from "@/components/Toast";
 import type {
   BlastDatabaseMetadata,
   BlastExportFormat,
+  BlastJobTiming,
   BlastResultFile,
 } from "@/api/endpoints";
 import { blastApi } from "@/api/blast";
 import { BlastHelpMenu } from "@/pages/blastResults/BlastHelpMenu";
+import { formatTimingSeconds } from "@/pages/blastResults/timingModel";
 import {
   WORKFLOW_EXPORT_FORMATS,
   workflowExportFilename,
@@ -47,6 +49,7 @@ interface BlastJobHeaderProps {
   jobTitle: string | null;
   createdAt: string | null;
   updatedAt?: string | null;
+  timing?: BlastJobTiming | null;
   isRunning: boolean;
   canCancel: boolean;
   cancelDisabled: boolean;
@@ -102,7 +105,7 @@ export function BlastJobHeader({
   jobId,
   jobTitle,
   createdAt,
-  updatedAt,
+  timing,
   isRunning,
   canCancel,
   cancelDisabled,
@@ -132,7 +135,9 @@ export function BlastJobHeader({
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const [loadingQuery, setLoadingQuery] = useState(false);
   const [copyingCitation, setCopyingCitation] = useState(false);
-  const [exportingWorkflow, setExportingWorkflow] = useState<WorkflowExportFormat | null>(null);
+  const [exportingWorkflow, setExportingWorkflow] = useState<WorkflowExportFormat | null>(
+    null,
+  );
   const [exportingReproducibility, setExportingReproducibility] = useState(false);
   const [showPipelineMenu, setShowPipelineMenu] = useState(false);
 
@@ -155,7 +160,7 @@ export function BlastJobHeader({
     pickNumber(configSnapshot, ["outfmt"]) ?? pickNumber(jobPayload, ["outfmt"]);
   const dbSequenceCount = formatCount(databaseMetadata?.number_of_sequences);
   const dbLetterCount = formatCount(databaseMetadata?.number_of_letters);
-  const timingMetrics = buildTimingMetrics({ createdAt, updatedAt, customStatus });
+  const timingMetrics = buildTimingMetrics({ customStatus, timing });
 
   const handleCopyId = async () => {
     try {
@@ -344,7 +349,10 @@ export function BlastJobHeader({
   const closeDownloadMenu = () => setShowDownloadMenu(false);
 
   return (
-    <header className="blast-job-header" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    <header
+      className="blast-job-header"
+      style={{ display: "flex", flexDirection: "column", gap: 8 }}
+    >
       <div
         style={{
           display: "flex",
@@ -422,29 +430,34 @@ export function BlastJobHeader({
             }}
             title="Re-submit this job with the same parameters"
           >
-            <RotateCcw size={14} strokeWidth={1.5} /> {retryDisabled ? "Retrying…" : "Retry"}
+            <RotateCcw size={14} strokeWidth={1.5} />{" "}
+            {retryDisabled ? "Retrying…" : "Retry"}
           </button>
         )}
-        {autoRetry && failureClassification && (autoRetry.count > 0 || autoRetry.quarantined) && (
-          <span
-            title={
-              failureClassification?.reason ??
-              (autoRetry.quarantined ? "Auto-retry budget exhausted" : "Auto-retried")
-            }
-            style={{
-              fontSize: 11,
-              fontWeight: 600,
-              padding: "3px 8px",
-              borderRadius: 8,
-              color: autoRetry.quarantined ? "var(--danger, #f87171)" : "var(--text-muted)",
-              background: "var(--bg-tertiary)",
-            }}
-          >
-            {autoRetry.quarantined
-              ? "Quarantined"
-              : `Auto-retry ${autoRetry.count}/${autoRetry.max ?? 2}`}
-          </span>
-        )}
+        {autoRetry &&
+          failureClassification &&
+          (autoRetry.count > 0 || autoRetry.quarantined) && (
+            <span
+              title={
+                failureClassification?.reason ??
+                (autoRetry.quarantined ? "Auto-retry budget exhausted" : "Auto-retried")
+              }
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                padding: "3px 8px",
+                borderRadius: 8,
+                color: autoRetry.quarantined
+                  ? "var(--danger, #f87171)"
+                  : "var(--text-muted)",
+                background: "var(--bg-tertiary)",
+              }}
+            >
+              {autoRetry.quarantined
+                ? "Quarantined"
+                : `Auto-retry ${autoRetry.count}/${autoRetry.max ?? 2}`}
+            </span>
+          )}
         <button
           className="glass-button glass-button--primary"
           onClick={handleEditSearch}
@@ -628,7 +641,8 @@ export function BlastJobHeader({
                       padding: "2px 7px",
                       borderRadius: 6,
                       background: "color-mix(in srgb, var(--accent) 8%, transparent)",
-                      border: "1px solid color-mix(in srgb, var(--accent) 16%, transparent)",
+                      border:
+                        "1px solid color-mix(in srgb, var(--accent) 16%, transparent)",
                       fontSize: 12,
                     }}
                   >
@@ -993,7 +1007,8 @@ function DownloadAllMenu({
                 opacity: option.disabled ? 0.62 : 1,
               }}
               onMouseEnter={(event) => {
-                if (!option.disabled) event.currentTarget.style.background = "var(--glass-bg)";
+                if (!option.disabled)
+                  event.currentTarget.style.background = "var(--glass-bg)";
               }}
               onMouseLeave={(event) => {
                 event.currentTarget.style.background = "transparent";
@@ -1020,7 +1035,8 @@ function buildDownloadAllOptions(
     ? resultFiles.some((file) => resultFileLooksXml(file))
     : submittedOutfmt === 5;
   const textCaptured = submittedOutfmt === 0;
-  const rawOnlyTitle = "Captured only when the search is submitted with this output format.";
+  const rawOnlyTitle =
+    "Captured only when the search is submitted with this output format.";
   return [
     {
       key: "text",
@@ -1128,7 +1144,12 @@ function buildDownloadAllOptions(
 function resultFileLooksXml(file: BlastResultFile): boolean {
   const format = String(file.format ?? "").toLowerCase();
   const name = file.name.toLowerCase();
-  return format === "blast_xml" || format === "xml" || name.endsWith(".xml") || name.endsWith(".xml.gz");
+  return (
+    format === "blast_xml" ||
+    format === "xml" ||
+    name.endsWith(".xml") ||
+    name.endsWith(".xml.gz")
+  );
 }
 
 function Term({ label }: { label: string }) {
@@ -1233,9 +1254,7 @@ function deriveDbMolecule(program: string | null | undefined): string | null {
   }
 }
 
-function firstQueryRecordId(
-  payload: Record<string, unknown> | undefined,
-): string | null {
+function firstQueryRecordId(payload: Record<string, unknown> | undefined): string | null {
   const metadata = payload?.query_metadata;
   if (!metadata || typeof metadata !== "object") return null;
   const records = (metadata as Record<string, unknown>).records;
@@ -1261,9 +1280,7 @@ function firstQueryRecordLength(
     : null;
 }
 
-function queryFileBasename(
-  payload: Record<string, unknown> | undefined,
-): string | null {
+function queryFileBasename(payload: Record<string, unknown> | undefined): string | null {
   const raw = pickString(payload, ["query_file", "query_blob_url"]);
   if (!raw) return null;
   const cleaned = raw.replace(/\\/g, "/");
@@ -1318,24 +1335,57 @@ export interface TimingMetric {
 }
 
 export function buildTimingMetrics({
-  createdAt,
-  updatedAt,
   customStatus,
+  timing,
 }: {
-  createdAt: string | null;
+  createdAt?: string | null;
   updatedAt?: string | null;
   customStatus?: unknown;
+  timing?: BlastJobTiming | null;
 }): TimingMetric[] {
   const metrics: TimingMetric[] = [];
-  const workflowMs = durationBetweenMs(createdAt, updatedAt ?? null);
-  if (workflowMs !== null) {
-    metrics.push({
-      label: "Workflow",
-      value: formatDurationMs(workflowMs),
-      title: "Dashboard elapsed time from submit acceptance to the latest recorded update.",
-    });
+  if (timing) {
+    const stableMetrics: Array<[string, number | null, string]> = [
+      [
+        "Time to result",
+        timing.time_to_result_seconds,
+        "User wait from broker enqueue or API acceptance until the result became ready.",
+      ],
+      [
+        timing.queue_complete ? "Queue wait" : "Execution queue",
+        timing.total_queue_seconds,
+        timing.queue_complete
+          ? "Combined broker and execution-admission queue time."
+          : "Known execution-admission queue time; upstream broker timing was not recorded.",
+      ],
+      [
+        "Submit",
+        timing.submit_seconds,
+        "Control-plane routing and OpenAPI submit latency.",
+      ],
+      [
+        "Processing",
+        timing.processing_seconds,
+        "OpenAPI orchestration, Kubernetes setup, BLAST, export, and finalization.",
+      ],
+      [
+        "Other execution",
+        timing.unattributed_seconds && timing.unattributed_seconds > 0
+          ? timing.unattributed_seconds
+          : null,
+        "Execution time not attributed to queueing or the reported processing interval.",
+      ],
+      [
+        "Status delivery",
+        timing.status_delivery_seconds,
+        "Result-ready to terminal notification delivery; excluded from time to result.",
+      ],
+    ];
+    for (const [label, seconds, title] of stableMetrics) {
+      if (finiteTimingSeconds(seconds) === null) continue;
+      metrics.push({ label, value: formatTimingSeconds(seconds), title });
+    }
   }
-
   const steps = recordValue(recordValue(customStatus)?.steps);
   const running = recordValue(steps?.running);
   const submitting = recordValue(steps?.submitting);
@@ -1374,25 +1424,33 @@ export function buildTimingMetrics({
   const exportContainerMs = numberValue(k8s?.results_export_container_duration_ms);
   const exportWorkflowMs = numberValue(exporting?.duration_ms);
   if (exportContainerMs !== null || exportWorkflowMs !== null) {
-    const value = exportContainerMs !== null
-      ? formatDurationMs(exportContainerMs)
-      : formatDurationMs(exportWorkflowMs ?? 0);
+    const value =
+      exportContainerMs !== null
+        ? formatDurationMs(exportContainerMs)
+        : formatDurationMs(exportWorkflowMs ?? 0);
     metrics.push({
       label: exportContainerMs !== null ? "Export containers" : "Export path",
       value,
-      title: exportContainerMs !== null && exportWorkflowMs !== null
-        ? `Result export containers ran for ${value}; dashboard export/finalize path was ${formatDurationMs(exportWorkflowMs)}.`
-        : exportContainerMs !== null
-          ? "Wall-clock span of the result export containers."
-          : "Dashboard export/finalize path after the K8s BLAST runtime completed.",
+      title:
+        exportContainerMs !== null && exportWorkflowMs !== null
+          ? `Result export containers ran for ${value}; dashboard export/finalize path was ${formatDurationMs(exportWorkflowMs)}.`
+          : exportContainerMs !== null
+            ? "Wall-clock span of the result export containers."
+            : "Dashboard export/finalize path after the K8s BLAST runtime completed.",
     });
   }
 
   return metrics;
 }
 
+function finiteTimingSeconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 function recordValue(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function numberValue(value: unknown): number | null {
@@ -1407,7 +1465,8 @@ function durationBetweenMs(start: string | null, end: string | null): number | n
   if (!start || !end) return null;
   const startMs = Date.parse(start);
   const endMs = Date.parse(end);
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return null;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs)
+    return null;
   return endMs - startMs;
 }
 

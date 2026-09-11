@@ -678,6 +678,11 @@ def _external_to_blast_job(
         "phase": status,
         "created_at": created_at,
         "updated_at": updated_at,
+        "completed_at": job.get("completed_at") or None,
+        "result_ready_at": job.get("result_ready_at") or job.get("completed_at") or None,
+        "execution_timing": (
+            dict(job["execution_timing"]) if isinstance(job.get("execution_timing"), dict) else None
+        ),
         "source": source,
         "submission_source": source,
         "queue_origin": str(job.get("queue_origin") or ""),
@@ -803,6 +808,9 @@ def _external_to_blast_job(
         out["error"] = error_message
     if error_code:
         out["error_code"] = error_code
+    from api.services.blast.timing import build_job_timing
+
+    out["timing"] = build_job_timing(out)
     return out
 
 

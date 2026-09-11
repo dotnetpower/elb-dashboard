@@ -306,9 +306,7 @@ def test_validate_copied_runtime_policy_rejects_missing_marker(tmp_path: Path) -
         "_FETCH_LOCK.acquire(timeout=_FETCH_LOCK_WAIT_SECONDS)\n"
     )
     (app / "requirements.txt").write_text("defusedxml==0.7.1\n")
-    (tmp_path / "merge-sharded-results.sh").write_text(
-        "num_shards must be between 1 and 1024\n"
-    )
+    (tmp_path / "merge-sharded-results.sh").write_text("num_shards must be between 1 and 1024\n")
 
     with pytest.raises(RuntimeError, match="volume limit"):
         module._validate_copied_runtime_policy(tmp_path)
@@ -724,9 +722,7 @@ def test_patched_reference_context_route_enforces_auth_and_response_model(
 
     assert unauthenticated.status_code == 401
     assert authenticated.status_code == 200
-    assert authenticated.json()["web_blast_statistical_context"][
-        "effective_search_space"
-    ] == 2700
+    assert authenticated.json()["web_blast_statistical_context"]["effective_search_space"] == 2700
     assert "internal_only" not in authenticated.json()
     assert resolver_calls == [
         {
@@ -1379,6 +1375,121 @@ def test_patch_finalizer_failure_becomes_terminal(tmp_path: Path) -> None:
     ast.parse(first)
 
 
+def test_patch_openapi_execution_timing_is_terminal_only(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def _k8s_job_summary(elb_job_id: str) -> dict[str, Any]:\n"
+        "    empty = {}\n"
+        "    items = []\n"
+        "    summary = dict(empty)\n"
+        "    for item in items:\n"
+        '        labels = item.get("metadata", {}).get("labels", {})\n'
+        '        app_label = labels.get("app", "")\n'
+        '        status = item.get("status", {})\n'
+        "    return summary\n"
+        "\n\n"
+        "def _k8s_pod_stuck_reason(elb_job_id: str) -> str | None:\n"
+        "    return None\n"
+        "\n\n"
+        "def _snapshot_k8s_summary_for_terminal(job, elb_job_id):\n"
+        "    snapshot = _k8s_job_summary(elb_job_id)\n"
+        "    return snapshot\n"
+        "\n\n"
+        "def external_payload(job_info, summary, payload):\n"
+        "    if summary:\n"
+        '        payload["execution"] = {\n'
+        '            "shard_count": int(summary.get("total", 0) or 0),\n'
+        '            "shards_succeeded": int(summary.get("succeeded", 0) or 0),\n'
+        '            "shards_active": int(summary.get("active", 0) or 0),\n'
+        '            "shards_failed": int(summary.get("failed", 0) or 0),\n'
+        "        }\n"
+        "\n\n"
+        "def notify(started_at, terminal_at, merged, updates, payload):\n"
+        '            payload["run_seconds"] = (\n'
+        "                _duration_seconds(started_at, terminal_at) if started_at else None\n"
+        "            )\n"
+    )
+
+    module._patch_openapi_execution_timing(path)
+    first = path.read_text()
+    module._patch_openapi_execution_timing(path)
+
+    assert path.read_text() == first
+    ast.parse(first)
+    assert "include_container_timing: bool = False" in first
+    assert first.count("include_container_timing=True") == 1
+    assert "timeout=15" in first
+    assert "raw_pod_items[:4096]" in first
+    assert "terminal container timing unavailable" in first
+    assert "def _execution_timing_payload(" in first
+    assert 'payload["execution_timing"] = execution_timing' in first
+    assert 'payload["result_ready_at"] = terminal_at' in first
+    assert 'output["finalizer_seconds"] = finalizer_seconds' in first
+    assert 'or job_info.get("updated_at")' not in first
+
+
+def test_patch_terminal_timing_requires_immutable_terminal_clock(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def notify(merged, payload):\n"
+        '            started_at = merged.get("started_at") or ""\n'
+        "            terminal_at = (\n"
+        '                merged.get("completed_at")\n'
+        '                or merged.get("failed_at")\n'
+        '                or merged.get("updated_at")\n'
+        "            )\n"
+        '            payload["started_at"] = started_at\n'
+        '            payload["elapsed_seconds"] = _duration_seconds(\n'
+        '                merged.get("created_at"), terminal_at\n'
+        "            )\n"
+        '            payload["queue_wait_seconds"] = (\n'
+        '                _duration_seconds(merged.get("queued_at"), started_at)\n'
+        "                if started_at\n"
+        "                else None\n"
+        "            )\n"
+        '            payload["run_seconds"] = (\n'
+        "                _duration_seconds(started_at, terminal_at) if started_at else None\n"
+        "            )\n"
+        "\n\n"
+        "def detail(job_info, public_status, payload):\n"
+        '    terminal_at = job_info.get("completed_at") or job_info.get("failed_at") '
+        'or job_info.get("updated_at")\n'
+        '    elapsed_end = terminal_at if public_status in {"success", "failed"} else None\n'
+        '    elapsed_seconds = _duration_seconds(job_info.get("created_at"), elapsed_end)\n'
+        "    if elapsed_seconds is not None:\n"
+        '        payload["elapsed_seconds"] = elapsed_seconds\n'
+        '    run_seconds = _duration_seconds(job_info.get("started_at"), elapsed_end)\n'
+        "\n\n"
+        "def listing(i):\n"
+        "        terminal_at = (\n"
+        '            i.get("completed_at")\n'
+        '            or i.get("failed_at")\n'
+        '            or i.get("updated_at")\n'
+        "        )\n"
+        "        elapsed_end = terminal_at if i else None\n"
+        '        started_at = i.get("started_at") or ""\n'
+        "        return {\n"
+        '            "elapsed_seconds": _duration_seconds(i.get("created_at"), elapsed_end),\n'
+        '            "run_seconds": (\n'
+        "                _duration_seconds(started_at, elapsed_end) if started_at else None\n"
+        "            ),\n"
+        "        }\n"
+    )
+
+    module._patch_terminal_timing_immutability(path)
+    first = path.read_text()
+    module._patch_terminal_timing_immutability(path)
+
+    assert path.read_text() == first
+    ast.parse(first)
+    assert '.get("updated_at")' not in first
+    assert "if started_at and terminal_at" in first
+    assert first.count("if elapsed_end") == 2
+    assert first.count("and elapsed_end") == 2
+
+
 def test_patch_app_rejects_late_warmed_cache_skip_assignment(tmp_path: Path) -> None:
     module = _load_module()
     path = tmp_path / "main.py"
@@ -1610,7 +1721,7 @@ def test_patch_app_recovers_latest_runtime_and_makes_submit_replay_safe(
         "def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:\n"
         "    if not stdout:\n"
         '        return ""\n'
-        "    match = re.search(r\"\\b(?P<elb_job_id>job-[0-9a-fA-F]{32})\\b\", stdout)\n"
+        '    match = re.search(r"\\b(?P<elb_job_id>job-[0-9a-fA-F]{32})\\b", stdout)\n'
         "    if match:\n"
         '        return match.group("elb_job_id").lower()\n'
         '    return ""\n'
@@ -1754,16 +1865,11 @@ def test_patch_app_recovers_latest_runtime_and_makes_submit_replay_safe(
     effective = namespace["_effective_elb_job_id"]
     deterministic = namespace["_deterministic_elb_job_id"]
 
-    assert (
-        effective({"job_id": request_id, "status": "submitting", "attempt": 1})
-        == newer_runtime
-    )
+    assert effective({"job_id": request_id, "status": "submitting", "attempt": 1}) == newer_runtime
     assert updates == [(request_id, newer_runtime)]
     assert calls == [(["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"], 15)]
     assert warnings and "duplicate generations" in str(warnings[0][0])
-    expected = "job-" + hashlib.sha256(
-        f"elb-openapi:{request_id}".encode()
-    ).hexdigest()[:32]
+    expected = "job-" + hashlib.sha256(f"elb-openapi:{request_id}".encode()).hexdigest()[:32]
     assert deterministic(request_id) == expected
     assert re.fullmatch(r"job-[0-9a-f]{32}", deterministic(request_id))
 
@@ -1804,9 +1910,7 @@ def test_patch_app_recovers_latest_runtime_and_makes_submit_replay_safe(
     }
     run_calls: list[list[str]] = []
     errors: list[tuple[object, ...]] = []
-    run_source = first[
-        first.index("def _run_submit_bg") : first.index("\n\ndef next_helper")
-    ]
+    run_source = first[first.index("def _run_submit_bg") : first.index("\n\ndef next_helper")]
     run_namespace: dict[str, Any] = {
         "Any": Any,
         "Event": lambda: SimpleNamespace(),

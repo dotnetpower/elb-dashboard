@@ -274,9 +274,7 @@ def _revalidate_blast_jobs_list(
         )
         jobs_list_cache_set(cache_key, response)
     except Exception as exc:
-        LOGGER.warning(
-            "blast_jobs_list background revalidate failed: %s", type(exc).__name__
-        )
+        LOGGER.warning("blast_jobs_list background revalidate failed: %s", type(exc).__name__)
     finally:
         end_jobs_list_revalidate(cache_key)
 
@@ -728,8 +726,7 @@ def blast_job_get(
             # double-fetches a failed job (whose error path already fetched it)
             # and only when the stats are actually missing.
             if (
-                str(out.get("submission_source") or "")
-                in ("servicebus", "external_api")
+                str(out.get("submission_source") or "") in ("servicebus", "external_api")
                 and str(out.get("status") or "").lower() in ("completed", "succeeded")
                 and not out.get("db_version")
             ):
@@ -742,9 +739,12 @@ def blast_job_get(
                 _stat_keys = (
                     "db_version",
                     "blast_version",
+                    "completed_at",
+                    "result_ready_at",
                     "run_seconds",
                     "queue_wait_seconds",
                     "elapsed_seconds",
+                    "execution_timing",
                 )
                 # Hardening: gate the live fetch on a cache MISS, not on
                 # db_version presence. A completed sibling that reports no
@@ -808,6 +808,9 @@ def blast_job_get(
                 from api.services.blast.message_trace import derive_trace
 
                 out["message_trace"] = derive_trace(hist)
+            from api.services.blast.timing import build_job_timing
+
+            out["timing"] = build_job_timing(out, out.get("message_trace"))
             out["meta"] = build_meta(request_id=request_id_from_scope(request))
             return out
     except HTTPException:
@@ -832,6 +835,9 @@ def blast_job_get(
             external_blast.get_job(job_id, **external_kwargs),
             include_database_metadata=True,
         )
+        from api.services.blast.timing import build_job_timing
+
+        out["timing"] = build_job_timing(out)
         out["meta"] = build_meta(request_id=request_id_from_scope(request))
         return out
     except HTTPException as exc:

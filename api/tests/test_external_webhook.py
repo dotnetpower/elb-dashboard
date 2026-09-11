@@ -519,9 +519,7 @@ def test_register_external_job_records_runtime_identity_conflict(
     )
 
     assert response.status_code == 202
-    assert fake_repo.rows["job-1"].elastic_blast_job_id == (
-        "job-11111111111111111111111111111111"
-    )
+    assert fake_repo.rows["job-1"].elastic_blast_job_id == ("job-11111111111111111111111111111111")
     assert fake_repo.history == [
         {
             "job_id": "job-1",
@@ -849,6 +847,96 @@ def test_register_external_job_caches_sibling_stats_on_terminal_event(
         "queue_wait_seconds": 591,
         "elapsed_seconds": 871,
     }
+
+
+def test_register_external_job_caches_completion_and_execution_timing(
+    client: TestClient, fake_repo: _FakeRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_repo.rows["job-timing"] = _FakeRow(job_id="job-timing", status="running", phase="running")
+    recorded: list[tuple[str, dict[str, Any]]] = []
+
+    from api.services.blast import external_config
+
+    monkeypatch.setattr(
+        external_config,
+        "remember_sibling_stats",
+        lambda job_id, payload: recorded.append((job_id, dict(payload))),
+    )
+
+    response = client.post(
+        _WEBHOOK_PATH,
+        json={
+            "job_id": "job-timing",
+            "status": "completed",
+            "completed_at": "2026-09-11T02:18:33Z",
+            "result_ready_at": "2026-09-11T02:18:33Z",
+            "execution_timing": {
+                "blast_started_at": "2026-09-11T02:17:00Z",
+                "blast_completed_at": "2026-09-11T02:17:22Z",
+                "blast_seconds": 22,
+                "future_optional_field": "ignored",
+            },
+        },
+        headers=_headers(),
+    )
+
+    assert response.status_code == 202
+    assert recorded == [
+        (
+            "job-timing",
+            {
+                "completed_at": "2026-09-11T02:18:33Z",
+                "result_ready_at": "2026-09-11T02:18:33Z",
+                "execution_timing": {
+                    "blast_started_at": "2026-09-11T02:17:00Z",
+                    "blast_completed_at": "2026-09-11T02:17:22Z",
+                    "blast_seconds": 22,
+                },
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "execution_timing",
+    [
+        {"blast_started_at": "not-a-timestamp"},
+        {"blast_started_at": "2026-09-11T02:17:00"},
+        {"blast_seconds": -1},
+        {"blast_seconds": 2_147_483_648},
+    ],
+)
+def test_register_external_job_acks_invalid_execution_timing_without_caching(
+    client: TestClient,
+    fake_repo: _FakeRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    execution_timing: dict[str, object],
+) -> None:
+    fake_repo.rows["job-invalid-timing"] = _FakeRow(job_id="job-invalid-timing")
+    recorded: list[object] = []
+
+    from api.services.blast import external_config
+
+    monkeypatch.setattr(
+        external_config,
+        "remember_sibling_stats",
+        lambda *_args: recorded.append(object()),
+    )
+
+    response = client.post(
+        _WEBHOOK_PATH,
+        json={
+            "job_id": "job-invalid-timing",
+            "status": "completed",
+            "execution_timing": execution_timing,
+        },
+        headers=_headers(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["reason"] == "invalid_body"
+    assert fake_repo.updates == []
+    assert recorded == []
 
 
 def test_register_external_job_does_not_cache_stats_on_non_terminal_event(

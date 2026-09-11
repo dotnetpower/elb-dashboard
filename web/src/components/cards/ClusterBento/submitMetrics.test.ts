@@ -51,13 +51,34 @@ describe("submitWindow", () => {
     vi.setSystemTime(NOW);
     const jobs = [
       job({ created_at: ago(10), status: "running" }), // active
-      job({ created_at: ago(20), status: "completed", updated_at: ago(18) }), // 120s runtime
-      job({ created_at: ago(30), status: "failed", updated_at: ago(26) }), // 240s runtime
+      job({
+        created_at: ago(20),
+        status: "completed",
+        updated_at: ago(18),
+        run_seconds: 120,
+      }),
+      job({
+        created_at: ago(30),
+        status: "failed",
+        updated_at: ago(26),
+        run_seconds: 240,
+      }),
     ];
     const w = submitWindow(jobs);
     expect(w.last24hActive).toBe(1);
     // (120 + 240) / 2 = 180
     expect(w.avgRuntimeSec).toBe(180);
+  });
+
+  it("does not derive average runtime from mutable updated_at", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    const w = submitWindow([
+      job({ created_at: ago(20), status: "completed", updated_at: ago(1) }),
+    ]);
+
+    expect(w.avgRuntimeSec).toBeNull();
   });
 
   it("ignores jobs with an unparseable created_at", () => {

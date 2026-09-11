@@ -39,7 +39,16 @@ def _state() -> SimpleNamespace:
         resource_group="",
         cluster_name="",
         storage_account="",
-        payload={"external": {"db": "core_nt", "program": "blastn"}},
+        payload={
+            "external": {
+                "db": "core_nt",
+                "program": "blastn",
+                "started_at": "2026-06-14T00:00:10+00:00",
+                "queue_wait_seconds": 5,
+                "run_seconds": 20,
+                "elapsed_seconds": 25,
+            }
+        },
     )
 
 
@@ -88,6 +97,11 @@ def test_blast_job_detail_includes_message_trace(monkeypatch: pytest.MonkeyPatch
     assert trace["metrics"]["queue_dwell_ms"] == 2000
     assert trace["metrics"]["e2e_ms"] == 30000
     assert trace["last_stage"] == "completion_published"
+    assert body["timing"]["service_bus_queue_seconds"] == 2
+    assert body["timing"]["execution_queue_seconds"] == 5
+    assert body["timing"]["processing_seconds"] == 20
+    assert body["timing"]["time_to_result_seconds"] == 30
+    assert body["timing"]["status_delivery_seconds"] == 0
 
 
 def test_blast_job_detail_omits_trace_without_history(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,3 +125,5 @@ def test_blast_job_detail_omits_trace_without_history(monkeypatch: pytest.Monkey
     )
     assert r.status_code == 200
     assert "message_trace" not in r.json()
+    assert r.json()["timing"]["processing_seconds"] == 20
+    assert r.json()["timing"]["time_to_result_seconds"] == 25

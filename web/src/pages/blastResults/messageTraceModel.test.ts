@@ -67,6 +67,12 @@ describe("visibleTraceStages", () => {
     expect(v[v.length - 1]).toBe("completion_published");
     expect(v).toContain("succeeded");
   });
+
+  it("places non-terminal subscriber delivery between running and terminal", () => {
+    const v = visibleTraceStages(trace(["running", "transition_published"]));
+    expect(v.slice(-2)).toEqual(["running", "transition_published"]);
+    expect(v).not.toContain("succeeded");
+  });
 });
 
 describe("stage constants", () => {
@@ -110,12 +116,10 @@ describe("stageDisplayState (terminal-failure handling)", () => {
     );
   });
 
-  it("failed job: terminal stage is failed; result-delivered is canceled (not done)", () => {
+  it("failed job: terminal stage fails and terminal delivery remains done", () => {
     expect(stageDisplayState("failed", failedReached, true)).toBe("failed");
-    // The completion event was published for a failure → no result delivered.
-    expect(stageDisplayState("completion_published", failedReached, true)).toBe(
-      "canceled",
-    );
+    expect(stageDisplayState("completion_published", failedReached, true)).toBe("done");
+    expect(STAGE_LABELS.completion_published).toBe("Terminal status delivered");
   });
 
   it("failed job: skipped success-path stages are canceled, not pending", () => {

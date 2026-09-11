@@ -63,6 +63,56 @@ _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _FORWARD_ONLY_BLOCKED_WHEN_RUNNING = frozenset({"submitted", "queued"})
 
 
+def _validate_iso_timestamp(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp must be ISO 8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include a timezone")
+    return value
+
+
+class ExternalExecutionTiming(BaseModel):
+    """Bounded execution-phase timestamps/durations reported by the sibling."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    orchestration_started_at: str | None = Field(default=None, max_length=64)
+    orchestration_completed_at: str | None = Field(default=None, max_length=64)
+    orchestration_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    k8s_setup_started_at: str | None = Field(default=None, max_length=64)
+    k8s_setup_completed_at: str | None = Field(default=None, max_length=64)
+    k8s_setup_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    blast_started_at: str | None = Field(default=None, max_length=64)
+    blast_completed_at: str | None = Field(default=None, max_length=64)
+    blast_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    export_started_at: str | None = Field(default=None, max_length=64)
+    export_completed_at: str | None = Field(default=None, max_length=64)
+    export_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    finalizer_started_at: str | None = Field(default=None, max_length=64)
+    finalizer_completed_at: str | None = Field(default=None, max_length=64)
+    finalizer_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
+
+    @field_validator(
+        "orchestration_started_at",
+        "orchestration_completed_at",
+        "k8s_setup_started_at",
+        "k8s_setup_completed_at",
+        "blast_started_at",
+        "blast_completed_at",
+        "export_started_at",
+        "export_completed_at",
+        "finalizer_started_at",
+        "finalizer_completed_at",
+    )
+    @classmethod
+    def _validate_timestamps(cls, value: str | None) -> str | None:
+        return _validate_iso_timestamp(value)
+
+
 class ExternalJobEvent(BaseModel):
     """Payload posted by the sibling's ``_webhook_notify``.
 
@@ -83,23 +133,18 @@ class ExternalJobEvent(BaseModel):
     # immediately, instead of waiting up to one /v1/jobs sync cycle (~70 s)
     # for ``_sync_external_jobs_to_table`` to pull the same stats.
     started_at: str | None = Field(default=None, max_length=64)
+    completed_at: str | None = Field(default=None, max_length=64)
+    result_ready_at: str | None = Field(default=None, max_length=64)
     run_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
     queue_wait_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
     elapsed_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
     elb_job_id: str | None = Field(default=None, max_length=128)
+    execution_timing: ExternalExecutionTiming | None = None
 
-    @field_validator("started_at")
+    @field_validator("started_at", "completed_at", "result_ready_at")
     @classmethod
     def _validate_started_at(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError("started_at must be an ISO 8601 timestamp") from exc
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("started_at must include a timezone")
-        return value
+        return _validate_iso_timestamp(value)
 
 
 def _expected_token() -> str:
@@ -187,8 +232,7 @@ def _record_runtime_identity_conflict(
         )
     except Exception as exc:
         LOGGER.info(
-            "openapi webhook: runtime identity conflict history skipped "
-            "job_id=%s err=%s",
+            "openapi webhook: runtime identity conflict history skipped job_id=%s err=%s",
             job_id,
             type(exc).__name__,
         )
@@ -394,9 +438,7 @@ def _apply_to_jobstate(
         "phase": target_phase,
         "completion_deferred": completion_deferred,
         "runtime_identity": (
-            incoming_elastic_blast_job_id
-            if identity_resolved
-            else stored_elastic_blast_job_id
+            incoming_elastic_blast_job_id if identity_resolved else stored_elastic_blast_job_id
         ),
         "identity_backfilled": identity_backfilled,
         "identity_resolved": identity_resolved,
@@ -423,8 +465,7 @@ def _enqueue_terminal_artifacts(job_id: str, ext_status: str, outcome: dict[str,
             )
         except Exception as exc:
             LOGGER.info(
-                "openapi webhook: identity-pending artifact state skipped "
-                "job_id=%s err=%s",
+                "openapi webhook: identity-pending artifact state skipped job_id=%s err=%s",
                 job_id,
                 type(exc).__name__,
             )
@@ -512,9 +553,20 @@ async def register_external_job(request: Request) -> dict[str, Any]:
 
             stats_payload = {
                 k: getattr(body, k)
-                for k in ("started_at", "run_seconds", "queue_wait_seconds", "elapsed_seconds")
+                for k in (
+                    "started_at",
+                    "completed_at",
+                    "result_ready_at",
+                    "run_seconds",
+                    "queue_wait_seconds",
+                    "elapsed_seconds",
+                )
                 if getattr(body, k, None) not in (None, "")
             }
+            if body.execution_timing is not None:
+                stats_payload["execution_timing"] = body.execution_timing.model_dump(
+                    exclude_none=True
+                )
             if stats_payload:
                 remember_sibling_stats(job_id, stats_payload)
         except Exception:

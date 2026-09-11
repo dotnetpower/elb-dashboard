@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   classifyJobState,
@@ -47,9 +47,9 @@ describe("classifyJobState", () => {
     expect(classifyJobState({ phase: "waiting_for_submit_slot", status: "failed" })).toBe(
       "Failed",
     );
-    expect(
-      classifyJobState({ phase: "waiting_for_capacity", status: "completed" }),
-    ).toBe("Completed");
+    expect(classifyJobState({ phase: "waiting_for_capacity", status: "completed" })).toBe(
+      "Completed",
+    );
   });
 
   it("classifies submit_failed as failed even without an error string", () => {
@@ -91,6 +91,7 @@ describe("toJobRowView", () => {
       phase: "completed",
       created_at: "2026-05-19T10:42:09Z",
       updated_at: "2026-05-19T10:44:14Z",
+      run_seconds: 125,
       output: {
         execution: {
           shard_count: 10,
@@ -113,6 +114,41 @@ describe("toJobRowView", () => {
     expect(row.splitsTotal).toBe(10);
     expect(row.splitsDone).toBe(10);
     expect(row.elapsedSec).toBe(125);
+  });
+
+  it("does not derive terminal duration from mutable updated_at", () => {
+    const row = toJobRowView({
+      job_id: "terminal-without-runtime",
+      job_title: "Terminal timing",
+      program: "blastn",
+      db: "core_nt",
+      status: "completed",
+      phase: "completed",
+      created_at: "2026-05-19T10:42:09Z",
+      updated_at: "2026-05-19T12:44:14Z",
+    } satisfies BlastJobSummary);
+
+    expect(row.elapsedSec).toBeNull();
+  });
+
+  it("derives active processing from started_at without including queue age", () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-05-19T10:45:00Z"));
+
+    const row = toJobRowView({
+      job_id: "active-runtime",
+      job_title: "Active timing",
+      program: "blastn",
+      db: "core_nt",
+      status: "running",
+      phase: "running",
+      created_at: "2026-05-19T10:30:00Z",
+      started_at: "2026-05-19T10:43:00Z",
+      updated_at: "2026-05-19T10:44:59Z",
+      splits_total: 1,
+    } satisfies BlastJobSummary);
+
+    expect(row.elapsedSec).toBe(120);
+    vi.restoreAllMocks();
   });
 
   it("does not count stale active rows without execution as active", () => {

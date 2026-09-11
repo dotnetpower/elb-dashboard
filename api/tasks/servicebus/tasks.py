@@ -824,8 +824,13 @@ def _enrich_failure_message_for_event(
         return None
 
 
-def _record_transition_trace(openapi_job_id: str, status: str) -> None:
-    """Record the status stage + ``completion_published`` on a transition.
+def _record_transition_trace(
+    openapi_job_id: str,
+    status: str,
+    *,
+    job: dict[str, Any] | None = None,
+) -> None:
+    """Record the status stage and its subscriber-delivery boundary.
 
     Called after a transition event is successfully published to the completion
     topic, so the dashboard's per-job message trace shows running/terminal hops
@@ -840,14 +845,84 @@ def _record_transition_trace(openapi_job_id: str, status: str) -> None:
         from api.services.state_repo import get_state_repo
 
         repo = get_state_repo()
+        sibling = job if isinstance(job, dict) else {}
+        published_at = _now_iso()
         # Map the published status vocabulary onto a trace stage.
         if status == _STATUS_RUNNING:
-            record_stage(repo, openapi_job_id, "running")
+            record_stage(
+                repo,
+                openapi_job_id,
+                "running",
+                stage_ts=str(sibling.get("started_at") or "") or None,
+            )
+            record_stage(
+                repo,
+                openapi_job_id,
+                "transition_published",
+                stage_ts=published_at,
+                status=status,
+            )
         elif status == _STATUS_SUCCEEDED:
-            record_stage(repo, openapi_job_id, "succeeded")
+            result_ready_at = str(
+                sibling.get("result_ready_at") or sibling.get("completed_at") or ""
+            )
+            record_stage(
+                repo,
+                openapi_job_id,
+                "succeeded",
+                stage_ts=result_ready_at or None,
+            )
+            record_stage(
+                repo,
+                openapi_job_id,
+                "completion_published",
+                stage_ts=published_at,
+                status=status,
+            )
+            if hasattr(repo, "backfill_payload_section"):
+                terminal_timing: dict[str, Any] = {
+                    "completion_published_at": published_at,
+                }
+                if result_ready_at:
+                    terminal_timing["completed_at"] = result_ready_at
+                    terminal_timing["result_ready_at"] = result_ready_at
+                execution_timing = sibling.get("execution_timing")
+                if isinstance(execution_timing, dict) and execution_timing:
+                    terminal_timing["execution_timing"] = execution_timing
+                repo.backfill_payload_section(
+                    openapi_job_id,
+                    "external",
+                    terminal_timing,
+                )
         elif status == _STATUS_FAILED:
-            record_stage(repo, openapi_job_id, "failed")
-        record_stage(repo, openapi_job_id, "completion_published", status=status)
+            failed_at = str(sibling.get("failed_at") or sibling.get("completed_at") or "")
+            record_stage(
+                repo,
+                openapi_job_id,
+                "failed",
+                stage_ts=failed_at or None,
+            )
+            record_stage(
+                repo,
+                openapi_job_id,
+                "completion_published",
+                stage_ts=published_at,
+                status=status,
+            )
+            if hasattr(repo, "backfill_payload_section"):
+                failure_timing: dict[str, Any] = {
+                    "completion_published_at": published_at,
+                }
+                if failed_at:
+                    failure_timing["failed_at"] = failed_at
+                execution_timing = sibling.get("execution_timing")
+                if isinstance(execution_timing, dict) and execution_timing:
+                    failure_timing["execution_timing"] = execution_timing
+                repo.backfill_payload_section(
+                    openapi_job_id,
+                    "external",
+                    failure_timing,
+                )
     except SoftTimeLimitExceeded:
         raise
     except Exception as exc:  # pragma: no cover - best-effort
@@ -1779,8 +1854,7 @@ def _drain_handler(
         monotonic = clock or time.monotonic
         remaining = submit_deadline - monotonic()
         if remaining <= (
-            _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS
-            + _SERVICEBUS_TASK_MIN_SUBMIT_WINDOW_SECONDS
+            _SERVICEBUS_TASK_SETTLEMENT_RESERVE_SECONDS + _SERVICEBUS_TASK_MIN_SUBMIT_WINDOW_SECONDS
         ):
             if _ATOMIC_CLAIM:
                 release_bridge(correlation_id)
@@ -1837,9 +1911,7 @@ def _drain_handler(
         retry_exhausted = not permanent and _retry_exhausted(msg)
         detail_code = str(exc.detail.get("code") or "") if isinstance(exc.detail, dict) else ""
         sequence_detail_code = (
-            detail_code
-            if permanent and detail_code.startswith("sequence_diversity_")
-            else ""
+            detail_code if permanent and detail_code.startswith("sequence_diversity_") else ""
         )
         if permanent:
             failure_code = sequence_detail_code or f"servicebus_submit_rejected_{status}"
@@ -2076,6 +2148,11 @@ def _persist_drain_row_and_trace(
     """
     if not openapi_job_id:
         return
+    if isinstance(enqueued_at, datetime):
+        message_enqueued_at = enqueued_at.astimezone(UTC).isoformat(timespec="seconds")
+    else:
+        message_enqueued_at = str(enqueued_at or "").strip()
+    submitted_at = _now_iso()
     try:
         from api.services.blast.external_config import build_external_config_snapshot
         from api.services.blast.external_jobs import _sync_external_jobs_to_table
@@ -2111,6 +2188,9 @@ def _persist_drain_row_and_trace(
             "program": payload.get("program"),
             "db": payload.get("db"),
             "created_at": received_ts,
+            "message_enqueued_at": message_enqueued_at,
+            "message_received_at": received_ts,
+            "submitted_at": submitted_at,
             "submission_source": "servicebus",
             "queue_origin": queue_origin,
             "external_correlation_id": correlation_id,
@@ -2170,9 +2250,15 @@ def _persist_drain_row_and_trace(
         repo = get_state_repo()
         record_stage(repo, openapi_job_id, "enqueued", stage_ts=enqueued_at)
         record_stage(repo, openapi_job_id, "received", stage_ts=received_ts)
-        record_stage(repo, openapi_job_id, "row_created")
-        record_stage(repo, openapi_job_id, "routed", target="openapi")
-        record_stage(repo, openapi_job_id, "submitted", openapi_job_id=openapi_job_id)
+        record_stage(repo, openapi_job_id, "row_created", stage_ts=submitted_at)
+        record_stage(repo, openapi_job_id, "routed", stage_ts=submitted_at, target="openapi")
+        record_stage(
+            repo,
+            openapi_job_id,
+            "submitted",
+            stage_ts=submitted_at,
+            openapi_job_id=openapi_job_id,
+        )
     except SoftTimeLimitExceeded:
         raise
     except Exception as exc:
@@ -2584,7 +2670,7 @@ def _publish_one_bridge(
     durable, delivered = _stage_response_event(cfg, event)
     if not durable:
         return (0, 0)
-    _record_transition_trace(rec.openapi_job_id, status)
+    _record_transition_trace(rec.openapi_job_id, status, job=job)
     if status in _TERMINAL:
         mark_done(rec.correlation_id, status)
         return (int(delivered), 1)

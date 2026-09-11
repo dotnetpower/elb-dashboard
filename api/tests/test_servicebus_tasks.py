@@ -736,9 +736,7 @@ def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) 
                     "external_correlation_id": "corr-9",
                     "resource_profile": "core_nt_safe",
                     "blast_options": {
-                        "outfmt": (
-                            "7 qseqid saccver sseq qstart qend evalue bitscore"
-                        ),
+                        "outfmt": ("7 qseqid saccver sseq qstart qend evalue bitscore"),
                         "max_target_seqs": 10_000,
                         "candidate_pool_size": 20_000,
                         "result_selection_policy": "sequence_diversity",
@@ -763,12 +761,13 @@ def test_drain_persists_jobstate_row_and_trace(monkeypatch: pytest.MonkeyPatch) 
     assert rows[0]["job_id"] == "openapi-9"
     assert rows[0]["submission_source"] == "servicebus"
     assert rows[0]["external_correlation_id"] == "corr-9"
+    assert rows[0]["message_enqueued_at"] == "2026-06-14T00:00:00+00:00"
+    assert rows[0]["message_received_at"]
+    assert rows[0]["submitted_at"]
+    assert rows[0]["message_received_at"] <= rows[0]["submitted_at"]
     assert rows[0]["config_snapshot"]["max_target_seqs"] == 10_000
     assert rows[0]["config_snapshot"]["candidate_pool_size"] == 20_000
-    assert (
-        rows[0]["config_snapshot"]["result_selection_policy"]
-        == "sequence_diversity"
-    )
+    assert rows[0]["config_snapshot"]["result_selection_policy"] == "sequence_diversity"
     assert kw.get("caller_oid") == ""
 
     # Trace stages recorded, keyed by the OpenAPI job id.
@@ -894,8 +893,7 @@ def test_drain_fails_placeholder_on_malformed_message(monkeypatch: pytest.Monkey
 
 
 def test_publish_transitions_records_trace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A published transition records the status stage + completion_published on
-    the job's message trace, keyed by the OpenAPI job id."""
+    """A running transition is delivered without claiming result completion."""
     _enable(monkeypatch)
     from api.services.service_bus_tracking import BridgeRecord, upsert_bridge
 
@@ -916,17 +914,110 @@ def test_publish_transitions_records_trace(monkeypatch: pytest.MonkeyPatch) -> N
 
     class _FakeRepo:
         def append_history(self, job_id, event, payload=None):
-            history.append((job_id, event))
+            history.append((job_id, event, payload or {}))
 
     monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FakeRepo())
 
     sb_tasks.publish_transitions()
 
-    events = [e for (jid, e) in history if jid == "openapi-t"]
+    events = [e for (jid, e, _payload) in history if jid == "openapi-t"]
     assert "mf.running" in events
-    assert "mf.completion_published" in events
+    assert "mf.transition_published" in events
+    assert "mf.completion_published" not in events
     assert poll_kwargs
     assert 0 < float(poll_kwargs[0]["timeout_seconds"]) <= 5
+
+
+@pytest.mark.parametrize(
+    ("status", "job", "terminal_event", "expected_backfill"),
+    [
+        (
+            "succeeded",
+            {
+                "result_ready_at": "2026-09-11T02:18:33+00:00",
+                "updated_at": "2026-09-11T03:30:31+00:00",
+                "execution_timing": {"blast_seconds": 22},
+            },
+            "mf.succeeded",
+            {
+                "completed_at": "2026-09-11T02:18:33+00:00",
+                "result_ready_at": "2026-09-11T02:18:33+00:00",
+                "execution_timing": {"blast_seconds": 22},
+            },
+        ),
+        (
+            "failed",
+            {
+                "failed_at": "2026-09-11T02:18:33+00:00",
+                "updated_at": "2026-09-11T03:30:31+00:00",
+                "execution_timing": {"blast_seconds": 22},
+            },
+            "mf.failed",
+            {
+                "failed_at": "2026-09-11T02:18:33+00:00",
+                "execution_timing": {"blast_seconds": 22},
+            },
+        ),
+    ],
+)
+def test_record_transition_trace_backfills_authoritative_terminal_timing(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    job: dict[str, Any],
+    terminal_event: str,
+    expected_backfill: dict[str, Any],
+) -> None:
+    history: list[tuple[str, str, dict[str, Any]]] = []
+    backfills: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _FakeRepo:
+        def append_history(self, job_id, event, payload=None):
+            history.append((job_id, event, payload or {}))
+
+        def backfill_payload_section(self, job_id, section, values):
+            backfills.append((job_id, section, values))
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FakeRepo())
+    monkeypatch.setattr(sb_tasks, "_now_iso", lambda: "2026-09-11T02:19:15+00:00")
+
+    sb_tasks._record_transition_trace("openapi-terminal", status, job=job)
+
+    terminal = next(payload for _job_id, event, payload in history if event == terminal_event)
+    assert terminal["stage_ts"] == "2026-09-11T02:18:33+00:00"
+    assert backfills == [
+        (
+            "openapi-terminal",
+            "external",
+            {"completion_published_at": "2026-09-11T02:19:15+00:00", **expected_backfill},
+        )
+    ]
+
+
+def test_record_transition_trace_does_not_promote_updated_at_and_is_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history: list[str] = []
+    attempted_backfills: list[dict[str, Any]] = []
+
+    class _FailingRepo:
+        def append_history(self, _job_id, event, payload=None):
+            history.append(event)
+
+        def backfill_payload_section(self, _job_id, _section, values):
+            attempted_backfills.append(values)
+            raise RuntimeError("table unavailable")
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FailingRepo())
+    monkeypatch.setattr(sb_tasks, "_now_iso", lambda: "2026-09-11T02:19:15+00:00")
+
+    sb_tasks._record_transition_trace(
+        "openapi-best-effort",
+        "succeeded",
+        job={"updated_at": "2026-09-11T03:30:31+00:00"},
+    )
+
+    assert history == ["mf.succeeded", "mf.completion_published"]
+    assert attempted_backfills == [{"completion_published_at": "2026-09-11T02:19:15+00:00"}]
 
 
 def test_publish_transitions_does_not_touch_outbox_when_config_io_is_fenced(
@@ -1757,9 +1848,7 @@ def test_dlq_reconciliation_preserves_sequence_rejection(
             "result_ref": sb_tasks._result_ref(""),
             "request_id": "request-001",
             "error_code": "sequence_diversity_missing_fields",
-            "error_message": (
-                "sequence_diversity requires sseq in the effective tabular outfmt"
-            ),
+            "error_message": ("sequence_diversity requires sseq in the effective tabular outfmt"),
             "retryable": False,
         }
     ]
@@ -3450,9 +3539,7 @@ def test_drain_lock_redis_errors_warn_without_exception_telemetry() -> None:
     coordination = sb_tasks.drain_coordination
     warnings: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
     logger = SimpleNamespace(
-        warning=lambda message, *args, **kwargs: warnings.append(
-            (message, args, kwargs)
-        )
+        warning=lambda message, *args, **kwargs: warnings.append((message, args, kwargs))
     )
 
     def unavailable(**_kwargs: object) -> object:

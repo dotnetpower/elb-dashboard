@@ -134,7 +134,30 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     refetchInterval: false,
   });
 
-  const job = jobQuery.data;
+  const jobSnapshot = jobQuery.data;
+  const messageTraceQuery = useQuery({
+    queryKey: ["blast-job-trace", jobId],
+    queryFn: () =>
+      blastApi.getJob(jobId!, { history: true, includeDatabaseMetadata: false }),
+    enabled: Boolean(jobId && jobSnapshot?.submission_source === "servicebus"),
+    refetchInterval: (query) => {
+      const current = query.state.data ?? jobSnapshot;
+      if (!current) return 8_000;
+      const currentPhase = resolveBlastJobPhase(current).phase;
+      return TERMINAL_PHASES.has(currentPhase) || FAILURE_PHASES.has(currentPhase)
+        ? false
+        : 8_000;
+    },
+    staleTime: 5_000,
+  });
+  const job =
+    jobSnapshot && messageTraceQuery.data?.timing
+      ? {
+          ...jobSnapshot,
+          timing: messageTraceQuery.data.timing,
+          message_trace: messageTraceQuery.data.message_trace,
+        }
+      : jobSnapshot;
   const databaseMetadata =
     databaseMetadataQuery.data?.database_metadata ?? job?.database_metadata ?? null;
   const payload = job?.payload;
@@ -146,12 +169,13 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
   // we must fall back to the job's own infrastructure block — NOT the workspace
   // anchor RG/cluster — otherwise results listing, downloads, exports, and
   // cancel all target the wrong resource group/cluster for cross-RG fleets.
-  const { subscriptionId, storageAccount, resourceGroup, clusterName } = resolveBlastJobScope({
-    searchParams,
-    payload,
-    infrastructure: job?.infrastructure,
-    config,
-  });
+  const { subscriptionId, storageAccount, resourceGroup, clusterName } =
+    resolveBlastJobScope({
+      searchParams,
+      payload,
+      infrastructure: job?.infrastructure,
+      config,
+    });
 
   const phaseInfo = resolveBlastJobPhase(job);
 
@@ -160,7 +184,10 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     queryFn: () =>
       blastApi.listResults(jobId!, subscriptionId, storageAccount, resourceGroup),
     enabled: Boolean(
-      jobId && subscriptionId && storageAccount && RESULTS_READY_PHASES.has(phaseInfo.phase),
+      jobId &&
+      subscriptionId &&
+      storageAccount &&
+      RESULTS_READY_PHASES.has(phaseInfo.phase),
     ),
     refetchInterval: (q) => {
       if (q.state.data?.files && q.state.data.files.length > 0) return false;
@@ -195,7 +222,12 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
       const data = q.state.data;
       const artifactState = data?.artifact_state;
       // While the artifact bundle is still being assembled we poll fast.
-      if (artifactState && artifactState !== "ready" && artifactState !== "inline_fallback" && artifactState !== "missing") {
+      if (
+        artifactState &&
+        artifactState !== "ready" &&
+        artifactState !== "inline_fallback" &&
+        artifactState !== "missing"
+      ) {
         return 5_000;
       }
       // After the artifact bundle is "ready" we KEEP polling at a slow
@@ -240,8 +272,9 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
   // inside the effect; ``phase`` is the only meaningful trigger.
   const prevPhaseRef = useRef<string | null>(null);
   const initialPhaseRef = useRef<string | null>(null);
+  const hasJob = Boolean(job);
   useEffect(() => {
-    if (!job) return;
+    if (!hasJob) return;
     const phase = phaseInfo.phase;
     if (prevPhaseRef.current === null) {
       prevPhaseRef.current = phase;
@@ -257,7 +290,7 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
       else if (FAILURE_PHASES.has(phase)) toast("BLAST job failed.", "error");
     }
     prevPhaseRef.current = phase;
-  }, [job, phaseInfo.phase, toast]);
+  }, [hasJob, phaseInfo.phase, toast]);
 
   const hasExportTargets = Boolean(subscriptionId && storageAccount);
   const showCompletedMetrics =
@@ -277,8 +310,7 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
   const jobQueryErrorStatus = (jobQuery.error as ApiError | null)?.status;
   const liveUpdatesStalled =
     jobQuery.isError && Boolean(job) && !TERMINAL_PHASES.has(phaseInfo.phase);
-  const liveUpdatesStalledAuthExpired =
-    liveUpdatesStalled && jobQueryErrorStatus === 401;
+  const liveUpdatesStalledAuthExpired = liveUpdatesStalled && jobQueryErrorStatus === 401;
 
   return {
     // identity
@@ -291,6 +323,7 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     databaseMetadataQuery,
     resultsQuery,
     executionStepsQuery,
+    messageTraceQuery,
     job,
     databaseMetadata,
     executionStepsJob,

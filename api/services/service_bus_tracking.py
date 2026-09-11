@@ -28,7 +28,9 @@ Risky contracts: ``last_status`` is the published-transition marker — the
     ``odata.etag`` is not a key of a deserialized ``TableEntity``, and passing
     ``None`` to ``MatchConditions.IfNotModified`` raises ``ValueError`` out of
     ``claim_bridge`` / silently skips ``release_bridge``, wedging the
-    correlation id. The stale-claim floor must exceed the resident consumer's
+    correlation id. Transition markers are monotonic and terminal-sticky; Table
+    updates use that same etag contract so a stale running writer cannot revive
+    a terminal bridge. The stale-claim floor must exceed the resident consumer's
     full OpenAPI transport-retry envelope, not just one HTTP timeout.
 Validation: ``uv run pytest -q api/tests/test_service_bus_tracking.py``.
 """
@@ -45,6 +47,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import sleep
 from typing import Any, cast
 
 from azure.core import MatchConditions
@@ -73,6 +76,10 @@ _ENSURED_TABLES: set[str] = set()
 _ENSURED_TABLES_LOCK = threading.Lock()
 _BRIDGE_TABLE_POOLED: TableClient | None = None
 _BRIDGE_TABLE_POOL_LOCK = threading.Lock()
+
+_NON_TERMINAL_STATUS_RANK = {"queued": 1, "running": 2}
+_TRANSITION_UPDATE_ATTEMPTS = 3
+_TRANSITION_RETRY_BACKOFF_SECONDS = 0.01
 
 
 # How long a ``claimed`` placeholder (a row reserved before its sibling submit
@@ -278,20 +285,32 @@ def release_bridge(correlation_id: str) -> None:
 
 
 def mark_published(correlation_id: str, status: str) -> None:
-    rec = get_bridge(correlation_id)
-    if rec is None:
-        return
-    rec.last_status = status
-    upsert_bridge(rec)
+    _mark_transition(correlation_id, status, done=False)
 
 
 def mark_done(correlation_id: str, status: str) -> None:
-    rec = get_bridge(correlation_id)
-    if rec is None:
-        return
-    rec.last_status = status
-    rec.done = True
-    upsert_bridge(rec)
+    _mark_transition(correlation_id, status, done=True)
+
+
+def _transition_advances(record: BridgeRecord, status: str, *, done: bool) -> bool:
+    """Return whether a marker update advances the bridge state machine."""
+    if record.done:
+        return False
+    if done:
+        return True
+    current_rank = _NON_TERMINAL_STATUS_RANK.get(record.last_status)
+    requested_rank = _NON_TERMINAL_STATUS_RANK.get(status)
+    if current_rank is not None and requested_rank is not None:
+        return requested_rank > current_rank
+    return status != record.last_status
+
+
+def _mark_transition(correlation_id: str, status: str, *, done: bool) -> None:
+    """Advance one bridge marker without permitting regression or terminal overwrite."""
+    if _use_table_backend():
+        _mark_table_transition(correlation_id, status, done=done)
+    else:
+        _mark_file_transition(correlation_id, status, done=done)
 
 
 def list_active_bridges(limit: int = 200) -> list[BridgeRecord]:
@@ -592,6 +611,51 @@ def _release_table(correlation_id: str) -> None:
         LOGGER.warning("release_bridge (table) failed corr=%s", correlation_id, exc_info=True)
 
 
+def _mark_table_transition(correlation_id: str, status: str, *, done: bool) -> None:
+    """Conditionally advance a Table-backed marker; stale writers retry from fresh state."""
+    _ensure_table()
+    last_conflict: ResourceModifiedError | None = None
+    with _table_client() as table:
+        for attempt in range(_TRANSITION_UPDATE_ATTEMPTS):
+            try:
+                entity = table.get_entity(
+                    partition_key=_PARTITION_KEY,
+                    row_key=_row_key(correlation_id),
+                )
+            except ResourceNotFoundError:
+                return
+            record = _record_from_entity(dict(entity))
+            if record is None or not _transition_advances(record, status, done=done):
+                return
+            etag = _entity_etag(entity)
+            if not etag:
+                LOGGER.warning(
+                    "service bus transition skipped: no etag on row corr=%s",
+                    correlation_id,
+                )
+                return
+            record.last_status = status
+            record.done = done
+            record.updated_at = _now_iso()
+            try:
+                table.update_entity(
+                    _entity(record),
+                    mode=UpdateMode.REPLACE,
+                    etag=etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+                return
+            except ResourceModifiedError as exc:
+                last_conflict = exc
+                if attempt + 1 < _TRANSITION_UPDATE_ATTEMPTS:
+                    sleep(_TRANSITION_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                continue
+            except ResourceNotFoundError:
+                return
+    if last_conflict is not None:
+        raise last_conflict
+
+
 # --------------------------------------------------------------------------- #
 # Local JSON file backend
 # --------------------------------------------------------------------------- #
@@ -636,6 +700,24 @@ def _save_file(record: BridgeRecord) -> None:
     with _FILE_LOCK:
         data = _read_file_state()
         data[_row_key(record.correlation_id)] = record.to_dict()
+        _write_file_state(data)
+
+
+def _mark_file_transition(correlation_id: str, status: str, *, done: bool) -> None:
+    """Advance a local marker within one locked read-modify-write section."""
+    key = _row_key(correlation_id)
+    with _FILE_LOCK:
+        data = _read_file_state()
+        raw = data.get(key)
+        if not isinstance(raw, dict):
+            return
+        record = BridgeRecord.from_dict(raw)
+        if not _transition_advances(record, status, done=done):
+            return
+        record.last_status = status
+        record.done = done
+        record.updated_at = _now_iso()
+        data[key] = record.to_dict()
         _write_file_state(data)
 
 

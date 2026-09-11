@@ -12,9 +12,10 @@ export const STAGE_LABELS: Record<string, string> = {
   routed: "Routed",
   submitted: "Submitted",
   running: "Running",
+  transition_published: "Running delivered",
   succeeded: "Succeeded",
   failed: "Failed",
-  completion_published: "Result delivered",
+  completion_published: "Terminal status delivered",
   dead_letter: "Dead-lettered",
 };
 
@@ -25,6 +26,7 @@ export const CANONICAL_ORDER = [
   "routed",
   "submitted",
   "running",
+  "transition_published",
   "succeeded",
   "failed",
   "completion_published",
@@ -34,15 +36,8 @@ export const CANONICAL_ORDER = [
 /** Visual state of a single lifecycle row. */
 export type StageDisplay = "done" | "failed" | "canceled" | "pending";
 
-/** Stages that only make sense on the success branch (running → succeeded →
- *  result delivered). When the job terminally fails these are either skipped
- *  (never reached) or — for ``completion_published`` — published as a FAILURE
- *  completion, so none of them represent a delivered result. */
-const SUCCESS_PATH_STAGES = new Set([
-  "running",
-  "succeeded",
-  "completion_published",
-]);
+/** Stages that only make sense on the success branch. */
+const SUCCESS_PATH_STAGES = new Set(["running", "succeeded"]);
 
 /** True when the trace reached a terminal failure (``failed`` / ``dead_letter``). */
 export function traceTerminallyFailed(reached: ReadonlySet<string>): boolean {
@@ -56,8 +51,8 @@ export function traceTerminallyFailed(reached: ReadonlySet<string>): boolean {
  *   ``failed`` when reached.
  * - On a terminally-failed job the success-branch stages render as
  *   ``canceled`` (grey) rather than a green success or an in-progress
- *   ``pending`` — including ``completion_published`` ("Result delivered"),
- *   which was published for a failure and so did NOT deliver a result.
+ *   ``pending``. A reached ``completion_published`` remains done because it
+ *   means the terminal failure status was delivered to subscribers.
  * - Otherwise a reached stage is ``done`` and an unreached one is ``pending``.
  */
 export function stageDisplayState(
@@ -68,9 +63,6 @@ export function stageDisplayState(
   const isReached = reached.has(stage);
   if ((stage === "failed" || stage === "dead_letter") && isReached) {
     return "failed";
-  }
-  if (terminalFailed && stage === "completion_published") {
-    return "canceled";
   }
   if (isReached) return "done";
   if (terminalFailed && SUCCESS_PATH_STAGES.has(stage)) return "canceled";
@@ -96,9 +88,7 @@ export function fmtTraceMs(ms: number | null): string {
 export function visibleTraceStages(trace: BlastMessageTrace): string[] {
   if (!trace.stages.length) return [];
   const reached = new Set(trace.stages.map((s) => s.stage));
-  const lastIdx = Math.max(
-    ...trace.stages.map((s) => CANONICAL_ORDER.indexOf(s.stage)),
-  );
+  const lastIdx = Math.max(...trace.stages.map((s) => CANONICAL_ORDER.indexOf(s.stage)));
   return CANONICAL_ORDER.filter(
     (st, i) => i <= lastIdx && (reached.has(st) || i < lastIdx),
   );

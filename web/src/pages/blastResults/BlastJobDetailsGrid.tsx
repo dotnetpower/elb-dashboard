@@ -1,4 +1,4 @@
-import { memo, useMemo, type CSSProperties } from "react";
+import { Fragment, memo, useMemo, type CSSProperties } from "react";
 import { CheckCircle2, Clock, Copy } from "lucide-react";
 
 import { ElapsedTimer } from "@/components/BlastFilePreview";
@@ -11,6 +11,12 @@ import {
   isExternalJob,
   taxonomyFilterLabel,
 } from "@/pages/blastResults/configFormat";
+import {
+  formatTimingSeconds,
+  stableProcessingSeconds,
+  stableQueueSeconds,
+  stableTimeToResultSeconds,
+} from "@/pages/blastResults/timingModel";
 
 interface BlastJobDetailsGridProps {
   job: BlastJobSummary;
@@ -43,10 +49,17 @@ function BlastJobDetailsGridComponent({
   // the details view matches the job list's QUEUED secondary line.
   const queueReason =
     effectivePhase === "submit_failed" ? null : queueReasonText(effectivePhase);
+  const timeToResultSeconds = stableTimeToResultSeconds(job);
+  const queueSeconds = stableQueueSeconds(job);
+  const processingSeconds = stableProcessingSeconds(job);
+  const submitSeconds = job.timing?.submit_seconds ?? null;
+  const deliverySeconds = job.timing?.status_delivery_seconds ?? null;
+  const unattributedSeconds = job.timing?.unattributed_seconds ?? null;
+  const timingPhases = job.timing?.phases;
   const gridStyle = useMemo<CSSProperties>(
     () => ({
       display: "grid",
-      gridTemplateColumns: "140px 1fr",
+      gridTemplateColumns: "minmax(108px, 140px) minmax(0, 1fr)",
       gap: "var(--space-2) var(--space-4)",
       fontSize: 13,
     }),
@@ -66,12 +79,15 @@ function BlastJobDetailsGridComponent({
   return (
     <div style={gridStyle} data-testid="blast-run-details-grid">
       <span className="muted">Job ID</span>
-      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <code className="code-val">{job.job_id}</code>
+      <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+        <code className="code-val" style={{ overflowWrap: "anywhere" }}>
+          {job.job_id}
+        </code>
         <button
           className={`copy-btn${copiedId ? " copy-btn--copied" : ""}`}
           onClick={onCopyJobId}
           title="Copy Job ID"
+          aria-label="Copy Job ID"
         >
           {copiedId ? <CheckCircle2 size={12} /> : <Copy size={12} />}
         </button>
@@ -85,9 +101,7 @@ function BlastJobDetailsGridComponent({
         <span style={statusDotStyle} />
         <span style={{ display: "flex", flexDirection: "column" }}>
           <span>
-            {effectivePhase === "submit_failed"
-              ? "failed"
-              : phaseLabel(effectivePhase)}
+            {effectivePhase === "submit_failed" ? "failed" : phaseLabel(effectivePhase)}
           </span>
           {queueReason && (
             <span className="muted" style={{ fontSize: 11 }}>
@@ -98,20 +112,66 @@ function BlastJobDetailsGridComponent({
       </span>
       <span className="muted">Created</span>
       <span>{job.created_at ? new Date(job.created_at).toLocaleString() : "—"}</span>
-      <span className="muted">Duration</span>
+      <span className="muted">{isRunning ? "Elapsed" : "Time to result"}</span>
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <Clock size={12} strokeWidth={1.5} style={{ color: "var(--text-faint)" }} />
         {job.created_at && isRunning ? (
           <ElapsedTimer startTime={job.created_at} />
-        ) : job.created_at && job.updated_at ? (
-          formatDuration(
-            new Date(job.updated_at as string).getTime() -
-              new Date(job.created_at).getTime(),
-          )
+        ) : timeToResultSeconds !== null ? (
+          formatTimingSeconds(timeToResultSeconds)
         ) : (
           "—"
         )}
       </span>
+      {queueSeconds !== null && (
+        <>
+          <span className="muted">
+            {job.timing?.queue_complete === false ? "Execution queue" : "Queue wait"}
+          </span>
+          <span>{formatTimingSeconds(queueSeconds)}</span>
+        </>
+      )}
+      {submitSeconds != null && (
+        <>
+          <span className="muted">Submit</span>
+          <span>{formatTimingSeconds(submitSeconds)}</span>
+        </>
+      )}
+      {processingSeconds !== null && (
+        <>
+          <span className="muted">Processing</span>
+          <span>{formatTimingSeconds(processingSeconds)}</span>
+        </>
+      )}
+      {unattributedSeconds != null && unattributedSeconds > 0 && (
+        <>
+          <span className="muted">Other execution</span>
+          <span>{formatTimingSeconds(unattributedSeconds)}</span>
+        </>
+      )}
+      {deliverySeconds != null && (
+        <>
+          <span className="muted">Status delivery</span>
+          <span>{formatTimingSeconds(deliverySeconds)}</span>
+        </>
+      )}
+      {timingPhases &&
+        (
+          [
+            ["Orchestration", timingPhases.orchestration_seconds],
+            ["Kubernetes setup", timingPhases.k8s_setup_seconds],
+            ["BLAST containers", timingPhases.blast_seconds],
+            ["Result export", timingPhases.export_seconds],
+            ["Finalizer", timingPhases.finalizer_seconds],
+          ] as const
+        ).map(([label, seconds]) =>
+          seconds == null ? null : (
+            <Fragment key={label}>
+              <span className="muted">{label}</span>
+              <span>{formatTimingSeconds(seconds)}</span>
+            </Fragment>
+          ),
+        )}
       {config ? (
         <>
           <span className="muted">Output format</span>
@@ -173,7 +233,7 @@ function BlastJobDetailsGridComponent({
               <span>{String(job.db_version)}</span>
             </>
           )}
-          {job.run_seconds != null && (
+          {job.run_seconds != null && processingSeconds === null && (
             <>
               <span className="muted">Run time</span>
               <span>{formatRunSeconds(job.run_seconds)}</span>
@@ -251,12 +311,3 @@ function BlastJobDetailsGridComponent({
 }
 
 export const BlastJobDetailsGrid = memo(BlastJobDetailsGridComponent);
-
-function formatDuration(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const h = Math.floor(m / 60);
-  if (h > 0) return `${h}h ${m % 60}m ${s % 60}s`;
-  if (m > 0) return `${m}m ${s % 60}s`;
-  return `${s}s`;
-}
