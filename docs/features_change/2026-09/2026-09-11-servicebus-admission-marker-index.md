@@ -97,9 +97,33 @@ marker set, which would hide active work. Both conditions remain deliberately fa
   the smoke fixture's all-zero subscription and unavailable local Storage data-plane permissions;
   no admission timeout or `SoftTimeLimitExceeded` was emitted.
 
-Full CI-parity and live rollout evidence will be appended after the API, worker, and beat sidecars
-converge. The rollout reuses existing infrastructure and does not create or repoint an Azure
-resource. Tier 2a host-mode smoke passed, but its local file/Redis state backend cannot reproduce
+The rollout reused existing infrastructure and did not create or repoint an Azure resource. Tier
+2a host-mode smoke passed, but its local file/Redis state backend cannot reproduce
 the production Azure Table's accumulated pagination and network latency. Live validation is
 therefore limited to the API/worker/beat image and passive Service Bus/App Insights telemetry; the
 frontend, terminal, OpenAPI workload, sidecar layout, and infrastructure remain unchanged.
+
+## Live rollout
+
+- ACR run `deaq` built `elb-api:manual-89904ce0` with digest
+  `sha256:7ab73ff58b9103381acc518d679bce6bb10abc88f5f9fba5464e58d39b0d3c77`.
+- API, worker, and beat converged on that digest in revision
+  `ca-elb-dashboard--env-beat-1789118737-24242`; Container App provisioning and running states
+  remained healthy.
+- The pre-rollout safety gate reported no active, scheduled, or dead-letter request messages and no
+  active warmup jobs.
+- One authenticated empty-queue manual drain returned HTTP 200 in 4.021 seconds. Its dependency
+  trace recorded 24 ms across three `dashboardsingletons` calls and one 9 ms JobState call, instead
+  of the previous nine sequential JobState pages and roughly 43-second admission scan.
+- During the rollout observation window, 44 automatic `drain_and_resubmit` task spans all succeeded:
+  p50 3 ms, p95 4.118 seconds, maximum 4.269 seconds, zero failures, and zero
+  `SoftTimeLimitExceeded` exceptions.
+- The final readiness probe reported Redis, managed identity, terminal sidecar, and Azure Storage
+  healthy. Request queue counts remained 0/0/0 and active warmups remained zero.
+- The final ACR state was `publicNetworkAccess=Disabled`, `defaultAction=Deny`, trusted Azure
+  services enabled, with zero active builds.
+
+The whole-workspace telemetry audit also observed six pre-existing worker exceptions from Storage
+oracle/orphan reconcilers that lack data-plane authorization, plus two ARM 404 dependencies for an
+all-zero E2E preference. Their operation IDs did not overlap admission/drain spans; no new API 5xx,
+admission exception, failed drain, or soft timeout was recorded after this rollout.
