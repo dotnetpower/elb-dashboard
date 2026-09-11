@@ -84,10 +84,33 @@ claim plus sibling idempotency protects redelivery), and marker overflow excepti
 - Ruff, the production mypy debt ratchet, OpenAPI contract/generated types, docs frontmatter, and
   strict MkDocs build passed.
 - The updated Playwright scenario is discovered. Local browser launch is unavailable because the
-  host Chromium runtime lacks `libnspr4.so`; the same assertions will be run against the deployed
-  page with the integrated browser.
+  host Chromium runtime lacks `libnspr4.so`; the same assertions passed against the deployed page
+  with the integrated browser.
 - Live baseline before rollout: the canary timing breakdown was complete, 834 automatic drains over
   two hours had zero failures (p95 954 ms, max 5.590 s), and no soft-time-limit exception recurred.
 
-Live image, browser, and post-rollout telemetry evidence will be appended after the frontend and
-API/worker/beat revisions converge.
+## Live rollout
+
+- ACR run `deax` built `elb-api:manual-aecaa613` with digest
+  `sha256:22873d1471dcaea014938e3e5d32edf415e5aae8e5f6cb408997e5ea4ebf93a2`.
+- ACR run `deb0` built `elb-frontend:manual-aecaa613` with digest
+  `sha256:172b46c7c0965e611686b3015eb6649070e4eaedf97c094ee1f25824aea077c9`.
+- API, worker, and beat converged on the API digest; frontend converged in revision
+  `ca-elb-dashboard--env-frontend-1789141451-17451`. The Container App remained Running and its
+  readiness probe reported Redis, managed identity, terminal sidecar, and Azure Storage healthy.
+- The deployed SPA reported build `v0.3.131` and commit `aecaa613`. At 320 px the completed canary
+  showed one `Succeeded` row and zero `Failed`/`Dead-lettered` alternatives; the named lifecycle
+  region/list were discoverable and document/body scroll widths equalled their client widths.
+  The 390 px and 1,440 px checks also had no horizontal overflow. An integrated-browser screenshot
+  captured the final 320 px state.
+- From backend rollout through the first observation window, 39 automatic
+  `drain_and_resubmit` spans all succeeded (p50 3 ms, p95 3.140 s, max 3.514 s) with zero soft
+  timeouts. After a 90-second revision stabilization cutoff, seven more spans all succeeded and the
+  severe trace, 5xx, exception, and non-InProc failed-dependency query returned no rows.
+- Revision-transition telemetry contained expected Redis connection warnings with successful
+  durable Table fallback and pre-existing Storage authorization failures in oracle/orphan
+  reconcilers. Neither recurred in the stabilized observation window and no admission reset was
+  skipped.
+- Final request queue counts were 0 active / 0 scheduled / 0 dead-letter and active warmups were
+  zero. ACR returned to `publicNetworkAccess=Disabled`, `defaultAction=Deny`, trusted Azure services
+  enabled, with zero active builds.
