@@ -37,7 +37,33 @@ export const CANONICAL_ORDER = [
 export type StageDisplay = "done" | "failed" | "canceled" | "pending";
 
 /** Stages that only make sense on the success branch. */
-const SUCCESS_PATH_STAGES = new Set(["running", "succeeded"]);
+const SUCCESS_PATH_STAGES = new Set(["running", "transition_published", "succeeded"]);
+const TERMINAL_BRANCH_STAGES = new Set(["succeeded", "failed", "dead_letter"]);
+
+function terminalBranch(
+  trace: BlastMessageTrace,
+  reached: ReadonlySet<string>,
+): string | null {
+  const declared = trace.terminal_stage;
+  if (declared && TERMINAL_BRANCH_STAGES.has(declared) && reached.has(declared)) {
+    return declared;
+  }
+  const candidates = trace.stages
+    .filter(({ stage }) => TERMINAL_BRANCH_STAGES.has(stage))
+    .map(({ stage, ts }) => ({ stage, time: Date.parse(ts) }))
+    .filter(({ time }) => Number.isFinite(time))
+    .sort(
+      (left, right) =>
+        left.time - right.time ||
+        CANONICAL_ORDER.indexOf(left.stage) - CANONICAL_ORDER.indexOf(right.stage),
+    );
+  if (candidates[0]) return candidates[0].stage;
+  return (
+    CANONICAL_ORDER.find(
+      (stage) => TERMINAL_BRANCH_STAGES.has(stage) && reached.has(stage),
+    ) ?? null
+  );
+}
 
 /** True when the trace reached a terminal failure (``failed`` / ``dead_letter``). */
 export function traceTerminallyFailed(reached: ReadonlySet<string>): boolean {
@@ -88,8 +114,14 @@ export function fmtTraceMs(ms: number | null): string {
 export function visibleTraceStages(trace: BlastMessageTrace): string[] {
   if (!trace.stages.length) return [];
   const reached = new Set(trace.stages.map((s) => s.stage));
+  const resolvedTerminalBranch = terminalBranch(trace, reached);
   const lastIdx = Math.max(...trace.stages.map((s) => CANONICAL_ORDER.indexOf(s.stage)));
   return CANONICAL_ORDER.filter(
-    (st, i) => i <= lastIdx && (reached.has(st) || i < lastIdx),
+    (stage, index) =>
+      index <= lastIdx &&
+      (reached.has(stage) || index < lastIdx) &&
+      (resolvedTerminalBranch === null ||
+        !TERMINAL_BRANCH_STAGES.has(stage) ||
+        stage === resolvedTerminalBranch),
   );
 }

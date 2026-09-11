@@ -21,7 +21,7 @@ dedicated `worker-servicebus` parent, never once per Celery worker parent.
 Replacement prefork children must reset every network pool the resident parent
 can initialize, without closing parent-owned transports.
 Validation: `uv run pytest -q api/tests/test_celery_failure_visibility.py
-api/tests/test_telemetry_init.py`.
+api/tests/test_telemetry_init.py api/tests/test_celery_queue_isolation.py`.
 """
 
 from __future__ import annotations
@@ -56,9 +56,7 @@ def _start_reporter(sender_name: str) -> None:
         name = os.environ.get("SIDECAR_NAME", sender_name)
         start_in_thread(name)
     except Exception:
-        LOGGER.warning(
-            "cgroup reporter failed to start in %s", sender_name, exc_info=True
-        )
+        LOGGER.warning("cgroup reporter failed to start in %s", sender_name, exc_info=True)
 
 
 def _now_iso() -> str:
@@ -164,6 +162,7 @@ def _reset_inherited_client_pools() -> None:
         ("api.services.service_bus_pref", "reset_service_bus_table_pool_after_fork"),
         ("api.services.service_bus_tracking", "reset_service_bus_bridge_pool_after_fork"),
         ("api.services.service_bus_outbox", "reset_service_bus_outbox_after_fork"),
+        ("api.services.aks.execution_admission", "reset_execution_admission_after_fork"),
         ("api.services.state.singletons", "reset_singleton_cache_after_fork"),
         ("api.services.state_repo", "reset_state_repo_cache_after_fork"),
     )

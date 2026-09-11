@@ -95,9 +95,7 @@ def test_servicebus_parent_initialises_telemetry_and_consumers_post_fork(
         lambda: calls.append("external") or True,
     )
 
-    celery_signals._on_worker_ready(
-        sender=SimpleNamespace(hostname="worker-servicebus@replica")
-    )
+    celery_signals._on_worker_ready(sender=SimpleNamespace(hostname="worker-servicebus@replica"))
 
     assert calls == ["telemetry:worker", "resident", "external"]
 
@@ -114,6 +112,7 @@ def test_prefork_child_resets_resident_parent_table_clients(
         service_bus_tracking,
         state_repo,
     )
+    from api.services.aks import execution_admission
     from api.services.k8s import client as k8s_client
     from api.services.state import singletons
 
@@ -126,6 +125,7 @@ def test_prefork_child_resets_resident_parent_table_clients(
         (service_bus_pref, "reset_service_bus_table_pool_after_fork"),
         (service_bus_tracking, "reset_service_bus_bridge_pool_after_fork"),
         (service_bus_outbox, "reset_service_bus_outbox_after_fork"),
+        (execution_admission, "reset_execution_admission_after_fork"),
         (singletons, "reset_singleton_cache_after_fork"),
         (state_repo, "reset_state_repo_cache_after_fork"),
     )

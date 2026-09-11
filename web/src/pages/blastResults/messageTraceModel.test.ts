@@ -11,14 +11,14 @@ import {
   visibleTraceStages,
 } from "./messageTraceModel";
 
-function trace(stages: string[]): BlastMessageTrace {
+function trace(stages: string[], terminalStage: string | null = null): BlastMessageTrace {
   return {
     stages: stages.map((stage, i) => ({
       stage,
       ts: `2026-06-14T00:00:0${i}+00:00`,
     })),
     metrics: { queue_dwell_ms: null, submit_latency_ms: null, e2e_ms: null },
-    terminal_stage: null,
+    terminal_stage: terminalStage,
     last_stage: stages[stages.length - 1] ?? null,
   };
 }
@@ -66,6 +66,51 @@ describe("visibleTraceStages", () => {
     );
     expect(v[v.length - 1]).toBe("completion_published");
     expect(v).toContain("succeeded");
+    expect(v).not.toContain("failed");
+    expect(v).not.toContain("dead_letter");
+  });
+
+  it("shows only the reached failure terminal branch", () => {
+    const v = visibleTraceStages(
+      trace(["enqueued", "received", "submitted", "failed", "completion_published"]),
+    );
+    expect(v).toContain("failed");
+    expect(v).not.toContain("succeeded");
+    expect(v).not.toContain("dead_letter");
+  });
+
+  it("shows dead-letter without pending success or failure alternatives", () => {
+    const v = visibleTraceStages(trace(["enqueued", "received", "dead_letter"]));
+    expect(v).toContain("dead_letter");
+    expect(v).not.toContain("succeeded");
+    expect(v).not.toContain("failed");
+  });
+
+  it("uses terminal_stage when contradictory terminal history exists", () => {
+    const v = visibleTraceStages(
+      trace(["enqueued", "succeeded", "failed", "completion_published"], "failed"),
+    );
+    expect(v).toContain("failed");
+    expect(v).not.toContain("succeeded");
+  });
+
+  it("uses the earliest valid terminal timestamp for legacy traces", () => {
+    const legacy = trace(["enqueued", "failed", "succeeded", "completion_published"]);
+    const v = visibleTraceStages(legacy);
+    expect(v).toContain("failed");
+    expect(v).not.toContain("succeeded");
+  });
+
+  it("chooses one deterministic branch when legacy terminal timestamps are invalid", () => {
+    const legacy = trace(["enqueued", "succeeded", "failed", "completion_published"]);
+    legacy.stages = legacy.stages.map((stage) =>
+      ["succeeded", "failed"].includes(stage.stage) ? { ...stage, ts: "invalid" } : stage,
+    );
+
+    const v = visibleTraceStages(legacy);
+
+    expect(v).toContain("succeeded");
+    expect(v).not.toContain("failed");
   });
 
   it("places non-terminal subscriber delivery between running and terminal", () => {
@@ -123,8 +168,11 @@ describe("stageDisplayState (terminal-failure handling)", () => {
   });
 
   it("failed job: skipped success-path stages are canceled, not pending", () => {
-    // running / succeeded never happened on a fail-at-submit job.
+    // Running and its subscriber notification never happened on a fail-at-submit job.
     expect(stageDisplayState("running", failedReached, true)).toBe("canceled");
+    expect(stageDisplayState("transition_published", failedReached, true)).toBe(
+      "canceled",
+    );
     expect(stageDisplayState("succeeded", failedReached, true)).toBe("canceled");
   });
 

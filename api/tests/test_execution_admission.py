@@ -152,6 +152,29 @@ def test_readiness_soft_deadline_is_not_converted_to_deny(
         _decision()
 
 
+def test_after_fork_reset_replaces_inherited_locked_caches() -> None:
+    old_decision_lock = admission._DECISION_CACHE_LOCK
+    old_marker_lock = admission_state._MEMORY_LOCK
+    old_decision_lock.acquire()
+    old_marker_lock.acquire()
+    try:
+        admission._DECISION_CACHE[("s", "r", "c", "", "state")] = (
+            1.0,
+            {"allowed": False, "reason": "cached"},
+        )
+        admission_state._MEMORY["marker"] = {"job_id": "warmup-1"}
+
+        admission.reset_execution_admission_after_fork()
+    finally:
+        old_marker_lock.release()
+        old_decision_lock.release()
+
+    assert admission._DECISION_CACHE == {}
+    assert admission_state._MEMORY == {}
+    assert admission._DECISION_CACHE_LOCK is not old_decision_lock
+    assert admission_state._MEMORY_LOCK is not old_marker_lock
+
+
 def test_caller_deadline_stops_before_next_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Ban, CheckCircle2, Circle, Clock, GitBranch } from "lucide-react";
+import { useId } from "react";
 
 import { blastApi } from "@/api/blast";
 import type { BlastMessageTrace } from "@/api/blast.types";
@@ -60,6 +61,7 @@ export function MessageTraceCard({
   jobId: string;
   isActive: boolean;
 }) {
+  const headingId = useId();
   const query = useQuery({
     queryKey: ["blast-job-trace", jobId],
     queryFn: () =>
@@ -99,8 +101,13 @@ export function MessageTraceCard({
     : [];
 
   return (
-    <section className="glass-card" style={{ padding: "14px 16px" }}>
+    <section
+      aria-labelledby={headingId}
+      className="glass-card"
+      style={{ padding: "14px 16px" }}
+    >
       <h3
+        id={headingId}
         style={{
           margin: "0 0 10px 0",
           fontSize: 14,
@@ -132,7 +139,10 @@ export function MessageTraceCard({
         )}
       </div>
 
-      <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+      <ol
+        aria-label="Message lifecycle stages"
+        style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}
+      >
         {visible.map((stage) => {
           const ts = tsByStage.get(stage);
           const display = stageDisplayState(stage, reached, terminalFailed);
@@ -165,10 +175,16 @@ export function MessageTraceCard({
               ) : (
                 <Clock size={14} strokeWidth={1.5} className="muted" />
               )}
-              <span style={{ flex: 1 }}>{STAGE_LABELS[stage] ?? stage}</span>
+              <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
+                {STAGE_LABELS[stage] ?? stage}
+              </span>
               <span
                 className="muted"
-                style={{ fontVariantNumeric: "tabular-nums", fontSize: 12 }}
+                style={{
+                  flexShrink: 0,
+                  fontVariantNumeric: "tabular-nums",
+                  fontSize: 12,
+                }}
               >
                 {display === "canceled"
                   ? "canceled"

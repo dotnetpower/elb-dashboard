@@ -4,8 +4,9 @@ Responsibility: Combine lifecycle barrier state, ARM/Kubernetes node convergence
     database warmup state, and correlated warmup JobState into one fail-closed admission decision.
 Edit boundaries: Durable record I/O belongs in `execution_admission_state.py`; queue receive,
     settlement, and lifecycle side effects remain in their callers.
-Key entry points: `evaluate_execution_admission`; state primitives are re-exported for callers
-    that create lifecycle generations or correlate warmup jobs.
+Key entry points: `evaluate_execution_admission`, `reset_execution_admission_after_fork`; state
+    primitives are re-exported for callers that create lifecycle generations or correlate warmup
+    jobs.
 Risky contracts: Stop/delete always deny. Start/scale require ARM completion, exact target node
     convergence, strict (not degraded) DB readiness, and completed token-correlated warmup jobs.
     A terminal start failure may reconcile without its failed token only when the same exact node
@@ -14,7 +15,8 @@ Risky contracts: Stop/delete always deny. Start/scale require ARM completion, ex
     an earlier allow decision before another queue message is submitted. Celery soft deadlines are
     process-control signals and must propagate rather than becoming a cached deny decision.
 Validation: `uv run pytest -q api/tests/test_execution_admission.py
-    api/tests/test_servicebus_tasks.py api/tests/test_resident_consumer.py`.
+    api/tests/test_servicebus_tasks.py api/tests/test_resident_consumer.py
+    api/tests/test_celery_queue_isolation.py`.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from api.services.aks.execution_admission_state import (
     record_barrier_warmup_jobs,
     record_lifecycle_completed,
     record_lifecycle_failed,
+    reset_execution_admission_state_after_fork,
     reset_execution_admission_state_for_tests,
 )
 
@@ -555,6 +558,14 @@ def reset_execution_admission_for_tests() -> None:
     _invalidate_decisions()
 
 
+def reset_execution_admission_after_fork() -> None:
+    """Drop caches and replace locks in the single-threaded prefork child init."""
+    global _DECISION_CACHE_LOCK
+    _DECISION_CACHE.clear()
+    _DECISION_CACHE_LOCK = threading.Lock()
+    reset_execution_admission_state_after_fork()
+
+
 __all__ = [
     "AdmissionDecision",
     "ExecutionAdmissionPersistenceError",
@@ -571,5 +582,6 @@ __all__ = [
     "record_barrier_warmup_jobs",
     "record_lifecycle_completed",
     "record_lifecycle_failed",
+    "reset_execution_admission_after_fork",
     "reset_execution_admission_for_tests",
 ]

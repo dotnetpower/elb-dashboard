@@ -10,12 +10,13 @@ Key entry points: `create_lifecycle_barrier`, `get_lifecycle_barrier`,
     `record_barrier_warmup_jobs`, `clear_barrier_warmup_job`,
     `get_barrier_warmup_jobs`, `record_active_warmup_job`,
     `list_active_warmup_markers`, `clear_active_warmup_job`,
-    `lifecycle_barrier_interrupts_job`.
+    `lifecycle_barrier_interrupts_job`, `reset_execution_admission_state_after_fork`.
 Risky contracts: Deployed writes fail closed unless Azure Table persistence succeeds. Token-scoped
     records never mutate another lifecycle generation, and per-database keys prevent concurrent
     warmup writers from losing each other's updates. Deployed reads distinguish confirmed missing
     rows from Table failures so a storage outage cannot silently open execution admission.
-Validation: `uv run pytest -q api/tests/test_execution_admission.py`.
+Validation: `uv run pytest -q api/tests/test_execution_admission.py
+    api/tests/test_celery_queue_isolation.py`.
 """
 
 from __future__ import annotations
@@ -623,6 +624,13 @@ def reset_execution_admission_state_for_tests() -> None:
         _MEMORY.clear()
 
 
+def reset_execution_admission_state_after_fork() -> None:
+    """Drop marker memory and replace its lock in single-threaded child init."""
+    global _MEMORY_LOCK
+    _MEMORY.clear()
+    _MEMORY_LOCK = threading.Lock()
+
+
 __all__ = [
     "ExecutionAdmissionPersistenceError",
     "LifecycleBarrier",
@@ -641,5 +649,6 @@ __all__ = [
     "record_barrier_warmup_jobs",
     "record_lifecycle_completed",
     "record_lifecycle_failed",
+    "reset_execution_admission_state_after_fork",
     "reset_execution_admission_state_for_tests",
 ]

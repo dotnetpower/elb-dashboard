@@ -261,6 +261,24 @@ test("Run details keeps timing metadata within a 320px viewport", async ({
         finalizer_seconds: 32,
       },
     },
+    message_trace: {
+      schema_version: 1,
+      stages: [
+        { stage: "enqueued", ts: "2026-09-11T02:13:34Z" },
+        { stage: "received", ts: "2026-09-11T02:14:36Z" },
+        { stage: "submitted", ts: "2026-09-11T02:14:49Z" },
+        { stage: "running", ts: "2026-09-11T02:15:00Z" },
+        { stage: "succeeded", ts: "2026-09-11T02:18:33Z" },
+        { stage: "completion_published", ts: "2026-09-11T02:19:15Z" },
+      ],
+      metrics: {
+        queue_dwell_ms: 62_000,
+        submit_latency_ms: 13_000,
+        e2e_ms: 341_000,
+      },
+      terminal_stage: "succeeded",
+      last_stage: "completion_published",
+    },
     meta: {},
   });
   await stubResults(uiPage, jobId);
@@ -281,6 +299,16 @@ test("Run details keeps timing metadata within a 320px viewport", async ({
           .length,
     ),
   ).toBe(1);
+  const lifecycle = uiPage.getByRole("region", { name: "Message lifecycle" });
+  await expect(lifecycle).toBeVisible();
+  await expect(
+    lifecycle.getByRole("list", { name: "Message lifecycle stages" }),
+  ).toBeVisible();
+  await expect(lifecycle.getByText("Succeeded", { exact: true })).toBeVisible();
+  await expect(lifecycle.getByText("Failed", { exact: true })).toHaveCount(0);
+  await expect(
+    lifecycle.getByText("Dead-lettered", { exact: true }),
+  ).toHaveCount(0);
 
   const width = await uiPage.evaluate(() => ({
     client: document.documentElement.clientWidth,
