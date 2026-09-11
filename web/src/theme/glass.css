@@ -1771,6 +1771,20 @@ textarea.form-input {
   font-weight: 700;
 }
 
+.blast-run-details-grid > * {
+  min-width: 0;
+}
+
+.blast-run-details-grid > span {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 360px) {
+  .blast-job-metric-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .metric-block .mu {
   font-size: var(--font-size-small);
   color: var(--text-faint);
@@ -2159,7 +2173,6 @@ textarea.form-input {
     height: 380px;
   }
 }
-
 
 .glass-dialog ul,
 .glass-dialog ol {
@@ -8692,7 +8705,6 @@ select.terminal-cockpit__cfg-input {
   }
 }
 
-
 /* Submit button keyboard-shortcut hint badge (Ctrl/⌘ + Enter). Sits on the
    accent-filled Run BLAST button, so it uses translucent white chrome. */
 .blast-submit-kbd {
@@ -8741,4 +8753,3 @@ select.terminal-cockpit__cfg-input {
 .example-picker__search input::placeholder {
   color: var(--text-faint);
 }
-

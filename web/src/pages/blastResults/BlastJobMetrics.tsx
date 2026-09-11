@@ -1,9 +1,5 @@
 import { Link } from "react-router-dom";
-import {
-  BarChart3,
-  Download,
-  Loader2,
-} from "lucide-react";
+import { BarChart3, Download, Loader2 } from "lucide-react";
 
 import { formatBytes } from "@/components/BlastFilePreview";
 import { phaseLabel } from "@/constants";
@@ -36,7 +32,10 @@ export function BlastJobMetrics({
 }: BlastJobMetricsProps) {
   return (
     <>
-      <div className="metric-grid" style={{ marginTop: "var(--space-3)" }}>
+      <div
+        className="metric-grid blast-job-metric-grid"
+        style={{ marginTop: "var(--space-3)" }}
+      >
         <div className="metric-block">
           <div className="mv">{files.length}</div>
           <div className="mu">Result files</div>

@@ -77,7 +77,11 @@ function BlastJobDetailsGridComponent({
   );
 
   return (
-    <div style={gridStyle} data-testid="blast-run-details-grid">
+    <div
+      className="blast-run-details-grid"
+      style={gridStyle}
+      data-testid="blast-run-details-grid"
+    >
       <span className="muted">Job ID</span>
       <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
         <code className="code-val" style={{ overflowWrap: "anywhere" }}>

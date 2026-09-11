@@ -52,7 +52,7 @@ metric stopped at the running notification instead of terminal result delivery.
 
 ## Hardening review
 
-Fourteen review rounds were run until no reproducible Medium-or-higher finding remained:
+Seventeen review rounds were run until no reproducible Medium-or-higher finding remained:
 
 1. Contract/state-machine: pinned terminal-only generated timing collection and normalized
   cancelled sibling states onto the existing failed terminal vocabulary.
@@ -80,8 +80,16 @@ Fourteen review rounds were run until no reproducible Medium-or-higher finding r
    from Jobs rows, Cluster Bento duration, and 24-hour runtime averages.
 13. Independent adversarial review: added bounded CAS conflict backoff and an additive trace schema
    version; rejected non-reproducible findings against intentionally incomplete broker evidence.
-14. Final independent review: reported `No Medium-or-higher findings`; only Low observability and
-   future schema-migration audit gaps remained.
+14. Independent whole-diff review: reported no Medium-or-higher code finding; only Low
+  observability and future schema-migration audit gaps remained.
+15. Live minimum-width review: a 320 px browser check found 46 px horizontal overflow from legacy
+  long metadata values and the three-column result metrics. Metadata children now wrap within
+  `min-width: 0`, and result metrics stack at the minimum supported viewport.
+16. Independent responsive review: caught those new rules accidentally nested under the metric
+  value selector. They now live at root scope, and a ui-mock regression asserts long metadata,
+  one-column metrics, and no document overflow at 320 px.
+17. Final post-fix review: repeated the whole-diff state-machine, timing, generated-runtime,
+  accessibility, and responsive critique after the root-scoped CSS correction.
 
 ## Validation
 
@@ -93,6 +101,9 @@ Fourteen review rounds were run until no reproducible Medium-or-higher finding r
 - The patched sibling context accepted two consecutive applications with the same hash and the
   generated `main.py` compiled.
 - Independent final review found no Medium-or-higher issue after 14 rounds.
+- The new 320 px Playwright case was discovered successfully. Local browser launch was unavailable
+  because the host Chromium runtime lacks `libnspr4.so`; the same assertion is repeated against the
+  deployed app with the integrated browser after rollout.
 
 Live image, rollout, and passive validation evidence will be appended after the immutable image is
 built and the affected services converge. Synthetic billable jobs are not required for rollout; an

@@ -103,6 +103,27 @@ async function stubDetail(
   );
 }
 
+async function stubResults(page: Page, jobId: string): Promise<void> {
+  await page.route(`**/api/blast/jobs/${jobId}/results**`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        job_id: jobId,
+        files: [
+          {
+            file_id: "result-1",
+            name: "results.tsv",
+            size: 12_600,
+            last_modified: "2026-09-11T02:18:33Z",
+            format: "tsv",
+          },
+        ],
+      }),
+    }),
+  );
+}
+
 test("Run details renders captured queue-job metadata, BLAST command, and raw params", async ({
   uiPage,
 }) => {
@@ -157,7 +178,9 @@ test("Run details shows 'not recorded' for a legacy queue job without captured p
   // No captured options -> the raw-parameters panel is absent. (The BLAST
   // command preview still renders the bare `blastn -db core_nt` derived from
   // program + db, so it is intentionally NOT asserted absent here.)
-  await expect(grid.getByText("Raw parameters", { exact: true })).toHaveCount(0);
+  await expect(grid.getByText("Raw parameters", { exact: true })).toHaveCount(
+    0,
+  );
   await expect(grid.getByText(/blastn .*-db core_nt/)).toBeVisible();
   await expect(grid.getByText(/-outfmt|-evalue/)).toHaveCount(0);
 });
@@ -192,6 +215,78 @@ test("Run details Job ID copy button confirms the copy", async ({ uiPage }) => {
   // Copy success toggles the copy-btn--copied modifier (icon swaps to a check).
   // navigator.clipboard.writeText is stubbed by the ui-mock fixture.
   await expect(grid.locator("button.copy-btn--copied")).toBeVisible();
+});
+
+test("Run details keeps timing metadata within a 320px viewport", async ({
+  uiPage,
+}) => {
+  const jobId = "ext-meta-mobile-timing";
+  await uiPage.setViewportSize({ width: 320, height: 720 });
+  await stubDetail(uiPage, jobId, {
+    job_id: jobId,
+    job_title: "Mobile timing",
+    status: "completed",
+    phase: "completed",
+    submission_source: "servicebus",
+    program: "blastn",
+    db: "core_nt",
+    created_at: "2026-09-11T02:13:34Z",
+    completed_at: "2026-09-11T02:18:33Z",
+    infrastructure: {
+      subscription_id: "sub",
+      resource_group: "rg-elb-cluster",
+      cluster_name: "elb-cluster-01",
+      storage_account: "stelbdashboardcyutlgcnv3",
+    },
+    timing: {
+      schema_version: 1,
+      result_ready_at: "2026-09-11T02:18:33Z",
+      completion_published_at: "2026-09-11T02:19:15Z",
+      time_to_result_seconds: 299,
+      total_queue_seconds: 148,
+      service_bus_queue_seconds: 62,
+      submit_seconds: 13,
+      execution_queue_seconds: 86,
+      processing_seconds: 138,
+      execution_elapsed_seconds: 224,
+      status_delivery_seconds: 42,
+      unattributed_seconds: 0,
+      queue_complete: true,
+      breakdown_complete: true,
+      phases: {
+        orchestration_seconds: 75,
+        k8s_setup_seconds: 60,
+        blast_seconds: 22,
+        export_seconds: 8,
+        finalizer_seconds: 32,
+      },
+    },
+    meta: {},
+  });
+  await stubResults(uiPage, jobId);
+
+  await uiPage.goto(`/blast/jobs/${jobId}?tab=run`);
+
+  const grid = uiPage.getByTestId("blast-run-details-grid");
+  await expect(grid.getByText("Time to result", { exact: true })).toBeVisible();
+  await expect(
+    grid.getByText("stelbdashboardcyutlgcnv3", { exact: true }),
+  ).toBeVisible();
+  const metrics = uiPage.locator(".blast-job-metric-grid");
+  await expect(metrics).toBeVisible();
+  expect(
+    await metrics.evaluate(
+      (element) =>
+        getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean)
+          .length,
+    ),
+  ).toBe(1);
+
+  const width = await uiPage.evaluate(() => ({
+    client: document.documentElement.clientWidth,
+    scroll: document.documentElement.scrollWidth,
+  }));
+  expect(width.scroll).toBeLessThanOrEqual(width.client);
 });
 
 const FAILED_JOB_ID = "ext-meta-failed";
@@ -279,9 +374,13 @@ test("Run details renders the conditional option rows + protein molecule unit", 
   // Conditional option rows only render when their key is present.
   await expect(grid.getByText("Dust", { exact: true })).toBeVisible();
   await expect(grid.getByText("Machine", { exact: true })).toBeVisible();
-  await expect(grid.getByText("Standard_E16s_v5", { exact: true })).toBeVisible();
+  await expect(
+    grid.getByText("Standard_E16s_v5", { exact: true }),
+  ).toBeVisible();
   await expect(grid.getByText("Nodes", { exact: true })).toBeVisible();
-  await expect(grid.getByText("Taxonomy filter", { exact: true })).toBeVisible();
+  await expect(
+    grid.getByText("Taxonomy filter", { exact: true }),
+  ).toBeVisible();
   await expect(grid.getByText(/exclude taxid 9606/)).toBeVisible();
 
   // Protein query -> "aa" unit + Molecule row.
