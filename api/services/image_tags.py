@@ -159,6 +159,10 @@ from __future__ import annotations
 # in-flight runtime IDs from Kubernetes, fails closed when observation fails,
 # and invokes ElasticBLAST's JSON idempotency path. ACR run dea0 produced digest
 # sha256:91db00630b0f9f753bb3c28fd05a3eea597b14646e56e1dbc56c6a6dc59494cc.
+# 4.59 makes recovery observation tri-state, requires the runtime ID ConfigMap
+# write before submit side effects, terminates in-memory on persistence failure,
+# and preserves the bounded submit deadline. ACR run dea6 produced digest
+# sha256:c24807bc7aaf9e144054301936caa35addba15421304d346fdb4bedefa59f8d4.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -186,7 +190,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.58",
+    "elb-openapi": "4.59",
 }
 
 # GitHub source repo for ACR Build Tasks.

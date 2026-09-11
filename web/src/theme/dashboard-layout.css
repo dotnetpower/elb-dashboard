@@ -766,85 +766,110 @@
     display: none !important;
   }
 
-  /* ---- Recent searches list (/blast/jobs) ----
-     The 5-column desktop table (Job / User / Status / Time / Delete)
-     still clips at phone widths even after .table-scroll contains
-     the overflow — Status badges and the Time column get pushed out
-     of the visible card. The User column is almost always empty in
-     single-user workspaces, so hide it on mobile and tighten the
-     remaining columns so the table fits without horizontal scroll. */
+  /* ---- Recent searches list (/blast/jobs) ---- */
+  .jobs-filter-bar {
+    width: 100%;
+    min-width: 0;
+    gap: 8px !important;
+  }
+  .jobs-filter-bar > div:nth-child(1),
+  .jobs-filter-bar > div:nth-child(2) {
+    display: grid !important;
+    width: 100%;
+    min-width: 0;
+    gap: 4px !important;
+  }
+  .jobs-filter-bar > div:nth-child(1) {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .jobs-filter-bar > div:nth-child(2) {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .jobs-filter-bar > div:nth-child(3) {
+    flex: 1 1 100% !important;
+    width: 100%;
+    max-width: none !important;
+    min-width: 0;
+  }
+  .jobs-filter-bar .glass-button {
+    min-width: 0;
+    padding: 6px 4px !important;
+    line-height: 1.2;
+    white-space: normal;
+  }
+
+  /* Preserve all five data points on phones by turning each semantic
+     table row into a compact grid: job identity spans the first line,
+     source/status/delete share the second, and relative + runtime time
+     share the third. */
   .jobs-page table {
-    /* `auto` layout lets row content (long titles like
-       `20260520-2309 MPXV F3L - NC_003310.1` or the `elb-cluster`
-       badge) push the Job column past the viewport even after
-       `white-space: normal` because the min-content of the badges
-       inside the meta row isn't breakable. Pin the layout so the
-       Job column absorbs whatever space remains after the fixed
-       right-side columns. */
-    table-layout: fixed !important;
+    display: block;
     width: 100% !important;
   }
-  /* Hide the User column (header + cells); nth-child(2) of every row. */
-  .jobs-page thead th:nth-child(2),
-  .jobs-page tbody td:nth-child(2) {
+  .jobs-page thead {
     display: none !important;
   }
-  /* Pin the right-side columns to fixed widths so the Job column
-     gets the remaining space under `table-layout: fixed`. */
-  .jobs-page thead th:nth-child(3),
-  .jobs-page tbody td:nth-child(3) {
-    width: 78px !important;
+  .jobs-page tbody {
+    display: block;
+    width: 100%;
   }
-  .jobs-page thead th:nth-child(4),
-  .jobs-page tbody td:nth-child(4) {
-    width: 72px !important;
+  .jobs-page tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "job job job"
+      "source status delete"
+      "time time time";
+    gap: 5px 8px;
+    width: 100%;
+    padding: 10px 0;
   }
-  .jobs-page thead th:nth-child(5),
-  .jobs-page tbody td:nth-child(5) {
-    width: 32px !important;
-  }
-  /* Compact remaining cells: smaller font, tighter padding, allow
-     status badge / time to wrap into two lines if necessary. */
-  .jobs-page thead th,
   .jobs-page tbody td {
-    padding-left: 4px !important;
-    padding-right: 4px !important;
+    min-width: 0;
+    width: auto !important;
+    padding: 0 !important;
     font-size: 11px !important;
   }
   .jobs-page tbody td:first-child {
-    padding-left: 0 !important;
+    grid-area: job;
   }
-  .jobs-page tbody td:last-child {
-    padding-right: 0 !important;
+  .jobs-page tbody td:nth-child(2) {
+    display: block !important;
+    grid-area: source;
+    align-self: center;
+    color: var(--text-muted);
   }
-  /* The Job title link is `white-space: nowrap` for desktop so it
-     ellipsises in a wide row; on mobile that forces the column to
-     the title's intrinsic width and pushes Time/Delete off-screen.
-     Let the title wrap into 2 lines instead. */
+  .jobs-page tbody td:nth-child(3) {
+    grid-area: status;
+    align-self: center;
+  }
+  .jobs-page tbody td:nth-child(4) {
+    grid-area: time;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-align: left !important;
+    white-space: nowrap !important;
+  }
+  .jobs-page tbody td:nth-child(5) {
+    grid-area: delete;
+    align-self: center;
+  }
   .jobs-page tbody td:first-child a {
-    white-space: normal !important;
-    overflow: visible !important;
-    text-overflow: clip !important;
-    word-break: break-word !important;
-    overflow-wrap: anywhere !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
     font-size: 12px !important;
     line-height: 1.25 !important;
   }
-  /* Status / Time TDs hard-set `whitespace: nowrap` inline; override
-     so the cells can shrink. Hide the "Duration N" sub-line on mobile
-     — the headline "X ago" is enough at a glance. */
-  .jobs-page tbody td:nth-child(3),
-  .jobs-page tbody td:nth-child(4) {
-    white-space: normal !important;
-  }
   .jobs-page tbody td:nth-child(4) > div + div {
-    display: none !important;
+    display: block !important;
   }
   .jobs-page tbody td:nth-child(4) > div {
     font-size: 10px !important;
   }
-  /* Hide the table's own internal scroll affordance — content now
-     fits without it. */
   .jobs-page .table-scroll {
     overflow-x: hidden !important;
     padding-left: 8px !important;

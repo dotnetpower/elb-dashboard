@@ -2569,6 +2569,7 @@ fi
                 CANDIDATE_TOTAL_BYTES=0
                 CANDIDATE_FAILURE_REASON=""
                 CANDIDATE_ORACLE_TMP="${CANDIDATE_ORACLE}.$$.tmp"
+                CANDIDATE_ORACLE_SORTED="${CANDIDATE_ORACLE}.$$.sorted"
                 : > "$CANDIDATE_ORACLE_TMP"
                 if ! [[ "${SHARD_COUNT:-}" =~ ^[0-9]+$ ]] || [ "$SHARD_COUNT" -le 0 ]; then
                     CANDIDATE_COMPLETE=0
@@ -2625,17 +2626,44 @@ fi
                     fi
                     cat "$candidate_file" >> "$CANDIDATE_ORACLE_TMP"
                 done
+                # Candidate files are discovered in shard/batch path order, but
+                # separate query batches can contain interleaved local OIDs for
+                # the same shard. Re-establish the generation-wide DB order
+                # before assigning logical ranks in merge-sharded-results.sh.
                 if [ "$CANDIDATE_COMPLETE" -eq 1 ] \
                         && [ "$CANDIDATE_FILE_COUNT" -eq "$SHARD_COUNT" ] \
                         && [ -s "$CANDIDATE_ORACLE_TMP" ]; then
-                    mv "$CANDIDATE_ORACLE_TMP" "$CANDIDATE_ORACLE"
+                    printf '# ELB candidate-order-v1 files=%s candidates=%s\n' \
+                        "$CANDIDATE_FILE_COUNT" "$CANDIDATE_TOTAL_ROWS" \
+                        > "$CANDIDATE_ORACLE_SORTED"
+                    if [ "$CANDIDATE_TOTAL_ROWS" -gt 0 ] \
+                            && ! grep -v '^#' "$CANDIDATE_ORACLE_TMP" \
+                                | LC_ALL=C sort -s -t $'\t' -k1,1n -k2,2n \
+                                >> "$CANDIDATE_ORACLE_SORTED"; then
+                        CANDIDATE_COMPLETE=0
+                        CANDIDATE_FAILURE_REASON="candidate_global_sort_failed"
+                    fi
+                    CANDIDATE_SORTED_ROWS=$(grep -cve '^#' \
+                        "$CANDIDATE_ORACLE_SORTED" 2>/dev/null || true)
+                    if ! [[ "$CANDIDATE_SORTED_ROWS" =~ ^[0-9]+$ ]] \
+                            || [ "$CANDIDATE_SORTED_ROWS" -ne "$CANDIDATE_TOTAL_ROWS" ]; then
+                        CANDIDATE_COMPLETE=0
+                        CANDIDATE_FAILURE_REASON="candidate_sorted_row_count_mismatch"
+                    fi
+                fi
+                if [ "$CANDIDATE_COMPLETE" -eq 1 ] \
+                        && [ "$CANDIDATE_FILE_COUNT" -eq "$SHARD_COUNT" ] \
+                        && [ -s "$CANDIDATE_ORACLE_SORTED" ]; then
+                    mv "$CANDIDATE_ORACLE_SORTED" "$CANDIDATE_ORACLE"
+                    rm -f "$CANDIDATE_ORACLE_TMP"
                     export ELB_TIE_ORDER_FILE="$CANDIDATE_ORACLE"
                     export ELB_TIE_ORDER_BASE="$CANDIDATE_ORACLE_BASE"
                     export ELB_TIE_ORDER_SOURCE="db_order"
                     export ELB_TIE_ORDER_SCOPE="candidate"
                     echo "CANDIDATE_ORDER_FAST_PATH file_count=${CANDIDATE_FILE_COUNT} rows=${CANDIDATE_TOTAL_ROWS} bytes=${CANDIDATE_TOTAL_BYTES}"
                 else
-                    rm -f "$CANDIDATE_ORACLE" "$CANDIDATE_ORACLE_TMP"
+                    rm -f "$CANDIDATE_ORACLE" "$CANDIDATE_ORACLE_TMP" \
+                        "$CANDIDATE_ORACLE_SORTED"
                     if [ -z "$CANDIDATE_FAILURE_REASON" ] \
                             && [ "$CANDIDATE_FILE_COUNT" -ne "$SHARD_COUNT" ]; then
                         CANDIDATE_FAILURE_REASON="candidate_file_count_mismatch"

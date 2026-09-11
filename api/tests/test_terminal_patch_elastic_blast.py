@@ -2099,6 +2099,58 @@ def test_patch_candidate_order_oracle_wires_complete_set_fast_path(tmp_path: Pat
         assert "ELB_CANDIDATE_ORDER_TIMEOUT_SECONDS" in blast_script.read_text()
 
 
+def test_candidate_order_global_sort_handles_interleaved_batches(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    scripts = tmp_path / "src" / "elastic_blast" / "templates" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "results-export-aks.sh").write_text(
+        "#!/bin/bash\n"
+        'exit "$(cat "$RESULTS_DIR/BLAST_EXIT_CODE-${JOB_NUM}.out")"\n'
+    )
+    finalizer = scripts / "elb-finalizer-aks.sh"
+    finalizer.write_text(
+        "#!/bin/bash\n"
+        'azcopy cp "${SHARD_DIR}/*" "$LOCAL_DIR/" '
+        '--include-pattern "*.out.gz" --log-level=ERROR 2>/dev/null\n'
+        '        if [ -z "${ELB_TIE_ORDER_FILE:-}" ]; then\n'
+        "            for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
+        "                :\n"
+        "            done\n"
+        "        fi\n"
+    )
+
+    patch_module.patch_candidate_order_oracle(tmp_path)
+    finalizer_text = finalizer.read_text()
+    sort_command = "LC_ALL=C sort -s -t $'\\t' -k1,1n -k2,2n"
+
+    assert sort_command in finalizer_text
+    assert 'CANDIDATE_FAILURE_REASON="candidate_global_sort_failed"' in finalizer_text
+    assert 'CANDIDATE_FAILURE_REASON="candidate_sorted_row_count_mismatch"' in finalizer_text
+
+    concatenated_batches = (
+        "00\t9000000\tlate-a\n"
+        "00\t9000000\tlate-alias\n"
+        "01\t8000000\tshard-one\n"
+        "00\t1\tearly\n"
+        "00\t5000000\tmiddle\n"
+    )
+    result = subprocess.run(  # noqa: S603 -- executes the generated fixed sort command
+        ["/bin/bash", "-c", sort_command],
+        input=concatenated_batches,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.splitlines() == [
+        "00\t1\tearly",
+        "00\t5000000\tmiddle",
+        "00\t9000000\tlate-a",
+        "00\t9000000\tlate-alias",
+        "01\t8000000\tshard-one",
+    ]
+
+
 def test_finalizer_awk_filter_preserves_fields_header() -> None:
     """The patched finalizer concatenation keeps the `# Fields:` comment so the
     merge can re-emit a self-describing header.

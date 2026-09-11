@@ -20,7 +20,8 @@ its displayed duration when an in-memory timing cache was empty.
 ## User-facing change
 
 - Exact DB-order finalization now prefers a job-scoped candidate oracle generated while each
-  shard holds its database reader lock. Sparse local OIDs and aliases retain the same comparator
+  shard holds its database reader lock. Candidate rows receive a stable global numeric sort by
+  shard and local OID across query batches. Sparse local OIDs and aliases retain the same comparator
   result as the complete oracle for XML and tabular output.
 - Missing, malformed, oversized, incomplete, or timed-out candidate artifacts fail safely to the
   existing generation-wide oracle. Fast-path and fallback logs include file, row, byte, and reason
@@ -36,6 +37,9 @@ its displayed duration when an in-memory timing cache was empty.
   so a process restart does not make the UI count queue time as execution time.
 - Direct sibling `/v1/jobs` submissions display as `api`; only API submissions carrying a
   dashboard correlation ID display as `api (dashboard)`.
+- The Jobs page preserves source and runtime duration on phones. Status/source filters use bounded
+  grids and each mobile row stacks job, source/status/action, and time without horizontal overflow
+  or letter-by-letter title wrapping.
 - Artifact identity waits expire after 30 minutes and one runtime generation receives at most five
   periodic reconciliation attempts. Exhaustion is visible as a failed artifact sentinel and a new
   runtime identity can still recover.
@@ -59,7 +63,7 @@ its displayed duration when an in-memory timing cache was empty.
 
 ## Hardening review
 
-Seventeen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
+Nineteen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
 partial uploads, aggregate bounds, subprocess deadlines, cache generation fencing, marker
 publication, timing validation, terminal-state convergence, artifact retry liveness, concurrency,
 security boundaries, rolling fallback, and runtime-identity binding. The fourteenth round used the
@@ -69,12 +73,16 @@ The fifteenth round closed the related Kubernetes outage race: an observation er
 reclaim instead of being misread as proof that no runtime exists. The sixteenth requires the runtime
 ID ConfigMap write to succeed before any submit side effect and makes write failure terminal in the
 current process. The seventeenth normalizes observation failures to the existing `submitting` phase
-so the established two-hour submit deadline remains effective. All reproducible findings above Low
-severity were fixed and revalidated. The remaining Low risks are the negligible 128-bit truncated
-hash collision probability, the bounded 15-second all-Job scan used only to recover legacy attempted
-rows, and that the 24-hour shard attestation fingerprints file metadata rather than every byte;
-source/layout identity, size, mtime, ctime, `blastdbcmd -info`, and the bounded full record probe
-limit that exposure.
+so the established two-hour submit deadline remains effective. The eighteenth found that
+concatenating multiple candidate files from one shard could interleave local OIDs across query
+batches; the finalizer now globally stable-sorts numeric `(shard, local_oid)` keys and verifies the
+post-sort row count before selecting the fast path. The nineteenth rechecked all reported findings
+against generated code, live path isolation, and browser measurements. All reproducible findings
+above Low severity were fixed and revalidated. The remaining Low risks are the negligible 128-bit
+truncated hash collision probability, the bounded 15-second all-Job scan used only to recover legacy
+attempted rows, and that the 24-hour shard attestation fingerprints file metadata rather than every
+byte; source/layout identity, size, mtime, ctime, `blastdbcmd -info`, and the bounded full record
+probe limit that exposure.
 
 ## Validation
 
@@ -100,6 +108,10 @@ limit that exposure.
 - Final tri-state and required-persistence patcher suite: `48 passed`; Ruff passed. A simulated
   Kubernetes timeout blocked reclaim, and a simulated ConfigMap write failure started no subprocess
   and reached terminal `submit_state_persist_failed` in memory.
+- Candidate global-order validation: merge/runtime patch suites `50 passed`; the interleaved
+  two-batch regression preserved equal-OID aliases and restored numeric shard/local-OID order.
+  Applying the patch to an isolated sibling clone produced a finalizer that passed `bash -n` and
+  carried both the stable sort and post-sort row-count fallback markers.
 - Post-hardening full backend sweep: `5,889 passed, 4 skipped`.
 - ACR run `de9y` built immutable `elb-openapi:4.57` successfully with digest
   `sha256:9f8fc4aa59c552cd77681df445a3736056f655d6b8be553f43aafd42a52a92fb`.
@@ -139,3 +151,22 @@ authenticated UI, so the targeted image-only deployment and browser smoke are re
 - Ready revision `ca-elb-dashboard--env-terminal-1789092066-11328` is Running with one replica.
   Before replacement, all five Celery queues and reserved counts were zero; the only active task was
   the short-lived Service Bus transition publisher.
+- ACR run `dea6` built final `elb-openapi:4.59` with digest
+  `sha256:c24807bc7aaf9e144054301936caa35addba15421304d346fdb4bedefa59f8d4`;
+  the registry returned to `Disabled / Deny / AzureServices` afterward.
+- AKS generation 60 pulled that exact digest and reached 1/1 Ready with zero restarts. Four jobs
+  active during rollout kept their canonical runtime IDs. Restart canary `2a180957e82a` replayed
+  once within the three-attempt bound, retained only runtime
+  `job-b9e822938360629c643705e4a4c1683f`, and completed successfully in 317 seconds.
+- That canary reused attested SSD caches on all 10 nodes, generated one candidate file per shard,
+  and finalized in 53 seconds from 115,090 candidate-oracle bytes. Its merge report recorded
+  `tie_order_oracle_scope=candidate`, `selection_equivalence=full_db_hitlist_exact`, 5,000 oracle
+  accessions, zero missing accessions, and 500 output rows.
+- The deployed Container App API reports `status=ok` on the ready revision; Celery reports four
+  workers, no errors, all five queue depths at zero, and no reserved tasks. The live frontend loaded
+  through the public ingress and correctly redirected unauthenticated access to Microsoft sign-in.
+- Browser validation rendered direct `api` and correlated `api (dashboard)` rows with durations
+  `5m 17s` and `2m 5s`. At 1,440px and 390px the body client/scroll widths matched exactly; at the
+  320px minimum check the 5 status filters, 4 source filters, both source labels, and both durations
+  remained visible with no horizontal overflow. Desktop and mobile screenshots were captured.
+- After the mobile fix, all `1,024` frontend tests, the production build, and ESLint passed.
