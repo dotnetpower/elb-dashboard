@@ -39,6 +39,10 @@ its displayed duration when an in-memory timing cache was empty.
 - Artifact identity waits expire after 30 minutes and one runtime generation receives at most five
   periodic reconciliation attempts. Exhaustion is visible as a failed artifact sentinel and a new
   runtime identity can still recover.
+- OpenAPI now persists a deterministic canonical ElasticBLAST runtime ID before starting submit and
+  invokes the CLI through its JSON idempotency path. A pod restart resumes that runtime instead of
+  creating another generation. Legacy in-flight submits recover the latest matching runtime from
+  Kubernetes Job result paths; a failed Kubernetes observation never counts as proof of absence.
 
 ## Implementation summary
 
@@ -55,13 +59,16 @@ its displayed duration when an in-memory timing cache was empty.
 
 ## Hardening review
 
-Thirteen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
+Fourteen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
 partial uploads, aggregate bounds, subprocess deadlines, cache generation fencing, marker
 publication, timing validation, terminal-state convergence, artifact retry liveness, concurrency,
-security boundaries, rolling fallback, and runtime-identity binding. All reproducible findings
-above Low severity were fixed and revalidated. The remaining Low risk is that the 24-hour shard
-attestation fingerprints file metadata rather than every byte; source/layout identity, size,
-mtime, ctime, `blastdbcmd -info`, and the bounded full record probe limit that exposure.
+security boundaries, rolling fallback, and runtime-identity binding. The fourteenth round used the
+live rollout to find and fix a High-severity restart replay: four request IDs each had three distinct
+runtime generations because their blocking submit threads died before returning the generated ID.
+All reproducible findings above Low severity were fixed and revalidated. The remaining Low risk is
+that the 24-hour shard attestation fingerprints file metadata rather than every byte;
+source/layout identity, size, mtime, ctime, `blastdbcmd -info`, and the bounded full record probe
+limit that exposure.
 
 ## Validation
 
@@ -82,6 +89,15 @@ mtime, ctime, `blastdbcmd -info`, and the bounded full record probe limit that e
   passed.
 - Current OpenAPI build context accepted two consecutive patch applications and all generated shell
   scripts passed `bash -n`.
+- Replay-safe OpenAPI build-context patcher suite: `47 passed`; Ruff passed. The patched sibling
+  context was applied twice without drift and all generated Python modules passed `py_compile`.
+- ACR run `de9y` built immutable `elb-openapi:4.57` successfully with digest
+  `sha256:9f8fc4aa59c552cd77681df445a3736056f655d6b8be553f43aafd42a52a92fb`.
+- After the build, the registry returned to `publicNetworkAccess=Disabled`,
+  `defaultAction=Deny`, and `networkRuleBypassOptions=AzureServices`.
+- AKS rollout generation 58 pulled the exact `4.57` digest and reached 1/1 Ready with zero restarts;
+  authenticated `/v1/ready` reported 10 ready workload nodes. Startup recovery exposed the replay
+  defect above, so `4.57` remains diagnostic and is not the final rollout image.
 
 Live deployment evidence will record the candidate fast-path byte count, attested SSD reuse, and
 end-to-end canary timing after the new OpenAPI image is rolled out.

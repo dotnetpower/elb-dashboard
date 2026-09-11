@@ -19,6 +19,7 @@ Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import re
@@ -1598,6 +1599,195 @@ def test_patch_app_restricts_runtime_ids_to_canonical_values(tmp_path: Path) -> 
     assert effective({"job_id": "request-1", "elb_job_id": "job-not-canonical"}) == ("request-1")
     assert effective({"job_id": "request-1", "stdout_tail": canonical_upper}) == (canonical_lower)
     assert updates == [("request-1", canonical_lower)]
+
+
+def test_patch_app_recovers_latest_runtime_and_makes_submit_replay_safe(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:\n"
+        "    if not stdout:\n"
+        '        return ""\n'
+        "    match = re.search(r\"\\b(?P<elb_job_id>job-[0-9a-fA-F]{32})\\b\", stdout)\n"
+        "    if match:\n"
+        '        return match.group("elb_job_id").lower()\n'
+        '    return ""\n'
+        "\n\n"
+        "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n"
+        '    job_id = str(job_info.get("job_id") or "")\n'
+        '    current = str(job_info.get("elb_job_id") or "")\n'
+        '    canonical_current = re.fullmatch(r"job-[0-9a-f]{32}", current, re.IGNORECASE)\n'
+        "    if canonical_current:\n"
+        "        return canonical_current.group(0).lower()\n"
+        "    discovered = _discover_elb_job_id_from_submit_output(\n"
+        "        job_id,\n"
+        '        "\\n".join(\n'
+        '            str(job_info.get(key) or "")\n'
+        '            for key in ("stdout_tail", "stderr_tail")\n'
+        "        ),\n"
+        "    )\n"
+        "    if discovered:\n"
+        "        _update_job(job_id, elb_job_id=discovered)\n"
+        "        return discovered\n"
+        "    return job_id\n"
+        "\n\n"
+        "def _run_submit_bg(job_id: str) -> None:\n"
+        "    with _jobs_lock:\n"
+        "        job = dict(_jobs.get(job_id, {}))\n"
+        "    if not job:\n"
+        "        return\n"
+        '    config_text = job.get("config_ini", "")\n'
+        "    if not config_text:\n"
+        '        _update_job(job_id, status="failed", error="missing persisted config_ini")\n'
+        "        return\n"
+        "\n"
+        "    cfg_path = _write_config_file(job_id, config_text)\n"
+        "    cancel_event = _job_cancel_events.setdefault(job_id, Event())\n"
+        "    _update_job(\n"
+        "        job_id,\n"
+        '        status="submitting",\n'
+        "        cfg_path=cfg_path,\n"
+        '        attempt=int(job.get("attempt", 0)) + 1,\n'
+        "    )\n"
+        "    result = run_cancellable(\n"
+        '                ["elastic-blast", "submit", "--cfg", cfg_path],\n'
+        "                timeout=None,\n"
+        "                stop_event=cancel_event,\n"
+        "            )\n"
+        "\n\n"
+        "def next_helper() -> None:\n"
+        "    pass\n"
+    )
+
+    module._harden_openapi_runtime_ids(path)
+    module._patch_replay_safe_submit_identity(path)
+    first = path.read_text()
+    module._patch_replay_safe_submit_identity(path)
+
+    assert path.read_text() == first
+    ast.parse(first)
+    assert first.index("elb_job_id=runtime_job_id") < first.index("result = run_cancellable")
+    assert '"--json",' in first
+    assert '"--idempotency-key",' in first
+
+    request_id = "abcdef123456"
+    older_runtime = "job-" + "1" * 32
+    newer_runtime = "job-" + "2" * 32
+    mismatched_runtime = "job-" + "3" * 32
+
+    def job(
+        runtime_id: str,
+        *,
+        created_at: str,
+        resource_version: str,
+        path_runtime: str | None = None,
+        path_request: str = request_id,
+    ) -> dict[str, Any]:
+        return {
+            "metadata": {
+                "labels": {"app": "setup", "elb-job-id": runtime_id},
+                "creationTimestamp": created_at,
+                "resourceVersion": resource_version,
+            },
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "-o",
+                                    f"https://storage/results/{path_request}/"
+                                    f"{path_runtime or runtime_id}",
+                                ]
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+
+    payload = {
+        "items": [
+            job(older_runtime, created_at="2026-09-11T00:41:51Z", resource_version="10"),
+            job(newer_runtime, created_at="2026-09-11T01:16:44Z", resource_version="20"),
+            job(
+                mismatched_runtime,
+                created_at="2026-09-11T01:17:00Z",
+                resource_version="30",
+                path_runtime=newer_runtime,
+            ),
+            job(
+                "job-" + "4" * 32,
+                created_at="2026-09-11T01:18:00Z",
+                resource_version="40",
+                path_request="000000000000",
+            ),
+        ]
+    }
+    calls: list[tuple[list[str], int]] = []
+    updates: list[tuple[str, str]] = []
+    warnings: list[tuple[object, ...]] = []
+
+    def safe_exec(command: list[str], *, timeout: int) -> SimpleNamespace:
+        calls.append((command, timeout))
+        return SimpleNamespace(stdout=json.dumps(payload))
+
+    def update_job(job_id: str, *, elb_job_id: str) -> None:
+        updates.append((job_id, elb_job_id))
+
+    namespace: dict[str, Any] = {
+        "Any": Any,
+        "hashlib": hashlib,
+        "json": json,
+        "logger": SimpleNamespace(warning=lambda *args: warnings.append(args)),
+        "re": re,
+        "safe_exec": safe_exec,
+        "_update_job": update_job,
+    }
+    helper_source = first[: first.index("\n\ndef _run_submit_bg")]
+    exec(helper_source, namespace)  # noqa: S102 - generated temporary fixture code.
+    effective = namespace["_effective_elb_job_id"]
+    deterministic = namespace["_deterministic_elb_job_id"]
+
+    assert effective({"job_id": request_id, "status": "submitting"}) == newer_runtime
+    assert updates == [(request_id, newer_runtime)]
+    assert calls == [(["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"], 15)]
+    assert warnings and "duplicate generations" in str(warnings[0][0])
+    expected = "job-" + hashlib.sha256(
+        f"elb-openapi:{request_id}".encode()
+    ).hexdigest()[:32]
+    assert deterministic(request_id) == expected
+    assert re.fullmatch(r"job-[0-9a-f]{32}", deterministic(request_id))
+
+    calls.clear()
+    completed_id = "fedcba654321"
+    assert effective({"job_id": completed_id, "status": "completed"}) == completed_id
+    assert calls == []
+
+
+def test_patch_dead_thread_reclaim_waits_when_k8s_observation_fails(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def reclaim(summary):\n"
+        '    if summary.get("total") or summary.get("submit_failed"):\n'
+        "        return False\n"
+        "    return True\n"
+    )
+
+    module._patch_dead_thread_reclaim_observation_guard(path)
+    first = path.read_text()
+    module._patch_dead_thread_reclaim_observation_guard(path)
+
+    assert path.read_text() == first
+    namespace: dict[str, Any] = {}
+    exec(first, namespace)  # noqa: S102 - generated temporary fixture code.
+    reclaim = namespace["reclaim"]
+    assert reclaim({"error": "Kubernetes unavailable"}) is False
+    assert reclaim({"total": 1}) is False
+    assert reclaim({}) is True
 
 
 def test_patch_app_rejects_duplicate_runtime_id_helpers(tmp_path: Path) -> None:

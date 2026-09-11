@@ -10,12 +10,15 @@ Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`,
 `_patch_partitioned_completion_fail_closed`, `_patch_result_selection_policy`,
 `_patch_finalizer_failure_status`,
 `_patch_web_blast_candidate_selection_evidence`, `_harden_openapi_runtime_ids`,
-`_patch_submit_runtime_id_priority`, `_harden_elb_scripts_configmap_reconciliation`,
+`_patch_replay_safe_submit_identity`, `_patch_dead_thread_reclaim_observation_guard`,
+`_patch_submit_runtime_id_priority`,
+`_harden_elb_scripts_configmap_reconciliation`,
 `patch_app`, `main`
 Risky contracts: Preserve strict result-path validation; only shard outputs and the exact canonical
 merged filename may pass. Precise core_nt submits without an explicit search space must derive it
 from validated active-generation metadata and fail closed when that metadata is unavailable. Assume
-local developer context only; avoid broad production-side effects.
+local developer context only; avoid broad production-side effects. OpenAPI submit retries must reuse
+one canonical ElasticBLAST runtime identity across pod restarts.
 Validation: `uv run pytest -q api/tests/test_patch_openapi_build_context.py`.
 """
 
@@ -1556,6 +1559,179 @@ def _harden_openapi_runtime_ids(path: Path) -> None:
     path.write_text(text[:start] + block + text[effective_end:])
 
 
+def _patch_replay_safe_submit_identity(path: Path) -> None:
+    """Persist one runtime identity before submit and recover legacy in-flight work."""
+
+    helpers = '''def _deterministic_elb_job_id(job_id: str) -> str:
+    digest = hashlib.sha256(f"elb-openapi:{job_id}".encode("utf-8")).hexdigest()
+    return f"job-{digest[:32]}"
+
+
+def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{12}", job_id, re.IGNORECASE):
+        return ""
+    try:
+        proc = safe_exec(
+            ["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"],
+            timeout=15,
+        )
+        items = json.loads(proc.stdout or "{}").get("items", [])
+    except Exception as exc:
+        logger.warning(
+            "runtime-id Kubernetes discovery failed job=%s reason=%s",
+            job_id,
+            type(exc).__name__,
+        )
+        return ""
+    if not isinstance(items, list):
+        return ""
+
+    result_pattern = re.compile(
+        rf"/results/(?:\\d{{4}}/\\d{{2}}/\\d{{2}}/)?{re.escape(job_id)}/"
+        r'(?P<elb_job_id>job-[0-9a-f]{32})(?:/|(?=")|$)',
+        re.IGNORECASE,
+    )
+    candidates: dict[str, tuple[str, int]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata", {})
+        raw_labels = metadata.get("labels", {}) if isinstance(metadata, dict) else {}
+        labels = raw_labels if isinstance(raw_labels, dict) else {}
+        runtime_id = str(labels.get("elb-job-id") or "").lower()
+        if not re.fullmatch(r"job-[0-9a-f]{32}", runtime_id):
+            continue
+        pod_spec = item.get("spec", {}).get("template", {}).get("spec", {})
+        spec_text = json.dumps(pod_spec, separators=(",", ":"), sort_keys=True)
+        if not any(
+            match.group("elb_job_id").lower() == runtime_id
+            for match in result_pattern.finditer(spec_text)
+        ):
+            continue
+        created_at = str(metadata.get("creationTimestamp") or "")
+        try:
+            resource_version = int(metadata.get("resourceVersion") or 0)
+        except (TypeError, ValueError):
+            resource_version = 0
+        ordering = (created_at, resource_version)
+        if ordering > candidates.get(runtime_id, ("", 0)):
+            candidates[runtime_id] = ordering
+
+    if not candidates:
+        return ""
+    selected = max(candidates.items(), key=lambda item: (item[1], item[0]))[0]
+    if len(candidates) > 1:
+        logger.warning(
+            "runtime-id discovery found duplicate generations job=%s count=%d selected=%s",
+            job_id,
+            len(candidates),
+            selected,
+        )
+    return selected
+
+
+'''
+    _replace_once_unless_marker(
+        path,
+        "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n",
+        helpers + "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n",
+        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:\n",
+    )
+    _replace_once_unless_marker(
+        path,
+        (
+            "    if discovered:\n"
+            "        _update_job(job_id, elb_job_id=discovered)\n"
+            "        return discovered\n"
+            "    return job_id\n"
+        ),
+        (
+            "    if not discovered and str(job_info.get(\"status\") or \"\") in {\n"
+            "        \"dispatching\", \"submitting\", \"running\"\n"
+            "    }:\n"
+            "        discovered = _discover_elb_job_id_from_k8s_jobs(job_id)\n"
+            "    if discovered:\n"
+            "        _update_job(job_id, elb_job_id=discovered)\n"
+            "        return discovered\n"
+            "    return job_id\n"
+        ),
+        "        discovered = _discover_elb_job_id_from_k8s_jobs(job_id)\n",
+    )
+    _insert_once(
+        path,
+        (
+            '    config_text = job.get("config_ini", "")\n'
+            "    if not config_text:\n"
+            '        _update_job(job_id, status="failed", error="missing persisted config_ini")\n'
+            "        return\n"
+        ),
+        (
+            "\n    runtime_job_id = _effective_elb_job_id(job)\n"
+            "    if not re.fullmatch(r\"job-[0-9a-f]{32}\", runtime_job_id, re.IGNORECASE):\n"
+            "        runtime_job_id = _deterministic_elb_job_id(job_id)\n"
+        ),
+        "        runtime_job_id = _deterministic_elb_job_id(job_id)\n",
+    )
+    _insert_once(
+        path,
+        "        cfg_path=cfg_path,\n",
+        "        elb_job_id=runtime_job_id,\n",
+        "        elb_job_id=runtime_job_id,\n",
+    )
+    _replace_once_unless_marker(
+        path,
+        '                ["elastic-blast", "submit", "--cfg", cfg_path],\n',
+        (
+            "                [\n"
+            '                    "elastic-blast",\n'
+            '                    "submit",\n'
+            '                    "--cfg",\n'
+            "                    cfg_path,\n"
+            '                    "--json",\n'
+            '                    "--idempotency-key",\n'
+            "                    runtime_job_id,\n"
+            "                ],\n"
+        ),
+        '                    "--idempotency-key",\n',
+    )
+
+    text = path.read_text()
+    required = (
+        "def _deterministic_elb_job_id(job_id: str) -> str:",
+        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:",
+        '["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"]',
+        "runtime_job_id = _effective_elb_job_id(job)",
+        "elb_job_id=runtime_job_id",
+        '                    "--json",',
+        '                    "--idempotency-key",',
+    )
+    if any(fragment not in text for fragment in required):
+        raise RuntimeError("OpenAPI replay-safe submit identity patch is incomplete")
+    submit_start = text.index("def _run_submit_bg(job_id: str) -> None:")
+    submit_end = text.find("\n\ndef ", submit_start + 1)
+    if submit_end < 0:
+        raise RuntimeError("could not isolate replay-safe OpenAPI submit function")
+    submit_block = text[submit_start:submit_end]
+    if submit_block.index("elb_job_id=runtime_job_id") > submit_block.index(
+        "result = run_cancellable"
+    ):
+        raise RuntimeError("OpenAPI runtime identity must persist before submit side effects")
+
+
+def _patch_dead_thread_reclaim_observation_guard(path: Path) -> None:
+    """Do not infer runtime absence when the Kubernetes observation failed."""
+
+    _replace_once_unless_marker(
+        path,
+        '    if summary.get("total") or summary.get("submit_failed"):\n',
+        (
+            '    if summary.get("error") or summary.get("total") '
+            'or summary.get("submit_failed"):\n'
+        ),
+        '    if summary.get("error") or summary.get("total")',
+    )
+
+
 def _harden_openapi_runtime_id_consumers(path: Path) -> None:
     """Require canonical IDs at every injected OpenAPI correlation boundary."""
 
@@ -1819,8 +1995,16 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "ELB scripts ConfigMap drift detected",
         "ELB scripts ConfigMap verification found drift",
         "def _discover_elb_job_id_from_submit_output(",
+        "def _deterministic_elb_job_id(job_id: str) -> str:",
+        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:",
         "def _effective_elb_job_id(",
         'canonical_current = re.fullmatch(r"job-[0-9a-f]{32}"',
+        '["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"]',
+        "runtime_job_id = _effective_elb_job_id(job)",
+        "elb_job_id=runtime_job_id",
+        '                    "--json",',
+        '                    "--idempotency-key",',
+        'if summary.get("error") or summary.get("total")',
         "canonical_correlation_id = (",
         'payload["elb_job_id"] = runtime_job_id',
         'def _job_marker_phase(results_url: str, elb_job_id: str = "")',
@@ -1869,6 +2053,7 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         'effective_elb_job_id.startswith("job-")',
         'safe_exec(["kubectl", "get", "jobs", "-o", "json"]',
         'safe_exec(["kubectl", "get", "pods", "-o", "json"]',
+        '["elastic-blast", "submit", "--cfg", cfg_path],',
     )
     present = [fragment for fragment in forbidden if fragment in text]
     assignment = 'config["cluster"]["exp-skip-warmed-ssd-init"] = "true"'
@@ -2233,6 +2418,8 @@ def patch_app(root: Path) -> None:
             ),
         )
     _harden_openapi_runtime_ids(path)
+    _patch_replay_safe_submit_identity(path)
+    _patch_dead_thread_reclaim_observation_guard(path)
     _harden_elb_scripts_configmap_reconciliation(path)
     _insert_once(
         path,

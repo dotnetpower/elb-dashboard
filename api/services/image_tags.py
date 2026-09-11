@@ -150,8 +150,10 @@ from __future__ import annotations
 # selection natively from sibling commit 6132ccb. It accepts a valid zero
 # length adjustment, rejects unsupported policy combinations without fallback,
 # and keeps each explicit candidate pool as a finite per-request shard bound.
-# It is a source-publication target; deployed 4.55 remains the rollback image
-# until 4.56 is built and rolled out explicitly.
+# 4.57 adds job-scoped candidate-order oracles, immutable-generation SSD cache
+# attestation, and runtime-scoped success markers while preserving 4.56 as the
+# deployed rollback boundary. ACR run de9y produced digest
+# sha256:9f8fc4aa59c552cd77681df445a3736056f655d6b8be553f43aafd42a52a92fb.
 # 4.36/4.37 were intermediate builds and were never deployed. Tags 4.32
 # and 4.33 were older June builds, so the rollout intentionally skipped them
 # rather than overwriting an existing rollback boundary. ACR run de5f produced
@@ -179,7 +181,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.56",
+    "elb-openapi": "4.57",
 }
 
 # GitHub source repo for ACR Build Tasks.
