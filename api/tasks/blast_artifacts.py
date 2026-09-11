@@ -4,7 +4,9 @@ Responsibility: Finalize terminal BLAST artifacts and reconcile missed finalizer
 Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
 persist state.
 Key entry points: `finalize_job_artifacts`, `reconcile_terminal_artifacts`
-Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Risky contracts: Tasks are idempotent and generation-aware; identity waits expire after 30 minutes,
+and periodic reconcile stops after five attempts for one runtime identity while allowing a new
+identity to recover.
 Validation: `uv run pytest -q api/tests/test_blast_tasks.py
 api/tests/test_job_artifacts.py`.
 """
@@ -15,6 +17,8 @@ import logging
 from typing import Any
 
 from celery import shared_task
+
+from api.services.job_artifacts import ARTIFACT_RECONCILE_ATTEMPT_MAX
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +32,7 @@ _POD_LOG_RETRY_MAX = 3
 _POD_LOG_RETRY_COUNTDOWN_S = 60
 _RESULT_READY_RETRY_MAX = 20
 _RESULT_READY_RETRY_COUNTDOWN_S = 30
-_RECONCILE_ATTEMPT_MAX = 5
+_RECONCILE_ATTEMPT_MAX = ARTIFACT_RECONCILE_ATTEMPT_MAX
 
 
 def _record_pod_log_capture_state(
@@ -118,13 +122,35 @@ def reconcile_terminal_artifacts(
     summary["scanned"] = len(rows)
     for row in rows:
         try:
-            from api.services.job_artifacts import get_artifact_state
+            from api.services.job_artifacts import (
+                get_artifact_state,
+                runtime_identity_pending_expired,
+                upsert_artifact_state,
+            )
             from api.services.state.job_state import canonical_elastic_blast_job_id
 
             runtime_identity = canonical_elastic_blast_job_id(
                 getattr(row, "elastic_blast_job_id", "")
             )
             sentinel = get_artifact_state(row.job_id, "artifact_finalizer")
+            if (
+                sentinel is not None
+                and sentinel.error_code == "runtime_identity_pending"
+                and not runtime_identity
+            ):
+                if runtime_identity_pending_expired(sentinel):
+                    upsert_artifact_state(
+                        row.job_id,
+                        "artifact_finalizer",
+                        status="failed",
+                        error_code="runtime_identity_timeout",
+                        reconcile_attempts=_RECONCILE_ATTEMPT_MAX,
+                    )
+                    LOGGER.warning(
+                        "terminal artifact runtime identity timed out job_id=%s",
+                        row.job_id,
+                    )
+                continue
             same_generation = bool(
                 sentinel is not None
                 and (
@@ -200,6 +226,7 @@ def finalize_job_artifacts(
     try:
         from api.services.job_artifacts import (
             get_artifact_state,
+            runtime_identity_pending_expired,
             upsert_artifact_state,
             write_execution_steps_snapshot,
         )
@@ -226,6 +253,31 @@ def finalize_job_artifacts(
             and sentinel.error_code == "runtime_identity_pending"
             and not runtime_identity
         ):
+            if runtime_identity_pending_expired(sentinel):
+                upsert_artifact_state(
+                    job_id,
+                    "artifact_finalizer",
+                    status="failed",
+                    error_code="runtime_identity_timeout",
+                    reconcile_attempts=_RECONCILE_ATTEMPT_MAX,
+                )
+                try:
+                    repo.append_history(
+                        job_id,
+                        "artifact_runtime_identity_timeout",
+                        {"timeout_seconds": 1800},
+                    )
+                except Exception:
+                    LOGGER.debug(
+                        "artifact identity timeout history write failed job_id=%s",
+                        job_id,
+                        exc_info=True,
+                    )
+                LOGGER.warning(
+                    "finalize_job_artifacts: runtime identity timed out job_id=%s",
+                    job_id,
+                )
+                return {**summary, "status": "identity_timeout"}
             LOGGER.info(
                 "finalize_job_artifacts: runtime identity pending job_id=%s",
                 job_id,

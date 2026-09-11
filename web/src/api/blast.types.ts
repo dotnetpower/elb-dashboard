@@ -289,7 +289,7 @@ export interface BlastJobSummary {
   /**
    * Service Bus / external request correlation id for a queue-drained job, so
    * an operator can trace a Jobs row back to its Service Bus request message.
-   * Null / absent for dashboard-native jobs.
+  * Null / absent when no upstream correlation id was supplied.
    */
   external_correlation_id?: string | null;
   error_code?: string;

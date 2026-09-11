@@ -249,7 +249,8 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     patch_module.patch_init_shard_script(tmp_path)
 
     text = target.read_text()
-    skip_prefix = text.split('echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"', 1)[0]
+    fast_skip_prefix = text.split('echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"', 1)[0]
+    slow_skip_prefix = text.rsplit('echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"', 1)[0]
     assert 'cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"' in text
     assert "CLEANUP partial downloads" in text
     assert "find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +" in text
@@ -272,12 +273,17 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     assert "printf '%s' ok > \"${CACHE_COMPLETE}.tmp\"" in text
     # The blastdbcmd integrity probe gates the skip so a vol/lmdb-mismatch cache
     # is re-downloaded instead of skipped onto a broken DB.
-    assert "CACHE_CORRUPT blastdbcmd integrity probe failed" in skip_prefix
-    assert 'blastdbcmd -db "$ELB_DB" -info' in skip_prefix
+    assert "CACHE_RECORD_FINGERPRINT" in fast_skip_prefix
+    assert "CACHE_RECORD_VERIFIED_AT" in fast_skip_prefix
+    assert "CACHE_ATTESTATION_REUSE" in fast_skip_prefix
+    assert 'blastdbcmd -db "$ELB_DB" -info' in fast_skip_prefix
+    assert "CACHE_CORRUPT blastdbcmd integrity probe failed" in slow_skip_prefix
+    assert 'blastdbcmd -db "$ELB_DB" -info' in slow_skip_prefix
     assert 'printf \'%s\' "$EXPECTED_SOURCE_VERSION" > "${CACHE_SOURCE_VERSION}.tmp"' in text
     assert "if [ -s .download-complete ]" not in text
     assert "touch .download-complete" not in text
-    assert "taxonomy4blast.sqlite3" not in skip_prefix
+    assert '[ ! -s taxonomy4blast.sqlite3 ]' not in fast_skip_prefix
+    assert '[ -s taxonomy4blast.sqlite3 ]' not in fast_skip_prefix
     # Regression guard: the `-taxids`/`-negative_taxids` taxonomy FILTER memory-maps the
     # DB-prefix seqid->taxid index `${ORIG_DB}.nos` and `${ORIG_DB}.not`. Omitting them
     # made sharded core_nt runs with a taxon include/exclude abort with blastn exit 255
@@ -299,7 +305,9 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     assert "taxdb.btd" not in cleanup
     assert "taxonomy4blast.sqlite3" not in cleanup
     assert "--overwrite=true" in text
-    assert text.index("CACHE_UNVERIFIED expected source version is unavailable") < text.index(
+    assert "/generations/([^/]+)/shards/" in fast_skip_prefix
+    assert 'cat "$CACHE_SOURCE_VERSION"' in fast_skip_prefix
+    assert text.index("CACHE_UNVERIFIED expected source version is unavailable") < text.rindex(
         'echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"'
     )
     assert text.index("downloaded DB failed blastdbcmd integrity probe") < text.index(
@@ -1980,6 +1988,115 @@ def test_blast_reader_fails_closed_without_shard_completion_marker(tmp_path: Pat
     assert "DB shard completion marker is missing" in result.stderr
     assert not ready.exists()
     assert _writer_lock_available(tmp_path / ".elb-stage.lock")
+
+
+@pytest.mark.subprocess
+def test_blast_reader_emits_candidate_order_artifact_under_lock(tmp_path: Path) -> None:
+    script, results, queries = _reader_lock_test_assets(tmp_path)
+    program = tmp_path / "blast-candidate"
+    program.write_text(
+        "#!/bin/bash\n"
+        "set -eu\n"
+        'db_safe="${ELB_DB//\\//-}"\n'
+        'cat > "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${db_safe}.out" <<\'XML\'\n'
+        "<BlastOutput><BlastOutput_iterations><Iteration><Iteration_hits>\n"
+        "<Hit><Hit_accession>subject-b.1</Hit_accession></Hit>\n"
+        "<Hit><Hit_accession>alias-a</Hit_accession></Hit>\n"
+        "</Iteration_hits></Iteration></BlastOutput_iterations></BlastOutput>\n"
+        "XML\n"
+    )
+    program.chmod(0o755)
+    blastdbcmd = tmp_path / "blastdbcmd"
+    blastdbcmd.write_text(
+        "#!/bin/bash\n"
+        "set -eu\n"
+        "case \" $* \" in\n"
+        "  *\" -info \"*) exit 0 ;;\n"
+        "esac\n"
+        "entry_batch=\"\"\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"-entry_batch\" ]; then entry_batch=\"$2\"; shift 2; else shift; fi\n"
+        "done\n"
+        "while IFS= read -r accession; do\n"
+        "  case \"$accession\" in\n"
+        "    subject-b.1) printf '9000000\\tsubject-b.1\\tref|subject-b.1|\\n' ;;\n"
+        "    alias-a) printf '0\\tprimary-a.1\\tref|alias-a|\\n' ;;\n"
+        "  esac\n"
+        "done < \"$entry_batch\"\n"
+    )
+    blastdbcmd.chmod(0o755)
+    env = _reader_lock_env(
+        program=program,
+        results=results,
+        queries=queries,
+        ready=tmp_path / "unused-ready",
+        release=tmp_path / "unused-release",
+    )
+    env["ELB_BLAST_PROGRAM"] = program.name
+    env["ELB_BLAST_OPTIONS"] = "-outfmt 5"
+
+    result = subprocess.run(  # noqa: S603 -- executes generated fixture
+        ["/bin/bash", str(script)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    artifact = results / "CANDIDATE_ORDER-000.tsv"
+    assert artifact.read_text().splitlines() == [
+        "# ELB candidate-order-v1 shard=00 batch=000 candidates=2",
+        "00\t0\talias-a",
+        "00\t9000000\tsubject-b.1",
+    ]
+    assert "CANDIDATE_ORDER_READY shard=00 batch=000 rows=2" in result.stdout
+    assert _writer_lock_available(tmp_path / ".elb-stage.lock")
+
+
+def test_patch_candidate_order_oracle_wires_complete_set_fast_path(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    scripts = tmp_path / "src" / "elastic_blast" / "templates" / "scripts"
+    scripts.mkdir(parents=True)
+    exporter = scripts / "results-export-aks.sh"
+    exporter.write_text(
+        "#!/bin/bash\n"
+        'exit "$(cat "$RESULTS_DIR/BLAST_EXIT_CODE-${JOB_NUM}.out")"\n'
+    )
+    finalizer = scripts / "elb-finalizer-aks.sh"
+    finalizer.write_text(
+        "#!/bin/bash\n"
+        'azcopy cp "${SHARD_DIR}/*" "$LOCAL_DIR/" '
+        '--include-pattern "*.out.gz" --log-level=ERROR 2>/dev/null\n'
+        '        if [ -z "${ELB_TIE_ORDER_FILE:-}" ]; then\n'
+        "            for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
+        "                :\n"
+        "            done\n"
+        "        fi\n"
+    )
+
+    patch_module.patch_candidate_order_oracle(tmp_path)
+    exporter_once = exporter.read_text()
+    finalizer_once = finalizer.read_text()
+    patch_module.patch_candidate_order_oracle(tmp_path)
+
+    assert exporter.read_text() == exporter_once
+    assert finalizer.read_text() == finalizer_once
+    assert "CANDIDATE_ORDER_UPLOADED" in exporter_once
+    assert '--include-pattern "*.out.gz;candidate-order-*.tsv"' in finalizer_once
+    assert "CANDIDATE_ORDER_FAST_PATH" in finalizer_once
+    assert '[ "$CANDIDATE_FILE_COUNT" -eq "$SHARD_COUNT" ]' in finalizer_once
+    assert 'export ELB_TIE_ORDER_SCOPE="candidate"' in finalizer_once
+    assert "CANDIDATE_ORDER_FALLBACK reason=${CANDIDATE_FAILURE_REASON" in finalizer_once
+    assert "CANDIDATE_TOTAL_ROWS" in finalizer_once
+    assert "CANDIDATE_TOTAL_BYTES" in finalizer_once
+    assert "aggregate_limit_exceeded" in finalizer_once
+    blast_script = (
+        tmp_path / "src" / "elastic_blast" / "templates" / "scripts" / "blast-run-aks.sh"
+    )
+    if blast_script.exists():
+        assert "ELB_CANDIDATE_ORDER_TIMEOUT_SECONDS" in blast_script.read_text()
 
 
 def test_finalizer_awk_filter_preserves_fields_header() -> None:

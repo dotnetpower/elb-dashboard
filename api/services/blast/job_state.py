@@ -956,6 +956,15 @@ def _local_to_blast_job(
         "owner_upn": getattr(state, "owner_upn", None) or None,
     }
     if isinstance(_external_snapshot, dict):
+        for _timing_key in (
+            "started_at",
+            "run_seconds",
+            "queue_wait_seconds",
+            "elapsed_seconds",
+        ):
+            _timing_value = _external_snapshot.get(_timing_key)
+            if out.get(_timing_key) in (None, "") and _timing_value not in (None, ""):
+                out[_timing_key] = _timing_value
         from api.services.blast.external_job_projection import (
             _external_web_blast_provenance,
         )

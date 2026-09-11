@@ -90,10 +90,11 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
   // rows show the submitter's upn local-part.
   const shortUser =
     source === "servicebus" || isApiSubmit
-      ? jobSourceLabel(source, job.queue_origin)
+      ? jobSourceLabel(source, job.queue_origin, job.external_correlation_id)
       : upn
         ? upn.split("@")[0]
         : null;
+  const userTitle = source === "servicebus" || isApiSubmit ? shortUser || "" : upn || "";
   const splitChildren = job.split_children;
   const splitLabel = splitChildren ? `${splitChildren.child_count} child jobs` : null;
   // A failed job's `note` carries the raw (often multi-line, 700+ char) BLAST
@@ -230,7 +231,7 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
       <td
         style={{ padding: "8px 6px", fontSize: 11, whiteSpace: "nowrap" }}
         className="muted"
-        title={upn || ""}
+        title={userTitle}
       >
         {shortUser || "—"}
       </td>

@@ -369,7 +369,11 @@ def _has_parseable_result_artifact(storage_account: str, job_id: str) -> bool:
         return False
 
 
-def _has_blast_success_marker(storage_account: str, job_id: str) -> bool:
+def _has_blast_success_marker(
+    storage_account: str,
+    job_id: str,
+    runtime_identity: str = "",
+) -> bool:
     """True when the durable elastic-blast ``metadata/SUCCESS.txt`` marker exists.
 
     Authoritative completion signal that survives AKS cluster teardown and the
@@ -381,7 +385,7 @@ def _has_blast_success_marker(storage_account: str, job_id: str) -> bool:
     try:
         from api.services.blast.result_analytics import has_blast_success_marker
 
-        return has_blast_success_marker(storage_account, job_id)
+        return has_blast_success_marker(storage_account, job_id, runtime_identity)
     except Exception as exc:
         LOGGER.info("success marker check skipped job_id=%s: %s", job_id, type(exc).__name__)
         return False

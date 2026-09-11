@@ -1545,6 +1545,30 @@ def test_started_at_from_external_sibling_snapshot():
     assert out["started_at"] == "2026-06-27T04:10:54.315480+00:00"
 
 
+def test_external_runtime_stats_project_from_durable_snapshot(monkeypatch):
+    from api.services.blast import external_config
+
+    monkeypatch.setattr(external_config, "recall_sibling_stats", lambda _job_id: {})
+    out = _local_to_blast_job(
+        _state(
+            payload={
+                "external": {
+                    "submission_source": "external_api",
+                    "started_at": "2026-06-27T04:10:54Z",
+                    "run_seconds": 303,
+                    "queue_wait_seconds": 187,
+                    "elapsed_seconds": 490,
+                }
+            }
+        )
+    )
+
+    assert out["started_at"] == "2026-06-27T04:10:54Z"
+    assert out["run_seconds"] == 303
+    assert out["queue_wait_seconds"] == 187
+    assert out["elapsed_seconds"] == 490
+
+
 def test_started_at_from_dashboard_progress_steps_submitted():
     """Dashboard-native jobs derive started_at from _progress.steps.submitted."""
     out = _local_to_blast_job(

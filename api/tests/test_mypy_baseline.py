@@ -75,7 +75,7 @@ def test_checked_in_baseline_shape() -> None:
     module = _load_module()
     baseline = module.load_baseline(_BASELINE_PATH)
 
-    assert sum(baseline.values()) == 502
+    assert sum(baseline.values()) == 500
     assert len({path for path, _code in baseline}) == 97
     assert all(
         path.startswith("api/") and not path.startswith("api/tests/") for path, _ in baseline

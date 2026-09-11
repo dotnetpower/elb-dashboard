@@ -14,7 +14,9 @@ Key entry points:
      ``name="api.tasks.blast.reconcile_stale_jobs"``, scheduled every
      60 s by Celery beat).
 Risky contracts: Idempotent — calling twice is a no-op if the first
-pass brought every active row to a terminal state. Public task name
+pass brought every active row to a terminal state. External K8s completion
+must not become terminal until the current runtime identity's SUCCESS marker
+exists. Public task name
 must stay ``api.tasks.blast.reconcile_stale_jobs`` (referenced from
 ``api/celery_app.py`` beat schedule).
 Validation: ``uv run pytest -q api/tests/test_blast_tasks.py``.
@@ -40,6 +42,13 @@ __all__ = (
     "_worker_lost_reason",
     "reconcile_stale_jobs",
 )
+
+
+def _row_is_external_origin(row: Any) -> bool:
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
+    return isinstance(payload.get("external"), Mapping) or str(
+        getattr(row, "owner_upn", "") or ""
+    ) == "api"
 
 
 def _reconcile_row_k8s_status(
@@ -76,12 +85,24 @@ def _reconcile_row_k8s_status(
 
     k8s_status = str(k8s.get("status") or "")
     if k8s_status == "completed":
-        if _blast._has_parseable_result_artifact(
-            _blast._storage_account_from_row(row), str(row.job_id)
-        ):
+        storage_account = _blast._storage_account_from_row(row)
+        external_origin = _row_is_external_origin(row)
+        if external_origin:
+            completion_ready = _blast._has_blast_success_marker(
+                storage_account,
+                str(row.job_id),
+                elastic_blast_job_id,
+            )
+        else:
+            completion_ready = _blast._has_parseable_result_artifact(
+                storage_account,
+                str(row.job_id),
+            )
+        if completion_ready:
             status, phase, outcome = "completed", "completed", "completed"
         else:
-            status, phase, outcome = "running", "results_pending", "results_pending"
+            phase = "finalizing" if external_origin else "results_pending"
+            status, outcome = "running", "results_pending"
     elif k8s_status == "failed":
         status, phase, outcome = "failed", "failed", "failed"
     elif k8s_status == "running":
@@ -504,7 +525,9 @@ def reconcile_stale_jobs(
                             continue
                     storage_account = _blast._storage_account_from_row(row)
                     if _blast._has_blast_success_marker(
-                        storage_account, str(row.job_id)
+                        storage_account,
+                        str(row.job_id),
+                        external_job_id,
                     ):
                         _blast._update_state(
                             row.job_id,

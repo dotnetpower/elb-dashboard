@@ -220,6 +220,13 @@ def _validate_copied_runtime_policy(root: Path) -> None:
             "SEQUENCE_SATURATION_REPORT_LIMIT = 100",
             "candidate_pool_saturation_summary",
             "merge_disk_pressure_warning",
+            "def tie_order_oracle_scope(",
+        ),
+        root / "patch_elastic_blast.py": (
+            "CANDIDATE_ORDER_READY",
+            "CANDIDATE_ORDER_UPLOADED",
+            "CANDIDATE_ORDER_FAST_PATH",
+            "CACHE_RECORD_PROBE_REUSE",
         ),
     }
     forbidden = {
@@ -1774,6 +1781,10 @@ def _validate_dockerfile_runtime_policy(path: Path) -> None:
         "grep -q 'name: ELB_DB_WRITER_LOCK'": 3,
         "for template in blast-batch-job-local-ssd-aks.yaml.template": 3,
         "grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}'": 3,
+        "grep -q 'CACHE_RECORD_PROBE_REUSE'": 1,
+        "grep -q 'CANDIDATE_ORDER_READY'": 1,
+        "grep -q 'CANDIDATE_ORDER_UPLOADED'": 1,
+        "grep -q 'CANDIDATE_ORDER_FAST_PATH'": 1,
         "|| exit 1; done": 6,
         "cp -a /tmp/elb-src/src/elastic_blast/templates/.": 2,
     }
@@ -1991,6 +2002,22 @@ def patch_dockerfile(root: Path) -> None:
         legacy=source_identity_check + source_hardening_check_legacy,
         desired=source_identity_check + source_hardening_check,
         marker=source_hardening_check.strip(),
+    )
+    source_candidate_checks = (
+        "    grep -q 'CACHE_RECORD_PROBE_REUSE' "
+        "/tmp/elb-src/src/elastic_blast/templates/scripts/init-db-shard-aks.sh && \\\n"
+        "    grep -q 'CANDIDATE_ORDER_READY' "
+        "/tmp/elb-src/src/elastic_blast/templates/scripts/blast-run-aks.sh && \\\n"
+        "    grep -q 'CANDIDATE_ORDER_UPLOADED' "
+        "/tmp/elb-src/src/elastic_blast/templates/scripts/results-export-aks.sh && \\\n"
+        "    grep -q 'CANDIDATE_ORDER_FAST_PATH' "
+        "/tmp/elb-src/src/elastic_blast/templates/scripts/elb-finalizer-aks.sh && \\\n"
+    )
+    _insert_once(
+        path,
+        source_hardening_check,
+        source_candidate_checks,
+        source_candidate_checks.strip(),
     )
     _replace_once(
         path,

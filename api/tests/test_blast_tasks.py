@@ -4578,6 +4578,73 @@ def test_reconcile_k8s_completed_marks_completed_when_results_ready(
     assert enqueued == [("j-ready", "completed", "completed")]
 
 
+@pytest.mark.parametrize(
+    ("marker_ready", "expected_status", "expected_phase", "expected_completed"),
+    [
+        (False, "running", "finalizing", 0),
+        (True, "completed", "completed", 1),
+    ],
+)
+def test_reconcile_external_k8s_completion_requires_finalizer_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    marker_ready: bool,
+    expected_status: str,
+    expected_phase: str,
+    expected_completed: int,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="external-ready",
+                status="running",
+                phase="running",
+                payload={
+                    "external": {"submission_source": "external_api"},
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "storage_account": "stelb",
+                    "elastic_blast_job_id": _RUNTIME_ID,
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "job_id": _RUNTIME_ID,
+            "started_at": "2026-05-21T03:04:30+00:00",
+            "completed_at": "2026-05-21T03:06:35+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        blast,
+        "_has_parseable_result_artifact",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("external completion must not trust shard artifacts")
+        ),
+    )
+    marker_calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        blast,
+        "_has_blast_success_marker",
+        lambda storage, job_id, runtime_identity="": marker_calls.append(
+            (storage, job_id, runtime_identity)
+        )
+        or marker_ready,
+    )
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
+
+    assert summary["completed"] == expected_completed
+    assert repo.updates[0][1]["status"] == expected_status
+    assert repo.updates[0][1]["phase"] == expected_phase
+    assert marker_calls == [("stelb", "external-ready", _RUNTIME_ID)]
+
+
 def test_backfill_completed_runtime_metrics_updates_missing_container_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4906,6 +4973,10 @@ def test_reconcile_does_not_mark_external_origin_row_worker_lost(
             self.result = None
 
     monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.lifecycle_barrier_interrupts_job",
+        lambda **_kwargs: None,
+    )
 
     summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=60)
 

@@ -1014,10 +1014,20 @@ def test_warmup_staging_commits_marker_after_post_download_integrity() -> None:
         'mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"'
     )
     assert "CACHE_CORRUPT blastdbcmd record probe failed" in helper
-    assert helper.index("CACHE_CORRUPT blastdbcmd record probe failed") < helper.index(
+    assert helper.index("CACHE_CORRUPT blastdbcmd record probe failed") < helper.rindex(
         "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
     )
-    assert helper.index('mv "${CACHE_SOURCE_VERSION}.tmp" "$CACHE_SOURCE_VERSION"') < (
+    fast_skip_prefix = helper.split("DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}", 1)[0]
+    assert "CACHE_ATTESTATION_REUSE" in fast_skip_prefix
+    assert "CACHE_RECORD_FINGERPRINT" in fast_skip_prefix
+    assert 'blastdbcmd -db "$ELB_DB" -info' in fast_skip_prefix
+    assert "DB source version derived from immutable shard path" in helper
+    assert "shard prefix does not identify an Azure container root" in helper
+    assert "${CONTAINER_ROOT_URL}${ORIG_DB}-metadata.json" in helper
+    assert helper.rindex('mv "${CACHE_SOURCE_VERSION}.tmp" "$CACHE_SOURCE_VERSION"') < (
+        helper.rindex("commit_record_probe_markers")
+    )
+    assert helper.rindex("commit_record_probe_markers") < (
         helper.index('mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"')
     )
     entrypoint = warmup_shell_command()
@@ -1025,8 +1035,10 @@ def test_warmup_staging_commits_marker_after_post_download_integrity() -> None:
     assert "final blastdbcmd integrity probe failed" in entrypoint
     assert "final blastdbcmd record probe failed" in entrypoint
     assert '-entry all -outfmt \'%a\'' in entrypoint
+    assert "/generations/([^/]+)/shards/" in fast_skip_prefix
+    assert 'cat "$CACHE_SOURCE_VERSION"' in fast_skip_prefix
     assert helper.index("CACHE_UNVERIFIED expected source version is unavailable") < (
-        helper.index("DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}")
+        helper.rindex("DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}")
     )
     assert "STAGE_RESULT=$(cat /tmp/elb-stage-result)" in entrypoint
     assert 'if [ "$STAGE_RESULT" = "downloaded" ]; then' in entrypoint

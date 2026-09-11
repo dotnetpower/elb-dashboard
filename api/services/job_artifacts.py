@@ -5,10 +5,11 @@ Edit boundaries: Keep reusable domain logic here; routes and tasks should call t
 instead of duplicating SDK code.
 Key entry points: `ArtifactState`, `_now_iso`, `_platform_storage_account_name`,
 `write_json_artifact`, `read_json_artifact`, `upsert_artifact_state`,
-`_invalidate_ready_artifact_if_unchanged`
+`_invalidate_ready_artifact_if_unchanged`, `runtime_identity_pending_expired`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries. Stale ready artifacts must use ETag compare-and-set invalidation so an older reader
-cannot overwrite a concurrent rebuild.
+cannot overwrite a concurrent rebuild. Identity waits and reconcile retries must remain bounded
+per ElasticBLAST runtime identity.
 Validation: `uv run pytest -q api/tests`.
 """
 
@@ -47,6 +48,8 @@ _ARTIFACT_TABLE_POOLED: TableClient | None = None
 _ARTIFACT_TABLE_POOL_LOCK = threading.Lock()
 _ANALYTICS_JSON_MAX_BYTES = int(os.environ.get("RESULT_ANALYTICS_ARTIFACT_MAX_BYTES", "16777216"))
 _PENDING_STALE_SECONDS = int(os.environ.get("JOB_ARTIFACT_PENDING_STALE_SECONDS", "900"))
+ARTIFACT_RECONCILE_ATTEMPT_MAX = 5
+RUNTIME_IDENTITY_PENDING_TIMEOUT_SECONDS = 1800
 _ENSURED_TABLES: set[tuple[str, str]] = set()
 _ENSURED_TABLES_LOCK = threading.Lock()
 _ENSURED_CONTAINERS: set[tuple[str, str]] = set()
@@ -489,7 +492,22 @@ def artifact_build_should_enqueue(
     expected_runtime_identity = runtime_identity.strip().casefold()
     for artifact_type in artifact_types:
         state = get_artifact_state(job_id, artifact_type)
-        if state is None or state.status == "failed":
+        if state is None:
+            return True
+        if state.status == "failed":
+            same_runtime = (
+                not expected_runtime_identity
+                or state.runtime_identity.casefold() == expected_runtime_identity
+            )
+            if (
+                artifact_type == "artifact_finalizer"
+                and same_runtime
+                and (
+                    state.error_code == "runtime_identity_timeout"
+                    or state.reconcile_attempts >= ARTIFACT_RECONCILE_ATTEMPT_MAX
+                )
+            ):
+                continue
             return True
         if (
             artifact_type == "artifact_finalizer"
@@ -516,6 +534,26 @@ def artifact_build_should_enqueue(
             continue
         return True
     return False
+
+
+def runtime_identity_pending_expired(
+    state: ArtifactState,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether an identity-pending sentinel exceeded its hard deadline."""
+
+    if state.status != "pending" or state.error_code != "runtime_identity_pending":
+        return False
+    try:
+        updated_at = datetime.fromisoformat(state.updated_at.replace("Z", "+00:00"))
+    except Exception:
+        return True
+    current = now or datetime.now(UTC)
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=UTC)
+    age_seconds = (current - updated_at.astimezone(UTC)).total_seconds()
+    return age_seconds >= RUNTIME_IDENTITY_PENDING_TIMEOUT_SECONDS
 
 
 def build_execution_steps_snapshot(state: Any) -> dict[str, Any]:

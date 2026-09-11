@@ -111,7 +111,7 @@
 4 api/tasks/blast/poll_tasks.py attr-defined
 2 api/tasks/blast/progress.py arg-type
 1 api/tasks/blast/reconcile_task.py arg-type
-14 api/tasks/blast/reconcile_task.py attr-defined
+12 api/tasks/blast/reconcile_task.py attr-defined
 4 api/tasks/blast/runtime_gc_task.py arg-type
 2 api/tasks/blast/split_pipeline.py arg-type
 1 api/tasks/blast/split_pipeline.py assignment

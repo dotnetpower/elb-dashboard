@@ -6055,6 +6055,100 @@ def test_sync_external_caches_sibling_stats_on_update_path(monkeypatch):
     }
 
 
+def test_sync_external_durably_backfills_terminal_timing(monkeypatch):
+    from api.routes import _blast_shared as shared
+    from api.services import state_repo
+
+    class FakeExisting:
+        job_id = "timing-1"
+        status = "running"
+        phase = "running"
+        error_code = ""
+        subscription_id = "sub-1"
+        resource_group = "rg-1"
+        cluster_name = "elb-cluster"
+        storage_account = ""
+        program = "blastn"
+        db = "core_nt"
+        job_title = "blastn core_nt"
+        query_label = "q.fa"
+        results_prefix = "2026/06/27/timing-1/"
+        payload: ClassVar[dict] = {"external": {"submission_source": "external_api"}}
+
+    backfills: list[tuple[str, str, dict]] = []
+
+    class FakeRepo:
+        def get_many(self, _ids):
+            return {"timing-1": FakeExisting()}
+
+        def create(self, _state):
+            raise AssertionError("existing row must update, not create")
+
+        def update(self, *_a, **_kw):
+            return None
+
+        def backfill_payload_section(self, job_id, section, values):
+            backfills.append((job_id, section, dict(values)))
+            return True
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", lambda: FakeRepo())
+    monkeypatch.setattr(state_repo, "JobState", object)
+    ext = _make_completed_ext_with_runtime("timing-1")
+    ext["queued_at"] = "2026-06-27T05:15:31.118590+00:00"
+    ext["completed_at"] = "2026-06-27T05:23:41.118590+00:00"
+
+    shared._sync_external_jobs_to_table([ext], caller_oid="oid-1")
+
+    assert backfills == [
+        (
+            "timing-1",
+            "external",
+            {
+                "queued_at": "2026-06-27T05:15:31.118590+00:00",
+                "started_at": "2026-06-27T05:18:38.118590+00:00",
+                "completed_at": "2026-06-27T05:23:41.118590+00:00",
+                "elapsed_seconds": 490,
+                "queue_wait_seconds": 187,
+                "run_seconds": 303,
+            },
+        )
+    ]
+
+
+def test_external_timing_evidence_does_not_persist_live_durations():
+    from api.services.blast.external_jobs import _external_timing_evidence
+
+    assert _external_timing_evidence(
+        {
+            "status": "running",
+            "queued_at": "2026-06-27T05:15:31Z",
+            "started_at": "2026-06-27T05:18:38Z",
+            "elapsed_seconds": 490,
+            "queue_wait_seconds": 187,
+            "run_seconds": 303,
+        }
+    ) == {
+        "queued_at": "2026-06-27T05:15:31Z",
+        "started_at": "2026-06-27T05:18:38Z",
+    }
+
+
+def test_external_timing_evidence_drops_invalid_values():
+    from api.services.blast.external_jobs import _external_timing_evidence
+
+    assert _external_timing_evidence(
+        {
+            "status": "completed",
+            "queued_at": "not-a-timestamp",
+            "started_at": "2026-06-27T05:18:38",
+            "completed_at": "2026-06-27T05:23:41Z",
+            "elapsed_seconds": -1,
+            "queue_wait_seconds": True,
+            "run_seconds": 2_147_483_648,
+        }
+    ) == {"completed_at": "2026-06-27T05:23:41Z"}
+
+
 @pytest.mark.parametrize("terminal_status", ["completed", "succeeded", "failed", "cancelled"])
 def test_sync_external_caches_sibling_stats_for_every_terminal_status(monkeypatch, terminal_status):
     """All four terminal statuses populate the cache. The live verification

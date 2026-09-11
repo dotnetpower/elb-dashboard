@@ -13,7 +13,9 @@ Key entry points: `warmup_shell_command()`, `INIT_DB_SHARD_AKS_SCRIPT`,
 `BLAST_VMTOUCH_AKS_SCRIPT`.
 Risky contracts: The scripts reference the ConfigMap mount path
 `/scripts/init-db-shard-aks.sh` and `/scripts/blast-vmtouch-aks.sh`; keep
-those paths in lock-step with `build_warmup_scripts_configmap()`.
+those paths in lock-step with `build_warmup_scripts_configmap()`. Cache reuse
+requires an immutable-generation source, layout/manifest markers, a bounded-age
+record-probe attestation, unchanged file stats, and the exclusive stage lock.
 The warmup Job entrypoint deliberately does NOT call `blast-vmtouch-aks.sh`
 any more (kept in ConfigMap only for the equivalence-experiment shell
 scripts that exec it directly): on the DOWNLOAD path, pages staged by
@@ -179,6 +181,8 @@ CACHE_COMPLETE=".elb-cache.${ELB_DB}.complete"
 CACHE_SOURCE_VERSION=".elb-cache.${ELB_DB}.source-version"
 CACHE_MANIFEST=".elb-cache.${ELB_DB}.manifest"
 CACHE_LAYOUT_SHA=".elb-cache.${ELB_DB}.layout-sha256"
+CACHE_RECORD_FINGERPRINT=".elb-cache.${ELB_DB}.record-fingerprint"
+CACHE_RECORD_VERIFIED_AT=".elb-cache.${ELB_DB}.record-verified-at"
 if [ "${ELB_STAGE_LOCK_HELD:-0}" = "1" ]; then
     if ! flock -n 9; then
         echo "ERROR: inherited stage lock descriptor is unavailable"
@@ -229,6 +233,83 @@ log_runtime() {
     ts=$(date +'%F %T')
     printf '%s RUNTIME %s %f seconds\n' "$ts" "$1" "$2"
 }
+
+fast_attested_cache_ready() {
+    local expected_source ttl verified_at now fingerprint cached_fingerprint
+    local payload_ext volume candidate volpaths=""
+    local -a cached_volumes
+    if [[ ! "${ELB_PARTITION_PREFIX:-}" =~ /generations/([^/]+)/shards/ ]]; then
+        return 1
+    fi
+    expected_source="${BASH_REMATCH[1]}"
+    for candidate in "$CACHE_COMPLETE" "$CACHE_SOURCE_VERSION" "$CACHE_MANIFEST" \
+            "$CACHE_LAYOUT_SHA" "$CACHE_RECORD_FINGERPRINT" "$CACHE_RECORD_VERIFIED_AT" \
+            "./${ELB_DB}.nal"; do
+        [ -s "$candidate" ] || return 1
+    done
+    [ "$(cat "$CACHE_SOURCE_VERSION")" = "$expected_source" ] || return 1
+    [[ "$(cat "$CACHE_LAYOUT_SHA")" =~ ^[0-9a-f]{64}$ ]] || return 1
+    ttl="${ELB_CACHE_RECORD_PROBE_TTL_SECONDS:-86400}"
+    case "$ttl" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#ttl}" -le 7 ] && [ "$ttl" -ge 60 ] && [ "$ttl" -le 604800 ] || return 1
+    verified_at=$(cat "$CACHE_RECORD_VERIFIED_AT")
+    [[ "$verified_at" =~ ^[0-9]+$ ]] || return 1
+    now=$(date +%s)
+    [ "$now" -ge "$verified_at" ] \
+        && [ $((now - verified_at)) -le "$ttl" ] || return 1
+    mapfile -t cached_volumes < "$CACHE_MANIFEST"
+    [ "${#cached_volumes[@]}" -gt 0 ] || return 1
+    payload_ext="nsq"
+    [ "${ELB_DB_MOL_TYPE:-nucl}" = "prot" ] && payload_ext="psq"
+    for volume in "${cached_volumes[@]}"; do
+        if [ "$volume" != "$ORIG_DB" ] \
+                && [[ "$volume" != "$ORIG_DB".[0-9]* ]]; then
+            return 1
+        fi
+        [[ "$volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,126}$ ]] || return 1
+        [ -s "${volume}.${payload_ext}" ] || return 1
+    done
+    if [ -s "${ORIG_DB}.ntf" ] \
+            && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
+        return 1
+    fi
+    cached_fingerprint=$(cat "$CACHE_RECORD_FINGERPRINT")
+    [[ "$cached_fingerprint" =~ ^[0-9a-f]{64}$ ]] || return 1
+    fingerprint=$(
+        {
+            printf 'source=%s\nlayout=%s\n' \
+                "$(cat "$CACHE_SOURCE_VERSION")" "$(cat "$CACHE_LAYOUT_SHA")"
+            cat "$CACHE_MANIFEST"
+            for volume in "${cached_volumes[@]}"; do
+                for candidate in "${volume}".*; do
+                    [ -f "$candidate" ] && stat -Lc '%n\t%s\t%Y\t%Z' -- "$candidate"
+                done
+            done
+            for candidate in "./${ELB_DB}.nal" \
+                    "${ORIG_DB}.ndb" "${ORIG_DB}.ntf" "${ORIG_DB}.nto" \
+                    "${ORIG_DB}.nos" "${ORIG_DB}.not" \
+                    taxdb.btd taxdb.bti taxonomy4blast.sqlite3; do
+                [ -f "$candidate" ] && stat -Lc '%n\t%s\t%Y\t%Z' -- "$candidate"
+            done
+            true
+        } | LC_ALL=C sort | sha256sum | awk '{print $1}'
+    )
+    [ "$fingerprint" = "$cached_fingerprint" ] || return 1
+    blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1 || return 1
+    for volume in "${cached_volumes[@]}"; do
+        [ -n "$volpaths" ] && volpaths="$volpaths "
+        volpaths="${volpaths}$(pwd)/${volume}"
+    done
+    echo "VOLPATHS=${volpaths}" > /tmp/shard_volpaths.txt
+    printf '%s' skipped > /tmp/elb-stage-result
+    echo "CACHE_ATTESTATION_REUSE source=${expected_source} age_seconds=$((now - verified_at))"
+    echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
+    return 0
+}
+
+if fast_attested_cache_ready; then
+    exit 0
+fi
 
 azcopy login --identity || { echo "ERROR: azcopy login failed"; exit 1; }
 # Do not pin AZCOPY_CONCURRENCY_VALUE / AZCOPY_BUFFER_GB inside the script. The
@@ -300,14 +381,33 @@ for volume in "${VOLUMES[@]}"; do
 done
 echo "Volumes: ${VOLUMES[*]}"
 
-DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
-DB_URL="${ELB_DB_URL:-${DB_BASE_URL}${ORIG_DB}/}"
+if [[ "${ELB_PARTITION_PREFIX}" =~ ^(.+)/shards/[0-9]+shards/[^/]+_shard_$ ]]; then
+    DB_BASE_URL="${BASH_REMATCH[1]}/"
+    DEFAULT_DB_URL="${DB_BASE_URL}"
+else
+    DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
+    DEFAULT_DB_URL="${DB_BASE_URL}${ORIG_DB}/"
+fi
+DB_URL="${ELB_DB_URL:-${DEFAULT_DB_URL}}"
 echo "DB base URL: ${DB_URL}"
 
 EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
+# The immutable path itself is authoritative. Pin the expected generation even
+# when an older caller did not inject ELB_DB_SOURCE_VERSION.
+if [ -z "$EXPECTED_SOURCE_VERSION" ] \
+        && [[ "${ELB_PARTITION_PREFIX}" =~ /generations/([^/]+)/shards/ ]]; then
+    EXPECTED_SOURCE_VERSION="${BASH_REMATCH[1]}"
+    echo "DB source version derived from immutable shard path: ${EXPECTED_SOURCE_VERSION}"
+fi
 METADATA_SOURCE_VERSION=""
 SHARD_LAYOUT_SCHEMA="0"
-METADATA_URL="${ELB_METADATA_URL:-${DB_BASE_URL}${ORIG_DB}-metadata.json}"
+if [[ "${ELB_PARTITION_PREFIX}" =~ ^(https://[^/]+/[^/]+)/ ]]; then
+    CONTAINER_ROOT_URL="${BASH_REMATCH[1]}/"
+else
+    echo "ERROR: shard prefix does not identify an Azure container root"
+    exit 65
+fi
+METADATA_URL="${ELB_METADATA_URL:-${CONTAINER_ROOT_URL}${ORIG_DB}-metadata.json}"
 echo "Resolving DB metadata: ${METADATA_URL}"
 if retry_azcopy cp "${METADATA_URL}" /tmp/db-metadata.json --log-level=ERROR; then
     if command -v python3 >/dev/null 2>&1; then
@@ -446,8 +546,42 @@ commit_layout_markers() {
     fi
 }
 
+record_fingerprint() {
+    local volume candidate
+    {
+        printf 'source=%s\nlayout=%s\n' \
+            "$(cat "$CACHE_SOURCE_VERSION" 2>/dev/null || true)" \
+            "$(cat "$CACHE_LAYOUT_SHA" 2>/dev/null || true)"
+        cat "$CACHE_MANIFEST"
+        for volume in "${VOLUMES[@]}"; do
+            for candidate in "${volume}".*; do
+                [ -f "$candidate" ] && stat -Lc '%n\t%s\t%Y\t%Z' -- "$candidate"
+            done
+        done
+        for candidate in "./${ELB_DB}.nal" \
+                "${ORIG_DB}.ndb" "${ORIG_DB}.ntf" "${ORIG_DB}.nto" \
+                "${ORIG_DB}.nos" "${ORIG_DB}.not" \
+                taxdb.btd taxdb.bti taxonomy4blast.sqlite3; do
+            [ -f "$candidate" ] && stat -Lc '%n\t%s\t%Y\t%Z' -- "$candidate"
+        done
+        true
+    } | LC_ALL=C sort | sha256sum | awk '{print $1}'
+}
+
+commit_record_probe_markers() {
+    local fingerprint verified_at
+    fingerprint=$(record_fingerprint)
+    verified_at=$(date +%s)
+    printf '%s' "$fingerprint" > "${CACHE_RECORD_FINGERPRINT}.tmp"
+    printf '%s' "$verified_at" > "${CACHE_RECORD_VERIFIED_AT}.tmp"
+    mv "${CACHE_RECORD_FINGERPRINT}.tmp" "$CACHE_RECORD_FINGERPRINT"
+    mv "${CACHE_RECORD_VERIFIED_AT}.tmp" "$CACHE_RECORD_VERIFIED_AT"
+}
+
 rm -f "${CACHE_COMPLETE}.tmp" "${CACHE_SOURCE_VERSION}.tmp" \
-    "${CACHE_LAYOUT_SHA}.tmp" "${CACHE_MANIFEST}.tmp" "./${ELB_DB}.nal.tmp"
+    "${CACHE_LAYOUT_SHA}.tmp" "${CACHE_MANIFEST}.tmp" \
+    "${CACHE_RECORD_FINGERPRINT}.tmp" "${CACHE_RECORD_VERIFIED_AT}.tmp" \
+    "./${ELB_DB}.nal.tmp"
 if [ -f "$CACHE_COMPLETE" ] && [ -z "$EXPECTED_SOURCE_VERSION" ]; then
     echo "CACHE_UNVERIFIED expected source version is unavailable"
     rm -f "$CACHE_COMPLETE"
@@ -521,9 +655,38 @@ if [ -f "$CACHE_COMPLETE" ]; then
     fi
 fi
 if [ -f "$CACHE_COMPLETE" ]; then
-    if ! blastdbcmd -db "$ELB_DB" -entry all -outfmt '%a' >/dev/null 2>&1; then
-        echo "CACHE_CORRUPT blastdbcmd record probe failed - invalidating"
-        rm -f "$CACHE_COMPLETE"
+    RECORD_PROBE_TTL_SECONDS="${ELB_CACHE_RECORD_PROBE_TTL_SECONDS:-86400}"
+    case "$RECORD_PROBE_TTL_SECONDS" in
+      ''|*[!0-9]*) echo "ERROR: invalid record probe TTL"; exit 64 ;;
+    esac
+    if [ "${#RECORD_PROBE_TTL_SECONDS}" -gt 7 ] \
+            || [ "$RECORD_PROBE_TTL_SECONDS" -lt 60 ] \
+            || [ "$RECORD_PROBE_TTL_SECONDS" -gt 604800 ]; then
+        echo "ERROR: record probe TTL must be between 60 and 604800 seconds"
+        exit 64
+    fi
+    RECORD_PROBE_REUSE=0
+    if [ -s "$CACHE_RECORD_FINGERPRINT" ] && [ -s "$CACHE_RECORD_VERIFIED_AT" ]; then
+        CACHED_RECORD_FINGERPRINT=$(cat "$CACHE_RECORD_FINGERPRINT")
+        CACHED_RECORD_VERIFIED_AT=$(cat "$CACHE_RECORD_VERIFIED_AT")
+        NOW_EPOCH=$(date +%s)
+        if [[ "$CACHED_RECORD_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] \
+                && [[ "$CACHED_RECORD_VERIFIED_AT" =~ ^[0-9]+$ ]] \
+                && [ "$NOW_EPOCH" -ge "$CACHED_RECORD_VERIFIED_AT" ] \
+                && [ $((NOW_EPOCH - CACHED_RECORD_VERIFIED_AT)) -le "$RECORD_PROBE_TTL_SECONDS" ] \
+                && [ "$(record_fingerprint)" = "$CACHED_RECORD_FINGERPRINT" ]; then
+            RECORD_PROBE_REUSE=1
+            echo "CACHE_RECORD_PROBE_REUSE age_seconds=$((NOW_EPOCH - CACHED_RECORD_VERIFIED_AT))"
+        fi
+    fi
+    if [ "$RECORD_PROBE_REUSE" -ne 1 ]; then
+        echo "CACHE_RECORD_PROBE_REFRESH"
+        if ! blastdbcmd -db "$ELB_DB" -entry all -outfmt '%a' >/dev/null 2>&1; then
+            echo "CACHE_CORRUPT blastdbcmd record probe failed - invalidating"
+            rm -f "$CACHE_COMPLETE" "$CACHE_RECORD_FINGERPRINT" "$CACHE_RECORD_VERIFIED_AT"
+        else
+            commit_record_probe_markers
+        fi
     fi
 fi
 if [ -f "$CACHE_COMPLETE" ]; then
@@ -659,6 +822,7 @@ if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
 else
     rm -f "$CACHE_SOURCE_VERSION"
 fi
+commit_record_probe_markers
 printf '%s' ok > "${CACHE_COMPLETE}.tmp"
 mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"
 rm -f .download-source-version .download-layout-sha256 .download-manifest

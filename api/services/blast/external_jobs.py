@@ -10,8 +10,9 @@ Key entry points: `_external_list_jobs_cached`, `_sync_external_jobs_to_table`,
 `_openapi_client_kwargs_from_cluster`, `_discover_subscription_clusters`,
 `_reset_external_jobs_cache`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries. The projection helpers are re-exported under their original private names so
-existing consumers (`job_state`, tests) keep their import surface.
+log boundaries. Persist only validated immutable/terminal timing evidence. The projection helpers
+are re-exported under their original private names so existing consumers (`job_state`, tests) keep
+their import surface.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
 api/tests/test_blast_tasks.py api/tests/test_external_blast_api.py`.
 """
@@ -22,6 +23,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -577,18 +579,20 @@ def _sync_external_jobs_to_table(
             if _ext_status_lower in ("completed", "succeeded", "failed", "cancelled"):
                 from api.services.blast.external_config import remember_sibling_stats
 
+                _timing = _external_timing_evidence(ext) or {}
                 _stats_payload = {
-                    k: ext.get(k)
-                    for k in (
+                    key: _timing[key]
+                    for key in (
                         "started_at",
                         "run_seconds",
                         "queue_wait_seconds",
                         "elapsed_seconds",
-                        "db_version",
-                        "blast_version",
                     )
-                    if ext.get(k) not in (None, "")
+                    if key in _timing
                 }
+                for key in ("db_version", "blast_version"):
+                    if ext.get(key) not in (None, ""):
+                        _stats_payload[key] = ext[key]
                 if _stats_payload:
                     remember_sibling_stats(job_id, _stats_payload)
         except Exception as _exc:
@@ -686,11 +690,14 @@ def _sync_external_jobs_to_table(
                 if _row_results_prefix and not (getattr(existing, "results_prefix", None) or ""):
                     prefix_backfill["results_prefix"] = _row_results_prefix
                 runtime_evidence = _external_runtime_evidence(ext)
+                timing_evidence = _external_timing_evidence(ext)
+                durable_evidence = dict(runtime_evidence or {})
+                durable_evidence.update(timing_evidence or {})
                 evidence_needs_backfill = bool(
-                    runtime_evidence
+                    durable_evidence
                     and _external_runtime_evidence_needs_backfill(
                         getattr(existing, "payload", None),
-                        runtime_evidence,
+                        durable_evidence,
                     )
                 )
                 should_backfill_identity = False
@@ -749,12 +756,12 @@ def _sync_external_jobs_to_table(
                         updated += 1
                     except KeyError:
                         existing = None
-                if existing is not None and runtime_evidence and evidence_needs_backfill:
+                if existing is not None and durable_evidence and evidence_needs_backfill:
                     try:
                         if repo.backfill_payload_section(
                             job_id,
                             "external",
-                            runtime_evidence,
+                            durable_evidence,
                         ):
                             updated += 1
                     except KeyError:
@@ -890,6 +897,37 @@ _EXTERNAL_RUNTIME_EVIDENCE_KEYS = (
     "blast_version_detail",
     "config_snapshot",
 )
+_EXTERNAL_TERMINAL_STATUSES = frozenset(
+    {"completed", "succeeded", "failed", "cancelled", "deleted"}
+)
+_EXTERNAL_TERMINAL_TIMING_KEYS = (
+    "completed_at",
+    "failed_at",
+    "elapsed_seconds",
+    "queue_wait_seconds",
+    "run_seconds",
+)
+_EXTERNAL_DURATION_MAX_SECONDS = 2_147_483_647
+
+
+def _validated_external_timestamp(value: object) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return value
+
+
+def _validated_external_duration(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if not 0 <= value <= _EXTERNAL_DURATION_MAX_SECONDS:
+        return None
+    return value
 
 
 def _external_runtime_evidence(external_row: dict[str, Any]) -> dict[str, Any] | None:
@@ -907,6 +945,27 @@ def _external_runtime_evidence(external_row: dict[str, Any]) -> dict[str, Any] |
         if value in (None, "", {}, []):
             continue
         evidence[key] = value
+    return evidence or None
+
+
+def _external_timing_evidence(external_row: dict[str, Any]) -> dict[str, Any] | None:
+    """Return immutable lifecycle timing suitable for additive storage."""
+
+    evidence: dict[str, Any] = {}
+    for key in ("queued_at", "started_at"):
+        value = _validated_external_timestamp(external_row.get(key))
+        if value is not None:
+            evidence[key] = value
+    status = str(external_row.get("status") or "").strip().casefold()
+    if status in _EXTERNAL_TERMINAL_STATUSES:
+        for key in ("completed_at", "failed_at"):
+            timestamp_value = _validated_external_timestamp(external_row.get(key))
+            if timestamp_value is not None:
+                evidence[key] = timestamp_value
+        for key in ("elapsed_seconds", "queue_wait_seconds", "run_seconds"):
+            duration_value = _validated_external_duration(external_row.get(key))
+            if duration_value is not None:
+                evidence[key] = duration_value
     return evidence or None
 
 

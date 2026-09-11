@@ -695,7 +695,7 @@ def _external_to_blast_job(
         "molecule": (job.get("query_meta") or {}).get("molecule")
         if isinstance(job.get("query_meta"), dict)
         else None,
-        "external_correlation_id": job.get("external_correlation_id") or "",
+        "external_correlation_id": job.get("external_correlation_id") or None,
         "query_label": metadata["query_label"] or "query.fa",
         "owner_upn": "api",
         "custom_status": {

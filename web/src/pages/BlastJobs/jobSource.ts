@@ -32,14 +32,18 @@ export function jobSubmissionSource(job: BlastJobSummary): JobSource {
  *
  * `queueOrigin` distinguishes a Service Bus job that the dashboard send route
  * enqueued ("control_plane" → "queue (dashboard)") from one an external
- * producer put straight on the namespace ("queue"). An `api` submit always
- * comes through the dashboard's control-plane API facade, so it is labelled
- * "api (dashboard)".
+ * producer put straight on the namespace ("queue"). An `api` submit is marked
+ * as dashboard-originated only when the facade stamped an external correlation
+ * id; direct sibling `/v1/jobs` submissions remain simply "api".
  */
-export function jobSourceLabel(source: JobSource, queueOrigin?: string): string {
+export function jobSourceLabel(
+  source: JobSource,
+  queueOrigin?: string,
+  externalCorrelationId?: string | null,
+): string {
   if (source === "servicebus") {
     return queueOrigin === "control_plane" ? "queue (dashboard)" : "queue";
   }
-  if (source === "api") return "api (dashboard)";
+  if (source === "api") return externalCorrelationId ? "api (dashboard)" : "api";
   return "ui";
 }

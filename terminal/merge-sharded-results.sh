@@ -580,6 +580,11 @@ def tie_order_oracle_source():
     return source if source in {"query", "db_order"} else "query"
 
 
+def tie_order_oracle_scope():
+    scope = os.environ.get("ELB_TIE_ORDER_SCOPE", "").strip().lower()
+    return scope if scope in {"full", "candidate"} else "full"
+
+
 def blast_evalue_sort_key(evalue):
     # Mirrors NCBI BLAST core s_EvalueComp: values below 1e-180 compare equal.
     return 0.0 if evalue < BLAST_EVALUE_EPSILON else evalue
@@ -1688,6 +1693,7 @@ def merge_tabular(
         ),
         "tie_order_oracle_path": oracle_path,
         "tie_order_oracle_source": tie_order_oracle_source() if tie_order else None,
+        "tie_order_oracle_scope": tie_order_oracle_scope() if tie_order else None,
         "tie_order_oracle_accessions": oracle_unique_accessions,
         "tie_order_oracle_strict": strict_oracle,
         "tie_order_oracle_missing_count": sum(
@@ -2366,6 +2372,7 @@ def merge_xml(
         "web_blast_statistical_context": web_blast_statistics,
         "tie_order_oracle_path": oracle_path,
         "tie_order_oracle_source": tie_order_oracle_source() if tie_order else None,
+        "tie_order_oracle_scope": tie_order_oracle_scope() if tie_order else None,
         "tie_order_oracle_accessions": oracle_unique_accessions,
         "tie_order_oracle_strict": strict_oracle,
         "tie_order_oracle_missing_count": sum(

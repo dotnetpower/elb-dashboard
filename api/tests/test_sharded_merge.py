@@ -355,6 +355,67 @@ def test_db_order_oracle_v2_maps_grouped_aliases_and_shard_oid_resets(
     assert report["selection_equivalence"] == "full_db_hitlist_exact"
 
 
+def test_candidate_db_order_oracle_matches_full_oracle_with_sparse_oids(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        "q1\talias-a\t1e-30\t90\t100",
+        "q1\ts2\t1e-30\t90\t100",
+        "q1\ts3\t1e-30\t90\t100",
+    ]
+    full_oracle = tmp_path / "db-order-full.txt"
+    full_oracle.write_text(
+        "00\t0\tprimary-a\n"
+        "00\t0\talias-a\n"
+        "00\t1\tunrelated-1\n"
+        "00\t9000000\ts2\n"
+        "01\t0\tunrelated-2\n"
+        "01\t8000000\ts3\n"
+    )
+    candidate_oracle = tmp_path / "db-order-candidate.txt"
+    candidate_oracle.write_text(
+        "00\t0\tprimary-a\n"
+        "00\t0\talias-a\n"
+        "00\t9000000\ts2\n"
+        "01\t8000000\ts3\n"
+    )
+    full_dir = tmp_path / "full"
+    candidate_dir = tmp_path / "candidate"
+    full_dir.mkdir()
+    candidate_dir.mkdir()
+
+    full_rows, full_report = _run_tabular_merge(
+        full_dir,
+        rows,
+        num_shards="2",
+        max_target_seqs=3,
+        outfmt_spec="6 qseqid sseqid evalue bitscore score",
+        env={
+            "ELB_TIE_ORDER_FILE": str(full_oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+            "ELB_TIE_ORDER_SCOPE": "full",
+        },
+    )
+    candidate_rows, candidate_report = _run_tabular_merge(
+        candidate_dir,
+        rows,
+        num_shards="2",
+        max_target_seqs=3,
+        outfmt_spec="6 qseqid sseqid evalue bitscore score",
+        env={
+            "ELB_TIE_ORDER_FILE": str(candidate_oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+            "ELB_TIE_ORDER_SCOPE": "candidate",
+        },
+    )
+
+    assert candidate_rows == full_rows
+    assert candidate_report["ranking_basis"] == full_report["ranking_basis"]
+    assert candidate_report["selection_equivalence"] == "full_db_hitlist_exact"
+    assert candidate_report["tie_order_oracle_scope"] == "candidate"
+    assert full_report["tie_order_oracle_scope"] == "full"
+
+
 def test_db_order_oracle_uses_raw_score_and_evalue_epsilon(tmp_path: Path) -> None:
     rows = [
         "q1\ts1\t0\t90\t100",
@@ -433,6 +494,57 @@ def test_xml_db_order_oracle_uses_blast_comparator(tmp_path: Path) -> None:
     assert subjects == ["s2", "s1"]
     assert report["ranking_basis"] == "blast_evalue_raw_score_db_oid_desc"
     assert report["selection_equivalence"] == "full_db_hitlist_exact"
+
+
+def test_xml_candidate_db_order_oracle_matches_full_oracle(tmp_path: Path) -> None:
+    full_dir = tmp_path / "full"
+    candidate_dir = tmp_path / "candidate"
+    full_dir.mkdir()
+    candidate_dir.mkdir()
+    full_oracle = tmp_path / "db-order-full.txt"
+    full_oracle.write_text(
+        "00\t0\ts1\n"
+        "00\t1\tunrelated-1\n"
+        "00\t9000000\ts2\n"
+        "01\t0\tunrelated-2\n"
+        "01\t8000000\ts3\n"
+    )
+    candidate_oracle = tmp_path / "db-order-candidate.txt"
+    candidate_oracle.write_text(
+        "00\t0\ts1\n"
+        "00\t9000000\ts2\n"
+        "01\t8000000\ts3\n"
+    )
+    hits = [
+        [("s1", "0", 90.0, 100), ("s2", "1e-200", 90.0, 100)],
+        [("s3", "1e-200", 90.0, 100)],
+    ]
+
+    full_subjects, full_report = _run_xml_merge(
+        full_dir,
+        hits,
+        max_target_seqs=3,
+        env={
+            "ELB_TIE_ORDER_FILE": str(full_oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+            "ELB_TIE_ORDER_SCOPE": "full",
+        },
+    )
+    candidate_subjects, candidate_report = _run_xml_merge(
+        candidate_dir,
+        hits,
+        max_target_seqs=3,
+        env={
+            "ELB_TIE_ORDER_FILE": str(candidate_oracle),
+            "ELB_TIE_ORDER_SOURCE": "db_order",
+            "ELB_TIE_ORDER_SCOPE": "candidate",
+        },
+    )
+
+    assert candidate_subjects == full_subjects
+    assert candidate_report["ranking_basis"] == full_report["ranking_basis"]
+    assert candidate_report["selection_equivalence"] == "full_db_hitlist_exact"
+    assert candidate_report["tie_order_oracle_scope"] == "candidate"
 
 
 def test_merge_sharded_results_writes_valid_xml(tmp_path: Path) -> None:

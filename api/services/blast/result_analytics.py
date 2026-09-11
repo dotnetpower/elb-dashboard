@@ -211,7 +211,11 @@ class InvalidResultBlobName(ValueError):
         self.code = code
 
 
-def has_blast_success_marker(storage_account: str, job_id: str) -> bool:
+def has_blast_success_marker(
+    storage_account: str,
+    job_id: str,
+    runtime_identity: str = "",
+) -> bool:
     """True when the durable elastic-blast SUCCESS marker exists for a job.
 
     The cluster-side finalizer (``elb-finalizer-aks.sh``) writes
@@ -234,6 +238,11 @@ def has_blast_success_marker(storage_account: str, job_id: str) -> bool:
     """
     if not storage_account or not job_id:
         return False
+    from api.services.state.job_state import canonical_elastic_blast_job_id
+
+    scoped_runtime = canonical_elastic_blast_job_id(runtime_identity)
+    if runtime_identity and not scoped_runtime:
+        return False
     try:
         blobs = list_result_blobs_for_job(storage_account, job_id)
     except Exception as exc:
@@ -241,9 +250,12 @@ def has_blast_success_marker(storage_account: str, job_id: str) -> bool:
             "success marker check skipped job_id=%s: %s", job_id, type(exc).__name__
         )
         return False
-    return any(
-        str(blob.get("name") or "").endswith("/metadata/SUCCESS.txt") for blob in blobs
+    marker_suffix = (
+        f"/{scoped_runtime}/metadata/SUCCESS.txt"
+        if scoped_runtime
+        else "/metadata/SUCCESS.txt"
     )
+    return any(str(blob.get("name") or "").endswith(marker_suffix) for blob in blobs)
 
 
 def list_result_blobs_for_job(

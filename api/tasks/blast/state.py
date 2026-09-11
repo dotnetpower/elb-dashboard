@@ -57,6 +57,7 @@ def _enqueue_artifact_finalizer(
                     job_id,
                     type(exc).__name__,
                 )
+                return False
         if not should_enqueue:
             return False
         try:

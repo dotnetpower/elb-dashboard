@@ -40,6 +40,32 @@ def test_success_marker_present_returns_true(monkeypatch: pytest.MonkeyPatch) ->
     assert result_analytics.has_blast_success_marker("stelb", "job-1") is True
 
 
+def test_success_marker_is_scoped_to_runtime_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_blobs(
+        monkeypatch,
+        [
+            "job-1/job-11111111111111111111111111111111/metadata/SUCCESS.txt",
+            "job-1/job-22222222222222222222222222222222/batch_000.out.gz",
+        ],
+    )
+
+    assert not result_analytics.has_blast_success_marker(
+        "stelb",
+        "job-1",
+        "job-22222222222222222222222222222222",
+    )
+    assert result_analytics.has_blast_success_marker(
+        "stelb",
+        "job-1",
+        "job-11111111111111111111111111111111",
+    )
+    assert not result_analytics.has_blast_success_marker(
+        "stelb",
+        "job-1",
+        "not-a-runtime-id",
+    )
+
+
 def test_success_marker_absent_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_blobs(
         monkeypatch,

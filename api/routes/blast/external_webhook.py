@@ -18,6 +18,8 @@ Risky contracts:
     A 4xx/5xx would cause the sibling to retry-storm against the dashboard.
   * Only writes status/phase/error_code onto an EXISTING jobstate row. If the row does not
     exist, log + 202 — the next normal /v1/jobs poll will create it with the right owner.
+    * Successful completion is accepted only after the current ElasticBLAST runtime identity's
+        durable SUCCESS marker is visible; an early webhook remains running/finalizing.
     * Every accepted terminal event re-checks the idempotent artifact-finalizer gate, including
         same-status delivery, so a transient enqueue failure can recover before Kubernetes TTL GC.
 Validation: ``uv run pytest -q api/tests/test_external_webhook.py``.
@@ -27,10 +29,11 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,11 +82,24 @@ class ExternalJobEvent(BaseModel):
     # BlastJobs list view's "Elapsed" / "Duration" timer reads accurate values
     # immediately, instead of waiting up to one /v1/jobs sync cycle (~70 s)
     # for ``_sync_external_jobs_to_table`` to pull the same stats.
-    started_at: str | None = None
-    run_seconds: int | None = None
-    queue_wait_seconds: int | None = None
-    elapsed_seconds: int | None = None
+    started_at: str | None = Field(default=None, max_length=64)
+    run_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    queue_wait_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    elapsed_seconds: int | None = Field(default=None, ge=0, le=2_147_483_647)
     elb_job_id: str | None = Field(default=None, max_length=128)
+
+    @field_validator("started_at")
+    @classmethod
+    def _validate_started_at(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("started_at must be an ISO 8601 timestamp") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("started_at must include a timezone")
+        return value
 
 
 def _expected_token() -> str:
@@ -178,6 +194,23 @@ def _record_runtime_identity_conflict(
         )
 
 
+def _success_marker_ready(existing: Any, job_id: str, runtime_identity: str = "") -> bool:
+    payload = existing.payload if isinstance(getattr(existing, "payload", None), dict) else {}
+    raw_external = payload.get("external")
+    external = raw_external if isinstance(raw_external, dict) else {}
+    storage_account = str(
+        getattr(existing, "storage_account", "")
+        or payload.get("storage_account")
+        or external.get("storage_account")
+        or ""
+    )
+    if not storage_account:
+        return False
+    from api.services.blast.result_analytics import has_blast_success_marker
+
+    return has_blast_success_marker(storage_account, job_id, runtime_identity)
+
+
 def _apply_to_jobstate(
     job_id: str,
     ext_status: str,
@@ -215,6 +248,7 @@ def _apply_to_jobstate(
         return {"synced": False, "reason": "unknown_job"}
 
     cur_status = str(getattr(existing, "status", "") or "").lower()
+    cur_phase = str(getattr(existing, "phase", "") or cur_status).lower()
     from api.services.state.job_state import canonical_elastic_blast_job_id
 
     incoming_elastic_blast_job_id = canonical_elastic_blast_job_id(elastic_blast_job_id)
@@ -267,15 +301,38 @@ def _apply_to_jobstate(
         )
         return {"synced": False, "reason": "backward_transition_ignored"}
 
+    completion_deferred = False
+    target_status = ext_status
+    target_phase = ext_status
     if (
-        cur_status == ext_status
+        ext_status == "completed"
+        and cur_status not in _TERMINAL_STATUSES
+        and not _success_marker_ready(
+            existing,
+            job_id,
+            stored_elastic_blast_job_id or incoming_elastic_blast_job_id,
+        )
+    ):
+        completion_deferred = True
+        target_status = "running"
+        target_phase = "finalizing"
+
+    if (
+        cur_status == target_status
+        and cur_phase == target_phase
         and not (ext_status in _TERMINAL_STATUSES and error_msg)
         and not identity_backfill
     ):
         # Idempotent no-op: same status, no new error detail to attach.
-        return {"synced": True, "noop": True, "status": ext_status}
+        return {
+            "synced": True,
+            "noop": True,
+            "status": target_status,
+            "completion_deferred": completion_deferred,
+            "runtime_identity": stored_elastic_blast_job_id,
+        }
 
-    update_kwargs: dict[str, Any] = {"status": ext_status, "phase": ext_status}
+    update_kwargs: dict[str, Any] = {"status": target_status, "phase": target_phase}
     existing_error_code = _text_attr(existing, "error_code")
     if ext_status in _TERMINAL_STATUSES and error_msg:
         # ``error_code`` is a short tag (≤200 chars per sibling truncation rule).
@@ -311,6 +368,13 @@ def _apply_to_jobstate(
     else:
         identity_backfilled = False
 
+    if ext_status == "completed" and identity_backfill and not identity_resolved:
+        completion_deferred = True
+        target_status = "running"
+        target_phase = "finalizing"
+        update_kwargs["status"] = target_status
+        update_kwargs["phase"] = target_phase
+
     try:
         repo.update(job_id, **update_kwargs)
     except KeyError:
@@ -326,7 +390,14 @@ def _apply_to_jobstate(
     return {
         "synced": True,
         "from": cur_status,
-        "to": ext_status,
+        "to": target_status,
+        "phase": target_phase,
+        "completion_deferred": completion_deferred,
+        "runtime_identity": (
+            incoming_elastic_blast_job_id
+            if identity_resolved
+            else stored_elastic_blast_job_id
+        ),
         "identity_backfilled": identity_backfilled,
         "identity_resolved": identity_resolved,
         "identity_pending": bool(identity_backfill) and not identity_resolved,
@@ -337,6 +408,8 @@ def _enqueue_terminal_artifacts(job_id: str, ext_status: str, outcome: dict[str,
     """Best-effort artifact capture after a successfully correlated terminal event."""
 
     if ext_status not in _TERMINAL_STATUSES or outcome.get("synced") is not True:
+        return
+    if outcome.get("completion_deferred") is True:
         return
     if outcome.get("identity_pending") is True:
         try:
@@ -359,10 +432,22 @@ def _enqueue_terminal_artifacts(job_id: str, ext_status: str, outcome: dict[str,
     try:
         from api.tasks.blast.state import _enqueue_artifact_finalizer
 
+        runtime_identity = str(outcome.get("runtime_identity") or "")
         if outcome.get("identity_resolved") is True:
-            _enqueue_artifact_finalizer(job_id, ext_status, ext_status, force=True)
+            _enqueue_artifact_finalizer(
+                job_id,
+                ext_status,
+                ext_status,
+                force=True,
+                runtime_identity=runtime_identity,
+            )
         else:
-            _enqueue_artifact_finalizer(job_id, ext_status, ext_status)
+            _enqueue_artifact_finalizer(
+                job_id,
+                ext_status,
+                ext_status,
+                runtime_identity=runtime_identity,
+            )
     except Exception as exc:
         LOGGER.info(
             "openapi webhook: artifact finalizer enqueue skipped job_id=%s err=%s",

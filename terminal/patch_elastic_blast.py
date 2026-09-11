@@ -8,6 +8,7 @@ wrappers.
 Key entry points: `_replace_once`, `_replace_once_unless_present`,
 `_replace_all_unless_present`, `patch_azure_py`, `patch_azure_cli_glue`,
 `patch_finalizer_template`, `patch_finalizer_script`,
+`patch_candidate_order_oracle`,
 `patch_kubectl_transient_retries`, `patch_disk_backed_monolithic_mode`,
 `patch_requested_max_target_seqs`, `patch_aks_job_ttl`
 Risky contracts: Do not expose terminal services directly to the internet or log secrets.
@@ -960,6 +961,19 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
     merge_script_target = path.parent / "merge-sharded-results.sh"
     merge_script_target.write_text(merge_script_source.read_text())
 
+    intermediate_download = (
+        '            if ! azcopy cp "${SHARD_DIR}/*" "$LOCAL_DIR/" '
+        '--include-pattern "*.out.gz" --log-level=ERROR 2>/dev/null; then\n'
+    )
+    candidate_download = (
+        '            if ! azcopy cp "${SHARD_DIR}/*" "$LOCAL_DIR/" '
+        '--include-pattern "*.out.gz;candidate-order-*.tsv" '
+        "--log-level=ERROR 2>/dev/null; then\n"
+    )
+    text = path.read_text()
+    if candidate_download not in text and intermediate_download in text:
+        path.write_text(text.replace(intermediate_download, candidate_download, 1))
+
     _replace_once_unless_present(
         path,
         (
@@ -1033,9 +1047,10 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
         ),
         (
             '            if ! azcopy cp "${SHARD_DIR}/*" "$LOCAL_DIR/" '
-            '--include-pattern "*.out.gz" --log-level=ERROR 2>/dev/null; then\n'
+            '--include-pattern "*.out.gz;candidate-order-*.tsv" '
+            "--log-level=ERROR 2>/dev/null; then\n"
         ),
-        '--include-pattern "*.out.gz"',
+        'candidate-order-*.tsv',
     )
     # Preserve the per-shard ``# Fields:`` comment line when concatenating
     # shard outputs into MERGE_INPUT. Upstream strips every comment with
@@ -1303,6 +1318,8 @@ CACHE_COMPLETE=".elb-cache.${ELB_DB}.complete"
 CACHE_SOURCE_VERSION=".elb-cache.${ELB_DB}.source-version"
 CACHE_MANIFEST=".elb-cache.${ELB_DB}.manifest"
 CACHE_LAYOUT_SHA=".elb-cache.${ELB_DB}.layout-sha256"
+CACHE_RECORD_FINGERPRINT=".elb-cache.${ELB_DB}.record-fingerprint"
+CACHE_RECORD_VERIFIED_AT=".elb-cache.${ELB_DB}.record-verified-at"
 if [ "${ELB_STAGE_LOCK_HELD:-0}" = "1" ]; then
     if ! flock -n 9; then
         echo "ERROR: inherited stage lock descriptor is unavailable"
@@ -1347,6 +1364,83 @@ log_runtime() {
     ts=$(date +'%F %T')
     printf '%s RUNTIME %s %f seconds\n' "$ts" "$1" "$2"
 }
+
+fast_attested_cache_ready() {
+    local expected_source ttl verified_at now fingerprint cached_fingerprint
+    local payload_ext volume candidate volpaths=""
+    local -a cached_volumes
+    if [[ ! "${ELB_PARTITION_PREFIX:-}" =~ /generations/([^/]+)/shards/ ]]; then
+        return 1
+    fi
+    expected_source="${BASH_REMATCH[1]}"
+    for candidate in "$CACHE_COMPLETE" "$CACHE_SOURCE_VERSION" "$CACHE_MANIFEST" \
+            "$CACHE_LAYOUT_SHA" "$CACHE_RECORD_FINGERPRINT" "$CACHE_RECORD_VERIFIED_AT" \
+            "./${ELB_DB}.nal"; do
+        [ -s "$candidate" ] || return 1
+    done
+    [ "$(cat "$CACHE_SOURCE_VERSION")" = "$expected_source" ] || return 1
+    [[ "$(cat "$CACHE_LAYOUT_SHA")" =~ ^[0-9a-f]{64}$ ]] || return 1
+    ttl="${ELB_CACHE_RECORD_PROBE_TTL_SECONDS:-86400}"
+    case "$ttl" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#ttl}" -le 7 ] && [ "$ttl" -ge 60 ] && [ "$ttl" -le 604800 ] || return 1
+    verified_at=$(cat "$CACHE_RECORD_VERIFIED_AT")
+    [[ "$verified_at" =~ ^[0-9]+$ ]] || return 1
+    now=$(date +%s)
+    [ "$now" -ge "$verified_at" ] \
+        && [ $((now - verified_at)) -le "$ttl" ] || return 1
+    mapfile -t cached_volumes < "$CACHE_MANIFEST"
+    [ "${#cached_volumes[@]}" -gt 0 ] || return 1
+    payload_ext="nsq"
+    [ "${ELB_DB_MOL_TYPE:-nucl}" = "prot" ] && payload_ext="psq"
+    for volume in "${cached_volumes[@]}"; do
+        if [ "$volume" != "$ORIG_DB" ] \
+                && [[ "$volume" != "$ORIG_DB".[0-9]* ]]; then
+            return 1
+        fi
+        [[ "$volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,126}$ ]] || return 1
+        [ -s "${volume}.${payload_ext}" ] || return 1
+    done
+    if [ -s "${ORIG_DB}.ntf" ] \
+            && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
+        return 1
+    fi
+    cached_fingerprint=$(cat "$CACHE_RECORD_FINGERPRINT")
+    [[ "$cached_fingerprint" =~ ^[0-9a-f]{64}$ ]] || return 1
+    fingerprint=$(
+        {
+            printf 'source=%s\nlayout=%s\n' \
+                "$(cat "$CACHE_SOURCE_VERSION")" "$(cat "$CACHE_LAYOUT_SHA")"
+            cat "$CACHE_MANIFEST"
+            for volume in "${cached_volumes[@]}"; do
+                for candidate in "${volume}".*; do
+                    [ -f "$candidate" ] && stat -Lc '%n\t%s\t%Y\t%Z' -- "$candidate"
+                done
+            done
+            for candidate in "./${ELB_DB}.nal" \
+                    "${ORIG_DB}.ndb" "${ORIG_DB}.ntf" "${ORIG_DB}.nto" \
+                    "${ORIG_DB}.nos" "${ORIG_DB}.not" \
+                    taxdb.btd taxdb.bti taxonomy4blast.sqlite3; do
+                [ -f "$candidate" ] && stat -Lc '%n\t%s\t%Y\t%Z' -- "$candidate"
+            done
+            true
+        } | LC_ALL=C sort | sha256sum | awk '{print $1}'
+    )
+    [ "$fingerprint" = "$cached_fingerprint" ] || return 1
+    blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1 || return 1
+    for volume in "${cached_volumes[@]}"; do
+        [ -n "$volpaths" ] && volpaths="$volpaths "
+        volpaths="${volpaths}$(pwd)/${volume}"
+    done
+    echo "VOLPATHS=${volpaths}" > /tmp/shard_volpaths.txt
+    printf '%s' skipped > /tmp/elb-stage-result
+    echo "CACHE_ATTESTATION_REUSE source=${expected_source} age_seconds=$((now - verified_at))"
+    echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
+    return 0
+}
+
+if fast_attested_cache_ready; then
+    exit 0
+fi
 
 azcopy login --identity || { echo "ERROR: azcopy login failed"; exit 1; }
 export AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}
@@ -1578,8 +1672,42 @@ commit_layout_markers() {
     fi
 }
 
+record_fingerprint() {
+    local volume candidate
+    {
+        printf 'source=%s\nlayout=%s\n' \
+            "$(cat "$CACHE_SOURCE_VERSION" 2>/dev/null || true)" \
+            "$(cat "$CACHE_LAYOUT_SHA" 2>/dev/null || true)"
+        cat "$CACHE_MANIFEST"
+        for volume in "${VOLUMES[@]}"; do
+            for candidate in "${volume}".*; do
+                [ -f "$candidate" ] && stat -Lc '%n\t%s\t%Y\t%Z' -- "$candidate"
+            done
+        done
+        for candidate in "./${ELB_DB}.nal" \
+                "${ORIG_DB}.ndb" "${ORIG_DB}.ntf" "${ORIG_DB}.nto" \
+                "${ORIG_DB}.nos" "${ORIG_DB}.not" \
+                taxdb.btd taxdb.bti taxonomy4blast.sqlite3; do
+            [ -f "$candidate" ] && stat -Lc '%n\t%s\t%Y\t%Z' -- "$candidate"
+        done
+        true
+    } | LC_ALL=C sort | sha256sum | awk '{print $1}'
+}
+
+commit_record_probe_markers() {
+    local fingerprint verified_at
+    fingerprint=$(record_fingerprint)
+    verified_at=$(date +%s)
+    printf '%s' "$fingerprint" > "${CACHE_RECORD_FINGERPRINT}.tmp"
+    printf '%s' "$verified_at" > "${CACHE_RECORD_VERIFIED_AT}.tmp"
+    mv "${CACHE_RECORD_FINGERPRINT}.tmp" "$CACHE_RECORD_FINGERPRINT"
+    mv "${CACHE_RECORD_VERIFIED_AT}.tmp" "$CACHE_RECORD_VERIFIED_AT"
+}
+
 rm -f "${CACHE_COMPLETE}.tmp" "${CACHE_SOURCE_VERSION}.tmp" \
-    "${CACHE_LAYOUT_SHA}.tmp" "${CACHE_MANIFEST}.tmp" "./${ELB_DB}.nal.tmp"
+    "${CACHE_LAYOUT_SHA}.tmp" "${CACHE_MANIFEST}.tmp" \
+    "${CACHE_RECORD_FINGERPRINT}.tmp" "${CACHE_RECORD_VERIFIED_AT}.tmp" \
+    "./${ELB_DB}.nal.tmp"
 if [ -f "$CACHE_COMPLETE" ] && [ -z "$EXPECTED_SOURCE_VERSION" ]; then
     echo "CACHE_UNVERIFIED expected source version is unavailable"
     rm -f "$CACHE_COMPLETE"
@@ -1668,6 +1796,42 @@ if [ -f "$CACHE_COMPLETE" ]; then
     if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
         echo "CACHE_CORRUPT blastdbcmd integrity probe failed - invalidating"
         rm -f "$CACHE_COMPLETE"
+    fi
+fi
+
+if [ -f "$CACHE_COMPLETE" ]; then
+    RECORD_PROBE_TTL_SECONDS="${ELB_CACHE_RECORD_PROBE_TTL_SECONDS:-86400}"
+    case "$RECORD_PROBE_TTL_SECONDS" in
+      ''|*[!0-9]*) echo "ERROR: invalid record probe TTL"; exit 64 ;;
+    esac
+    if [ "${#RECORD_PROBE_TTL_SECONDS}" -gt 7 ] \
+            || [ "$RECORD_PROBE_TTL_SECONDS" -lt 60 ] \
+            || [ "$RECORD_PROBE_TTL_SECONDS" -gt 604800 ]; then
+        echo "ERROR: record probe TTL must be between 60 and 604800 seconds"
+        exit 64
+    fi
+    RECORD_PROBE_REUSE=0
+    if [ -s "$CACHE_RECORD_FINGERPRINT" ] && [ -s "$CACHE_RECORD_VERIFIED_AT" ]; then
+        CACHED_RECORD_FINGERPRINT=$(cat "$CACHE_RECORD_FINGERPRINT")
+        CACHED_RECORD_VERIFIED_AT=$(cat "$CACHE_RECORD_VERIFIED_AT")
+        NOW_EPOCH=$(date +%s)
+        if [[ "$CACHED_RECORD_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] \
+                && [[ "$CACHED_RECORD_VERIFIED_AT" =~ ^[0-9]+$ ]] \
+                && [ "$NOW_EPOCH" -ge "$CACHED_RECORD_VERIFIED_AT" ] \
+                && [ $((NOW_EPOCH - CACHED_RECORD_VERIFIED_AT)) -le "$RECORD_PROBE_TTL_SECONDS" ] \
+                && [ "$(record_fingerprint)" = "$CACHED_RECORD_FINGERPRINT" ]; then
+            RECORD_PROBE_REUSE=1
+            echo "CACHE_RECORD_PROBE_REUSE age_seconds=$((NOW_EPOCH - CACHED_RECORD_VERIFIED_AT))"
+        fi
+    fi
+    if [ "$RECORD_PROBE_REUSE" -ne 1 ]; then
+        echo "CACHE_RECORD_PROBE_REFRESH"
+        if ! blastdbcmd -db "$ELB_DB" -entry all -outfmt '%a' >/dev/null 2>&1; then
+            echo "CACHE_CORRUPT blastdbcmd record probe failed - invalidating"
+            rm -f "$CACHE_COMPLETE" "$CACHE_RECORD_FINGERPRINT" "$CACHE_RECORD_VERIFIED_AT"
+        else
+            commit_record_probe_markers
+        fi
     fi
 fi
 
@@ -1801,6 +1965,10 @@ if ! blastdbcmd -db "$ELB_DB" -info >/dev/null 2>&1; then
     echo "ERROR: downloaded DB failed blastdbcmd integrity probe"
     exit 1
 fi
+if ! blastdbcmd -db "$ELB_DB" -entry all -outfmt '%a' >/dev/null; then
+    echo "ERROR: downloaded DB failed blastdbcmd record probe"
+    exit 1
+fi
 
 write_volpaths
 commit_layout_markers
@@ -1810,6 +1978,7 @@ if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
 else
     rm -f "$CACHE_SOURCE_VERSION"
 fi
+commit_record_probe_markers
 printf '%s' ok > "${CACHE_COMPLETE}.tmp"
 mv "${CACHE_COMPLETE}.tmp" "$CACHE_COMPLETE"
 rm -f .download-source-version .download-layout-sha256 .download-manifest
@@ -2066,6 +2235,212 @@ fi
 """
 _BLAST_RUN_AKS_READER_LOCK_RELEASE_ANCHOR = "BLAST_EXIT_CODE=$?\n"
 _BLAST_RUN_AKS_READER_LOCK_RELEASE_BLOCK = r"""BLAST_EXIT_CODE=$?
+# Build a job-scoped DB-order oracle while the shard database reader lock is
+# still held. Any unsupported format or lookup miss removes this optional
+# artifact so the finalizer falls back to the generation-wide oracle.
+if [ "$BLAST_EXIT_CODE" -eq 0 ] \
+        && [ "${ELB_DB_READER_LOCK_HELD:-0}" = "1" ] \
+        && [[ "$ELB_DB" =~ _shard_([0-9]{2})$ ]]; then
+    CANDIDATE_SHARD="${BASH_REMATCH[1]}"
+    CANDIDATE_RESULT="$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out"
+    CANDIDATE_IDS="$RESULTS_DIR/.candidate-order-${JOB_NUM}.ids"
+    CANDIDATE_RAW="$RESULTS_DIR/.candidate-order-${JOB_NUM}.raw"
+    CANDIDATE_OUT="$RESULTS_DIR/CANDIDATE_ORDER-${JOB_NUM}.tsv"
+    CANDIDATE_LIMIT="${ELB_CANDIDATE_ORDER_MAX_ACCESSIONS:-100000}"
+        CANDIDATE_TIMEOUT="${ELB_CANDIDATE_ORDER_TIMEOUT_SECONDS:-120}"
+        case "$CANDIDATE_TIMEOUT" in
+          ''|*[!0-9]*) CANDIDATE_TIMEOUT=0 ;;
+        esac
+        if [ "$CANDIDATE_TIMEOUT" -lt 1 ] || [ "$CANDIDATE_TIMEOUT" -gt 600 ] \
+            || ! command -v timeout >/dev/null 2>&1; then
+        echo "CANDIDATE_ORDER_FALLBACK shard=${CANDIDATE_SHARD} batch=${JOB_NUM} reason=invalid_timeout"
+        CANDIDATE_TIMEOUT=0
+        fi
+    rm -f "$CANDIDATE_IDS" "$CANDIDATE_RAW" "$CANDIDATE_OUT"
+        if [ "$CANDIDATE_TIMEOUT" -gt 0 ] \
+            && timeout "${CANDIDATE_TIMEOUT}s" python3 - \
+            "$CANDIDATE_RESULT" "${ELB_BLAST_OPTIONS:-}" \
+            "$CANDIDATE_IDS" "$CANDIDATE_LIMIT" <<'PY'
+import shlex
+import os
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+result_path = Path(sys.argv[1])
+options = sys.argv[2]
+output_path = Path(sys.argv[3])
+try:
+    limit = int(sys.argv[4])
+except ValueError:
+    raise SystemExit(2)
+if not 1 <= limit <= 1_000_000 or not result_path.is_file():
+    raise SystemExit(2)
+
+
+def valid_accession(value):
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 512
+        and not any(character.isspace() or ord(character) < 32 for character in value)
+    )
+
+
+seen = set()
+candidates = []
+
+
+def add(value):
+    value = (value or "").strip()
+    if not valid_accession(value):
+        raise ValueError("invalid candidate accession")
+    if value not in seen:
+        seen.add(value)
+        candidates.append(value)
+        if len(candidates) > limit:
+            raise ValueError("candidate accession limit exceeded")
+
+
+with result_path.open("rb") as handle:
+    prefix = handle.read(256).lstrip()
+if prefix.startswith(b"<"):
+    for _event, element in ET.iterparse(result_path, events=("end",)):
+        if element.tag.rsplit("}", 1)[-1] == "Hit_accession" and element.text:
+            add(element.text)
+        element.clear()
+else:
+    tokens = shlex.split(options)
+    spec = []
+    for index, token in enumerate(tokens):
+        if token == "-outfmt" and index + 1 < len(tokens):
+            spec = [tokens[index + 1]]
+            cursor = index + 2
+            while cursor < len(tokens) and not tokens[cursor].startswith("-"):
+                spec.append(tokens[cursor])
+                cursor += 1
+            break
+        if token.startswith("-outfmt="):
+            spec = token.split("=", 1)[1].split()
+            break
+    if not spec or spec[0] not in {"6", "7"}:
+        raise ValueError("unsupported candidate output format")
+    fields = spec[1:] or [
+        "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+        "qstart", "qend", "sstart", "send", "evalue", "bitscore",
+    ]
+    subject_index = next(
+        (fields.index(name) for name in ("saccver", "sacc", "sseqid") if name in fields),
+        None,
+    )
+    if subject_index is None:
+        raise ValueError("candidate output has no subject accession field")
+    with result_path.open(encoding="utf-8", errors="strict") as handle:
+        for raw_line in handle:
+            if not raw_line.strip() or raw_line.startswith("#"):
+                continue
+            columns = raw_line.rstrip("\n").split("\t")
+            if subject_index >= len(columns):
+                raise ValueError("candidate output row is truncated")
+            add(columns[subject_index])
+
+temporary_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+try:
+    temporary_path.write_text("".join(f"{candidate}\n" for candidate in candidates))
+    os.replace(temporary_path, output_path)
+finally:
+    temporary_path.unlink(missing_ok=True)
+PY
+    then
+        if [ ! -s "$CANDIDATE_IDS" ]; then
+            printf '# ELB candidate-order-v1 shard=%s batch=%s candidates=0\n' \
+                "$CANDIDATE_SHARD" "$JOB_NUM" > "$CANDIDATE_OUT"
+        elif timeout "${CANDIDATE_TIMEOUT}s" blastdbcmd \
+            -db "$ELB_DB" -entry_batch "$CANDIDATE_IDS" -get_dups \
+                -outfmt $'%o\t%a\t%i' > "$CANDIDATE_RAW" 2>/dev/null \
+            && timeout "${CANDIDATE_TIMEOUT}s" python3 - \
+                "$CANDIDATE_IDS" "$CANDIDATE_RAW" \
+                    "$CANDIDATE_OUT" "$CANDIDATE_SHARD" "$JOB_NUM" <<'PY'
+import re
+import os
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+candidate_path = Path(sys.argv[1])
+raw_path = Path(sys.argv[2])
+output_path = Path(sys.argv[3])
+shard = sys.argv[4]
+batch = sys.argv[5]
+if re.fullmatch(r"[0-9]{2}", shard) is None or re.fullmatch(r"[0-9]+", batch) is None:
+    raise SystemExit(2)
+
+
+def base(value):
+    head, separator, tail = value.rpartition(".")
+    return head if separator and tail.isdigit() else value
+
+
+def aliases(*values):
+    output = set()
+    ignored = {"dbj", "emb", "gb", "gi", "gnl", "lcl", "pdb", "ref", "sp", "tr"}
+    for value in values:
+        value = (value or "").strip()
+        if value:
+            output.add(value)
+            output.add(base(value))
+        for token in re.split(r"[|, ]+", value):
+            if token and token.lower() not in ignored and len(token) <= 512:
+                output.add(token)
+                output.add(base(token))
+    return output
+
+
+oid_by_alias = defaultdict(set)
+for raw_line in raw_path.read_text(errors="strict").splitlines():
+    columns = raw_line.split("\t", 2)
+    if len(columns) != 3 or not columns[0].isdigit():
+        continue
+    oid = int(columns[0])
+    for alias in aliases(columns[1], columns[2]):
+        oid_by_alias[alias].add(oid)
+
+rows = []
+missing = []
+for candidate in candidate_path.read_text().splitlines():
+    matches = set()
+    for alias in (candidate, base(candidate)):
+        matches.update(oid_by_alias.get(alias, ()))
+    if not matches:
+        missing.append(candidate)
+        continue
+    rows.append((min(matches), candidate))
+if missing:
+    raise SystemExit(3)
+rows.sort(key=lambda row: (row[0], row[1]))
+temporary_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+try:
+    with temporary_path.open("w") as handle:
+        handle.write(
+            f"# ELB candidate-order-v1 shard={shard} batch={batch} candidates={len(rows)}\n"
+        )
+        for oid, candidate in rows:
+            handle.write(f"{shard}\t{oid}\t{candidate}\n")
+    os.replace(temporary_path, output_path)
+finally:
+    temporary_path.unlink(missing_ok=True)
+PY
+        then
+            chmod 0600 "$CANDIDATE_OUT"
+            echo "CANDIDATE_ORDER_READY shard=${CANDIDATE_SHARD} batch=${JOB_NUM} rows=$(grep -cve '^#' "$CANDIDATE_OUT")"
+        else
+            echo "CANDIDATE_ORDER_FALLBACK shard=${CANDIDATE_SHARD} batch=${JOB_NUM} reason=lookup_incomplete"
+            rm -f "$CANDIDATE_OUT"
+        fi
+    else
+        echo "CANDIDATE_ORDER_FALLBACK shard=${CANDIDATE_SHARD} batch=${JOB_NUM} reason=extract_failed"
+    fi
+    rm -f "$CANDIDATE_IDS" "$CANDIDATE_RAW"
+fi
 if [ "${ELB_DB_READER_LOCK_HELD:-0}" = "1" ]; then
     flock -u 8 || true
     exec 8>&-
@@ -2116,6 +2491,162 @@ def patch_blast_run_aks_reader_lock(path: Path) -> None:
         _BLAST_RUN_AKS_READER_LOCK_RELEASE_BLOCK,
         "DB_READER_LOCK_RELEASED file=${READER_LOCK_FILE}",
     )
+
+
+def _results_export_aks_script_paths(root: Path) -> list[Path]:
+    source_path = root / "src/elastic_blast/templates/scripts/results-export-aks.sh"
+    paths = [source_path]
+    for pattern in (
+        "venv/lib/python*/site-packages/elastic_blast/templates/scripts/results-export-aks.sh",
+        ".venv/lib/python*/site-packages/elastic_blast/templates/scripts/results-export-aks.sh",
+    ):
+        paths.extend(root.glob(pattern))
+    return sorted({path for path in paths if path.exists()})
+
+
+def patch_candidate_order_oracle(root: Path) -> None:
+    """Upload and consume bounded shard candidate-order artifacts."""
+
+    paths = _results_export_aks_script_paths(root)
+    if not paths:
+        raise RuntimeError(f"results-export-aks.sh not found under {root}")
+    anchor = 'exit "$(cat "$RESULTS_DIR/BLAST_EXIT_CODE-${JOB_NUM}.out")"\n'
+    block = r'''# Upload the optional candidate-scoped DB-order artifact. A missing or failed
+# upload is non-fatal: the finalizer requires a complete set and otherwise
+# falls back to the generation-wide oracle.
+CANDIDATE_ORDER_FILE="$RESULTS_DIR/CANDIDATE_ORDER-${JOB_NUM}.tsv"
+if [ -s "$CANDIDATE_ORDER_FILE" ]; then
+    if azcopy cp "$CANDIDATE_ORDER_FILE" \
+            "$ELB_RESULTS/candidate-order-${JOB_NUM}.tsv" --log-level=ERROR; then
+        echo "CANDIDATE_ORDER_UPLOADED batch=${JOB_NUM}"
+    else
+        echo "WARNING: candidate-order artifact upload failed batch=${JOB_NUM}"
+    fi
+fi
+
+'''
+    for path in paths:
+        _replace_once_unless_present(
+            path,
+            anchor,
+            block + anchor,
+            "CANDIDATE_ORDER_UPLOADED",
+        )
+
+    finalizer = root / "src/elastic_blast/templates/scripts/elb-finalizer-aks.sh"
+    text = finalizer.read_text()
+    legacy_download = '--include-pattern "*.out.gz"'
+    candidate_download = '--include-pattern "*.out.gz;candidate-order-*.tsv"'
+    if candidate_download not in text and legacy_download in text:
+        finalizer.write_text(text.replace(legacy_download, candidate_download, 1))
+    text = finalizer.read_text()
+    marker = "CANDIDATE_ORDER_FAST_PATH"
+    if marker in text:
+        return
+    anchor = (
+        '        if [ -z "${ELB_TIE_ORDER_FILE:-}" ]; then\n'
+        "            for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
+    )
+    if text.count(anchor) != 1:
+        raise RuntimeError(f"expected one candidate-oracle finalizer anchor in {finalizer}")
+    block = r'''        # Prefer shard-produced candidate order rows only when the exact
+        # generation-wide DB-order manifest exists. Every result batch must have
+        # one validated artifact; otherwise the existing full-oracle path runs.
+        if [ -z "${ELB_TIE_ORDER_FILE:-}" ] && [ -n "$ORACLE_SEARCH_BASES" ]; then
+            CANDIDATE_ORACLE="$MERGE_DIR/candidate-order-v1.tsv"
+            CANDIDATE_ORACLE_BASE=""
+            for ORACLE_BASE in $ORACLE_SEARCH_BASES; do
+                ORACLE_URLS_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/tie-order-oracle-urls.txt"
+                if blob_exists "$ORACLE_URLS_BLOB"; then
+                    CANDIDATE_ORACLE_BASE="$ORACLE_BASE"
+                    break
+                fi
+            done
+            if [ -n "$CANDIDATE_ORACLE_BASE" ]; then
+                CANDIDATE_COMPLETE=1
+                CANDIDATE_FILE_COUNT=0
+                CANDIDATE_TOTAL_ROWS=0
+                CANDIDATE_TOTAL_BYTES=0
+                CANDIDATE_FAILURE_REASON=""
+                CANDIDATE_ORACLE_TMP="${CANDIDATE_ORACLE}.$$.tmp"
+                : > "$CANDIDATE_ORACLE_TMP"
+                if ! [[ "${SHARD_COUNT:-}" =~ ^[0-9]+$ ]] || [ "$SHARD_COUNT" -le 0 ]; then
+                    CANDIDATE_COMPLETE=0
+                    CANDIDATE_FAILURE_REASON="invalid_result_file_count"
+                fi
+                for result_file in "$MERGE_DIR"/shard_*/*.out.gz; do
+                    [ "$CANDIDATE_COMPLETE" -eq 1 ] || break
+                    [ -f "$result_file" ] || continue
+                    result_name=$(basename "$result_file")
+                    batch_num="${result_name#batch_}"
+                    batch_num="${batch_num%%-*}"
+                    shard_name=$(basename "$(dirname "$result_file")")
+                    shard_num="${shard_name#shard_}"
+                    candidate_file="$(dirname "$result_file")/candidate-order-${batch_num}.tsv"
+                    candidate_rows=$(grep -cve '^#' "$candidate_file" 2>/dev/null || true)
+                    candidate_bytes=$(stat -Lc '%s' -- "$candidate_file" 2>/dev/null || true)
+                    if ! [[ "$batch_num" =~ ^[0-9]+$ ]]; then
+                        CANDIDATE_FAILURE_REASON="invalid_batch_id"
+                    elif ! [[ "$shard_num" =~ ^[0-9]{2}$ ]]; then
+                        CANDIDATE_FAILURE_REASON="unsupported_shard_id"
+                    elif [ ! -s "$candidate_file" ]; then
+                        CANDIDATE_FAILURE_REASON="missing_candidate_file"
+                    elif ! [[ "$candidate_rows" =~ ^[0-9]+$ ]] \
+                            || [ "$candidate_rows" -gt 1000000 ]; then
+                        CANDIDATE_FAILURE_REASON="invalid_candidate_row_count"
+                    elif ! [[ "$candidate_bytes" =~ ^[0-9]+$ ]] \
+                            || [ "$candidate_bytes" -gt 268435456 ]; then
+                        CANDIDATE_FAILURE_REASON="candidate_file_too_large"
+                    elif ! head -n 1 "$candidate_file" \
+                            | grep -Fqx "# ELB candidate-order-v1 shard=${shard_num} batch=${batch_num} candidates=${candidate_rows}"; then
+                        CANDIDATE_FAILURE_REASON="candidate_header_mismatch"
+                    elif ! awk -F '\t' -v shard="$shard_num" '
+                                /^#/ { next }
+                                NF != 3 || $1 != shard || $2 !~ /^[0-9]+$/ || $3 == "" { exit 1 }
+                                length($3) > 512 || $3 ~ /[[:cntrl:]]/ { exit 1 }
+                                { rows += 1; if (rows > 1000000) exit 1 }
+                            ' "$candidate_file"; then
+                        CANDIDATE_FAILURE_REASON="candidate_rows_invalid"
+                    fi
+                    if [ -n "$CANDIDATE_FAILURE_REASON" ]; then
+                        echo "CANDIDATE_ORDER_VALIDATION_FAILED shard=${shard_num} batch=${batch_num} reason=${CANDIDATE_FAILURE_REASON}"
+                        CANDIDATE_COMPLETE=0
+                        break
+                    fi
+                    CANDIDATE_TOTAL_ROWS=$((CANDIDATE_TOTAL_ROWS + candidate_rows))
+                    CANDIDATE_TOTAL_BYTES=$((CANDIDATE_TOTAL_BYTES + candidate_bytes))
+                    CANDIDATE_FILE_COUNT=$((CANDIDATE_FILE_COUNT + 1))
+                    if [ "$CANDIDATE_FILE_COUNT" -gt 4096 ] \
+                            || [ "$CANDIDATE_TOTAL_ROWS" -gt 1000000 ] \
+                            || [ "$CANDIDATE_TOTAL_BYTES" -gt 268435456 ]; then
+                        CANDIDATE_COMPLETE=0
+                        CANDIDATE_FAILURE_REASON="aggregate_limit_exceeded"
+                        break
+                    fi
+                    cat "$candidate_file" >> "$CANDIDATE_ORACLE_TMP"
+                done
+                if [ "$CANDIDATE_COMPLETE" -eq 1 ] \
+                        && [ "$CANDIDATE_FILE_COUNT" -eq "$SHARD_COUNT" ] \
+                        && [ -s "$CANDIDATE_ORACLE_TMP" ]; then
+                    mv "$CANDIDATE_ORACLE_TMP" "$CANDIDATE_ORACLE"
+                    export ELB_TIE_ORDER_FILE="$CANDIDATE_ORACLE"
+                    export ELB_TIE_ORDER_BASE="$CANDIDATE_ORACLE_BASE"
+                    export ELB_TIE_ORDER_SOURCE="db_order"
+                    export ELB_TIE_ORDER_SCOPE="candidate"
+                    echo "CANDIDATE_ORDER_FAST_PATH file_count=${CANDIDATE_FILE_COUNT} rows=${CANDIDATE_TOTAL_ROWS} bytes=${CANDIDATE_TOTAL_BYTES}"
+                else
+                    rm -f "$CANDIDATE_ORACLE" "$CANDIDATE_ORACLE_TMP"
+                    if [ -z "$CANDIDATE_FAILURE_REASON" ] \
+                            && [ "$CANDIDATE_FILE_COUNT" -ne "$SHARD_COUNT" ]; then
+                        CANDIDATE_FAILURE_REASON="candidate_file_count_mismatch"
+                    fi
+                    echo "CANDIDATE_ORDER_FALLBACK reason=${CANDIDATE_FAILURE_REASON:-incomplete_or_invalid}"
+                fi
+            fi
+        fi
+
+'''
+    finalizer.write_text(text.replace(anchor, block + anchor, 1))
 
 
 # ---------------------------------------------------------------------------
@@ -2397,12 +2928,20 @@ def patch_unique_init_ssd_job_names(root: Path) -> None:
     ]
     for name in templates:
         path = root / "src/elastic_blast/templates" / name
-        _replace_once_unless_present(
-            path,
+        desired = "  name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}\n"
+        text = path.read_text()
+        if desired in text:
+            continue
+        candidates = (
             "  name: init-ssd-${NODE_ORDINAL}\n",
-            "  name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}\n",
-            "name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}",
+            "  name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}\n",
         )
+        matches = [candidate for candidate in candidates if candidate in text]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected one legacy init Job name in {path}, found {len(matches)}"
+            )
+        path.write_text(text.replace(matches[0], desired, 1))
 
 
 def patch_create_workspace_daemonset_tolerations(root: Path) -> None:
@@ -2474,16 +3013,26 @@ def patch_init_job_wait_filters(root: Path) -> None:
         "get jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id} -o jsonpath=",
         allow_absent=True,
     )
-    _replace_all_unless_present(
-        path,
-        "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup'",
-        (
-            "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
-            "delete jobs --ignore-not-found=true "
-            "-l app=setup,elb-job-id={cfg.azure.elb_job_id}'"
-        ),
-        "delete jobs --ignore-not-found=true -l app=setup,elb-job-id={cfg.azure.elb_job_id}",
+    desired = (
+        "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+        "delete jobs --ignore-not-found=true "
+        "-l app=setup,elb-job-id={cfg.azure.elb_job_id}'"
     )
+    text = path.read_text()
+    if desired not in text:
+        candidates = (
+            "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup'",
+            (
+                "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+                "delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}'"
+            ),
+        )
+        replacements = sum(text.count(candidate) for candidate in candidates)
+        if replacements < 1:
+            raise RuntimeError(f"expected at least one init Job delete command in {path}")
+        for candidate in candidates:
+            text = text.replace(candidate, desired)
+        path.write_text(text)
 
 
 def patch_init_job_retry_tolerance(root: Path) -> None:
@@ -2709,6 +3258,7 @@ def main() -> int:
     patch_init_shard_script(root)
     patch_init_db_download_writer_lock(root)
     patch_blast_run_aks_script(root)
+    patch_candidate_order_oracle(root)
     patch_aks_workload_tolerations(root)
     patch_sharded_reader_lock_opt_in(root)
     patch_aks_job_ttl(root)
