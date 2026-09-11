@@ -2030,6 +2030,68 @@ def test_replace_once_unless_marker_accepts_later_hardening(tmp_path: Path) -> N
     assert path.read_text() == "modern strict\n"
 
 
+def test_replace_fresh_or_legacy_accepts_nested_legacy_form(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    fresh = "base\n"
+    legacy = fresh + "legacy hardening\n"
+    path.write_text(f"before\n{legacy}after\n")
+
+    module._replace_fresh_or_legacy(
+        path,
+        fresh=fresh,
+        legacy=legacy,
+        desired="desired\n",
+        marker="desired",
+    )
+    first = path.read_text()
+    module._replace_fresh_or_legacy(
+        path,
+        fresh=fresh,
+        legacy=legacy,
+        desired="desired\n",
+        marker="desired",
+    )
+
+    assert first == "before\ndesired\nafter\n"
+    assert path.read_text() == first
+
+
+def test_replace_fresh_or_legacy_rejects_independent_hybrid_state(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    original = "before\nfresh form\nmiddle\nlegacy form\nafter\n"
+    path.write_text(original)
+
+    with pytest.raises(RuntimeError, match="ambiguous fresh/legacy"):
+        module._replace_fresh_or_legacy(
+            path,
+            fresh="fresh form\n",
+            legacy="legacy form\n",
+            desired="desired\n",
+            marker="desired",
+        )
+
+    assert path.read_text() == original
+
+
+def test_replace_fresh_or_legacy_rejects_unknown_state(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text("upstream changed\n")
+
+    with pytest.raises(RuntimeError, match="found 0"):
+        module._replace_fresh_or_legacy(
+            path,
+            fresh="fresh form\n",
+            legacy="legacy form\n",
+            desired="desired\n",
+            marker="desired",
+        )
+
+    assert path.read_text() == "upstream changed\n"
+
+
 def test_dockerfile_validator_rejects_tampered_identity_assertion(tmp_path: Path) -> None:
     module = _load_module()
     (tmp_path / "app").mkdir()

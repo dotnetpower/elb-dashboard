@@ -63,7 +63,7 @@ its displayed duration when an in-memory timing cache was empty.
 
 ## Hardening review
 
-Nineteen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
+Twenty focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
 partial uploads, aggregate bounds, subprocess deadlines, cache generation fencing, marker
 publication, timing validation, terminal-state convergence, artifact retry liveness, concurrency,
 security boundaries, rolling fallback, and runtime-identity binding. The fourteenth round used the
@@ -78,11 +78,14 @@ concatenating multiple candidate files from one shard could interleave local OID
 batches; the finalizer now globally stable-sorts numeric `(shard, local_oid)` keys and verifies the
 post-sort row count before selecting the fast path. The nineteenth rechecked all reported findings
 against generated code, live path isolation, and browser measurements. All reproducible findings
-above Low severity were fixed and revalidated. The remaining Low risks are the negligible 128-bit
-truncated hash collision probability, the bounded 15-second all-Job scan used only to recover legacy
-attempted rows, and that the 24-hour shard attestation fingerprints file metadata rather than every
-byte; source/layout identity, size, mtime, ctime, `blastdbcmd -info`, and the bounded full record
-probe limit that exposure.
+against generated code, live path isolation, and browser measurements. The twentieth hardened the
+build-context upgrader itself: nested legacy blocks remain supported, while independent fresh and
+legacy forms now fail closed as an ambiguous hybrid instead of selecting one silently. All
+reproducible findings above Low severity were fixed and revalidated. The remaining Low risks are the
+negligible 128-bit truncated hash collision probability, the bounded 15-second all-Job scan used
+only to recover legacy attempted rows, and that the 24-hour shard attestation fingerprints file
+metadata rather than every byte; source/layout identity, size, mtime, ctime, `blastdbcmd -info`, and
+the bounded full record probe limit that exposure.
 
 ## Validation
 
@@ -112,6 +115,10 @@ probe limit that exposure.
   two-batch regression preserved equal-OID aliases and restored numeric shard/local-OID order.
   Applying the patch to an isolated sibling clone produced a finalizer that passed `bash -n` and
   carried both the stable sort and post-sort row-count fallback markers.
+- Build-context hybrid-state validation: patcher suite `51 passed`; three focused regressions cover
+  nested legacy acceptance, independent hybrid rejection, and unknown-state rejection. The complete
+  pinned sibling context remained byte-stable across two patch applications and passed generated
+  Python and shell syntax checks. This build-time guard does not alter deployed runtime bytes.
 - Post-hardening full backend sweep: `5,889 passed, 4 skipped`.
 - ACR run `de9y` built immutable `elb-openapi:4.57` successfully with digest
   `sha256:9f8fc4aa59c552cd77681df445a3736056f655d6b8be553f43aafd42a52a92fb`.
@@ -190,7 +197,7 @@ authenticated UI, so the targeted image-only deployment and browser smoke are re
 - The live compressed asset set contains the mobile Jobs grid rules and 14 occurrences of build
   stamp `7e8218ba`; the public app renders the Microsoft sign-in shell. Direct credential entry was
   intentionally not automated.
-- Final hermetic backend sweep: `5,891 passed, 4 skipped`. App Insights from 01:00 UTC onward showed
+- Final hermetic backend sweep: `5,894 passed, 4 skipped`. App Insights from 01:00 UTC onward showed
   no server exceptions, severity-3 traces, failed dependencies, or 5xx requests; the only failed
   request was the intentional unauthenticated `/api/health/celery` 401 probe. Final api, worker,
   beat, and terminal log tails contained no error, critical, traceback, crash, or startup-failure

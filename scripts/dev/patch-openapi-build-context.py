@@ -100,11 +100,57 @@ def _replace_fresh_or_legacy(
     text = path.read_text()
     if marker in text:
         return
-    source = legacy if legacy in text else fresh
-    count = text.count(source)
-    if count != 1:
-        raise RuntimeError(f"expected one fresh/legacy match in {path}, found {count}")
+
+    if not fresh or not legacy:
+        raise RuntimeError("fresh and legacy build-context forms must be non-empty")
+    if fresh == legacy:
+        if text.count(fresh) != 1:
+            raise RuntimeError(f"expected one fresh/legacy match in {path}")
+        source = fresh
+    else:
+        fresh_spans = _substring_spans(text, fresh)
+        legacy_spans = _substring_spans(text, legacy)
+        if fresh_spans and legacy_spans:
+            longer_name, longer_value, longer_spans, shorter_spans = (
+                ("fresh", fresh, fresh_spans, legacy_spans)
+                if len(fresh) > len(legacy)
+                else ("legacy", legacy, legacy_spans, fresh_spans)
+            )
+            if len(longer_spans) != 1 or any(
+                not (longer_spans[0][0] <= start and end <= longer_spans[0][1])
+                for start, end in shorter_spans
+            ):
+                raise RuntimeError(
+                    f"ambiguous fresh/legacy build-context state in {path}"
+                )
+            source = longer_value
+            if text.count(source) != 1:
+                raise RuntimeError(
+                    f"expected one nested {longer_name} match in {path}"
+                )
+        elif fresh_spans:
+            if len(fresh_spans) != 1:
+                raise RuntimeError(f"expected one fresh match in {path}")
+            source = fresh
+        elif legacy_spans:
+            if len(legacy_spans) != 1:
+                raise RuntimeError(f"expected one legacy match in {path}")
+            source = legacy
+        else:
+            raise RuntimeError(f"expected one fresh/legacy match in {path}, found 0")
     path.write_text(text.replace(source, desired, 1))
+
+
+def _substring_spans(text: str, value: str) -> list[tuple[int, int]]:
+    """Return every possibly overlapping occurrence span for source-state checks."""
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    while True:
+        start = text.find(value, offset)
+        if start < 0:
+            return spans
+        spans.append((start, start + len(value)))
+        offset = start + 1
 
 
 def _copy_support_files(root: Path) -> None:
