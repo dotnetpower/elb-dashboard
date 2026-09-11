@@ -59,17 +59,22 @@ its displayed duration when an in-memory timing cache was empty.
 
 ## Hardening review
 
-Fifteen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
+Seventeen focused review rounds covered exact comparator equivalence, aliases and sparse OIDs,
 partial uploads, aggregate bounds, subprocess deadlines, cache generation fencing, marker
 publication, timing validation, terminal-state convergence, artifact retry liveness, concurrency,
 security boundaries, rolling fallback, and runtime-identity binding. The fourteenth round used the
 live rollout to find and fix a High-severity restart replay: four request IDs each had three distinct
 runtime generations because their blocking submit threads died before returning the generated ID.
 The fifteenth round closed the related Kubernetes outage race: an observation error now blocks
-reclaim instead of being misread as proof that no runtime exists. All reproducible findings above
-Low severity were fixed and revalidated. The remaining Low risk is that the 24-hour shard
-attestation fingerprints file metadata rather than every byte; source/layout identity, size, mtime,
-ctime, `blastdbcmd -info`, and the bounded full record probe limit that exposure.
+reclaim instead of being misread as proof that no runtime exists. The sixteenth requires the runtime
+ID ConfigMap write to succeed before any submit side effect and makes write failure terminal in the
+current process. The seventeenth normalizes observation failures to the existing `submitting` phase
+so the established two-hour submit deadline remains effective. All reproducible findings above Low
+severity were fixed and revalidated. The remaining Low risks are the negligible 128-bit truncated
+hash collision probability, the bounded 15-second all-Job scan used only to recover legacy attempted
+rows, and that the 24-hour shard attestation fingerprints file metadata rather than every byte;
+source/layout identity, size, mtime, ctime, `blastdbcmd -info`, and the bounded full record probe
+limit that exposure.
 
 ## Validation
 
@@ -92,6 +97,10 @@ ctime, `blastdbcmd -info`, and the bounded full record probe limit that exposure
   scripts passed `bash -n`.
 - Replay-safe OpenAPI build-context patcher suite: `47 passed`; Ruff passed. The patched sibling
   context was applied twice without drift and all generated Python modules passed `py_compile`.
+- Final tri-state and required-persistence patcher suite: `48 passed`; Ruff passed. A simulated
+  Kubernetes timeout blocked reclaim, and a simulated ConfigMap write failure started no subprocess
+  and reached terminal `submit_state_persist_failed` in memory.
+- Post-hardening full backend sweep: `5,889 passed, 4 skipped`.
 - ACR run `de9y` built immutable `elb-openapi:4.57` successfully with digest
   `sha256:9f8fc4aa59c552cd77681df445a3736056f655d6b8be553f43aafd42a52a92fb`.
 - After the build, the registry returned to `publicNetworkAccess=Disabled`,
@@ -116,5 +125,17 @@ ctime, `blastdbcmd -info`, and the bounded full record probe limit that exposure
 - Node-local setup logs recorded `CACHE_ATTESTATION_REUSE` on all 10 workload nodes for the same
   immutable source generation, with attestation ages of 778-923 seconds.
 
-The remaining deployment step is publishing the matching dashboard API and frontend revision so
-durable timing, runtime-scoped completion, and corrected source labels are visible in the live UI.
+The matching Container App deployment publishes the API image to `api`, `worker`, and `beat` for
+durable timing and runtime-scoped completion; the frontend image for the corrected source label;
+and the rebuilt terminal base for the shared patched ElasticBLAST toolchain. Tier 1 tests and Tier
+2a host-mode validation cannot prove live revision image/environment convergence or the rendered
+authenticated UI, so the targeted image-only deployment and browser smoke are required here.
+
+- Container App tag `manual-e1070d35` converged `api`, `worker`, and `beat` to digest
+  `sha256:28df026ddc9086a0e8e0d9121eaa1248198796ce52dc0e751644959fecfaa5cd`,
+  `frontend` to `sha256:3c070610a8f8bf3d199cf5001dd735f32c99d1264b13f5666db72a7a76c671f9`,
+  and rebuilt `terminal` to
+  `sha256:68f0b0800e5b40a4c8b6340a76ac4bd157421609d2e7bbd59056d4b4a03be117`.
+- Ready revision `ca-elb-dashboard--env-terminal-1789092066-11328` is Running with one replica.
+  Before replacement, all five Celery queues and reserved counts were zero; the only active task was
+  the short-lived Service Bus transition publisher.

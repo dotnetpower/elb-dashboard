@@ -1650,6 +1650,7 @@ def test_patch_app_recovers_latest_runtime_and_makes_submit_replay_safe(
         '        status="submitting",\n'
         "        cfg_path=cfg_path,\n"
         '        attempt=int(job.get("attempt", 0)) + 1,\n'
+        "        last_progress_at=_now_iso(),\n"
         "    )\n"
         "    result = run_cancellable(\n"
         '                ["elastic-blast", "submit", "--cfg", cfg_path],\n'
@@ -1668,7 +1669,9 @@ def test_patch_app_recovers_latest_runtime_and_makes_submit_replay_safe(
 
     assert path.read_text() == first
     ast.parse(first)
-    assert first.index("elb_job_id=runtime_job_id") < first.index("result = run_cancellable")
+    assert first.index("_save_job(job_id, submit_state, require_persist=True)") < first.index(
+        "result = run_cancellable"
+    )
     assert '"--json",' in first
     assert '"--idempotency-key",' in first
 
@@ -1751,7 +1754,10 @@ def test_patch_app_recovers_latest_runtime_and_makes_submit_replay_safe(
     effective = namespace["_effective_elb_job_id"]
     deterministic = namespace["_deterministic_elb_job_id"]
 
-    assert effective({"job_id": request_id, "status": "submitting"}) == newer_runtime
+    assert (
+        effective({"job_id": request_id, "status": "submitting", "attempt": 1})
+        == newer_runtime
+    )
     assert updates == [(request_id, newer_runtime)]
     assert calls == [(["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"], 15)]
     assert warnings and "duplicate generations" in str(warnings[0][0])
@@ -1765,6 +1771,71 @@ def test_patch_app_recovers_latest_runtime_and_makes_submit_replay_safe(
     completed_id = "fedcba654321"
     assert effective({"job_id": completed_id, "status": "completed"}) == completed_id
     assert calls == []
+
+    failed_observation = {
+        "job_id": request_id,
+        "status": "submitting",
+        "attempt": 1,
+    }
+
+    def unavailable(_command: list[str], *, timeout: int) -> SimpleNamespace:
+        raise TimeoutError(timeout)
+
+    namespace["safe_exec"] = unavailable
+    assert effective(failed_observation) == request_id
+    assert failed_observation["_runtime_id_observation_failed"] is True
+    assert "Kubernetes discovery failed" in str(warnings[-1][0])
+
+    calls.clear()
+    fresh = {"job_id": "0123456789ab", "status": "dispatching", "attempt": 0}
+    assert effective(fresh) == fresh["job_id"]
+    assert "_runtime_id_observation_failed" not in fresh
+    assert calls == []
+
+    persisted_runtime = "job-" + "5" * 32
+    jobs = {
+        request_id: {
+            "job_id": request_id,
+            "status": "dispatching",
+            "config_ini": "[blast]\nprogram = blastn\n",
+            "elb_job_id": persisted_runtime,
+            "attempt": 0,
+        }
+    }
+    run_calls: list[list[str]] = []
+    errors: list[tuple[object, ...]] = []
+    run_source = first[
+        first.index("def _run_submit_bg") : first.index("\n\ndef next_helper")
+    ]
+    run_namespace: dict[str, Any] = {
+        "Any": Any,
+        "Event": lambda: SimpleNamespace(),
+        "_effective_elb_job_id": lambda item: str(item["elb_job_id"]),
+        "_job_cancel_events": {},
+        "_jobs": jobs,
+        "_jobs_lock": __import__("contextlib").nullcontext(),
+        "_now_iso": lambda: "now",
+        "_save_job": lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("persist unavailable")
+        ),
+        "_update_job": lambda *_args, **_kwargs: None,
+        "_write_config_file": lambda *_args: "/tmp/config.ini",  # noqa: S108
+        "logger": SimpleNamespace(
+            error=lambda *args: errors.append(args),
+            warning=lambda *_args: None,
+        ),
+        "re": re,
+        "run_cancellable": lambda command, **_kwargs: run_calls.append(command),
+    }
+    exec(run_source, run_namespace)  # noqa: S102 - generated temporary fixture code.
+
+    run_namespace["_run_submit_bg"](request_id)
+
+    assert run_calls == []
+    assert jobs[request_id]["status"] == "failed"
+    assert jobs[request_id]["phase"] == "submit_state_persist_failed"
+    assert jobs[request_id]["error"] == "runtime identity could not be persisted"
+    assert errors and "persistence failed" in str(errors[0][0])
 
 
 def test_patch_dead_thread_reclaim_waits_when_k8s_observation_fails(tmp_path: Path) -> None:
@@ -1788,6 +1859,54 @@ def test_patch_dead_thread_reclaim_waits_when_k8s_observation_fails(tmp_path: Pa
     assert reclaim({"error": "Kubernetes unavailable"}) is False
     assert reclaim({"total": 1}) is False
     assert reclaim({}) is True
+
+
+def test_patch_runtime_observation_failure_reaches_reclaim_summary(tmp_path: Path) -> None:
+    module = _load_module()
+    path = tmp_path / "main.py"
+    path.write_text(
+        "def refresh(job_id, job):\n"
+        "    elb_job_id = _effective_elb_job_id(job)\n"
+        '    marker_results_url = str(job.get("results", "")).rstrip("/")\n'
+        "    return marker_results_url\n"
+    )
+
+    module._patch_runtime_id_observation_fail_closed(path)
+    first = path.read_text()
+    module._patch_runtime_id_observation_fail_closed(path)
+
+    assert path.read_text() == first
+    updates: list[tuple[str, dict[str, Any]]] = []
+
+    def update(job_id: str, **fields: Any) -> dict[str, Any]:
+        updates.append((job_id, fields))
+        return fields
+
+    namespace: dict[str, Any] = {
+        "_effective_elb_job_id": lambda job: (
+            job.__setitem__("_runtime_id_observation_failed", True) or "request"
+        ),
+        "_update_job": update,
+    }
+    exec(first, namespace)  # noqa: S102 - generated temporary fixture code.
+
+    result = namespace["refresh"]("request-1", {"results": "https://results"})
+
+    assert result == {
+        "status": "submitting",
+        "phase": "submitting",
+        "k8s_summary": {"error": "runtime identity observation unavailable"},
+    }
+    assert updates == [
+        (
+            "request-1",
+            {
+                "status": "submitting",
+                "phase": "submitting",
+                "k8s_summary": {"error": "runtime identity observation unavailable"},
+            },
+        )
+    ]
 
 
 def test_patch_app_rejects_duplicate_runtime_id_helpers(tmp_path: Path) -> None:

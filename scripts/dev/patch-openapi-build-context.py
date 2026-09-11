@@ -11,7 +11,7 @@ Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`,
 `_patch_finalizer_failure_status`,
 `_patch_web_blast_candidate_selection_evidence`, `_harden_openapi_runtime_ids`,
 `_patch_replay_safe_submit_identity`, `_patch_dead_thread_reclaim_observation_guard`,
-`_patch_submit_runtime_id_priority`,
+`_patch_runtime_id_observation_fail_closed`, `_patch_submit_runtime_id_priority`,
 `_harden_elb_scripts_configmap_reconciliation`,
 `patch_app`, `main`
 Risky contracts: Preserve strict result-path validation; only shard outputs and the exact canonical
@@ -1567,9 +1567,9 @@ def _patch_replay_safe_submit_identity(path: Path) -> None:
     return f"job-{digest[:32]}"
 
 
-def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
+def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:
     if not re.fullmatch(r"[0-9a-f]{12}", job_id, re.IGNORECASE):
-        return ""
+        return "", True
     try:
         proc = safe_exec(
             ["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"],
@@ -1582,9 +1582,10 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
             job_id,
             type(exc).__name__,
         )
-        return ""
+        return "", False
     if not isinstance(items, list):
-        return ""
+        logger.warning("runtime-id Kubernetes discovery returned invalid items job=%s", job_id)
+        return "", False
 
     result_pattern = re.compile(
         rf"/results/(?:\\d{{4}}/\\d{{2}}/\\d{{2}}/)?{re.escape(job_id)}/"
@@ -1618,7 +1619,7 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
             candidates[runtime_id] = ordering
 
     if not candidates:
-        return ""
+        return "", True
     selected = max(candidates.items(), key=lambda item: (item[1], item[0]))[0]
     if len(candidates) > 1:
         logger.warning(
@@ -1627,7 +1628,7 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
             len(candidates),
             selected,
         )
-    return selected
+    return selected, True
 
 
 '''
@@ -1635,7 +1636,7 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
         path,
         "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n",
         helpers + "def _effective_elb_job_id(job_info: dict[str, Any]) -> str:\n",
-        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:\n",
+        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:\n",
     )
     _replace_once_unless_marker(
         path,
@@ -1646,16 +1647,22 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
             "    return job_id\n"
         ),
         (
-            "    if not discovered and str(job_info.get(\"status\") or \"\") in {\n"
+            "    if (\n"
+            "        not discovered\n"
+            "        and int(job_info.get(\"attempt\", 0) or 0) > 0\n"
+            "        and str(job_info.get(\"status\") or \"\") in {\n"
             "        \"dispatching\", \"submitting\", \"running\"\n"
-            "    }:\n"
-            "        discovered = _discover_elb_job_id_from_k8s_jobs(job_id)\n"
+            "        }\n"
+            "    ):\n"
+            "        discovered, observed = _discover_elb_job_id_from_k8s_jobs(job_id)\n"
+            "        if not observed:\n"
+            "            job_info[\"_runtime_id_observation_failed\"] = True\n"
             "    if discovered:\n"
             "        _update_job(job_id, elb_job_id=discovered)\n"
             "        return discovered\n"
             "    return job_id\n"
         ),
-        "        discovered = _discover_elb_job_id_from_k8s_jobs(job_id)\n",
+        "        discovered, observed = _discover_elb_job_id_from_k8s_jobs(job_id)\n",
     )
     _insert_once(
         path,
@@ -1667,16 +1674,56 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
         ),
         (
             "\n    runtime_job_id = _effective_elb_job_id(job)\n"
+            "    if job.pop(\"_runtime_id_observation_failed\", False):\n"
+            "        logger.warning(\n"
+            "            \"submit deferred because runtime-id observation failed job=%s\",\n"
+            "            job_id,\n"
+            "        )\n"
+            "        return\n"
             "    if not re.fullmatch(r\"job-[0-9a-f]{32}\", runtime_job_id, re.IGNORECASE):\n"
             "        runtime_job_id = _deterministic_elb_job_id(job_id)\n"
         ),
         "        runtime_job_id = _deterministic_elb_job_id(job_id)\n",
     )
-    _insert_once(
+    _replace_once_unless_marker(
         path,
-        "        cfg_path=cfg_path,\n",
-        "        elb_job_id=runtime_job_id,\n",
-        "        elb_job_id=runtime_job_id,\n",
+        (
+            "    _update_job(\n"
+            "        job_id,\n"
+            '        status="submitting",\n'
+            "        cfg_path=cfg_path,\n"
+            '        attempt=int(job.get("attempt", 0)) + 1,\n'
+            "        last_progress_at=_now_iso(),\n"
+            "    )\n"
+        ),
+        (
+            "    submit_state = {\n"
+            "        **job,\n"
+            '        "status": "submitting",\n'
+            '        "cfg_path": cfg_path,\n'
+            '        "elb_job_id": runtime_job_id,\n'
+            '        "attempt": int(job.get("attempt", 0)) + 1,\n'
+            '        "last_progress_at": _now_iso(),\n'
+            "    }\n"
+            "    try:\n"
+            "        _save_job(job_id, submit_state, require_persist=True)\n"
+            "    except Exception as exc:\n"
+            "        with _jobs_lock:\n"
+            "            _jobs[job_id] = {\n"
+            "                **job,\n"
+            '                "status": "failed",\n'
+            '                "phase": "submit_state_persist_failed",\n'
+            '                "error": "runtime identity could not be persisted",\n'
+            '                "updated_at": _now_iso(),\n'
+            "            }\n"
+            "        logger.error(\n"
+            "            \"submit deferred because runtime-id persistence failed job=%s reason=%s\",\n"
+            "            job_id,\n"
+            "            type(exc).__name__,\n"
+            "        )\n"
+            "        return\n"
+        ),
+        "        _save_job(job_id, submit_state, require_persist=True)\n",
     )
     _replace_once_unless_marker(
         path,
@@ -1698,10 +1745,11 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
     text = path.read_text()
     required = (
         "def _deterministic_elb_job_id(job_id: str) -> str:",
-        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:",
+        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:",
         '["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"]',
         "runtime_job_id = _effective_elb_job_id(job)",
-        "elb_job_id=runtime_job_id",
+        'job.pop("_runtime_id_observation_failed", False)',
+        "_save_job(job_id, submit_state, require_persist=True)",
         '                    "--json",',
         '                    "--idempotency-key",',
     )
@@ -1712,7 +1760,7 @@ def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:
     if submit_end < 0:
         raise RuntimeError("could not isolate replay-safe OpenAPI submit function")
     submit_block = text[submit_start:submit_end]
-    if submit_block.index("elb_job_id=runtime_job_id") > submit_block.index(
+    if submit_block.index("_save_job(job_id, submit_state, require_persist=True)") > submit_block.index(
         "result = run_cancellable"
     ):
         raise RuntimeError("OpenAPI runtime identity must persist before submit side effects")
@@ -1729,6 +1777,30 @@ def _patch_dead_thread_reclaim_observation_guard(path: Path) -> None:
             'or summary.get("submit_failed"):\n'
         ),
         '    if summary.get("error") or summary.get("total")',
+    )
+
+
+def _patch_runtime_id_observation_fail_closed(path: Path) -> None:
+    """Carry a failed legacy-runtime observation into dead-thread reclaim."""
+
+    _replace_once_unless_marker(
+        path,
+        (
+            "    elb_job_id = _effective_elb_job_id(job)\n"
+            '    marker_results_url = str(job.get("results", "")).rstrip("/")\n'
+        ),
+        (
+            "    elb_job_id = _effective_elb_job_id(job)\n"
+            '    if job.pop("_runtime_id_observation_failed", False):\n'
+            "        return _update_job(\n"
+            "            job_id,\n"
+            '            status="submitting",\n'
+            '            phase="submitting",\n'
+            '            k8s_summary={"error": "runtime identity observation unavailable"},\n'
+            "        )\n"
+            '    marker_results_url = str(job.get("results", "")).rstrip("/")\n'
+        ),
+        '"runtime identity observation unavailable"',
     )
 
 
@@ -1996,12 +2068,15 @@ def _validate_openapi_runtime_policy(path: Path) -> None:
         "ELB scripts ConfigMap verification found drift",
         "def _discover_elb_job_id_from_submit_output(",
         "def _deterministic_elb_job_id(job_id: str) -> str:",
-        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> str:",
+        "def _discover_elb_job_id_from_k8s_jobs(job_id: str) -> tuple[str, bool]:",
         "def _effective_elb_job_id(",
         'canonical_current = re.fullmatch(r"job-[0-9a-f]{32}"',
         '["kubectl", "get", "jobs", "-l", "elb-job-id", "-o", "json"]',
         "runtime_job_id = _effective_elb_job_id(job)",
-        "elb_job_id=runtime_job_id",
+        'job.pop("_runtime_id_observation_failed", False)',
+        "_save_job(job_id, submit_state, require_persist=True)",
+        '"phase": "submit_state_persist_failed"',
+        '"runtime identity observation unavailable"',
         '                    "--json",',
         '                    "--idempotency-key",',
         'if summary.get("error") or summary.get("total")',
@@ -2704,6 +2779,7 @@ def patch_app(root: Path) -> None:
         desired=marker_desired,
         marker='    marker_results_url = str(job.get("results", "")).rstrip("/")\n',
     )
+    _patch_runtime_id_observation_fail_closed(path)
     _replace_once(
         path,
         '    elb_job_id = job.get("elb_job_id") or job_id\n',
