@@ -5,7 +5,9 @@
 Every control-plane deploy pushes a fresh image tag per sidecar repository
 (`elb-api`, `elb-frontend`, `elb-terminal`). Both the in-app self-upgrade
 (Settings → Update) and `scripts/dev/quick-deploy.sh` therefore accumulate one
-manifest per run in the platform ACR forever, growing registry storage
+manifest per run in the platform
+[Azure Container Registry (ACR)](https://learn.microsoft.com/azure/container-registry/container-registry-intro)
+forever, growing registry storage
 unbounded. There was no automatic cleanup — old, unreferenced images piled up.
 
 ## User-facing change
@@ -24,13 +26,17 @@ two moments the user named:
   prune runs between `acr_ensure_build_access` and `acr_restore_build_access`).
   Tunable via `ELB_ACR_KEEP_IMAGES` (default 3); skip with `--no-prune` or
   `ELB_SKIP_ACR_PRUNE=1`. Skipped automatically on `--no-build` (no fresh image
-  was pushed that run).
+  was pushed that run). The current template and every active revision are
+  inspected before deletion; their image digests remain protected even when
+  build-only runs have moved them outside the newest-N window.
 
 Both paths are **best-effort**: a missing `AcrDelete`/`Contributor` permission,
 a transient registry error, or a repository with ≤ keep manifests is a no-op
 and never fails the deploy/upgrade. The newest `keep` manifests (by
-last-update time) are never deleted, so the just-pushed image and the
-previously-running image always survive.
+last-update time) are never deleted. Quick deploy also fails closed and skips
+the sweep when live references cannot be read or resolved, so retention cannot
+delete an image needed to start a revision. See the
+[live-manifest protection follow-up](../2026-09/2026-09-16-quick-deploy-live-manifest-protection.md).
 
 ## API / IaC diff summary
 

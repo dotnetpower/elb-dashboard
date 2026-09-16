@@ -760,8 +760,11 @@ resolve_image_digest() {
 #   * Best-effort: a missing 'Contributor'/'AcrDelete' permission, a transient
 #     registry error, or a repo with <= keep manifests is a no-op — it never
 #     fails the deploy (the caller invokes it with `|| true`).
-#   * Keeps the newest N, so the just-pushed image AND the previously-running
-#     image (the rollback target) are always retained.
+#   * Keeps the newest N plus every manifest referenced by the current template
+#     or an active revision. Build-only runs can otherwise push a live manifest
+#     outside the newest-N window before the next deploy.
+#   * Fails closed when live image references cannot be read or resolved: stale
+#     storage is safer than deleting a manifest needed to start the next revision.
 #   * Skipped on --no-prune / ELB_SKIP_ACR_PRUNE=1 and on --no-build (no fresh
 #     image was pushed, so nothing new accumulated this run).
 #   * MUST be called WHILE the ACR firewall is open (between
@@ -770,8 +773,18 @@ resolve_image_digest() {
 #     below are network-refused once the registry is re-locked.
 # ---------------------------------------------------------------------------
 acr_prune_repo_keep_recent() {
-  local acr="$1" repo="$2" keep="${3:-3}"
+  local acr="$1" repo="$2" keep="3"
+  shift 2
+  if (( $# > 0 )); then
+    keep="$1"
+    shift
+  fi
   [[ -n "$acr" && -n "$repo" ]] || return 0
+  local -A protected_digests=()
+  local protected_digest
+  for protected_digest in "$@"; do
+    [[ "$protected_digest" == sha256:* ]] && protected_digests["$protected_digest"]=1
+  done
   # All digests for the repo, newest first. `--orderby time_desc` puts the most
   # recently updated manifest at index 0.
   local -a digests=()
@@ -785,17 +798,63 @@ acr_prune_repo_keep_recent() {
     ts "    (acr prune: $repo has $total manifest(s) <= keep=$keep; nothing to delete)"
     return 0
   fi
-  local deleted=0 idx digest
+  local refreshed_digests
+  if ! refreshed_digests="$(acr_live_repo_digests "$repo")"; then
+    ts "    ! acr prune: could not revalidate live images for $repo; skipping this repository prune"
+    return 0
+  fi
+  while IFS= read -r protected_digest; do
+    [[ "$protected_digest" == sha256:* ]] && protected_digests["$protected_digest"]=1
+  done <<< "$refreshed_digests"
+  local deleted=0 protected=0 idx digest
   for (( idx = keep; idx < total; idx++ )); do
     digest="${digests[$idx]}"
     [[ "$digest" == sha256:* ]] || continue
+    if [[ -n "${protected_digests[$digest]:-}" ]]; then
+      protected=$(( protected + 1 ))
+      continue
+    fi
     if az acr manifest delete --registry "$acr" --name "$repo@$digest" --yes -o none 2>/dev/null; then
       deleted=$(( deleted + 1 ))
     else
       ts "    ! acr prune: failed to delete $repo@${digest:0:19}… (need 'Contributor'/'AcrDelete'?); skipping"
     fi
   done
-  ts "    ✓ acr prune: $repo kept newest $keep, deleted $deleted older manifest(s)"
+  ts "    ✓ acr prune: $repo kept newest $keep + $protected older live manifest(s), deleted $deleted older manifest(s)"
+}
+
+acr_live_image_refs() {
+  local template_refs active_refs
+  template_refs="$(timeout 30s az containerapp show \
+    --name "$CONTAINER_APP_NAME" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "properties.template.containers[].image" \
+    -o tsv 2>/dev/null)" || return 1
+  active_refs="$(timeout 30s az containerapp revision list \
+    --name "$CONTAINER_APP_NAME" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "[?properties.active].properties.template.containers[].image" \
+    -o tsv 2>/dev/null)" || return 1
+  [[ -n "$template_refs$active_refs" ]] || return 1
+  printf '%s\n%s\n' "$template_refs" "$active_refs" | awk 'NF && !seen[$0]++'
+}
+
+acr_live_repo_digests() {
+  local repo="$1" live_refs ref resolved
+  if ! live_refs="$(acr_live_image_refs)"; then
+    return 1
+  fi
+  while IFS= read -r ref; do
+    case "$ref" in
+      "${ACR_LOGIN_SERVER}/${repo}@"*)
+        printf '%s\n' "${ref##*@}"
+        ;;
+      "${ACR_LOGIN_SERVER}/${repo}:"*)
+        resolved="$(resolve_image_digest "$ref")" || return 1
+        printf '%s\n' "${resolved##*@}"
+        ;;
+    esac
+  done <<< "$live_refs"
 }
 
 # acr_prune_targets -- run the retention sweep over one or more repos unless
@@ -815,9 +874,23 @@ acr_prune_targets() {
     keep=3
   fi
   ts "==> ACR retention prune (keep newest $keep per repository) on $ACR_NAME"
-  local repo
+  local repo protected_output target_ref target_resolved
   for repo in "$@"; do
-    acr_prune_repo_keep_recent "$ACR_NAME" "$repo" "$keep" || true
+    local -a protected=()
+    if ! protected_output="$(acr_live_repo_digests "$repo")"; then
+      ts "    ! acr prune: could not read or resolve live images for $repo; skipping retention prune"
+      return 0
+    fi
+    [[ -n "$protected_output" ]] && mapfile -t protected <<< "$protected_output"
+    if [[ -n "${TAG:-}" ]]; then
+      target_ref="${ACR_LOGIN_SERVER}/${repo}:${TAG}"
+      if ! target_resolved="$(resolve_image_digest "$target_ref")"; then
+        ts "    ! acr prune: could not resolve deploy target '$target_ref'; skipping retention prune"
+        return 0
+      fi
+      protected+=("${target_resolved##*@}")
+    fi
+    acr_prune_repo_keep_recent "$ACR_NAME" "$repo" "$keep" "${protected[@]}" || true
   done
 }
 
