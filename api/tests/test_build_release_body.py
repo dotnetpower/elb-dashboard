@@ -3,8 +3,8 @@
 Responsibility: Pin the size contract that broke the v0.3.0 publish — the
     GitHub Releases API rejects a body over 125,000 characters with HTTP 422,
     and `docs/releases/v0.3.0.md` rendered ~195 KB. Verify the builder stays
-    under the limit, truncates on a line boundary, always keeps the pointer to
-    the full page, and leaves a small release untouched.
+    under the limit, strips page metadata, truncates on a line boundary, always
+    keeps the pointer to the full page, and leaves a small release untouched.
 Edit boundaries: Pure text-shaping assertions. The script lives outside the
     `api/` import tree, so it is loaded via
     `importlib.util.spec_from_file_location` rather than adding `scripts/` to
@@ -25,9 +25,7 @@ from typing import Any
 
 import pytest
 
-_SCRIPT_PATH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "dev" / "build_release_body.py"
-)
+_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "dev" / "build_release_body.py"
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +50,29 @@ def test_small_release_is_passed_through_untruncated(builder: Any) -> None:
     assert "truncated" not in body
 
 
+def test_frontmatter_and_duplicate_h1_are_removed(builder: Any) -> None:
+    notes = """\
+---
+title: v0.9.0
+description: Release page.
+tags:
+    - release
+---
+
+# v0.9.0
+
+- One change
+"""
+
+    body, truncated = builder.build_body(notes, notes_path="docs/releases/v0.9.0.md")
+
+    assert truncated is False
+    assert "title: v0.9.0" not in body
+    assert "description: Release page." not in body
+    assert "# v0.9.0" not in body
+    assert "- One change" in body
+
+
 def test_oversized_release_is_bounded_and_keeps_the_pointer(builder: Any) -> None:
     # Mirrors the real failure: v0.3.0 rendered 753 notes / ~195 KB and the API
     # rejected it with "body is too long (maximum is 125000 characters)".
@@ -59,9 +80,7 @@ def test_oversized_release_is_bounded_and_keeps_the_pointer(builder: Any) -> Non
     notes = "# v0.3.0\n\n" + entry * 4000
     limit = 10_000
 
-    body, truncated = builder.build_body(
-        notes, notes_path="docs/releases/v0.3.0.md", limit=limit
-    )
+    body, truncated = builder.build_body(notes, notes_path="docs/releases/v0.3.0.md", limit=limit)
 
     assert truncated is True
     assert len(body) <= limit
@@ -83,9 +102,7 @@ def test_real_release_page_fits_when_present(builder: Any) -> None:
     if not page.exists():  # pragma: no cover - page removed in a future cleanup
         pytest.skip("docs/releases/v0.3.0.md not present")
 
-    body, truncated = builder.build_body(
-        page.read_text(encoding="utf-8"), notes_path=str(page)
-    )
+    body, truncated = builder.build_body(page.read_text(encoding="utf-8"), notes_path=str(page))
 
     assert truncated is True  # ~195 KB of notes
     assert len(body) < 125_000

@@ -14,9 +14,10 @@ This automation does **not** calculate or predict Web BLAST `searchsp`. Search-s
 
 ## Activation
 
-The feature ships dormant for its first soak window:
+All three behavior-changing gates remain off in the shared deployment defaults
+as of 2026-09-16:
 
-| Setting | Initial value | Purpose |
+| Setting | Shared default | Purpose |
 | --- | --- | --- |
 | `AUTO_ORACLE_RECONCILE_ENABLED` | `false` | Enables targeted and 120-second recovery reconciliation. |
 | `ENFORCE_AUTO_ORACLE_RBAC` | `false` | Enforces current AKS/Storage caller capabilities on preference reads, writes, and background execution. |
@@ -26,7 +27,13 @@ The feature ships dormant for its first soak window:
 | `AUTO_ORACLE_MAX_INSPECTIONS_PER_TICK` | `50` | Bounds preference and Azure API work per pass. |
 | `ORACLE_UNCLAIMED_REDELIVERY_SECONDS` | `120` | Reissues a delivery only when no durable execution claim appeared. |
 
-Enable `ENFORCE_AUTO_ORACLE_RBAC=true` first and run the Persona Matrix with the gate forced ON. After that gate soaks, enable reconciliation and leave retention off for at least one full release cycle. The planned RBAC/reconcile flip review date is **2026-09-10**, after a dogfood run confirms owner-RBAC checks, duplicate suppression, progress convergence, and retry exhaustion. Retention requires a separate review after reconciliation soaks with zero incorrect deletions.
+Enable `ENFORCE_AUTO_ORACLE_RBAC=true` first and run the Persona Matrix with the
+gate forced ON. After that gate soaks, enable reconciliation and leave retention
+off for at least one full release cycle. The 2026-09-10 review date passed
+without a shared-default flip; activation remains pending explicit, documented
+dogfood evidence for owner-RBAC checks, duplicate suppression, progress
+convergence, and retry exhaustion. Retention still requires a separate review
+after reconciliation soaks with zero incorrect deletions.
 
 The runtime enforces this order: setting `AUTO_ORACLE_RECONCILE_ENABLED=true` while `ENFORCE_AUTO_ORACLE_RBAC` remains false leaves execution dormant and emits a warning. Preferences can still be staged safely before both gates are enabled.
 

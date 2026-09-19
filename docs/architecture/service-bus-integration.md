@@ -500,11 +500,13 @@ enqueued → received → row_created → routed → submitted → running → s
 the ordered stages plus `queue_dwell_ms` / `submit_latency_ms` / `e2e_ms`
 metrics, so the dashboard can show where a message is and how long each hop took.
 
-### Optional submit ingress + resident consumer (default-OFF)
+### Submit ingress + resident consumer
 
-Two behavioural switches let an operator move from the historical direct
-`/v1/jobs` submit to the unified Service Bus front door, each gated default-OFF
-so the live contract only changes by explicit opt-in:
+Two behavioural switches control the unified Service Bus front door. The
+submit-ingress switch remains default-OFF so the browser's live submit contract
+changes only by explicit opt-in. The resident consumer is ON in the shared
+deployment defaults for low-latency drain, but remains inert until the durable
+Service Bus Settings row enables and configures the integration:
 
 - `ENABLE_SB_SUBMIT_INGRESS` — the dashboard submit API enqueues the request to
   Service Bus instead of calling `/v1/jobs` directly, returning the dashboard
@@ -513,9 +515,10 @@ so the live contract only changes by explicit opt-in:
   explicitly selects a subscription, resource group, or cluster stays on the
   direct path because the queue has one deployment-wide execution target.
 - `SERVICEBUS_RESIDENT_CONSUMER` — a resident long-polling consumer drains the
-  queue within ~1 s instead of waiting the 30 s beat. The beat drain task stays
-  registered as the fallback reconcile, so the resident loop is an accelerator,
-  never a single point of failure. The resident and beat paths share the same
+  queue within ~1 s instead of waiting for the periodic beat fallback (60 s in
+  the shared deployment policy; 10 s process fallback when unset). The beat
+  task stays registered as a recovery reconcile, so the resident loop is an
+  accelerator, never a single point of failure. The resident and beat paths share the same
   execution-admission decision, queue-scoped single-flight lease, and bounded
   `SERVICEBUS_DRAIN_CONCURRENCY` resolver. Concurrency above one still requires
   the atomic correlation claim.
@@ -621,10 +624,11 @@ Rules a subscriber must follow:
 |---|---|---|---|
 | `SERVICEBUS_ENABLED` | _(empty)_ | api, worker, beat | Three-state deploy-time override of the saved config. **Empty/unset (default)** defers to the Settings config row, so the toggle is a runtime feature flag that survives redeploys. **Truthy** (`true`/`1`/`yes`/`on`) pins the capability on, but activation still requires the config (enabled + namespace). **Falsy** (`false`/`0`/`no`/`off`) is a deployment kill switch that forces the integration OFF regardless of the config. When OFF the drain/publish/cleanup beat tasks no-op and the submit routes do not enqueue. |
 | `ENABLE_SB_SUBMIT_INGRESS` | `false` | api | When true (and Service Bus enabled) an unscoped dashboard submit enqueues to Service Bus instead of calling `/v1/jobs` directly; a publish failure falls back to the direct path and an explicitly scoped request always remains direct. |
-| `SERVICEBUS_RESIDENT_CONSUMER` | `false` | worker | When true (and Service Bus enabled) a resident long-polling consumer drains the queue continuously (~1 s) instead of waiting the 30 s beat; the beat stays as the fallback. |
+| `SERVICEBUS_RESIDENT_CONSUMER` | `true` in the shared deployment defaults; unset fallback `false` | worker | When true (and Service Bus enabled) a resident long-polling consumer drains the queue continuously (~1 s) instead of waiting for the periodic beat fallback. |
 | `SERVICEBUS_ATOMIC_CLAIM` | `true` | worker | Required when drain concurrency is greater than 1. Atomically reserves each correlation id before OpenAPI submit; code falls back to serial drain if explicitly disabled. |
 | `SERVICEBUS_CLAIM_STALE_SECONDS` | `900` | worker | Minimum age before an unconfirmed bridge claim can be stolen after a worker crash. Values below 900 seconds are raised to the floor so a live resident submit cannot be stolen during its complete OpenAPI transport, stale-token retry, and token-resync envelope. |
 | `SERVICEBUS_DRAIN_SINGLEFLIGHT` | `true` | worker | Legacy compatibility setting. Every drain now takes the queue-scoped Redis lease regardless of a false override because Settings uses that lease as its routing-mutation fence. |
+| `SERVICEBUS_QUEUE_AUTOSTART` | `true` in the shared deployment defaults; unset fallback `false` | api, worker | When true, pending request-queue work triggers an immediate and periodic evaluation that starts an exactly `Stopped` AKS cluster. A fail-closed Redis lease prevents duplicate starts and imposes a 600-second default cooldown. |
 | `SERVICEBUS_DRAIN_LOCK_TTL_SECONDS` | `900` | worker | Drain-lease crash backstop. Values below 900 seconds are raised to the routing-safety floor so the lease cannot expire during a bounded resident submit/pass while Settings relies on it. |
 | `SERVICEBUS_TASK_SUBMIT_TIMEOUT_SECONDS` | `35` | worker | OpenAPI timeout used only by the 45-second Celery fallback task, clamped to 5-35 seconds. The fallback processes one concurrency-sized receive batch and uses no internal transport retry; durable Service Bus retry owns later attempts. The resident consumer keeps the general 90-second policy. |
 | `CELERY_SERVICEBUS_QUEUES` | `servicebus` | worker | Dedicated Celery queue for drain fallback, outbox/transition publication, DLQ response reconciliation, and Service Bus health. `worker-servicebus` consumes it independently of long general reconciliation scans. |

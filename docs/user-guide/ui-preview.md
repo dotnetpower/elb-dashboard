@@ -10,6 +10,10 @@ tags:
 
 The UI Preview is a static, mock-backed build of the real Control Plane React app. It runs inside the documentation site and uses fixture data instead of Azure, AKS, Storage, ACR, Redis, or the FastAPI backend.
 
+The Browser Terminal is intentionally excluded because a useful terminal view
+requires a live ttyd process and an authenticated one-shot WebSocket ticket.
+Use the deployed dashboard or the full local sidecar stack for that page.
+
 Use it when you want to review the product surface from GitHub Pages, share a screen with a researcher, or check the shape of the UI without touching live infrastructure.
 
 ## Open The Preview

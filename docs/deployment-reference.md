@@ -188,6 +188,13 @@ After step `8/8`, `deploy.sh` runs three follow-up helpers (see [Get Started →
 - `scripts/dev/check-mi-rbac.sh --auto-fix` — managed-identity RBAC doctor (read-only with `ELB_AUTO_FIX_RBAC=false`).
 - `scripts/dev/grant-runtime-rbac.sh` — pre-creates the cluster RG (default `rg-elb-cluster`) and grants the MI `Contributor + UAA` on it so the first **Create Cluster** click works (disable with `ELB_BOOTSTRAP_CLUSTER_RG=false`).
 
+These helpers do not grant subscription-wide `Contributor` or `User Access
+Administrator`. The dashboard MI keeps subscription-level `Reader` plus the
+ABAC-constrained `Elb Workload RG Creator` custom role for discovery and
+resource-group bootstrap; mutable permissions are scoped to the platform and
+workload resource groups. See [Authentication](architecture/authentication.md#1-container-app-managed-identity-required-rbac-roles)
+for the full scope matrix.
+
 Check the health endpoint:
 
 ```bash
@@ -262,7 +269,8 @@ Required runtime image tags:
 - `ncbi/elb:1.4.0`
 - `ncbi/elasticblast-job-submit:4.1.0`
 - `ncbi/elasticblast-query-split:0.1.4`
-- `elb-openapi:4.14`
+- `elb-openapi:<current dashboard pin>` from
+  [`api/services/image_tags.py`](https://github.com/dotnetpower/elb-dashboard/blob/main/api/services/image_tags.py)
 
 Tiny query for the first smoke run:
 

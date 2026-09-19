@@ -110,13 +110,13 @@ function acrPayload() {
     expected_image_tags: {
       "elb-api": "2026.05.21",
       "elb-worker": "2026.05.21",
-      "elb-openapi": "4.14",
+      "elb-openapi": "4.61",
       "elb-terminal": "2026.05.21",
     },
     actual_tags: {
       "elb-api": ["2026.05.21"],
       "elb-worker": ["2026.05.21"],
-      "elb-openapi": ["4.14"],
+      "elb-openapi": ["4.61"],
       "elb-terminal": ["2026.05.21"],
     },
     building_images: [],
@@ -838,7 +838,64 @@ function requestMetricsPayload() {
   };
 }
 
-function matchApi(path: string, method: string): Response | null {
+export function docsPreviewApiResponse(path: string, method: string): Response | null {
+  if (path === "/api/me") {
+    return jsonResponse({
+      object_id: "00000000-0000-0000-0000-000000000010",
+      tenant_id: "00000000-0000-0000-0000-000000000020",
+      upn: "docs-user@example.invalid",
+      subscriptions: [
+        {
+          subscriptionId: workspaceConfig.subscriptionId,
+          displayName: "Docs mock subscription",
+          tenantId: "00000000-0000-0000-0000-000000000020",
+          state: "Enabled",
+        },
+      ],
+    });
+  }
+  if (path === "/api/me/permissions") {
+    return jsonResponse({
+      can_read: true,
+      can_write: true,
+      can_start_stop: true,
+      can_delete: true,
+      can_submit_blast: true,
+      can_build_acr: true,
+      can_grant_rbac: true,
+      degraded: false,
+      matched_roles: ["b24988ac-6180-42a0-ab88-20f7382dd24c"],
+      matched_role_names: ["Contributor"],
+      reason: "docs mock contributor",
+    });
+  }
+  if (path === "/api/me/access-review") {
+    return jsonResponse({
+      subscription_id: workspaceConfig.subscriptionId,
+      principal: {
+        kind: "user",
+        object_id: "00000000-0000-0000-0000-000000000010",
+        available: true,
+      },
+      groups: [
+        {
+          resource_group: workspaceConfig.workloadResourceGroup,
+          scope: `/subscriptions/${workspaceConfig.subscriptionId}/resourceGroups/${workspaceConfig.workloadResourceGroup}`,
+          assignments: [
+            {
+              role_name: "Contributor",
+              role_guid: "b24988ac-6180-42a0-ab88-20f7382dd24c",
+              scope_level: "resource_group",
+              inherited: false,
+              assignment_scope: `/subscriptions/${workspaceConfig.subscriptionId}/resourceGroups/${workspaceConfig.workloadResourceGroup}`,
+            },
+          ],
+          degraded: false,
+          reason: "",
+        },
+      ],
+    });
+  }
   if (path === "/api/arm/subscriptions") {
     return jsonResponse([
       {
@@ -900,7 +957,7 @@ function matchApi(path: string, method: string): Response | null {
     });
   }
   if (path === "/api/monitor/aks/service-ip")
-    return jsonResponse({ service_name: "elb-openapi", external_ip: "10.42.0.52" });
+    return jsonResponse({ service_name: "elb-openapi", external_ip: "192.0.2.10" });
   if (path === "/api/aks/openapi/spec") return jsonResponse(openApiSpecPayload());
   if (path === "/api/aks/openapi/deployment") {
     return jsonResponse({
@@ -908,9 +965,9 @@ function matchApi(path: string, method: string): Response | null {
       deployment_name: "elb-openapi",
       container_name: "openapi",
       namespace: "default",
-      image: `${workspaceConfig.acrName}.azurecr.io/elb-openapi:4.14`,
+      image: `${workspaceConfig.acrName}.azurecr.io/elb-openapi:4.61`,
       image_repository: "elb-openapi",
-      image_tag: "4.14",
+      image_tag: "4.61",
       manifest_revision: 2,
       expected_manifest_revision: 2,
       manifest_outdated: false,
@@ -1097,7 +1154,7 @@ export function initDocsMockPreview(): void {
     const rawUrl =
       typeof input === "string" || input instanceof URL ? String(input) : input.url;
     const url = new URL(rawUrl, window.location.origin);
-    const mocked = matchApi(url.pathname, method);
+    const mocked = docsPreviewApiResponse(url.pathname, method);
     if (mocked) return mocked;
     if (url.hostname === "api.example.internal" || url.hostname.startsWith("10.")) {
       return jsonResponse({ status: "ok", mocked: true, path: url.pathname });

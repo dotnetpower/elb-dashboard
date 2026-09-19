@@ -12,9 +12,9 @@ Usage:
       [--docs-url https://…/releases/] [--limit 120000]
 
 Responsibility: Turn one rendered release-notes markdown page into a
-    GitHub-Release-safe body: drop the duplicated H1, prepend a provenance
-    header, and truncate on a line boundary with an explicit pointer when the
-    page exceeds the API limit.
+    GitHub-Release-safe body: drop page frontmatter and the duplicated H1,
+    prepend a provenance header, and truncate on a line boundary with an
+    explicit pointer when the page exceeds the API limit.
 Edit boundaries: Pure text shaping plus argv/file IO. No git, no network, no
     GitHub API calls — the workflow owns publishing.
 Key entry points: ``build_body``, ``main``.
@@ -36,6 +36,26 @@ DEFAULT_LIMIT = 120_000
 DEFAULT_DOCS_URL = "https://dotnetpower.github.io/elb-dashboard/releases/"
 
 
+def _content_lines(notes_text: str) -> list[str]:
+    lines = notes_text.splitlines()
+    if lines and lines[0].strip() == "---":
+        try:
+            end = next(
+                index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"
+            )
+        except StopIteration:
+            pass
+        else:
+            lines = lines[end + 1 :]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if lines and lines[0].startswith("# "):
+        lines = lines[1:]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return lines
+
+
 def build_body(
     notes_text: str,
     *,
@@ -50,13 +70,10 @@ def build_body(
     until the budget is spent and a footer linking to the full page is appended,
     so the body is always valid markdown and never silently loses the pointer.
     """
-    lines = notes_text.splitlines()
-    if lines and lines[0].startswith("# "):
-        lines = lines[1:]
+    lines = _content_lines(notes_text)
 
     header = (
-        f"Generated from `{notes_path}`. "
-        f"See the [docs site]({docs_url}) for the rendered view.\n\n"
+        f"Generated from `{notes_path}`. See the [docs site]({docs_url}) for the rendered view.\n\n"
     )
     footer = (
         "\n---\n\n_Release notes truncated to fit GitHub's 125,000-character "
@@ -100,8 +117,7 @@ def main() -> int:
     )
     Path(args.out).write_text(body, encoding="utf-8")
     print(
-        f"release body: {len(body)} chars "
-        f"(limit {args.limit}, truncated={str(truncated).lower()})"
+        f"release body: {len(body)} chars (limit {args.limit}, truncated={str(truncated).lower()})"
     )
     return 0
 

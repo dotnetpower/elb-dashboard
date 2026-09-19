@@ -14,12 +14,16 @@ The Dashboard is the landing page of the ElasticBLAST control plane. It is built
 
 ![Dashboard overview — Cluster plane, Resource plane, Sidecar runtime](../images/screenshots/dashboard-overview-desktop.png)
 
-The page is divided into four bands, top to bottom:
+The page has three persistent bands plus an optional message-flow strip, top to
+bottom:
 
 1. **Hero header** — workspace selector (subscription + Workload RG), auto-refresh interval, Getting Started, Settings.
 2. **Cluster plane** — the AKS workload cluster card, full width.
-3. **Resource plane** — ACR (registry), Storage (BLAST databases + storage posture), Terminal availability.
-4. **Sidecar runtime** — the six in-revision sidecars of `ca-elb-dashboard` (frontend, api, worker, beat, redis, terminal).
+3. **Message Flow** (only when Service Bus is effective-enabled) — active
+  submitters, queued/in-flight work, target clusters, and the expandable
+  request/completion flow.
+4. **Resource plane** — ACR (registry), Storage (BLAST databases + storage posture), Terminal availability.
+5. **Sidecar runtime** — the six in-revision sidecars of `ca-elb-dashboard` (frontend, api, worker, beat, redis, terminal).
 
 A small coloured dot to the left of each section label tells you which plane you are looking at. Cards refresh on the cadence picked in the header chip (default: `Live` — server-pushed updates with a 30 s polling fallback).
 
@@ -27,7 +31,11 @@ A small coloured dot to the left of each section label tells you which plane you
 
 The hero header drives every card below it.
 
-- **Subscription** — switches the Azure subscription used by all ARM and data-plane calls. The picker lists every subscription the signed-in account can see; once a subscription has been used it is remembered between sessions.
+- **Subscription** — switches the Azure subscription used by downstream ARM
+  and data-plane calls. The picker lists subscriptions discoverable by the
+  dashboard managed identity; the signed-in caller's RBAC is evaluated
+  separately for entry and action affordances. Once a subscription has been
+  used it is remembered between sessions.
 - **Workload RG** — the resource group that holds the BLAST workload (AKS cluster, Storage account, optional terminal-related state). The picker is annotated:
     - resource groups tagged with `elb-*` are listed first;
     - AKS-managed node resource groups are **disabled** (you should not deploy into them);
@@ -58,6 +66,8 @@ The **Cluster plane** section holds a single full-width card backed by the AKS w
 - **Workload node pool** — VM SKU, current vs target node count, available vs allocated memory.
 - **System node pool** — small pool that hosts control-plane add-ons.
 - **Recent activity rail** — last few BLAST submissions and their pod-level status (queued, running, completed, failed).
+- **Capacity Gate** — a read-only snapshot of slot use, node pressure, pending
+  pods, and the decision the optional admission gate would make.
 
 When no suitable cluster exists, the card shows an **Add Cluster** action. Click it to open the provisioning dialog:
 
@@ -72,6 +82,12 @@ The dialog asks for:
 - **Estimated hourly cost** — based on the SKUs above. The same number is shown on the card after provisioning.
 
 The cluster takes several minutes to provision. The card transitions through `Provisioning → Running` and the activity rail starts showing pod events once nodes are ready.
+
+When the optional Service Bus integration is enabled, the **Message Flow** strip
+appears below the Cluster plane. It summarizes active jobs rather than treating
+the usually short-lived broker depth as workload progress. Expand it to inspect
+producer aliases, queued messages, worker routing, target clusters, transition
+events, and completion health.
 
 ## Resource plane
 
@@ -136,14 +152,14 @@ A degraded card never silently falls back to fake data. If the dashboard cannot 
 
 ![Dashboard, mobile layout](../images/screenshots/dashboard-mobile.png)
 
-On narrow screens the same cards stack vertically and the Sidecar runtime band is hidden by default (it is admin telemetry, not workflow data). The navigation menu in the top-left opens the full menu: **Dashboard**, **New Search**, **Recent searches**, **Custom DB**, **Lab Tools**, **Terminal**, **API**.
+On narrow screens the same cards stack vertically and the Sidecar runtime band is hidden by default (it is admin telemetry, not workflow data). The navigation menu in the top-left lists **Dashboard**, optional **Live Wall**, **New Search**, **BLAST Jobs**, optional **Custom DB** and **Playground**, optional **Lab Tools** and **Terminal**, and **API**.
 
-The Dashboard is the only page that needs a desktop layout for full information density. New Search, Recent searches, and Results are designed mobile-first.
+The Dashboard is the only page that needs a desktop layout for full information density. New Search, BLAST Jobs, and Results are designed mobile-first.
 
 ## What's next
 
 When every card is healthy:
 
 1. Open [New Search](new-search.md) and submit a small smoke job (e.g. `blastn` against a prepared `core_nt` shard) to verify end to end.
-2. After it finishes, open [Recent searches](jobs.md) to confirm the list view, then drill into [Results](results.md) to confirm hit data is loading.
+2. After it finishes, open [BLAST Jobs](jobs.md) to confirm the list view, then drill into [Results](results.md) to confirm hit data is loading.
 3. Use [Browser Terminal](terminal.md) only when you need a CLI — most flows do not require it.

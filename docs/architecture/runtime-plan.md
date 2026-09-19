@@ -72,19 +72,21 @@ can be referenced cleanly from Bicep.
 
 | Identity | Assigned to | Required scopes |
 |----------|-------------|-----------------|
-| `id-elb-dashboard-*` | `ca-elb-dashboard` Container App (shared by all six sidecars including `frontend` and `terminal`) | Contributor plus User Access Administrator on workload RGs; Storage Table Data Contributor + Storage Blob Data Contributor on platform storage; data-plane roles on workload Storage and ACR; Key Vault Secrets User; AcrPull on the platform ACR; AKS RBAC reader / `Azure Kubernetes Service Cluster User` so the terminal sidecar can run `kubectl` against the cluster. The `frontend` sidecar makes no Azure calls and inherits the MI only because it lives in the same revision. |
+| `id-elb-dashboard-*` | `ca-elb-dashboard` Container App (shared by all six sidecars including `frontend` and `terminal`) | Subscription Reader plus the ABAC-constrained `Elb Workload RG Creator`; Contributor/UAA and phase-1 narrow identity/network/AKS roles on platform and workload RGs; Storage Table/Blob data roles on platform and workload Storage; ACR pull/push/build roles; Key Vault Secrets User; AKS Cluster User for direct Kubernetes API access. The `frontend` sidecar makes no Azure calls and inherits the MI only because it lives in the same revision. |
 | `id-elb-openapi` | AKS Workload Identity | Storage Blob Data Contributor, AKS permissions, workload RG permissions needed by ElasticBLAST. |
 
 Because the six sidecars share one MI, the api sidecar technically holds the
 same ARM Contributor rights as the worker, the terminal, and the frontend.
 Scope abuse is mitigated by:
 
-- Mutating ARM operations only run inside Celery task handlers (in the
-  worker process) or as user-typed shell commands inside the terminal sidecar
-  (which is gated by MSAL + tenant role at the WebSocket upgrade).
-- The api sidecar's request handlers do not call ARM mutation methods; this
-  is enforced by static analysis (allow-list of Azure SDK call sites per
-  sidecar package).
+- Long-running ARM mutations run inside Celery task handlers in the worker.
+  Bounded, idempotent Setup Wizard operations under `/api/resources/*` may run
+  synchronously in the api sidecar through service wrappers; user-typed shell
+  commands run inside the terminal sidecar after the authenticated WebSocket
+  upgrade.
+- Routes and tasks never import `azure.mgmt.*` directly. Both layers delegate
+  SDK calls to `api/services/`, and CLI-only operations delegate to the
+  authenticated terminal exec channel.
 - The frontend sidecar is `nginx:alpine` with no Azure SDK and no shell; it
   cannot use the MI even if it wanted to.
 

@@ -42,7 +42,7 @@ inferred_searchsp = web_evalue / local_evalue_at_searchsp_1
 6. Round the inferred value and validate by running local BLAST+ with
    `-searchsp <rounded>`; the local rows should match Web rows exactly.
 
-The helper script is [scripts/dev/ncbi-searchsp-discovery.py](../scripts/dev/ncbi-searchsp-discovery.py).
+The helper script is [scripts/dev/ncbi-searchsp-discovery.py](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/ncbi-searchsp-discovery.py).
 It calls NCBI Web BLASTAlign and runs local BLAST+ through the terminal image, so
 it is an external-network dev probe rather than a unit test.
 
@@ -1147,7 +1147,7 @@ rank-for-rank Web top-500 identity for this query.
 After confirming that 16S/18S/ITS are too small to serve as production sharding
 proof, EQ-13 was rerun against `core_nt` from the AKS system node using 10
 blastpool child Jobs. The reusable runner is
-[scripts/dev/eq13-core-nt-f3l-widepool.sh](../scripts/dev/eq13-core-nt-f3l-widepool.sh).
+[scripts/dev/eq13-core-nt-f3l-widepool.sh](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/eq13-core-nt-f3l-widepool.sh).
 It dispatches one child Job per warmed `core_nt_shard_00..09`, gathers a
 widepool with `-max_target_seqs 5000`, and then compares the result with the
 MPXV F3L inclusive Web CSV.
@@ -1193,7 +1193,7 @@ score class.
 
 To remove the stale CSV/HSP mismatch, a new Web BLAST RID was submitted from the
 AKS system node and retrieved as BLAST XML (`outfmt 5`). The helper script is
-[scripts/dev/eq14-core-nt-webxml-sharded.sh](../scripts/dev/eq14-core-nt-webxml-sharded.sh).
+[scripts/dev/eq14-core-nt-webxml-sharded.sh](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/eq14-core-nt-webxml-sharded.sh).
 It submits Web BLAST, writes a normalized CSV from the XML HSPs, runs the same
 MPXV F3L query across 10 warmed `core_nt` shards, and compares Web XML fields
 against both the full widepool and a strict Web top-500 accession oracle merge.
@@ -1293,7 +1293,7 @@ Recommended starting point:
 | Network | Temporary public IP restricted to the caller IP for SSH, or a VM in the platform VNet if copying from private Storage | Do not enable production Storage public access for this experiment. |
 | Tooling | BLAST+ 2.17.0, `azcopy`, `jq`, `pigz`, `tmux`, Python 3 | Keeps the baseline aligned with current Web XML and terminal image observations. |
 
-The helper script [scripts/dev/core-nt-searchsp-calibration.sh](../scripts/dev/core-nt-searchsp-calibration.sh)
+The helper script [scripts/dev/core-nt-searchsp-calibration.sh](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/core-nt-searchsp-calibration.sh)
 prepares the temporary VM path with explicit approval gates. It prints the
 VM-side commands instead of running disk formatting automatically:
 

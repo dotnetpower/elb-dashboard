@@ -8,7 +8,7 @@ tags:
 
 # Results
 
-The Results page is the detail view for a single BLAST search. It opens when you click a row on [Recent searches](jobs.md) or follow a `/blast/jobs/<jobId>` link from a submit toast.
+The Results page is the detail view for a single BLAST search. It opens when you click a row on [BLAST Jobs](jobs.md) or follow a `/blast/jobs/<jobId>` link from a submit toast.
 
 ## Overview
 
@@ -24,7 +24,7 @@ The page is built around three regions:
 
 The header is laid out in four lines, top to bottom:
 
-1. A `< Recent searches` back link plus a **Help** menu with links to NCBI BLAST documentation.
+1. A `< BLAST Jobs` back link plus a **Help** menu with links to NCBI BLAST documentation.
 2. Job title with **Cancel**, **Edit search**, and **Duplicate** actions on the right. Cancel is shown only while the search is still running.
 3. `Search ID: …` and `Created: …` with **Copy ID** and a **Download all results ▾** combo (BLAST XML, JSON, TSV, ZIP archive).
 4. `Program: blastn   Database: …   Query: …   Molecule: dna   Query length: …` — the four facts a researcher checks first to confirm "yes, this is my search".

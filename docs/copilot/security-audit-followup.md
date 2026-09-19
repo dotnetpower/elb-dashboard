@@ -1,6 +1,6 @@
 ---
 title: Security Audit Follow-up (2026-05-22)
-description: Design notes for the open follow-up items from the ElasticBLAST Control Plane 20-finding security sweep on 2026-05-22.
+description: Historical designs and current status for follow-up items from the ElasticBLAST Control Plane 20-finding security sweep.
 tags:
   - agent
   - security
@@ -8,15 +8,32 @@ tags:
 
 # Security audit follow-up — design notes (2026-05-22)
 
-These items came out of the 20-finding security sweep on 2026-05-22 but
-require a design pass before any code change. Items #3, #6, and #7 were
+These items came out of the 20-finding security sweep on 2026-05-22. The design
+sections are retained as historical rationale; status banners describe the
+current implementation. Items #3, #6, and #7 were
 implemented in
 [docs/features_change/2026-05/2026-05-22-security-audit-3-6-7-fixes.md](../features_change/2026-05/2026-05-22-security-audit-3-6-7-fixes.md);
-the items in this file are the next blocks of work.
+the remaining gaps in this file are follow-up work, not a claim that none of
+the mitigations have shipped.
 
 ---
 
 ## #1 + #4 — Role-based access control on top of bearer validation
+
+> **Status (re-verified 2026-09-16): #4 RESOLVED; #1 PARTIALLY RESOLVED.**
+> `api/auth.py` now rejects a missing/mismatched `tid` explicitly. The shared
+> deployment enables `ENFORCE_DASHBOARD_RBAC`, so `/api/me` blocks a tenant
+> member with no readable Azure role on the platform scope. Upgrade mutations
+> have a fail-closed gate that accepts platform Owner/Contributor RBAC, the
+> `UpgradeAdmin` app role, or an explicit break-glass OID. The Persona Matrix
+> pins Owner, Contributor, Reader, and local-dev behavior.
+>
+> Full per-action authorization is still incomplete: most routes continue to
+> depend only on `require_caller`, and the activated universal
+> `ALLOW_OPENAPI_TOKEN_AUTH` path intentionally maps one shared token to an M2M
+> caller without caller-specific Azure RBAC. The four-role design below did not
+> become the global route contract. The remaining work is a reviewed,
+> backward-compatible server-side action matrix, not basic tenant validation.
 
 ### Problem
 [api/auth.py](../../api/auth.py) `require_caller` validates the MSAL bearer
@@ -25,6 +42,9 @@ the items in this file are the next blocks of work.
 member therefore reaches every `/api/*` route — ARM proxy, AKS provisioning,
 Storage prepare-db, BLAST submit, terminal WebSocket, OpenAPI admin. This is
 classic Broken Access Control (OWASP A01).
+
+This paragraph describes the original 2026-05-22 baseline. Use the status
+banner above for the current mitigations and remaining gap.
 
 Finding #4 (`tid` claim not separately verified) is a smaller defense-in-depth
 gap in the same module; the issuer check already constrains the tenant, but

@@ -64,7 +64,7 @@ source <(azd env get-values -e <YOUR_ENV> | sed 's/^/export /')
 # Then re-run the role assignments from docs/auth.md §0.
 ```
 
-Full checklist: [Auth → §0 Post-Deploy Permissions Checklist](architecture/authentication.md#0-post-deploy-permissions-checklist-run-after-every-azd-up).
+Full checklist: [Auth → §0 Post-Deploy Permissions Verification](architecture/authentication.md#0-post-deploy-permissions-verification).
 
 **Fix — local backend (your account has no roles)**
 
@@ -112,11 +112,43 @@ Azure Storage [IP network rules do not apply to clients in the same Azure region
 
 Do not leave the network surface open after debugging. The Storage card itself shows the current `publicNetworkAccess` value so you can confirm it is back to `Disabled`.
 
-## Sign-in works but Dashboard shows no workspace
+## Sign-in succeeds but the app shows Access denied
 
 **Symptom**
 
-You signed in, no error message, but the Dashboard shows the empty Setup Wizard ("Select your subscription / resource group / Storage account / ACR") instead of a workspace.
+MSAL sign-in succeeds, but the application stops on the full-page **Access
+denied** screen. The `/api/me` response is HTTP 403 with
+`code: dashboard_access_denied`; the Setup Wizard never opens.
+
+**Cause**
+
+The shipped deployment enables `ENFORCE_DASHBOARD_RBAC`. The signed-in caller
+does not have a readable Azure role on the dashboard's **platform resource
+group**, or on its parent subscription. This entry check is separate from
+permissions on the AKS/workload resource group.
+
+**Fix**
+
+1. Ask a subscription administrator to grant at least `Reader` on the
+  dashboard platform resource group (preferred) or its subscription.
+2. Wait for Azure RBAC propagation, then select **Retry** on the Access denied
+  screen.
+3. If diagnosis is still needed, an authenticated caller can inspect
+  `/api/me/access-review?subscription_id=<sub-id>&resource_group=<dashboard-rg>`;
+  this route remains available even when the SPA entry gate denies access.
+
+The entry gate degrades open when role-assignment enumeration itself fails, so
+an ARM outage or a dashboard managed identity that cannot enumerate roles does
+not create this explicit 403. Downstream Azure operations still enforce their
+own RBAC.
+
+## Dashboard opens but shows no workspace
+
+**Symptom**
+
+You passed sign-in and the entry gate, but the Dashboard shows the empty Setup
+Wizard ("Select your subscription / resource group / Storage account / ACR")
+instead of a workspace.
 
 **Cause**
 
@@ -136,7 +168,7 @@ The dashboard discovers workspaces by scanning subscriptions for a Storage accou
 
     It must match the tenant the deployment lives in.
 
-2. Confirm `Reader` on the workload subscription (ask the deployer to grant if missing):
+2. Confirm `Reader` on the workload subscription used for discovery (ask the deployer to grant if missing):
 
     ```bash
     az role assignment list --assignee <upn> --scope /subscriptions/<sub-id> -o table

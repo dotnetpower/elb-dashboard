@@ -1,45 +1,67 @@
 ---
-title: Glassmorphic UI Rules
-description: Design tokens, glass-card CSS, motion budget, and WCAG AA accessibility rules for the ElasticBLAST Control Plane SPA.
+title: Dashboard UI Rules
+description: Current dark/light theme tokens, flat panel styling, motion budget, and accessibility rules for the ElasticBLAST Control Plane SPA.
 tags:
   - agent
   - ui
 ---
 
-# Glassmorphic UI — Design Rules (detail)
+# Dashboard UI — Design Rules (detail)
 
-> Extracted from `.github/copilot-instructions.md` §10 on 2026-05-19.
+> Re-verified 2026-09-16 against `web/src/theme/glass.css`. The historical
+> `--glass-*` names remain compatibility aliases; the current UI is flat rather
+> than heavily frosted.
 
-Calm, muted, low-contrast surfaces. Reference tokens (use as CSS variables in `web/src/theme/`):
+The dark theme follows a restrained Grafana-like operational palette. The light
+theme follows VS Code Light Modern: white panels on a near-white canvas,
+hairline borders, no panel blur, and no default panel shadow. Use the shared
+tokens rather than literal colors:
 
 ```css
 :root {
-  --glass-bg: rgba(255, 255, 255, 0.08);
-  --glass-bg-strong: rgba(255, 255, 255, 0.14);
-  --glass-border: rgba(255, 255, 255, 0.18);
-  --glass-blur: 18px;
-  --glass-radius: 16px;
-  --bg-gradient: radial-gradient(1200px 600px at 20% 0%, #1c2541 0%, #0b132b 60%, #050816 100%);
-  --text-primary: #e8ecf4;
-  --text-muted:   #9aa3b8;
-  --accent:       #7aa7ff;   /* cool, low-saturation blue */
-  --success:      #6ad6a3;
-  --warning:      #f0c674;
-  --danger:       #e07b8a;
+  --bg-canvas: #111217;
+  --bg-primary: #181b1f;
+  --bg-secondary: #1e2228;
+  --glass-bg: var(--bg-primary);
+  --glass-bg-strong: var(--bg-secondary);
+  --glass-border: rgba(255, 255, 255, 0.06);
+  --glass-blur: 0px;
+  --glass-radius: 8px;
+  --text-primary: #e4e7ec;
+  --text-muted: #9da5b4;
+  --accent: #6e9fff;
+  --success: #73bf69;
+  --warning: #f2994a;
+  --danger: #f2726f;
+  --motion-fast: 120ms ease-out;
+  --motion-base: 200ms ease-out;
 }
 
-.glass-card {
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--glass-radius);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+[data-theme="light"] {
+  --bg-canvas: #f8f8f8;
+  --bg-primary: #ffffff;
+  --glass-bg: #ffffff;
+  --glass-border: #e5e5e5;
+  --glass-blur: 0px;
+  --text-primary: #1f1f1f;
+  --text-muted: #525252;
+  --accent: #005fb8;
+  --success: #15732e;
+  --warning: #8a5d00;
+  --danger: #b5251f;
+  --shadow-panel: none;
 }
 ```
 
-* Avoid pure black, pure white, and saturated brand colors. Stay in the deep-navy / cool-grey family.
-* No drop shadows above 32 px blur, no neon, no animated gradients.
+* Preserve the two established palettes; do not invent a third ad-hoc color
+  system inside one component.
+* Keep operational panels at 8px radius or less. Pills, status dots, and avatar
+  circles are the exceptions.
+* Dark panels may use restrained depth; light panels are flat with hairline
+  borders. No neon, decorative orbs, or animated gradients.
 * Motion: `prefers-reduced-motion` respected; transitions ≤ 200 ms ease-out.
 * Iconography: `lucide-react`, stroke 1.5.
-* Components must be readable on a 1366×768 laptop and accessible (WCAG AA contrast on text against the glass surface).
+* Use `--font-sans` / `--font-mono`; both currently resolve to Inter so code-like
+  values do not introduce an unrelated visual language.
+* Components must be readable on a 1366×768 laptop and accessible (WCAG AA
+  contrast against both dark and light surfaces).

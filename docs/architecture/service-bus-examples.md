@@ -228,7 +228,7 @@ uv run python example/servicebus/send_request.py --db core_nt --program blastn
 ```
 
 You can also enqueue through the dashboard route, which additionally creates the
-"Recent searches" placeholder row so the job is visible in the UI immediately:
+"BLAST Jobs" placeholder row so the job is visible in the UI immediately:
 
 ```bash
 TOKEN=$(az account get-access-token --resource <api-client-id> --query accessToken -o tsv)
@@ -246,7 +246,7 @@ uv run python example/servicebus/monitor.py --peek 10   # peek more request mess
 ```
 
 While a job is in flight the dashboard's **Message Flow** card shows the same
-queue activity (`active_total`), and the job appears in **Recent searches** and
+queue activity (`active_total`), and the job appears in **BLAST Jobs** and
 the **Jobs** list with `submission_source: servicebus`.
 
 ### 4. Consumer — settle requests or download results
@@ -279,7 +279,7 @@ A full live run on the bundled deployment looked like this:
 1. Enqueued a `core_nt` `blastn` request via the dashboard send route.
 2. The worker drained it (~30 s tick) and bridged it to `POST /v1/jobs`; the
    **Message Flow** card showed `active_total: 1` and the job appeared in
-   **Recent searches** / **Jobs** with `submission_source: servicebus`.
+  **BLAST Jobs** with `submission_source: servicebus`.
 3. The BLAST job ran on AKS and completed.
 4. `consume.py --source completions --download` received the `queued` → `running`
    → `succeeded` transitions. The `succeeded` event carried five `result_files`,

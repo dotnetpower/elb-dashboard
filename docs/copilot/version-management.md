@@ -7,12 +7,11 @@ tags:
 
 # Version Management
 
-> Extracted from `.github/copilot-instructions.md` §13 on 2026-05-22 to keep
-> the always-loaded charter lean. Read this when bumping the release version
-> or touching the header version stamp pipeline.
+> Re-verified 2026-09-16 against `bump-version.sh`, Vite, and the repository's
+> current-branch/no-push workflow.
 
 The control plane carries a small release + build stamp in the SPA header
-(`v0.2.17 · 4060551`). The release version is bumped by a single script that
+(`vA.B.<build> · <short-sha>`). The release version is bumped by a single script that
 reads Conventional Commits since the last tag — no manual edits to
 `package.json` or `pyproject.toml`. The build number is not committed; it is
 computed at build time from commits since the latest release tag.
@@ -128,22 +127,25 @@ The script:
 3. Decides the bump kind from Conventional Commits: `feat:` and `fix:` both
    move to the next `B` release; `BREAKING CHANGE` requires `--major`.
 4. Rewrites `web/package.json` (via `node`) and the first
-   `version = "…"` line in [pyproject.toml](../../pyproject.toml).
-5. Creates `chore(release): vA.B.0` commit + annotated `vA.B.0` tag.
-6. Does **not** push — that stays an explicit step so the maintainer can
+   `version = "…"` line in [pyproject.toml](../../pyproject.toml), refreshes
+   `uv.lock`, and generates the tagged/Unreleased documentation pages.
+5. Updates the Releases index and MkDocs navigation for the new tag.
+6. Creates `chore(release): vA.B.0` commit + annotated `vA.B.0` tag.
+7. Does **not** push — that stays an explicit step so the maintainer can
    review the diff first.
 
 ---
 
 ## 4. Release workflow
 
-Routine — feature shipped via PR, ready to cut a release:
+Routine — finished commits are ready to release on the current branch:
 
-1. Merge the PR(s) to `main` using Conventional Commits subjects.
+1. Confirm the current branch contains the reviewed Conventional Commits and a
+   clean version/release-note working tree.
 2. `scripts/dev/bump-version.sh --dry-run` → confirm the bump kind.
 3. `scripts/dev/bump-version.sh` → creates commit + tag locally.
-4. Inspect: `git show HEAD` (release commit), `git tag -v vA.B.0` (tag).
-5. `git push origin main --follow-tags` → cloud picks up the new tag for
+4. Inspect: `git show HEAD` (release commit) and `git show vA.B.0` (annotated tag).
+5. The maintainer runs `git push origin <current-branch> --follow-tags`; cloud picks up the new tag for
    GitHub releases automation.
 6. Deploy the frontend with the new build stamp visible in the header:
    ```bash
@@ -152,14 +154,9 @@ Routine — feature shipped via PR, ready to cut a release:
 7. Open the cloud URL, hover the header version caption, confirm the
    displayed build number and commit short SHA match the deployed `HEAD`.
 
-Hotfix — branch from a tag, ship the next release train:
-
-```bash
-git checkout -b hotfix/v0.2.0 v0.1.0
-# … fix: … commit …
-scripts/dev/bump-version.sh --release
-git push origin hotfix/v0.2.0 --follow-tags
-```
+Hotfixes follow the same current-branch procedure. This repository's agent
+workflow does not create a branch or push automatically; branch choice and
+publication remain maintainer decisions.
 
 ---
 
@@ -191,10 +188,9 @@ Before pushing a release tag:
    `--build-arg` path through `quick-deploy.sh` (or a refreshed
    postprovision build) carries the stamp. The pre-flight Step 0 in
    `quick-deploy.sh` resolves the host-side values automatically.
-4. **Bumping inside a feature branch.** Keep the bump on the same branch
-   that will land on `main` (or on the hotfix branch). Bumping then
-   rebasing rewrites the tag's target commit and confuses anyone who
-   already pulled it.
+4. **Moving/rebasing after tagging.** Create the tag only when the current
+   branch history is final. Rewriting the tagged commit confuses anyone who
+   already fetched it.
 5. **Using `--patch`.** `C` is now the build number, so `--patch` is rejected.
    Use `--release` / `--minor` for the next `B` release train, or `--major`
    when deliberately moving to the next `A` generation.

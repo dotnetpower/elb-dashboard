@@ -1,10 +1,10 @@
 ---
 title: Storage Network Isolation & Browser ↔ Storage Proxy
-description: The hard requirement that workload Storage stays publicNetworkAccess Disabled — and the api-sidecar streaming proxy contract that makes the browser workflow work without issuing SAS tokens.
+description: The hard requirement that workload Storage stays publicNetworkAccess Disabled — and the current API-mediated transfer contract that avoids browser SAS tokens.
 social:
   cards_layout_options:
     title: Storage Isolation & Proxy Contract
-    description: publicNetworkAccess Disabled + api-sidecar streaming proxy — no SAS tokens to the browser, ever.
+    description: publicNetworkAccess Disabled + API-mediated transfers — no SAS tokens to the browser, ever.
 tags:
   - architecture
   - security
@@ -25,9 +25,9 @@ audited, and reviewed on its own.
     2. The browser **never** receives a SAS token — not user delegation, not
        account, not service. The `api` sidecar is the only Storage client the
        browser sees.
-    3. All browser uploads/downloads stream through the `api` sidecar in
-       1 MiB chunks (download) / 4 MiB blocks (upload), capped to 4
-       concurrent transfers per replica.
+     3. Browser query and result traffic terminates at the `api` sidecar. Inline
+       query text is staged by the API, while result-file downloads are
+       streamed through it. The browser never connects to a Storage endpoint.
 
 The sanctioned exceptions are explicit, IP-allowlisted, local-debug only.
 See [.github/copilot-instructions.md §9](https://github.com/dotnetpower/elb-dashboard/blob/main/.github/copilot-instructions.md#9-storage-network-isolation-hard-requirement)
@@ -62,10 +62,10 @@ rule in the rest of the architecture documents is consistent with it.
    - There is **no temporary public-access window**, no `auto-keep-enabled`
      toggle, and no `bypass: AzureServices` workaround. Anything that needs to
      reach Storage must do so via private endpoint from inside the VNet.
-3. **Browser ↔ storage**: the SPA never talks to Storage directly. **All
-   browser downloads and uploads are proxied by the api sidecar.** No SAS
-   tokens (user delegation or otherwise) are ever issued to the browser. See
-   the next section for the full proxy contract.
+3. **Browser ↔ storage**: the SPA never talks to Storage directly. Query input,
+  result-file downloads, and result previews all pass through an API route.
+  No SAS tokens (user delegation or otherwise) are ever issued to the
+  browser. See the next section for the current transfer contract.
 
 ### Container Apps Environment requirements that make rule 1 enforceable
 
@@ -120,70 +120,77 @@ results).
 ### Rules
 
 - The api sidecar is the **only** Storage client the browser sees.
-- All transfers are **streamed** in chunks. The api sidecar must never buffer a
-  full blob in memory or to local disk.
-- Authentication: every byte the browser sends or receives is on a request
-  that carries a valid MSAL access token and passes the standard authorization
-  check (caller is `owner_oid` of the job, or has the right tenant role).
-- Authorization: the api sidecar resolves browser-supplied logical names
-  (`job_id`, `result_filename`) to the concrete container/path internally.
-  The browser never names a Storage account, container, or blob path
-  directly.
+- Transfer modes differ by operation: result files use a streaming response;
+  inline query FASTA is part of the submit JSON body and is therefore held in
+  memory before the API stages it in Storage; previews are bounded API
+  responses rather than direct blob downloads.
+- Authentication: browser transfers carry a valid MSAL access token. Trusted
+  automation may use the shared token while universal M2M auth is enabled, and
+  Service Bus completion links use a scoped expiring download token.
+- Job authorization: owner-scoped deployments require the caller's
+  `object_id` to match `owner_oid`; cluster-shared/external rows have no owner.
+  The shared deployment currently enables `BLAST_JOBS_SHARED_VISIBILITY`,
+  which deliberately relaxes per-owner reads and must be disabled before
+  multi-tenant/shared-subscription use.
+- Authorization: current dashboard requests carry the configured
+  `storage_account`. Job-bound result routes compare it with the account stored
+  in `JobState` and reject a mismatch with `403 cross_account_mismatch`; legacy
+  or not-yet-projected rows fall back to the supplied value. Account names are
+  grammar-validated before they can form an Azure endpoint. The preferred file
+  route uses an encoded `file_id`; the compatibility download route still
+  accepts a validated job-owned `blob_name`.
 - The api sidecar uses its managed identity + the private endpoint to talk to
   Storage. No SAS is ever generated, even server-side, for browser-facing
   flows.
-- Concurrency: a per-replica semaphore caps simultaneous proxy transfers
-  (initial: 4 concurrent transfers). Excess requests get `429 Too Many Requests`
-  with `Retry-After`. This protects the api sidecar's modest CPU/memory
-  budget inside the bundled Container App.
+- Concurrency: `stream_blob_bytes` wraps Storage downloads in a process-local
+  semaphore. The default is 8 permits, configurable with
+  `STORAGE_STREAM_MAX_CONCURRENCY`; acquisition waits up to 60 seconds by
+  default (`STORAGE_STREAM_ACQUIRE_TIMEOUT_SECONDS`). The current routes do not
+  translate exhaustion into a dedicated `429` response or add `Retry-After`.
 
-### Download contract (`GET /api/blast/jobs/{job_id}/results/{name}`)
+### Result-file download contract
 
-Behaviour:
-
-- Validate token + `owner_oid`; resolve `(job_id, name)` to a workload-storage
-  blob path; refuse if the job's `status` is not in a terminal-success state.
-- Open a streaming download from Storage with a small chunk size (1 MiB).
-- Pass through `ETag`, `Content-Type`, `Content-Length`, and
-  `Last-Modified` headers from the Storage response.
-- Honor `Range` requests by passing the same `Range` header to Storage and
-  returning `206 Partial Content` with the storage response's
-  `Content-Range`. This is required to keep large result downloads resumable
-  inside the Container Apps 240-second per-request timeout.
-- For results larger than what fits inside one 240-second window at the
-  user's link speed, the SPA must use range requests. The proxy advertises
-  `Accept-Ranges: bytes` so browsers and `curl --range` work.
-- Use Python `httpx` (or the Azure Storage SDK's streaming download) with
-  `chunk_size=1 MiB` and async iteration so the FastAPI worker is not
-  blocked.
-- Never decompress on the proxy. Pass the Storage `Content-Encoding`
-  through.
-
-### Upload contract (`POST /api/blast/jobs/{job_id}/queries`)
+The preferred route is
+`GET /api/blast/jobs/{job_id}/results/{file_id}`. The compatibility route is
+`GET /api/blast/jobs/{job_id}/results/download?blob_name=...`.
 
 Behaviour:
 
-- Validate token + `owner_oid`; resolve `(job_id, filename)` to a
-  workload-storage blob path inside the `queries` container; refuse if the
-  job's `status` does not allow new uploads.
-- Accept the request body as a stream (`request.stream()` in FastAPI), not
-  via `multipart` form parsing into memory.
-- Use the Azure Storage SDK's **block-blob staged upload**: call
-  `stage_block` for each chunk (initial chunk size: 4 MiB) as it arrives,
-  then `commit_block_list` once the request body ends. This caps proxy
-  memory use at one chunk plus internal SDK overhead, regardless of total
-  upload size.
-- Set a per-blob upload size limit (initial: 256 MiB) at the API layer and
-  reject larger requests with `413 Payload Too Large`. This keeps a single
-  upload inside the 240-second Container Apps request timeout at a typical
-  upload speed.
-- For the rare case of larger uploads (NCBI database imports, multi-GB
-  reference inputs): those are not browser-driven. The Celery worker
-  performs them server-side over the private endpoint, with progress
-  written to the Storage state row. The browser monitors progress via
-  `GET /api/storage/jobs/{import_id}`.
-- Do not generate a SAS. The browser PUT goes to the api sidecar; the api
-  sidecar PUTs to Storage with managed identity.
+- Validate the caller and job ownership, cross-check the supplied Storage
+  account when the state row records one, and ensure the decoded blob belongs
+  to the requested job.
+- Call the synchronous Azure Blob SDK's `download_blob()` before committing
+  the HTTP response, then yield `StorageStreamDownloader.chunks()` through a
+  FastAPI `StreamingResponse`. Chunk size is SDK-managed; the application does
+  not pin it to 1 MiB.
+- Infer `Content-Type` from the safe filename and set `Content-Disposition`.
+  The current route does not forward Storage `ETag`, `Content-Length`,
+  `Last-Modified`, or `Content-Encoding` metadata.
+- The current route does not implement HTTP `Range` / `206 Partial Content` or
+  advertise `Accept-Ranges`; interrupted large downloads restart from byte 0.
+- For an external OpenAPI `file_id`, fall back to the OpenAPI result stream
+  when the id is not a local encoded blob path.
+
+### Inline query staging contract (`POST /api/blast/jobs`)
+
+Behaviour:
+
+- New Search reads the selected FASTA into browser state and sends it as the
+  `query_data` field in a JSON request; there is no multipart or
+  `POST /api/blast/jobs/{job_id}/queries` streaming-upload route today.
+- The global request guard rejects a declared `Content-Length` above 10 MiB by
+  default (`MAX_REQUEST_BODY_BYTES`, with a 100 MiB configuration ceiling).
+  FastAPI still parses accepted JSON into memory.
+- Before queuing the local Celery submit, the API validates the FASTA and
+  synchronously calls `upload_blob` to write
+  `queries/uploads/{job_id}/query.fa`, then persists the blob reference rather
+  than the raw `query_data`.
+- The application does not explicitly call `stage_block`, does not define a
+  4 MiB application upload block, and has no separate 256 MiB query-upload
+  limit.
+- Inline OpenAPI `query_fasta` requests are API-mediated and forwarded to the
+  sibling execution plane, which owns their staging.
+- No browser-facing path generates a SAS or returns a direct upload URL.
 
 ### Why not user delegation SAS?
 
@@ -199,26 +206,24 @@ the proxy's CPU/memory cost. It does not work in this design because:
    incidents (logs, browser history, screenshots, support tickets).
 
 The trade-off is real: the api sidecar pays CPU and bandwidth for every
-download. The bundled Container App has a single replica, so a sustained
-many-user download workload would saturate it. This is acceptable for the
-project's expected scale (operator-driven, low concurrency). If future scale
-breaks the assumption, the escalation path is to split the api sidecar into
-its own Container App with `maxReplicas` > 1, **not** to re-introduce SAS.
+download and holds accepted inline query JSON in memory while staging it. The
+bundled Container App has a single replica, so sustained many-user downloads
+or several large simultaneous submissions can saturate it. If future scale
+breaks the operator-driven, low-concurrency assumption, the escalation path is
+an independently scalable private transfer service or API deployment, **not**
+browser SAS.
 
 ### Verification
 
-- A test that uploads a 32 MiB random file via the proxy, downloads it back
-  via the proxy, and verifies SHA-256 round-trip integrity.
-- A test that the api sidecar's RSS does not exceed `chunk_size + small
-  overhead` while a 256 MiB upload is in flight.
-- A test that 5 concurrent downloads of a 64 MiB blob complete and that the
-  6th request gets `429 Too Many Requests`.
-- A test that a `Range: bytes=10485760-` request returns `206 Partial
-  Content` with the correct `Content-Range`.
-- A SAST/grep check in CI: any code path that calls
-  `generate_blob_sas`, `generate_container_sas`, or
-  `BlobClient.url` for a browser-bound response fails the build. There is no
-  permitted browser-bound SAS use.
+Current automated coverage checks that a Storage download is opened before
+FastAPI commits the streaming response, SDK chunks are yielded unchanged,
+initial failures are raised eagerly, unsafe blob paths are rejected, and every
+job-bound result route invokes the Storage-account cross-check. The security
+suite also guards against reintroducing browser-bound SAS issuers.
+
+HTTP Range support, a dedicated overload response, and a true streaming query
+upload endpoint are **not** current capabilities and therefore must not appear
+in runbooks or client expectations until their routes and tests land.
 
 ## See also
 

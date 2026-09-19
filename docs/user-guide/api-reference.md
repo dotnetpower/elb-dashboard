@@ -21,7 +21,7 @@ The API Reference page is for developers and platform maintainers who need to in
 
 | Goal | Best surface |
 | --- | --- |
-| Run a normal BLAST search and inspect results | New Search, Recent searches, and Results |
+| Run a normal BLAST search and inspect results | New Search, BLAST Jobs, and Results |
 | Check whether the OpenAPI service is available | API Reference |
 | Generate or copy the API token | API Reference token panel |
 | Test one endpoint from the browser | API Reference endpoint cards |
@@ -74,7 +74,17 @@ The `Try` button is useful, but endpoint risk is not equal:
 
 ## Authentication
 
-The API token panel shows whether the `X-ELB-API-Token` value is configured for the sibling OpenAPI service. External clients must send this token in the request header when calling the OpenAPI endpoint directly.
+The API token panel shows whether the shared `X-ELB-API-Token` value is
+configured for the sibling OpenAPI service. External clients must send this
+token when calling the OpenAPI endpoint directly.
+
+The shared deployment also sets `ALLOW_OPENAPI_TOKEN_AUTH=true`, which lets the
+same token authenticate programmatic calls to every dashboard route guarded by
+`require_caller`, including mutating routes. That universal path maps to a
+synthetic M2M caller and has no caller-specific Azure RBAC identity. Keep
+ingress controlled, treat the token as an administrator credential, and set the
+gate to `false` when only interactive MSAL callers should reach dashboard APIs.
+See the [Feature Gate Registry](../operate/feature-gates.md).
 
 ![API token panel showing the Copy action](../images/screenshots/api-token-panel.svg)
 
@@ -95,7 +105,9 @@ The API Reference page's `Try` buttons use the same token internally. When you c
 
 Keep the token hidden in screenshots, demos, and shared notes. Regenerate it only when rotating integration credentials or recovering from a suspected exposure.
 
-The dashboard itself still uses the signed-in Azure identity for access. The OpenAPI token is for calls forwarded to the AKS-hosted OpenAPI execution service.
+The browser dashboard still uses its MSAL bearer. The shared token is the
+automation credential for direct OpenAPI calls and, while the universal gate is
+enabled, dashboard API calls.
 
 ## Submit, Status, Results: Browser Flow
 

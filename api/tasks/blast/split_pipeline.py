@@ -1056,8 +1056,8 @@ def _load_split_child_merge_reports(
     Per-shard reports are tiny JSON blobs (<= ``SPLIT_MERGE_REPORT_MAX_BYTES``).
     Sequential downloads (one HTTPS RTT per child) made the parent merge
     spend 100×RTT just to fetch reports on a 100-shard split. The fan-out
-    ceiling matches ``stream_blob_bytes`` (4 concurrent transfers) so we
-    don't blow the api sidecar's BlobServiceClient pool budget.
+    stays at four workers so this metadata read does not consume the
+    BlobServiceClient pool budget needed by result transfers.
     """
     from concurrent.futures import ThreadPoolExecutor
 

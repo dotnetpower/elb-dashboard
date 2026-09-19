@@ -63,7 +63,7 @@ jsonld: |
         "position": 6,
         "name": "Submit a first BLAST search",
         "url": "https://dotnetpower.github.io/elb-dashboard/get-started/#submit-your-first-blast-search",
-        "text": "From New Search, paste a small FASTA query, pick the warmed database, submit the job, and follow it on Recent searches until results appear."
+        "text": "From New Search, paste a small FASTA query, pick the warmed database, submit the job, and follow it on BLAST Jobs until results appear."
       }
     ]
   }
@@ -187,10 +187,6 @@ azd up progress map
   8/8  Health check             wait for /api/health and print URL
 ------------------------------------------------------------
 ```
-
-<!-- TODO: screenshot — terminal output of the azd up progress map block above. -->
-<!-- Save as: docs/images/screenshots/deploy-progress-map.png -->
-<!-- ![azd up progress map printed at the top of deploy.sh](images/screenshots/deploy-progress-map.png) -->
 
 The deployed control plane is one [Azure Container App](https://learn.microsoft.com/azure/container-apps/overview) with six sidecars. Researchers do not need Docker or local image builds for this path.
 
@@ -486,7 +482,7 @@ When AKS reports the cluster as running and the dashboard's post-provision RBAC 
 
 While the cluster is provisioning, kick off the ACR image builds in parallel — they have no dependency on AKS. The **Azure Container Registry** card in the Resource Plane shows the four images the BLAST runtime needs (`elb (BLAST worker)`, `job-submit`, `query-split`, `openapi`) with their pinned versions and a per-image **Build** action; the card-level **Build** button on the top right builds all four at once.
 
-![Azure Container Registry card showing Ready badge, Premium SKU, IMAGES BUILT 0/4, and a four-row image table (elb (BLAST worker) 1.4.0, job-submit 4.1.0, query-split 0.1.4, openapi 4.14) each with a Build action; a card-level Build button is in the header](images/screenshots/get-started/acr-build.png)
+![Azure Container Registry card showing Ready, Premium SKU, IMAGES BUILT 4/4, and built api, worker, OpenAPI 4.61, and terminal images](images/screenshots/get-started/acr-build.png)
 
 The build runs entirely inside [ACR Tasks](https://learn.microsoft.com/azure/container-registry/container-registry-tasks-overview) — your laptop only uploads the build context. While the worker picks up the task, every row flips to **Queued** and the card-level status shows `Build task queued; waiting for the worker to start an ACR run…` with an elapsed counter. Rows turn green individually as each image finishes and `IMAGES BUILT` climbs `0/4 → 4/4`. You can leave this view and come back — the card polls quietly in the background.
 
@@ -524,7 +520,7 @@ Once the warmup row flips to all-green (`AKS cache copying · N/N`) the database
 
 The OpenAPI execution surface — the `elb-openapi` service that powers the [API Reference](user-guide/api-reference.md) page and the OpenAPI submit / status routes — is a separate deployment on the same AKS cluster. It is not required for browser-only BLAST submissions through New Search, but it must be deployed before any external client (curl, Postman, an automation script) can drive BLAST through REST. Skip this section if you only need the dashboard UI.
 
-Open the **API** entry in the top navigation. On a fresh cluster the page shows an **OpenAPI service not found** banner identifying the cluster the discovery probe ran against (e.g. `elb-cluster-01`). Click **Deploy elb-openapi** to roll out the `elb-openapi:4.14` image you already built in ACR — the dashboard applies the deployment + internal LoadBalancer to the `elb` namespace and watches it through to a ready state. Use **Retry Discovery** if you deployed manually from the terminal sidecar and just need the page to re-probe.
+Open the **API** entry in the top navigation. On a fresh cluster the page shows an **OpenAPI service not found** banner identifying the cluster the discovery probe ran against (e.g. `elb-cluster-01`). Click **Deploy elb-openapi** to roll out the image pinned by [`api/services/image_tags.py`](https://github.com/dotnetpower/elb-dashboard/blob/main/api/services/image_tags.py) that you already built in ACR — the dashboard applies the deployment + internal LoadBalancer to the `elb` namespace and watches it through to a ready state. Use **Retry Discovery** if you deployed manually from the terminal sidecar and just need the page to re-probe.
 
 ![API Reference page showing the "OpenAPI service not found" banner: "The elb-openapi service is not running on elb-cluster-01. Deploy it now to load the live API specification." with Deploy elb-openapi (primary) and Retry Discovery (secondary) buttons, and an "API response contract · additive v1" panel below](images/screenshots/get-started/openapi-deploy.png)
 
@@ -540,7 +536,7 @@ With ACR images built, a warmed database, and the cluster green, the workspace i
 Then submit and track the first job:
 
 1. Open **New Search**, paste a small FASTA query, and pick the warmed database.
-2. Submit the job and follow it from **Recent searches** until it completes.
+2. Submit the job and follow it from **BLAST Jobs** until it completes.
 3. Open the result to confirm hits are rendered and that the download links stream through the API sidecar (no SAS URL in the browser).
 
 The first full BLAST smoke test creates an [AKS](https://learn.microsoft.com/azure/aks/intro-kubernetes) workload cluster and can add cost. Run it only when your tenant policy allows AKS to stay running long enough for the job lifecycle, and make sure someone owns cleanup before starting.

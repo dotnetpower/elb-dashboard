@@ -21,8 +21,10 @@ required by the ElasticBLAST control plane.
     Browser users sign in with MSAL.js (Auth Code + PKCE). The backend
     validates the bearer token for identity only — every Azure SDK call is
     made as the user-assigned managed identity `id-elb-dashboard-*` via
-    `DefaultAzureCredential`. No service principal secrets, no on-behalf-of
-    (OBO) flow, no SAS tokens to the browser.
+    `DefaultAzureCredential`. Trusted automation may use the shared
+    `X-ELB-API-Token` while `ALLOW_OPENAPI_TOKEN_AUTH=true` (ON in the shared
+    deployment defaults). No service principal secrets, no on-behalf-of (OBO)
+    flow, no SAS tokens to the browser.
 
 ---
 
@@ -32,6 +34,7 @@ required by the ElasticBLAST control plane.
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif"}, "flowchart": {"curve": "basis", "padding": 18}}}%%
 flowchart LR
   browser(["Browser SPA<br/>MSAL.js · Auth Code + PKCE"])
+  automation(["Trusted automation<br/>X-ELB-API-Token"])
   subgraph app["Azure Container App · ca-elb-dashboard"]
     api["api sidecar<br/>JWT validation (who called)"]
     sidecars["worker / beat / terminal sidecars"]
@@ -40,6 +43,7 @@ flowchart LR
   azure[("Azure ARM + data-plane APIs")]
 
   browser -- Bearer JWT --> api
+  automation -- shared M2M token --> api
   api -. DefaultAzureCredential .-> mi
   sidecars -. DefaultAzureCredential .-> mi
   mi -- token issued by Entra ID --> azure
@@ -52,6 +56,17 @@ user-assigned Managed Identity (MI) `id-elb-dashboard-*`** mounted on the
 `ca-elb-dashboard` Container App (the api, worker, beat, and terminal sidecars
 all pick it up via `DefaultAzureCredential`). On-Behalf-Of (OBO) is
 deliberately not used.
+
+### Shared-token automation path
+
+When `ALLOW_OPENAPI_TOKEN_AUTH=true`, any route using `require_caller` may
+authenticate a trusted automation caller with `X-ELB-API-Token`. The token is
+compared in constant time against the configured or runtime-cached OpenAPI
+admin token and maps to a synthetic M2M caller; a wrong presented token returns
+401 without falling through to bearer authentication. This path has no
+caller-specific Azure RBAC identity, so deployments must control ingress and
+rotate the shared token. Setting the gate to `false` restores MSAL-only
+authentication. Browser behavior is unchanged.
 
 ### Sign-in handshake
 
@@ -90,12 +105,14 @@ sequenceDiagram
 
 ---
 
-## §0 Post-Deploy Permissions Checklist (run after every `azd up`)
+## §0 Post-Deploy Permissions Verification
 
 > **Important**: When the user-assigned MI `id-elb-dashboard-*` is recreated
 > (e.g. after `azd down` followed by a fresh `azd up`) it gets a **new
-> object ID**. Previous role assignments do not carry over. Run this
-> checklist after each fresh provision.
+> object ID**. Previous out-of-band assignments do not carry over. `azd up`
+> recreates the assignments owned by Bicep, and `deploy.sh` runs the RBAC
+> doctor plus workload-RG bootstrap helper. Use this checklist after a fresh
+> provision or when attaching pre-existing workload resources.
 
 ### Step 1 — Capture the MI object ID
 
@@ -109,29 +126,21 @@ SUB=$(az account show --query id -o tsv)
 echo "MI ObjectId: $MI_OID"
 ```
 
-### Step 2 — Subscription-level roles (ARM management plane)
+### Step 2 — Verify deployment-owned roles
 
 ```bash
-# Contributor — CRUD for AKS, Storage, ACR, Network, Key Vault
-az role assignment create --assignee-object-id "$MI_OID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Contributor" --scope "/subscriptions/$SUB"
+scripts/dev/check-mi-rbac.sh --strict
+```
 
-# Reader — list subscriptions, RGs
-az role assignment create --assignee-object-id "$MI_OID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Reader" --scope "/subscriptions/$SUB"
+The expected subscription-wide baseline is `Reader` plus the
+ABAC-constrained `Elb Workload RG Creator` custom role. Do **not** grant
+subscription-wide `Contributor` or `User Access Administrator`; mutable
+permissions belong on the platform or workload resource group. If the doctor
+reports a missing deployment-owned assignment, review its exact command and
+run the explicit opt-in repair:
 
-# AKS Cluster User — get kubeconfig for direct K8s API calls
-az role assignment create --assignee-object-id "$MI_OID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Azure Kubernetes Service Cluster User Role" --scope "/subscriptions/$SUB"
-
-# User Access Administrator — runtime role assignments (AcrPull to kubelet, etc.)
-# Best-effort: if missing, the code logs a recovery hint instead of failing.
-az role assignment create --assignee-object-id "$MI_OID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "User Access Administrator" --scope "/subscriptions/$SUB"
+```bash
+scripts/dev/check-mi-rbac.sh --auto-fix
 ```
 
 ### Step 3 — Workload Storage Account (data plane)
@@ -165,7 +174,10 @@ az role assignment list --assignee "$MI_OID" --all \
   --query "[].{role:roleDefinitionName, scope:scope}" -o table
 ```
 
-Expected: 14+ roles covering subscription, platform storage, workload storage, platform ACR, workload ACR.
+Verify the scopes, not a fixed assignment count: subscription discovery roles,
+platform resource-group and resource roles, workload resource-group roles, and
+data-plane roles for every attached Storage account and registry must all name
+the current MI object ID.
 
 ---
 
@@ -175,14 +187,25 @@ The Container App's **shared user-assigned Managed Identity** `id-elb-dashboard-
 is the principal that performs all Azure operations. It must be granted the
 following roles.
 
-### Subscription-Level (ARM Management Plane)
+### Subscription-Level (Discovery and Workload-RG Bootstrap)
 
 | Role | Purpose |
 |------|---------|
-| **Contributor** | Create/delete AKS, Storage, ACR, Network, Key Vault resources |
-| **Reader** | List subscriptions, resource groups, VMs |
-| **Azure Kubernetes Service Cluster User Role** | Get kubeconfig via `listClusterUserCredential` for direct K8s API calls |
-| **User Access Administrator** | Assign RBAC roles at runtime (AcrPull to kubelet, etc.) — **best-effort**: code degrades gracefully if missing |
+| **Reader** | Discover subscriptions, resource groups, and existing Azure resources without subscription-wide mutation rights. |
+| **Elb Workload RG Creator** (custom, ABAC-constrained) | Create/read/delete workload and AKS node resource groups and assign only the five allowlisted runtime roles to service principals. It cannot grant Owner or arbitrary roles. |
+
+Subscription-wide `Contributor` and `User Access Administrator` are
+deliberately not part of the deployed identity contract.
+
+### Platform Resource Group (assigned by Bicep during `azd up`)
+
+| Role | Purpose |
+|------|---------|
+| **Contributor** | Legacy phase-1 grant retained during least-privilege soak; scopes mutable control-plane work to the dashboard RG rather than the subscription. |
+| **User Access Administrator** | Assign the runtime roles needed by managed identities inside the platform RG. |
+| **Managed Identity Contributor** | Create and manage user-assigned identities and federated credentials. |
+| **Network Contributor** | Manage the platform VNet, subnets, NSGs, and private endpoints. |
+| **Azure Kubernetes Service Contributor Role** | Manage AKS control-plane resources created in this RG. |
 
 ### Platform Resources (assigned by Bicep during `azd up`)
 
@@ -208,6 +231,8 @@ following roles.
 
 | Role | Scope | Purpose |
 |------|-------|---------|
+| **Contributor + User Access Administrator** | Workload/cluster resource group | Create `id-elb-openapi`, its federated credential, and the allowlisted downstream assignments. `grant-runtime-rbac.sh` supplies this bootstrap safety net. |
+| **Managed Identity Contributor + Network Contributor + Azure Kubernetes Service Contributor Role** | Workload/cluster resource group | Phase-1 narrower grants that cover identity, networking, and AKS lifecycle operations while the broader Contributor grant soaks before a separate removal change. |
 | **Storage Blob Data Contributor** | Workload storage account (e.g. `elbstg01`) | Upload queries, copy DBs from NCBI, list/read result blobs |
 | **AcrPush + AcrPull** | Workload ACR (e.g. `elbacr01`) | Build ElasticBLAST images via ACR Build Tasks |
 
@@ -240,29 +265,39 @@ runtime. All are idempotent and soft-fail if the MI lacks
 | Storage Blob Data Contributor | User storage account | Upload query/config files and read BLAST DB blobs |
 | Azure Kubernetes Service Cluster User Role | AKS cluster | Run Kubernetes API operations from the submit helper job |
 
-### Signed-In User (convenience)
+### Developer Identity (local tooling only)
 
 | Role | Scope | Purpose |
 |------|-------|---------|
-| Storage Blob Data Contributor | User storage account | Direct blob access |
-| AcrPush | ACR | Trigger ACR builds |
-| Key Vault Secrets Officer | Key Vault | Access VM passwords |
+| Storage Blob Data Contributor | Workload storage account | Exercise data-plane routes and inspect blobs during explicit local debugging. |
+| AcrPush | ACR | Trigger ACR builds from local operator tooling. |
 
-> If any assignment fails, the UI shows a toast with the manual
-> `az role assignment create` command.
+These grants are not required for normal browser traffic in the deployed
+Container App, which uses the dashboard MI. There is no terminal VM password
+or user-facing Key Vault secret path.
 
 ---
 
 ## §3 Signed-In User — Required Roles
 
-The signed-in user needs minimal roles since all Azure operations go
-through the shared MI:
+The shipped `ENFORCE_DASHBOARD_RBAC=true` entry gate requires a readable role
+on the platform resource group or an ancestor scope. The UI also projects the
+caller's effective roles at the selected workload scope so it can disable
+actions the caller should not request:
 
 | Role | Scope | Purpose |
 |------|-------|---------|
-| **Reader** | Subscription | See resources in the UI (cosmetic) |
+| **Reader** (minimum) | Platform resource group or subscription | Pass `/api/me` entry authorization and load the dashboard. |
+| **Reader** | Workload resource group or subscription | Browse workload resources and status. |
+| **Contributor** | Workload resource group | Enable lifecycle and resource mutation controls. |
+| **Storage Blob Data Contributor** | Workload Storage account | Enable submit and data-write controls. |
+| **AcrPush** | Workload ACR | Enable image-build controls. |
+| **Owner** or **User Access Administrator** | Target scope | Enable explicit RBAC-assignment workflows. |
 
-All data-plane and mutation operations are performed by the MI.
+Azure SDK and data-plane operations are still performed by the dashboard MI,
+not with the browser bearer token. Caller-role projection is an authorization
+and UX boundary; Azure independently enforces the MI's permissions on the
+actual downstream operation.
 
 ---
 
@@ -279,11 +314,12 @@ All data-plane and mutation operations are performed by the MI.
 | Feature | MI Role | Scope |
 |---|---|---|
 | Create / read containers | Contributor | Resource Group / Storage Account |
-| List / upload / copy blobs (streamed through the api sidecar) | Storage Blob Data Contributor | Storage Account |
+| List / upload / copy blobs (mediated by the api sidecar or workers) | Storage Blob Data Contributor | Storage Account |
 
-> **No SAS issuance.** Browser uploads/downloads are streamed through the api
-> sidecar over the private endpoint. `Storage Blob Delegator` is intentionally
-> NOT in the role list — see [Storage Isolation & Browser ↔ Storage Proxy](storage-contract.md#browser-storage-proxy-no-sas-to-the-browser).
+> **No SAS issuance.** Browser query and result traffic terminates at the api
+> sidecar; result files stream through it over the private endpoint. `Storage
+> Blob Delegator` is intentionally NOT in the role list — see [Storage
+> Isolation & Browser ↔ Storage Proxy](storage-contract.md#browser-storage-proxy-no-sas-to-the-browser).
 
 ### Azure Container Registry
 
@@ -297,7 +333,7 @@ All data-plane and mutation operations are performed by the MI.
 | Feature | MI Role | Scope |
 |---|---|---|
 | Create/delete/start/stop cluster | Contributor | Resource Group |
-| Get kubeconfig, run command | AKS Cluster User Role | Cluster |
+| Get kubeconfig for direct Kubernetes API calls | AKS Cluster User Role | Cluster |
 | Direct K8s API (pods, jobs, metrics) | AKS Cluster User Role | Cluster |
 
 ### Key Vault
@@ -305,7 +341,7 @@ All data-plane and mutation operations are performed by the MI.
 | Feature | MI Role | Scope |
 |---|---|---|
 | Create/update vault | Contributor | Resource Group |
-| Store/read/delete secrets | Key Vault Secrets Officer | Vault |
+| Read configured secrets | Key Vault Secrets User | Vault |
 
 ---
 
@@ -313,9 +349,9 @@ All data-plane and mutation operations are performed by the MI.
 
 | Error | Cause | Fix |
 |---|---|---|
-| `AuthorizationFailed` on ARM operations | MI lacks **Contributor** | Assign Contributor on the target RG or subscription |
+| `AuthorizationFailed` on ARM operations | MI lacks the required management-plane role | Assign the documented role on the target resource group; do not widen to subscription-level Contributor as a shortcut. |
 | `AuthorizationPermissionMismatch` on blobs | MI lacks **Storage Blob Data Contributor** | Assign data-plane role on the storage account |
-| `ForbiddenByRbac` on Key Vault | MI lacks **Key Vault Secrets Officer** | Assign on the vault |
+| `ForbiddenByRbac` on Key Vault secret reads | MI lacks **Key Vault Secrets User** | Assign on the vault |
 | `does not have authorization` on RBAC | MI lacks **User Access Administrator** | Assign at target scope; or run the logged `az` command manually |
 | `Forbidden` on AKS kubeconfig | MI lacks **AKS Cluster User Role** | Assign on the cluster |
 | RBAC assigned but still failing | Propagation delay (typically 1–5 min; observed 403→200 within ~70s on `listClusterUserCredential`) | Wait and retry; verify with `az role assignment list --assignee <MI_OID>` |
@@ -331,8 +367,9 @@ All data-plane and mutation operations are performed by the MI.
   flow; no `API_CLIENT_SECRET` is provisioned).
 - The browser terminal is a `terminal` sidecar in the same Container App; the
   api sidecar proxies the WebSocket to loopback `ttyd` on `127.0.0.1:7681`
-  after MSAL + tenant-role check. There is no SSH path, no NSG, no admin
-  password, and no public IP.
+  after authenticated one-shot ticket issuance and Origin validation. There is
+  no separate terminal app-role gate today. There is no SSH path, no NSG, no
+  admin password, and no public IP.
 - Every Storage account is `publicNetworkAccess: Disabled` and reachable only
   via private endpoint from the platform VNet — no anonymous access, no SAS
   to the browser, no temporary public-window toggle.

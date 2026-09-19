@@ -8,17 +8,34 @@ tags:
 
 # Monitoring UI (detail)
 
-> Extracted from `.github/copilot-instructions.md` §8 on 2026-05-19.
+> Re-verified 2026-09-16 against `DashboardGrid`, `ClusterBento`, and the
+> monitor/message-flow API clients.
 
 The dashboard is the landing page; the Browser Terminal is one tab among many.
 
-Required cards (each backed by a polled REST endpoint, 30 s default refresh):
+Current composition:
 
-1. **Cluster** — AKS name, RG, region, K8s version, node pool size/SKU, `powerState`, `provisioningState`, kubelet identity object id, attached ACR.
-2. **Storage** — account name, region, public-access state (read-only indicator; should always show **Disabled** for the workload account), container list, blob counts/sizes for `blast-db/`, `queries/`, `results/`.
-3. **ACR** — registry, login server, repositories with tag table (highlight mismatches against `IMAGE_TAGS`).
-4. **Jobs** — list of ElasticBLAST submissions with status (`Provisioning | Downloading DB | Splitting | Running | Completed | Failed | Deleted`), elapsed time, results URL. Drill-down opens the Celery task's full event history from Table Storage.
-5. **Browser Terminal** — `terminal` sidecar process state, last `az login` heartbeat (mtime of `~/.azure/azureProfile.json` inside the sidecar's ephemeral `/home/azureuser`), button to open the embedded shell.
-6. **Container App** — revision name, image digests for each sidecar, replica count (always 1), CPU/memory % per sidecar pulled from App Insights.
+1. **Cluster plane** — one full-width Cluster card. Its bento cells cover
+  lifecycle/readiness, live activity, resource pulse, topology, recent runtime,
+  and the read-only Capacity Gate decision preview. Job details live on the
+  dedicated BLAST Jobs/Results routes rather than in a standalone dashboard
+  card.
+2. **Message Flow** — an optional compact strip between Cluster and Resource
+  planes. It renders only while the Service Bus integration is effective-enabled
+  and opens the full producer → request queue → worker → completion flow.
+3. **Resource plane** — ACR, Storage, and preview-gated Browser Terminal cards.
+  Storage reports the private-network posture and database readiness; ACR
+  compares repository tags with `IMAGE_TAGS`; Terminal probes the loopback
+  sidecar path.
+4. **Sidecar runtime** — one card for all six containers in
+  `ca-elb-dashboard`, including CPU, memory, restart count, health, and recent
+  HTTP activity. It is hidden on narrow mobile layouts.
 
-All numbers must come from real Azure / Kubernetes APIs. Never fabricate or cache stale data without showing a "last refreshed" timestamp.
+The global refresh control offers Live, Slow, and Manual modes. Live uses SSE
+for sidecar and job invalidation with polling fallbacks; the optional Message
+Flow strip independently polls every 4-5 seconds while active or idle. Do not
+describe every dashboard surface as a fixed 30-second poll.
+
+All numbers must come from real Azure / Kubernetes APIs. Never fabricate or
+cache stale data without showing a last-refreshed timestamp or a clear degraded
+state.

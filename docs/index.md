@@ -39,7 +39,7 @@ jsonld: |
         "name": "Are SAS tokens issued to the browser?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "No. Every workload Storage account stays publicNetworkAccess Disabled; uploads and downloads of queries and results stream through the api sidecar in 1 MiB download chunks and 4 MiB block uploads, capped to four concurrent transfers. The browser never receives a SAS URL."
+          "text": "No. Every workload Storage account stays publicNetworkAccess Disabled. Inline query input is staged by the api sidecar, and result-file downloads stream through it with bounded concurrency. The browser never receives a SAS URL or connects to a Storage endpoint."
         }
       },
       {
@@ -81,7 +81,7 @@ Run large BLAST searches on Azure without becoming the cloud operator.
     - **What it is**: a browser-only control plane for [ElasticBLAST](https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/) on Microsoft Azure.
     - **Where it runs**: one Azure Container App named `ca-elb-dashboard` with six sidecars (`frontend`, `api`, `worker`, `beat`, `redis`, `terminal`); BLAST jobs run on Azure Kubernetes Service.
     - **How users sign in**: MSAL.js (Auth Code + PKCE) in the browser; the backend reaches Azure as a user-assigned managed identity. No client secrets.
-    - **Storage posture**: every workload Storage account stays `publicNetworkAccess: Disabled`; all uploads/downloads stream through the `api` sidecar. No SAS tokens are issued to the browser.
+    - **Storage posture**: every workload Storage account stays `publicNetworkAccess: Disabled`; browser query and result traffic is API-mediated. No SAS tokens are issued to the browser.
     - **Open source**: MIT licensed at [github.com/dotnetpower/elb-dashboard](https://github.com/dotnetpower/elb-dashboard).
 
 [ElasticBLAST](https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/) is built for serious sequence search, but the cloud work around it can pull a researcher away from the question they actually care about. Clusters, storage accounts, container images, database preparation, permissions, and job logs all have to line up before a search can run well.
@@ -127,13 +127,13 @@ It is especially useful when:
 - Leave the browser terminal available for advanced workflows without making it the default path.
 - Give maintainers a documented path into the architecture, deployment, authentication, and troubleshooting details.
 
-The Dashboard is the main pre-flight surface. It shows whether the workspace is ready enough to submit work, then keeps recent searches, degraded states, and follow-up actions visible after submission.
+The Dashboard is the main pre-flight surface. It shows whether the workspace is ready enough to submit work, then keeps BLAST Jobs, degraded states, and follow-up actions visible after submission.
 
 === "Cluster plane"
 
 	![Dashboard cluster plane with AKS status, recent BLAST jobs, and database readiness](images/screenshots/dashboard1.png)
 
-	Cluster readiness, recent searches, and database preparation stay visible before a researcher submits work.
+  Cluster readiness, BLAST Jobs, and database preparation stay visible before a researcher submits work.
 
 === "Resource plane"
 
@@ -152,7 +152,7 @@ The Dashboard is the main pre-flight surface. It shows whether the workspace is 
 1. Open the Dashboard and choose the active Azure workspace.
 2. Check whether the required compute, storage, images, and databases are ready.
 3. Submit a BLAST search from the browser.
-4. Watch progress from Recent searches.
+4. Watch progress from BLAST Jobs.
 5. Open, inspect, and download results when the job completes.
 
 The goal is not to hide Azure. It is to keep Azure in the background until it matters.
@@ -161,7 +161,7 @@ The goal is not to hide Azure. It is to keep Azure in the background until it ma
 
 - One [Azure Container Apps](https://learn.microsoft.com/azure/container-apps/overview) deployment bundles the frontend, API, worker, scheduler, [Redis](https://redis.io/docs/latest/) broker, and browser terminal sidecars.
 - Azure calls use [managed identity](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview), so the browser token is used for user identity rather than being forwarded as an Azure control-plane credential.
-- Query uploads, result downloads, and result previews stream through the API sidecar; the browser does not receive direct [Azure Storage](https://learn.microsoft.com/azure/storage/common/storage-introduction) URLs or SAS tokens.
+- Inline queries are staged by the API, result files stream through it, and previews arrive as bounded API responses; the browser does not receive direct [Azure Storage](https://learn.microsoft.com/azure/storage/common/storage-introduction) URLs or SAS tokens.
 - The browser terminal remains available for advanced `az`, `kubectl`, `azcopy`, and `elastic-blast` workflows, but the default research path stays in the UI.
 
 ## Start Here
@@ -183,7 +183,7 @@ If you are already operating an environment, use these entry points:
 - [Auth](architecture/authentication.md) explains browser sign-in and backend token validation.
 - [BLAST SearchSP Discovery](research/blast-searchsp-discovery.md) tracks SearchSP compatibility work.
 - [Web BLAST Compatibility Plan](research/web-blast-compatibility-plan.md) describes the web compatibility implementation plan.
-- The Agent Reference section documents the repository layout, browser terminal, resource plane, monitoring UI, and glass UI conventions.
+- The Agent Reference section documents the repository layout, browser terminal, resource plane, monitoring UI, and Dashboard UI conventions.
 
 ## Documentation Capture
 
@@ -221,9 +221,9 @@ principal secrets and no on-behalf-of (OBO) flows.
 ### Are SAS tokens issued to the browser?
 
 No. Every workload Storage account stays `publicNetworkAccess: Disabled`;
-uploads and downloads of queries and results stream through the `api`
-sidecar (1 MiB chunks, 4 MiB block uploads, semaphore-capped to four
-concurrent transfers). The browser never receives a SAS URL.
+inline query input is staged by the `api` sidecar, and result-file downloads
+stream through it with a process-local semaphore (eight permits by default).
+The browser never receives a SAS URL or connects to a Storage endpoint.
 
 ### Who actually downloads BLAST databases from NCBI — the `api` sidecar, the `terminal` sidecar, or AKS?
 

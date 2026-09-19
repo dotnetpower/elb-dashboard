@@ -103,7 +103,7 @@ managed.
 
 | Removed | Reason | Replacement |
 |---------|--------|-------------|
-| Azure Service Bus | Adds a managed dependency we no longer need once the worker model is Celery-based. | Celery + in-revision Redis sidecar. |
+| Azure Service Bus as the Celery broker | Adds a managed dependency to the always-on control plane. | Celery + in-revision Redis sidecar. An operator may connect the separate, default-OFF [Service Bus BLAST integration](service-bus-integration.md) for external request ingress and completion events. |
 | Cosmos DB / Azure Database for PostgreSQL | A managed database is over-scoped for the document/append workloads this control plane has. Adds cost and operational surface. | Azure Storage (blob for documents, table for indexed queries). |
 | Azure Cache for Redis (managed) | Cost. Broker is internal-only and does not need geo-replication, AAD, or managed patching. | Redis 7 alpine sidecar inside the Container App. |
 | Self-hosted Redis VM (`vm-elb-redis`) | Adds a VM, NIC, NSG, subnet, MI, and nightly backup job. | Redis sidecar in the same Container App revision; ephemeral, queue rebuilt from the `jobstate` table by the `beat` reconciler on restart. |
@@ -130,9 +130,11 @@ estimates or writing new Bicep modules.
 | User-assigned managed identities | `Microsoft.ManagedIdentity/userAssignedIdentities` | `id-elb-dashboard-*` (shared by all six sidecars), `id-elb-openapi` (AKS Workload Identity) | New |
 | Log Analytics + Application Insights | `Microsoft.OperationalInsights/workspaces` + `Microsoft.Insights/components` | Logs, metrics, traces | Existing |
 
-Not created: Azure Service Bus, Azure Cosmos DB, Azure Database for PostgreSQL,
-Azure Cache for Redis, dedicated Redis VM, dedicated Redis subnet/NSG/MI,
-Remote Terminal VM, terminal subnet, terminal NSG, terminal admin password
+Not created by this deployment: Azure Service Bus (the optional external
+integration connects to an operator-supplied namespace), Azure Cosmos DB,
+Azure Database for PostgreSQL, Azure Cache for Redis, dedicated Redis VM,
+dedicated Redis subnet/NSG/MI, Remote Terminal VM, terminal subnet, terminal
+NSG, terminal admin password
 secret, terminal MI, Azure Bastion, **Azure Static Web Apps**.
 
 ## CPU and Memory Sizing
@@ -158,17 +160,17 @@ ratio).
 
 ### Current allocation per sidecar
 
-Sized for the steady-state operator workload (low concurrency, occasional
-BLAST submit / DB warmup). Revise after the first week of production
-telemetry; resize is a revision swap with no downtime.
+The checked-in template uses the full Consumption-profile envelope. Any growth
+requires moving resources between sidecars or changing workload profile; a
+resize creates a new revision.
 
 | Sidecar | vCPU | Memory | Sizing reasoning |
 |---------|------|--------|------------------|
 | `frontend` (nginx:alpine) | 0.25 | 0.5 GiB | Static files; a few QPS at most. The minimum allocation is already overkill. |
 | `api` (FastAPI) | 1.0 | 2.0 GiB | Handles JSON requests, the WebSocket terminal proxy, and streaming upload/download traffic. The allocation provides headroom for overlapping monitor polls and result-analysis bursts. |
-| `worker` (Celery) | 1.75 | 3.5 GiB | Runs three isolated Celery parents with five prefork children plus the resident Service Bus consumer. This is the largest allocation that keeps the bundled replica on the Consumption profile and protects against in-flight memory spikes. |
+| `worker` (Celery) | 1.75 | 3.5 GiB | Runs four isolated Celery parents with five prefork children total; the dedicated Service Bus parent also owns the resident consumer. This is the largest allocation that keeps the bundled replica on the Consumption profile and protects against in-flight memory spikes. |
 | `beat` (Celery beat) | 0.25 | 0.5 GiB | Scheduler thread + Storage poller for schedule definitions. Trivial. |
-| `redis` (redis:7-alpine) | 0.25 | 0.5 GiB | Single-node broker for control-plane traffic. Ephemeral (no AOF) — queue is rebuilt from the `jobstate` table by the `beat` reconciler on revision restart. Memory grows with queue depth; 0.5 GiB is enough for hundreds of thousands of pending tasks. |
+| `redis` (redis:7-alpine) | 0.25 | 0.5 GiB | Ephemeral broker, result backend, and ops cache (no AOF/RDB). Durable Storage plus reconcilers restore control-plane work after a revision restart. |
 | `terminal` (Ubuntu + elastic-blast toolchain) | 0.5 | 1.0 GiB | Bash + tmux + `python` + occasional `kubectl`/`az`/`azcopy`. Carries the heaviest image, but at runtime it is mostly idle waiting for the operator to type. |
 | **Replica total** | **4.0** | **8.0 GiB** | Satisfies the 1 vCPU : 2 GiB ratio and exactly reaches the Consumption-profile per-replica maximum. |
 
@@ -292,10 +294,11 @@ The 30-second summary that the rest of this document depends on:
 - Every workload Storage account stays `publicNetworkAccess: Disabled` in
   production. No code path enables it, even temporarily.
 - The browser never receives a SAS token. The `api` sidecar is the only
-  Storage client the browser sees; uploads/downloads stream through it
-  (1 MiB download chunks, 4 MiB block uploads, max 4 concurrent transfers).
+  Storage client the browser sees. Inline query JSON is staged by the API;
+  result-file downloads stream in SDK-managed chunks with a process-local
+  semaphore (8 permits by default).
 
-## Target Architecture
+## Deployed Architecture
 
 ```text
 Browser
@@ -347,14 +350,14 @@ Private endpoints and managed identity
 | Component | Target service | Purpose | Notes |
 |-----------|----------------|---------|-------|
 | `ca-elb-dashboard` | Azure Container Apps | Single Container App, six sidecars | `minReplicas: 1`, `maxReplicas: 1`. Public ingress only on the `api` container. |
-| `frontend` sidecar | Container in `ca-elb-dashboard` | nginx:alpine serving the built React SPA `dist/` | Listens on `127.0.0.1:8081`. SPA navigation fallback to `/index.html`. Security headers (CSP, HSTS, X-Frame-Options, etc.) move from `staticwebapp.config.json` into `nginx.conf`. Image tag matches the SPA build hash so cache-busting is automatic across revisions. |
-| `api` sidecar | Container in `ca-elb-dashboard` | FastAPI HTTP API on Python 3.12 + reverse proxy for non-`/api/*` to the frontend sidecar | Owns the public `/api/*` contract. Public ingress restricted (Container Apps ingress with optional `allowedCidrs`). Forwards requests that do not match `/api/*` to `127.0.0.1:8081`. Terminates the browser WebSocket and proxies it to the `terminal` sidecar's loopback `ttyd` after MSAL + tenant-role check. |
-| `worker` sidecar | Container in `ca-elb-dashboard` | Celery worker | Pulls from `redis://127.0.0.1:6379/0`. Writes progress to Storage. |
+| `frontend` sidecar | Container in `ca-elb-dashboard` | nginx:alpine serving the built React SPA `dist/` | Listens on `127.0.0.1:8081`. SPA navigation falls back to `/index.html`; nginx emits the deployed security and cache headers. |
+| `api` sidecar | Container in `ca-elb-dashboard` | FastAPI HTTP API on Python 3.12 + reverse proxy for non-`/api/*` to the frontend sidecar | Owns the public `/api/*` contract. Forwards non-API requests to `127.0.0.1:8081`; issues one-shot terminal tickets and proxies authenticated WebSockets to loopback ttyd. |
+| `worker` sidecar | Container in `ca-elb-dashboard` | Four isolated Celery worker parents | `worker-main` handles interactive queues; dedicated reconcile, Service Bus, and artifact workers prevent head-of-line blocking. All durable progress goes to Storage. |
 | `beat` sidecar | Container in `ca-elb-dashboard` | Celery beat scheduler | Reads schedule definitions from Storage. Singleton by construction (one container, one replica). |
-| `redis` sidecar | Container in `ca-elb-dashboard` | Broker + result backend | `redis:7-alpine`. Binds to `127.0.0.1` only. Ephemeral (no AOF, no Azure Files mount); the broker queue is rebuilt from the `jobstate` table by the `beat` reconciler on revision restart. |
-| `terminal` sidecar | Container in `ca-elb-dashboard` | Browser-accessible operator shell with the `elastic-blast` toolchain | Image based on Ubuntu 24.04 with `azure-cli`, `kubectl`, `azcopy`, `python3.12`, `primer3`, `tmux`, `git`, `jq`, `make`, and the `elastic_blast` package + venv pre-installed. Runs `ttyd -p 7681 -i 127.0.0.1 -W tmux new -A -s elb` so each browser session attaches to the same persistent tmux. `/home/azureuser` is ephemeral; user files stage to workload Storage via `azcopy` rather than to a local mount. Authenticates to ARM with `id-elb-dashboard-*` via the env-injected MSI endpoint. |
+| `redis` sidecar | Container in `ca-elb-dashboard` | Broker + result backend + ops cache | `redis:7-alpine`, loopback only. Ephemeral (no AOF/RDB/Azure Files); Celery work and operational caches are reconstructed from durable Storage state by reconcilers after restart. |
+| `terminal` sidecar | Container in `ca-elb-dashboard` | Browser shell and programmatic CLI execution | Ubuntu 24.04 toolchain. Runs per-operator tmux sessions behind ttyd `:7681`, an authenticated allowlisted exec server on `:7682`, and a cgroup reporter. `/home/azureuser` is ephemeral; user files stage to workload Storage. Programmatic commands use a separate dashboard-UAMI Azure CLI cache. |
 | Job state | Azure Storage table + blob | Job registry, audit log, command history, schedule records | Table for indexed lookups (`PartitionKey=job_id`); blob (append) for audit trail; blob for large request/response payloads. |
-| Secrets | Azure Key Vault | App configuration references and any future SSH material | Use private endpoint and RBAC. Keep purge protection enabled. No VM admin password is stored anywhere because there is no VM. |
+| Secrets | Azure Key Vault | App configuration references | Use private endpoint and RBAC. Keep purge protection enabled. No SSH key or VM admin password exists in this architecture. |
 | Runtime storage | Azure Storage | Query, config, DB, and result blobs | Use private endpoints, HNS where needed, and managed identity auth. |
 | Images | Azure Container Registry | App containers (frontend, api, worker, beat, terminal) and ElasticBLAST images | Disable anonymous pulls. Use private endpoint where supported by environment. |
 | Workload cluster | AKS | ElasticBLAST compute plane | Keep Workload Identity and Blob CSI. Prefer private cluster or authorized IP ranges. |
@@ -373,13 +376,12 @@ Responsibilities:
   `127.0.0.1:8081`.
 - Provide SPA navigation fallback (any non-asset path that 404s on disk →
   serve `/index.html` with `200`).
-- Apply the security headers that today live in
-  [web/staticwebapp.config.json](web/staticwebapp.config.json):
+- Apply the security headers defined in
+  [`web/nginx.conf`](https://github.com/dotnetpower/elb-dashboard/blob/main/web/nginx.conf):
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: strict-origin-when-cross-origin`,
   `Strict-Transport-Security: max-age=31536000; includeSubDomains`, and the
-  Content-Security-Policy. These move from the SWA config into
-  `nginx.conf`.
+  Content-Security-Policy.
 - Serve `/assets/*` with `Cache-Control: public, immutable, max-age=31536000`
   (Vite hashes asset filenames). Serve `/index.html` with
   `Cache-Control: no-cache` so a redeploy is picked up immediately.
@@ -389,7 +391,7 @@ Responsibilities:
 Image build (`elb-frontend:<tag>`):
 
 - Multi-stage Dockerfile: stage 1 runs `npm ci && npm run build` against
-  [web/](web/); stage 2 is `FROM nginx:alpine` and copies `web/dist/` into
+  [`web/`](https://github.com/dotnetpower/elb-dashboard/tree/main/web); stage 2 is `FROM nginx:alpine` and copies `web/dist/` into
   `/usr/share/nginx/html` plus the custom `nginx.conf`.
 - Image tag = the SPA build hash so cache busting is automatic across
   revisions.
@@ -460,7 +462,7 @@ Responsibilities:
   Files mount.** SMB mounts in Container Apps require a Storage account key,
   which conflicts with the `allowSharedKeyAccess: false` invariant on the
   platform Storage account; see `infra/modules/storageState.bicep`.
-- Resource limits: 0.25 vCPU / 0.5 GiB; revisit after load testing.
+- Resource limits: 0.25 vCPU / 0.5 GiB (current checked-in allocation).
 - No outbound traffic; lifecycle managed entirely by the Container App.
 
 This sidecar is a single point of failure for queued work within one revision.
@@ -476,54 +478,53 @@ sidecar's authenticated WebSocket proxy.
 
 Image build (`elb-terminal:<tag>`, pushed to the platform ACR):
 
-- Base: `ubuntu:22.04`.
-- Apt: `azure-cli`, `kubectl` (or installed via direct binary download for
-  version pinning), `azcopy`, `python3.12`, `python3.12-venv`,
-  `python3-pip`, `primer3`, `git`, `make`, `jq`, `unzip`, `curl`, `tmux`,
-  `ttyd`.
-- Pre-installed Python deps: `requirements/test.txt` from
+- Base: `ubuntu:24.04`; the heavy toolchain lives in
+  `Dockerfile.base` and the fast-changing scripts in `Dockerfile.runtime`.
+- Apt/binaries: `azure-cli`, pinned `kubectl`, `azcopy`, BLAST+ 2.17.0,
+  Python 3.12, `primer3`, `git`, `make`, `jq`, `tmux`, `ttyd`, and the
+  documented sequence-analysis utilities.
+- Pre-installed Python deps: `requirements/base.txt` from the pinned
   `dotnetpower/elastic-blast-azure`, the Azure mgmt SDKs (`azure-mgmt-resource`,
   `azure-mgmt-network`, `azure-mgmt-compute`, `azure-mgmt-storage`,
   `azure-mgmt-containerregistry`, `azure-mgmt-containerservice`,
   `azure-mgmt-authorization`, `azure-mgmt-msi`, `azure-mgmt-monitor`), and the
   `elastic_blast` package itself (installed `--no-build-isolation --no-deps`
-  exactly like the cloud-init script does today). Versions pinned in the
-  `IMAGE_TAGS` table so a single bump propagates atomically.
-- `/etc/profile.d/elb-env.sh` exports `PYTHONPATH=src:$PYTHONPATH`,
-  `AZCOPY_AUTO_LOGIN_TYPE=MSI`, `ELB_SKIP_DB_VERIFY=true`,
-  `ELB_DISABLE_AUTO_SHUTDOWN=1`.
-- Entry point: `ttyd -p 7681 -i 127.0.0.1 -W tmux new -A -s elb`.
-  - `-i 127.0.0.1` binds to loopback so only the api sidecar (same network
-    namespace) can reach it.
-  - `-W` makes the shell writable (default ttyd is read-only).
-  - `tmux new -A -s elb` attaches every browser session to a single
-    persistent tmux session called `elb`, so refreshing the browser does not
-    lose work and multiple browser tabs share state. tmux also keeps
-    long-running `elastic-blast submit` from dying when the WebSocket drops.
+  after the dashboard runtime patch is applied). The build fails if the pinned
+  source no longer produces the `elastic-blast` launcher.
+- `/etc/profile.d/elb-env.sh` exports the runtime override and pinned sibling
+  source paths, `AZCOPY_AUTO_LOGIN_TYPE=AZCLI`, fast-submit toggles,
+  `ELB_SKIP_DB_VERIFY=true`, and `ELB_DISABLE_AUTO_SHUTDOWN=1`.
+- The entrypoint supervises three processes: writable loopback `ttyd` on
+  `:7681`, the authenticated allowlisted exec server on `:7682`, and a
+  non-critical cgroup metrics reporter. Exit of ttyd or exec-server terminates
+  the sidecar; reporter failure does not.
+- ttyd forwards a server-derived, non-reversible caller token to
+  `elb-tmux-attach`. Each operator gets a stable `elb-<token>` tmux session and
+  private `AZURE_CONFIG_DIR`; browser refresh reattaches the same operator
+  without sharing shell history or credentials with anyone else.
 
 Auth and authorization on the WebSocket:
 
-- Browser opens `wss://<api-host>/api/terminal/ws` with the MSAL access token
-  in the `Sec-WebSocket-Protocol` header (or as a `?token=` query parameter
-  with a short-lived API-issued one-time-use ticket; see verification).
-- The api sidecar validates the token, requires the caller to hold a tenant
-  role such as `elb-operator`, and only then upgrades the WebSocket and
-  starts a duplex copy with the loopback ttyd.
-- Per-session correlation id (`session_id`) is logged at upgrade and on
-  close, with `owner_oid` and `tenant_id`.
-- Idle-timeout: api closes the WebSocket after 30 minutes of no activity in
-  either direction. tmux survives so reconnecting resumes the same session.
+- Browser first sends its MSAL bearer to `POST /api/terminal/ticket`; the API
+  returns a process-local, one-shot ticket with a 30-second redemption TTL.
+- Browser opens `wss://<api-host>/api/terminal/ws?ticket=<ticket>`. The API
+  consumes the ticket, validates Origin, derives the operator session token
+  from the server-side caller object ID, and starts a duplex copy with ttyd.
+- Per-connection `session_id` plus hashed caller identifiers are logged at
+  issue, connect, and close. Raw object IDs, UPNs, bearer tokens, and tickets
+  are not logged.
 
 Azure auth from inside the terminal:
 
-- Container Apps exposes a managed-identity endpoint to the workload
-  (`IDENTITY_ENDPOINT` and `IDENTITY_HEADER` env vars). The shell startup
-  script runs `az login --identity` (or, if the user prefers their own
-  identity, `az login --use-device-code`). The MOTD explains both options.
-- `AZCOPY_AUTO_LOGIN_TYPE=MSI` means `azcopy` picks up the same identity.
-- `kubectl` uses kubeconfig generated by `az aks get-credentials --admin` (or
-  via `aksAadAuth` once the cluster is configured for AAD); the AKS
-  permissions on `id-elb-dashboard-*` cover this.
+- The exec server uses a separate Azure CLI cache bootstrapped with
+  `az login --identity --client-id $AZURE_CLIENT_ID`; api/worker shell-only
+  operations therefore run as the dashboard UAMI.
+- Interactive browser shells use their private per-operator cache. Operators
+  run `az login --use-device-code` when they need ad-hoc CLI credentials;
+  `AZCOPY_AUTO_LOGIN_TYPE=AZCLI` reuses that same private cache.
+- Kubernetes operations invoked by api/worker use the direct Kubernetes client
+  or allowlisted exec commands. Interactive users obtain and select kubeconfig
+  deliberately for their own shell session.
 
 Persistence:
 
@@ -536,18 +537,17 @@ Persistence:
 - The cloned `elastic-blast-azure` repo, the venv, and the pre-installed
   toolchain all live inside the container image — they are immutable per
   revision and do not depend on a writable home directory.
-- `~/.azure/` and `~/.kube/config` are regenerated on each session: the
-  startup script runs `az login --identity` against the MI endpoint and
-  `az aks get-credentials` against the workload cluster.
+- Per-operator Azure CLI caches and kubeconfig are ephemeral. The exec server's
+  separate UAMI cache is recreated when the sidecar starts.
 
 Lifecycle:
 
 - Starts and stops with the rest of the Container App revision. There is no
   per-user provisioning, no per-VM cloud-init wait, and no admin password to
   reveal.
-- Resource limits: 0.5 vCPU / 1 GiB initial; revisit after the first real
-  user session that runs an `elastic-blast submit`. The terminal is the
-  single largest sidecar in the bundle because it carries the toolchain.
+- Resource limits: 0.5 vCPU / 1 GiB (current checked-in allocation). Image size
+  is driven by the toolchain; runtime memory is shared by ttyd, exec server,
+  tmux sessions, and the cgroup reporter.
 
 What this sidecar intentionally does NOT carry (do not re-introduce; the
 left column is the retired Remote Terminal VM model preserved as a guardrail):
@@ -557,14 +557,14 @@ left column is the retired Remote Terminal VM model preserved as a guardrail):
 | Ubuntu 24.04 VM (`vm-elb-terminal`) | `elb-terminal:<tag>` container in `ca-elb-dashboard` |
 | 10-15 min cloud-init bootstrap (apt, pip, clone, venv, defender-onboarding retry) | Image build does this once at CI time. Cold start is whatever the container engine takes (seconds). |
 | `azure-cli`, `kubectl`, `azcopy`, `git`, `make`, `jq`, `python3.12`, `primer3`, `tmux` installed via cloud-init | All baked into the image at build time, with retry / failure handling moved to CI |
-| `~/elastic-blast-azure` clone + venv + `pip install -r requirements/test.txt` + `pip install --no-build-isolation --no-deps elastic_blast` | All baked into the image; venv at `/opt/elb/venv`. |
+| `~/elastic-blast-azure` clone + venv + pip installs during VM bootstrap | Pinned source, `requirements/base.txt`, dashboard runtime patch, and package install are baked into `/opt/elb/venv`. |
 | `azure-mgmt-*` SDKs installed via cloud-init | Baked into the image |
 | `/etc/profile.d/elb-env.sh` env vars | Same content baked into the image |
 | `elb-az-login-mi` script that `az login --identity` from IMDS | Same script runs from the image; uses Container Apps' MI endpoint instead of IMDS. The end result (`az account show` works) is identical. |
 | MOTD with onboarding hints | Same MOTD baked into the image |
 | SSH on port 22 + 443 | **Removed.** No SSH. Browser → api WebSocket → ttyd. |
 | `Port 22 / Port 443` in `sshd_config` | **Removed.** |
-| Per-VM admin password generated and stored in Key Vault, revealed once via `/api/terminal/{vm}/password` | **Removed.** No password. Access is gated by MSAL + tenant role on the WebSocket upgrade. |
+| Per-VM admin password generated and stored in Key Vault, revealed once via `/api/terminal/{vm}/password` | **Removed.** No password. Access uses an authenticated, one-shot WebSocket ticket plus Origin validation. |
 | NSG with `AllowSSH` rule scoped to caller IP via `/api/terminal/{vm}/open-ssh` | **Removed.** No NSG, no IP allow-list. |
 | `/api/terminal/{vm}/start` (deallocate the VM) | **Removed.** Terminal lifecycle is the Container App revision lifecycle; stopping the terminal would mean stopping the whole control plane. |
 | `/api/terminal/{vm}/stop` (deallocate the VM) | **Removed** for the same reason. |
@@ -576,18 +576,15 @@ left column is the retired Remote Terminal VM model preserved as a guardrail):
 
 Verification:
 
-- A test that opening `wss://<api-host>/api/terminal/ws` without a token
-  returns `401`; without the required tenant role returns `403`; with both
-  succeeds and returns a working bash prompt.
-- A test that two concurrent browser tabs see the same tmux session and that
-  closing one tab does not kill the other or kill any process started in
-  the shared session.
-- A test that running `az account show` from the terminal sidecar returns
-  the `id-elb-dashboard-*` identity by default, and that running `az login
-  --use-device-code` lets the user override with their own identity for the
-  duration of the session (without leaking back into the shared tmux for
-  other users — sessions are per-tmux-window, and the docs make this
-  explicit).
+- Ticket tests cover authenticated issuance, 30-second expiry, one-shot
+  consumption, Origin rejection, and WebSocket auth close codes.
+- Session-token tests prove the same operator reattaches to one stable tmux
+  session while different operators derive distinct, non-reversible names and
+  private Azure CLI caches.
+- Exec-channel tests verify token authentication, argv allowlisting, body and
+  timeout bounds, concurrency limits, loopback binding, and managed-identity
+  Azure CLI bootstrap. Interactive device-code login remains isolated from
+  this programmatic cache.
 - A test that `kubectl get nodes`, `azcopy ls`, and `elastic-blast --help`
   all work without further setup.
 - A test that the api sidecar refuses to upgrade the WebSocket when the

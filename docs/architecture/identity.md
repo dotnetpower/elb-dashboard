@@ -53,10 +53,10 @@ The two identities exist for orthogonal reasons.
 | Why not reuse the dashboard MI? | — | The OpenAPI pod runs inside AKS, not inside the Container App. It cannot reach the Container App's IMDS, and giving the dashboard MI direct kubeconfig is the wrong blast radius. |
 
 The dashboard MI is the **control-plane principal**: it can create AKS
-clusters, push images to ACR, write to platform Storage and Key Vault.
-The OpenAPI MI is the **workload principal**: it can only do what the
-OpenAPI pod needs (read the workload Storage account, get an AKS user
-kubeconfig) and is scoped to a single AKS cluster RG.
+clusters, push images to ACR, write to platform Storage, and read configured
+Key Vault secrets. The OpenAPI MI is the **workload principal**: it receives
+Contributor on one workload RG, Storage Blob Data Contributor on the selected
+workload Storage account, and AKS Cluster User on one cluster.
 
 ---
 
@@ -84,7 +84,7 @@ a unique `principalId`) even after an `azd down`.
 > previous deployment do **not** carry over — the assignments are keyed
 > by `{principalId, scope, roleDefinitionId}` and Azure leaves the
 > orphaned entries behind. See the
-> [post-deploy permissions checklist](authentication.md#0-post-deploy-permissions-checklist-run-after-every-azd-up).
+> [post-deploy permissions verification](authentication.md#0-post-deploy-permissions-verification).
 
 ### 2.2 Where it is mounted
 
@@ -170,8 +170,10 @@ and are idempotent (named via `guid(scope, principalId, roleDefinitionId)`).
 | Scope | Role | Module | Why |
 |-------|------|--------|-----|
 | Subscription | [`Reader`][builtin-roles] | [subscriptionRoles.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/subscriptionRoles.bicep) (opt-in via `assignSubscriptionReader=true`) | SPA discovery wizard: `SubscriptionClient.list`, `ResourceGroups.list`, `Storage/ACR/Compute.list_by_*` |
+| Subscription | `Elb Workload RG Creator` (custom, ABAC-constrained) | [workloadRgCreatorRole.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/workloadRgCreatorRole.bicep) | Create/read/delete workload and AKS node resource groups and assign only five allowlisted runtime roles to service principals; cannot grant Owner or arbitrary roles. |
 | Platform RG `rg-elb-dashboard` | [`Contributor`][builtin-roles] | [controlPlaneRoles.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/controlPlaneRoles.bicep) | CRUD child resources inside the platform RG |
 | Platform RG `rg-elb-dashboard` | [`User Access Administrator`][builtin-roles] | [controlPlaneRoles.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/controlPlaneRoles.bicep) | Assign AcrPull / Blob Data Contributor to AKS kubelet identities |
+| Platform RG `rg-elb-dashboard` | Managed Identity Contributor + Network Contributor + Azure Kubernetes Service Contributor Role | [controlPlaneRoles.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/controlPlaneRoles.bicep) | Phase-1 narrower replacements for identity, network, and AKS lifecycle operations while the legacy Contributor grant soaks. |
 | Platform ACR | [`AcrPull`][builtin-roles] | [acr.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/acr.bicep) | Container App + AKS pull images |
 | Platform ACR | [`AcrPush`][builtin-roles] | [acr.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/acr.bicep) | postprovision `az acr build` pushes |
 | Platform ACR | [`Contributor`][builtin-roles] | [acr.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/acr.bicep) | ACR Tasks `scheduleRun/action` (worker builds runtime BLAST images) — `AcrPush` alone cannot call ACR Tasks |
@@ -180,27 +182,29 @@ and are idempotent (named via `guid(scope, principalId, roleDefinitionId)`).
 | Key Vault | [`Key Vault Secrets User`][builtin-roles] | [keyvault.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/keyvault.bicep) | Read MSAL `apiClientId` and any App Registration secrets |
 | AKS workload RG `rg-elb-cluster` *(conditional)* | [`Contributor`][builtin-roles] | [workloadClusterRoles.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/workloadClusterRoles.bicep) (skipped when `aksClusterResourceGroup` is empty) | Create `id-elb-openapi` + federated credential, read AKS |
 | AKS workload RG `rg-elb-cluster` *(conditional)* | [`User Access Administrator`][builtin-roles] | [workloadClusterRoles.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/workloadClusterRoles.bicep) | Assign Contributor + Blob Data Contributor + AKS Cluster User to `id-elb-openapi` |
+| AKS workload RG `rg-elb-cluster` *(conditional)* | Managed Identity Contributor + Network Contributor + Azure Kubernetes Service Contributor Role | [workloadClusterRoles.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/workloadClusterRoles.bicep) | Phase-1 narrower grants matching the platform-RG identity/network/AKS responsibilities. |
 
 > **Deliberately not granted at subscription scope: `Contributor` /
 > `User Access Administrator`.** The dashboard MI must not be able to
-> create resource groups anywhere it wants, nor escalate role
-> assignments outside the deployment RGs. Operators that need this for
-> the *first-time-cluster-create* path use
+> create arbitrary Azure resources throughout the subscription or grant
+> unapproved roles. The custom `Elb Workload RG Creator` role permits the
+> resource-group bootstrap actions AKS needs and constrains role-assignment
+> writes to a five-role service-principal allowlist. Legacy deployments that
+> predate the custom role can recover with
 > [`scripts/dev/grant-runtime-rbac.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/grant-runtime-rbac.sh)
-> (with the bootstrap-mode `--cluster-rg <name> --region <r>` flags) so
-> the grant remains RG-scoped.
+> while keeping mutable grants RG-scoped.
 
 ### 2.5 First `azd up` vs second `azd provision`
 
 The role table above splits into two waves because `workloadClusterRoles`
 needs an existing RG to scope to. The recommended flow:
 
-1. **First `azd up`** — `aksClusterResourceGroup` parameter is empty, so
-   `workloadClusterRoles` is skipped. Every other role above is granted.
-2. **Operator creates AKS via the SPA wizard** — this creates
-   `rg-elb-cluster` as a side effect (or pre-create it with
-   `grant-runtime-rbac.sh --cluster-rg rg-elb-cluster --region <r>` so
-   the MI has Contributor on it *before* the SPA tries to write).
+1. **First `azd up`** — `aksClusterResourceGroup` is empty, so
+  `workloadClusterRoles` is skipped. Subscription Reader, the constrained
+  workload-RG creator, platform-RG roles, and per-resource roles are granted.
+2. **Operator creates AKS via the SPA wizard** — the custom role allows the
+  dashboard MI to create `rg-elb-cluster` and self-heal the allowlisted
+  runtime assignments without subscription Contributor.
 3. **Second `azd provision`** — set `aksClusterResourceGroup` so the
    module runs. This is the steady-state grant and is what
    [`api.tasks.openapi.rbac.setup_workload_identity`](https://github.com/dotnetpower/elb-dashboard/blob/main/api/tasks/openapi/rbac.py)
@@ -377,15 +381,16 @@ logged as `actor`).
 **Symptom.** SPA "Create Cluster" shows
 `AuthorizationFailed … 'Microsoft.Resources/subscriptions/resourcegroups/write' over scope '/subscriptions/<sub>/resourcegroups/rg-elb-cluster'`.
 
-**Cause.** The dashboard MI has `Reader` at subscription scope (by
-design — least privilege) and Contributor only on the platform RG. When
-`api.tasks.azure.provision.provision_aks` calls
-`rc.resource_groups.create_or_update(<cluster_rg>)`, the write is
-rejected because the RG does not exist yet and the MI has no
-sub-scope write.
+**Cause.** The deployment is missing the `Elb Workload RG Creator` custom-role
+assignment, its constrained assignment failed, or
+`assignWorkloadRgCreatorRole=false` was deliberately used. A legacy deployment
+with only subscription Reader cannot create the workload or AKS node resource
+group.
 
-**Fix.** Pre-create the cluster RG and grant the MI Contributor on it
-*only* (do not escalate to subscription Contributor):
+**Fix.** Prefer re-running provisioning so Bicep restores the constrained
+custom role. For a legacy or restricted tenant, pre-create the cluster RG and
+grant the MI Contributor on that RG only (do not escalate to subscription
+Contributor):
 
 ```bash
 bash scripts/dev/grant-runtime-rbac.sh \
@@ -409,7 +414,7 @@ roles granted *outside* Bicep (e.g. on workload Storage, on a pre-existing
 ACR, on a second subscription) need to be re-applied.
 
 **Fix.** Run the
-[post-deploy permissions checklist](authentication.md#0-post-deploy-permissions-checklist-run-after-every-azd-up).
+[post-deploy permissions verification](authentication.md#0-post-deploy-permissions-verification).
 
 ### 6.3 OpenAPI pod logs `WorkloadIdentityCredential: failed to read token file`
 

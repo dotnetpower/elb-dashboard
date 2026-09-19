@@ -111,17 +111,23 @@ pending pods or node pressure.
 
 **Automatic response.**
 
-* The **capacity admission gate** (`capacity_gate`, default-OFF behind
-  `BLAST_GATE_ENABLED`) caps concurrent submits per cluster (default 1 slot) and
-  re-enqueues a contended submit with backoff instead of overcommitting. The
-  `/api/blast/capacity` preview reports the would-be decision even when the gate
-  is off.
+* With `BLAST_COORD_BACKEND=k8s`, the cross-path gate serialises object creation
+   with a Kubernetes Lease and caps active runs by distinct finalizer Jobs
+   (`BLAST_MAX_RUN_CONCURRENCY`, default 3). Busy and full decisions re-enqueue
+   with bounded wait deadlines. This backend takes precedence over
+   `BLAST_GATE_ENABLED`.
+* With the default `BLAST_COORD_BACKEND=redis`, the legacy per-cluster submit
+   lock remains active. The optional Redis capacity model
+   (`BLAST_GATE_ENABLED`, shared default OFF) adds pressure-aware reservations;
+   `/api/blast/capacity` reports its would-be decision even while disabled.
 
 **Manual action.**
 
 1. Check how many jobs are `running` on the Cluster/Jobs cards.
-2. Scale the workload node pool up (cluster scale action) if the workload
-   warrants it, or enable the capacity gate to serialise submits.
+2. Confirm the dashboard and OpenAPI deployment use the same
+   `BLAST_COORD_BACKEND`. Scale the workload node pool if the workload warrants
+   it; do not enable the legacy Redis capacity gate alongside an active K8s
+   backend because the K8s backend intentionally wins.
 3. Wait for in-flight jobs to drain; queued submits admit automatically.
 
 ---

@@ -22,7 +22,7 @@ docs/images/screenshots/
 Default desktop viewport:
 
 ```text
-1440 x 1000
+1280 x 900
 ```
 
 Default mobile viewport:

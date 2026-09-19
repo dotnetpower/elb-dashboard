@@ -1,9 +1,6 @@
 ---
 title: AKS Capacity Gate for Parallel BLAST Submits
-description: Design proposal for a capacity-aware admission control layer that
-  lets the BLAST control plane run multiple submits in parallel on one AKS
-  cluster when there is real CPU / memory headroom, while keeping the existing
-  per-cluster Redis lock as the depth=1 fallback.
+description: Historical design and current implementation status for the optional Redis capacity gate, superseded in cross-path deployments by Kubernetes Lease and active-job-count coordination.
 tags:
   - research
   - blast
@@ -13,10 +10,27 @@ tags:
 # AKS Capacity Gate for Parallel BLAST Submits
 
 Date: 2026-05-31
-Status: **Proposed** — design only. No code or infra change in this commit.
+Status: **Implemented behind a default-OFF legacy gate; superseded for
+cross-path coordination** (verified 2026-09-16).
 Owner: `api/tasks/blast/` + `api/services/k8s/` maintainers.
 
-> One-paragraph summary: The current submit pipeline serialises every BLAST run
+!!! info "Current implementation"
+
+  Stages 1-4 below landed: the Redis reservation model lives in
+  `api/services/blast/capacity_gate.py`, `submit_task.py` invokes it when
+  `BLAST_GATE_ENABLED=true`, and `/api/blast/capacity` plus the dashboard
+  Capacity Gate cell expose the decision preview. The shared deployment
+  default remains `BLAST_GATE_ENABLED=false`.
+
+  A newer cross-path design coordinates both dashboard and direct OpenAPI
+  submits with a Kubernetes Lease plus an active-finalizer ceiling when
+  `BLAST_COORD_BACKEND=k8s`. That backend takes precedence over
+  `BLAST_GATE_ENABLED` and bypasses the Redis reservation store. See
+  [Cross-Path BLAST Submit Coordination](blast-submit-coordination.md) for
+  the current cross-path contract. The proposal and 2026-06 measurements
+  below are retained as design history, not as an operator runbook.
+
+> Original proposal summary: At the time of this design, the submit pipeline serialised every BLAST run
 > on a given AKS cluster (a Redis lock keyed on `(cluster, namespace)`, and
 > every submit hard-codes `namespace="default"`). Two real bottlenecks make
 > this unsafe to relax blindly: (1) the terminal sidecar writes a shared
@@ -54,7 +68,7 @@ the lock" is unsafe.
 
 ---
 
-## 2. Current state (verified 2026-05-31)
+## 2. Baseline at proposal time (verified 2026-05-31)
 
 ### 2.1 The lock
 
@@ -261,7 +275,12 @@ All ship **default-OFF / safe-equivalent** per Charter §12a Rule 4
 
 ---
 
-## 4. Code changes (sketch — not implemented in this commit)
+## 4. Original implementation sketch
+
+The following subsections preserve the proposed shape from 2026-05-31. See the
+[current implementation](#aks-capacity-gate-for-parallel-blast-submits) note and
+[status board](#11-status-board) for what landed and what the Kubernetes
+coordination backend superseded.
 
 ### 4.1 New module — `api/services/blast/capacity_gate.py`
 
@@ -357,10 +376,11 @@ guarantees they're correlated to the submit request):
 * `blast_gate_deny{job_id, reason, measured_pct, retryable}`
 * `blast_gate_release{job_id, wall_clock_s, actual_cpu_m_peak, actual_mem_mi_peak}` — last two fields cross-checked against the post-run probe output, this is how the demand model tightens.
 
-Three new
-[`api.services.audit`](../../api/services/audit.py) append-blob rows for
-the same events, so an operator can `az storage blob download` the
-audit log and run analysis offline.
+The original plan also proposed three dedicated append-blob audit rows for the
+same events so an operator could run offline analysis. That dedicated
+`api.services.audit` module did not land; current audit/history writes go
+through the state repository, and the status board records telemetry as only
+partially implemented.
 
 Three new entries in the
 [`/api/monitor/sidecars`](../../api/routes/monitor/sidecars.py) SSE
@@ -400,10 +420,9 @@ two phases.
 * The watermark (75%) is now the real binding constraint, not the slot
   ceiling. The gate will admit up to whatever the pressure model allows.
 
-Each phase is a separate PR with the
-[per-feature change note](../features_change/) under
-`docs/features_change/YYYY-MM/` summarising the metrics from the
-previous phase.
+Each phase is a separate change with a per-feature note under
+`docs/features_change/YYYY-MM/`, surfaced through the
+[Change Log](../changelog.md), summarising the metrics from the previous phase.
 
 ---
 
@@ -703,7 +722,7 @@ image.
 * [api/services/k8s/node_pressure.py](../../api/services/k8s/node_pressure.py) — per-pool request pressure helper.
 * [api/services/k8s/metrics.py](../../api/services/k8s/metrics.py) — `k8s_top_nodes` / `k8s_top_pods`.
 * [scripts/research/blast_capacity_probe.py](../../scripts/research/blast_capacity_probe.py) — single-query CPU/mem probe; demand-model bootstrap.
-* [api/run_celery_workers.py](../../api/run_celery_workers.py) — `worker-main --concurrency=3 --queues=default,acr,azure,blast,storage`; periodic work uses the isolated `worker-reconcile` process.
+* [api/run_celery_workers.py](../../api/run_celery_workers.py) — `worker-main --concurrency=2 --queues=default,acr,azure,blast,storage`; reconcile, Service Bus, and artifact work use isolated worker parents.
 * [api/celery_app.py](../../api/celery_app.py) — `task_acks_late=True`, retry semantics.
 * [.github/copilot-instructions.md §12a](../../.github/copilot-instructions.md) — phased rollout discipline + default-OFF guard rule.
 * [docs/features_change/2026-05/2026-05-22-submit-parallelism-and-fast-poll.md](../features_change/2026-05/2026-05-22-submit-parallelism-and-fast-poll.md) — the historical PR that lifted the lock from single-key to per-(cluster, namespace).
@@ -716,14 +735,14 @@ image.
 
 ## 11. Status board
 
-| Stage | Description | Status |
+| Stage | Description | Current status |
 |---|---|---|
-| Stage 0 | Design proposal (this document) | **Proposed** (2026-05-31) |
-| Stage 1 | `api/services/blast/capacity_gate.py` + unit tests | Not started |
-| Stage 2 | Per-job terminal workdir isolation | Not started |
-| Stage 3 | `submit_task` wiring + `BLAST_GATE_ENABLED` env flag | Not started |
-| Stage 4 | `/api/blast/capacity` endpoint + dashboard cell | Not started |
-| Stage 5 | Telemetry (logs + audit + sidecar counters) | Not started |
-| Stage 6 | Phase 1 deploy (depth=1, telemetry only) | Not started |
-| Stage 7 | Phase 2 (depth=2) after soak | Not started |
-| Stage 8 | Phase 3 (depth=pool max) after soak | Not started |
+| Stage 0 | Design proposal (this document) | Complete (2026-05-31) |
+| Stage 1 | `api/services/blast/capacity_gate.py` + unit tests | Implemented |
+| Stage 2 | Per-submit terminal workdir isolation | Implemented by the authenticated exec server's fresh `/tmp/exec/<uuid>` workdir and `stdin_file` contract, rather than the proposed `~/elb-runs` path |
+| Stage 3 | `submit_task` wiring + `BLAST_GATE_ENABLED` env flag | Implemented; shared deployment default remains off |
+| Stage 4 | `/api/blast/capacity` endpoint + dashboard cell | Implemented |
+| Stage 5 | Telemetry (logs + audit + sidecar counters) | Partial: structured admit/deny/release logs and state fields shipped; the proposed dedicated audit rows and SSE counters did not become the contract |
+| Stage 6 | Phase 1 deploy (depth=1, telemetry only) | Not activated in shared defaults |
+| Stage 7 | Phase 2 (depth=2) after soak | Superseded by `BLAST_COORD_BACKEND=k8s` cross-path coordination |
+| Stage 8 | Phase 3 (depth=pool max) after soak | Superseded; the Kubernetes backend uses `BLAST_MAX_RUN_CONCURRENCY` and active finalizer Jobs |

@@ -1,18 +1,18 @@
 ---
-title: Recent Searches (User Guide)
+title: BLAST Jobs (User Guide)
 description: How to find every BLAST job the workspace knows about, jump into results detail, inspect logs, and clean up completed runs.
 tags:
   - user-guide
   - blast
 ---
 
-# Recent Searches
+# BLAST Jobs
 
-The Recent searches page lists every BLAST job the workspace knows about, grouped by date, and provides the path into result detail, log analytics, and cleanup. It is reached from the sidebar **Recent searches** entry or any `/blast/jobs` link.
+The BLAST Jobs page lists every BLAST job the workspace knows about, grouped by date, and provides the path into result detail, log analytics, and cleanup. It is reached from the navigation **BLAST Jobs** entry or any `/blast/jobs` link.
 
 ## Overview
 
-![Recent searches desktop layout with header, filter bar, and grouped job list](../images/screenshots/jobs-desktop.png)
+![BLAST Jobs desktop layout with header, filter bar, and grouped job list](../images/screenshots/jobs-desktop.png)
 
 The page header shows the totals — `<n> total · <n> running · <n> completed · <n> failed` — with a coloured progress strip that summarises completion versus running and failed states across all visible jobs. Two actions sit on the right:
 

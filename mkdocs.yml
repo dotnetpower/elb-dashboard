@@ -155,7 +155,7 @@ nav:
           - Browser Terminal: copilot/browser-terminal.md
           - Resource Plane: copilot/resource-plane.md
           - Monitoring UI: copilot/monitoring-ui.md
-          - Glass UI: copilot/glass-ui.md
+          - Dashboard UI: copilot/glass-ui.md
           - Version Management: copilot/version-management.md
           - Security Audit Follow-up: copilot/security-audit-followup.md
   - Glossary: glossary.md
@@ -205,6 +205,7 @@ plugins:
 
 hooks:
   - scripts/docs/llms_hooks.py
+  - scripts/docs/repo_links_hook.py
   - scripts/docs/tags_index_hook.py
   - scripts/docs/changelog_index_hook.py
 
@@ -255,8 +256,9 @@ validation:
     not_found: warn
     absolute_links: warn
   links:
-    # cross-repo source-code references (../../api/foo.py from copilot/codebase-map.md
-    # and features_change/*) are intentional and resolve on GitHub, not in the docs tree.
+    # repo_links_hook.py converts existing out-of-docs source references to
+    # GitHub URLs after Markdown rendering. Keep MkDocs from warning before
+    # that content-stage rewrite runs.
     not_found: ignore
     absolute_links: ignore
     unrecognized_links: ignore

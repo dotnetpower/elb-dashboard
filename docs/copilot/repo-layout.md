@@ -7,8 +7,8 @@ tags:
 
 # Repository Layout (detail)
 
-> Extracted from `.github/copilot-instructions.md` §4 on 2026-05-19 to keep the
-> always-loaded charter lean. Read this on demand when you need the full tree.
+> Re-verified 2026-09-16 against the current workspace tree. Read this on
+> demand when you need the full tree.
 
 Create directories on demand; do not scaffold empty folders speculatively.
 
@@ -17,26 +17,27 @@ Create directories on demand; do not scaffold empty folders speculatively.
 ├── api/                     # Backend — FastAPI for the `api` sidecar + Celery worker/beat
 │   ├── main.py                  # FastAPI app entrypoint (uvicorn target)
 │   ├── celery_app.py            # Celery app + queue routing
+│   ├── run_celery_workers.py    # Four isolated worker parents
 │   ├── auth.py                  # MSAL bearer token validation
 │   ├── _http_utils.py           # Shared HTTP boundary helpers
-│   ├── routes/                  # FastAPI routers (arm, monitor, resources, terminal_ws, frontend_proxy, …)
-│   ├── services/                # Pure-Python wrappers (azure_clients, monitoring, state_repo, sanitise, image_tags, …)
-│   ├── tasks/                   # Celery task modules (BLAST submit/delete, ACR build, AKS provision, schedules)
+│   ├── routes/                  # FastAPI domain packages (monitor, blast, aks, settings, terminal, …)
+│   ├── services/                # Azure/K8s/Storage/domain wrappers and focused packages
+│   ├── tasks/                   # Celery task families (azure, blast, storage, servicebus, upgrade, …)
 │   ├── tests/                   # pytest (FastAPI + Celery + shared service modules)
 │   └── Dockerfile               # Image used by both `api` and `worker`/`beat` sidecars
 ├── web/                         # React + Vite + TypeScript SPA + Dockerfile + nginx.conf for the `frontend` sidecar
 │   ├── src/
-│   │   ├── components/          # Glassmorphic UI building blocks
+│   │   ├── components/          # Shared cards, controls, dialogs, and layout building blocks
 │   │   ├── pages/               # Dashboard, BrowserTerminal, JobDetail, …
 │   │   ├── hooks/
 │   │   ├── api/                 # Typed fetchers for /api routes
-│   │   └── theme/               # Glassmorphism tokens (CSS variables)
+│   │   └── theme/               # Dark/light UI tokens (CSS variables)
 │   ├── nginx.conf               # nginx config for the `frontend` sidecar
 │   └── vite.config.ts
 ├── terminal/                    # Dockerfile + entrypoint for the `terminal` sidecar (ttyd + elastic-blast toolchain)
 ├── infra/                       # Bicep modules + main.bicep
 │   ├── main.bicep               # Container Apps Environment + ca-elb-dashboard + private networking
-│   └── modules/                 # containerApp.bicep, network.bicep, identity.bicep, acr.bicep, storage.bicep, keyVault.bicep, …
+│   └── modules/                 # containerAppControl, network, identity, RBAC, storage, keyvault, …
 ├── scripts/
 │   └── dev/                     # Local dev helpers + postprovision.sh (runs `az acr build` and swaps the Container App template)
 ├── docs/
@@ -46,7 +47,6 @@ Create directories on demand; do not scaffold empty folders speculatively.
 │   ├── user-guide/              # End-user documentation
 │   ├── research/                # Research notes that informed design decisions
 │   └── features_change/         # Per-change notes
-├── tests/                       # Cross-cutting tests; per-component tests live next to their code
 ├── pyproject.toml               # uv-managed Python deps (runtime + dev) — single source of truth, no requirements.txt
 ├── uv.lock                      # Locked dependency versions (commit with pyproject.toml)
 ├── azure.yaml                   # azd manifest (Bicep provider + pre/postprovision hooks)
@@ -57,14 +57,14 @@ Create directories on demand; do not scaffold empty folders speculatively.
 
 | Need to…                                  | Edit                                                |
 | ----------------------------------------- | --------------------------------------------------- |
-| Add a new monitoring card                 | `web/src/pages/Dashboard.tsx` + a new route in `api/routes/monitor/<area>.py` |
+| Add a new monitoring card                 | `web/src/pages/Dashboard/DashboardGrid.tsx` + `web/src/components/cards/` + a route in `api/routes/monitor/<area>.py` |
 | Add a new HTTP route                      | `api/routes/<area>.py` + register in `api/main.py` |
-| Add a new long-running operation          | `api/tasks/<area>.py` (Celery task) + an enqueue endpoint in `api/routes/` |
-| Change tools installed in the terminal    | `terminal/Dockerfile` + `terminal/entrypoint.sh`    |
+| Add a new long-running operation          | focused module under `api/tasks/<area>/` + an enqueue endpoint in `api/routes/` |
+| Change terminal toolchain / runtime       | `terminal/Dockerfile.base` or `terminal/Dockerfile.runtime` + `terminal/entrypoint.sh` |
 | Bump pinned ACR image tags                | `api/services/image_tags.py` (`IMAGE_TAGS` dict) |
 | Adjust glass styling                      | `web/src/theme/glass.css`                           |
 | Add a new Bicep resource                  | `infra/modules/*.bicep` + wire into `infra/main.bicep` |
-| Change Container App sidecar layout       | `infra/modules/containerApp.bicep` (or the template diff applied by `scripts/dev/postprovision.sh`) |
+| Change Container App sidecar layout       | `infra/modules/containerAppControl.bicep` + the template flow in `scripts/dev/postprovision.sh` |
 | Document a behaviour change               | `docs/features_change/YYYY-MM/…md` (mandatory)      |
 
 For deeper navigation (route map, tripwires) see [AGENTS.md](../../AGENTS.md).
@@ -76,24 +76,23 @@ For deeper navigation (route map, tripwires) see [AGENTS.md](../../AGENTS.md).
 ```
 api/
 ├── main.py              # FastAPI app factory + middleware (RequestId, structured logs)
-├── celery_app.py        # Celery app + queue routing (azure / blast / storage / default)
-├── auth.py              # MSAL bearer-token validation (OIDC discovery + JWKS cache)
-├── conftest.py          # pytest sys.path bootstrap
-├── routes/              # FastAPI routers (one file per /api/<area>)
-├── services/            # The ONLY place that touches azure.mgmt.* / azure.identity / k8s
+├── celery_app.py        # Celery routes/schedules (interactive + isolated maintenance queues)
+├── run_celery_workers.py # main / reconcile / servicebus / artifact parents
+├── auth.py              # MSAL bearer + optional shared-token M2M validation
+├── routes/              # FastAPI routers (files and focused subpackages)
+├── services/            # Azure SDK boundary plus domain/K8s/Storage packages
 │   ├── azure_clients.py # Cached Azure SDK client factories (MI under DefaultAzureCredential)
-│   ├── monitoring.py    # AKS / Storage / ACR readers + k8s_* kubelet helpers
+│   ├── monitoring/      # AKS / Storage / ACR / provisioning compatibility façade
+│   ├── k8s/             # Direct Kubernetes clients, metrics, jobs, Lease, runtime GC
+│   ├── storage/         # Blob/DFS I/O, private networking, DB preparation, retention
+│   ├── blast/           # Submit normalization, state projection, parsing, coordination
 │   ├── network.py       # ensure_resource_group + VNet/Subnet/NSG primitives
-│   ├── compute.py       # VM lifecycle helpers (only used by legacy code paths now)
-│   ├── keyvault.py      # KV secret read/write
-│   ├── storage_data.py  # Blob upload/list/read — NO SAS issuance, see charter §9 footgun note
+│   ├── keyvault.py      # Key Vault provisioning/access helpers
 │   ├── state_repo.py    # JobStateRepository (Table Storage + append-blob audit)
 │   ├── sanitise.py      # Output redactor (SAS, bearer, sub-id, secrets) — apply at every UI boundary
 │   ├── passwords.py     # generate_admin_password (used only by legacy, kept for tests)
-│   ├── ssh_exec.py      # paramiko helpers (used only by legacy)
-│   ├── blast_config.py  # Azure SKU / pricing constants
 │   └── image_tags.py    # IMAGE_TAGS dict — bump in sync with sibling repo
-├── tasks/               # Celery tasks live here (mostly empty; populate as you implement stub routes)
+├── tasks/               # Implemented Azure, ACR, BLAST, Storage, OpenAPI, SB, upgrade tasks
 └── tests/               # `uv run pytest -q api/tests`
 ```
 
@@ -104,9 +103,10 @@ web/src/
 ├── App.tsx, main.tsx    # Router + MSAL provider wiring
 ├── api/
 │   ├── client.ts        # fetch wrapper that injects MSAL bearer
-│   ├── endpoints.ts     # Typed endpoint helpers (one source of /api/* surface)
-│   ├── arm.ts           # Direct ARM token flow (used only where SPA needs subscription list)
-│   ├── callerIp.ts      # Browser → ipify (caller IP capture)
+│   ├── endpoints.ts     # Typed endpoint compatibility façade
+│   ├── generated/       # OpenAPI-generated declarations checked for drift
+│   ├── arm.ts           # Direct ARM token flow for caller-visible subscription discovery
+│   ├── armProxy.ts      # Same-origin dashboard ARM proxy client
 │   └── resilience.ts    # Retry / backoff helpers + tests
 ├── auth/                # MSAL configuration
 ├── components/          # Reusable glass cards, modals, etc.
@@ -114,17 +114,19 @@ web/src/
 ├── hooks/, data/, theme/, constants.ts
 ```
 
-UI tokens (glassmorphism) are CSS variables; see [docs/copilot/glass-ui.md](./glass-ui.md).
+UI tokens are CSS variables; see [Dashboard UI](./glass-ui.md).
 
 ## Infra map (`infra/`)
 
-[`infra/main.bicep`](../../infra/main.bicep) wires nine modules in this order:
-`network → monitoring → identity → acr → storage → storageState → keyvault →
-containerEnv → controlApp`. Each one is a single small file under
+[`infra/main.bicep`](../../infra/main.bicep) wires the platform modules in this
+order: network, monitoring, identity, subscription/control-plane/workload RBAC,
+optional DNS-zone RBAC, ACR, Storage/state, Key Vault, Container Apps
+Environment, and the bundled control app. Each module lives under
 [`infra/modules/`](../../infra/modules/).
 
 Public ingress lands on the `api` sidecar at `:8080`. All other sidecars
 listen on loopback only:
 - frontend nginx → `127.0.0.1:8081`
 - terminal ttyd → `127.0.0.1:7681`
+- terminal exec server → `127.0.0.1:7682`
 - redis → `127.0.0.1:6379`

@@ -25,7 +25,8 @@
   `publicNetworkAccess: Disabled`; all browser traffic is proxied through
   the `api` sidecar. No SAS tokens are issued to the browser.
 - **Identity**: browser users sign in with MSAL.js (Auth Code + PKCE).
-  The backend validates the bearer token and then uses
+  Trusted automation may use the shared `X-ELB-API-Token` while its M2M gate
+  is enabled. The backend validates the caller credential and then uses
   `DefaultAzureCredential` (user-assigned managed identity) for every
   Azure SDK call.
 
@@ -43,13 +44,19 @@
 ### Architecture
 
 - [High Level Architecture](https://dotnetpower.github.io/elb-dashboard/architecture/high-level/):
-  major boundaries and flows for researchers vs operators.
+  browser and optional queue ingress, six sidecars, private Storage, and AKS execution.
 - [Container Apps Architecture](https://dotnetpower.github.io/elb-dashboard/architecture/container-apps/):
   authoritative reference for the shipped six-sidecar topology.
 - [Storage Isolation & Browser ↔ Storage Proxy](https://dotnetpower.github.io/elb-dashboard/architecture/storage-contract/):
-  hard requirement that workload Storage stays publicNetworkAccess Disabled, plus the api-sidecar streaming proxy contract.
+  hard requirement that workload Storage stays publicNetworkAccess Disabled, plus the current API-mediated query and result transfer contract.
 - [Authentication & Authorization](https://dotnetpower.github.io/elb-dashboard/architecture/authentication/):
-  MSAL flow, RBAC roles, managed identity scopes.
+  MSAL and shared-token authentication, RBAC roles, managed identity scopes.
+- [Identity Architecture](https://dotnetpower.github.io/elb-dashboard/architecture/identity/):
+  dashboard and OpenAPI managed identities, federation, and role lifecycle.
+- [Service Bus BLAST Integration](https://dotnetpower.github.io/elb-dashboard/architecture/service-bus-integration/):
+  optional external queue ingress, execution admission, and completion events.
+- [Diagnostics](https://dotnetpower.github.io/elb-dashboard/architecture/diagnostics/):
+  read-only reliability, availability, and security findings.
 - [BLAST Search Space Discovery](https://dotnetpower.github.io/elb-dashboard/research/blast-searchsp-discovery/):
   how database discovery is performed on Azure storage.
 - [Web BLAST Compatibility Plan](https://dotnetpower.github.io/elb-dashboard/research/web-blast-compatibility-plan/):
@@ -60,15 +67,20 @@
 - [User Guide Home](https://dotnetpower.github.io/elb-dashboard/user-guide/)
 - [Dashboard](https://dotnetpower.github.io/elb-dashboard/user-guide/dashboard/)
 - [New Search](https://dotnetpower.github.io/elb-dashboard/user-guide/new-search/)
-- [Jobs](https://dotnetpower.github.io/elb-dashboard/user-guide/jobs/)
+- [BLAST Jobs](https://dotnetpower.github.io/elb-dashboard/user-guide/jobs/)
 - [Results](https://dotnetpower.github.io/elb-dashboard/user-guide/results/)
+- [BLAST Options](https://dotnetpower.github.io/elb-dashboard/user-guide/blast-options/)
+- [Pipeline Export](https://dotnetpower.github.io/elb-dashboard/user-guide/pipeline-export/)
+- [Observability](https://dotnetpower.github.io/elb-dashboard/user-guide/observability/)
 - [API Reference](https://dotnetpower.github.io/elb-dashboard/user-guide/api-reference/)
 - [Browser Terminal](https://dotnetpower.github.io/elb-dashboard/user-guide/terminal/)
+- [In-app Upgrades](https://dotnetpower.github.io/elb-dashboard/user-guide/upgrades/)
 - [UI Preview](https://dotnetpower.github.io/elb-dashboard/user-guide/ui-preview/)
 
 ### Contributor guide
 
 - [Screenshot Workflow](https://dotnetpower.github.io/elb-dashboard/contributor-guide/screenshot-workflow/)
+- [Archive Policy](https://dotnetpower.github.io/elb-dashboard/contributor-guide/archive-policy/)
 
 ### Agent / Copilot reference
 
@@ -77,8 +89,9 @@
 - [Browser Terminal Internals](https://dotnetpower.github.io/elb-dashboard/copilot/browser-terminal/)
 - [Resource Plane](https://dotnetpower.github.io/elb-dashboard/copilot/resource-plane/)
 - [Monitoring UI](https://dotnetpower.github.io/elb-dashboard/copilot/monitoring-ui/)
-- [Glass UI](https://dotnetpower.github.io/elb-dashboard/copilot/glass-ui/)
+- [Dashboard UI](https://dotnetpower.github.io/elb-dashboard/copilot/glass-ui/)
 - [Codebase Map](https://dotnetpower.github.io/elb-dashboard/copilot/codebase-map/)
+- [Version Management](https://dotnetpower.github.io/elb-dashboard/copilot/version-management/)
 
 ## Releases
 

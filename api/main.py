@@ -259,11 +259,10 @@ def create_app() -> FastAPI:
     except Exception:  # pragma: no cover - defensive
         LOGGER.debug("telemetry init skipped", exc_info=True)
 
-    # Body size limit — reject payloads > 10 MiB.  Uvicorn's
+    # Body size limit — reject declared payloads > 10 MiB. Uvicorn's
     # --limit-concurrency and --limit-max-requests handle connection-level
-    # limits; this catches oversized JSON bodies before they hit route
-    # handlers.  Streaming uploads (query files) bypass this because they
-    # use chunked transfer encoding and never buffer the full body.
+    # limits. Requests without Content-Length cannot be rejected here; current
+    # query submits are JSON and FastAPI still parses accepted bodies in full.
     _MAX_BODY = int(os.environ.get("MAX_REQUEST_BODY_BYTES", str(10 * 1024 * 1024)))
     if _MAX_BODY > 100 * 1024 * 1024:
         raise ValueError("MAX_REQUEST_BODY_BYTES must be <= 100 MiB")

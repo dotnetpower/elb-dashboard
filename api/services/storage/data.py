@@ -227,9 +227,9 @@ __all__ = [
 # Per .github/copilot-instructions.md §9, every Storage account stays
 # `publicNetworkAccess: Disabled` and **the browser must never receive a SAS
 # token**. Result downloads are served by streaming the blob through the api
-# sidecar (1 MiB chunks, 4 MiB block uploads, semaphore-capped to 4 concurrent
-# transfers). When that route is implemented, add a `stream_blob_to_response`
-# helper here that returns an async iterator the FastAPI route can await — do
-# NOT bring back `generate_blob_sas` / `get_user_delegation_key`.
+# sidecar with SDK-managed chunks and a bounded download semaphore (8 permits
+# by default). Inline query JSON is staged by the api sidecar before task
+# dispatch. Do NOT bring back `generate_blob_sas` /
+# `get_user_delegation_key`.
 
 

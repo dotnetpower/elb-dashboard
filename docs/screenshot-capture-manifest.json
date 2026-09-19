@@ -40,7 +40,7 @@
     },
     {
       "id": "jobs-desktop",
-      "title": "Recent jobs",
+      "title": "BLAST Jobs",
       "path": "/blast/jobs",
       "viewport": "desktop",
       "waitForSelector": "main",

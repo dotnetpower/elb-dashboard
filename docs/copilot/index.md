@@ -19,9 +19,9 @@ This section is the agent-facing handbook for **ElasticBLAST Control Plane**. Th
 | [Repo Layout](repo-layout.md) | Full directory tree + edit-boundary table. |
 | [Auth Flow](auth-flow.md) | MSAL + managed identity request lifecycle. |
 | [Browser Terminal](browser-terminal.md) | `terminal` sidecar lifecycle, image, exec contract. |
-| [Resource Plane](resource-plane.md) | Celery task table mirroring `azure-prereq.md`. |
-| [Monitoring UI](monitoring-ui.md) | Dashboard card spec. |
-| [Glass UI](glass-ui.md) | Glassmorphism CSS tokens and accessibility rules. |
+| [Resource Plane](resource-plane.md) | FastAPI/Celery ownership, task families, queues, and durable state contracts. |
+| [Monitoring UI](monitoring-ui.md) | Current Dashboard bands, cards, optional Message Flow, and refresh behavior. |
+| [Dashboard UI](glass-ui.md) | Current dark/light tokens, flat panel styling, motion, and accessibility rules. |
 | [Version Management](version-management.md) | `bump-version.sh` policy and SPA header stamp pipeline. |
 | [Security Audit Follow-up](security-audit-followup.md) | Open design items from the 20-finding security sweep. |
 

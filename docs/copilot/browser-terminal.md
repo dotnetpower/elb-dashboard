@@ -8,7 +8,8 @@ tags:
 
 # Browser Terminal — Sidecar Lifecycle (detail)
 
-> Extracted from `.github/copilot-instructions.md` §6 on 2026-05-19.
+> Re-verified 2026-09-16 against `terminal/entrypoint.sh`, `exec_server.py`, and
+> the terminal WebSocket routes.
 
 The Browser Terminal is the `terminal` sidecar in the `ca-elb-dashboard` Container App. It carries the `elastic-blast` toolchain and is reached from the SPA via xterm.js → WebSocket → loopback `ttyd`. **There is no Remote Terminal VM, no SSH, no admin password, no NSG, no public IP.** The previous Function-App + Remote-Terminal-VM model has been deleted from the repository.
 
@@ -17,22 +18,31 @@ The Browser Terminal is the `terminal` sidecar in the `ca-elb-dashboard` Contain
 The `terminal` image is built by `az acr build` during `postprovision.sh`. It must:
 
 * Be Ubuntu-based and install `azure-cli` ≥ 2.81, `kubectl` ≥ 1.34, `azcopy` ≥ 10.28, Python 3.12 + `python3.12-venv`, `git`, `make`, `jq`, `unzip`, `curl`, `tmux`, and `ttyd`.
-* Clone `https://github.com/dotnetpower/elastic-blast-azure.git` into `/opt/elastic-blast-azure` at build time and `pip install` its `requirements/test.txt` into a venv that is on PATH for the operator.
-* Default `ENTRYPOINT` runs `ttyd` bound to **127.0.0.1** only (the `api` sidecar is the only client; never expose `ttyd` on the public ingress).
-* Set `~/.bashrc` to export `PYTHONPATH=src:$PYTHONPATH`, `AZCOPY_AUTO_LOGIN_TYPE=AZCLI`, `ELB_SKIP_DB_VERIFY=true`, `ELB_DISABLE_AUTO_SHUTDOWN=1`, and write a MOTD telling the user the next step is `az login --use-device-code`.
+* Clone the pinned `dotnetpower/elastic-blast-azure` commit into `/opt/elb/elastic-blast-azure`, apply the dashboard runtime patch, install `requirements/base.txt`, and install the package into `/opt/elb/venv`.
+* Default `ENTRYPOINT` supervises loopback `ttyd` on `:7681`, the authenticated exec server on `:7682`, and a non-critical cgroup metrics reporter. The `api` sidecar is the only ttyd/exec client; neither port is public ingress.
+* Set the operator profile and MOTD, isolate each browser operator into a stable tmux session plus its own `AZURE_CONFIG_DIR`, and bootstrap the separate programmatic exec cache with the shared UAMI.
 
 ## Persistence
 
-`/home/azureuser` is **ephemeral**. The earlier design mounted a `terminal-home` Azure Files share, but SMB mounts in Container Apps require a Storage account key, which conflicts with the platform Storage account's `allowSharedKeyAccess: false` invariant. The control plane is designed to tolerate ephemeral terminal state: user query/result files stage to workload Storage via `azcopy`, and `az login --use-device-code` is re-run per session (or per revision swap).
+`/home/azureuser` is **ephemeral**. The earlier design mounted a `terminal-home` Azure Files share, but SMB mounts in Container Apps require a Storage account key, which conflicts with the platform Storage account's `allowSharedKeyAccess: false` invariant. The control plane is designed to tolerate ephemeral terminal state: user query/result files stage to workload Storage via `azcopy`, the exec server's shared-UAMI cache is recreated at sidecar startup, and each operator repeats device-code login after a revision swap.
 
 ## Browser path
 
 * The SPA page (e.g. `BrowserTerminal`) opens a WebSocket to `/api/terminal/ws` on the `api` sidecar.
-* The `api` sidecar validates the bearer token + role, then proxies the WebSocket to `127.0.0.1:7681` inside the `terminal` sidecar.
-* No download, no SSH client, no password reveal. Display "Run `az login --use-device-code` first" as a one-time helper banner.
+* The `api` sidecar validates `require_caller` when issuing a 30-second,
+  one-shot ticket, validates Origin at redemption, then proxies the WebSocket
+  to `127.0.0.1:7681`. There is no separate terminal app-role gate today.
+* No download, no SSH client, no password reveal. The cockpit Azure probe uses the programmatic exec channel, so it reports that cache's MI status rather than a browser operator's private tmux cache. The operator should run `az account show` in the shell and use `az login --use-device-code` when interactive credentials are needed.
 
-## Lifecycle controls
+## Lifecycle
 
-There is no "Destroy Remote Terminal" action because there is no VM. The lifecycle controls reduce to:
+There is no "Destroy Remote Terminal" or in-app single-sidecar restart action
+because there is no VM and all containers share one Container App replica.
+Host-mode development may run `docker compose restart terminal`; in Azure, a
+revision/replica restart affects the bundled sidecars. The terminal page treats
+WebSocket loss as recoverable and obtains a fresh one-shot ticket when the
+sidecar returns.
 
-* **Restart terminal** — restart the `terminal` sidecar process (`ttyd`) without rolling the revision. A new revision (or sidecar restart) already discards `/home/azureuser` because it is ephemeral.
+A revision or terminal-process restart discards `/home/azureuser`, rebuilds the
+managed-identity CLI caches, and preserves durable files only when they were
+staged to workload Storage.

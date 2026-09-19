@@ -12,6 +12,7 @@ This guide collects everything you need to contribute code or documentation to *
 ## Pages
 
 - [Screenshot Workflow](screenshot-workflow.md) — capture and refresh product screenshots used across the docs.
+- [Archive Policy](archive-policy.md) — decide when superseded plans move out of the active documentation set.
 - **Agent Reference** — durable knowledge for AI agents (Copilot) and humans editing the codebase. See the index page below.
 
 ## Agent Reference
@@ -24,7 +25,7 @@ The `copilot/` section is the agent-facing handbook extracted from `.github/copi
 - [Browser Terminal](../copilot/browser-terminal.md)
 - [Resource Plane](../copilot/resource-plane.md)
 - [Monitoring UI](../copilot/monitoring-ui.md)
-- [Glass UI](../copilot/glass-ui.md)
+- [Dashboard UI](../copilot/glass-ui.md)
 - [Version Management](../copilot/version-management.md)
 - [Security Audit Follow-up](../copilot/security-audit-followup.md)
 
