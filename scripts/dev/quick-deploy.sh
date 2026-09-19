@@ -18,10 +18,8 @@
 # Frontend runtime config and the server-side guard/platform coordinates below
 # are exact-key upserts; unrelated environment values stay untouched.
 #
-# Control-plane GUARD env exception: api/worker/beat PATCHes also upsert the
-# policy toggles from infra/control-plane-env.json (ENFORCE_DASHBOARD_RBAC,
-# ENFORCE_OPENAPI_EXEC_RBAC, BLAST_GATE_ENABLED, BLAST_JOBS_SHARED_VISIBILITY,
-# STRICT_BLUEGREEN, OPENAPI_ALLOW_PUBLIC_LB). That same JSON is the source
+# Control-plane GUARD env exception: api/worker/beat PATCHes also upsert every
+# sidecar-specific policy toggle from infra/control-plane-env.json. That same JSON is the source
 # Bicep loads, so a guard-default change lands on BOTH a full `azd provision`
 # AND a fast / GitHub-Actions deploy. All other runtime env stays untouched.
 #

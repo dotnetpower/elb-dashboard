@@ -76,6 +76,9 @@ export function Tip({ text }: { text: string }) {
   return (
     <span
       title={text}
+      aria-label={text}
+      role="img"
+      tabIndex={0}
       style={{
         cursor: "help",
         marginLeft: 4,

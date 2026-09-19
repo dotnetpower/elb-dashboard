@@ -1,8 +1,9 @@
-import { ChevronDown, ChevronUp, Gauge, Zap } from "lucide-react";
+import { ChevronDown, ChevronUp, Gauge, TriangleAlert, Zap } from "lucide-react";
 
 import { PRESETS } from "@/pages/blastSubmitModel";
 import type { FormState } from "@/pages/blastSubmitModel";
 import { parseNumericInput } from "@/pages/blastSubmit/numericInput";
+import { parameterWarnings } from "@/pages/blastSubmit/parameterWarnings";
 import type { ProgramMeta, SetBlastField } from "@/pages/blastSubmit/types";
 import { Tip } from "@/pages/blastSubmit/ui";
 
@@ -76,6 +77,7 @@ export function AlgorithmParametersSection({
 }) {
   const gapCostValue = form.gap_open || form.gap_extend ? `${form.gap_open},${form.gap_extend}` : "";
   const matchMismatchValue = form.match_score || form.mismatch_score ? `${form.match_score || "1"},${form.mismatch_score || "-2"}` : "1,-2";
+  const warnings = parameterWarnings(form);
 
   return (
     <section className="glass-card blast-section bsl-runtime bsl-done">
@@ -120,13 +122,24 @@ export function AlgorithmParametersSection({
             })}
           </div>
 
+          {warnings.length > 0 && (
+            <div className="blast-parameter-warnings" role="status" aria-live="polite" aria-label="Custom parameter cautions">
+              {warnings.map((warning) => (
+                <span className="blast-parameter-warning" key={warning.key}>
+                  <TriangleAlert size={12} strokeWidth={1.5} aria-hidden="true" />
+                  <span><strong>Caution:</strong> {warning.message}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
           <div className="blast-parameter-groups">
             <div className="blast-parameter-group">
               <div className="blast-parameter-group__title">General Parameters</div>
               <div className="blast-params-grid">
                 <label>
                   <span className="glass-label">
-                    Max target sequences <Tip text="Maximum number of aligned sequences to keep." />
+                    Max target sequences <Tip text="Lowering this limit can change which hits appear, not only how many are returned, because BLAST prunes candidates during the search." />
                   </span>
                   <input
                     className="glass-input"
@@ -139,7 +152,7 @@ export function AlgorithmParametersSection({
                 </label>
                 <label>
                   <span className="glass-label">
-                    Expect threshold <Tip text="Expected number of chance matches. Lower = more stringent." />
+                    Expect threshold <Tip text="Lower values remove weaker matches; changing this value changes result membership and comparability with earlier searches." />
                   </span>
                   <input
                     className="glass-input"
@@ -153,7 +166,7 @@ export function AlgorithmParametersSection({
                 </label>
                 <label>
                   <span className="glass-label">
-                    Word size <Tip text="Length of initial exact match." />
+                    Word size <Tip text="Larger words usually run faster but can miss weaker similarities; smaller words increase sensitivity and runtime." />
                   </span>
                   <input
                     className="glass-input"
@@ -165,7 +178,7 @@ export function AlgorithmParametersSection({
                 </label>
                 <label>
                   <span className="glass-label">
-                    Max matches in a query range <Tip text="Maps to BLAST culling limit. Zero keeps the NCBI default." />
+                    Max matches in a query range <Tip text="Positive values suppress nearby lower-ranked matches and can remove otherwise reportable hits. Zero keeps the BLAST default." />
                   </span>
                   <input
                     className="glass-input"
@@ -176,7 +189,9 @@ export function AlgorithmParametersSection({
                   />
                 </label>
                 <label>
-                  <span className="glass-label">Output format</span>
+                  <span className="glass-label">
+                    Output format <Tip text="The format changes downstream parsing and reformatting options, not the underlying alignments." />
+                  </span>
                   <select
                     className="glass-input"
                     value={form.outfmt}
@@ -236,7 +251,7 @@ export function AlgorithmParametersSection({
                 {form.program === "blastn" && (
                   <label>
                     <span className="glass-label">
-                      Match/Mismatch scores <Tip text="Reward for a nucleotide match and penalty for a mismatch." />
+                      Match/Mismatch scores <Tip text="Changing these scores can alter nucleotide alignment boundaries, bit scores, and hit ranking." />
                     </span>
                     <select
                       className="glass-input"
@@ -257,7 +272,7 @@ export function AlgorithmParametersSection({
                 )}
                 <label>
                   <span className="glass-label">
-                    Gap costs <Tip text="NCBI-style gap cost presets. Linear leaves BLAST defaults untouched." />
+                    Gap costs <Tip text="Changing gap penalties can alter alignment boundaries, scores, and hit ranking. Linear leaves BLAST defaults untouched." />
                   </span>
                   <select
                     className="glass-input"
@@ -281,7 +296,9 @@ export function AlgorithmParametersSection({
                   </select>
                 </label>
                 <label>
-                  <span className="glass-label">Gap open</span>
+                  <span className="glass-label">
+                    Gap open <Tip text="A higher opening penalty discourages new gaps and can change alignment boundaries and ranking." />
+                  </span>
                   <input
                     className="glass-input"
                     type="number"
@@ -291,7 +308,9 @@ export function AlgorithmParametersSection({
                   />
                 </label>
                 <label>
-                  <span className="glass-label">Gap extend</span>
+                  <span className="glass-label">
+                    Gap extend <Tip text="A higher extension penalty shortens existing gaps and can change alignment boundaries and ranking." />
+                  </span>
                   <input
                     className="glass-input"
                     type="number"
@@ -312,7 +331,7 @@ export function AlgorithmParametersSection({
                     checked={form.low_complexity_filter}
                     onChange={(event) => set("low_complexity_filter", event.target.checked)}
                   />
-                  <span>Low complexity regions <Tip text="Mask low-complexity regions (DUST for nucleotide, SEG for protein)." /></span>
+                  <span>Low complexity regions <Tip text="Turning this off can increase repetitive or compositionally biased matches and substantially increase runtime." /></span>
                 </label>
                 <label className="blast-checkbox-row">
                   <input
@@ -336,12 +355,12 @@ export function AlgorithmParametersSection({
                     checked={form.species_repeat_filter}
                     onChange={(event) => set("species_repeat_filter", event.target.checked)}
                   />
-                  <span>Species-specific repeats</span>
+                  <span>Species-specific repeats <Tip text="Suppresses repeat-derived matches for the selected taxid; relevant hits overlapping repeats may also disappear." /></span>
                 </label>
                 {form.species_repeat_filter && (
                   <label>
                     <span className="glass-label">
-                      Repeat taxid <Tip text="NCBI taxid passed to window masker. Homo sapiens is 9606." />
+                      Repeat taxid <Tip text="Chooses which species repeat library is masked; selecting the wrong taxid can suppress the wrong query regions. Homo sapiens is 9606." />
                     </span>
                     <input
                       className="glass-input"
@@ -356,7 +375,7 @@ export function AlgorithmParametersSection({
 
             <label>
               <span className="glass-label">
-                Additional options <Tip text="Extra command-line flags for BLAST." />
+                Additional options <Tip text="Extra flags can override form defaults and make this run difficult to compare with searches that used the recommended settings." />
               </span>
               <input
                 className="glass-input"

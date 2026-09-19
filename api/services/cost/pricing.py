@@ -1,36 +1,45 @@
 """Live VM hourly pricing via the public Azure Retail Prices API (opt-in).
 
 Responsibility: Fetch the Linux on-demand hourly USD price for a VM SKU in a
-region from the public, no-auth Azure Retail Prices API, with an in-process TTL
-cache and a short negative cache. Gated behind ``COST_PRICING_LIVE`` (default OFF)
-so the dashboard makes no external call unless an operator opts in.
+region from the public, no-auth Azure Retail Prices API, with process-local and
+best-effort shared Redis caches. Gated behind ``COST_PRICING_LIVE`` (default
+OFF) so the dashboard makes no external call unless an operator opts in.
 Edit boundaries: This is the only module that talks to ``prices.azure.com``. It
 returns ``None`` on any fault / miss; the caller (``estimate.py``) falls back to
 the static price map. No Azure SDK, no Storage.
 Key entry points: ``pricing_live_enabled``, ``live_hourly_price_usd``.
 Risky contracts: Only Consumption (on-demand), "1 Hour", non-Windows, non-Spot,
 non-reserved line items are considered — picking the wrong item would yield a
-wrong price, so the filter is strict and the lowest matching price is used. The
-cache is per-process (single api replica); a None result is cached briefly so a
+wrong price, so the filter is strict and the lowest matching price is used.
+Redis is never authoritative: malformed data or an unavailable sidecar falls
+back to the process cache and Retail API. A None result is cached briefly so a
 transient outage does not hammer the API.
 Validation: ``uv run pytest -q api/tests/test_cost_pricing.py``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import time
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 
 LOGGER = logging.getLogger(__name__)
 
 _RETAIL_URL = "https://prices.azure.com/api/retail/prices"
 _TIMEOUT_SECONDS = 5.0
 _CACHE_TTL_SECONDS = 86_400  # 24h for a real price
-_NEG_CACHE_TTL_SECONDS = 3_600  # 1h for a miss/fault, so we retry sooner
+_NEG_CACHE_TTL_SECONDS = 900  # 15m for a miss/fault, so new SKUs recover promptly
 _HTTP_PAGE_CAP = 200  # never read more than this many line items
+_REDIS_KEY_PREFIX = "elb:cost:retail-price:v1:"
+_REDIS_TIMEOUT_SECONDS = 0.25
+_REDIS_FAILURE_COOLDOWN_SECONDS = 30.0
+_REDIS_VALUE_MAX_BYTES = 128
+_FETCH_LOCK_STRIPES = 64
+_FETCH_MAX_CONCURRENCY = 4
+_FETCH_SLOT_WAIT_SECONDS = 0.25
 
 # ARM SKU / region identifiers are alphanumerics + a few separators. Validate
 # before interpolating into the OData filter so a malformed value cannot inject.
@@ -60,12 +69,14 @@ def _int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
 # only unbounded module-level cache in the api sidecar; the cap makes a leak
 # structurally impossible even if a future caller enumerates many regions/SKUs.
 # Clamped so a malformed/huge override cannot crash import or defeat the cap.
-_CACHE_MAX_ENTRIES = _int_env(
-    "COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000
-)
+_CACHE_MAX_ENTRIES = _int_env("COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000)
 
 _CACHE: dict[tuple[str, str], tuple[float | None, float]] = {}
 _CACHE_LOCK = Lock()
+_REDIS_STATE_LOCK = Lock()
+_REDIS_DISABLED_UNTIL = 0.0
+_FETCH_LOCKS = tuple(Lock() for _ in range(_FETCH_LOCK_STRIPES))
+_FETCH_SEMAPHORE = BoundedSemaphore(_FETCH_MAX_CONCURRENCY)
 
 
 def pricing_live_enabled() -> bool:
@@ -120,10 +131,87 @@ def _cache_put(key: tuple[str, str], value: float | None) -> None:
         _evict_over_cap_locked()
 
 
+def _shared_cache_key(key: tuple[str, str]) -> str:
+    sku, region = key
+    return f"{_REDIS_KEY_PREFIX}{region.casefold()}:{sku.casefold()}"
+
+
+def _shared_cache_available() -> bool:
+    with _REDIS_STATE_LOCK:
+        return _now() >= _REDIS_DISABLED_UNTIL
+
+
+def _mark_shared_cache_unavailable() -> bool:
+    """Open the Redis cooldown and return True only for the first failure."""
+    global _REDIS_DISABLED_UNTIL
+    now = _now()
+    with _REDIS_STATE_LOCK:
+        if now < _REDIS_DISABLED_UNTIL:
+            return False
+        _REDIS_DISABLED_UNTIL = now + _REDIS_FAILURE_COOLDOWN_SECONDS
+        return True
+
+
+def _shared_cache_get(key: tuple[str, str]) -> tuple[bool, float | None]:
+    if not _shared_cache_available():
+        return False, None
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        client = get_ops_redis_client(
+            socket_timeout=_REDIS_TIMEOUT_SECONDS,
+            socket_connect_timeout=_REDIS_TIMEOUT_SECONDS,
+        )
+        raw = client.get(_shared_cache_key(key))
+        if raw is None:
+            return False, None
+        if len(raw) > _REDIS_VALUE_MAX_BYTES:
+            return False, None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or "price" not in payload:
+            return False, None
+        price = payload["price"]
+        if price is None:
+            return True, None
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or price <= 0:
+            return False, None
+        return True, float(price)
+    except Exception as exc:
+        if _mark_shared_cache_unavailable():
+            LOGGER.warning("retail pricing redis unavailable: %s", type(exc).__name__)
+        return False, None
+
+
+def _shared_cache_put(key: tuple[str, str], value: float | None) -> None:
+    if not _shared_cache_available():
+        return
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        client = get_ops_redis_client(
+            socket_timeout=_REDIS_TIMEOUT_SECONDS,
+            socket_connect_timeout=_REDIS_TIMEOUT_SECONDS,
+        )
+        ttl = _CACHE_TTL_SECONDS if value is not None else _NEG_CACHE_TTL_SECONDS
+        client.setex(
+            _shared_cache_key(key),
+            ttl,
+            json.dumps({"price": value}, separators=(",", ":")),
+        )
+    except Exception as exc:
+        if _mark_shared_cache_unavailable():
+            LOGGER.warning("retail pricing redis unavailable: %s", type(exc).__name__)
+
+
 def reset_cache() -> None:
     """Test hook."""
+    global _REDIS_DISABLED_UNTIL
     with _CACHE_LOCK:
         _CACHE.clear()
+    with _REDIS_STATE_LOCK:
+        _REDIS_DISABLED_UNTIL = 0.0
 
 
 def _pick_linux_on_demand_price(items: list[dict[str, object]]) -> float | None:
@@ -160,6 +248,9 @@ def _fetch(sku: str, region: str) -> float | None:
         f"and armSkuName eq '{sku}' "
         "and priceType eq 'Consumption'"
     )
+    if not _FETCH_SEMAPHORE.acquire(timeout=_FETCH_SLOT_WAIT_SECONDS):
+        LOGGER.info("retail pricing fetch concurrency limit reached")
+        return None
     try:
         import httpx
 
@@ -178,6 +269,8 @@ def _fetch(sku: str, region: str) -> float | None:
             type(exc).__name__,
         )
         return None
+    finally:
+        _FETCH_SEMAPHORE.release()
     items = payload.get("Items") if isinstance(payload, dict) else None
     if not isinstance(items, list):
         return None
@@ -201,6 +294,25 @@ def live_hourly_price_usd(sku: str, region: str) -> float | None:
     hit, value = _cache_get(key)
     if hit:
         return value
-    price = _fetch(sku, region)
-    _cache_put(key, price)
-    return price
+    fetch_lock = _FETCH_LOCKS[hash(key) % len(_FETCH_LOCKS)]
+    if not fetch_lock.acquire(timeout=_TIMEOUT_SECONDS):
+        LOGGER.info(
+            "retail pricing single-flight wait timed out sku=%s region=%s",
+            sku,
+            region,
+        )
+        return None
+    try:
+        hit, value = _cache_get(key)
+        if hit:
+            return value
+        hit, value = _shared_cache_get(key)
+        if hit:
+            _cache_put(key, value)
+            return value
+        price = _fetch(sku, region)
+        _cache_put(key, price)
+        _shared_cache_put(key, price)
+        return price
+    finally:
+        fetch_lock.release()

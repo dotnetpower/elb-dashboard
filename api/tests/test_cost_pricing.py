@@ -10,6 +10,9 @@ Validation: ``uv run pytest -q api/tests/test_cost_pricing.py``.
 
 from __future__ import annotations
 
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -78,6 +81,190 @@ def test_negative_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(calls) == 1  # miss is cached
 
 
+def test_shared_cache_hit_avoids_fetch_and_hydrates_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COST_PRICING_LIVE", "true")
+    pricing.reset_cache()
+    key = ("Standard_E16s_v5", "koreacentral")
+    monkeypatch.setattr(pricing, "_shared_cache_get", lambda _key: (True, 1.25))
+    monkeypatch.setattr(
+        pricing,
+        "_fetch",
+        lambda *_args: pytest.fail("shared cache hit must not call Retail API"),
+    )
+
+    assert pricing.live_hourly_price_usd(*key) == 1.25
+    assert pricing._cache_get(key) == (True, 1.25)
+
+
+def test_shared_cache_uses_hit_and_negative_ttls(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.writes: list[tuple[str, int, str]] = []
+
+        def setex(self, key: str, ttl: int, value: str) -> None:
+            self.writes.append((key, ttl, value))
+
+    fake = FakeRedis()
+    pricing.reset_cache()
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client",
+        lambda **_kwargs: fake,
+    )
+
+    pricing._shared_cache_put(("Standard_E16s_v5", "koreacentral"), 1.5)
+    pricing._shared_cache_put(("Standard_E32s_v5", "koreacentral"), None)
+
+    assert fake.writes[0][1] == 86_400
+    assert json.loads(fake.writes[0][2]) == {"price": 1.5}
+    assert fake.writes[1][1] == 900
+    assert json.loads(fake.writes[1][2]) == {"price": None}
+
+
+def test_shared_cache_failure_preserves_fetch_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COST_PRICING_LIVE", "true")
+    pricing.reset_cache()
+    monkeypatch.setattr(pricing, "_shared_cache_get", lambda _key: (False, None))
+    monkeypatch.setattr(pricing, "_shared_cache_put", lambda _key, _value: None)
+    monkeypatch.setattr(pricing, "_fetch", lambda _sku, _region: 2.0)
+
+    assert pricing.live_hourly_price_usd("Standard_E16s_v5", "koreacentral") == 2.0
+
+
+def test_shared_cache_failure_enters_bounded_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExplodingRedis:
+        def get(self, _key: str) -> None:
+            raise ConnectionError("redis unavailable")
+
+    pricing.reset_cache()
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client",
+        lambda **_kwargs: ExplodingRedis(),
+    )
+
+    assert pricing._shared_cache_get(("Standard_E16s_v5", "koreacentral")) == (
+        False,
+        None,
+    )
+    assert pricing._shared_cache_available() is False
+
+
+def test_shared_cache_cooldown_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(pricing, "_now", lambda: clock[0])
+    pricing.reset_cache()
+
+    assert pricing._mark_shared_cache_unavailable() is True
+    assert pricing._mark_shared_cache_unavailable() is False
+    assert pricing._shared_cache_available() is False
+    clock[0] += pricing._REDIS_FAILURE_COOLDOWN_SECONDS
+    assert pricing._shared_cache_available() is True
+
+
+def test_shared_cache_rejects_oversized_or_invalid_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRedis:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+        def get(self, _key: str) -> object:
+            return self.value
+
+    pricing.reset_cache()
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client",
+        lambda **_kwargs: FakeRedis(b"x" * 129),
+    )
+    assert pricing._shared_cache_get(("Standard_E16s_v5", "koreacentral")) == (
+        False,
+        None,
+    )
+
+    monkeypatch.setattr(
+        "api.services.redis_clients.get_ops_redis_client",
+        lambda **_kwargs: FakeRedis(b'{"price":true}'),
+    )
+    assert pricing._shared_cache_get(("Standard_E16s_v5", "koreacentral")) == (
+        False,
+        None,
+    )
+
+
+def test_same_key_concurrent_miss_fetches_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COST_PRICING_LIVE", "true")
+    pricing.reset_cache()
+    calls: list[int] = []
+    monkeypatch.setattr(pricing, "_shared_cache_get", lambda _key: (False, None))
+    monkeypatch.setattr(pricing, "_shared_cache_put", lambda _key, _value: None)
+
+    def fetch(_sku: str, _region: str) -> float:
+        calls.append(1)
+        time.sleep(0.05)
+        return 1.5
+
+    monkeypatch.setattr(pricing, "_fetch", fetch)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        values = list(
+            executor.map(
+                lambda _index: pricing.live_hourly_price_usd("Standard_E16s_v5", "koreacentral"),
+                range(8),
+            )
+        )
+
+    assert values == [1.5] * 8
+    assert len(calls) == 1
+
+
+def test_fetch_concurrency_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    active = 0
+    peak = 0
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"Items": [_item(retailPrice=1.0)]}
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, *_args: object, **_kwargs: object) -> FakeResponse:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                time.sleep(0.05)
+                return FakeResponse()
+            finally:
+                active -= 1
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        values = list(
+            executor.map(
+                lambda index: pricing._fetch(f"Standard_E{index}s_v5", "koreacentral"),
+                range(12),
+            )
+        )
+
+    assert values == [1.0] * 12
+    assert peak == pricing._FETCH_MAX_CONCURRENCY
+
+
 def test_cache_is_size_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     """The per-process cache must never grow past its size cap, so a caller
     that enumerates many region/SKU pairs cannot leak memory."""
@@ -112,21 +299,20 @@ def test_cache_reclaims_expired_before_evicting_valid(
 def test_int_env_falls_back_on_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A malformed override must not crash import — it falls back to default."""
     monkeypatch.setenv("COST_PRICING_CACHE_MAX_ENTRIES", "not-a-number")
-    assert pricing._int_env(
-        "COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000
-    ) == 512
+    assert (
+        pricing._int_env("COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000) == 512
+    )
     monkeypatch.delenv("COST_PRICING_CACHE_MAX_ENTRIES", raising=False)
-    assert pricing._int_env(
-        "COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000
-    ) == 512
+    assert (
+        pricing._int_env("COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000) == 512
+    )
 
 
 def test_int_env_clamps_out_of_range(monkeypatch: pytest.MonkeyPatch) -> None:
     """Over/under-range overrides are clamped, so the cap can never be defeated."""
     monkeypatch.setenv("COST_PRICING_CACHE_MAX_ENTRIES", "5")
     assert (
-        pricing._int_env("COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000)
-        == 64
+        pricing._int_env("COST_PRICING_CACHE_MAX_ENTRIES", 512, minimum=64, maximum=100_000) == 64
     )
     monkeypatch.setenv("COST_PRICING_CACHE_MAX_ENTRIES", "9999999")
     assert (

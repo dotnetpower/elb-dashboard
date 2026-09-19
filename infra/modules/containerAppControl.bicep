@@ -323,6 +323,9 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // egress behavior. The UI can disclose the newer release while
             // this gate is off, but cannot enqueue the large HTTPS transfer.
             { name: 'PREPARE_DB_NCBI_DIRECT_ENABLED', value: effectivePrepareDbNcbiDirectEnabled }
+            // Opt-in public Azure Retail Prices lookup. Default false keeps
+            // the bundled static estimate and performs no external request.
+            { name: 'COST_PRICING_LIVE', value: controlPlaneEnv.api.COST_PRICING_LIVE }
             // Live Wall log-tail fallback target. When non-empty,
             // `api.services.sidecar_logs` switches from local file tailing
             // to KQL against the LA workspace. Empty disables the fallback
