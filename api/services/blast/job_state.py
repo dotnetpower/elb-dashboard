@@ -1,12 +1,13 @@
 """BLAST job projection, file preview, and refresh helpers.
 
-Responsibility: BLAST job projection, file preview, and refresh helpers
-Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
-instead of duplicating SDK code.
+Responsibility: Project BLAST job state and reconcile owner-visible running
+rows with durable/K8s state.
+Edit boundaries: Keep reusable read-side projection and refresh logic here; task-wide scans stay
+in ``api.tasks.blast.reconcile_task``.
 Key entry points: `_payload_value`, `_queries_blob_path`, `_job_query_blob_path`,
 `_refresh_running_blast_state`, `_blocked_refresh_reasons`
-Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
+Risky contracts: Runtime ID discovery must honor the stored results prefix for flat and dated
+layouts; K8s terminal state is surfaced only when durable result artifacts agree.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
 api/tests/test_blast_tasks.py`.
 """
@@ -1593,18 +1594,20 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
 
         container = _blob_service(get_credential(), storage_account).get_container_client("results")
         from api.services.storage.job_prefix import (
+            elastic_blast_job_id_from_blob_name,
             elastic_blast_subdir_prefix,
             resolve_results_prefix,
         )
 
-        prefix = elastic_blast_subdir_prefix(resolve_results_prefix(job_id))
+        results_prefix = resolve_results_prefix(job_id)
+        prefix = elastic_blast_subdir_prefix(results_prefix)
         for blob in container.list_blobs(name_starts_with=prefix):
             name = str(blob.name or "")
-            parts = name.split("/", 2)
-            if len(parts) >= 2:
-                runtime_identity = canonical_elastic_blast_job_id(parts[1])
-                if runtime_identity:
-                    return runtime_identity
+            runtime_identity = canonical_elastic_blast_job_id(
+                elastic_blast_job_id_from_blob_name(name, results_prefix)
+            )
+            if runtime_identity:
+                return runtime_identity
     except Exception as exc:
         LOGGER.debug("elastic blast job id discovery skipped job_id=%s: %s", job_id, exc)
     return ""

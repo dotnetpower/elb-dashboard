@@ -22,6 +22,7 @@ from api.services.storage.job_prefix import (
     build_dated_results_prefix,
     date_layout_enabled,
     default_results_prefix,
+    elastic_blast_job_id_from_blob_name,
     elastic_blast_subdir_prefix,
     normalize_results_prefix,
     resolve_results_prefix,
@@ -57,6 +58,44 @@ def test_default_results_prefix_is_flat_layout() -> None:
 def test_elastic_blast_subdir_prefix() -> None:
     assert elastic_blast_subdir_prefix("job-xyz/") == "job-xyz/job-"
     assert elastic_blast_subdir_prefix("2026/06/23/job-xyz/") == "2026/06/23/job-xyz/job-"
+
+
+@pytest.mark.parametrize(
+    ("results_prefix", "blob_name"),
+    [
+        (
+            "dashboard-job/",
+            "dashboard-job/job-11f96f79510a4ee2bd0b2c717d352112/metadata/SUCCESS.txt",
+        ),
+        (
+            "2026/09/21/dashboard-job/",
+            "2026/09/21/dashboard-job/job-11f96f79510a4ee2bd0b2c717d352112/metadata/SUCCESS.txt",
+        ),
+    ],
+)
+def test_elastic_blast_job_id_from_blob_name_supports_results_layouts(
+    results_prefix: str,
+    blob_name: str,
+) -> None:
+    assert (
+        elastic_blast_job_id_from_blob_name(blob_name, results_prefix)
+        == "job-11f96f79510a4ee2bd0b2c717d352112"
+    )
+
+
+@pytest.mark.parametrize(
+    ("results_prefix", "blob_name"),
+    [
+        ("2026/09/21/dashboard-job/", "2026/09/21/dashboard-job-other/job-" + "a" * 32),
+        ("dashboard-job/", "dashboard-job/job-deadbeef/metadata/SUCCESS.txt"),
+        ("dashboard-job/", "dashboard-job/nested/job-" + "a" * 32 + "/SUCCESS.txt"),
+    ],
+)
+def test_elastic_blast_job_id_from_blob_name_rejects_wrong_child(
+    results_prefix: str,
+    blob_name: str,
+) -> None:
+    assert elastic_blast_job_id_from_blob_name(blob_name, results_prefix) == ""
 
 
 def test_results_prefix_from_state_uses_stored_value() -> None:

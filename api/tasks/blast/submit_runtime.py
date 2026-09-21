@@ -19,7 +19,8 @@ on this to avoid premature "completed" reporting. ``_stream_submit_command`` als
 submit once after stripping an OPTIONAL ``[cluster]`` param the terminal ``elastic-blast`` does
 not recognise (``_OPTIONAL_STRIPPABLE_CFG_PARAMS``) so api/worker→terminal version skew cannot
 hard-fail submit; required params are intentionally excluded so a genuinely invalid config still
-fails loudly.
+fails loudly. Runtime identity discovery parses blob names relative to the resolved job prefix;
+never assume a fixed slash index because date-tiered result paths add three leading segments.
 Validation: ``uv run pytest -q api/tests/test_blast_tasks.py``.
 """
 
@@ -400,18 +401,20 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
 
         container = _blob_service(get_credential(), storage_account).get_container_client("results")
         from api.services.storage.job_prefix import (
+            elastic_blast_job_id_from_blob_name,
             elastic_blast_subdir_prefix,
             resolve_results_prefix,
         )
 
-        prefix = elastic_blast_subdir_prefix(resolve_results_prefix(job_id))
+        results_prefix = resolve_results_prefix(job_id)
+        prefix = elastic_blast_subdir_prefix(results_prefix)
         for blob in container.list_blobs(name_starts_with=prefix):
             name = str(blob.name or "")
-            parts = name.split("/", 2)
-            if len(parts) >= 2:
-                runtime_identity = canonical_elastic_blast_job_id(parts[1])
-                if runtime_identity:
-                    return runtime_identity
+            runtime_identity = canonical_elastic_blast_job_id(
+                elastic_blast_job_id_from_blob_name(name, results_prefix)
+            )
+            if runtime_identity:
+                return runtime_identity
     except Exception as exc:
         LOGGER.info(
             "elastic blast job id discovery skipped job_id=%s: %s", job_id, type(exc).__name__

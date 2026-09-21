@@ -11,13 +11,16 @@ that have a state row pass it; callers that only have a ``job_id`` get the
 legacy ``{job_id}/`` fallback.
 Key entry points: ``normalize_results_prefix``, ``default_results_prefix``,
 ``build_dated_results_prefix``, ``results_prefix_from_state``,
-``resolve_results_prefix``, ``date_layout_enabled``, ``elastic_blast_subdir_prefix``.
+``resolve_results_prefix``, ``date_layout_enabled``, ``elastic_blast_subdir_prefix``,
+``elastic_blast_job_id_from_blob_name``.
 Risky contracts: The returned prefix ALWAYS ends with a single ``/`` and never
 contains ``..`` — a bare ``{job_id}`` (no trailing slash) was a latent
 prefix-collision bug (``name_starts_with="job-abc"`` also matches
 ``job-abcd/...``); normalizing here fixes it. External (``/v1/jobs``) jobs keep
 the flat ``{job_id}/`` layout per the sibling's contract, so the default is the
 correct value for them and #67 must not change it.
+Runtime child IDs are parsed relative to this prefix; fixed path indexes break
+as soon as the date-tiered layout adds ``YYYY/MM/DD`` segments.
 Validation: ``uv run pytest -q api/tests/test_storage_job_prefix.py``.
 """
 
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,6 +36,7 @@ LOGGER = logging.getLogger(__name__)
 
 _DATE_LAYOUT_ENV = "STORAGE_DATE_LAYOUT_ENABLED"
 _ON_VALUES = {"1", "true", "yes", "on"}
+_ELASTIC_BLAST_JOB_ID_RE = re.compile(r"job-[0-9a-f]{32}", re.IGNORECASE)
 
 
 def date_layout_enabled() -> bool:
@@ -171,3 +176,21 @@ def elastic_blast_subdir_prefix(results_prefix: str) -> str:
     already be normalized (trailing slash).
     """
     return f"{results_prefix}job-"
+
+
+def elastic_blast_job_id_from_blob_name(blob_name: str, results_prefix: str) -> str:
+    """Extract the runtime ``job-<32hex>`` child directly under a job prefix.
+
+    Both flat and date-tiered layouts are supported because parsing is relative
+    to the canonical ``results_prefix`` instead of a fixed path index.
+    """
+    prefix = results_prefix.strip("/")
+    name = str(blob_name or "").strip("/")
+    relative_prefix = f"{prefix}/" if prefix else ""
+    if relative_prefix and not name.startswith(relative_prefix):
+        return ""
+    relative = name[len(relative_prefix) :]
+    candidate = relative.split("/", 1)[0]
+    if not _ELASTIC_BLAST_JOB_ID_RE.fullmatch(candidate):
+        return ""
+    return candidate.lower()

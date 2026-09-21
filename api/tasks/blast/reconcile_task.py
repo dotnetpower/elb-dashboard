@@ -16,7 +16,9 @@ Key entry points:
 Risky contracts: Idempotent — calling twice is a no-op if the first
 pass brought every active row to a terminal state. External K8s completion
 must not become terminal until the current runtime identity's SUCCESS marker
-exists. Public task name
+exists. A successful submit task may still report ``status=running``; when K8s
+resources are gone, the durable SUCCESS marker overrides that stale task result.
+Public task name
 must stay ``api.tasks.blast.reconcile_stale_jobs`` (referenced from
 ``api/celery_app.py`` beat schedule).
 Validation: ``uv run pytest -q api/tests/test_blast_tasks.py``.
@@ -35,6 +37,7 @@ from api.tasks import blast as _blast
 from api.tasks.blast.progress import _merge_progress_payload
 
 LOGGER = logging.getLogger(__name__)
+_BLAST_EXPORTS: Any = _blast
 
 __all__ = (
     "_celery_success_row_status",
@@ -377,6 +380,17 @@ def reconcile_stale_jobs(
             external_missing = False
             external_active = False
             external_job_id = _blast._external_reconcile_job_id(row)
+            if not external_job_id and submit_task_completed_active:
+                storage_account = _blast._storage_account_from_row(row)
+                external_job_id = _BLAST_EXPORTS._discover_elastic_blast_job_id(
+                    storage_account,
+                    str(row.job_id),
+                )
+                if external_job_id:
+                    repo.update(
+                        row.job_id,
+                        elastic_blast_job_id=external_job_id,
+                    )
             k8s_outcome = _reconcile_row_k8s_status(
                 repo,
                 row,
@@ -445,6 +459,23 @@ def reconcile_stale_jobs(
                 continue
 
             if submit_task_completed_active:
+                storage_account = _blast._storage_account_from_row(row)
+                if _blast._has_blast_success_marker(
+                    storage_account,
+                    str(row.job_id),
+                    external_job_id,
+                ):
+                    extra = {"elastic_blast_job_id": external_job_id} if external_job_id else {}
+                    _BLAST_EXPORTS._update_state(
+                        row.job_id,
+                        "completed",
+                        status="completed",
+                        event="reconcile_results_recovered",
+                        error_code="",
+                        **extra,
+                    )
+                    summary["completed"] += 1
+                    continue
                 summary["untouched"] += 1
                 continue
 

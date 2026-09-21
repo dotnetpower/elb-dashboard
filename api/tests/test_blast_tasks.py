@@ -443,6 +443,38 @@ def test_extract_elastic_blast_job_id_requires_canonical_identity() -> None:
     )
 
 
+def test_discover_elastic_blast_job_id_supports_dated_results_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_id = "job-11f96f79510a4ee2bd0b2c717d352112"
+
+    class Container:
+        def list_blobs(self, *, name_starts_with: str):
+            assert name_starts_with == "2026/09/21/dashboard-job/job-"
+            return [
+                SimpleNamespace(
+                    name=(f"2026/09/21/dashboard-job/{runtime_id}/metadata/SUCCESS.txt")
+                )
+            ]
+
+    class BlobService:
+        def get_container_client(self, name: str):
+            assert name == "results"
+            return Container()
+
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda *_args, **_kwargs: BlobService(),
+    )
+    monkeypatch.setattr(
+        "api.services.storage.job_prefix.resolve_results_prefix",
+        lambda _job_id: "2026/09/21/dashboard-job/",
+    )
+
+    assert blast._discover_elastic_blast_job_id("stelb", "dashboard-job") == runtime_id
+
+
 def test_external_reconcile_job_id_rejects_short_identity() -> None:
     row = SimpleNamespace(
         payload={"elastic_blast_job_id": "job-deadbeef"},
@@ -4440,6 +4472,60 @@ def test_reconcile_submit_success_keeps_running_row_running(
     assert summary["completed"] == 0
     assert summary["untouched"] == 1
     assert repo.updates[0][1] == {"status": "running", "phase": "submitted"}
+
+
+def test_reconcile_submit_success_recovers_completed_dated_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_id = "job-11f96f79510a4ee2bd0b2c717d352112"
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="dashboard-job",
+                task_id="task-2",
+                status="running",
+                phase="submitted",
+                payload={"storage_account": "stelb"},
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "SUCCESS"
+            self.result = {"status": "running", "phase": "submitted"}
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr(
+        blast,
+        "_discover_elastic_blast_job_id",
+        lambda *_args: runtime_id,
+    )
+    monkeypatch.setattr(
+        blast,
+        "_has_blast_success_marker",
+        lambda storage, job_id, runtime: (
+            (
+                storage,
+                job_id,
+                runtime,
+            )
+            == ("stelb", "dashboard-job", runtime_id)
+        ),
+    )
+
+    summary = blast.reconcile_stale_jobs.run()
+
+    assert summary["completed"] == 1
+    completed_updates = [
+        update for _job_id, update in repo.updates if update.get("status") == "completed"
+    ]
+    assert len(completed_updates) == 1
+    assert completed_updates[0]["phase"] == "completed"
+    assert completed_updates[0]["error_code"] == ""
+    assert any(update.get("elastic_blast_job_id") == runtime_id for _job_id, update in repo.updates)
+    assert any(event == "reconcile_results_recovered" for _job_id, event, _payload in repo.history)
 
 
 def test_reconcile_submit_completed_waits_for_result_artifacts(
