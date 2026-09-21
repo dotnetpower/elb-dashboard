@@ -86,7 +86,7 @@ function poolStateAccent(state: string | null | undefined): {
     color: "var(--accent)",
     border: "rgba(110,159,255,0.4)",
     bg: "rgba(110,159,255,0.08)",
-    icon: <Loader2 size={11} className="spin" />,
+    icon: <Loader2 size={11} className="spin spin-essential" />,
   };
 }
 
@@ -187,7 +187,11 @@ export function ProvisioningBanner({
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <Loader2 size={16} className="spin" style={{ color: "var(--accent)" }} />
+          <Loader2
+            size={16}
+            className="spin spin-essential"
+            style={{ color: "var(--accent)" }}
+          />
           <div style={{ minWidth: 0 }}>
             <div
               style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}
