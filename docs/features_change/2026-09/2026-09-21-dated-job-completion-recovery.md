@@ -27,8 +27,9 @@ been cleaned up.
 
 Completed searches with date-tiered result paths now transition to `Completed`
 instead of remaining indefinitely `Running`. Existing affected rows are repaired
-by the periodic reconciler: it backfills the runtime identity and uses the
-cluster finalizer's durable `SUCCESS.txt` marker as completion ground truth.
+by either job-detail refresh or the periodic reconciler: both backfill the
+runtime identity and use the cluster finalizer's durable `SUCCESS.txt` marker
+as completion ground truth.
 
 ## API / IaC Diff Summary
 
@@ -38,6 +39,9 @@ cluster finalizer's durable `SUCCESS.txt` marker as completion ground truth.
 - When a completed submit task still reports `running`, reconciliation attempts
   runtime-ID backfill and checks the scoped durable success marker after live
   K8s/external refreshes cannot provide a terminal state.
+- A direct job-detail refresh applies the same recovery when K8s reports
+  `creating` with zero Jobs/Pods after finalizer cleanup, so an affected job
+  does not wait behind the reconciler's bounded active-row scan.
 - No HTTP schema, Azure resource, queue name, or Storage layout changed.
 
 ## Validation Evidence
@@ -46,6 +50,6 @@ cluster finalizer's durable `SUCCESS.txt` marker as completion ground truth.
   prefix contained a canonical runtime ID, merged output, merge report, and
   `metadata/SUCCESS.txt`; aggregate analytics returned 100 hits.
 - Focused prefix/discovery/reconciliation tests passed.
-- Full backend suite passed: 6,141 with 4 fixture-dependent skips.
+- Full backend suite passed: 6,142 with 4 fixture-dependent skips.
 - Ruff, the mypy debt ratchet, the 242-operation OpenAPI contract, generated
   TypeScript API types, and strict MkDocs build passed.

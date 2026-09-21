@@ -1077,6 +1077,69 @@ def test_refresh_running_blast_state_uses_discovered_elastic_blast_job_id(monkey
     assert seen["job_id"] == _RUNTIME_ID
 
 
+def test_refresh_running_blast_state_recovers_from_success_marker_after_k8s_cleanup(
+    monkeypatch,
+):
+    state = _state(
+        status="running",
+        phase="submitted",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+        },
+    )
+
+    class Repo:
+        def __init__(self) -> None:
+            self.updated = None
+            self.history = []
+
+        def update(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return _state(**{**state.__dict__, **kwargs})
+
+        def append_history(self, job_id, event, payload):
+            self.history.append((job_id, event, payload))
+
+    repo = Repo()
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(blast_job_state, "_discover_elastic_blast_job_id", lambda *_: _RUNTIME_ID)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {
+            "status": "creating",
+            "jobs": 0,
+            "pods": 0,
+            "detail": "no app=blast jobs/pods yet",
+        },
+    )
+    monkeypatch.setattr(
+        blast_job_state,
+        "_state_has_blast_success_marker",
+        lambda _state, _payload, runtime_identity: runtime_identity == _RUNTIME_ID,
+    )
+    monkeypatch.setattr(
+        blast_job_state,
+        "_state_has_parseable_result_artifact",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("SUCCESS marker is authoritative")
+        ),
+    )
+
+    refreshed = blast_job_state._refresh_running_blast_state(repo, state)
+
+    assert refreshed.status == "completed"
+    assert refreshed.phase == "completed"
+    assert repo.updated[1]["elastic_blast_job_id"] == _RUNTIME_ID
+    assert repo.updated[1]["payload"]["_progress"]["steps"]["completed"][
+        "status"
+    ] == "completed"
+    assert repo.history[-1][1] == "k8s_status_refreshed"
+    assert repo.history[-1][2]["k8s"]["source"] == "storage_success_marker"
+
+
 def test_refresh_running_blast_state_throttles_repeated_k8s_checks(monkeypatch):
     state = _state(
         job_id="job-throttle",

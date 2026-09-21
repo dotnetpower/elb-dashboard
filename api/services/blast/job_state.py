@@ -1318,6 +1318,20 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
         _K8S_REFRESH_LAST_CHECK[refresh_key] = now
         _arm_cluster_refresh_cooldown(cluster_key, cluster_name, now, "status=unknown")
         return state
+    completed_from_marker = False
+    if (
+        k8s_status == "creating"
+        and int(k8s.get("jobs") or 0) == 0
+        and int(k8s.get("pods") or 0) == 0
+        and _state_has_blast_success_marker(state, payload, k8s_job_id)
+    ):
+        k8s_status = "completed"
+        completed_from_marker = True
+        k8s = {
+            **k8s,
+            "status": "completed",
+            "source": "storage_success_marker",
+        }
     # Reachable with a concrete status → the cluster recovered (if it was ever
     # cooling down), so clear the negative cache for immediate live refreshes.
     _K8S_REFRESH_CLUSTER_COOLDOWN.pop(cluster_key, None)
@@ -1330,7 +1344,11 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     # pulling the full row first preserves the existing step history.
     state = _maybe_reload_with_payload(repo, state)
     payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
-    if k8s_status == "completed" and not _state_has_parseable_result_artifact(state, payload):
+    if (
+        k8s_status == "completed"
+        and not completed_from_marker
+        and not _state_has_parseable_result_artifact(state, payload)
+    ):
         try:
             updated = repo.update(
                 state.job_id,
@@ -1392,6 +1410,7 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
             state.job_id,
             status=k8s_status,
             phase=k8s_status,
+            elastic_blast_job_id=k8s_job_id,
             payload=_payload_with_refresh_progress(
                 payload,
                 phase=k8s_status,
@@ -1579,6 +1598,35 @@ def _state_has_parseable_result_artifact(state: Any, payload: dict[str, Any]) ->
     except Exception as exc:
         LOGGER.info(
             "blast result artifact check unavailable job_id=%s: %s",
+            getattr(state, "job_id", ""),
+            type(exc).__name__,
+        )
+        return False
+
+
+def _state_has_blast_success_marker(
+    state: Any,
+    payload: dict[str, Any],
+    runtime_identity: str,
+) -> bool:
+    storage_account = str(
+        getattr(state, "storage_account", None)
+        or _payload_value(payload, "storage_account")
+        or ""
+    )
+    if not storage_account or not runtime_identity:
+        return False
+    try:
+        from api.services.blast.result_analytics import has_blast_success_marker
+
+        return has_blast_success_marker(
+            storage_account,
+            str(state.job_id),
+            runtime_identity,
+        )
+    except Exception as exc:
+        LOGGER.info(
+            "blast success marker check unavailable job_id=%s: %s",
             getattr(state, "job_id", ""),
             type(exc).__name__,
         )
