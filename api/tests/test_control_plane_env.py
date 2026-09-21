@@ -90,6 +90,30 @@ def test_postprovision_validates_each_platform_network_surface() -> None:
     assert precheck < build_open < final_restore < final_check
 
 
+def test_postprovision_probes_structure_and_deployed_uami_runtime() -> None:
+    """Private data-plane checks must execute inside the deployed API VNet."""
+    script = _POSTPROVISION_PATH.read_text(encoding="utf-8")
+
+    assert "SHARED_IDENTITY_PRINCIPAL_ID\n" in script
+    assert '"$PROBE_SCRIPT" --structural-only' in script
+    assert 'RBAC_DOCTOR="$REPO_ROOT/scripts/dev/check-mi-rbac.sh"' in script
+    assert '--principal-id "$SHARED_IDENTITY_PRINCIPAL_ID"' in script
+    assert 'bash "$RBAC_DOCTOR" "${RBAC_DOCTOR_ARGS[@]}"' in script
+    assert 'RUNTIME_PROBE_SCRIPT="$REPO_ROOT/scripts/dev/probe-deployed-capabilities.sh"' in script
+    assert 'bash "$RUNTIME_PROBE_SCRIPT"' in script
+
+    runtime_probe = (
+        _REPO_ROOT / "scripts" / "dev" / "probe-deployed-capabilities.sh"
+    ).read_text(encoding="utf-8")
+    for route in (
+        "/api/health/ready",
+        "/api/health/azure-discovery",
+        "/api/monitor/storage",
+        "/api/monitor/acr",
+    ):
+        assert route in runtime_probe
+
+
 def _run_network_posture_guard(
     tmp_path: Path,
     *,

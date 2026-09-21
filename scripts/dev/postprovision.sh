@@ -31,6 +31,7 @@ REQUIRED_VARS=(
   CONTAINER_ENV_NAME
   SHARED_IDENTITY_RESOURCE_ID
   SHARED_IDENTITY_CLIENT_ID
+  SHARED_IDENTITY_PRINCIPAL_ID
   AZURE_TENANT_ID
   AZURE_SUBSCRIPTION_ID
   STORAGE_ACCOUNT_NAME
@@ -876,13 +877,11 @@ fi
 # 6. Capability probe — final RBAC sanity check.
 #
 # Per .github/copilot-instructions.md §12a Rule 3, the probe attempts one
-# real call against every critical Azure surface (Blob / Table / ACR /
-# Container Apps + optional AKS / Key Vault) and structurally verifies the
-# shared UAMI's AKS bootstrap custom role + constrained assignment. A 403,
-# AuthorizationFailed, or stale required RBAC contract aborts the deploy with
-# a non-zero exit code and prints the missing role + Bicep module to fix it.
-# Optional surfaces (AKS / Key Vault) downgrade to warnings so first-deploys
-# before the SPA wizard creates AKS do not trip the gate.
+# The local structural probe inspects the shared UAMI's AKS bootstrap custom
+# role + constrained assignment through the deployer's ARM read permissions.
+# Runtime capability checks then call the deployed API: those requests execute
+# Azure operations under the sidecar's actual UAMI from inside the private VNet,
+# avoiding false Storage failures from the deployer's public network/identity.
 #
 # Hard-fail: there is intentionally no skip flag. The probe is read-only
 # and runs in ~3-5 seconds against the SDKs the rest of the deploy already
@@ -894,9 +893,9 @@ if [[ -f "$PROBE_SCRIPT" ]]; then
   ts "==> Verifying shared MI capabilities (probe_capabilities.py)"
   PROBE_RC=0
   if command -v uv >/dev/null 2>&1; then
-    uv run --quiet python "$PROBE_SCRIPT" 2>&1 | sed 's/^/    /' || PROBE_RC=${PIPESTATUS[0]}
+    uv run --quiet python "$PROBE_SCRIPT" --structural-only 2>&1 | sed 's/^/    /' || PROBE_RC=${PIPESTATUS[0]}
   else
-    python3 "$PROBE_SCRIPT" 2>&1 | sed 's/^/    /' || PROBE_RC=${PIPESTATUS[0]}
+    python3 "$PROBE_SCRIPT" --structural-only 2>&1 | sed 's/^/    /' || PROBE_RC=${PIPESTATUS[0]}
   fi
   if [[ "$PROBE_RC" -ne 0 ]]; then
     ts "    ✗ capability probe FAILED (rc=$PROBE_RC)"
@@ -904,8 +903,45 @@ if [[ -f "$PROBE_SCRIPT" ]]; then
     ts "      See the probe output above for the specific role + Bicep module."
     exit "$PROBE_RC"
   fi
-  ts "    ✓ capability probe passed"
+  ts "    ✓ structural capability probe passed"
 fi
+
+RBAC_DOCTOR="$REPO_ROOT/scripts/dev/check-mi-rbac.sh"
+ts "==> Verifying the complete shared UAMI role manifest"
+RBAC_DOCTOR_ARGS=(
+  --strict
+  --quiet
+  --subscription "$AZURE_SUBSCRIPTION_ID"
+  --rg "$AZURE_RESOURCE_GROUP"
+  --container-app "$CONTAINER_APP_NAME"
+  --principal-id "$SHARED_IDENTITY_PRINCIPAL_ID"
+  --storage "$STORAGE_ACCOUNT_NAME"
+  --acr "$ACR_NAME"
+  --keyvault "$KEY_VAULT_NAME"
+)
+AKS_ROLE_RG="${AKS_CLUSTER_RESOURCE_GROUP:-${AZURE_AKS_RESOURCE_GROUP:-}}"
+if [[ -n "$AKS_ROLE_RG" ]]; then
+  RBAC_DOCTOR_ARGS+=(--cluster-rg "$AKS_ROLE_RG")
+fi
+RBAC_DOCTOR_RC=0
+bash "$RBAC_DOCTOR" "${RBAC_DOCTOR_ARGS[@]}" 2>&1 | sed 's/^/    /' \
+  || RBAC_DOCTOR_RC=${PIPESTATUS[0]}
+if [[ "$RBAC_DOCTOR_RC" -ne 0 ]]; then
+  ts "    ✗ shared UAMI role manifest FAILED (rc=$RBAC_DOCTOR_RC)"
+  exit "$RBAC_DOCTOR_RC"
+fi
+ts "    ✓ shared UAMI role manifest passed"
+
+RUNTIME_PROBE_SCRIPT="$REPO_ROOT/scripts/dev/probe-deployed-capabilities.sh"
+ts "==> Verifying runtime capabilities through the deployed API sidecar"
+RUNTIME_PROBE_RC=0
+API_CLIENT_ID="$API_CLIENT_ID_VAL" bash "$RUNTIME_PROBE_SCRIPT" 2>&1 \
+  | sed 's/^/    /' || RUNTIME_PROBE_RC=${PIPESTATUS[0]}
+if [[ "$RUNTIME_PROBE_RC" -ne 0 ]]; then
+  ts "    ✗ deployed UAMI capability probe FAILED (rc=$RUNTIME_PROBE_RC)"
+  exit "$RUNTIME_PROBE_RC"
+fi
+ts "    ✓ deployed UAMI readiness, discovery, Storage, and ACR probes passed"
 
 # Restore the temporary ACR build opening before the final posture check. The
 # EXIT trap remains as a crash/interruption backstop and becomes a no-op after a

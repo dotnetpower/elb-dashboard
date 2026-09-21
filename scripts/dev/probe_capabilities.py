@@ -16,18 +16,27 @@ Risky contracts: Treats 401/403/`AuthorizationFailed` as missing RBAC.
     Treats network errors / 404 (resource doesn't exist yet) as "skip" so a
     fresh azd up before AKS is created doesn't fail the probe.
 Validation: `uv run pytest -q api/tests/test_probe_capabilities.py` and
-    `uv run python scripts/dev/probe_capabilities.py` after postprovision.
-    Exit code 0 = all required probes passed; non-zero = failure.
+    `uv run python scripts/dev/probe_capabilities.py --structural-only`.
+    Runtime checks use `scripts/dev/probe-deployed-capabilities.sh`.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+# Direct execution (`python scripts/dev/probe_capabilities.py`) puts only the
+# script directory on sys.path. Add the repository root so the structural AKS
+# role probe can reuse the API's authoritative RBAC contract.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 # Import lazily inside each probe so a missing optional SDK doesn't blow up
 # the whole script before it can print actionable output.
@@ -121,6 +130,8 @@ class Probe:
     bicep     — repo-relative Bicep module path that grants the role.
     required  — when True a failure aborts the probe with EXIT_FAIL.
                 When False a failure is surfaced as a warning only.
+    structural — safe to run from the deployer's network/identity because it
+                 inspects the dashboard UAMI's role definition/assignment.
     env_vars  — env vars that must be set for the probe to run; missing env
                 is reported as a skip, not a failure.
     """
@@ -130,6 +141,7 @@ class Probe:
     role: str
     bicep: str
     required: bool = True
+    structural: bool = False
     env_vars: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -353,6 +365,7 @@ PROBES: tuple[Probe, ...] = (
         role="Elb Workload RG Creator with constrained role delegation",
         bicep="infra/modules/workloadRgCreatorRole.bicep",
         required=True,
+        structural=True,
         env_vars=("AZURE_SUBSCRIPTION_ID", "SHARED_IDENTITY_PRINCIPAL_ID"),
     ),
     Probe(
@@ -503,9 +516,32 @@ def _identity_disclosure() -> str:
     )
 
 
-def main() -> int:
+def _selected_probes(*, structural_only: bool) -> tuple[Probe, ...]:
+    if structural_only:
+        return tuple(probe for probe in PROBES if probe.structural)
+    return PROBES
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--structural-only",
+        action="store_true",
+        help=(
+            "Check deployer-readable UAMI role structure only. Runtime data-plane "
+            "checks must run through the deployed API sidecar."
+        ),
+    )
+    args = parser.parse_args(argv)
     print("==> Capability probe (charter §12a Rule 3)", flush=True)
-    print(f"    {_identity_disclosure()}", flush=True)
+    if args.structural_only:
+        print(
+            "    identity: deployer credential reading the dashboard UAMI's "
+            "role definition and assignment",
+            flush=True,
+        )
+    else:
+        print(f"    {_identity_disclosure()}", flush=True)
 
     # Hard guard: must have a subscription configured.
     if not os.environ.get("AZURE_SUBSCRIPTION_ID"):
@@ -517,7 +553,7 @@ def main() -> int:
         return EXIT_BAD_ENV
 
     counts = {"ok": 0, "skip": 0, "warn": 0, "fail": 0}
-    for probe in PROBES:
+    for probe in _selected_probes(structural_only=args.structural_only):
         counts[run_probe(probe)] += 1
 
     print(

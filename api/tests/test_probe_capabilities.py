@@ -11,10 +11,16 @@ Validation: `uv run pytest -q api/tests/test_probe_capabilities.py`.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 from scripts.dev import probe_capabilities as probe
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PROBE_SCRIPT = _REPO_ROOT / "scripts" / "dev" / "probe_capabilities.py"
 
 _SUBSCRIPTION_ID = "00000000-0000-0000-0000-000000000000"
 _PRINCIPAL_ID = "11111111-1111-1111-1111-111111111111"
@@ -139,3 +145,25 @@ def test_required_contract_mismatch_is_a_failed_probe(capsys: Any) -> None:
 
     assert result == "fail"
     assert "roleAssignments/write missing" in capsys.readouterr().out
+
+
+def test_structural_only_selects_no_local_runtime_probes() -> None:
+    selected = probe._selected_probes(structural_only=True)
+
+    assert selected
+    assert all(item.structural for item in selected)
+    assert {item.name for item in selected} == {"AKS bootstrap RBAC contract"}
+
+
+@pytest.mark.subprocess
+def test_probe_script_direct_execution_resolves_api_package() -> None:
+    result = subprocess.run(  # noqa: S603 - executes the reviewed repository script.
+        [sys.executable, str(_PROBE_SCRIPT), "--help"],
+        cwd=_REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--structural-only" in result.stdout

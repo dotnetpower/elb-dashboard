@@ -52,6 +52,12 @@ failure after provisioning had started.
 - `scripts/dev/probe_capabilities.py` registers the same structural contract as
   a required postprovision probe. A deployment with a stale role definition or
   assignment condition now exits non-zero instead of reporting success.
+- Postprovision runs that probe in `--structural-only` mode, then invokes
+  `check-mi-rbac.sh --strict` for the full expected role manifest and finally
+  `probe-deployed-capabilities.sh`. The latter authenticates to the deployed
+  API and checks readiness, subscription/RG discovery, Storage, and ACR; those
+  Azure calls therefore run under the actual sidecar UAMI inside the private
+  VNet instead of the deployer's local identity.
 - `scripts/dev/local-run.sh` imports only `SHARED_IDENTITY_PRINCIPAL_ID`; it does
   not import the managed identity client ID, so local authentication continues
   to use the developer's Azure CLI credential. The azd lookup is non-interactive
@@ -68,7 +74,7 @@ failure after provisioning had started.
 - `npm --prefix web test -- --run src/components/cards/ClusterCard/armErrorClassifier.test.ts`
   -> 6 passed.
 - `uv run pytest -q api/tests/test_local_run_identity_env.py -m ""` -> 4 passed.
-- Full backend suite including slow/subprocess tests -> 6,126 passed with 4
+- Full backend suite including slow/subprocess tests -> 6,129 passed with 4
   fixture-dependent skips.
 - Full frontend suite -> 1,048 passed across 120 files.
 - Ruff, the mypy debt ratchet, ESLint, the 242-operation OpenAPI contract,
@@ -86,3 +92,8 @@ failure after provisioning had started.
   `Succeeded`. The post-deploy structural probe reported
   `Elb Workload RG Creator definition + assignment OK`, and the live preflight
   changed from `ok=false` to `ok=true` for `rg-elb-cluster`.
+- The exact structural-only command completed with `ok=1, fail=0`; the deployed
+  runtime probe passed readiness/Storage Table, Azure discovery, Storage
+  management/container listing, and ACR management/repository listing.
+- The full read-only UAMI role audit completed with `ok=10, fail=0` and one
+  informational warning because no AKS cluster exists yet.
