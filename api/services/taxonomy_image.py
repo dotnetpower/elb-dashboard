@@ -1,13 +1,12 @@
-"""Best-effort thumbnail lookup for an organism scientific name.
+"""Safe, cached Wikimedia thumbnail lookup for a scientific name.
 
-Responsibility: Best-effort thumbnail lookup for an organism scientific name
-Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
-instead of duplicating SDK code.
+Responsibility: Resolve and cache a Wikimedia reference image for one normalized scientific name.
+Edit boundaries: Keep HTTP lookup, URL validation, and cache policy here; routes only shape errors.
 Key entry points: `TaxonomyImageUnavailable`, `fetch_taxonomy_image`,
 `clear_taxonomy_image_cache`
-Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
-log boundaries.
-Validation: `uv run pytest -q api/tests`.
+Risky contracts: Return only exact HTTPS Wikimedia image hosts. Empty results use a short negative
+cache so transient upstream failures do not hide images for the 24-hour success TTL.
+Validation: `uv run pytest -q api/tests/test_taxonomy_image.py`.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import re
 import threading
 import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -27,9 +26,16 @@ LOGGER = logging.getLogger(__name__)
 WIKIPEDIA_BASE_URL = "https://en.wikipedia.org/api/rest_v1"
 DEFAULT_TIMEOUT_SECONDS = 4.0
 DEFAULT_CACHE_TTL_SECONDS = 24 * 60 * 60
+NEGATIVE_CACHE_TTL_SECONDS = 5 * 60
 MAX_NAME_CHARS = 120
 MAX_BODY_BYTES = 64 * 1024
 MAX_CACHE_ENTRIES = 1024
+ALLOWED_IMAGE_HOSTS = frozenset(
+    {
+        "thumb.wikimedia.org",
+        "upload.wikimedia.org",
+    }
+)
 
 # Allow letters (incl. accents), digits, space, hyphen, dot, parens and the
 # multiplication sign used in hybrid names ("×"). Everything else (slashes,
@@ -151,7 +157,7 @@ def _extract_from_summary(body: dict[str, Any]) -> dict[str, Any]:
     thumbnail = body.get("thumbnail")
     if isinstance(thumbnail, dict):
         src = thumbnail.get("source")
-        if isinstance(src, str) and src.startswith("https://upload.wikimedia.org/"):
+        if isinstance(src, str) and _is_allowed_image_url(src):
             out["image_url"] = src
     content_urls = body.get("content_urls")
     if isinstance(content_urls, dict):
@@ -161,6 +167,22 @@ def _extract_from_summary(body: dict[str, Any]) -> dict[str, Any]:
             if isinstance(page, str) and page.startswith("https://en.wikipedia.org/"):
                 out["page_url"] = page
     return out
+
+
+def _is_allowed_image_url(value: str) -> bool:
+    """Accept only HTTPS thumbnails on Wikimedia's exact image hosts."""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname in ALLOWED_IMAGE_HOSTS
+        and parsed.username is None
+        and parsed.password is None
+        and port in (None, 443)
+    )
 
 
 def _cache_get(name: str) -> dict[str, Any] | None:
@@ -185,7 +207,5 @@ def _cache_put(name: str, payload: dict[str, Any]) -> None:
                 _CACHE.pop(oldest, None)
             except StopIteration:
                 pass
-        _CACHE[key] = (
-            time.monotonic() + DEFAULT_CACHE_TTL_SECONDS,
-            dict(payload),
-        )
+        ttl = DEFAULT_CACHE_TTL_SECONDS if payload.get("image_url") else NEGATIVE_CACHE_TTL_SECONDS
+        _CACHE[key] = (time.monotonic() + ttl, dict(payload))

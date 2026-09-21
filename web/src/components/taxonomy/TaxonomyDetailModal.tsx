@@ -42,6 +42,7 @@ import { LineageTree } from "@/pages/blastSubmit/LineageTree";
 import { TaxonomyDefaultIcon } from "@/pages/blastSubmit/TaxonomyDefaultIcon";
 
 const DETAIL_STALE_MS = 24 * 60 * 60 * 1000;
+const IMAGE_STALE_MS = 5 * 60 * 1000;
 
 export interface TaxonomyDetailModalProps {
   open: boolean;
@@ -114,7 +115,7 @@ export function TaxonomyDetailModal({
     queryFn: () => blastApi.getTaxonomyImage(trimmedName),
     enabled: open && trimmedName.length > 0,
     retry: false,
-    staleTime: DETAIL_STALE_MS,
+    staleTime: IMAGE_STALE_MS,
   });
 
   const treeQuery = useQuery<TaxonomyTreeResponse>({

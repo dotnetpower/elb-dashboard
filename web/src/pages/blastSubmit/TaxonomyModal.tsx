@@ -48,6 +48,7 @@ const TAXONOMY_RESULT_LIMIT = 8;
 const MAX_TAXONOMY_QUERY_CHARS = 120;
 const TAXONOMY_SEARCH_DEBOUNCE_MS = 400;
 const DETAIL_STALE_MS = 24 * 60 * 60 * 1000;
+const IMAGE_STALE_MS = 5 * 60 * 1000;
 
 export interface TaxonomyModalValue {
   taxid: string;
@@ -279,7 +280,7 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
     queryFn: () => blastApi.getTaxonomyImage(focused!.scientific_name),
     enabled: open && focused !== null && Boolean(focused.scientific_name),
     retry: false,
-    staleTime: DETAIL_STALE_MS,
+    staleTime: IMAGE_STALE_MS,
   });
 
   const treeQuery = useQuery({

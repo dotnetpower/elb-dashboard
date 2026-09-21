@@ -1,18 +1,19 @@
-"""Tests for Taxonomy Image behavior.
+"""Taxonomy image lookup, URL safety, cache, route, and frontend CSP tests.
 
-Responsibility: Tests for Taxonomy Image behavior
-Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
-Azure calls.
+Responsibility: Verify the taxonomy reference-image contract across backend lookup and browser CSP.
+Edit boundaries: Use mocked upstream HTTP; live Wikipedia and browser checks stay outside pytest.
 Key entry points: `_install_transport`, `test_fetch_image_returns_thumbnail_url`,
 `test_fetch_image_404_returns_null`, `test_fetch_image_swallows_network_errors`,
 `test_fetch_image_caches_subsequent_lookups`, `test_fetch_image_rejects_off_origin_thumbnail`
-Risky contracts: Do not require network access or real Azure credentials unless the test is
-explicitly integration-scoped.
+Risky contracts: Exact Wikimedia host checks and short negative-cache TTL prevent SSRF-style URL
+acceptance and long-lived fallback images; both frontend hosting CSPs must stay aligned.
 Validation: `uv run pytest -q api/tests/test_taxonomy_image.py`.
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,7 +24,7 @@ _SUMMARY_RESPONSE = {
     "type": "standard",
     "title": "Human",
     "thumbnail": {
-        "source": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Akha.jpg/330px-Akha.jpg",
+        "source": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/68/Akha.jpg/330px-Akha.jpg",
         "width": 330,
         "height": 552,
     },
@@ -32,6 +33,8 @@ _SUMMARY_RESPONSE = {
         "mobile": {"page": "https://en.m.wikipedia.org/wiki/Human"},
     },
 }
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _install_transport(monkeypatch: pytest.MonkeyPatch, handler) -> list[httpx.Request]:
@@ -73,6 +76,23 @@ def test_fetch_image_returns_thumbnail_url(monkeypatch: pytest.MonkeyPatch) -> N
     assert result["cached"] is False
     # Path is slugged with underscores and properly percent-encoded.
     assert requests[0].url.path == "/api/rest_v1/page/summary/Homo_sapiens"
+
+
+def test_fetch_image_still_accepts_legacy_upload_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import taxonomy_image
+
+    taxonomy_image.clear_taxonomy_image_cache()
+    payload = {
+        **_SUMMARY_RESPONSE,
+        "thumbnail": {"source": "https://upload.wikimedia.org/wikipedia/commons/example.jpg"},
+    }
+    _install_transport(monkeypatch, lambda _req: httpx.Response(200, json=payload))
+
+    result = taxonomy_image.fetch_taxonomy_image("Homo sapiens")
+
+    assert result["image_url"].startswith("https://upload.wikimedia.org/")
 
 
 def test_fetch_image_404_returns_null(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,6 +154,57 @@ def test_fetch_image_rejects_off_origin_thumbnail(monkeypatch: pytest.MonkeyPatc
 
     assert result["image_url"] is None
     assert result["page_url"] is None
+
+
+def test_fetch_image_rejects_wikimedia_lookalike_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import taxonomy_image
+
+    taxonomy_image.clear_taxonomy_image_cache()
+    payload = {
+        "thumbnail": {"source": "https://thumb.wikimedia.org.attacker.example/evil.jpg"},
+    }
+    _install_transport(monkeypatch, lambda _req: httpx.Response(200, json=payload))
+
+    result = taxonomy_image.fetch_taxonomy_image("Homo sapiens")
+
+    assert result["image_url"] is None
+
+
+def test_missing_image_uses_short_negative_cache_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import taxonomy_image
+
+    taxonomy_image.clear_taxonomy_image_cache()
+    now = 1000.0
+    monkeypatch.setattr(taxonomy_image.time, "monotonic", lambda: now)
+    _install_transport(monkeypatch, lambda _req: httpx.Response(404))
+
+    taxonomy_image.fetch_taxonomy_image("Notarealorganism")
+    expires_at, _payload = taxonomy_image._CACHE["notarealorganism"]
+
+    assert expires_at == now + taxonomy_image.NEGATIVE_CACHE_TTL_SECONDS
+    assert taxonomy_image.NEGATIVE_CACHE_TTL_SECONDS < taxonomy_image.DEFAULT_CACHE_TTL_SECONDS
+
+
+def test_frontend_csp_allows_exact_wikimedia_image_hosts() -> None:
+    expected = {
+        "https://upload.wikimedia.org",
+        "https://thumb.wikimedia.org",
+    }
+    nginx = (_REPO_ROOT / "web" / "nginx.conf").read_text(encoding="utf-8")
+    static_config = json.loads(
+        (_REPO_ROOT / "web" / "staticwebapp.config.json").read_text(encoding="utf-8")
+    )
+    static_csp = static_config["globalHeaders"]["Content-Security-Policy"]
+
+    for origin in expected:
+        assert origin in nginx
+        assert origin in static_csp
+    assert "https://*.wikimedia.org" not in nginx
+    assert "https://*.wikimedia.org" not in static_csp
 
 
 def test_fetch_image_caps_oversized_body(monkeypatch: pytest.MonkeyPatch) -> None:

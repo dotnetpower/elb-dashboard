@@ -787,7 +787,7 @@ export interface TaxonomyDetail {
 
 export interface TaxonomyImageResponse {
   name: string;
-  /** Wikipedia upload.wikimedia.org thumbnail URL, or null when unavailable. */
+  /** Wikipedia Wikimedia-hosted thumbnail URL, or null when unavailable. */
   image_url: string | null;
   /** Wikipedia article URL, or null when not found. */
   page_url: string | null;
