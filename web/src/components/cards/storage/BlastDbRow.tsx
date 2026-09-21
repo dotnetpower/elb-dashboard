@@ -464,7 +464,11 @@ export function BlastDbRow({
         {isDownloaded ? (
           <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
         ) : isDownloading || copyActive ? (
-          <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
+          <Loader2
+            size={14}
+            className="spin spin-essential"
+            style={{ color: "var(--accent)" }}
+          />
         ) : (
           <Circle
             size={14}
@@ -701,7 +705,7 @@ export function BlastDbRow({
                     gap: 4,
                   }}
                 >
-                  <Loader2 size={10} className="spin" /> Updating
+                  <Loader2 size={10} className="spin spin-essential" /> Updating
                 </span>
               )}
               {meta.update_error && !isUpdating && (
@@ -1018,7 +1022,7 @@ export function BlastDbRow({
                 gap: 4,
               }}
             >
-              <Loader2 size={10} className="spin" /> Updating
+              <Loader2 size={10} className="spin spin-essential" /> Updating
               {progressTotal > 0 ? ` · ${copyPct}%` : ""}
             </span>
             {onCancel && (

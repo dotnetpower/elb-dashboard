@@ -1651,8 +1651,8 @@ textarea.form-input {
   animation: spin 1s linear infinite;
 }
 
-/* A provisioning spinner is an essential state cue rather than decorative
-   motion. Keep it moving more slowly when reduced motion is requested. */
+/* An in-progress spinner is an essential state cue rather than decorative
+  motion. Keep it moving more slowly when reduced motion is requested. */
 @media (prefers-reduced-motion: reduce) {
   .spin.spin-essential {
     animation: spin 2s linear infinite !important;

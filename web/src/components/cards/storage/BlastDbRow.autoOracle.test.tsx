@@ -234,4 +234,19 @@ describe("BlastDbRow NCBI Direct update", () => {
     expect(html).toContain("Downloading 0 / 85 archives");
     expect(html).not.toContain("Copying 731 / 731 files");
   });
+
+  it("keeps database update status spinners active under reduced motion", () => {
+    const updateMeta = {
+      source_version: "2026-07-21-01-05-02",
+      update_in_progress: true,
+      updating_to_source_version: "ncbi-direct-20260819-cab30d18c360",
+      copy_status: { phase: "copying" },
+    };
+
+    const downloadedHtml = renderRow({ meta: updateMeta });
+    const copyingHtml = renderRow({ meta: updateMeta, isDownloaded: false });
+
+    expect(downloadedHtml.match(/spin-essential/g)).toHaveLength(2);
+    expect(copyingHtml.match(/spin-essential/g)).toHaveLength(2);
+  });
 });
