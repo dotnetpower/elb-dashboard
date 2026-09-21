@@ -27,7 +27,9 @@ failure after provisioning had started.
 - AKS preflight now reads the assigned custom role's live Actions.
 - It also verifies `conditionVersion=2.0` and the constrained delegation
   condition for Contributor, User Access Administrator, role-assignment writes,
-  and `ServicePrincipal` targets.
+  Storage Blob Data Contributor, AcrPull, AKS Cluster User, and
+  `ServicePrincipal` targets. Unexpected role-definition GUIDs also fail the
+  check so the whitelist cannot silently widen.
 - Resource-group creation and Contributor self-bootstrap are evaluated as
   separate capabilities.
 - A legacy role still satisfies the resource-group creation requirement, but it
@@ -74,7 +76,7 @@ failure after provisioning had started.
 - `npm --prefix web test -- --run src/components/cards/ClusterCard/armErrorClassifier.test.ts`
   -> 6 passed.
 - `uv run pytest -q api/tests/test_local_run_identity_env.py -m ""` -> 4 passed.
-- Full backend suite including slow/subprocess tests -> 6,129 passed with 4
+- Full backend suite including slow/subprocess tests -> 6,130 passed with 4
   fixture-dependent skips.
 - Full frontend suite -> 1,048 passed across 120 files.
 - Ruff, the mypy debt ratchet, ESLint, the 242-operation OpenAPI contract,

@@ -28,9 +28,15 @@ command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required" >&2; exit 2;
 command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required" >&2; exit 2; }
 
 base_url="https://$CONTAINER_APP_FQDN"
-token="$(az account get-access-token \
-  --scope "api://$API_CLIENT_ID/.default" \
-  --query accessToken -o tsv --only-show-errors 2>/dev/null || true)"
+if command -v timeout >/dev/null 2>&1; then
+  token="$(timeout 30s az account get-access-token \
+    --scope "api://$API_CLIENT_ID/.default" \
+    --query accessToken -o tsv --only-show-errors 2>/dev/null || true)"
+else
+  token="$(az account get-access-token \
+    --scope "api://$API_CLIENT_ID/.default" \
+    --query accessToken -o tsv --only-show-errors 2>/dev/null || true)"
+fi
 if [[ -z "$token" ]]; then
   echo "ERROR: could not acquire a delegated token for the dashboard API audience" >&2
   exit 1

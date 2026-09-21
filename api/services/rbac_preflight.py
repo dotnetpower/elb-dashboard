@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from azure.core.credentials import TokenCredential
@@ -40,6 +41,17 @@ _ROLE_OWNER = "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
 _ROLE_CONTRIBUTOR = "b24988ac-6180-42a0-ab88-20f7382dd24c"
 _ROLE_READER = "acdd72a7-3385-48ef-bd42-f606fba81ae7"
 _ROLE_USER_ACCESS_ADMINISTRATOR = "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
+_AKS_BOOTSTRAP_ROLE_IDS = {
+    "Contributor": _ROLE_CONTRIBUTOR,
+    "User Access Administrator": _ROLE_USER_ACCESS_ADMINISTRATOR,
+    "Storage Blob Data Contributor": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+    "AcrPull": "7f951dda-4ed3-4680-a7ca-43fe172d538d",
+    "Azure Kubernetes Service Cluster User": "4abbcc35-e782-43d8-92c5-2d3f1bd2253f",
+}
+_GUID_PATTERN = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
 
 # Name of the project-specific custom role that grants only sub-scope
 # `Microsoft.Resources/subscriptions/resourceGroups/write` so AKS can
@@ -163,10 +175,21 @@ def aks_bootstrap_assignment_issues(
         issues.append("conditionVersion must be 2.0")
     if "microsoft.authorization/roleassignments/write" not in normalized:
         issues.append("condition must constrain roleAssignments/write")
-    if _ROLE_CONTRIBUTOR not in normalized:
-        issues.append("condition must allow Contributor role assignments")
-    if _ROLE_USER_ACCESS_ADMINISTRATOR not in normalized:
-        issues.append("condition must allow User Access Administrator role assignments")
+    if "foranyofanyvalues:guidequals" not in normalized:
+        issues.append("condition must use the role-definition GUID whitelist")
+    missing_roles = [
+        role_name
+        for role_name, role_id in _AKS_BOOTSTRAP_ROLE_IDS.items()
+        if role_id not in normalized
+    ]
+    if missing_roles:
+        issues.append("condition must allow required runtime roles: " + ", ".join(missing_roles))
+    expected_role_ids = {role_id.lower() for role_id in _AKS_BOOTSTRAP_ROLE_IDS.values()}
+    unexpected_role_ids = sorted(set(_GUID_PATTERN.findall(normalized)) - expected_role_ids)
+    if unexpected_role_ids:
+        issues.append(
+            "condition contains unexpected role definition ids: " + ", ".join(unexpected_role_ids)
+        )
     if "principaltype" not in normalized or "serviceprincipal" not in normalized:
         issues.append("condition must restrict principalType to ServicePrincipal")
     return issues

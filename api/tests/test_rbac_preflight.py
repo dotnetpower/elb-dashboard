@@ -29,6 +29,9 @@ _OWNER_ID = "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
 _CONTRIB_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c"
 _READER_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7"
 _UAA_ID = "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
+_BLOB_CONTRIB_ID = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+_ACR_PULL_ID = "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+_AKS_USER_ID = "4abbcc35-e782-43d8-92c5-2d3f1bd2253f"
 
 
 def _role_id(sub: str, guid: str) -> str:
@@ -55,7 +58,9 @@ def _bootstrap_condition() -> str:
     return (
         "((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR "
         f"(@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] "
-        f"ForAnyOfAnyValues:GuidEquals {{{_CONTRIB_ID}, {_UAA_ID}}} AND "
+        "ForAnyOfAnyValues:GuidEquals {"
+        f"{_CONTRIB_ID}, {_UAA_ID}, {_BLOB_CONTRIB_ID}, {_ACR_PULL_ID}, {_AKS_USER_ID}"
+        "} AND "
         "@Request[Microsoft.Authorization/roleAssignments:PrincipalType] "
         "StringEqualsIgnoreCase 'ServicePrincipal'))"
     )
@@ -303,9 +308,25 @@ def test_rbac_check_fails_when_custom_role_assignment_condition_is_missing(
     assert check.details["custom_role_assignment_issues"] == [
         "conditionVersion must be 2.0",
         "condition must constrain roleAssignments/write",
-        "condition must allow Contributor role assignments",
-        "condition must allow User Access Administrator role assignments",
+        "condition must use the role-definition GUID whitelist",
+        "condition must allow required runtime roles: Contributor, User Access "
+        "Administrator, Storage Blob Data Contributor, AcrPull, Azure Kubernetes "
+        "Service Cluster User",
         "condition must restrict principalType to ServicePrincipal",
+    ]
+
+
+def test_bootstrap_assignment_rejects_unexpected_role_definition() -> None:
+    """The constrained delegation whitelist must not silently widen."""
+    from api.services.rbac_preflight import aks_bootstrap_assignment_issues
+
+    condition = _bootstrap_condition().replace(
+        f"{_AKS_USER_ID}}}",
+        f"{_AKS_USER_ID}, {_OWNER_ID}}}",
+    )
+
+    assert aks_bootstrap_assignment_issues(condition, "2.0") == [
+        f"condition contains unexpected role definition ids: {_OWNER_ID}"
     ]
 
 

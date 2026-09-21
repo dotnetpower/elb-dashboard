@@ -30,13 +30,18 @@ _ROLE_DEFINITION_ID = (
 )
 _CONTRIBUTOR_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c"
 _UAA_ID = "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
+_BLOB_CONTRIB_ID = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+_ACR_PULL_ID = "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+_AKS_USER_ID = "4abbcc35-e782-43d8-92c5-2d3f1bd2253f"
 
 
 def _condition() -> str:
     return (
         "((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR "
         "(@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] "
-        f"ForAnyOfAnyValues:GuidEquals {{{_CONTRIBUTOR_ID}, {_UAA_ID}}} AND "
+        "ForAnyOfAnyValues:GuidEquals {"
+        f"{_CONTRIBUTOR_ID}, {_UAA_ID}, {_BLOB_CONTRIB_ID}, {_ACR_PULL_ID}, {_AKS_USER_ID}"
+        "} AND "
         "@Request[Microsoft.Authorization/roleAssignments:PrincipalType] "
         "StringEqualsIgnoreCase 'ServicePrincipal'))"
     )

@@ -112,6 +112,7 @@ def test_postprovision_probes_structure_and_deployed_uami_runtime() -> None:
         "/api/monitor/acr",
     ):
         assert route in runtime_probe
+    assert "timeout 30s az account get-access-token" in runtime_probe
 
 
 def _run_network_posture_guard(
