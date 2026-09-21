@@ -28,6 +28,7 @@ import pytest
 _OWNER_ID = "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
 _CONTRIB_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c"
 _READER_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7"
+_UAA_ID = "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
 
 
 def _role_id(sub: str, guid: str) -> str:
@@ -36,9 +37,28 @@ def _role_id(sub: str, guid: str) -> str:
 
 
 class _RoleAssignment:
-    def __init__(self, role_definition_id: str, scope: str) -> None:
+    def __init__(
+        self,
+        role_definition_id: str,
+        scope: str,
+        *,
+        condition: str | None = None,
+        condition_version: str | None = None,
+    ) -> None:
         self.role_definition_id = role_definition_id
         self.scope = scope
+        self.condition = condition
+        self.condition_version = condition_version
+
+
+def _bootstrap_condition() -> str:
+    return (
+        "((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR "
+        f"(@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] "
+        f"ForAnyOfAnyValues:GuidEquals {{{_CONTRIB_ID}, {_UAA_ID}}} AND "
+        "@Request[Microsoft.Authorization/roleAssignments:PrincipalType] "
+        "StringEqualsIgnoreCase 'ServicePrincipal'))"
+    )
 
 
 class _RoleAssignmentsOp:
@@ -50,14 +70,28 @@ class _RoleAssignmentsOp:
 
 
 class _RoleDefinitionsOp:
-    def __init__(self, name_by_id: dict[str, str]) -> None:
+    def __init__(
+        self,
+        name_by_id: dict[str, str],
+        actions_by_id: dict[str, list[str]] | None = None,
+    ) -> None:
         self._name_by_id = name_by_id
+        self._actions_by_id = actions_by_id or {}
 
     def get_by_id(self, role_definition_id: str) -> Any:
-        class _Def:
-            role_name = self._name_by_id.get(role_definition_id.lower())
+        class _Permission:
+            def __init__(self, actions: list[str]) -> None:
+                self.actions = actions
 
-        return _Def()
+        class _Def:
+            def __init__(self, role_name: str | None, actions: list[str]) -> None:
+                self.role_name = role_name
+                self.permissions = [_Permission(actions)]
+
+        return _Def(
+            self._name_by_id.get(role_definition_id.lower()),
+            self._actions_by_id.get(role_definition_id.lower(), []),
+        )
 
 
 class _FakeAuthClient:
@@ -65,9 +99,13 @@ class _FakeAuthClient:
         self,
         assignments: list[_RoleAssignment],
         role_name_by_id: dict[str, str] | None = None,
+        role_actions_by_id: dict[str, list[str]] | None = None,
     ) -> None:
         self.role_assignments = _RoleAssignmentsOp(assignments)
-        self.role_definitions = _RoleDefinitionsOp(role_name_by_id or {})
+        self.role_definitions = _RoleDefinitionsOp(
+            role_name_by_id or {},
+            role_actions_by_id,
+        )
 
 
 def _patch_auth_client(monkeypatch: pytest.MonkeyPatch, client: _FakeAuthClient) -> None:
@@ -126,7 +164,15 @@ def test_rbac_check_ok_when_rg_contributor_and_custom_role_at_sub(
         _RoleAssignment(custom_role_id, sub),
     ]
     name_by_id = {custom_role_id.lower(): "Elb Workload RG Creator"}
-    _patch_auth_client(monkeypatch, _FakeAuthClient(rows, name_by_id))
+    actions_by_id = {
+        custom_role_id.lower(): [
+            "Microsoft.Resources/subscriptions/resourceGroups/write",
+        ]
+    }
+    _patch_auth_client(
+        monkeypatch,
+        _FakeAuthClient(rows, name_by_id, actions_by_id),
+    )
 
     check = aks_create_rbac_check(
         object(),
@@ -185,10 +231,25 @@ def test_rbac_check_ok_when_only_custom_role_at_sub_bootstraps_cluster_rg(
     custom_role_id = _role_id(sub, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     rows = [
         _RoleAssignment(_role_id(sub, _READER_ID), sub),
-        _RoleAssignment(custom_role_id, sub),
+        _RoleAssignment(
+            custom_role_id,
+            sub,
+            condition=_bootstrap_condition(),
+            condition_version="2.0",
+        ),
     ]
     name_by_id = {custom_role_id.lower(): "Elb Workload RG Creator"}
-    _patch_auth_client(monkeypatch, _FakeAuthClient(rows, name_by_id))
+    actions_by_id = {
+        custom_role_id.lower(): [
+            "Microsoft.Resources/subscriptions/resourceGroups/write",
+            "Microsoft.Authorization/roleAssignments/read",
+            "Microsoft.Authorization/roleAssignments/write",
+        ]
+    }
+    _patch_auth_client(
+        monkeypatch,
+        _FakeAuthClient(rows, name_by_id, actions_by_id),
+    )
 
     check = aks_create_rbac_check(
         object(),
@@ -199,6 +260,99 @@ def test_rbac_check_ok_when_only_custom_role_at_sub_bootstraps_cluster_rg(
     assert "self-grant" in check.message.lower()
     assert "rg-elb-cluster-small" in check.message
     assert check.details["cluster_rg_bootstrap_capable"] is True
+
+
+def test_rbac_check_fails_when_custom_role_assignment_condition_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Role Actions alone are insufficient for fresh-RG self-bootstrap.
+
+    The subscription assignment must carry the constrained delegation
+    condition that allows Contributor + UAA grants to service principals.
+    """
+    monkeypatch.setenv("SHARED_IDENTITY_PRINCIPAL_ID", "mi-oid")
+    from api.services.rbac_preflight import aks_create_rbac_check
+
+    sub = "/subscriptions/sub-1"
+    custom_role_id = _role_id(sub, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    rows = [
+        _RoleAssignment(_role_id(sub, _READER_ID), sub),
+        _RoleAssignment(custom_role_id, sub),
+    ]
+    name_by_id = {custom_role_id.lower(): "Elb Workload RG Creator"}
+    actions_by_id = {
+        custom_role_id.lower(): [
+            "Microsoft.Resources/subscriptions/resourceGroups/write",
+            "Microsoft.Authorization/roleAssignments/read",
+            "Microsoft.Authorization/roleAssignments/write",
+        ]
+    }
+    _patch_auth_client(
+        monkeypatch,
+        _FakeAuthClient(rows, name_by_id, actions_by_id),
+    )
+
+    check = aks_create_rbac_check(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+    )
+
+    assert check.status == "fail"
+    assert check.details["cluster_rg_bootstrap_capable"] is False
+    assert check.details["custom_role_assignment_issues"] == [
+        "conditionVersion must be 2.0",
+        "condition must constrain roleAssignments/write",
+        "condition must allow Contributor role assignments",
+        "condition must allow User Access Administrator role assignments",
+        "condition must restrict principalType to ServicePrincipal",
+    ]
+
+
+def test_rbac_check_fails_when_custom_role_cannot_bootstrap_cluster_rg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy custom role can create RGs but cannot self-grant Contributor.
+
+    Matching only its display name produced a false-positive preflight, then
+    AKS create failed after the RG had already been created. The live role
+    definition actions must prove the bootstrap capability.
+    """
+    monkeypatch.setenv("SHARED_IDENTITY_PRINCIPAL_ID", "mi-oid")
+    from api.services.rbac_preflight import aks_create_rbac_check
+
+    sub = "/subscriptions/sub-1"
+    custom_role_id = _role_id(sub, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    rows = [
+        _RoleAssignment(_role_id(sub, _READER_ID), sub),
+        _RoleAssignment(custom_role_id, sub),
+    ]
+    name_by_id = {custom_role_id.lower(): "Elb Workload RG Creator"}
+    legacy_actions_by_id = {
+        custom_role_id.lower(): [
+            "Microsoft.Resources/subscriptions/resourceGroups/read",
+            "Microsoft.Resources/subscriptions/resourceGroups/write",
+            "Microsoft.Resources/subscriptions/resourceGroups/delete",
+        ]
+    }
+    _patch_auth_client(
+        monkeypatch,
+        _FakeAuthClient(rows, name_by_id, legacy_actions_by_id),
+    )
+
+    check = aks_create_rbac_check(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+    )
+
+    assert check.status == "fail"
+    assert check.details["cluster_rg_bootstrap_capable"] is False
+    assert check.details["custom_role_missing_actions"] == [
+        "Microsoft.Authorization/roleAssignments/read",
+        "Microsoft.Authorization/roleAssignments/write",
+    ]
+    assert [row["role"] for row in check.details["missing"]] == ["Contributor"]
 
 
 def test_rbac_check_fail_when_no_sub_scope_grants_at_all(
@@ -276,8 +430,6 @@ def test_rbac_check_warn_when_role_enumeration_fails(
 # ---------------------------------------------------------------------------
 # `aks_runtime_rbac_check` — UAA detection for the ensuring_rbac step.
 # ---------------------------------------------------------------------------
-
-_UAA_ID = "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
 
 
 def test_runtime_rbac_ok_when_uaa_at_sub_scope(

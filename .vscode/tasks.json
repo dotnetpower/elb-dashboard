@@ -79,7 +79,7 @@
     },
     {
       "label": "debug-env: write",
-      "detail": "Resolve AZURE_TABLE/BLOB_ENDPOINT from azd env and write .vscode/.debug.env for the debugger envFile.",
+      "detail": "Resolve Storage endpoints and dashboard UAMI principal metadata from azd, then write .vscode/.debug.env for the debugger envFile.",
       "type": "shell",
       "command": "${workspaceFolder}/scripts/dev/local-run.sh",
       "args": ["debug-env"],

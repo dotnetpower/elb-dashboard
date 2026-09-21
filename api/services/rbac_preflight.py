@@ -17,8 +17,9 @@ Risky contracts: Returns `status="warn"` (not `fail`) when role enumeration
     itself fails — the caller may lack `Microsoft.Authorization/
     roleAssignments/read` on the relevant scope. ARM is still the ground
     truth; preflight must never block submit on a false negative caused by
-    a missing read permission.
-Validation: `uv run pytest -q api/tests/test_aks_availability.py`.
+    a missing read permission. A matching custom-role name is insufficient:
+    its live Actions must include RG-write and role-assignment read/write.
+Validation: `uv run pytest -q api/tests/test_rbac_preflight.py`.
 """
 
 from __future__ import annotations
@@ -44,7 +45,15 @@ _ROLE_USER_ACCESS_ADMINISTRATOR = "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
 # `Microsoft.Resources/subscriptions/resourceGroups/write` so AKS can
 # auto-create the MC_* node resource group without granting sub-scope
 # Contributor. Defined in `infra/modules/workloadRgCreatorRole.bicep`.
-_CUSTOM_ROLE_NAME = "Elb Workload RG Creator"
+AKS_BOOTSTRAP_ROLE_NAME = "Elb Workload RG Creator"
+AKS_BOOTSTRAP_RG_WRITE_ACTION = "Microsoft.Resources/subscriptions/resourceGroups/write"
+AKS_BOOTSTRAP_REQUIRED_ACTIONS = frozenset(
+    {
+        AKS_BOOTSTRAP_RG_WRITE_ACTION,
+        "Microsoft.Authorization/roleAssignments/read",
+        "Microsoft.Authorization/roleAssignments/write",
+    }
+)
 
 # Roles that satisfy the cluster-RG requirement (managedClusters/write +
 # child resources). Owner and Contributor both grant `*` actions; Reader
@@ -79,13 +88,17 @@ def _list_role_assignments(
     credential: TokenCredential,
     subscription_id: str,
     principal_id: str,
-) -> tuple[list[tuple[str, str, str]], str | None]:
+) -> tuple[
+    list[tuple[str, str, str, str | None, str | None]],
+    str | None,
+]:
     """List role assignments for `principal_id` within `subscription_id`.
 
     Returns `(rows, error_reason)`. Each row is
-    `(role_guid_lower, scope_lower, role_name_or_id)`. When enumeration
-    fails (e.g. caller lacks `roleAssignments/read`), returns
-    `([], <short_error>)` so the caller can degrade to a warn row.
+    `(role_guid_lower, scope_lower, role_definition_id, condition,
+    condition_version)`. When enumeration fails (e.g. caller lacks
+    `roleAssignments/read`), returns `([], <short_error>)` so the caller
+    can degrade to a warn row.
     """
     try:
         from azure.mgmt.authorization import AuthorizationManagementClient
@@ -94,36 +107,77 @@ def _list_role_assignments(
 
     try:
         client = AuthorizationManagementClient(credential, subscription_id)
-        rows: list[tuple[str, str, str]] = []
+        rows: list[tuple[str, str, str, str | None, str | None]] = []
         for r in client.role_assignments.list_for_subscription(
             filter=f"principalId eq '{principal_id}'"
         ):
             role_def_id = (getattr(r, "role_definition_id", None) or "").lower()
             role_guid = role_def_id.rsplit("/", 1)[-1]
             scope = (getattr(r, "scope", None) or "").lower()
-            rows.append((role_guid, scope, role_def_id))
+            rows.append(
+                (
+                    role_guid,
+                    scope,
+                    role_def_id,
+                    getattr(r, "condition", None),
+                    getattr(r, "condition_version", None),
+                )
+            )
         return rows, None
     except Exception as exc:
         return [], f"{type(exc).__name__}: {str(exc)[:120]}"
 
 
-def _resolve_role_name(
+def _resolve_role_definition(
     credential: TokenCredential,
     subscription_id: str,
     role_definition_id: str,
-) -> str | None:
-    """Look up a role definition's display name by full ARM id."""
+) -> tuple[str | None, set[str]]:
+    """Return a role definition's display name and normalized Actions."""
     try:
         from azure.mgmt.authorization import AuthorizationManagementClient
     except Exception:
-        return None
+        return None, set()
     try:
         client = AuthorizationManagementClient(credential, subscription_id)
         # `get_by_id` expects the full ARM resource id.
         definition = client.role_definitions.get_by_id(role_definition_id)
-        return getattr(definition, "role_name", None)
+        actions = {
+            str(action).lower()
+            for permission in (getattr(definition, "permissions", None) or [])
+            for action in (getattr(permission, "actions", None) or [])
+        }
+        return getattr(definition, "role_name", None), actions
     except Exception:
-        return None
+        return None, set()
+
+
+def aks_bootstrap_assignment_issues(
+    condition: str | None,
+    condition_version: str | None,
+) -> list[str]:
+    """Return gaps in the custom role's constrained-delegation assignment."""
+    normalized = (condition or "").lower()
+    issues: list[str] = []
+    if condition_version != "2.0":
+        issues.append("conditionVersion must be 2.0")
+    if "microsoft.authorization/roleassignments/write" not in normalized:
+        issues.append("condition must constrain roleAssignments/write")
+    if _ROLE_CONTRIBUTOR not in normalized:
+        issues.append("condition must allow Contributor role assignments")
+    if _ROLE_USER_ACCESS_ADMINISTRATOR not in normalized:
+        issues.append("condition must allow User Access Administrator role assignments")
+    if "principaltype" not in normalized or "serviceprincipal" not in normalized:
+        issues.append("condition must restrict principalType to ServicePrincipal")
+    return issues
+
+
+def aks_bootstrap_role_missing_actions(actions: set[str]) -> list[str]:
+    """Return required custom-role Actions absent from a live definition."""
+    normalized = {action.lower() for action in actions}
+    return sorted(
+        action for action in AKS_BOOTSTRAP_REQUIRED_ACTIONS if action.lower() not in normalized
+    )
 
 
 def aks_create_rbac_check(
@@ -184,7 +238,7 @@ def aks_create_rbac_check(
     # ---- Cluster RG scope: any of Owner / Contributor at sub OR RG. ----
     cluster_rg_ok = False
     cluster_rg_via: dict[str, Any] = {}
-    for role_guid, scope, _ in rows:
+    for role_guid, scope, _, _, _ in rows:
         if role_guid not in _RG_WRITE_ROLES:
             continue
         if scope == sub_scope or scope == rg_scope:
@@ -205,21 +259,39 @@ def aks_create_rbac_check(
     # task can self-grant Contributor on the cluster RG immediately
     # after creating it — meaning the cluster-RG requirement is
     # bootstrap-capable even when no per-RG Contributor exists yet.
-    sub_rg_write_via_custom_role = False
-    for role_guid, scope, role_def_id in rows:
+    custom_role_bootstrap_capable = False
+    custom_role_missing_actions: list[str] = []
+    custom_role_assignment_issues: list[str] = []
+    for role_guid, scope, role_def_id, condition, condition_version in rows:
         if scope != sub_scope:
             continue
         if role_guid in _SUB_RG_WRITE_BUILTIN_ROLES:
             sub_rg_write_ok = True
             sub_rg_write_via = {"role_guid": role_guid, "scope": scope}
             break
-        # Custom role — resolve name once and match.
-        role_name = _resolve_role_name(credential, subscription_id, role_def_id)
-        if role_name and role_name.strip().lower() == _CUSTOM_ROLE_NAME.lower():
-            sub_rg_write_ok = True
-            sub_rg_write_via = {"role_name": role_name, "scope": scope}
-            sub_rg_write_via_custom_role = True
-            break
+        # Custom role — verify its live capabilities, not only its display
+        # name. Older deployments used the same name but lacked
+        # roleAssignments/read+write, so they could create the RG yet could
+        # not self-grant Contributor before AKS create.
+        role_name, actions = _resolve_role_definition(
+            credential,
+            subscription_id,
+            role_def_id,
+        )
+        if role_name and role_name.strip().lower() == AKS_BOOTSTRAP_ROLE_NAME.lower():
+            custom_role_missing_actions = aks_bootstrap_role_missing_actions(actions)
+            if AKS_BOOTSTRAP_RG_WRITE_ACTION.lower() in actions:
+                sub_rg_write_ok = True
+                sub_rg_write_via = {"role_name": role_name, "scope": scope}
+            custom_role_assignment_issues = aks_bootstrap_assignment_issues(
+                condition,
+                condition_version,
+            )
+            custom_role_bootstrap_capable = not (
+                custom_role_missing_actions or custom_role_assignment_issues
+            )
+            if sub_rg_write_ok:
+                break
 
     # If the cluster-RG Contributor grant is missing but the MI holds
     # the `Elb Workload RG Creator` custom role at sub scope, the
@@ -229,9 +301,7 @@ def aks_create_rbac_check(
     # this as ok so renaming the cluster (which derives a fresh
     # `rg-<base>` RG) does not turn a fully-functional bootstrap path
     # into a hard preflight failure.
-    cluster_rg_bootstrap_capable = (
-        not cluster_rg_ok and sub_rg_write_via_custom_role
-    )
+    cluster_rg_bootstrap_capable = not cluster_rg_ok and custom_role_bootstrap_capable
 
     if (cluster_rg_ok or cluster_rg_bootstrap_capable) and sub_rg_write_ok:
         if cluster_rg_ok:
@@ -243,7 +313,7 @@ def aks_create_rbac_check(
         else:
             message = (
                 "Dashboard managed identity will self-grant Contributor "
-                f"on '{resource_group}' (via the '{_CUSTOM_ROLE_NAME}' "
+                f"on '{resource_group}' (via the '{AKS_BOOTSTRAP_ROLE_NAME}' "
                 "custom role at subscription scope) before AKS create — "
                 "no manual role assignment needed."
             )
@@ -263,8 +333,7 @@ def aks_create_rbac_check(
     if not cluster_rg_ok:
         missing.append(
             {
-                "scope": f"/subscriptions/{subscription_id}"
-                f"/resourceGroups/{resource_group}",
+                "scope": f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}",
                 "role": "Contributor",
                 "reason": (
                     "Required for Microsoft.ContainerService/managedClusters/"
@@ -283,7 +352,7 @@ def aks_create_rbac_check(
         missing.append(
             {
                 "scope": f"/subscriptions/{subscription_id}",
-                "role": _CUSTOM_ROLE_NAME,
+                "role": AKS_BOOTSTRAP_ROLE_NAME,
                 "reason": (
                     "AKS auto-creates the MC_<rg>_<cluster>_<region> node "
                     "resource group at subscription scope; the dashboard "
@@ -292,7 +361,7 @@ def aks_create_rbac_check(
                 ),
                 "remediation": (
                     "Re-run `./deploy.sh` (azd up) so the new "
-                    f"'{_CUSTOM_ROLE_NAME}' custom role assignment in "
+                    f"'{AKS_BOOTSTRAP_ROLE_NAME}' custom role assignment in "
                     "infra/modules/workloadRgCreatorRole.bicep is applied; "
                     "or grant Contributor at subscription scope manually."
                 ),
@@ -303,6 +372,14 @@ def aks_create_rbac_check(
         f"Dashboard managed identity is missing {len(missing)} role assignment(s) "
         "needed for AKS create."
     )
+    if custom_role_missing_actions or custom_role_assignment_issues:
+        summary = (
+            f"The assigned '{AKS_BOOTSTRAP_ROLE_NAME}' role or its constrained "
+            "delegation condition is outdated and cannot safely self-grant "
+            "Contributor on the cluster resource group. Re-run azd provision "
+            "to update it, or grant Contributor on the target resource group "
+            "manually."
+        )
     return PreflightCheck(
         name="rbac",
         status="fail",
@@ -310,6 +387,9 @@ def aks_create_rbac_check(
         details={
             "principal_id": pid,
             "missing": missing,
+            "cluster_rg_bootstrap_capable": cluster_rg_bootstrap_capable,
+            "custom_role_missing_actions": custom_role_missing_actions,
+            "custom_role_assignment_issues": custom_role_assignment_issues,
         },
     )
 
@@ -370,8 +450,7 @@ def aks_runtime_rbac_check(
             name="rbac_runtime",
             status="ok",
             message=(
-                "No ACR or Storage targets configured; the runtime RBAC "
-                "step has nothing to assign."
+                "No ACR or Storage targets configured; the runtime RBAC step has nothing to assign."
             ),
             details={"principal_id": pid, "targets": []},
         )
@@ -421,7 +500,7 @@ def aks_runtime_rbac_check(
     # lookup. UAA at any scope that contains the target satisfies it.
     uaa_grants = [
         (role_guid, scope)
-        for role_guid, scope, _ in rows
+        for role_guid, scope, _, _, _ in rows
         if role_guid in _ROLE_ASSIGNMENT_WRITE_ROLES
     ]
 

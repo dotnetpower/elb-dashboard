@@ -877,11 +877,12 @@ fi
 #
 # Per .github/copilot-instructions.md §12a Rule 3, the probe attempts one
 # real call against every critical Azure surface (Blob / Table / ACR /
-# Container Apps + optional AKS / Key Vault) using the shared user-assigned
-# MI. A 403 / AuthorizationFailed on a REQUIRED surface aborts the deploy
-# with a non-zero exit code and prints the missing role + Bicep module to
-# fix it. Optional surfaces (AKS / Key Vault) downgrade to warnings so
-# first-deploys before the SPA wizard creates AKS do not trip the gate.
+# Container Apps + optional AKS / Key Vault) and structurally verifies the
+# shared UAMI's AKS bootstrap custom role + constrained assignment. A 403,
+# AuthorizationFailed, or stale required RBAC contract aborts the deploy with
+# a non-zero exit code and prints the missing role + Bicep module to fix it.
+# Optional surfaces (AKS / Key Vault) downgrade to warnings so first-deploys
+# before the SPA wizard creates AKS do not trip the gate.
 #
 # Hard-fail: there is intentionally no skip flag. The probe is read-only
 # and runs in ~3-5 seconds against the SDKs the rest of the deploy already

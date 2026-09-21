@@ -52,6 +52,8 @@ describe("classifyArmError", () => {
     });
     expect(res.category).toBe("rg_permission");
     expect(res.summary).toContain("rg-elb-cluster");
+    expect(res.details).toContain("legacy 'Elb Workload RG Creator'");
+    expect(res.details).not.toContain("has Reader at subscription scope");
     const portal = res.actions.find((a) => a.kind === "portal");
     expect(portal?.href).toContain("rg-elb-cluster");
   });

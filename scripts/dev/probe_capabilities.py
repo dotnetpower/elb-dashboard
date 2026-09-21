@@ -6,7 +6,8 @@ Azure surface and translating 403 / AuthorizationFailed into a human-readable
 
 Responsibility: Single-purpose RBAC capability sanity check invoked at the
     end of `scripts/dev/postprovision.sh` (see .github/copilot-instructions.md
-    §12a Rule 3). Read-only. Does not mutate any Azure resource.
+    §12a Rule 3). Read-only. Includes structural verification of the AKS
+    bootstrap custom-role definition and constrained assignment.
 Edit boundaries: Add a new probe ONLY when a new role assignment lands in a
     Bicep module that production code will actually exercise. Each probe must
     be paired with the Bicep module path so failures are self-explanatory.
@@ -14,9 +15,9 @@ Key entry points: `main`, `Probe`, `PROBES`.
 Risky contracts: Treats 401/403/`AuthorizationFailed` as missing RBAC.
     Treats network errors / 404 (resource doesn't exist yet) as "skip" so a
     fresh azd up before AKS is created doesn't fail the probe.
-Validation: `uv run python scripts/dev/probe_capabilities.py` after
-    `scripts/dev/postprovision.sh` completes. Exit code 0 = all required
-    probes passed; non-zero = at least one required probe failed.
+Validation: `uv run pytest -q api/tests/test_probe_capabilities.py` and
+    `uv run python scripts/dev/probe_capabilities.py` after postprovision.
+    Exit code 0 = all required probes passed; non-zero = failure.
 """
 
 from __future__ import annotations
@@ -287,10 +288,73 @@ class SkipProbe(Exception):
     """
 
 
+class RequiredCapabilityMissing(Exception):
+    """A required structural RBAC contract is absent or stale."""
+
+
+def probe_aks_bootstrap_rbac_contract() -> str:
+    """Verify the dashboard UAMI's AKS bootstrap role and ABAC condition."""
+    from api.services.rbac_preflight import (
+        AKS_BOOTSTRAP_ROLE_NAME,
+        aks_bootstrap_assignment_issues,
+        aks_bootstrap_role_missing_actions,
+    )
+    from azure.mgmt.authorization import AuthorizationManagementClient
+
+    subscription_id = os.environ["AZURE_SUBSCRIPTION_ID"]
+    principal_id = os.environ["SHARED_IDENTITY_PRINCIPAL_ID"]
+    sub_scope = f"/subscriptions/{subscription_id}".lower()
+    client = AuthorizationManagementClient(_credential(), subscription_id)
+    stale_issues: list[str] = []
+
+    assignments = client.role_assignments.list_for_subscription(
+        filter=f"principalId eq '{principal_id}'"
+    )
+    for assignment in assignments:
+        if (getattr(assignment, "scope", None) or "").lower() != sub_scope:
+            continue
+        role_definition_id = getattr(assignment, "role_definition_id", None) or ""
+        if not role_definition_id:
+            continue
+        definition = client.role_definitions.get_by_id(role_definition_id)
+        role_name = (getattr(definition, "role_name", None) or "").strip()
+        if role_name.lower() != AKS_BOOTSTRAP_ROLE_NAME.lower():
+            continue
+
+        actions = {
+            str(action)
+            for permission in (getattr(definition, "permissions", None) or [])
+            for action in (getattr(permission, "actions", None) or [])
+        }
+        stale_issues = [
+            *aks_bootstrap_role_missing_actions(actions),
+            *aks_bootstrap_assignment_issues(
+                getattr(assignment, "condition", None),
+                getattr(assignment, "condition_version", None),
+            ),
+        ]
+        if not stale_issues:
+            return f"{AKS_BOOTSTRAP_ROLE_NAME} definition + assignment OK"
+
+    if stale_issues:
+        raise RequiredCapabilityMissing("; ".join(stale_issues))
+    raise RequiredCapabilityMissing(
+        f"subscription assignment '{AKS_BOOTSTRAP_ROLE_NAME}' not found for dashboard UAMI"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Probe table — declarative, easy to add to.
 # ---------------------------------------------------------------------------
 PROBES: tuple[Probe, ...] = (
+    Probe(
+        name="AKS bootstrap RBAC contract",
+        runner=probe_aks_bootstrap_rbac_contract,
+        role="Elb Workload RG Creator with constrained role delegation",
+        bicep="infra/modules/workloadRgCreatorRole.bicep",
+        required=True,
+        env_vars=("AZURE_SUBSCRIPTION_ID", "SHARED_IDENTITY_PRINCIPAL_ID"),
+    ),
     Probe(
         name="Storage Blob (data plane)",
         runner=probe_blob_list,
@@ -375,6 +439,12 @@ def run_probe(probe: Probe) -> str:
     except SkipProbe as exc:
         skip(probe.name, str(exc))
         return "skip"
+    except RequiredCapabilityMissing as exc:
+        if probe.required:
+            fail(probe.name, str(exc), role=probe.role, bicep=probe.bicep)
+            return "fail"
+        warn(probe.name, str(exc))
+        return "warn"
     except Exception as exc:
         if _is_not_found(exc):
             skip(probe.name, "target resource not found (not yet provisioned)")

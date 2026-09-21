@@ -310,10 +310,11 @@ export function classifyArmError(
       category: "rg_permission",
       summary: `Could not access resource group ${rg ?? "(unknown)"}.`,
       details:
-        "The Container App's managed identity has Reader at subscription scope but " +
-        "needs Contributor on this resource group to create or modify it. The dashboard " +
-        "deploy intentionally does not grant subscription-scope Contributor — " +
-        "pre-create the RG and assign the role at RG scope using the command below.",
+        "The dashboard managed identity does not have Contributor on this resource " +
+        "group. Older deployments may still have a legacy 'Elb Workload RG Creator' " +
+        "role that cannot self-grant Contributor. Re-run infrastructure provisioning " +
+        "to update that role, or grant Contributor at resource-group scope using the " +
+        "command below.",
       actions,
     };
   }

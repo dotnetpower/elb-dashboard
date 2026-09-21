@@ -20,7 +20,7 @@ Examples:
   scripts/dev/local-run.sh web
   scripts/dev/local-run.sh worker
   scripts/dev/local-run.sh terminal-exec   # exec_server.py on 127.0.0.1:7682 so api/worker can run kubectl/az locally
-  scripts/dev/local-run.sh debug-env       # write .vscode/.debug.env (AZURE_TABLE/BLOB_ENDPOINT from azd) for the debugger
+  scripts/dev/local-run.sh debug-env       # write Storage endpoints + dashboard UAMI principal metadata for the debugger
   scripts/dev/local-run.sh storage-on      # open workload Storage to this caller IP for local debugging
   scripts/dev/local-run.sh storage-off     # restore workload Storage to publicNetworkAccess=Disabled
   scripts/dev/local-run.sh auth-on         # one-shot: RBAC + storage-on + AUTH_DEV_BYPASS=false + restart api/web
@@ -79,7 +79,7 @@ load_local_azure_env() {
     value="${line#*=}"
     key="${key#export }"
     case "$key" in
-      AZURE_SUBSCRIPTION_ID|AZURE_TENANT_ID|ELB_LOCAL_STORAGE_ACCOUNT|ELB_LOCAL_STORAGE_RG|API_CLIENT_ID|AUTH_DEV_BYPASS|VITE_AUTH_DEV_BYPASS)
+      AZURE_SUBSCRIPTION_ID|AZURE_TENANT_ID|ELB_LOCAL_STORAGE_ACCOUNT|ELB_LOCAL_STORAGE_RG|SHARED_IDENTITY_PRINCIPAL_ID|API_CLIENT_ID|AUTH_DEV_BYPASS|VITE_AUTH_DEV_BYPASS)
         # Set-vs-unset guard (${!key+x}) preserves an explicit empty export,
         # e.g. AUTH_DEV_BYPASS= passed on the command line — see lib-env.sh.
         if [[ -z "${!key+x}" ]]; then
@@ -98,13 +98,33 @@ load_local_azure_env() {
 azd_env_value() {
   local name=$1
   command -v azd >/dev/null 2>&1 || return 1
-  azd env get-values 2>/dev/null | awk -F= -v key="$name" '
+  local values
+  if command -v timeout >/dev/null 2>&1; then
+    values=$(timeout 8s azd env get-values </dev/null 2>/dev/null || true)
+  else
+    values=$(azd env get-values </dev/null 2>/dev/null || true)
+  fi
+  printf '%s\n' "$values" | awk -F= -v key="$name" '
     $1 == key {
       gsub(/"/, "", $2)
       print $2
       exit
     }
   '
+}
+
+load_local_shared_identity_env() {
+  # The local process authenticates with the developer's az login, but RBAC
+  # preflight and self-grant target the deployed dashboard UAMI. Keep that
+  # principal metadata aligned with the selected azd environment without
+  # exporting SHARED_IDENTITY_CLIENT_ID (which would alter credential choice).
+  [[ -n "${SHARED_IDENTITY_PRINCIPAL_ID+x}" ]] && return 0
+
+  local principal_id
+  principal_id=$(azd_env_value SHARED_IDENTITY_PRINCIPAL_ID || true)
+  if [[ -n "$principal_id" ]]; then
+    export SHARED_IDENTITY_PRINCIPAL_ID="$principal_id"
+  fi
 }
 
 validate_azure_cli_context() {
@@ -142,6 +162,7 @@ validate_azure_cli_context() {
 
 with_common_env() {
   load_local_azure_env
+  load_local_shared_identity_env
   validate_azure_cli_context
   export PYTHONPATH="$project_root${PYTHONPATH:+:$PYTHONPATH}"
   export LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -718,10 +739,11 @@ case "$service" in
     exec_local_service terminal-exec python3 terminal/exec_server.py "$@"
     ;;
   debug-env)
-    # Resolve the local storage endpoints from azd env (STORAGE_ACCOUNT_NAME)
-    # and write them to a dotenv file the VS Code debug launch configs load via
-    # `envFile`. This keeps the endpoints out of launch.json (no hard-coded
-    # account name) and in sync with `local-run.sh api`'s `with_local_storage_env`.
+    # Resolve local Storage endpoints and the deployed dashboard UAMI principal
+    # from azd, then write them to the debugger's dotenv file. The principal ID
+    # is metadata for RBAC checks; local authentication still uses az login.
+    load_local_azure_env
+    load_local_shared_identity_env
     with_local_storage_env
     debug_env_out=${ELB_DEBUG_ENV_FILE:-"$project_root/.vscode/.debug.env"}
     mkdir -p "$(dirname -- "$debug_env_out")"
@@ -730,6 +752,9 @@ case "$service" in
       echo "# Loaded by the VS Code debug launch configs (.vscode/launch.json envFile)."
       echo "AZURE_TABLE_ENDPOINT=$AZURE_TABLE_ENDPOINT"
       echo "AZURE_BLOB_ENDPOINT=$AZURE_BLOB_ENDPOINT"
+      if [[ -n "${SHARED_IDENTITY_PRINCIPAL_ID:-}" ]]; then
+        echo "SHARED_IDENTITY_PRINCIPAL_ID=$SHARED_IDENTITY_PRINCIPAL_ID"
+      fi
     } > "$debug_env_out"
     echo "[local-run] Wrote $debug_env_out (AZURE_TABLE_ENDPOINT=$AZURE_TABLE_ENDPOINT)." >&2
     ;;
