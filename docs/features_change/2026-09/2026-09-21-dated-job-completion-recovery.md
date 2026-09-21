@@ -36,6 +36,9 @@ as completion ground truth.
 - Runtime IDs are extracted from the direct child segment relative to the
   canonical stored results prefix, supporting both flat and dated layouts.
 - Submit-time and read-side runtime identity discovery share the same helper.
+- Recovered runtime IDs are persisted through the repository's existing
+  ETag-conditional `backfill_elastic_blast_job_id` operation, so a concurrent
+  writer's different canonical identity is never overwritten.
 - When a completed submit task still reports `running`, reconciliation attempts
   runtime-ID backfill and checks the scoped durable success marker after live
   K8s/external refreshes cannot provide a terminal state.
@@ -49,6 +52,9 @@ as completion ground truth.
 - The affected job had no remaining Kubernetes resources, but its dated results
   prefix contained a canonical runtime ID, merged output, merge report, and
   `metadata/SUCCESS.txt`; aggregate analytics returned 100 hits.
+- The affected row was recovered to `status=completed`, `phase=completed`, with
+  runtime ID `job-11f96f79510a4ee2bd0b2c717d352112` and a
+  `reconcile_results_recovered` history event.
 - Focused prefix/discovery/reconciliation tests passed.
 - Full backend suite passed: 6,142 with 4 fixture-dependent skips.
 - Ruff, the mypy debt ratchet, the 242-operation OpenAPI contract, generated

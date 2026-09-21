@@ -1274,6 +1274,19 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
         k8s_job_id = canonical_elastic_blast_job_id(
             _discover_elastic_blast_job_id(storage_account, str(state.job_id))
         )
+        if k8s_job_id:
+            try:
+                stored_runtime_id = repo.backfill_elastic_blast_job_id(
+                    state.job_id,
+                    k8s_job_id,
+                )
+                k8s_job_id = stored_runtime_id or k8s_job_id
+            except Exception as exc:
+                LOGGER.info(
+                    "blast runtime id backfill skipped job_id=%s: %s",
+                    state.job_id,
+                    type(exc).__name__,
+                )
     if not k8s_job_id:
         return state
     refresh_key = (str(state.job_id), subscription_id, resource_group, cluster_name)
@@ -1410,7 +1423,6 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
             state.job_id,
             status=k8s_status,
             phase=k8s_status,
-            elastic_blast_job_id=k8s_job_id,
             payload=_payload_with_refresh_progress(
                 payload,
                 phase=k8s_status,

@@ -1095,10 +1095,22 @@ def test_refresh_running_blast_state_recovers_from_success_marker_after_k8s_clea
         def __init__(self) -> None:
             self.updated = None
             self.history = []
+            self.runtime_id = None
+
+        def backfill_elastic_blast_job_id(self, job_id, runtime_id):
+            assert job_id == "job-1"
+            self.runtime_id = runtime_id
+            return runtime_id
 
         def update(self, job_id, **kwargs):
             self.updated = (job_id, kwargs)
-            return _state(**{**state.__dict__, **kwargs})
+            return _state(
+                **{
+                    **state.__dict__,
+                    "elastic_blast_job_id": self.runtime_id,
+                    **kwargs,
+                }
+            )
 
         def append_history(self, job_id, event, payload):
             self.history.append((job_id, event, payload))
@@ -1132,7 +1144,8 @@ def test_refresh_running_blast_state_recovers_from_success_marker_after_k8s_clea
 
     assert refreshed.status == "completed"
     assert refreshed.phase == "completed"
-    assert repo.updated[1]["elastic_blast_job_id"] == _RUNTIME_ID
+    assert repo.runtime_id == _RUNTIME_ID
+    assert refreshed.elastic_blast_job_id == _RUNTIME_ID
     assert repo.updated[1]["payload"]["_progress"]["steps"]["completed"][
         "status"
     ] == "completed"

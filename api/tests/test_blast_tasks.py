@@ -4385,6 +4385,10 @@ class _FakeReconcileRepo:
     def update(self, job_id: str, **kwargs: object) -> None:
         self.updates.append((job_id, kwargs))
 
+    def backfill_elastic_blast_job_id(self, job_id: str, value: str) -> str:
+        self.updates.append((job_id, {"elastic_blast_job_id": value}))
+        return value
+
     def append_history(
         self,
         job_id: str,

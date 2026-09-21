@@ -387,10 +387,11 @@ def reconcile_stale_jobs(
                     str(row.job_id),
                 )
                 if external_job_id:
-                    repo.update(
+                    stored_runtime_id = repo.backfill_elastic_blast_job_id(
                         row.job_id,
-                        elastic_blast_job_id=external_job_id,
+                        external_job_id,
                     )
+                    external_job_id = stored_runtime_id or external_job_id
             k8s_outcome = _reconcile_row_k8s_status(
                 repo,
                 row,
