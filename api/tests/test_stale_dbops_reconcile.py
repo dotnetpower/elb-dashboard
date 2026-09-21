@@ -28,6 +28,7 @@ from api.services.db.stale_dbops import (
     reconcile_dbops,
     reconcile_dbops_decision,
 )
+from billiard.exceptions import SoftTimeLimitExceeded
 
 _NOW = datetime(2026, 6, 13, 12, 0, 0, tzinfo=UTC)
 
@@ -225,6 +226,7 @@ class _Row:
     status: str
     updated_at: str
     created_at: str
+    phase: str = ""
     task_id: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
 
@@ -299,6 +301,209 @@ def test_decision_skips_when_row_vanishes(monkeypatch: pytest.MonkeyPatch) -> No
     )
     reason = reconcile_dbops_decision(repo, row, celery_app=None, now=_NOW)
     assert reason == "row-gone"
+
+
+def test_decision_propagates_soft_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _TimedOutResult:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr("celery.result.AsyncResult", _TimedOutResult)
+    row = _Row(
+        job_id="warm-timeout",
+        type="warmup",
+        status="running",
+        updated_at=_iso(_NOW),
+        created_at=_iso(_NOW),
+        task_id="warm-task",
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        reconcile_dbops_decision(_FakeRepo(), row, celery_app=None, now=_NOW)
+
+
+def test_decision_recovers_pending_warmup_when_all_expected_nodes_are_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_async(monkeypatch, {"warm-task": "PENDING"})
+    repo = _FakeRepo()
+    row = _Row(
+        job_id="warm-ready",
+        type="warmup",
+        status="running",
+        phase="warming_nodes",
+        updated_at=_iso(_NOW),
+        created_at=_iso(_NOW),
+        task_id="warm-task",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "database_name": "core_nt",
+            "expected_node_count": 2,
+            "require_all_warmup_nodes": True,
+            "execution_admission_token": "barrier-token",
+        },
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *_args: {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Ready",
+                    "nodes_ready": 2,
+                    "nodes_active": 0,
+                    "nodes_failed": 0,
+                    "total_jobs": 2,
+                    "sources": ["warmup"],
+                    "source_version": "generation-1",
+                    "source_versions": ["generation-1"],
+                }
+            ]
+        },
+    )
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.clear_active_warmup_job",
+        lambda **kwargs: cleared.append(kwargs["job_id"]),
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.clear_barrier_warmup_job",
+        lambda **_kwargs: pytest.fail("completed warmup correlation must remain"),
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.autowarmup_inflight_release",
+        lambda *_args: None,
+    )
+
+    reason = reconcile_dbops_decision(repo, row, celery_app=None, now=_NOW)
+
+    assert reason == "k8s-warmup-completed"
+    assert repo.updates == [("warm-ready", "completed", "completed", None)]
+    assert repo.history == [("warm-ready", "completed")]
+    assert cleared == ["warm-ready"]
+
+
+def test_decision_keeps_pending_warmup_when_readiness_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_async(monkeypatch, {"warm-task": "PENDING"})
+    repo = _FakeRepo()
+    row = _Row(
+        job_id="warm-incomplete",
+        type="warmup",
+        status="running",
+        phase="warming_nodes",
+        updated_at=_iso(_NOW),
+        created_at=_iso(_NOW),
+        task_id="warm-task",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "database_name": "core_nt",
+            "expected_node_count": 2,
+            "require_all_warmup_nodes": True,
+        },
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *_args: {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Warming",
+                    "nodes_ready": 1,
+                    "nodes_active": 1,
+                    "nodes_failed": 0,
+                    "total_jobs": 2,
+                    "sources": ["warmup"],
+                    "source_version": "generation-1",
+                    "source_versions": ["generation-1"],
+                }
+            ]
+        },
+    )
+
+    reason = reconcile_dbops_decision(repo, row, celery_app=None, now=_NOW)
+
+    assert reason == "task-live"
+    assert repo.updates == []
+
+
+def test_decision_reuses_warmup_snapshot_for_same_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_async(monkeypatch, {"warm-task-1": "PENDING", "warm-task-2": "PENDING"})
+    repo = _FakeRepo()
+    base = {
+        "subscription_id": "sub-1",
+        "resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+        "database_name": "core_nt",
+        "expected_node_count": 1,
+        "require_all_warmup_nodes": True,
+    }
+    rows = [
+        _Row(
+            job_id=f"warm-{index}",
+            type="warmup",
+            status="running",
+            phase="warming_nodes",
+            updated_at=_iso(_NOW),
+            created_at=_iso(_NOW),
+            task_id=f"warm-task-{index}",
+            payload=dict(base),
+        )
+        for index in (1, 2)
+    ]
+    calls: list[int] = []
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *_args: calls.append(1)
+        or {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Ready",
+                    "nodes_ready": 1,
+                    "nodes_active": 0,
+                    "nodes_failed": 0,
+                    "total_jobs": 1,
+                    "sources": ["warmup"],
+                    "source_version": "generation-1",
+                    "source_versions": ["generation-1"],
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.aks.execution_admission.clear_active_warmup_job",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "api.services.auto_warmup_reconcile.autowarmup_inflight_release",
+        lambda *_args: None,
+    )
+    snapshots: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    reasons = [
+        reconcile_dbops_decision(
+            repo,
+            row,
+            celery_app=None,
+            now=_NOW,
+            warmup_snapshots=snapshots,
+        )
+        for row in rows
+    ]
+
+    assert reasons == ["k8s-warmup-completed", "k8s-warmup-completed"]
+    assert calls == [1]
 
 
 # --------------------------------------------------------------------------- #

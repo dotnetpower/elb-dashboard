@@ -4478,6 +4478,73 @@ def test_reconcile_submit_success_keeps_running_row_running(
     assert repo.updates[0][1] == {"status": "running", "phase": "submitted"}
 
 
+@pytest.mark.parametrize(
+    ("terminal_payload", "expected_status", "expected_error"),
+    [
+        (
+            {
+                "completion_published_at": "2026-09-21T03:00:00+00:00",
+                "completed_at": "2026-09-21T02:59:59+00:00",
+            },
+            "completed",
+            "",
+        ),
+        (
+            {
+                "completion_published_at": "2026-09-21T03:00:00+00:00",
+                "failed_at": "2026-09-21T02:59:59+00:00",
+                "error_code": "runtime_failed",
+            },
+            "failed",
+            "runtime_failed",
+        ),
+    ],
+)
+def test_reconcile_recovers_servicebus_published_terminal_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_payload: dict[str, str],
+    expected_status: str,
+    expected_error: str,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="servicebus-job",
+                status="queued",
+                phase="queued",
+                payload={
+                    "external": {
+                        "submission_source": "servicebus",
+                        **terminal_payload,
+                    }
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    summary = blast.reconcile_stale_jobs.run()
+
+    assert summary[expected_status] == 1
+    assert summary["servicebus_terminal_recovered"] == 1
+    terminal_updates = [
+        update for _job_id, update in repo.updates if update.get("status") == expected_status
+    ]
+    assert len(terminal_updates) == 1
+    assert {
+        "status": terminal_updates[0]["status"],
+        "phase": terminal_updates[0]["phase"],
+        "error_code": terminal_updates[0]["error_code"],
+    } == {
+        "status": expected_status,
+        "phase": expected_status,
+        "error_code": expected_error,
+    }
+    assert any(
+        event == "reconcile_servicebus_terminal" for _job_id, event, _payload in repo.history
+    )
+
+
 def test_reconcile_submit_success_recovers_completed_dated_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

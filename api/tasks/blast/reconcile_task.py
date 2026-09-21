@@ -4,7 +4,8 @@ Responsibility: Bring Table Storage back in sync when a worker died
 mid-flight by walking active rows and asking Celery, the K8s API, and
 the external OpenAPI plane (in that order) for the latest status.
 Edit boundaries: Reconcile-specific helpers (``_reconcile_row_k8s_status``,
-``_celery_success_row_status``) live here; cross-cutting helpers
+``_celery_success_row_status``, ``_servicebus_published_terminal_state``) live here;
+cross-cutting helpers
 (``_external_reconcile_job_id``, ``_storage_account_from_row``,
 ``_has_parseable_result_artifact``, ``_enqueue_artifact_finalizer``,
 ``_snippet``, ``_exception_detail_snippet``) stay in ``api.tasks.blast``
@@ -42,6 +43,7 @@ _BLAST_EXPORTS: Any = _blast
 __all__ = (
     "_celery_success_row_status",
     "_reconcile_row_k8s_status",
+    "_servicebus_published_terminal_state",
     "_worker_lost_reason",
     "reconcile_stale_jobs",
 )
@@ -52,6 +54,39 @@ def _row_is_external_origin(row: Any) -> bool:
     return isinstance(payload.get("external"), Mapping) or str(
         getattr(row, "owner_upn", "") or ""
     ) == "api"
+
+
+def _servicebus_published_terminal_state(row: Any) -> tuple[str, str, str] | None:
+    """Project durable completion-publication evidence onto a stale active row."""
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
+    external = payload.get("external")
+    if not isinstance(external, Mapping):
+        return None
+    if str(external.get("submission_source") or "").lower() != "servicebus":
+        return None
+    if not str(external.get("completion_published_at") or "").strip():
+        return None
+    completed = bool(
+        str(external.get("completed_at") or "").strip()
+        or str(external.get("result_ready_at") or "").strip()
+    )
+    failed = bool(str(external.get("failed_at") or "").strip())
+    if completed == failed:
+        return None
+    if completed:
+        return ("completed", "completed", "")
+    from api.services.sanitise import sanitise
+
+    error_code = str(
+        sanitise(
+            str(
+                getattr(row, "error_code", "")
+                or external.get("error_code")
+                or "servicebus_terminal_failed"
+            )
+        )
+    )[:120]
+    return ("failed", "failed", error_code)
 
 
 def _reconcile_row_k8s_status(
@@ -273,6 +308,7 @@ def reconcile_stale_jobs(
         "k8s_refreshed": 0,
         "results_pending": 0,
         "external_refreshed": 0,
+        "servicebus_terminal_recovered": 0,
         "lifecycle_interrupted": 0,
         "untouched": 0,
         "errors": 0,
@@ -299,6 +335,19 @@ def reconcile_stale_jobs(
 
     for row in active_rows:
         try:
+            published_terminal = _servicebus_published_terminal_state(row)
+            if published_terminal is not None:
+                status, phase, error_code = published_terminal
+                _BLAST_EXPORTS._update_state(
+                    row.job_id,
+                    phase,
+                    status=status,
+                    event="reconcile_servicebus_terminal",
+                    error_code=error_code,
+                )
+                summary[status] += 1
+                summary["servicebus_terminal_recovered"] += 1
+                continue
             task_id = (row.task_id or "").strip()
             celery_status: str | None = None
             celery_result: Any = None
@@ -654,6 +703,7 @@ def reconcile_stale_jobs(
             "reconcile_stale_jobs: scanned=%(scanned)d completed=%(completed)d "
             "failed=%(failed)d worker_lost=%(worker_lost)d k8s_refreshed=%(k8s_refreshed)d "
             "results_pending=%(results_pending)d external_refreshed=%(external_refreshed)d "
+            "servicebus_terminal_recovered=%(servicebus_terminal_recovered)d "
             "lifecycle_interrupted=%(lifecycle_interrupted)d "
             "errors=%(errors)d",
             summary,

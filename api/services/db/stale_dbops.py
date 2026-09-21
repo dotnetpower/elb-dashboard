@@ -12,9 +12,9 @@ Responsibility: Drive ``warmup`` and ``prepare_db_*`` / ``shard`` / ``oracle``
 Edit boundaries: ``classify_dbops_row`` is a PURE decision function (no IO) so
     every branch is unit-testable; the orchestrator ``reconcile_stale_dbops``
     does the Table scan, the Celery ``AsyncResult`` probe, and the terminal
-    write through ``state_repo``. No Azure SDK, no Kubernetes, no Storage reads
-    — the authoritative signal is the Celery task result plus a generous
-    per-type quiet threshold. Do NOT re-dispatch any work from here.
+    write through ``state_repo``. Strict Kubernetes warmup completion recovery
+    is delegated to ``api.services.db.warmup_recovery``. Do NOT re-dispatch any
+    work from here.
 Key entry points: ``classify_dbops_row`` (pure), ``reconcile_dbops_decision``
     (per-row IO glue), ``reconcile_dbops`` (orchestrator).
 Risky contracts:
@@ -40,6 +40,8 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from billiard.exceptions import SoftTimeLimitExceeded
 
 from api.services.env import env_int as _env_int
 from api.services.storage.prepare_db_metadata import (
@@ -206,7 +208,14 @@ def classify_dbops_row(
     return DbopsDecision("skip", status, "", "", "within-threshold")
 
 
-def reconcile_dbops_decision(repo: Any, row: Any, *, celery_app: Any, now: datetime) -> str:
+def reconcile_dbops_decision(
+    repo: Any,
+    row: Any,
+    *,
+    celery_app: Any,
+    now: datetime,
+    warmup_snapshots: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+) -> str:
     """Classify one row (probing Celery as needed) and apply the terminal write.
 
     Returns the decision ``reason`` (or ``"error"`` on an unexpected failure)
@@ -229,12 +238,25 @@ def reconcile_dbops_decision(repo: Any, row: Any, *, celery_app: Any, now: datet
                 celery_state = (
                     str(AsyncResult(task_id, app=celery_app).status or "").upper() or None
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 LOGGER.debug(
                     "reconcile_dbops: AsyncResult failed job_id=%s: %s",
                     getattr(row, "job_id", "?"),
                     type(exc).__name__,
                 )
+
+        if row_type == "warmup" and celery_state == "PENDING":
+            from api.services.db.warmup_recovery import recover_completed_warmup
+
+            if recover_completed_warmup(
+                repo,
+                row,
+                celery_state=celery_state,
+                snapshot_cache=warmup_snapshots,
+            ):
+                return "k8s-warmup-completed"
 
         decision = classify_dbops_row(
             row_type=row_type,
@@ -269,6 +291,8 @@ def reconcile_dbops_decision(repo: Any, row: Any, *, celery_app: Any, now: datet
             # Row vanished between scan and write (deleted) — nothing to do.
             return "row-gone"
         return decision.reason
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         LOGGER.warning(
             "reconcile_dbops: row failed job_id=%s: %s",
@@ -314,6 +338,7 @@ def reconcile_dbops(*, limit: int = 200, enabled: bool | None = None) -> dict[st
         return summary
 
     now = datetime.now(UTC)
+    warmup_snapshots: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row_type in RECONCILE_TYPES:
         try:
             rows = repo.list_active(job_type=row_type, limit=limit)
@@ -323,10 +348,20 @@ def reconcile_dbops(*, limit: int = 200, enabled: bool | None = None) -> dict[st
             continue
         for row in rows:
             summary["scanned"] += 1
-            reason = reconcile_dbops_decision(repo, row, celery_app=celery_app, now=now)
+            reason = reconcile_dbops_decision(
+                repo,
+                row,
+                celery_app=celery_app,
+                now=now,
+                warmup_snapshots=warmup_snapshots,
+            )
             if reason == "error":
                 summary["errors"] += 1
-            elif reason in {"celery-success", "synchronous-op-completed"}:
+            elif reason in {
+                "celery-success",
+                "k8s-warmup-completed",
+                "synchronous-op-completed",
+            }:
                 summary["completed"] += 1
             elif reason in {"celery-terminal-failed", "aged-out-worker-lost"}:
                 summary["failed"] += 1

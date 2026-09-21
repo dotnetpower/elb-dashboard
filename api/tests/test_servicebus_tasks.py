@@ -1063,6 +1063,47 @@ def test_record_transition_trace_does_not_promote_updated_at_and_is_best_effort(
     assert attempted_backfills == [{"completion_published_at": "2026-09-11T02:19:15+00:00"}]
 
 
+@pytest.mark.parametrize(
+    ("status", "job", "expected"),
+    [
+        ("running", {}, {"status": "running", "phase": "running"}),
+        (
+            "succeeded",
+            {},
+            {"status": "completed", "phase": "completed", "error_code": ""},
+        ),
+        (
+            "failed",
+            {"error": {"code": "runtime_failed"}},
+            {"status": "failed", "phase": "failed", "error_code": "runtime_failed"},
+        ),
+    ],
+)
+def test_record_transition_trace_persists_projected_job_state(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    job: dict[str, Any],
+    expected: dict[str, str],
+) -> None:
+    updates: list[tuple[str, dict[str, str]]] = []
+
+    class _FakeRepo:
+        def update(self, job_id, **kwargs):
+            updates.append((job_id, kwargs))
+
+        def append_history(self, _job_id, _event, _payload=None):
+            return None
+
+        def backfill_payload_section(self, _job_id, _section, _values):
+            return True
+
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: _FakeRepo())
+
+    sb_tasks._record_transition_trace("openapi-state", status, job=job)
+
+    assert updates == [("openapi-state", expected)]
+
+
 def test_publish_transitions_does_not_touch_outbox_when_config_io_is_fenced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

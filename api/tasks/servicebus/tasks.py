@@ -848,6 +848,43 @@ def _record_transition_trace(
         repo = get_state_repo()
         sibling = job if isinstance(job, dict) else {}
         published_at = _now_iso()
+        if hasattr(repo, "update"):
+            try:
+                if status == _STATUS_RUNNING:
+                    repo.update(openapi_job_id, status="running", phase="running")
+                elif status == _STATUS_SUCCEEDED:
+                    repo.update(
+                        openapi_job_id,
+                        status="completed",
+                        phase="completed",
+                        error_code="",
+                    )
+                elif status == _STATUS_FAILED:
+                    from api.services.sanitise import sanitise
+
+                    error = sibling.get("error") if isinstance(sibling.get("error"), dict) else {}
+                    repo.update(
+                        openapi_job_id,
+                        status="failed",
+                        phase="failed",
+                        error_code=str(
+                            sanitise(
+                                str(
+                                    (error or {}).get("code")
+                                    or "servicebus_terminal_failed"
+                                )
+                            )
+                        )[:120],
+                    )
+            except SoftTimeLimitExceeded:
+                raise
+            except Exception as exc:
+                LOGGER.warning(
+                    "transition job state update skipped job=%s status=%s error=%s",
+                    openapi_job_id,
+                    status,
+                    type(exc).__name__,
+                )
         # Map the published status vocabulary onto a trace stage.
         if status == _STATUS_RUNNING:
             record_stage(
