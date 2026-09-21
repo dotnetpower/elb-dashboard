@@ -270,6 +270,20 @@ def test_open_policy_is_rechecked_after_settle(tmp_path: Path) -> None:
     assert "simulated open-policy convergence timeout" in logs
 
 
+def test_already_open_policy_is_rechecked_after_settle(tmp_path: Path) -> None:
+    result, calls, logs = _run_harness(
+        tmp_path,
+        initial_state="Enabled Allow AzureServices",
+        open_wait_fail_call=2,
+        preserve_open=True,
+    )
+
+    assert result.returncode != 0
+    assert calls == ""
+    assert "ACR policy already open; settling" in logs
+    assert "simulated open-policy convergence timeout" in logs
+
+
 def test_open_rejects_unbounded_settle_before_mutation(tmp_path: Path) -> None:
     result, calls, logs = _run_harness(
         tmp_path,

@@ -113,6 +113,16 @@ acr_ensure_build_access() {
     # registry that was returned to private posture in the meantime.
     acr_wait_for_build_access_state "$acr_name" || return 1
   else
+    # Another deploy may have opened the registry only moments ago. ARM can
+    # already report Enabled/Allow while the managed ACR build agents still
+    # observe the old firewall policy. Apply the same bounded propagation
+    # settle and post-settle verification as the process that performed the
+    # mutation; otherwise a concurrent build can fail while pulling a private
+    # base image even though the control-plane state looks open.
+    acr_wait_for_build_access_state "$acr_name" || return 1
+    acr_build_access_log "    ACR policy already open; settling ${settle_seconds}s for build-agent propagation"
+    sleep "$settle_seconds"
+    acr_wait_for_build_access_state "$acr_name" || return 1
     case "${ACR_BUILD_ACCESS_PRESERVE_OPEN:-}" in
       1|true|TRUE|yes|YES)
         acr_build_access_log "==> ACR build access already open; explicit preserve requested"
